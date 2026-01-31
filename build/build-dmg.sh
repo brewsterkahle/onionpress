@@ -25,6 +25,39 @@ if [ ! -d "$APP_PATH" ]; then
     exit 1
 fi
 
+# Prepare binaries in app bundle
+BIN_DIR="$APP_PATH/Contents/Resources/bin"
+if [ -d "$BIN_DIR" ]; then
+    echo "Preparing binaries for distribution..."
+
+    # Extract ARM64-only slices to prevent Rosetta emulation issues
+    echo "  Extracting ARM64 slices from universal binaries..."
+    cd "$BIN_DIR"
+    for binary in colima docker limactl; do
+        if [ -f "$binary" ] && file "$binary" | grep -q "universal"; then
+            echo "    Extracting ARM64 slice for $binary"
+            lipo "$binary" -thin arm64 -output "${binary}.arm64"
+            mv "$binary" "${binary}.universal"
+            mv "${binary}.arm64" "$binary"
+        fi
+    done
+
+    # Create lima wrapper script if it doesn't exist
+    if [ ! -f "$BIN_DIR/lima" ]; then
+        echo "  Creating lima wrapper script..."
+        cat > "$BIN_DIR/lima" <<'EOF'
+#!/bin/bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+LIMACTL="$SCRIPT_DIR/limactl"
+INSTANCE="${LIMA_INSTANCE:-colima}"
+exec "$LIMACTL" shell "$INSTANCE" -- "$@"
+EOF
+        chmod +x "$BIN_DIR/lima"
+    fi
+
+    cd "$PROJECT_DIR"
+fi
+
 # Clean up old builds
 echo "Cleaning up old builds..."
 rm -f "$DMG_PATH" "$TEMP_DMG"

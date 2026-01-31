@@ -104,6 +104,31 @@ cp "$TEMP_BIN_DIR/docker" "$BIN_DIR/docker"
 
 chmod +x "$BIN_DIR"/*
 
+# Extract ARM64-only slices to prevent Rosetta emulation issues
+echo "Extracting ARM64 slices from universal binaries..."
+cd "$BIN_DIR"
+for binary in colima docker limactl; do
+    if file "$binary" | grep -q "universal"; then
+        echo "  Extracting ARM64 slice for $binary"
+        lipo "$binary" -thin arm64 -output "${binary}.arm64"
+        mv "$binary" "${binary}.universal"
+        mv "${binary}.arm64" "$binary"
+    fi
+done
+
+# Create lima wrapper script
+echo "Creating lima wrapper script..."
+cat > "$BIN_DIR/lima" <<'EOF'
+#!/bin/bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+LIMACTL="$SCRIPT_DIR/limactl"
+INSTANCE="${LIMA_INSTANCE:-colima}"
+exec "$LIMACTL" shell "$INSTANCE" -- "$@"
+EOF
+chmod +x "$BIN_DIR/lima"
+
+cd "$PROJECT_DIR"
+
 # Copy Lima share files
 echo "Copying Lima support files..."
 SHARE_DIR="$APP_PATH/Contents/Resources/share/lima"
