@@ -28,3 +28,10 @@ env/
 
 # Logs
 *.log
+
+# Bundled binaries (downloaded during build)
+onion.press.app/Contents/Resources/bin/
+onion.press.app/Contents/Resources/share/
+
+# Build artifacts
+build/onion.press.dmg

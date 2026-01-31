@@ -12,9 +12,17 @@ RESOURCES_DIR="$APP_DIR/Resources"
 DOCKER_DIR="$RESOURCES_DIR/docker"
 SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 DATA_DIR="$HOME/.onion.press"
+BIN_DIR="$RESOURCES_DIR/bin"
+COLIMA_HOME="$DATA_DIR/colima"
 
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
+
+# Prefer bundled binaries
+export PATH="$BIN_DIR:$PATH"
+export COLIMA_HOME="$COLIMA_HOME"
+export LIMA_HOME="$COLIMA_HOME/_lima"
+export LIMA_INSTANCE="onionpress"
 
 # Log file
 LOG_FILE="$DATA_DIR/onion.press.log"
@@ -31,72 +39,76 @@ command_exists() {
 
 # Function to detect container runtime
 detect_container_runtime() {
-    if command_exists orbstack; then
-        echo "orbstack"
-        return 0
-    elif command_exists docker && docker info >/dev/null 2>&1; then
-        # Could be Docker Desktop or Colima
-        if pgrep -x "Docker" > /dev/null 2>&1; then
-            echo "docker-desktop"
-        elif command_exists colima && colima status >/dev/null 2>&1; then
-            echo "colima"
-        else
-            echo "docker"
+    # Use bundled Colima
+    if command_exists colima; then
+        if [ -f "$COLIMA_HOME/.initialized" ]; then
+            if "$BIN_DIR/colima" status >/dev/null 2>&1; then
+                echo "colima-bundled"
+                return 0
+            else
+                # Start Colima if stopped
+                log "Starting bundled Colima..."
+                "$BIN_DIR/colima" start >> "$LOG_FILE" 2>&1
+                if [ $? -eq 0 ]; then
+                    echo "colima-bundled"
+                    return 0
+                fi
+            fi
         fi
+    fi
+
+    # Fallback to system Docker (for development)
+    if command_exists docker && docker info >/dev/null 2>&1; then
+        echo "docker-system"
         return 0
     fi
+
     return 1
 }
 
-# Function to offer Docker installation
+# Function to initialize container runtime
 install_docker() {
-    log "Docker runtime not found. Installation required."
+    log "Container runtime initialization required"
 
-    # Show dialog to user offering Docker Desktop
-    response=$(osascript <<EOF
+    osascript <<EOF
 tell application "System Events"
     activate
-    set theResponse to display dialog "onion.press requires Docker to run WordPress and Tor.
+    display dialog "Initializing bundled container runtime (2-3 minutes)...
 
-Docker Desktop is free for personal use.
-
-Would you like to download Docker Desktop?" buttons {"Cancel", "Download Docker Desktop"} default button "Download Docker Desktop" with icon note with title "onion.press Setup"
-    return button returned of theResponse
+Please wait while onion.press sets up its container environment." buttons {"OK"} default button "OK" with icon note with title "onion.press Setup"
 end tell
 EOF
-)
 
-    if [ "$response" = "Download Docker Desktop" ]; then
-        log "Opening Docker Desktop download page..."
+    # Should not happen if launcher worked, but handle it
+    "$BIN_DIR/colima" start \
+        --vm-type vz \
+        --mount-type virtiofs \
+        --cpu 2 \
+        --memory 4 \
+        --disk 60 \
+        --arch aarch64 \
+        --network-address \
+        >> "$LOG_FILE" 2>&1
 
-        # Detect architecture for correct download link
-        ARCH=$(uname -m)
-        if [ "$ARCH" = "arm64" ]; then
-            DOCKER_URL="https://desktop.docker.com/mac/main/arm64/Docker.dmg"
-        else
-            DOCKER_URL="https://desktop.docker.com/mac/main/amd64/Docker.dmg"
-        fi
-
-        # Open Docker Desktop download page
-        open "$DOCKER_URL"
-
+    if [ $? -eq 0 ]; then
+        touch "$COLIMA_HOME/.initialized"
+        log "Container runtime initialized successfully"
+        return 0
+    else
+        log "ERROR: Failed to initialize container runtime"
         osascript <<EOF
 tell application "System Events"
     activate
-    display dialog "Docker Desktop download has started in your browser.
+    display dialog "Failed to initialize container runtime.
 
-After installing Docker Desktop:
-1. Open Docker Desktop to complete setup
-2. Wait for Docker to start (whale icon in menu bar)
-3. Relaunch onion.press
+Check the logs for details:
+$LOG_FILE
 
-Note: Docker Desktop is free for personal use." buttons {"OK"} default button "OK" with icon note with title "onion.press Setup"
+Or file an issue at:
+https://github.com/brewsterkahle/onion.press/issues" buttons {"OK"} default button "OK" with icon stop with title "onion.press Error"
 end tell
 EOF
-        exit 0
-    else
-        log "User cancelled Docker installation"
-        exit 0
+        exit 1
     fi
 }
 

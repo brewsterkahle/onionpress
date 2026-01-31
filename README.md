@@ -14,20 +14,22 @@ onion.press is a macOS application that bundles WordPress with a Tor hidden serv
 
 ## Requirements
 
-- macOS 11.0 (Big Sur) or later
+- macOS 13.0 (Ventura) or later
 - Python 3 (pre-installed on macOS 12.3+, or install from [python.org](https://www.python.org/downloads/))
-- Container runtime: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (free for personal use) or [OrbStack](https://orbstack.dev/) - will auto-launch when needed
+- Internet connection for first-time setup
+
+**No external Docker installation required!** All container runtime components are bundled.
 
 ## Installation
 
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (free for personal use)
-2. Download the latest `onion.press.dmg` from the releases page
-3. Open the DMG and drag `onion.press.app` to your Applications folder
-4. Launch onion.press from Applications
-5. On first launch:
-   - The app will automatically launch Docker Desktop if it's not running
+1. Download the latest `onion.press.dmg` from the releases page
+2. Open the DMG and drag `onion.press.app` to your Applications folder
+3. Launch onion.press from Applications
+4. On first launch:
+   - The app will initialize its bundled container runtime (Colima) - takes ~2-3 minutes
    - It will download WordPress, MariaDB, and Tor container images (~1GB)
-   - This takes 3-5 minutes depending on your internet connection
+   - Total setup: 3-5 minutes depending on your internet connection
+   - Subsequent launches are instant
 
 ## Usage
 
@@ -58,10 +60,13 @@ onion.press uses:
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
 - **Tor**: Hidden service container that exposes WordPress as an onion service
-- **Docker**: Container runtime (Docker Desktop or OrbStack)
+- **Colima**: Bundled container runtime using Apple's virtualization framework
+- **Lima**: VM management layer (bundled)
+- **Docker CLI**: Container management tools (bundled)
 
-All data is stored in Docker volumes, persisted at:
-- `~/.onion.press/` - Application data and logs
+All data is stored in:
+- `~/.onion.press/` - Application data, logs, and Colima VM
+- Docker volumes for WordPress, database, and Tor keys
 
 ## Building from Source
 
@@ -82,21 +87,26 @@ Install Python 3 from [python.org](https://www.python.org/downloads/) or via Hom
 brew install python3
 ```
 
-### "Container runtime not found"
-Install one of these Docker runtimes:
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (recommended, free for personal use)
-- [OrbStack](https://orbstack.dev/) (lightweight alternative)
-
-The app will automatically launch whichever is installed when it starts.
+### "macOS version too old"
+onion.press requires macOS 13 (Ventura) or later for Apple's native virtualization framework.
 
 ### Containers won't start
 Check the logs via the menu bar app or run:
 ```bash
 tail -f ~/.onion.press/onion.press.log
+tail -f ~/.onion.press/colima/colima.log
 ```
 
 ### Onion address not generating
 Wait 30-60 seconds for Tor to generate your onion address. Check logs if it takes longer.
+
+### Reset everything
+If you encounter persistent issues:
+```bash
+# Stop the app first, then:
+rm -rf ~/.onion.press
+# Relaunch onion.press
+```
 
 ## Security Notes
 

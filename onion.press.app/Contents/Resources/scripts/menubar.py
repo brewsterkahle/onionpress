@@ -22,6 +22,14 @@ class OnionPressApp(rumps.App):
         self.contents_dir = os.path.dirname(self.resources_dir)
         self.macos_dir = os.path.join(self.contents_dir, "MacOS")
         self.launcher_script = os.path.join(self.macos_dir, "onion.press")
+        self.bin_dir = os.path.join(self.resources_dir, "bin")
+        self.colima_home = os.path.join(self.app_support, "colima")
+
+        # Set up bundled binaries environment
+        os.environ["PATH"] = f"{self.bin_dir}:{os.environ.get('PATH', '')}"
+        os.environ["COLIMA_HOME"] = self.colima_home
+        os.environ["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
+        os.environ["LIMA_INSTANCE"] = "onionpress"
 
         # State
         self.onion_address = "Starting..."
@@ -54,54 +62,42 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=self.auto_start, daemon=True).start()
 
     def ensure_docker_available(self):
-        """Ensure Docker is running, start Docker Desktop or OrbStack if needed"""
+        """Ensure bundled Colima is running"""
         try:
-            # Check if Docker is accessible
-            result = subprocess.run(
-                ["docker", "info"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                # Docker is already running
+            colima_bin = os.path.join(self.bin_dir, "colima")
+            if not os.path.exists(colima_bin):
+                print("ERROR: Bundled Colima not found")
                 return
-        except:
-            pass
 
-        # Docker not accessible, try to start a container runtime
-        # Try Docker Desktop first (free for personal use)
-        docker_apps = [
-            ("Docker", "Docker Desktop"),
-            ("OrbStack", "OrbStack")
-        ]
+            # Check if running
+            result = subprocess.run([colima_bin, "status"], capture_output=True, timeout=5)
 
-        for app_name, display_name in docker_apps:
-            if os.path.exists(f"/Applications/{app_name}.app"):
-                print(f"Docker not accessible, launching {display_name}...")
+            if result.returncode == 0:
+                # Verify docker accessible
+                docker_check = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+                if docker_check.returncode == 0:
+                    print("Bundled Colima is running")
+                    return
+
+            # Start Colima
+            print("Starting bundled Colima...")
+            subprocess.run([colima_bin, "start"], capture_output=True, timeout=120)
+
+            # Wait for docker
+            for i in range(30):
+                time.sleep(1)
                 try:
-                    subprocess.run(["open", "-a", app_name], check=False)
-
-                    # Wait for Docker to become available (up to 30 seconds)
-                    for i in range(30):
-                        time.sleep(1)
-                        try:
-                            result = subprocess.run(
-                                ["docker", "info"],
-                                capture_output=True,
-                                timeout=5
-                            )
-                            if result.returncode == 0:
-                                print(f"Docker is now available via {display_name}")
-                                return
-                        except:
-                            continue
-
-                    print(f"Warning: Docker still not available after launching {display_name}")
-                except Exception as e:
-                    print(f"Error launching {display_name}: {e}")
+                    result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+                    if result.returncode == 0:
+                        print("Colima started successfully")
+                        return
+                except:
                     continue
 
-        print("Warning: No Docker runtime found. Please install Docker Desktop or OrbStack.")
+            print("Warning: Colima started but docker not available yet")
+
+        except Exception as e:
+            print(f"Error with Colima: {e}")
 
     def auto_start(self):
         """Automatically start the service when the app launches"""

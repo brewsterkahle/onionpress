@@ -11,9 +11,19 @@ RESOURCES_DIR="$APP_DIR/Resources"
 SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 DATA_DIR="$HOME/.onion.press"
 VENV_DIR="$DATA_DIR/venv"
+BIN_DIR="$RESOURCES_DIR/bin"
+COLIMA_HOME="$DATA_DIR/colima"
 
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
+
+# Set up bundled binaries in PATH
+export PATH="$BIN_DIR:$PATH"
+
+# Configure Colima environment
+export COLIMA_HOME="$COLIMA_HOME"
+export LIMA_HOME="$COLIMA_HOME/_lima"
+export LIMA_INSTANCE="onionpress"
 
 # Log file
 LOG_FILE="$DATA_DIR/launcher.log"
@@ -56,6 +66,67 @@ if [ ! -d "$VENV_DIR" ]; then
 
     log "Virtual environment created successfully"
 fi
+
+# Initialize Colima on first run
+initialize_colima() {
+    if [ ! -f "$COLIMA_HOME/.initialized" ]; then
+        log "Initializing Colima container runtime..."
+
+        # Check macOS version >= 13
+        MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
+        if [ "$MACOS_VERSION" -lt 13 ]; then
+            log "ERROR: macOS 13+ required"
+            osascript <<EOF
+tell application "System Events"
+    activate
+    display dialog "onion.press requires macOS 13 (Ventura) or later.
+
+Your macOS version: $(sw_vers -productVersion)
+
+The bundled container runtime uses Apple's virtualization framework which requires macOS 13+." buttons {"OK"} default button "OK" with icon stop with title "onion.press Error"
+end tell
+EOF
+            exit 1
+        fi
+
+        # Initialize Colima with VZ backend
+        "$BIN_DIR/colima" start \
+            --vm-type vz \
+            --mount-type virtiofs \
+            --cpu 2 \
+            --memory 4 \
+            --disk 60 \
+            --arch aarch64 \
+            --network-address \
+            >> "$LOG_FILE" 2>&1
+
+        if [ $? -eq 0 ]; then
+            touch "$COLIMA_HOME/.initialized"
+            log "Colima initialized successfully"
+        else
+            log "ERROR: Colima init failed"
+            osascript <<EOF
+tell application "System Events"
+    activate
+    display dialog "Failed to initialize container runtime.
+
+Check the logs for details:
+$LOG_FILE" buttons {"OK"} default button "OK" with icon stop with title "onion.press Error"
+end tell
+EOF
+            exit 1
+        fi
+    fi
+
+    # Ensure Colima is running
+    if ! "$BIN_DIR/colima" status >/dev/null 2>&1; then
+        log "Starting Colima VM..."
+        "$BIN_DIR/colima" start >> "$LOG_FILE" 2>&1
+    fi
+}
+
+# Run initialization
+initialize_colima
 
 # Activate virtual environment and run menu bar app
 log "Launching menu bar application..."
