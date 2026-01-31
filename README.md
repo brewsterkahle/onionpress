@@ -2,11 +2,14 @@
 
 **Easy-to-install WordPress with Tor Hidden Service for macOS**
 
+> **Current Version: 2.0.2** - Now with vanity onion addresses!
+
 onion.press is a macOS application that bundles WordPress with a Tor hidden service, allowing you to run a WordPress blog accessible only through the Tor network.
 
 ## Features
 
 - 🧅 **Tor Hidden Service**: Your WordPress site is automatically configured as a Tor onion service
+- ✨ **Vanity Onion Addresses**: All installations generate addresses starting with "op2" for easy identification
 - 🐳 **Container-Based**: Uses Docker containers for easy management and isolation
 - 📱 **Menu Bar App**: Simple menu bar interface to control your site
 - 🚀 **One-Click Install**: Download the DMG, drag to Applications, and launch
@@ -22,10 +25,11 @@ onion.press is a macOS application that bundles WordPress with a Tor hidden serv
 
 ## Installation
 
-1. Download the latest `onion.press.dmg` from the releases page
+1. Download the latest `onion.press.dmg` from the [releases page](https://github.com/brewsterkahle/onion.press/releases)
 2. Open the DMG and drag `onion.press.app` to your Applications folder
 3. Launch onion.press from Applications
 4. On first launch:
+   - The app will generate your vanity onion address (starting with "op2") - takes < 1 second
    - The app will initialize its bundled container runtime (Colima) - takes ~2-3 minutes
    - It will download WordPress, MariaDB, and Tor container images (~1GB)
    - Total setup: 3-5 minutes depending on your internet connection
@@ -44,10 +48,12 @@ Once installed, onion.press appears in your menu bar with an onion icon (🧅):
 
 ### Accessing Your Site
 
-1. Your onion address is displayed in the menu bar dropdown
+1. Your onion address is displayed in the menu bar dropdown (starts with "op2" for easy identification)
 2. Install [Tor Browser](https://www.torproject.org/download/) to access .onion sites
 3. Copy your onion address and paste it into Tor Browser
 4. Complete the WordPress setup wizard
+
+**Vanity Address Configuration**: You can customize the prefix in `~/.onion.press/config` before first launch. See the config file for details on generation times for different prefix lengths.
 
 ### Local Testing
 
@@ -60,12 +66,13 @@ onion.press uses:
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
 - **Tor**: Hidden service container that exposes WordPress as an onion service
+- **mkp224o**: Vanity onion address generator (generates addresses with custom prefixes)
 - **Colima**: Bundled container runtime using Apple's virtualization framework
 - **Lima**: VM management layer (bundled)
 - **Docker CLI**: Container management tools (bundled)
 
 All data is stored in:
-- `~/.onion.press/` - Application data, logs, and Colima VM
+- `~/.onion.press/` - Application data, logs, config, and Colima VM
 - Docker volumes for WordPress, database, and Tor keys
 
 ## Building from Source
@@ -133,9 +140,11 @@ MIT License - See LICENSE file for details
 ## Credits
 
 Built with:
-- [WordPress](https://wordpress.org/)
-- [Tor Project](https://www.torproject.org/)
-- [OrbStack](https://orbstack.dev/)
+- [WordPress](https://wordpress.org/) - Open source content management system
+- [Tor Project](https://www.torproject.org/) - Anonymous communication network
+- [Colima](https://github.com/abiosoft/colima) - Container runtime for macOS
+- [Lima](https://github.com/lima-vm/lima) - Linux virtual machines for macOS
+- [mkp224o](https://github.com/cathugger/mkp224o) - Vanity onion address generator
 - [rumps](https://github.com/jaredks/rumps) - Python library for macOS menu bar apps
 
 ## Support
