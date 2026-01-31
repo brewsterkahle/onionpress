@@ -2,15 +2,16 @@
 # This file is automatically copied to ~/.onion.press/config on first run
 
 # Vanity Onion Address Prefix
-# Default: "op" (generates addresses like opxxxxxxxxxxxxx.onion)
+# Default: "op2" (generates addresses like op2xxxxxxxxxxxxx.onion)
 #
 # You can customize this to any lowercase alphanumeric string.
+# Note: Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.
 # Longer prefixes take exponentially longer to generate:
-# - 2 chars (op): < 1 minute
-# - 3 chars (ion): 1-5 minutes
-# - 4 chars (blog): 10-30 minutes
-# - 5 chars (press): several hours
-# - 6+ chars: days to weeks
+# - 2 chars (op): < 1 second
+# - 3 chars (op2): < 1 second
+# - 4 chars (op24): 5-30 seconds
+# - 5 chars (op2024): 10-30 minutes
+# - 6+ chars: hours to days
 #
 # To use a custom prefix:
 # 1. Stop onion.press
@@ -19,4 +20,4 @@
 # 4. Delete the tor-keys volume: docker volume rm onionpress-tor-keys
 # 5. Restart onion.press (will generate new vanity address)
 #
-VANITY_PREFIX=op
+VANITY_PREFIX=op2

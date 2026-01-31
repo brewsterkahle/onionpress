@@ -5,16 +5,17 @@ All notable changes to onion.press will be documented in this file.
 ## [2.0.2] - 2026-01-31
 
 ### Added
-- **Vanity onion addresses** - All new installations now generate addresses starting with "op" for easy identification
+- **Vanity onion addresses** - All new installations now generate addresses starting with "op2" for easy identification
 - Bundled mkp224o for vanity address generation (no external dependencies)
-- Configurable vanity prefix via `~/.onion.press/config` (default: "op")
-- Fast generation: 2-character prefix takes under 1 minute
+- Configurable vanity prefix via `~/.onion.press/config` (default: "op2")
+- Fast generation: 3-character prefix takes under 1 second
 
 ### Technical
 - Integrated mkp224o v3 onion address generator into build process
 - Automatic vanity key generation on first launch
 - Config template for customizing vanity prefix
-- All onion.press services now easily identifiable by "op" prefix
+- All onion.press services now easily identifiable by "op2" prefix
+- Base32 validation (only a-z, 2-7 characters allowed in onion addresses)
 
 ## [2.0.1] - 2026-01-31
 

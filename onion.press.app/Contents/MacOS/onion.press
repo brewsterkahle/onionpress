@@ -23,7 +23,7 @@ if [ ! -f "$DATA_DIR/config" ]; then
     if [ -f "$RESOURCES_DIR/config-template.txt" ]; then
         cp "$RESOURCES_DIR/config-template.txt" "$DATA_DIR/config"
     else
-        echo "VANITY_PREFIX=op" > "$DATA_DIR/config"
+        echo "VANITY_PREFIX=op2" > "$DATA_DIR/config"
     fi
 fi
 
@@ -77,17 +77,17 @@ detect_container_runtime() {
 
 # Function to generate vanity onion address
 generate_vanity_address() {
-    local prefix="${1:-op}"
+    local prefix="${1:-op2}"
     local output_dir="$DATA_DIR/vanity-keys"
 
-    log "Generating vanity onion address with prefix '$prefix'..."
+    log "Generating vanity onion address with prefix '$prefix'..." >&2
 
     # Create output directory
     mkdir -p "$output_dir"
 
     # Check if mkp224o is available
     if [ ! -f "$BIN_DIR/mkp224o" ]; then
-        log "WARNING: mkp224o not found, using random address"
+        log "WARNING: mkp224o not found, using random address" >&2
         return 1
     fi
 
@@ -99,14 +99,14 @@ generate_vanity_address() {
     VANITY_DIR=$(find "$output_dir" -type d -name "${prefix}*" | head -1)
 
     if [ -z "$VANITY_DIR" ]; then
-        log "ERROR: Failed to generate vanity address"
+        log "ERROR: Failed to generate vanity address" >&2
         return 1
     fi
 
     VANITY_ADDRESS=$(basename "$VANITY_DIR")
-    log "Generated vanity address: $VANITY_ADDRESS"
+    log "Generated vanity address: $VANITY_ADDRESS" >&2
 
-    # Return the directory path
+    # Return the directory path (only thing on stdout)
     echo "$VANITY_DIR"
     return 0
 }
@@ -167,8 +167,8 @@ start_containers() {
     if ! docker volume ls | grep -q "onionpress-tor-keys"; then
         log "First run detected - generating vanity onion address..."
 
-        # Read prefix from config, default to "op"
-        VANITY_PREFIX="op"
+        # Read prefix from config, default to "op2"
+        VANITY_PREFIX="op2"
         if [ -f "$DATA_DIR/config" ]; then
             CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
             if [ ! -z "$CUSTOM_PREFIX" ]; then
@@ -186,7 +186,7 @@ start_containers() {
             docker volume create onionpress-tor-keys >> "$LOG_FILE" 2>&1
             docker run --rm \
                 -v onionpress-tor-keys:/dest \
-                -v "$VANITY_DIR":/src \
+                --mount type=bind,source="$VANITY_DIR",target=/src \
                 alpine sh -c 'mkdir -p /dest/wordpress && cp -r /src/* /dest/wordpress/' >> "$LOG_FILE" 2>&1
 
             log "Vanity keys installed to tor volume"
