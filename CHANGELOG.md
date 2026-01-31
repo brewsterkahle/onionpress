@@ -2,6 +2,17 @@
 
 All notable changes to onion.press will be documented in this file.
 
+## [2.0.4] - 2026-01-31
+
+### Fixed
+- Fixed duplicate "QUIT" menu items in menu bar dropdown
+- Menu bar now shows only one Quit option (rumps framework provides it automatically)
+
+### Technical
+- Removed manual Quit menu item definition
+- Changed quit handler to use `quit_callback()` to properly override rumps default behavior
+- Maintained confirmation dialog and service shutdown functionality
+
 ## [2.0.3] - 2026-01-31
 
 ### Added
