@@ -1,0 +1,30 @@
+# Build artifacts
+build/*.dmg
+build/temp.dmg
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+
+# User data
+.onion.press/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs
+*.log

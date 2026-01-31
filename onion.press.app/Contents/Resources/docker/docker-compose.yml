@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  tor:
+    image: goldy/tor-hidden-service:latest
+    container_name: onionpress-tor
+    environment:
+      # WordPress is the service name we're exposing
+      - WORDPRESS_PORTS=80:80
+      - WORDPRESS_VERSION=3
+    volumes:
+      - tor-keys:/var/lib/tor/hidden_service/
+    depends_on:
+      - wordpress
+    restart: unless-stopped
+    networks:
+      - onionpress-network
+
+  wordpress:
+    image: wordpress:latest
+    container_name: onionpress-wordpress
+    environment:
+      - WORDPRESS_DB_HOST=db:3306
+      - WORDPRESS_DB_USER=wordpress
+      - WORDPRESS_DB_PASSWORD=wordpress_password_change_me
+      - WORDPRESS_DB_NAME=wordpress
+      - WORDPRESS_CONFIG_EXTRA=
+          define('WP_HOME', 'http://' . $$_SERVER['HTTP_HOST']);
+          define('WP_SITEURL', 'http://' . $$_SERVER['HTTP_HOST']);
+          define('FORCE_SSL_ADMIN', false);
+    volumes:
+      - wordpress-data:/var/www/html
+    depends_on:
+      - db
+    restart: unless-stopped
+    networks:
+      - onionpress-network
+    ports:
+      - "127.0.0.1:8080:80"
+
+  db:
+    image: mariadb:latest
+    container_name: onionpress-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=root_password_change_me
+      - MYSQL_DATABASE=wordpress
+      - MYSQL_USER=wordpress
+      - MYSQL_PASSWORD=wordpress_password_change_me
+    volumes:
+      - db-data:/var/lib/mysql
+    restart: unless-stopped
+    networks:
+      - onionpress-network
+
+volumes:
+  tor-keys:
+    name: onionpress-tor-keys
+  wordpress-data:
+    name: onionpress-wordpress-data
+  db-data:
+    name: onionpress-db-data
+
+networks:
+  onionpress-network:
+    name: onionpress-network
+    driver: bridge

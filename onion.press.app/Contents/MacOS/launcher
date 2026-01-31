@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# onion.press launcher - Bootstraps Python environment and starts menu bar app
+
+set -e
+
+# Get directories
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+APP_DIR="$(dirname "$SCRIPT_DIR")"
+RESOURCES_DIR="$APP_DIR/Resources"
+SCRIPTS_DIR="$RESOURCES_DIR/scripts"
+DATA_DIR="$HOME/.onion.press"
+VENV_DIR="$DATA_DIR/venv"
+
+# Ensure data directory exists
+mkdir -p "$DATA_DIR"
+
+# Log file
+LOG_FILE="$DATA_DIR/launcher.log"
+
+# Function to log messages
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+log "Starting onion.press launcher..."
+
+# Check for Python 3
+if ! command -v python3 >/dev/null 2>&1; then
+    log "ERROR: Python 3 not found"
+    osascript <<EOF
+tell application "System Events"
+    activate
+    display dialog "Python 3 is required to run onion.press but was not found.
+
+macOS 12.3+ removed Python 2. Please install Python 3 from:
+https://www.python.org/downloads/
+
+Or install via Homebrew:
+brew install python3" buttons {"OK"} default button "OK" with icon stop with title "onion.press Error"
+end tell
+EOF
+    exit 1
+fi
+
+log "Python 3 found: $(python3 --version)"
+
+# Create virtual environment if it doesn't exist
+if [ ! -d "$VENV_DIR" ]; then
+    log "Creating Python virtual environment..."
+    python3 -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1
+
+    log "Installing Python dependencies..."
+    "$VENV_DIR/bin/pip" install --upgrade pip >> "$LOG_FILE" 2>&1
+    "$VENV_DIR/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" >> "$LOG_FILE" 2>&1
+
+    log "Virtual environment created successfully"
+fi
+
+# Activate virtual environment and run menu bar app
+log "Launching menu bar application..."
+cd "$SCRIPTS_DIR"
+
+# Use pythonw if available (for GUI apps on macOS), otherwise use python3
+if [ -f "$VENV_DIR/bin/pythonw" ] || [ -f "$VENV_DIR/bin/pythonw3" ]; then
+    PYTHON_CMD="$VENV_DIR/bin/pythonw"
+else
+    # Create a proper GUI context by using the Python framework
+    PYTHON_CMD="$VENV_DIR/bin/python3"
+fi
+
+# Launch with proper environment
+export PYTHONPATH="$SCRIPTS_DIR"
+"$PYTHON_CMD" "$SCRIPTS_DIR/menubar.py" >> "$LOG_FILE" 2>&1

@@ -1,0 +1,267 @@
+#!/bin/bash
+
+# onion.press launcher script
+# This script manages the WordPress + Tor hidden service containers
+
+set -e
+
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+APP_DIR="$(dirname "$SCRIPT_DIR")"
+RESOURCES_DIR="$APP_DIR/Resources"
+DOCKER_DIR="$RESOURCES_DIR/docker"
+SCRIPTS_DIR="$RESOURCES_DIR/scripts"
+DATA_DIR="$HOME/.onion.press"
+
+# Ensure data directory exists
+mkdir -p "$DATA_DIR"
+
+# Log file
+LOG_FILE="$DATA_DIR/onion.press.log"
+
+# Function to log messages
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Function to check if a command exists
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# Function to detect container runtime
+detect_container_runtime() {
+    if command_exists orbstack; then
+        echo "orbstack"
+        return 0
+    elif command_exists docker && docker info >/dev/null 2>&1; then
+        # Could be Docker Desktop or Colima
+        if pgrep -x "Docker" > /dev/null 2>&1; then
+            echo "docker-desktop"
+        elif command_exists colima && colima status >/dev/null 2>&1; then
+            echo "colima"
+        else
+            echo "docker"
+        fi
+        return 0
+    fi
+    return 1
+}
+
+# Function to install OrbStack
+install_orbstack() {
+    log "OrbStack not found. Installation required."
+
+    # Show dialog to user
+    response=$(osascript <<EOF
+tell application "System Events"
+    activate
+    set theResponse to display dialog "onion.press requires a container runtime to run WordPress and Tor.
+
+Would you like to install OrbStack? (Recommended - ~100MB)
+
+Alternatively, you can install Docker Desktop manually and restart onion.press." buttons {"Cancel", "Install OrbStack"} default button "Install OrbStack" with icon note with title "onion.press Setup"
+    return button returned of theResponse
+end tell
+EOF
+)
+
+    if [ "$response" = "Install OrbStack" ]; then
+        log "Downloading OrbStack..."
+
+        # Show progress window
+        osascript <<EOF &
+tell application "System Events"
+    activate
+    display dialog "Downloading OrbStack...
+
+This may take a few minutes depending on your internet connection." buttons {"Cancel"} with icon note with title "onion.press Setup" giving up after 300
+end tell
+EOF
+
+        # Download OrbStack
+        ORBSTACK_DMG="$DATA_DIR/OrbStack.dmg"
+
+        # Detect architecture
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "arm64" ]; then
+            ORBSTACK_URL="https://orbstack.dev/download/stable/latest/arm64"
+        else
+            ORBSTACK_URL="https://orbstack.dev/download/stable/latest/amd64"
+        fi
+
+        log "Downloading OrbStack for $ARCH..."
+        curl -L "$ORBSTACK_URL" -o "$ORBSTACK_DMG" 2>&1 | tee -a "$LOG_FILE"
+
+        if [ $? -eq 0 ]; then
+            log "Installing OrbStack..."
+
+            # Mount DMG
+            hdiutil attach "$ORBSTACK_DMG" -nobrowse -quiet
+
+            # Copy to Applications
+            cp -R "/Volumes/OrbStack/OrbStack.app" "/Applications/"
+
+            # Unmount DMG
+            hdiutil detach "/Volumes/OrbStack" -quiet
+
+            # Clean up
+            rm "$ORBSTACK_DMG"
+
+            # Launch OrbStack for first-time setup
+            open -a OrbStack
+
+            log "OrbStack installed successfully!"
+
+            osascript <<EOF
+tell application "System Events"
+    activate
+    display dialog "OrbStack has been installed!
+
+Please complete the OrbStack setup, then relaunch onion.press." buttons {"OK"} default button "OK" with icon note with title "onion.press Setup"
+end tell
+EOF
+            exit 0
+        else
+            log "ERROR: Failed to download OrbStack"
+            osascript <<EOF
+tell application "System Events"
+    activate
+    display dialog "Failed to download OrbStack.
+
+Please check your internet connection or install Docker Desktop manually." buttons {"OK"} default button "OK" with icon stop with title "onion.press Error"
+end tell
+EOF
+            exit 1
+        fi
+    else
+        log "User cancelled OrbStack installation"
+        exit 0
+    fi
+}
+
+# Function to start containers
+start_containers() {
+    log "Starting onion.press containers..."
+
+    cd "$DOCKER_DIR"
+
+    # Pull images if not present (with progress)
+    if ! docker compose images | grep -q "wordpress"; then
+        log "Downloading container images (this may take a few minutes)..."
+        docker compose pull 2>&1 | tee -a "$LOG_FILE"
+    fi
+
+    # Start containers
+    docker compose up -d 2>&1 | tee -a "$LOG_FILE"
+
+    log "Containers started successfully"
+}
+
+# Function to stop containers
+stop_containers() {
+    log "Stopping onion.press containers..."
+    cd "$DOCKER_DIR"
+    docker compose down 2>&1 | tee -a "$LOG_FILE"
+    log "Containers stopped"
+}
+
+# Function to get container status
+get_status() {
+    cd "$DOCKER_DIR"
+    docker compose ps --format json 2>/dev/null || echo "[]"
+}
+
+# Function to get onion address
+get_onion_address() {
+    cd "$DOCKER_DIR"
+
+    # Wait for tor container to generate the address
+    for i in {1..30}; do
+        ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+        if [ ! -z "$ONION_ADDR" ]; then
+            echo "$ONION_ADDR"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Generating..."
+    return 1
+}
+
+# Main execution
+main() {
+    case "${1:-start}" in
+        start)
+            # Detect container runtime
+            RUNTIME=$(detect_container_runtime)
+
+            if [ $? -ne 0 ]; then
+                install_orbstack
+                exit $?
+            fi
+
+            log "Detected container runtime: $RUNTIME"
+
+            # Start containers
+            start_containers
+
+            # Wait a bit for services to start
+            sleep 3
+
+            # Get onion address
+            ONION_ADDR=$(get_onion_address)
+
+            log "onion.press is running!"
+            log "Onion address: $ONION_ADDR"
+            log "Local access: http://localhost:8080"
+
+            # Show success dialog
+            osascript <<EOF
+tell application "System Events"
+    activate
+    display dialog "onion.press is now running!
+
+Your onion address:
+$ONION_ADDR
+
+Local access (for testing):
+http://localhost:8080
+
+The menu bar app will show your status." buttons {"OK"} default button "OK" with icon note with title "onion.press"
+end tell
+EOF
+            ;;
+
+        stop)
+            stop_containers
+            ;;
+
+        restart)
+            stop_containers
+            sleep 2
+            start_containers
+            ;;
+
+        status)
+            get_status
+            ;;
+
+        address)
+            get_onion_address
+            ;;
+
+        logs)
+            cd "$DOCKER_DIR"
+            docker compose logs -f
+            ;;
+
+        *)
+            echo "Usage: $0 {start|stop|restart|status|address|logs}"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

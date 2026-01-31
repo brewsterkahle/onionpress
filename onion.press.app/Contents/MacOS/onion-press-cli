@@ -1,0 +1,61 @@
+#!/bin/bash
+
+# onion.press CLI tool
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+LAUNCHER="$SCRIPT_DIR/onion.press"
+
+case "${1:-help}" in
+    start)
+        echo "Starting onion.press..."
+        "$LAUNCHER" start
+        ;;
+    stop)
+        echo "Stopping onion.press..."
+        "$LAUNCHER" stop
+        ;;
+    restart)
+        echo "Restarting onion.press..."
+        "$LAUNCHER" restart
+        ;;
+    status)
+        echo "Checking status..."
+        "$LAUNCHER" status
+        ;;
+    address)
+        ADDR=$("$LAUNCHER" address)
+        echo "Your onion address:"
+        echo "$ADDR"
+        echo ""
+        echo "Access your WordPress site with Tor Browser at:"
+        echo "http://$ADDR"
+        ;;
+    logs)
+        "$LAUNCHER" logs
+        ;;
+    *)
+        cat <<EOF
+onion.press - WordPress + Tor Hidden Service
+
+Usage: onion-press-cli [command]
+
+Commands:
+  start     - Start WordPress and Tor containers
+  stop      - Stop all containers
+  restart   - Restart all containers
+  status    - Show container status
+  address   - Show your .onion address
+  logs      - View container logs
+
+Examples:
+  onion-press-cli start
+  onion-press-cli address
+  onion-press-cli logs
+
+Your WordPress site will be available at:
+  - Via Tor: http://[your-onion-address].onion
+  - Locally (testing): http://localhost:8080
+
+EOF
+        ;;
+esac
