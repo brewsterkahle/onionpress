@@ -44,11 +44,64 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
 
+        # Ensure Docker is available
+        threading.Thread(target=self.ensure_docker_available, daemon=True).start()
+
         # Start status checker
         self.start_status_checker()
 
         # Auto-start on launch
         threading.Thread(target=self.auto_start, daemon=True).start()
+
+    def ensure_docker_available(self):
+        """Ensure Docker is running, start Docker Desktop or OrbStack if needed"""
+        try:
+            # Check if Docker is accessible
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                # Docker is already running
+                return
+        except:
+            pass
+
+        # Docker not accessible, try to start a container runtime
+        # Try Docker Desktop first (free for personal use)
+        docker_apps = [
+            ("Docker", "Docker Desktop"),
+            ("OrbStack", "OrbStack")
+        ]
+
+        for app_name, display_name in docker_apps:
+            if os.path.exists(f"/Applications/{app_name}.app"):
+                print(f"Docker not accessible, launching {display_name}...")
+                try:
+                    subprocess.run(["open", "-a", app_name], check=False)
+
+                    # Wait for Docker to become available (up to 30 seconds)
+                    for i in range(30):
+                        time.sleep(1)
+                        try:
+                            result = subprocess.run(
+                                ["docker", "info"],
+                                capture_output=True,
+                                timeout=5
+                            )
+                            if result.returncode == 0:
+                                print(f"Docker is now available via {display_name}")
+                                return
+                        except:
+                            continue
+
+                    print(f"Warning: Docker still not available after launching {display_name}")
+                except Exception as e:
+                    print(f"Error launching {display_name}: {e}")
+                    continue
+
+        print("Warning: No Docker runtime found. Please install Docker Desktop or OrbStack.")
 
     def auto_start(self):
         """Automatically start the service when the app launches"""

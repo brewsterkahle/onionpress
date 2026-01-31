@@ -48,94 +48,54 @@ detect_container_runtime() {
     return 1
 }
 
-# Function to install OrbStack
-install_orbstack() {
-    log "OrbStack not found. Installation required."
+# Function to offer Docker installation
+install_docker() {
+    log "Docker runtime not found. Installation required."
 
-    # Show dialog to user
+    # Show dialog to user offering Docker Desktop
     response=$(osascript <<EOF
 tell application "System Events"
     activate
-    set theResponse to display dialog "onion.press requires a container runtime to run WordPress and Tor.
+    set theResponse to display dialog "onion.press requires Docker to run WordPress and Tor.
 
-Would you like to install OrbStack? (Recommended - ~100MB)
+Docker Desktop is free for personal use.
 
-Alternatively, you can install Docker Desktop manually and restart onion.press." buttons {"Cancel", "Install OrbStack"} default button "Install OrbStack" with icon note with title "onion.press Setup"
+Would you like to download Docker Desktop?" buttons {"Cancel", "Download Docker Desktop"} default button "Download Docker Desktop" with icon note with title "onion.press Setup"
     return button returned of theResponse
 end tell
 EOF
 )
 
-    if [ "$response" = "Install OrbStack" ]; then
-        log "Downloading OrbStack..."
+    if [ "$response" = "Download Docker Desktop" ]; then
+        log "Opening Docker Desktop download page..."
 
-        # Show progress window
-        osascript <<EOF &
-tell application "System Events"
-    activate
-    display dialog "Downloading OrbStack...
-
-This may take a few minutes depending on your internet connection." buttons {"Cancel"} with icon note with title "onion.press Setup" giving up after 300
-end tell
-EOF
-
-        # Download OrbStack
-        ORBSTACK_DMG="$DATA_DIR/OrbStack.dmg"
-
-        # Detect architecture
+        # Detect architecture for correct download link
         ARCH=$(uname -m)
         if [ "$ARCH" = "arm64" ]; then
-            ORBSTACK_URL="https://orbstack.dev/download/stable/latest/arm64"
+            DOCKER_URL="https://desktop.docker.com/mac/main/arm64/Docker.dmg"
         else
-            ORBSTACK_URL="https://orbstack.dev/download/stable/latest/amd64"
+            DOCKER_URL="https://desktop.docker.com/mac/main/amd64/Docker.dmg"
         fi
 
-        log "Downloading OrbStack for $ARCH..."
-        curl -L "$ORBSTACK_URL" -o "$ORBSTACK_DMG" 2>&1 | tee -a "$LOG_FILE"
+        # Open Docker Desktop download page
+        open "$DOCKER_URL"
 
-        if [ $? -eq 0 ]; then
-            log "Installing OrbStack..."
-
-            # Mount DMG
-            hdiutil attach "$ORBSTACK_DMG" -nobrowse -quiet
-
-            # Copy to Applications
-            cp -R "/Volumes/OrbStack/OrbStack.app" "/Applications/"
-
-            # Unmount DMG
-            hdiutil detach "/Volumes/OrbStack" -quiet
-
-            # Clean up
-            rm "$ORBSTACK_DMG"
-
-            # Launch OrbStack for first-time setup
-            open -a OrbStack
-
-            log "OrbStack installed successfully!"
-
-            osascript <<EOF
+        osascript <<EOF
 tell application "System Events"
     activate
-    display dialog "OrbStack has been installed!
+    display dialog "Docker Desktop download has started in your browser.
 
-Please complete the OrbStack setup, then relaunch onion.press." buttons {"OK"} default button "OK" with icon note with title "onion.press Setup"
+After installing Docker Desktop:
+1. Open Docker Desktop to complete setup
+2. Wait for Docker to start (whale icon in menu bar)
+3. Relaunch onion.press
+
+Note: Docker Desktop is free for personal use." buttons {"OK"} default button "OK" with icon note with title "onion.press Setup"
 end tell
 EOF
-            exit 0
-        else
-            log "ERROR: Failed to download OrbStack"
-            osascript <<EOF
-tell application "System Events"
-    activate
-    display dialog "Failed to download OrbStack.
-
-Please check your internet connection or install Docker Desktop manually." buttons {"OK"} default button "OK" with icon stop with title "onion.press Error"
-end tell
-EOF
-            exit 1
-        fi
+        exit 0
     else
-        log "User cancelled OrbStack installation"
+        log "User cancelled Docker installation"
         exit 0
     fi
 }
@@ -198,7 +158,7 @@ main() {
             RUNTIME=$(detect_container_runtime)
 
             if [ $? -ne 0 ]; then
-                install_orbstack
+                install_docker
                 exit $?
             fi
 

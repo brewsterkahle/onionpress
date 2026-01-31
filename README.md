@@ -16,16 +16,17 @@ onion.press is a macOS application that bundles WordPress with a Tor hidden serv
 
 - macOS 11.0 (Big Sur) or later
 - Python 3 (pre-installed on macOS 12.3+, or install from [python.org](https://www.python.org/downloads/))
-- Container runtime (OrbStack recommended - will auto-install if needed)
+- Container runtime: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (free for personal use) or [OrbStack](https://orbstack.dev/) - will auto-launch when needed
 
 ## Installation
 
-1. Download the latest `onion.press.dmg` from the releases page
-2. Open the DMG and drag `onion.press.app` to your Applications folder
-3. Launch onion.press from Applications
-4. On first launch:
-   - If OrbStack/Docker is not installed, you'll be prompted to install OrbStack
-   - The app will download WordPress, MariaDB, and Tor container images (~1GB)
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (free for personal use)
+2. Download the latest `onion.press.dmg` from the releases page
+3. Open the DMG and drag `onion.press.app` to your Applications folder
+4. Launch onion.press from Applications
+5. On first launch:
+   - The app will automatically launch Docker Desktop if it's not running
+   - It will download WordPress, MariaDB, and Tor container images (~1GB)
    - This takes 3-5 minutes depending on your internet connection
 
 ## Usage
@@ -57,7 +58,7 @@ onion.press uses:
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
 - **Tor**: Hidden service container that exposes WordPress as an onion service
-- **OrbStack/Docker**: Container runtime (lightweight alternative to Docker Desktop)
+- **Docker**: Container runtime (Docker Desktop or OrbStack)
 
 All data is stored in Docker volumes, persisted at:
 - `~/.onion.press/` - Application data and logs
@@ -82,9 +83,11 @@ brew install python3
 ```
 
 ### "Container runtime not found"
-The app should prompt to install OrbStack automatically. If not, you can:
-- Install [OrbStack](https://orbstack.dev/) manually
-- Or install [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+Install one of these Docker runtimes:
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (recommended, free for personal use)
+- [OrbStack](https://orbstack.dev/) (lightweight alternative)
+
+The app will automatically launch whichever is installed when it starts.
 
 ### Containers won't start
 Check the logs via the menu bar app or run:
