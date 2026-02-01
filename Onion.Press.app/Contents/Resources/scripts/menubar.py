@@ -36,6 +36,7 @@ class OnionPressApp(rumps.App):
         # Icon paths
         self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
         self.icon_stopped = os.path.join(self.resources_dir, "menubar-icon-stopped.png")
+        self.icon_starting = os.path.join(self.resources_dir, "menubar-icon-starting.png")
 
         # Initialize with icon instead of text (empty string, not None)
         super(OnionPressApp, self).__init__("", icon=self.icon_stopped, quit_button=None)
@@ -48,10 +49,12 @@ class OnionPressApp(rumps.App):
         os.environ["COLIMA_HOME"] = self.colima_home
         os.environ["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
         os.environ["LIMA_INSTANCE"] = "onionpress"
+        os.environ["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
 
         # State
         self.onion_address = "Starting..."
         self.is_running = False
+        self.is_ready = False  # WordPress is ready to serve requests
         self.checking = False
 
         # Menu items
@@ -143,6 +146,53 @@ class OnionPressApp(rumps.App):
             print(f"Error running command {command}: {e}")
             return None
 
+    def check_wordpress_health(self):
+        """Check if WordPress is actually responding to requests"""
+        try:
+            req = urllib.request.Request('http://localhost:8080')
+            with urllib.request.urlopen(req, timeout=3) as response:
+                content = response.read().decode('utf-8', errors='ignore')
+                # Check for database errors or WordPress not ready
+                if 'Error establishing a database connection' in content:
+                    return False
+                if 'Database connection error' in content:
+                    return False
+                # If we get here and got a response, WordPress is responding
+                # Either it's the install page or actual WordPress content
+                return True
+        except:
+            return False
+
+    def check_tor_reachability(self):
+        """Check if the onion address is actually reachable over the Tor network"""
+        try:
+            if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
+                return False
+
+            # Use docker to run a Tor client and test connectivity
+            docker_cmd = [
+                "docker", "run", "--rm", "--network", "onionpress-network",
+                "alpine", "sh", "-c",
+                f"timeout 15 sh -c 'apk add --no-cache tor curl >/dev/null 2>&1 && "
+                f"(tor >/dev/null 2>&1 &) && "
+                f"while ! nc -z localhost 9050 2>/dev/null; do sleep 0.5; done && "
+                f"curl -s -m 10 --socks5-hostname localhost:9050 http://{self.onion_address} >/dev/null 2>&1'"
+            ]
+
+            result = subprocess.run(
+                docker_cmd,
+                capture_output=True,
+                timeout=20
+            )
+
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            print("Tor reachability check timed out")
+            return False
+        except Exception as e:
+            print(f"Error checking Tor reachability: {e}")
+            return False
+
     def check_status(self):
         """Check if containers are running and get onion address"""
         if self.checking:
@@ -171,8 +221,15 @@ class OnionPressApp(rumps.App):
                     self.onion_address = addr.strip()
                 else:
                     self.onion_address = "Generating address..."
+
+                # Check if WordPress is actually ready AND the onion address is reachable over Tor
+                wordpress_ready = self.check_wordpress_health()
+                tor_reachable = self.check_tor_reachability()
+
+                self.is_ready = wordpress_ready and tor_reachable
             else:
                 self.onion_address = "Not running"
+                self.is_ready = False
 
             # Update menu
             self.update_menu()
@@ -184,12 +241,20 @@ class OnionPressApp(rumps.App):
 
     def update_menu(self):
         """Update menu items based on current state"""
-        if self.is_running:
+        if self.is_running and self.is_ready:
+            # Fully operational
             self.icon = self.icon_running
             self.menu["Starting..."].title = f"Address: {self.onion_address}"
             self.menu["Start"].set_callback(None)
             self.menu["Stop"].set_callback(self.stop_service)
+        elif self.is_running and not self.is_ready:
+            # Containers running but WordPress not ready yet
+            self.icon = self.icon_starting
+            self.menu["Starting..."].title = "Status: Starting up, please wait..."
+            self.menu["Start"].set_callback(None)
+            self.menu["Stop"].set_callback(self.stop_service)
         else:
+            # Stopped
             self.icon = self.icon_stopped
             self.menu["Starting..."].title = "Status: Stopped"
             self.menu["Start"].set_callback(self.start_service)

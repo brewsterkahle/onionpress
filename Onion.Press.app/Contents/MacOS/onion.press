@@ -35,6 +35,7 @@ export PATH="$BIN_DIR:$PATH"
 export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
+export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 
 # Log file
 LOG_FILE="$DATA_DIR/onion.press.log"
