@@ -101,13 +101,19 @@ fi
 
 # Create virtual environment if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then
-    update_status "Initializing Python environment..."
     log "Creating Python virtual environment..."
+
+    # Show progress dialog
+    osascript -e 'display notification "Setting up Python environment..." with title "Onion.Press Setup"' &
+
     python3 -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1
 
-    update_status "Installing Python dependencies..."
+    osascript -e 'display notification "Installing Python dependencies (1-2 min)..." with title "Onion.Press Setup"' &
+
     "$VENV_DIR/bin/pip" install --upgrade pip >> "$LOG_FILE" 2>&1
     "$VENV_DIR/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" >> "$LOG_FILE" 2>&1
+
+    osascript -e 'display notification "Python setup complete!" with title "Onion.Press Setup"' &
 
     log "Virtual environment created successfully"
 fi
@@ -116,7 +122,9 @@ fi
 initialize_colima() {
     if [ ! -f "$COLIMA_HOME/.initialized" ]; then
         log "Initializing Colima container runtime..."
-        update_status "Initializing container runtime (2-3 min)..."
+
+        # Show progress notification
+        osascript -e 'display notification "Initializing container runtime (1-2 min)..." with title "Onion.Press Setup"' &
 
         # Check macOS version >= 13
         MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
@@ -149,6 +157,7 @@ EOF
         if [ $? -eq 0 ]; then
             touch "$COLIMA_HOME/.initialized"
             log "Colima initialized successfully"
+            osascript -e 'display notification "Container runtime ready!" with title "Onion.Press Setup"' &
         else
             log "ERROR: Colima init failed"
             osascript <<EOF
@@ -193,7 +202,7 @@ fi
 
 # Show completion notification if first run
 if [ "$FIRST_RUN" = true ]; then
-    update_status "Setup complete! Launching Onion.Press..."
+    osascript -e 'display notification "Setup complete! Launching menubar app..." with title "Onion.Press Setup"' &
 fi
 
 # Activate virtual environment and run menu bar app
