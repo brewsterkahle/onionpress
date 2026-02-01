@@ -733,39 +733,62 @@ GitHub: github.com/brewsterkahle/onion.press"""
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
-        """Guide user through uninstallation"""
+        """Uninstall Onion.Press automatically"""
         response = rumps.alert(
             title="Uninstall Onion.Press",
-            message="This will guide you through removing Onion.Press from your system.\n\nYour WordPress data and onion address will be permanently deleted.\n\nContinue?",
-            ok="Continue",
+            message="This will remove Onion.Press from your system.\n\nYour WordPress data and onion address will be permanently deleted.\n\nContinue?",
+            ok="Uninstall",
             cancel="Cancel"
         )
 
         if response == 1:  # OK clicked
-            # Stop services first
-            subprocess.run([self.launcher_script, "stop"], capture_output=True)
+            try:
+                # Step 1: Stop services
+                self.log("Uninstall: Stopping services...")
+                subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
 
-            # Show uninstall instructions
-            instructions = """To complete uninstallation:
+                # Step 2: Remove Docker volumes
+                self.log("Uninstall: Removing Docker volumes...")
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                result = subprocess.run(
+                    [docker_bin, "volume", "rm",
+                     "onionpress-tor-keys",
+                     "onionpress-wordpress-data",
+                     "onionpress-db-data"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env={"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
+                )
 
-1. Quit Onion.Press (it will quit automatically)
-2. Move Onion.Press.app to Trash
-3. Open Terminal and run these commands:
+                if result.returncode == 0:
+                    self.log("Uninstall: Docker volumes removed successfully")
+                else:
+                    self.log(f"Uninstall: Docker volume removal failed: {result.stderr}")
 
-   # Remove Docker volumes (must be done BEFORE removing data directory)
-   DOCKER_HOST=unix://$HOME/.onion.press/colima/default/docker.sock docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
+                # Step 3: Remove data directory (but keep it until after we show dialog)
+                self.log("Uninstall: Preparing to remove data directory...")
+                import shutil
+                data_dir_exists = os.path.exists(self.app_support)
 
-   # Remove data directory
-   rm -rf ~/.onion.press
+                # Step 4: Show final instructions BEFORE removing data dir
+                # (so log file still exists if needed)
+                response = rumps.alert(
+                    title="Uninstall Complete",
+                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
+                    ok="OK"
+                )
 
-These commands have been copied to your clipboard."""
+                # Now remove data directory
+                if data_dir_exists:
+                    shutil.rmtree(self.app_support)
+                    print("Uninstall: Data directory removed successfully")
 
-            # Copy commands to clipboard
-            commands = """DOCKER_HOST=unix://$HOME/.onion.press/colima/default/docker.sock docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
-rm -rf ~/.onion.press"""
-            subprocess.run(["pbcopy"], input=commands.encode(), check=True)
-
-            rumps.alert(title="Uninstall Instructions", message=instructions)
+            except Exception as e:
+                rumps.alert(
+                    title="Uninstall Error",
+                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)"
+                )
 
             # Quit the app
             rumps.quit_application()
