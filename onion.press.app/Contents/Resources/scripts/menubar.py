@@ -15,9 +15,7 @@ import plistlib
 
 class OnionPressApp(rumps.App):
     def __init__(self):
-        super(OnionPressApp, self).__init__("onion.press", quit_button=None)
-
-        # Get paths
+        # Get paths first
         self.app_support = os.path.expanduser("~/.onion.press")
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
         self.resources_dir = os.path.dirname(self.script_dir)
@@ -32,8 +30,8 @@ class OnionPressApp(rumps.App):
         self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
         self.icon_stopped = os.path.join(self.resources_dir, "menubar-icon-stopped.png")
 
-        # Set initial icon (stopped state)
-        self.icon = self.icon_stopped
+        # Initialize with icon instead of text (empty string, not None)
+        super(OnionPressApp, self).__init__("", icon=self.icon_stopped, quit_button=None)
 
         # Get version from Info.plist
         self.version = self.get_version()
