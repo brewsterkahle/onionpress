@@ -19,8 +19,14 @@ Full resolution source images for the onion.press brand.
 ### `icon-face-transparent.png`
 - **Size**: 1024x1024px (transparent background)
 - **Use**: Onion character only, no background
-- **Purpose**: Menu bar icons, overlays, stickers, social media avatars
+- **Purpose**: Overlays, stickers, social media avatars
 - **Style**: Just the purple onion face with newspapers, transparent PNG for compositing
+
+### `icon-menubar.png`
+- **Size**: High resolution (transparent background)
+- **Use**: Menu bar icon source (tighter crop, enhanced detail)
+- **Purpose**: macOS menu bar display, system tray icons
+- **Style**: Polished onion character with improved shading and vibrant colors
 
 ## Design Notes
 
