@@ -2,6 +2,12 @@
 
 All notable changes to onion.press will be documented in this file.
 
+## [2.0.7] - 2026-01-31
+
+### Changed
+- **App icon updated** - Now uses the purple onion character (tighter crop) for better visibility in Finder and Dock
+- Replaced rounded background icon with face-only transparent icon for cleaner appearance
+
 ## [2.0.6] - 2026-01-31
 
 ### Added

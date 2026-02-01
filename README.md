@@ -6,7 +6,7 @@
 
 **Easy-to-install WordPress with Tor Hidden Service for macOS**
 
-> **Current Version: 2.0.6** - Now with vanity onion addresses and key backup!
+> **Current Version: 2.0.7** - Now with vanity onion addresses and key backup!
 
 onion.press is a macOS application that bundles WordPress with a Tor hidden service, allowing you to run a WordPress blog accessible only through the Tor network.
 
