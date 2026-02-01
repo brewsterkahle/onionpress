@@ -373,20 +373,34 @@ class OnionPressApp(rumps.App):
                 tor_reachable = self.check_tor_reachability(log_result=should_log)
 
                 previous_ready = self.is_ready
-                self.is_ready = wordpress_ready and tor_reachable
+                ready_now = wordpress_ready and tor_reachable
 
-                # Log status change when becoming ready
-                if self.is_ready and not previous_ready:
-                    self.log("✓ System fully operational - reducing check frequency")
+                # If just became ready, wait 10 seconds before showing as ready
+                # This gives the Tor network time to fully propagate the hidden service
+                if ready_now and not previous_ready:
+                    self.log("✓ System checks passed - waiting 10 seconds for Tor network propagation...")
                     self.last_status_logged = current_status
 
-                    # Dismiss setup dialog if it's showing
-                    self.dismiss_setup_dialog()
+                    def delayed_ready():
+                        time.sleep(10)
+                        self.is_ready = True
+                        self.log("✓ System fully operational - reducing check frequency")
 
-                    # Auto-open Tor Browser on first ready (if installed)
-                    if not self.auto_opened_browser:
-                        self.auto_opened_browser = True
-                        threading.Thread(target=self.auto_open_browser, daemon=True).start()
+                        # Dismiss setup dialog if it's showing
+                        self.dismiss_setup_dialog()
+
+                        # Auto-open Tor Browser on first ready (if installed)
+                        if not self.auto_opened_browser:
+                            self.auto_opened_browser = True
+                            self.auto_open_browser()
+
+                        # Force menu update
+                        self.update_menu()
+
+                    threading.Thread(target=delayed_ready, daemon=True).start()
+                elif ready_now:
+                    # Already was ready, keep it ready
+                    self.is_ready = True
 
                 # Start web log capture if not already running
                 if self.web_log_process is None:
@@ -397,12 +411,12 @@ class OnionPressApp(rumps.App):
                     self.log("Service stopped")
                     self.last_status_logged = None
 
+                    # Only dismiss setup dialog when actually stopping (not during startup)
+                    self.dismiss_setup_dialog()
+
                 self.onion_address = "Not running"
                 self.is_ready = False
                 self.auto_opened_browser = False  # Reset for next start
-
-                # Dismiss setup dialog if showing
-                self.dismiss_setup_dialog()
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -821,31 +835,71 @@ Store them in a safe place - you can use them to restore your onion address on a
             # Dismiss any existing dialog first
             self.dismiss_setup_dialog()
 
-            # Show dialog with a very long timeout (30 minutes) that we'll dismiss programmatically
-            # This runs in the background so it doesn't block
-            script = '''
-                tell application "System Events"
-                    activate
-                    display dialog "Setting up onion.press for first use...
+            # Show dialog with "Dismiss" and "Cancel Setup" buttons
+            # User can dismiss to hide the dialog, or cancel to stop setup
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+
+            script = f'''
+tell application "System Events"
+    activate
+    display dialog "Setting up onion.press for first use...
 
 Downloading container images (2-5 minutes)
 
-This window will close automatically when your site is ready." buttons {"OK"} default button "OK" with icon file ((path to application "onion.press") as text) with title "onion.press Setup" giving up after 1800
-                end tell
-            '''
+This window will close automatically when your site is ready." buttons {{"Cancel Setup", "Dismiss"}} default button "Dismiss" cancel button "Cancel Setup" with icon POSIX file "{icon_path}" with title "onion.press Setup" giving up after 1800
+end tell
+'''
+
+            # Start the dialog process
             self.setup_dialog_process = subprocess.Popen(
                 ["osascript", "-e", script],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
             )
-            self.log("Setup dialog shown")
+
+            # Monitor if user clicks Cancel Setup
+            def monitor_result():
+                try:
+                    stdout, _ = self.setup_dialog_process.communicate(timeout=1800)
+                    # If user clicked Cancel Setup, stop setup
+                    # (returncode 1 = cancel button clicked)
+                    result = self.setup_dialog_process.returncode
+                    if result == 1:
+                        self.log("User cancelled setup - stopping services")
+                        subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+                    # If user clicked Dismiss (returncode 0) or timeout, just continue
+                except:
+                    pass  # Dialog was dismissed programmatically or timed out
+
+            threading.Thread(target=monitor_result, daemon=True).start()
+            self.log("Setup dialog shown via osascript")
         except Exception as e:
-            self.log(f"Error showing setup dialog: {e}")
+            self.log(f"Error showing setup dialog via osascript (possibly permissions): {e}")
+            # Fallback to notification if osascript fails
+            try:
+                self.show_notification("Setting up onion.press for first use...",
+                                     "Downloading container images (2-5 minutes)")
+            except:
+                pass
 
     def dismiss_setup_dialog(self):
         """Dismiss the setup dialog if it's showing"""
         if self.setup_dialog_process is not None:
             try:
+                # Try to close the dialog window directly via AppleScript
+                subprocess.run([
+                    "osascript", "-e",
+                    '''tell application "System Events"
+                        tell process "osascript"
+                            if exists window "onion.press Setup" then
+                                click button 1 of window "onion.press Setup"
+                            end if
+                        end tell
+                    end tell'''
+                ], timeout=2, capture_output=True)
+
+                # Then terminate the process
                 self.setup_dialog_process.terminate()
                 self.setup_dialog_process.wait(timeout=2)
                 self.log("Setup dialog dismissed")
@@ -925,23 +979,58 @@ GitHub: github.com/brewsterkahle/onion.press"""
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
         """Uninstall Onion.Press automatically"""
-        response = rumps.alert(
-            title="Uninstall Onion.Press",
-            message="This will remove Onion.Press from your system.\n\nYour WordPress data and onion address will be permanently deleted.\n\nContinue?",
-            ok="Uninstall",
-            cancel="Cancel"
-        )
+        # Use osascript for confirmation dialog with proper icon
+        # Use direct path to icon instead of 'path to application' for better reliability
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        try:
+            result = subprocess.run(["osascript", "-e", f'''
+tell application "System Events"
+    activate
+    set userChoice to button returned of (display dialog "This will remove Onion.Press from your system.
 
-        if response == 1:  # OK clicked
+Your WordPress data and onion address will be permanently deleted.
+
+Continue?" buttons {{"Cancel", "Uninstall"}} default button "Cancel" cancel button "Cancel" with icon POSIX file "{icon_path}" with title "Uninstall Onion.Press")
+    return userChoice
+end tell
+'''], capture_output=True, text=True, timeout=60)
+
+            self.log(f"Uninstall dialog osascript result: returncode={result.returncode}, stdout={result.stdout}, stderr={result.stderr}")
+
+            # Check if user clicked Uninstall
+            if result.returncode != 0 or "Uninstall" not in result.stdout:
+                return  # User cancelled
+        except Exception as e:
+            # Fallback to rumps if osascript fails
+            self.log(f"Uninstall dialog osascript failed: {e}")
+            response = rumps.alert(
+                title="Uninstall Onion.Press",
+                message="This will remove Onion.Press from your system.\n\nYour WordPress data and onion address will be permanently deleted.\n\nContinue?",
+                ok="Uninstall",
+                cancel="Cancel"
+            )
+            if response != 1:  # Cancel clicked
+                return
+
+        # User confirmed uninstall - run in background thread to avoid beach ball
+        def do_uninstall():
             try:
-                # Dismiss setup dialog if showing
+                # First, stop any ongoing setup processes
+                self.log("Uninstall: Stopping any ongoing processes...")
                 self.dismiss_setup_dialog()
 
-                # Step 1: Stop services
+                # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
 
-                # Step 2: Remove Docker volumes
+                # Kill all colima/lima processes (including orphaned ones)
+                self.log("Uninstall: Killing all colima/lima processes...")
+                subprocess.run(["pkill", "-f", "colima daemon"], capture_output=True, timeout=10)
+                subprocess.run(["pkill", "-f", "limactl hostagent"], capture_output=True, timeout=10)
+                subprocess.run(["pkill", "-f", "limactl usernet"], capture_output=True, timeout=10)
+                subprocess.run(["pkill", "-f", "ssh.*colima.*ssh.sock"], capture_output=True, timeout=10)
+
+                # Remove Docker volumes
                 self.log("Uninstall: Removing Docker volumes...")
                 docker_bin = os.path.join(self.bin_dir, "docker")
                 result = subprocess.run(
@@ -967,11 +1056,27 @@ GitHub: github.com/brewsterkahle/onion.press"""
 
                 # Step 4: Show final instructions BEFORE removing data dir
                 # (so log file still exists if needed)
-                response = rumps.alert(
-                    title="Uninstall Complete",
-                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
-                    ok="OK"
-                )
+                # Try osascript first for nice icon, fall back to rumps.alert if it fails
+                try:
+                    result = subprocess.run(["osascript", "-e", f'''
+tell application "System Events"
+    activate
+    display dialog "Onion.Press has been uninstalled.
+
+Final step: Move Onion.Press.app to the Trash.
+
+Click OK to quit." buttons {{"OK"}} default button "OK" with icon POSIX file "{icon_path}" with title "Uninstall Complete"
+end tell
+'''], timeout=60, capture_output=True)
+                    if result.returncode != 0:
+                        raise Exception("osascript failed")
+                except:
+                    # Fallback to rumps.alert if osascript fails (permissions, etc)
+                    rumps.alert(
+                        title="Uninstall Complete",
+                        message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
+                        ok="OK"
+                    )
 
                 # Now remove data directory
                 if data_dir_exists:
@@ -988,6 +1093,9 @@ GitHub: github.com/brewsterkahle/onion.press"""
             subprocess.run(["osascript", "-e", 'quit app "Console"'], capture_output=True)
             # Quit the app
             rumps.quit_application()
+
+        # Run uninstall in background thread to avoid blocking UI
+        threading.Thread(target=do_uninstall, daemon=True).start()
 
     @rumps.clicked("Quit")
     def quit_app(self, _):
