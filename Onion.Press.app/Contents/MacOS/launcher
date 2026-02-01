@@ -78,7 +78,7 @@ tell application "System Events"
 • Initializing container runtime
 • Downloading Docker images
 
-Continue with setup?" buttons {"Cancel", "Continue"} default button "Continue" with title "Onion.Press Setup"
+Continue with setup?" buttons {"Cancel", "Continue"} default button "Continue" with icon file ((path to application "Onion.Press") as text) with title "Onion.Press Setup"
     return button returned of dialogResult
 end tell
 EOF
