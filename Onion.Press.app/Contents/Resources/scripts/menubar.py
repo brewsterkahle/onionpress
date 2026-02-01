@@ -752,19 +752,17 @@ GitHub: github.com/brewsterkahle/onion.press"""
 2. Move Onion.Press.app to Trash
 3. Open Terminal and run these commands:
 
+   # Remove Docker volumes (must be done BEFORE removing data directory)
+   DOCKER_HOST=unix://$HOME/.onion.press/colima/default/docker.sock docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
+
    # Remove data directory
    rm -rf ~/.onion.press
-
-   # Remove Docker volumes
-   docker volume rm onionpress-tor-keys
-   docker volume rm onionpress-wordpress-data
-   docker volume rm onionpress-db-data
 
 These commands have been copied to your clipboard."""
 
             # Copy commands to clipboard
-            commands = """rm -rf ~/.onion.press
-docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data"""
+            commands = """DOCKER_HOST=unix://$HOME/.onion.press/colima/default/docker.sock docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
+rm -rf ~/.onion.press"""
             subprocess.run(["pbcopy"], input=commands.encode(), check=True)
 
             rumps.alert(title="Uninstall Instructions", message=instructions)
