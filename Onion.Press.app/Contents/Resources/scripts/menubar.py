@@ -308,36 +308,6 @@ class OnionPressApp(rumps.App):
                 self.log(f"✗ Tor status check failed: {str(e)}")
             return False
 
-    def check_minimum_uptime(self, status):
-        """Check if containers have been running long enough for onion service to publish"""
-        try:
-            # Parse uptime from status (e.g., "Up 2 minutes" or "Up 45 seconds")
-            for container in status:
-                if 'tor' in container.get('Name', '').lower():
-                    status_str = container.get('Status', '')
-                    # Parse "Up X seconds/minutes"
-                    if 'Up' in status_str:
-                        parts = status_str.split()
-                        if len(parts) >= 3:
-                            value = parts[1]
-                            unit = parts[2].lower()
-
-                            try:
-                                uptime_seconds = int(value)
-                                if 'minute' in unit:
-                                    uptime_seconds *= 60
-                                elif 'hour' in unit:
-                                    uptime_seconds *= 3600
-
-                                # Require at least 90 seconds for onion service to publish
-                                return uptime_seconds >= 90
-                            except:
-                                pass
-            return False
-        except Exception as e:
-            print(f"Error checking uptime: {e}")
-            return False
-
     def check_status(self):
         """Check if containers are running and get onion address"""
         if self.checking:
@@ -372,18 +342,14 @@ class OnionPressApp(rumps.App):
                 current_status = (self.is_running, self.onion_address)
                 should_log = (current_status != self.last_status_logged) or not self.is_ready
 
-                # Check if WordPress is actually ready AND enough time has passed
-                # for the onion service to publish its descriptor (minimum 90 seconds)
+                # Check if WordPress is ready and Tor is reachable
                 wordpress_ready = self.check_wordpress_health(log_result=should_log)
-                minimum_uptime_reached = self.check_minimum_uptime(status)
 
-                # Only check Tor reachability if minimum uptime is reached
-                tor_reachable = False
-                if minimum_uptime_reached:
-                    tor_reachable = self.check_tor_reachability(log_result=should_log)
+                # Check Tor reachability immediately - if it works in Tor Browser, show as ready
+                tor_reachable = self.check_tor_reachability(log_result=should_log)
 
                 previous_ready = self.is_ready
-                self.is_ready = wordpress_ready and minimum_uptime_reached and tor_reachable
+                self.is_ready = wordpress_ready and tor_reachable
 
                 # Log status change when becoming ready
                 if self.is_ready and not previous_ready:
