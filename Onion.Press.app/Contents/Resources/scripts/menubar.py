@@ -473,7 +473,32 @@ class OnionPressApp(rumps.App):
         self.menu["Starting..."].title = "Status: Starting..."
 
         def start():
+            # Check if this is first run (no docker images yet)
+            first_run = False
+            try:
+                result = subprocess.run(
+                    ["docker", "images", "--format", "{{.Repository}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                images = result.stdout.strip().split('\n')
+                # First run if we don't have wordpress/mysql/tor images
+                if not any('wordpress' in img for img in images):
+                    first_run = True
+                    self.show_notification("Downloading container images (2-5 min)...",
+                                         "This happens once on first launch")
+                    self.log("First run detected - will monitor image downloads")
+            except:
+                pass
+
+            # Start the service
             subprocess.run([self.launcher_script, "start"])
+
+            # If first run, monitor download progress
+            if first_run:
+                self.monitor_image_downloads()
+
             time.sleep(2)
             self.check_status()
 
@@ -710,6 +735,63 @@ Store them in a safe place - you can use them to restore your onion address on a
                 title="Update Check Failed",
                 message=f"Could not check for updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onion.press/releases"
             )
+
+    def show_notification(self, message, subtitle=""):
+        """Show a macOS notification"""
+        try:
+            rumps.notification(
+                title="Onion.Press Setup",
+                subtitle=subtitle,
+                message=message
+            )
+        except:
+            pass
+
+    def monitor_image_downloads(self):
+        """Monitor Docker image downloads and show progress notifications"""
+        images_to_check = {
+            'wordpress': False,
+            'mariadb': False,
+            'tor': False
+        }
+
+        self.log("Monitoring image downloads...")
+
+        # Check for images every 3 seconds for up to 10 minutes
+        for i in range(200):
+            try:
+                result = subprocess.run(
+                    ["docker", "images", "--format", "{{.Repository}}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                current_images = result.stdout.strip().split('\n')
+
+                # Check each image
+                for image_name in images_to_check:
+                    if not images_to_check[image_name]:
+                        if any(image_name in img for img in current_images):
+                            images_to_check[image_name] = True
+                            if image_name == 'wordpress':
+                                self.show_notification("Downloaded WordPress container")
+                            elif image_name == 'mariadb':
+                                self.show_notification("Downloaded database container")
+                            elif image_name == 'tor':
+                                self.show_notification("Downloaded Tor container")
+                            self.log(f"Image downloaded: {image_name}")
+
+                # If all images are downloaded, we're done
+                if all(images_to_check.values()):
+                    self.show_notification("All containers downloaded!", "Starting services...")
+                    self.log("All images downloaded")
+                    break
+
+            except Exception as e:
+                self.log(f"Error checking images: {e}")
+                pass
+
+            time.sleep(3)
 
     @rumps.clicked("About Onion.Press")
     def show_about(self, _):
