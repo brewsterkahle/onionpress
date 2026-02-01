@@ -16,6 +16,8 @@
     <string>onion.press</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>2.0.4</string>
     <key>CFBundleVersion</key>

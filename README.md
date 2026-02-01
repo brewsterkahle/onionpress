@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="logo.png" alt="onion.press logo" width="400">
+</div>
+
 # onion.press
 
 **Easy-to-install WordPress with Tor Hidden Service for macOS**
