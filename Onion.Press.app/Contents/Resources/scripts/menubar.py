@@ -567,14 +567,10 @@ class OnionPressApp(rumps.App):
 
     @rumps.clicked("View Logs")
     def view_logs(self, _):
-        """Open logs in Terminal with tail -f (shows newest entries, follows log)"""
+        """Open logs in Console.app"""
         log_file = os.path.join(self.app_support, "onion.press.log")
         if os.path.exists(log_file):
-            # Use tail to show last 50 lines and follow the log
-            subprocess.run([
-                "osascript", "-e",
-                f'tell application "Terminal" to do script "tail -n 50 -f \\"{log_file}\\""'
-            ])
+            subprocess.run(["open", "-a", "Console", log_file])
         else:
             rumps.alert("No logs available yet")
 
