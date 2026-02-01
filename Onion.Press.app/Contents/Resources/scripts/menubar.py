@@ -4,6 +4,13 @@ onion.press Menu Bar Application
 Provides a simple menu bar interface to control the WordPress + Tor service
 """
 
+# Prevent Python icon from appearing in the dock - MUST be before rumps import
+import AppKit
+import objc
+# Get the shared NSApplication instance and set it to accessory (no dock icon)
+app = AppKit.NSApplication.sharedApplication()
+app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+
 import rumps
 import subprocess
 import os
@@ -14,13 +21,6 @@ import urllib.request
 import plistlib
 import sys
 from datetime import datetime
-
-# Prevent Python icon from appearing in the dock
-try:
-    import AppKit
-    AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
-except:
-    pass  # Ignore if AppKit not available
 
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
