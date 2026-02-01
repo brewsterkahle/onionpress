@@ -15,6 +15,13 @@ import plistlib
 import sys
 from datetime import datetime
 
+# Prevent Python icon from appearing in the dock
+try:
+    import AppKit
+    AppKit.NSApp.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+except:
+    pass  # Ignore if AppKit not available
+
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, script_dir)
