@@ -56,7 +56,6 @@ class OnionPressApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
-            rumps.MenuItem("Restart", callback=self.restart_service),
             rumps.separator,
             rumps.MenuItem("View Logs", callback=self.view_logs),
             rumps.MenuItem("Settings...", callback=self.open_settings),
@@ -64,6 +63,8 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("Check for Updates...", callback=self.check_for_updates),
             rumps.MenuItem("About onion.press", callback=self.show_about),
             rumps.MenuItem("Uninstall...", callback=self.uninstall),
+            rumps.separator,
+            rumps.MenuItem("Quit", callback=self.quit_app),
         ]
 
         # Ensure Docker is available
@@ -178,13 +179,11 @@ class OnionPressApp(rumps.App):
             self.menu["Starting..."].title = f"Address: {self.onion_address}"
             self.menu["Start"].set_callback(None)
             self.menu["Stop"].set_callback(self.stop_service)
-            self.menu["Restart"].set_callback(self.restart_service)
         else:
             self.icon = self.icon_stopped
             self.menu["Starting..."].title = "Status: Stopped"
             self.menu["Start"].set_callback(self.start_service)
             self.menu["Stop"].set_callback(None)
-            self.menu["Restart"].set_callback(None)
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
@@ -400,8 +399,9 @@ docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-dat
             # Quit the app
             rumps.quit_application()
 
-    def quit_callback(self, _):
-        """Called when user selects Quit from the menu (overrides default rumps quit)"""
+    @rumps.clicked("Quit")
+    def quit_app(self, _):
+        """Quit the application"""
         response = rumps.alert(
             title="Quit onion.press?",
             message="This will stop the WordPress service. Are you sure?",
