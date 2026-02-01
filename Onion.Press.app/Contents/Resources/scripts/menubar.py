@@ -909,6 +909,8 @@ GitHub: github.com/brewsterkahle/onion.press"""
                     message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)"
                 )
 
+            # Quit Console.app if it's running (so it releases the log file)
+            subprocess.run(["osascript", "-e", 'quit app "Console"'], capture_output=True)
             # Quit the app
             rumps.quit_application()
 
@@ -926,6 +928,8 @@ GitHub: github.com/brewsterkahle/onion.press"""
             self.stop_web_log_capture()
             # Stop services before quitting
             subprocess.run([self.launcher_script, "stop"])
+            # Quit Console.app if it's running (so it releases the log file)
+            subprocess.run(["osascript", "-e", 'quit app "Console"'], capture_output=True)
             rumps.quit_application()
 
 if __name__ == "__main__":
