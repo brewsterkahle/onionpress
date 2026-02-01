@@ -35,6 +35,16 @@ class OnionPressApp(rumps.App):
         self.info_plist = os.path.join(self.contents_dir, "Info.plist")
         self.log_file = os.path.join(self.app_support, "onion.press.log")
 
+        # Rotate log file on startup to avoid confusion with old sessions
+        if os.path.exists(self.log_file):
+            # Keep only the last session as backup
+            backup_log = os.path.join(self.app_support, "onion.press.log.prev")
+            try:
+                import shutil
+                shutil.move(self.log_file, backup_log)
+            except:
+                pass  # If rotation fails, just append
+
         # Icon paths
         self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
         self.icon_stopped = os.path.join(self.resources_dir, "menubar-icon-stopped.png")
