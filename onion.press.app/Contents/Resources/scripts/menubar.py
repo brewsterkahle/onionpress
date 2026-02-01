@@ -15,7 +15,7 @@ import plistlib
 
 class OnionPressApp(rumps.App):
     def __init__(self):
-        super(OnionPressApp, self).__init__("OP")
+        super(OnionPressApp, self).__init__("onion.press", quit_button=None)
 
         # Get paths
         self.app_support = os.path.expanduser("~/.onion.press")
@@ -27,6 +27,13 @@ class OnionPressApp(rumps.App):
         self.bin_dir = os.path.join(self.resources_dir, "bin")
         self.colima_home = os.path.join(self.app_support, "colima")
         self.info_plist = os.path.join(self.contents_dir, "Info.plist")
+
+        # Icon paths
+        self.icon_running = os.path.join(self.resources_dir, "menubar-icon-running.png")
+        self.icon_stopped = os.path.join(self.resources_dir, "menubar-icon-stopped.png")
+
+        # Set initial icon (stopped state)
+        self.icon = self.icon_stopped
 
         # Get version from Info.plist
         self.version = self.get_version()
@@ -169,13 +176,13 @@ class OnionPressApp(rumps.App):
     def update_menu(self):
         """Update menu items based on current state"""
         if self.is_running:
-            self.title = "OP ●"  # Running indicator
+            self.icon = self.icon_running
             self.menu["Starting..."].title = f"Address: {self.onion_address}"
             self.menu["Start"].set_callback(None)
             self.menu["Stop"].set_callback(self.stop_service)
             self.menu["Restart"].set_callback(self.restart_service)
         else:
-            self.title = "OP ○"  # Stopped indicator
+            self.icon = self.icon_stopped
             self.menu["Starting..."].title = "Status: Stopped"
             self.menu["Start"].set_callback(self.start_service)
             self.menu["Stop"].set_callback(None)

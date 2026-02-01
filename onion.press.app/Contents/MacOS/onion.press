@@ -220,7 +220,7 @@ tell application "System Events"
     activate
     display dialog "Initializing bundled container runtime (2-3 minutes)...
 
-Please wait while onion.press sets up its container environment." buttons {"OK"} default button "OK" with icon note with title "onion.press Setup"
+Please wait while onion.press sets up its container environment." buttons {"OK"} default button "OK" with icon file ((path to application "onion.press") as text) with title "onion.press Setup"
 end tell
 EOF
 
@@ -382,7 +382,7 @@ $ONION_ADDR
 Local access (for testing):
 http://localhost:8080
 
-The menu bar app will show your status." buttons {"OK"} default button "OK" with icon note with title "onion.press"
+The menu bar app will show your status." buttons {"OK"} default button "OK" with icon file ((path to application "onion.press") as text) with title "onion.press"
 end tell
 EOF
             ;;

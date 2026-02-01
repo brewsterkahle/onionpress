@@ -16,6 +16,12 @@ Full resolution source images for the onion.press brand.
 - **Purpose**: macOS application icon, website favicon, profile pictures
 - **Style**: Onion character on gradient background with sparkles, iOS/macOS style rounded corners
 
+### `icon-face-transparent.png`
+- **Size**: 1024x1024px (transparent background)
+- **Use**: Onion character only, no background
+- **Purpose**: Menu bar icons, overlays, stickers, social media avatars
+- **Style**: Just the purple onion face with newspapers, transparent PNG for compositing
+
 ## Design Notes
 
 - **Character**: Friendly purple onion with cute face and rosy cheeks
