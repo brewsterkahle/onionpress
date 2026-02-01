@@ -69,24 +69,17 @@ if [ ! -d "$VENV_DIR" ] || [ ! -f "$COLIMA_HOME/.initialized" ]; then
     log "First-time initialization detected"
 
     # Show confirmation dialog before starting (with 10 second timeout)
-    RESPONSE=$(osascript <<'EOF' 2>&1 || echo "Continue"
-tell application "System Events"
-    activate
-    set dialogResult to display dialog "First-time setup required (2-3 minutes):
-
-• Setting up Python environment
-• Initializing container runtime
-• Downloading Docker images
-
-Click Cancel to abort or wait to continue..." buttons {"Cancel", "Continue"} default button "Continue" with icon file ((path to application "Onion.Press") as text) with title "Onion.Press Setup" giving up after 10
-    if gave up of dialogResult then
-        return "Continue"
-    else
-        return button returned of dialogResult
-    end if
-end tell
-EOF
-)
+    ICON_PATH="$RESOURCES_DIR/app-icon.png"
+    RESPONSE=$(osascript -e "tell application \"System Events\"" \
+        -e "activate" \
+        -e "set dialogResult to display dialog \"First-time setup required (2-3 minutes):\n\n• Setting up Python environment\n• Initializing container runtime\n• Downloading Docker images\n\nClick Cancel to abort or wait to continue...\" buttons {\"Cancel\", \"Continue\"} default button \"Continue\" with icon POSIX file \"$ICON_PATH\" with title \"Onion.Press Setup\" giving up after 10" \
+        -e "if gave up of dialogResult then" \
+        -e "return \"Continue\"" \
+        -e "else" \
+        -e "return button returned of dialogResult" \
+        -e "end if" \
+        -e "end tell" 2>&1 || echo "Continue"
+    )
 
     log "Dialog response was: '$RESPONSE'"
 
