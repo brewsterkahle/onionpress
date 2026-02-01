@@ -68,20 +68,28 @@ if [ ! -d "$VENV_DIR" ] || [ ! -f "$COLIMA_HOME/.initialized" ]; then
     FIRST_RUN=true
     log "First-time initialization detected"
 
-    # Show initial setup dialog
-    osascript <<'EOF' &
+    # Show confirmation dialog before starting
+    RESPONSE=$(osascript <<'EOF'
 tell application "System Events"
     activate
-    display dialog "First-time setup in progress...
+    set dialogResult to display dialog "First-time setup required (2-3 minutes):
 
-This will take 2-3 minutes:
 • Setting up Python environment
 • Initializing container runtime
 • Downloading Docker images
 
-Please wait..." buttons {"OK"} default button "OK" giving up after 5 with title "Onion.Press Setup"
+Continue with setup?" buttons {"Cancel", "Continue"} default button "Continue" with title "Onion.Press Setup"
+    return button returned of dialogResult
 end tell
 EOF
+)
+
+    if [ "$RESPONSE" != "Continue" ]; then
+        log "User cancelled first-time setup"
+        exit 0
+    fi
+
+    log "User confirmed first-time setup"
 fi
 
 # Create virtual environment if it doesn't exist
@@ -101,18 +109,7 @@ fi
 initialize_colima() {
     if [ ! -f "$COLIMA_HOME/.initialized" ]; then
         log "Initializing Colima container runtime..."
-
-        # Show progress dialog
-        osascript <<'EOF' &
-tell application "System Events"
-    activate
-    display dialog "Initializing container runtime...
-
-This takes 2-3 minutes on first launch.
-
-The menubar app will appear when ready." buttons {"OK"} default button "OK" giving up after 3 with title "Onion.Press Setup"
-end tell
-EOF
+        update_status "Initializing container runtime (2-3 min)..."
 
         # Check macOS version >= 13
         MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
