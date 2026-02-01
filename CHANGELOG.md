@@ -2,6 +2,26 @@
 
 All notable changes to onion.press will be documented in this file.
 
+## [2.0.5] - 2026-01-31
+
+### Added
+- **Custom menubar icon** - Replaced "OP" text with cute onion character icon
+- **Settings menu item** - Opens config file for easy customization
+- **Check for Updates** - Checks GitHub for newer versions
+- **About dialog** - Shows version info, features, and credits
+- **Uninstall guide** - Step-by-step uninstallation with clipboard support
+
+### Changed
+- Menu bar displays onion character icon instead of text
+- Icon changes from **color** (running) to **grayscale** (stopped)
+- Removed "Restart" menu item (use Stop then Start instead)
+- Added "Quit" menu item with confirmation dialog
+- Dialogs now show custom onion.press icon instead of generic system icon
+
+### Fixed
+- Menubar icon now has proper transparent background
+- Icon displays cleanly in both light and dark menubar themes
+
 ## [2.0.4] - 2026-01-31
 
 ### Fixed
