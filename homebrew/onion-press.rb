@@ -1,6 +1,6 @@
 cask "onion-press" do
   version "2.1.6"
-  sha256 :no_check  # Will be updated after DMG is built
+  sha256 "176110e25c236efb83a4b800cc32aaf3847875f4e7fbbe9b32f170b831c160a7"
 
   url "https://github.com/brewsterkahle/onion.press/releases/download/v#{version}/onion.press.dmg"
   name "Onion.Press"
