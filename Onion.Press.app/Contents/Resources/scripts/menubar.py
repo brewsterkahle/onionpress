@@ -107,6 +107,7 @@ class OnionPressApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
+            rumps.MenuItem("Restart", callback=self.restart_service),
             rumps.separator,
             rumps.MenuItem("View Logs", callback=self.view_logs),
             rumps.MenuItem("View Web Usage Log", callback=self.view_web_log),
@@ -457,18 +458,21 @@ class OnionPressApp(rumps.App):
             self.menu["Starting..."].title = f"Address: {self.onion_address}"
             self.menu["Start"].set_callback(None)
             self.menu["Stop"].set_callback(self.stop_service)
+            self.menu["Restart"].set_callback(self.restart_service)
         elif self.is_running and not self.is_ready:
             # Containers running but WordPress not ready yet
             self.icon = self.icon_starting
             self.menu["Starting..."].title = "Status: Starting up, please wait..."
             self.menu["Start"].set_callback(None)
             self.menu["Stop"].set_callback(self.stop_service)
+            self.menu["Restart"].set_callback(self.restart_service)
         else:
             # Stopped
             self.icon = self.icon_stopped
             self.menu["Starting..."].title = "Status: Stopped"
             self.menu["Start"].set_callback(self.start_service)
             self.menu["Stop"].set_callback(None)
+            self.menu["Restart"].set_callback(None)
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
