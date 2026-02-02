@@ -570,28 +570,33 @@ end tell
             self.checking = False
 
     def update_menu(self):
-        """Update menu items based on current state"""
-        if self.is_running and self.is_ready:
-            # Fully operational
-            self.icon = self.icon_running
-            self.menu["Starting..."].title = f"Address: {self.onion_address}"
-            self.menu["Start"].set_callback(None)
-            self.menu["Stop"].set_callback(self.stop_service)
-            self.menu["Restart"].set_callback(self.restart_service)
-        elif self.is_running and not self.is_ready:
-            # Containers running but WordPress not ready yet
-            self.icon = self.icon_starting
-            self.menu["Starting..."].title = "Status: Starting up, please wait..."
-            self.menu["Start"].set_callback(None)
-            self.menu["Stop"].set_callback(self.stop_service)
-            self.menu["Restart"].set_callback(self.restart_service)
-        else:
-            # Stopped
-            self.icon = self.icon_stopped
-            self.menu["Starting..."].title = "Status: Stopped"
-            self.menu["Start"].set_callback(self.start_service)
-            self.menu["Stop"].set_callback(None)
-            self.menu["Restart"].set_callback(None)
+        """Update menu items based on current state - thread-safe"""
+        # Dispatch UI updates to main thread to avoid AppKit threading violations
+        def do_update():
+            if self.is_running and self.is_ready:
+                # Fully operational
+                self.icon = self.icon_running
+                self.menu["Starting..."].title = f"Address: {self.onion_address}"
+                self.menu["Start"].set_callback(None)
+                self.menu["Stop"].set_callback(self.stop_service)
+                self.menu["Restart"].set_callback(self.restart_service)
+            elif self.is_running and not self.is_ready:
+                # Containers running but WordPress not ready yet
+                self.icon = self.icon_starting
+                self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                self.menu["Start"].set_callback(None)
+                self.menu["Stop"].set_callback(self.stop_service)
+                self.menu["Restart"].set_callback(self.restart_service)
+            else:
+                # Stopped
+                self.icon = self.icon_stopped
+                self.menu["Starting..."].title = "Status: Stopped"
+                self.menu["Start"].set_callback(self.start_service)
+                self.menu["Stop"].set_callback(None)
+                self.menu["Restart"].set_callback(None)
+
+        # Execute on main thread
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
