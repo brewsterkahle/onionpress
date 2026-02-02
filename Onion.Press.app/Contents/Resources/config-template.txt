@@ -35,3 +35,15 @@ VANITY_PREFIX=op2
 # More info: https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/
 #
 INSTALL_IA_PLUGIN=yes
+
+# Update Docker Images on Launch
+# Default: "no" (manual updates only via Check for Updates menu)
+#
+# When enabled, onion.press will automatically check for and download updated
+# WordPress, MariaDB, and Tor container images when the app launches.
+# This ensures you have the latest security patches and features.
+#
+# Set to "yes" to enable automatic updates on launch.
+# Note: Updates only occur when containers are stopped.
+#
+UPDATE_ON_LAUNCH=no

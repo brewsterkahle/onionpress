@@ -43,6 +43,7 @@ if [ ! -f "$DATA_DIR/config" ]; then
         cat > "$DATA_DIR/config" <<EOF
 VANITY_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
+UPDATE_ON_LAUNCH=no
 EOF
     fi
 fi

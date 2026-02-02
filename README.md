@@ -91,6 +91,25 @@ Once installed, onion.press appears in your menu bar with an onion icon (🧅):
 - **Settings**: Open configuration file for customization
 - **Export Private Key**: Backup your onion address as 47 BIP39 mnemonic words (like Bitcoin seed phrases)
 - **Import Private Key**: Restore your onion address from a mnemonic backup
+- **Check for Updates**: Check for new app versions and update WordPress, MariaDB, and Tor container images
+
+### Keeping Your Site Updated
+
+**Manual Updates** (Recommended):
+Click "Check for Updates..." in the menu to:
+1. Check for new onion.press app versions
+2. Download updated WordPress, MariaDB, and Tor container images
+3. Apply security patches and new features
+
+**Automatic Updates** (Optional):
+Enable automatic Docker image updates on launch by editing `~/.onion.press/config`:
+```bash
+UPDATE_ON_LAUNCH=yes
+```
+
+When enabled, onion.press will check for and download updated container images each time you launch the app. This ensures you have the latest security patches without manual intervention.
+
+**Note**: After updating container images, restart the service from the menu bar to apply updates.
 
 ### Accessing Your Site
 

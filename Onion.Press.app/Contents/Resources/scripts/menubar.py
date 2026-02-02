@@ -222,6 +222,25 @@ class OnionPressApp(rumps.App):
     def auto_start(self):
         """Automatically start the service when the app launches"""
         time.sleep(1)  # Brief delay
+
+        # Check if UPDATE_ON_LAUNCH is enabled
+        config_file = os.path.join(self.app_support, "config")
+        update_on_launch = False
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    for line in f:
+                        if line.startswith('UPDATE_ON_LAUNCH='):
+                            value = line.split('=', 1)[1].strip().lower()
+                            update_on_launch = (value == 'yes')
+                            break
+            except:
+                pass
+
+        if update_on_launch:
+            self.log("UPDATE_ON_LAUNCH enabled - checking for Docker image updates...")
+            self.update_docker_images(show_notifications=False)
+
         self.start_service(None)
 
     def run_command(self, command):
@@ -783,9 +802,80 @@ Store them in a safe place - you can use them to restore your onion address on a
                 message=f"Could not import private key:\n\n{str(e)}\n\nYour original key has not been changed."
             )
 
+    def update_docker_images(self, show_notifications=True):
+        """Update Docker images (WordPress, MariaDB, Tor)"""
+        try:
+            if show_notifications:
+                self.log("Checking for Docker image updates...")
+                rumps.notification(
+                    title="Onion.Press",
+                    subtitle="Checking for Updates",
+                    message="Checking for updated container images..."
+                )
+
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            docker_compose_file = os.path.join(self.resources_dir, "docker", "docker-compose.yml")
+
+            # Set up environment
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+
+            # Pull latest images
+            self.log("Pulling latest Docker images...")
+            result = subprocess.run(
+                [docker_bin, "compose", "-f", docker_compose_file, "pull"],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env
+            )
+
+            if result.returncode == 0:
+                self.log("Docker images updated successfully")
+
+                # Check if any images were actually updated by comparing output
+                if "Downloaded" in result.stdout or "Pulled" in result.stdout:
+                    if show_notifications:
+                        rumps.notification(
+                            title="Onion.Press",
+                            subtitle="Updates Downloaded",
+                            message="Container images updated. Restart the service to apply updates."
+                        )
+                    return True
+                else:
+                    if show_notifications:
+                        rumps.notification(
+                            title="Onion.Press",
+                            subtitle="Already Up to Date",
+                            message="All container images are current."
+                        )
+                    return False
+            else:
+                self.log(f"Failed to update Docker images: {result.stderr}")
+                if show_notifications:
+                    rumps.notification(
+                        title="Onion.Press",
+                        subtitle="Update Failed",
+                        message="Could not update container images. Check logs for details."
+                    )
+                return False
+
+        except Exception as e:
+            self.log(f"Error updating Docker images: {e}")
+            if show_notifications:
+                rumps.notification(
+                    title="Onion.Press",
+                    subtitle="Update Error",
+                    message=f"Error updating containers: {str(e)}"
+                )
+            return False
+
     @rumps.clicked("Check for Updates...")
     def check_for_updates(self, _):
-        """Check GitHub for newer versions"""
+        """Check GitHub for newer versions and update Docker images"""
+        # Check for app updates
+        app_update_available = False
         try:
             # Fetch latest release from GitHub
             url = "https://api.github.com/repos/brewsterkahle/onion.press/releases/latest"
@@ -798,8 +888,9 @@ Store them in a safe place - you can use them to restore your onion address on a
                 current_version = self.version
 
                 if latest_version and latest_version > current_version:
+                    app_update_available = True
                     response = rumps.alert(
-                        title="Update Available",
+                        title="App Update Available",
                         message=f"A new version of onion.press is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nWould you like to download it?",
                         ok="Download Update",
                         cancel="Later"
@@ -807,15 +898,24 @@ Store them in a safe place - you can use them to restore your onion address on a
                     if response == 1:  # OK clicked
                         release_url = data.get('html_url', 'https://github.com/brewsterkahle/onion.press/releases/latest')
                         subprocess.run(["open", release_url])
-                else:
-                    rumps.alert(
-                        title="No Updates Available",
-                        message=f"You're running the latest version (v{current_version})"
-                    )
         except Exception as e:
             rumps.alert(
                 title="Update Check Failed",
-                message=f"Could not check for updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onion.press/releases"
+                message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onion.press/releases"
+            )
+
+        # Check for Docker image updates
+        threading.Thread(target=self._check_docker_updates_async, args=(app_update_available,), daemon=True).start()
+
+    def _check_docker_updates_async(self, app_update_available):
+        """Check for Docker updates in background thread"""
+        images_updated = self.update_docker_images(show_notifications=True)
+
+        # Show final summary if no app update was available
+        if not app_update_available and not images_updated:
+            rumps.alert(
+                title="No Updates Available",
+                message=f"You're running the latest version (v{self.version})\nAll container images are up to date."
             )
 
     def show_notification(self, message, subtitle=""):
