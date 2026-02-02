@@ -744,10 +744,18 @@ end tell
     def restart_service(self, _):
         """Restart the WordPress + Tor service"""
         self.menu["Starting..."].title = "Status: Restarting..."
+        self.icon = self.icon_starting  # Change icon to indicate restarting
 
         def restart():
+            # Mark as not ready during restart
+            self.is_ready = False
+            self.is_running = False
+
+            # Run restart command
             subprocess.run([self.launcher_script, "restart"])
-            time.sleep(2)
+            time.sleep(3)
+
+            # Check status after restart
             self.check_status()
 
         threading.Thread(target=restart, daemon=True).start()
