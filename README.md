@@ -6,7 +6,7 @@
 
 **Easy and free self-hosted web server for macOS**
 
-> **Current Version: 2.1.5** - Now with Docker image updates and Launch on Login!
+> **Current Version: 2.1.6** - Now with improved restart feedback and cleaner Docker Compose!
 
 onion.press is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible only through the Tor network.
 
