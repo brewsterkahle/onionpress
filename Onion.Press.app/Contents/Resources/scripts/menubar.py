@@ -1208,7 +1208,19 @@ License: AGPL v3
 
 GitHub: github.com/brewsterkahle/onion.press"""
 
-        rumps.alert(title="About Onion.Press", message=about_text)
+        # Use osascript to show dialog with custom icon
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        try:
+            subprocess.run(["osascript", "-e", f'''
+tell application "System Events"
+    activate
+    display dialog "{about_text}" buttons {{"OK"}} default button "OK" with icon POSIX file "{icon_path}" with title "About Onion.Press"
+end tell
+'''], timeout=60)
+        except Exception as e:
+            # Fallback to rumps if osascript fails
+            self.log(f"About dialog osascript failed: {e}")
+            rumps.alert(title="About Onion.Press", message=about_text)
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
