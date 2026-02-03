@@ -248,22 +248,6 @@ install_ia_plugin() {
 install_docker() {
     log "Container runtime initialization required"
 
-    # Open Console.app to show progress
-    open -a Console "$LOG_FILE"
-    log "Console.app opened to show initialization progress"
-
-    # Show dialog in background (non-blocking)
-    osascript <<EOF >/dev/null 2>&1 &
-tell current application
-    activate
-    display dialog "Initializing bundled container runtime (2-3 minutes)...
-
-Console.app has been opened so you can watch the progress.
-
-You can dismiss this dialog - initialization will continue in the background." buttons {"OK"} default button "OK" with icon file ((path to application "onion.press") as text) with title "onion.press Setup" giving up after 180
-end tell
-EOF
-
     # Should not happen if launcher worked, but handle it
     "$BIN_DIR/colima" start \
         --vm-type vz \

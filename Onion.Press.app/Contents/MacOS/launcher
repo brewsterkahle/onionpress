@@ -34,12 +34,6 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-# Function to update initialization status (shown as notification)
-update_status() {
-    log "Status: $1"
-    osascript -e "display notification \"$1\" with title \"Onion.Press Setup\"" 2>/dev/null || true
-}
-
 log "Starting onion.press launcher..."
 
 # Check for Python 3
@@ -67,48 +61,14 @@ FIRST_RUN=false
 if [ ! -d "$VENV_DIR" ] || [ ! -f "$COLIMA_HOME/.initialized" ]; then
     FIRST_RUN=true
     log "First-time initialization detected"
-
-    # Open Console.app to show progress
-    open -a Console "$LOG_FILE"
-    log "Console.app opened to show setup progress"
-
-    # Show setup dialog in background (non-blocking)
-    # Setup will proceed regardless of user interaction with the dialog
-    ICON_PATH="$RESOURCES_DIR/app-icon.png"
-    osascript <<EOF >/dev/null 2>&1 &
-tell current application
-    activate
-    display dialog "First-time setup in progress (2-3 minutes):
-
-• Setting up Python environment
-• Initializing container runtime
-• Downloading Docker images
-
-Console.app has been opened so you can watch the progress.
-
-You can dismiss this dialog - setup will continue in the background." buttons {"OK"} default button "OK" with icon POSIX file "$ICON_PATH" with title "Onion.Press Setup" giving up after 180
-end tell
-EOF
-
-    log "Proceeding with first-time setup (dialog shown in background)"
 fi
 
 # Create virtual environment if it doesn't exist
 if [ ! -d "$VENV_DIR" ]; then
     log "Creating Python virtual environment..."
-
-    # Show progress dialog
-    osascript -e 'display notification "Setting up Python environment..." with title "Onion.Press Setup"' &
-
     python3 -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1
-
-    osascript -e 'display notification "Installing Python dependencies (1-2 min)..." with title "Onion.Press Setup"' &
-
     "$VENV_DIR/bin/pip" install --upgrade pip >> "$LOG_FILE" 2>&1
     "$VENV_DIR/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" >> "$LOG_FILE" 2>&1
-
-    osascript -e 'display notification "Python setup complete!" with title "Onion.Press Setup"' &
-
     log "Virtual environment created successfully"
 fi
 
@@ -116,9 +76,6 @@ fi
 initialize_colima() {
     if [ ! -f "$COLIMA_HOME/.initialized" ]; then
         log "Initializing Colima container runtime..."
-
-        # Show progress notification
-        osascript -e 'display notification "Initializing container runtime (1-2 min)..." with title "Onion.Press Setup"' &
 
         # Check macOS version >= 13
         MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
@@ -151,7 +108,6 @@ EOF
         if [ $? -eq 0 ]; then
             touch "$COLIMA_HOME/.initialized"
             log "Colima initialized successfully"
-            osascript -e 'display notification "Container runtime ready!" with title "Onion.Press Setup"' &
         else
             log "ERROR: Colima init failed"
             osascript <<EOF
@@ -214,9 +170,8 @@ if [ -S "$COLIMA_SOCKET" ]; then
     fi
 fi
 
-# Show completion notification if first run
+# Exit if first run (menubar app already launched in background)
 if [ "$FIRST_RUN" = true ]; then
-    osascript -e 'display notification "Setup complete! Menu bar app is ready." with title "Onion.Press Setup"' &
     log "Setup complete - menu bar app already running"
     exit 0
 fi

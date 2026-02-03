@@ -277,11 +277,13 @@ class OnionPressApp(rumps.App):
             print("Stopped web log capture")
 
     def ensure_docker_available(self):
-        """Ensure bundled Colima is running"""
+        """Ensure bundled Colima is running (no-op during first-time setup as launcher handles it)"""
         try:
+            # During first-time setup, the launcher script handles Colima initialization
+            # So we just check if it's ready, but don't try to start it ourselves
             colima_bin = os.path.join(self.bin_dir, "colima")
             if not os.path.exists(colima_bin):
-                print("ERROR: Bundled Colima not found")
+                self.log("ERROR: Bundled Colima not found")
                 return
 
             # Check if running
@@ -291,32 +293,49 @@ class OnionPressApp(rumps.App):
                 # Verify docker accessible
                 docker_check = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
                 if docker_check.returncode == 0:
-                    print("Bundled Colima is running")
+                    self.log("Bundled Colima is running")
                     return
 
-            # Start Colima
-            print("Starting bundled Colima...")
-            subprocess.run([colima_bin, "start"], capture_output=True, timeout=120)
-
-            # Wait for docker
-            for i in range(30):
-                time.sleep(1)
-                try:
-                    result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
-                    if result.returncode == 0:
-                        print("Colima started successfully")
-                        return
-                except:
-                    continue
-
-            print("Warning: Colima started but docker not available yet")
+            # Don't try to start Colima here - the launcher script handles initialization
+            # This avoids conflicts during first-time setup
+            self.log("Colima not running yet (launcher may still be initializing)")
 
         except Exception as e:
-            print(f"Error with Colima: {e}")
+            self.log(f"Error checking Colima: {e}")
 
     def auto_start(self):
         """Automatically start the service when the app launches"""
         time.sleep(1)  # Brief delay
+
+        # Wait for Colima to be ready (important for first-time setup)
+        self.log("Waiting for container runtime to be ready...")
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        colima_initialized = os.path.join(self.colima_home, ".initialized")
+
+        # Wait up to 3 minutes for Colima initialization
+        max_wait = 180  # 3 minutes
+        waited = 0
+        while waited < max_wait:
+            # Check if Colima is initialized and docker is responding
+            if os.path.exists(colima_initialized):
+                try:
+                    result = subprocess.run(
+                        [docker_bin, "info"],
+                        capture_output=True,
+                        timeout=5,
+                        env=os.environ.copy()
+                    )
+                    if result.returncode == 0:
+                        self.log("Container runtime is ready")
+                        break
+                except:
+                    pass
+
+            time.sleep(3)
+            waited += 3
+
+        if waited >= max_wait:
+            self.log("WARNING: Container runtime not ready after 3 minutes")
 
         # Check if UPDATE_ON_LAUNCH is enabled
         config_file = os.path.join(self.app_support, "config")
@@ -1423,13 +1442,17 @@ DO NOT share these words with anyone."""
             script = f'''
 tell current application
     activate
-    display dialog "Setting up onion.press for first use...
+    display dialog "Setting up Onion.Press for first use...
 
-Downloading container images (2-5 minutes)
+• Downloading container images
+• Configuring Tor hidden service
+• Starting WordPress
+
+This may take 2-5 minutes depending on your internet speed.
 
 Console.app has been opened so you can watch the progress.
 
-This window will close automatically when your site is ready." buttons {{"Cancel Setup", "Dismiss"}} default button "Dismiss" cancel button "Cancel Setup" with icon POSIX file "{icon_path}" with title "onion.press Setup" giving up after 1800
+This window will close automatically when your site is ready." buttons {{"Cancel Setup", "Dismiss"}} default button "Dismiss" cancel button "Cancel Setup" with icon POSIX file "{icon_path}" with title "Onion.Press Setup" giving up after 1800
 end tell
 '''
 
