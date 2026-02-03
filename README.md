@@ -2,7 +2,7 @@
   <img src="logo.png" alt="onion.press logo" width="400">
 </div>
 
-# onion.press
+# Onion.Press
 
 **Easy and free self-hosted web server for macOS**
 
