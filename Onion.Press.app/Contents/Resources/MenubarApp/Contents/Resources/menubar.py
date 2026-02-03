@@ -48,6 +48,7 @@ class OnionPressApp(rumps.App):
             menubar_contents = os.path.dirname(menubar_resources_dir)  # MenubarApp/Contents
             menubar_app = os.path.dirname(menubar_contents)  # MenubarApp
             parent_resources = os.path.dirname(menubar_app)  # Onion.Press.app/Contents/Resources
+            self.parent_resources_dir = parent_resources  # Store for accessing docker/ and other parent resources
             self.contents_dir = os.path.dirname(parent_resources)  # Onion.Press.app/Contents
             self.macos_dir = os.path.join(self.contents_dir, "MacOS")
             self.launcher_script = os.path.join(self.macos_dir, "onion.press")
@@ -55,6 +56,7 @@ class OnionPressApp(rumps.App):
         else:
             # Running as regular Python script
             self.resources_dir = os.path.dirname(self.script_dir)
+            self.parent_resources_dir = self.resources_dir  # Same as resources_dir when not bundled
             self.contents_dir = os.path.dirname(self.resources_dir)
             self.macos_dir = os.path.join(self.contents_dir, "MacOS")
             self.launcher_script = os.path.join(self.macos_dir, "onion.press")
@@ -248,20 +250,26 @@ class OnionPressApp(rumps.App):
             return button_index if button_index >= 0 else None
 
         # Must run on main thread
-        result_container = [None]
-        def run_on_main():
-            result_container[0] = show_dialog()
+        # Check if we're already on the main thread to avoid deadlock
+        if AppKit.NSThread.isMainThread():
+            # Already on main thread, run directly
+            return show_dialog()
+        else:
+            # Not on main thread, dispatch to main thread and wait
+            result_container = [None]
+            def run_on_main():
+                result_container[0] = show_dialog()
 
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(run_on_main)
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(run_on_main)
 
-        # Wait for result (with timeout)
-        max_wait = 300  # 5 minutes
-        waited = 0
-        while result_container[0] is None and waited < max_wait:
-            time.sleep(0.1)
-            waited += 0.1
+            # Wait for result (with timeout)
+            max_wait = 300  # 5 minutes
+            waited = 0
+            while result_container[0] is None and waited < max_wait:
+                time.sleep(0.1)
+                waited += 0.1
 
-        return result_container[0]
+            return result_container[0]
 
     def log_version_info(self):
         """Log version information for all components at startup"""
@@ -1090,7 +1098,7 @@ class OnionPressApp(rumps.App):
             # If first run, start containers directly (which will pull images automatically)
             if first_run:
                 self.log("Starting containers (will download images automatically)...")
-                docker_dir = os.path.join(self.resources_dir, "docker")
+                docker_dir = os.path.join(self.parent_resources_dir, "docker")
                 try:
                     # Run docker compose up which will automatically pull missing images
                     env = os.environ.copy()
@@ -1747,28 +1755,28 @@ GitHub: github.com/brewsterkahle/onion.press"""
                 import shutil
                 data_dir_exists = os.path.exists(self.app_support)
 
-                # Step 4: Show final instructions BEFORE removing data dir
-                # (so log file still exists if needed)
-                # Use native alert (no osascript = no permissions needed)
-                rumps.alert(
-                    title="Uninstall Complete",
-                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
-                    ok="OK"
-                )
-
-                # Now remove data directory
+                # Step 4: Remove data directory
                 if data_dir_exists:
                     shutil.rmtree(self.app_support)
-                    print("Uninstall: Data directory removed successfully")
+                    self.log("Uninstall: Data directory removed successfully")
+
+                # Step 5: Show final dialog and quit
+                # Use show_native_alert which already handles main thread
+                self.show_native_alert(
+                    title="Uninstall Complete",
+                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
+                    buttons=["OK"]
+                )
+                rumps.quit_application()
 
             except Exception as e:
-                rumps.alert(
+                # Show error and quit
+                self.show_native_alert(
                     title="Uninstall Error",
-                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)"
+                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)",
+                    buttons=["OK"]
                 )
-
-            # Quit the app
-            rumps.quit_application()
+                rumps.quit_application()
 
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()

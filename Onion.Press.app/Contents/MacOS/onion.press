@@ -145,7 +145,8 @@ detect_container_runtime() {
 # Function to generate vanity onion address
 generate_vanity_address() {
     local prefix="${1:-op2}"
-    local output_dir="$DATA_DIR/vanity-keys"
+    # Use shared directory so Docker/Colima can access it
+    local output_dir="$DATA_DIR/shared/vanity-keys"
 
     log "Generating vanity onion address with prefix '$prefix'..." >&2
 
