@@ -1753,28 +1753,33 @@ GitHub: github.com/brewsterkahle/onion.press"""
                 import shutil
                 data_dir_exists = os.path.exists(self.app_support)
 
-                # Step 4: Show final instructions BEFORE removing data dir
-                # (so log file still exists if needed)
-                # Use native alert (no osascript = no permissions needed)
-                rumps.alert(
-                    title="Uninstall Complete",
-                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
-                    ok="OK"
-                )
-
-                # Now remove data directory
+                # Step 4: Remove data directory
                 if data_dir_exists:
                     shutil.rmtree(self.app_support)
-                    print("Uninstall: Data directory removed successfully")
+                    self.log("Uninstall: Data directory removed successfully")
+
+                # Step 5: Show final dialog on main thread and quit
+                def show_completion_and_quit():
+                    rumps.alert(
+                        title="Uninstall Complete",
+                        message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
+                        ok="OK"
+                    )
+                    rumps.quit_application()
+
+                # Schedule on main thread
+                rumps.Timer(show_completion_and_quit, 0).start()
 
             except Exception as e:
-                rumps.alert(
-                    title="Uninstall Error",
-                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)"
-                )
+                # Show error on main thread
+                def show_error_and_quit():
+                    rumps.alert(
+                        title="Uninstall Error",
+                        message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)"
+                    )
+                    rumps.quit_application()
 
-            # Quit the app
-            rumps.quit_application()
+                rumps.Timer(show_error_and_quit, 0).start()
 
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()
