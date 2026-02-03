@@ -248,20 +248,26 @@ class OnionPressApp(rumps.App):
             return button_index if button_index >= 0 else None
 
         # Must run on main thread
-        result_container = [None]
-        def run_on_main():
-            result_container[0] = show_dialog()
+        # Check if we're already on the main thread to avoid deadlock
+        if AppKit.NSThread.isMainThread():
+            # Already on main thread, run directly
+            return show_dialog()
+        else:
+            # Not on main thread, dispatch to main thread and wait
+            result_container = [None]
+            def run_on_main():
+                result_container[0] = show_dialog()
 
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(run_on_main)
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(run_on_main)
 
-        # Wait for result (with timeout)
-        max_wait = 300  # 5 minutes
-        waited = 0
-        while result_container[0] is None and waited < max_wait:
-            time.sleep(0.1)
-            waited += 0.1
+            # Wait for result (with timeout)
+            max_wait = 300  # 5 minutes
+            waited = 0
+            while result_container[0] is None and waited < max_wait:
+                time.sleep(0.1)
+                waited += 0.1
 
-        return result_container[0]
+            return result_container[0]
 
     def log_version_info(self):
         """Log version information for all components at startup"""
