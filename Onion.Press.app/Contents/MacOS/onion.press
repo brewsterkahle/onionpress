@@ -247,7 +247,7 @@ install_docker() {
     log "Container runtime initialization required"
 
     osascript <<EOF
-tell application "System Events"
+tell current application
     activate
     display dialog "Initializing bundled container runtime (2-3 minutes)...
 
@@ -273,7 +273,7 @@ EOF
     else
         log "ERROR: Failed to initialize container runtime"
         osascript <<EOF
-tell application "System Events"
+tell current application
     activate
     display dialog "Failed to initialize container runtime.
 
@@ -435,7 +435,7 @@ main() {
 
             # Show success dialog
             osascript <<EOF
-tell application "System Events"
+tell current application
     activate
     display dialog "onion.press is now running!
 

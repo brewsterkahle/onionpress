@@ -157,34 +157,24 @@ class OnionPressApp(rumps.App):
             print(f"Error writing to log: {e}")
 
     def request_applescript_permission(self):
-        """Request AppleScript automation permission on first launch"""
+        """Request System Events permission lazily on first use that needs it.
+
+        System Events access is only needed for login item management, not for
+        displaying dialogs. We defer the permission request until the user
+        actually triggers a feature that requires it (e.g. launch-on-login).
+        Dialogs use 'tell current application' which needs no special permission.
+        """
         try:
-            # Check if we've already requested permission (avoid showing alert every launch)
-            permission_flag = os.path.join(self.app_support, ".permission_requested")
-
-            if not os.path.exists(permission_flag):
-                # Show friendly explanation before the system prompt appears
-                rumps.alert(
-                    title="Permission Required",
-                    message="Onion.Press needs permission to display native confirmation dialogs.\n\nYou'll see a system permission request next - please click 'OK' to allow Onion.Press to control System Events.\n\nThis is used for features like the uninstall confirmation dialog.",
-                    ok="Continue"
-                )
-
-                # Create the flag file so we don't show this every time
-                os.makedirs(self.app_support, exist_ok=True)
-                with open(permission_flag, 'w') as f:
-                    f.write("1")
-
-            # Make a simple AppleScript call to trigger the permission request
-            # This will show the system dialog if permission hasn't been granted yet
-            subprocess.run(
+            # Only request if not already granted — check silently
+            result = subprocess.run(
                 ["osascript", "-e", 'tell application "System Events" to return name'],
                 capture_output=True,
                 timeout=10
             )
-
+            if result.returncode != 0:
+                self.log("System Events permission not yet granted (will request when needed for login items)")
         except Exception as e:
-            self.log(f"AppleScript permission request failed: {e}")
+            self.log(f"AppleScript permission check failed: {e}")
 
     def start_web_log_capture(self):
         """Start capturing WordPress logs to a file"""
@@ -882,7 +872,7 @@ end tell
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
         try:
             result = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     set userChoice to button returned of (display dialog "⚠️ SECURITY WARNING ⚠️
 
@@ -1179,7 +1169,7 @@ DO NOT share these words with anyone."""
             icon_path = os.path.join(self.resources_dir, "app-icon.png")
 
             script = f'''
-tell application "System Events"
+tell current application
     activate
     display dialog "Setting up onion.press for first use...
 
@@ -1226,19 +1216,7 @@ end tell
         """Dismiss the setup dialog if it's showing"""
         if self.setup_dialog_process is not None:
             try:
-                # Try to close the dialog window directly via AppleScript
-                subprocess.run([
-                    "osascript", "-e",
-                    '''tell application "System Events"
-                        tell process "osascript"
-                            if exists window "onion.press Setup" then
-                                click button 1 of window "onion.press Setup"
-                            end if
-                        end tell
-                    end tell'''
-                ], timeout=2, capture_output=True)
-
-                # Then terminate the process
+                # Terminate the osascript process which closes the dialog
                 self.setup_dialog_process.terminate()
                 self.setup_dialog_process.wait(timeout=2)
                 self.log("Setup dialog dismissed")
@@ -1320,7 +1298,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
         try:
             subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     display dialog "{about_text}" buttons {{"OK"}} default button "OK" with icon POSIX file "{icon_path}" with title "About Onion.Press"
 end tell
@@ -1338,7 +1316,7 @@ end tell
         # Step 1: Show critical warning about key loss
         try:
             result = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     set userChoice to button returned of (display dialog "⚠️ CRITICAL WARNING ⚠️
 
@@ -1373,7 +1351,7 @@ end tell
 
                 # After export, ask again if they want to continue with uninstall
                 result2 = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     set userChoice to button returned of (display dialog "Key backup complete.
 
@@ -1402,7 +1380,7 @@ end tell
         # Step 2: Final confirmation with explicit acknowledgment
         try:
             result = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     set userChoice to button returned of (display dialog "FINAL CONFIRMATION
 
@@ -1482,7 +1460,7 @@ end tell
                 # Try osascript first for nice icon, fall back to rumps.alert if it fails
                 try:
                     result = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     display dialog "Onion.Press has been uninstalled.
 
@@ -1527,7 +1505,7 @@ end tell
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
         try:
             result = subprocess.run(["osascript", "-e", f'''
-tell application "System Events"
+tell current application
     activate
     set userChoice to button returned of (display dialog "This will stop the WordPress service. Are you sure?" buttons {{"Cancel", "Quit"}} default button "Cancel" cancel button "Cancel" with icon POSIX file "{icon_path}" with title "Quit Onion.Press?")
     return userChoice

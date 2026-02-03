@@ -46,7 +46,7 @@ log "Starting onion.press launcher..."
 if ! command -v python3 >/dev/null 2>&1; then
     log "ERROR: Python 3 not found"
     osascript <<EOF
-tell application "System Events"
+tell current application
     activate
     display dialog "Python 3 is required to run onion.press but was not found.
 
@@ -71,7 +71,7 @@ if [ ! -d "$VENV_DIR" ] || [ ! -f "$COLIMA_HOME/.initialized" ]; then
     # Show confirmation dialog before starting (with 10 second timeout)
     ICON_PATH="$RESOURCES_DIR/app-icon.png"
     RESPONSE=$(osascript <<EOF 2>&1 || echo "Continue"
-tell application "System Events"
+tell current application
     activate
     set dialogResult to display dialog "First-time setup required (2-3 minutes):
 
@@ -131,7 +131,7 @@ initialize_colima() {
         if [ "$MACOS_VERSION" -lt 13 ]; then
             log "ERROR: macOS 13+ required"
             osascript <<EOF
-tell application "System Events"
+tell current application
     activate
     display dialog "onion.press requires macOS 13 (Ventura) or later.
 
@@ -161,7 +161,7 @@ EOF
         else
             log "ERROR: Colima init failed"
             osascript <<EOF
-tell application "System Events"
+tell current application
     activate
     display dialog "Failed to initialize container runtime.
 
