@@ -72,12 +72,13 @@ if [ ! -d "$VENV_DIR" ] || [ ! -f "$COLIMA_HOME/.initialized" ]; then
     open -a Console "$LOG_FILE"
     log "Console.app opened to show setup progress"
 
-    # Show setup dialog
+    # Show setup dialog in background (non-blocking)
+    # Setup will proceed regardless of user interaction with the dialog
     ICON_PATH="$RESOURCES_DIR/app-icon.png"
-    RESPONSE=$(osascript <<EOF 2>&1 || echo "Dismiss"
+    osascript <<EOF >/dev/null 2>&1 &
 tell current application
     activate
-    set dialogResult to display dialog "First-time setup required (2-3 minutes):
+    display dialog "First-time setup in progress (2-3 minutes):
 
 • Setting up Python environment
 • Initializing container runtime
@@ -85,24 +86,11 @@ tell current application
 
 Console.app has been opened so you can watch the progress.
 
-This window will close automatically when ready." buttons {"Cancel Setup", "Dismiss"} default button "Dismiss" cancel button "Cancel Setup" with icon POSIX file "$ICON_PATH" with title "Onion.Press Setup" giving up after 1800
-    if gave up of dialogResult then
-        return "Dismiss"
-    else
-        return button returned of dialogResult
-    end if
+You can dismiss this dialog - setup will continue in the background." buttons {"OK"} default button "OK" with icon POSIX file "$ICON_PATH" with title "Onion.Press Setup" giving up after 180
 end tell
 EOF
-)
 
-    log "Dialog response was: '$RESPONSE'"
-
-    if [ "$RESPONSE" = "Cancel Setup" ]; then
-        log "User cancelled first-time setup"
-        exit 0
-    fi
-
-    log "Proceeding with first-time setup"
+    log "Proceeding with first-time setup (dialog shown in background)"
 fi
 
 # Create virtual environment if it doesn't exist
@@ -186,7 +174,27 @@ EOF
     fi
 }
 
-# Run initialization
+# Launch menubar app in background if first run (so icon appears immediately)
+# The menubar app will show gray icon and wait for services to be ready
+if [ "$FIRST_RUN" = true ]; then
+    log "Launching menu bar application in background during setup..."
+    cd "$SCRIPTS_DIR"
+
+    # Use pythonw if available (for GUI apps on macOS), otherwise use python3
+    if [ -f "$VENV_DIR/bin/pythonw" ] || [ -f "$VENV_DIR/bin/pythonw3" ]; then
+        PYTHON_CMD="$VENV_DIR/bin/pythonw"
+    else
+        PYTHON_CMD="$VENV_DIR/bin/python3"
+    fi
+
+    # Launch menubar in background so setup can continue
+    export PYTHONPATH="$SCRIPTS_DIR"
+    "$PYTHON_CMD" "$SCRIPTS_DIR/menubar.py" >> "$LOG_FILE" 2>&1 &
+    MENUBAR_PID=$!
+    log "Menu bar app launched (PID: $MENUBAR_PID)"
+fi
+
+# Run initialization (menubar is now visible with gray icon during this)
 initialize_colima
 
 # Create symlink for Docker socket if needed
@@ -208,10 +216,12 @@ fi
 
 # Show completion notification if first run
 if [ "$FIRST_RUN" = true ]; then
-    osascript -e 'display notification "Setup complete! Launching menubar app..." with title "Onion.Press Setup"' &
+    osascript -e 'display notification "Setup complete! Menu bar app is ready." with title "Onion.Press Setup"' &
+    log "Setup complete - menu bar app already running"
+    exit 0
 fi
 
-# Activate virtual environment and run menu bar app
+# For subsequent launches, start menu bar app normally
 log "Launching menu bar application..."
 cd "$SCRIPTS_DIR"
 

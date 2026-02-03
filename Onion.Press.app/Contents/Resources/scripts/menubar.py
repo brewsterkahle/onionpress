@@ -738,8 +738,19 @@ end tell
                 time.sleep(check_interval)
                 elapsed += check_interval
 
-                if os.path.exists(tor_browser_path):
-                    self.log("Tor Browser detected!")
+                # Verify the app is in /Applications and is a proper app bundle
+                if os.path.exists(tor_browser_path) and os.path.isdir(tor_browser_path):
+                    # Check it's actually in /Applications (not on a volume)
+                    real_path = os.path.realpath(tor_browser_path)
+                    if not real_path.startswith("/Applications/"):
+                        continue  # It's a symlink or on a volume, keep waiting
+
+                    # Verify it's a proper app bundle with executable
+                    executable_path = os.path.join(tor_browser_path, "Contents", "MacOS", "firefox")
+                    if not os.path.exists(executable_path):
+                        continue  # Not fully installed yet
+
+                    self.log("Tor Browser detected in Applications!")
                     self.monitoring_tor_install = False
 
                     # Show dialog asking if they want to open the site
@@ -760,7 +771,8 @@ end tell
 
                         if "Open" in (result.stdout or ""):
                             url = f"http://{address}"
-                            subprocess.run(["open", "-a", "Tor Browser", url])
+                            # Use full path to ensure we open the one in Applications
+                            subprocess.run(["open", "-a", tor_browser_path, url])
                             self.log(f"Opened site in Tor Browser: {url}")
                     except Exception as e:
                         self.log(f"Error showing Tor Browser ready dialog: {e}")
@@ -790,8 +802,19 @@ end tell
                 time.sleep(check_interval)
                 elapsed += check_interval
 
-                if os.path.exists(brave_browser_path):
-                    self.log("Brave Browser detected!")
+                # Verify the app is in /Applications and is a proper app bundle
+                if os.path.exists(brave_browser_path) and os.path.isdir(brave_browser_path):
+                    # Check it's actually in /Applications (not on a volume)
+                    real_path = os.path.realpath(brave_browser_path)
+                    if not real_path.startswith("/Applications/"):
+                        continue  # It's a symlink or on a volume, keep waiting
+
+                    # Verify it's a proper app bundle with executable
+                    executable_path = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
+                    if not os.path.exists(executable_path):
+                        continue  # Not fully installed yet
+
+                    self.log("Brave Browser detected in Applications!")
                     self.monitoring_tor_install = False
 
                     # Show dialog asking if they want to open the site
@@ -812,7 +835,8 @@ end tell
 
                         if "Open" in (result.stdout or ""):
                             url = f"http://{address}"
-                            subprocess.run(["open", "-a", "Brave Browser", url])
+                            # Use full path to ensure we open the one in Applications
+                            subprocess.run(["open", "-a", brave_browser_path, url])
                             self.log(f"Opened site in Brave Browser: {url}")
                     except Exception as e:
                         self.log(f"Error showing Brave Browser ready dialog: {e}")

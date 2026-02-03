@@ -252,14 +252,15 @@ install_docker() {
     open -a Console "$LOG_FILE"
     log "Console.app opened to show initialization progress"
 
-    osascript <<EOF
+    # Show dialog in background (non-blocking)
+    osascript <<EOF >/dev/null 2>&1 &
 tell current application
     activate
     display dialog "Initializing bundled container runtime (2-3 minutes)...
 
 Console.app has been opened so you can watch the progress.
 
-This window will close automatically when ready." buttons {"Cancel Setup", "Dismiss"} default button "Dismiss" cancel button "Cancel Setup" with icon file ((path to application "onion.press") as text) with title "onion.press Setup" giving up after 1800
+You can dismiss this dialog - initialization will continue in the background." buttons {"OK"} default button "OK" with icon file ((path to application "onion.press") as text) with title "onion.press Setup" giving up after 180
 end tell
 EOF
 
