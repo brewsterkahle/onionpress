@@ -81,19 +81,21 @@ setup_db_passwords() {
         log "Generating random database passwords..."
 
         # Generate random 32-character passwords using /dev/urandom
-        local wordpress_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 32)
-        local root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 32)
+        # Use only alphanumeric chars to avoid shell quoting issues when sourcing
+        local wordpress_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
+        local root_pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
 
         # Write passwords to secrets file with restricted permissions
+        # Values are single-quoted to prevent shell interpretation on source
         touch "$secrets_file"
         chmod 600 "$secrets_file"
 
         cat > "$secrets_file" <<EOF
 # Database passwords - generated on $(date)
 # DO NOT SHARE THESE PASSWORDS
-WORDPRESS_DB_PASSWORD=$wordpress_pass
-MYSQL_PASSWORD=$wordpress_pass
-MYSQL_ROOT_PASSWORD=$root_pass
+WORDPRESS_DB_PASSWORD='$wordpress_pass'
+MYSQL_PASSWORD='$wordpress_pass'
+MYSQL_ROOT_PASSWORD='$root_pass'
 EOF
 
         log "Database passwords generated and saved to $secrets_file"
