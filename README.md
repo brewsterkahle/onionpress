@@ -10,14 +10,7 @@
 
 onion.press is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible only through the Tor network.
 
-## ⚠️ Important Notice
-
-This should **not** be considered a securely-anonymous publishing tool, even though it uses Tor which is often associated with privacy and anonymity.
-
-So far, Tor is being used in this project for its **practical networking capabilities**:
-- **Works behind NAT and firewalls** - No port forwarding or router configuration needed
-- **No DNS registration required** - Your .onion address works immediately without buying domains
-- **Built-in encryption** - No need to obtain HTTPS/SSL certificates
+## ⚠️ Important Notice: This should **not** be considered a securely-anonymous publishing tool.
 
 ## Features
 
