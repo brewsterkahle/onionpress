@@ -1758,28 +1758,23 @@ GitHub: github.com/brewsterkahle/onion.press"""
                     shutil.rmtree(self.app_support)
                     self.log("Uninstall: Data directory removed successfully")
 
-                # Step 5: Show final dialog on main thread and quit
-                def show_completion_and_quit():
-                    rumps.alert(
-                        title="Uninstall Complete",
-                        message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
-                        ok="OK"
-                    )
-                    rumps.quit_application()
-
-                # Schedule on main thread
-                rumps.Timer(show_completion_and_quit, 0).start()
+                # Step 5: Show final dialog and quit
+                # Use show_native_alert which already handles main thread
+                self.show_native_alert(
+                    title="Uninstall Complete",
+                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
+                    buttons=["OK"]
+                )
+                rumps.quit_application()
 
             except Exception as e:
-                # Show error on main thread
-                def show_error_and_quit():
-                    rumps.alert(
-                        title="Uninstall Error",
-                        message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)"
-                    )
-                    rumps.quit_application()
-
-                rumps.Timer(show_error_and_quit, 0).start()
+                # Show error and quit
+                self.show_native_alert(
+                    title="Uninstall Error",
+                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)",
+                    buttons=["OK"]
+                )
+                rumps.quit_application()
 
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()
