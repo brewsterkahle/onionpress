@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# onion.press launcher - Bootstraps Python environment and starts menu bar app
+# onion.press launcher - Initializes Colima and starts standalone menu bar app
 
 set -e
 
@@ -8,9 +8,8 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
-SCRIPTS_DIR="$RESOURCES_DIR/scripts"
+MENUBAR_APP="$RESOURCES_DIR/MenubarApp/menubar.app"
 DATA_DIR="$HOME/.onion.press"
-VENV_DIR="$DATA_DIR/venv"
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
@@ -36,32 +35,18 @@ log() {
 
 log "Starting onion.press launcher..."
 
-# Check for Python 3
-if ! command -v python3 >/dev/null 2>&1; then
-    log "ERROR: Python 3 not found"
-    echo "ERROR: Python 3 is required to run onion.press but was not found." >&2
-    echo "macOS 12.3+ removed Python 2. Please install Python 3 from:" >&2
-    echo "https://www.python.org/downloads/" >&2
-    echo "Or install via Homebrew: brew install python3" >&2
+# Check if standalone menubar app exists
+if [ ! -f "$MENUBAR_APP/Contents/MacOS/menubar" ]; then
+    log "ERROR: Standalone menubar app not found at $MENUBAR_APP"
+    echo "ERROR: Application bundle is corrupted. Please reinstall Onion.Press." >&2
     exit 1
 fi
 
-log "Python 3 found: $(python3 --version)"
-
 # Check if this is first-time initialization
 FIRST_RUN=false
-if [ ! -d "$VENV_DIR" ] || [ ! -f "$COLIMA_HOME/.initialized" ]; then
+if [ ! -f "$COLIMA_HOME/.initialized" ]; then
     FIRST_RUN=true
     log "First-time initialization detected"
-fi
-
-# Create virtual environment if it doesn't exist
-if [ ! -d "$VENV_DIR" ]; then
-    log "Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1
-    "$VENV_DIR/bin/pip" install --upgrade pip >> "$LOG_FILE" 2>&1
-    "$VENV_DIR/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" >> "$LOG_FILE" 2>&1
-    log "Virtual environment created successfully"
 fi
 
 # Initialize Colima on first run
@@ -112,18 +97,7 @@ initialize_colima() {
 # The menubar app will show gray icon and wait for services to be ready
 if [ "$FIRST_RUN" = true ]; then
     log "Launching menu bar application in background during setup..."
-    cd "$SCRIPTS_DIR"
-
-    # Use pythonw if available (for GUI apps on macOS), otherwise use python3
-    if [ -f "$VENV_DIR/bin/pythonw" ] || [ -f "$VENV_DIR/bin/pythonw3" ]; then
-        PYTHON_CMD="$VENV_DIR/bin/pythonw"
-    else
-        PYTHON_CMD="$VENV_DIR/bin/python3"
-    fi
-
-    # Launch menubar in background so setup can continue
-    export PYTHONPATH="$SCRIPTS_DIR"
-    "$PYTHON_CMD" "$SCRIPTS_DIR/menubar.py" >> "$LOG_FILE" 2>&1 &
+    "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1 &
     MENUBAR_PID=$!
     log "Menu bar app launched (PID: $MENUBAR_PID)"
 fi
@@ -156,16 +130,4 @@ fi
 
 # For subsequent launches, start menu bar app normally
 log "Launching menu bar application..."
-cd "$SCRIPTS_DIR"
-
-# Use pythonw if available (for GUI apps on macOS), otherwise use python3
-if [ -f "$VENV_DIR/bin/pythonw" ] || [ -f "$VENV_DIR/bin/pythonw3" ]; then
-    PYTHON_CMD="$VENV_DIR/bin/pythonw"
-else
-    # Create a proper GUI context by using the Python framework
-    PYTHON_CMD="$VENV_DIR/bin/python3"
-fi
-
-# Launch with proper environment
-export PYTHONPATH="$SCRIPTS_DIR"
-"$PYTHON_CMD" "$SCRIPTS_DIR/menubar.py" >> "$LOG_FILE" 2>&1
+exec "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1

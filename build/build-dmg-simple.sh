@@ -185,15 +185,14 @@ fi
 
 chmod +x "$BIN_DIR"/*
 
-# Extract ARM64-only slices to prevent Rosetta emulation issues
-echo "Extracting ARM64 slices from universal binaries..."
+# Keep universal binaries for both Intel and Apple Silicon support
+echo "Verified universal binaries for cross-platform compatibility:"
 cd "$BIN_DIR"
 for binary in colima docker docker-compose limactl; do
     if file "$binary" | grep -q "universal"; then
-        echo "  Extracting ARM64 slice for $binary"
-        lipo "$binary" -thin arm64 -output "${binary}.arm64"
-        mv "$binary" "${binary}.universal"
-        mv "${binary}.arm64" "$binary"
+        echo "  ✓ $binary (universal: x86_64 + arm64)"
+    else
+        echo "  ⚠️  $binary (single architecture)"
     fi
 done
 
@@ -220,6 +219,48 @@ cp -R "$TEMP_BIN_DIR/lima-arm64/share/lima"/* "$SHARE_DIR/"
 rm -rf "$TEMP_BIN_DIR"
 
 echo "Container runtime binaries installed successfully"
+
+# Build standalone Python app with py2app
+echo "Building standalone Python app (removing Python 3 dependency)..."
+cd "$PROJECT_DIR"
+
+# Check if py2app is installed
+if ! python3 -c "import py2app" 2>/dev/null; then
+    echo "  ERROR: py2app not installed"
+    echo "  Run: python3 -m pip install --user --break-system-packages py2app pyobjc-core pyobjc-framework-Cocoa rumps"
+    exit 1
+fi
+
+# Build with py2app
+echo "  Building menubar app with py2app..."
+rm -rf py2app_build py2app_dist  # Clean previous builds
+python3 setup.py py2app --quiet 2>&1 | grep -v "DEPRECATION\|WARNING\|copying" || true
+
+if [ -d "py2app_dist/menubar.app" ]; then
+    echo "  ✓ Standalone app built successfully"
+
+    # Remove old MenubarApp if exists
+    MENUBAR_STANDALONE="$APP_PATH/Contents/Resources/MenubarApp"
+    rm -rf "$MENUBAR_STANDALONE"
+
+    # Copy the py2app bundle into our app
+    mkdir -p "$(dirname "$MENUBAR_STANDALONE")"
+    cp -R "py2app_dist/menubar.app" "$MENUBAR_STANDALONE"
+
+    #Remove duplicate .universal binaries from previous builds
+    rm -f "$BIN_DIR"/*.universal
+
+    # Remove the old Python scripts (no longer needed)
+    rm -rf "$APP_PATH/Contents/Resources/scripts"
+
+    echo "  ✓ Standalone Python app installed (no Python 3 required)"
+
+    # Clean up build artifacts
+    rm -rf py2app_build py2app_dist
+else
+    echo "  ERROR: py2app build failed"
+    exit 1
+fi
 
 # Clean up old builds
 echo "Cleaning up old builds..."
