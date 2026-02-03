@@ -12,14 +12,12 @@ onion.press is a macOS application that bundles WordPress with a Tor onion servi
 
 ## ⚠️ Important Notice
 
-This should **not** be considered a privacy-enhanced publishing tool, even though it uses Tor which is often associated with privacy and anonymity.
+This should **not** be considered a securely-anonymous publishing tool, even though it uses Tor which is often associated with privacy and anonymity.
 
-Tor is being used in this project for its **practical networking capabilities**:
+So far, Tor is being used in this project for its **practical networking capabilities**:
 - **Works behind NAT and firewalls** - No port forwarding or router configuration needed
 - **No DNS registration required** - Your .onion address works immediately without buying domains
 - **Built-in encryption** - No need to obtain HTTPS/SSL certificates
-
-**This is likely not safe for anonymous publishing.** If privacy is your primary concern, you should use dedicated privacy tools and consult security experts about your threat model.
 
 ## Features
 
