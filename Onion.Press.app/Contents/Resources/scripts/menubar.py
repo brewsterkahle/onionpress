@@ -827,6 +827,9 @@ end tell
                     self.log("Tor Browser detected in Applications!")
                     self.monitoring_tor_install = False
 
+                    # Dismiss setup dialog before showing browser ready dialog
+                    self.dismiss_setup_dialog()
+
                     # Show dialog asking if they want to open the site
                     address = self.onion_address
                     try:
@@ -885,6 +888,9 @@ end tell
 
                     self.log("Brave Browser detected in Applications!")
                     self.monitoring_tor_install = False
+
+                    # Dismiss setup dialog before showing browser ready dialog
+                    self.dismiss_setup_dialog()
 
                     # Show dialog asking if they want to open the site
                     address = self.onion_address
@@ -981,6 +987,8 @@ end tell
                 )
             else:
                 self.log("Neither Tor Browser nor Brave Browser installed - showing download dialog")
+                # Dismiss setup dialog before showing browser download dialog
+                self.dismiss_setup_dialog()
                 address = self.onion_address
                 try:
                     button_index = self.show_native_alert(
