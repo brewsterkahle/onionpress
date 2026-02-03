@@ -33,7 +33,21 @@
 
 - **Bridge relay support** - Optional contribution to Tor network by running a bridge relay
 
+## Retro Features
+
+- **90's visitor counter** - Add a retro-style hit counter with local state tracking
+- **Webring support** - Discover and connect with other OnionPress sites:
+  - Add one or more OnionPress URLs to your webring
+  - Crawl homepages at session start to test which are active
+  - Rotate through active sites (need graphic design)
+  - Auto-discover other homepage URLs to expand the ring
+  - Maintain local state of webring members so that it is not a hosted service that someone else can see rings, also maintain the availability status of the other members so your site only shows Onion.Press services that are up
+  - **Webring reliability**: When adding an Onion.Press to your webring, support adding keys to replicate their content and serve it on their address for robustness (backup hosting)
+- **Animated GIF from gifcities.org** - Add "hello?hello?" animated GIF for retro aesthetic
+
 ## Technical Improvements
+
+- **Sleep/wake handling** - Detect when Mac wakes from sleep, change menubar icon to yellow, test Tor URL connectivity, and return to purple when connection confirmed
 
 - **Reduce disk usage** - Optimize Colima VM size and Docker image caching
 - **Faster startup** - Pre-warm containers or improve initialization time
