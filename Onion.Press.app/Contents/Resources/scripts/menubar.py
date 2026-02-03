@@ -920,9 +920,10 @@ end tell
 
                         if "Open" in (result.stdout or ""):
                             url = f"http://{address}"
-                            # Use full path to ensure we open the one in Applications
-                            subprocess.run(["open", "-a", brave_browser_path, url])
-                            self.log(f"Opened site in Brave Browser: {url}")
+                            # Launch Brave in Tor mode using executable with --tor flag
+                            brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
+                            subprocess.run([brave_executable, "--tor", url])
+                            self.log(f"Opened site in Brave Browser (Tor mode): {url}")
                     except Exception as e:
                         self.log(f"Error showing Brave Browser ready dialog: {e}")
                     return
@@ -947,14 +948,15 @@ end tell
                 self.log(f"Opened {url} in Tor Browser")
             elif os.path.exists(brave_browser_path):
                 # Fallback to Brave Browser with Tor support
-                # Brave automatically opens .onion URLs in a Private Window with Tor
-                subprocess.run(["open", "-a", "Brave Browser", url])
-                self.log(f"Opened {url} in Brave Browser")
+                # Launch Brave with --tor flag to open in Private Window with Tor
+                brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
+                subprocess.run([brave_executable, "--tor", url])
+                self.log(f"Opened {url} in Brave Browser (Tor mode)")
                 # Show notification to let user know Brave is being used
                 rumps.notification(
                     title="Onion.Press",
                     subtitle="Opening in Brave Browser",
-                    message="Brave will open your site in a Private Window with Tor"
+                    message="Opening in Private Window with Tor"
                 )
             else:
                 # Neither browser is installed - offer download options
@@ -989,13 +991,14 @@ end tell
                 subprocess.run(["open", "-a", "Tor Browser", url])
             elif os.path.exists(brave_browser_path):
                 # Fallback to Brave Browser with Tor support
-                self.log(f"Auto-opening Brave Browser: {url}")
-                subprocess.run(["open", "-a", "Brave Browser", url])
+                self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
+                brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
+                subprocess.run([brave_executable, "--tor", url])
                 # Show notification to let user know Brave is being used
                 rumps.notification(
                     title="Onion.Press",
                     subtitle="Opening in Brave Browser",
-                    message="Brave will open your site in a Private Window with Tor"
+                    message="Opening in Private Window with Tor"
                 )
             else:
                 self.log("Neither Tor Browser nor Brave Browser installed - showing download dialog")
