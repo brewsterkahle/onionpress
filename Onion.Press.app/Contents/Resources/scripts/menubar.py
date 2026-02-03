@@ -273,24 +273,13 @@ class OnionPressApp(rumps.App):
         self.log("=" * 60)
 
     def request_applescript_permission(self):
-        """Request System Events permission lazily on first use that needs it.
+        """No longer needed - we use native NSAlert instead of osascript for dialogs.
 
-        System Events access is only needed for login item management, not for
-        displaying dialogs. We defer the permission request until the user
-        actually triggers a feature that requires it (e.g. launch-on-login).
-        Dialogs use 'tell current application' which needs no special permission.
+        System Events access was only needed for login item management, which still
+        uses osascript but only when user explicitly enables launch-on-login feature.
         """
-        try:
-            # Only request if not already granted — check silently
-            result = subprocess.run(
-                ["osascript", "-e", 'tell application "System Events" to return name'],
-                capture_output=True,
-                timeout=10
-            )
-            if result.returncode != 0:
-                self.log("System Events permission not yet granted (will request when needed for login items)")
-        except Exception as e:
-            self.log(f"AppleScript permission check failed: {e}")
+        # Skip permission check - no longer needed for dialogs
+        pass
 
     def start_web_log_capture(self):
         """Start capturing WordPress logs to a file"""
@@ -839,22 +828,17 @@ end tell
                     self.monitoring_tor_install = False
 
                     # Show dialog asking if they want to open the site
-                    icon_path = os.path.join(self.resources_dir, "app-icon.png")
                     address = self.onion_address
                     try:
-                        result = subprocess.run(["osascript", "-e", f'''
-tell current application
-    activate
-    set userChoice to button returned of (display dialog "Tor Browser is now installed!
+                        button_index = self.show_native_alert(
+                            title="Onion.Press",
+                            message=f"Tor Browser is now installed!\n\nWould you like to open your site?\n\n{address}",
+                            buttons=["Open Site", "Later"],
+                            default_button=0,
+                            style="informational"
+                        )
 
-Would you like to open your site?
-
-{address}" buttons {{"Later", "Open Site"}} default button "Open Site" with icon POSIX file "{icon_path}" with title "Onion.Press")
-    return userChoice
-end tell
-'''], capture_output=True, text=True)  # No timeout - user can take their time
-
-                        if "Open" in (result.stdout or ""):
+                        if button_index == 0:  # Open Site
                             url = f"http://{address}"
                             # Use full path to ensure we open the one in Applications
                             subprocess.run(["open", "-a", tor_browser_path, url])
@@ -903,22 +887,17 @@ end tell
                     self.monitoring_tor_install = False
 
                     # Show dialog asking if they want to open the site
-                    icon_path = os.path.join(self.resources_dir, "app-icon.png")
                     address = self.onion_address
                     try:
-                        result = subprocess.run(["osascript", "-e", f'''
-tell current application
-    activate
-    set userChoice to button returned of (display dialog "Brave Browser is now installed!
+                        button_index = self.show_native_alert(
+                            title="Onion.Press",
+                            message=f"Brave Browser is now installed!\n\nWould you like to open your site?\n\n{address}",
+                            buttons=["Open Site", "Later"],
+                            default_button=0,
+                            style="informational"
+                        )
 
-Would you like to open your site?
-
-{address}" buttons {{"Later", "Open Site"}} default button "Open Site" with icon POSIX file "{icon_path}" with title "Onion.Press")
-    return userChoice
-end tell
-'''], capture_output=True, text=True)  # No timeout - user can take their time
-
-                        if "Open" in (result.stdout or ""):
+                        if button_index == 0:  # Open Site
                             url = f"http://{address}"
                             # Launch Brave in Tor mode using executable with --tor flag
                             brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
@@ -1002,28 +981,21 @@ end tell
                 )
             else:
                 self.log("Neither Tor Browser nor Brave Browser installed - showing download dialog")
-                icon_path = os.path.join(self.resources_dir, "app-icon.png")
                 address = self.onion_address
                 try:
-                    result = subprocess.run(["osascript", "-e", f'''
-tell current application
-    activate
-    set userChoice to button returned of (display dialog "Your site is ready!
-
-{address}
-
-To visit your site, you need Tor Browser or Brave Browser.
-
-Would you like to download one now?" buttons {{"Later", "Download Tor Browser", "Download Brave Browser"}} default button "Download Tor Browser" with icon POSIX file "{icon_path}" with title "Onion.Press")
-    return userChoice
-end tell
-'''], capture_output=True, text=True)  # No timeout - user can take their time
-                    button_clicked = result.stdout.strip() if result.stdout else ""
-                    if "Tor Browser" in button_clicked:
+                    button_index = self.show_native_alert(
+                        title="Onion.Press",
+                        message=f"Your site is ready!\n\n{address}\n\nTo visit your site, you need Tor Browser or Brave Browser.\n\nWould you like to download one now?",
+                        buttons=["Download Tor Browser", "Download Brave Browser", "Later"],
+                        default_button=0,
+                        cancel_button=2,
+                        style="informational"
+                    )
+                    if button_index == 0:  # Download Tor Browser
                         subprocess.run(["open", "https://www.torproject.org/download/"])
                         # Start monitoring for Tor Browser installation
                         self.monitor_tor_browser_install()
-                    elif "Brave Browser" in button_clicked:
+                    elif button_index == 1:  # Download Brave Browser
                         subprocess.run(["open", "https://brave.com/download/"])
                         # Start monitoring for Brave Browser installation
                         self.monitor_brave_install()
