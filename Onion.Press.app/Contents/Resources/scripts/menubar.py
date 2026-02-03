@@ -759,6 +759,16 @@ end tell
                     # Run docker compose up which will automatically pull missing images
                     env = os.environ.copy()
                     env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                    # Load database passwords from secrets file into env
+                    secrets_file = os.path.join(self.app_support, "secrets")
+                    if os.path.exists(secrets_file):
+                        with open(secrets_file, 'r') as sf:
+                            for line in sf:
+                                line = line.strip()
+                                if line and not line.startswith('#') and '=' in line:
+                                    key, val = line.split('=', 1)
+                                    # Strip surrounding single quotes
+                                    env[key] = val.strip("'")
                     # Use the bundled docker binary
                     docker_bin = os.path.join(self.bin_dir, "docker")
                     # Run in separate thread so it doesn't block
