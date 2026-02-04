@@ -318,6 +318,11 @@
             font-family: 'Courier New', Courier, monospace;
         }
 
+        /* Hide digits until they have content */
+        .digit-inner:empty {
+            opacity: 0;
+        }
+
         .counter-digit.spinning .digit-inner {
             animation: digitSpin 0.6s ease-in-out;
         }
@@ -539,6 +544,8 @@
         (function() {
             const counterAPI = '/wp-content/plugins/onionpress-hit-counter/standalone-counter.php';
             let hasIncremented = false;
+            let currentCount = 0;
+            let pollingInterval = null;
 
             function updateDisplay(formattedCount, animate = true) {
                 const digits = formattedCount.split('');
@@ -573,13 +580,20 @@
             }
 
             function initializeCounter() {
+                console.log('[Hit Counter] Initializing counter...');
                 // First, get current count without incrementing
                 fetch(counterAPI + '?action=get')
-                .then(response => response.json())
+                .then(response => {
+                    console.log('[Hit Counter] GET response status:', response.status);
+                    return response.json();
+                })
                 .then(data => {
+                    console.log('[Hit Counter] GET response data:', data);
                     if (data.success) {
                         // Set initial display without animation
                         updateDisplay(data.formatted, false);
+                        currentCount = data.count;
+                        console.log('[Hit Counter] Initial display set to:', data.formatted);
 
                         // Now increment the counter
                         setTimeout(() => {
@@ -588,27 +602,62 @@
                     }
                 })
                 .catch(error => {
-                    console.error('Hit counter init error:', error);
+                    console.error('[Hit Counter] Init error:', error);
                     // If init fails, just increment anyway
                     incrementCounter();
                 });
             }
 
             function incrementCounter() {
-                if (hasIncremented) return;
+                if (hasIncremented) {
+                    console.log('[Hit Counter] Already incremented, skipping');
+                    return;
+                }
 
+                console.log('[Hit Counter] Incrementing counter...');
                 fetch(counterAPI + '?action=increment', {
                     method: 'POST'
                 })
-                .then(response => response.json())
+                .then(response => {
+                    console.log('[Hit Counter] POST response status:', response.status);
+                    return response.json();
+                })
                 .then(data => {
+                    console.log('[Hit Counter] POST response data:', data);
                     if (data.success) {
                         // Animate the increment
                         updateDisplay(data.formatted, true);
+                        currentCount = data.count;
                         hasIncremented = true;
+                        console.log('[Hit Counter] Counter incremented to:', data.formatted);
+
+                        // Start polling for updates from other visitors
+                        startPolling();
                     }
                 })
-                .catch(error => console.error('Hit counter error:', error));
+                .catch(error => console.error('[Hit Counter] Increment error:', error));
+            }
+
+            function checkForUpdates() {
+                fetch(counterAPI + '?action=get')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.count > currentCount) {
+                        console.log('[Hit Counter] New visitor detected! Count:', data.count);
+                        // Someone else visited, animate the update
+                        updateDisplay(data.formatted, true);
+                        currentCount = data.count;
+                    }
+                })
+                .catch(error => console.error('[Hit Counter] Poll error:', error));
+            }
+
+            function startPolling() {
+                // Poll every 2 seconds to check for new visitors
+                if (!pollingInterval) {
+                    pollingInterval = setInterval(checkForUpdates, 2000);
+                    console.log('[Hit Counter] Started polling for updates');
+                }
             }
 
             // Initialize on page load
