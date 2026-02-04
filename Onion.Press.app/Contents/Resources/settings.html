@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Onion.Press Settings</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+        
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .setting-group {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .setting-group h3 {
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+        
+        .setting-group p {
+            color: #666;
+            font-size: 13px;
+            line-height: 1.5;
+            margin-bottom: 12px;
+        }
+        
+        .input-group {
+            display: flex;
+            align-items: center;
+            margin-top: 12px;
+        }
+        
+        label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            font-size: 14px;
+            color: #333;
+        }
+        
+        input[type="text"] {
+            padding: 8px 12px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: monospace;
+            width: 200px;
+            transition: border-color 0.2s;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            cursor: pointer;
+            accent-color: #667eea;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            border-left-color: #ffc107;
+            border: 1px solid #ffc107;
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 10px;
+            font-size: 13px;
+            color: #856404;
+        }
+        
+        .warning strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+        
+        .buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        button {
+            flex: 1;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-apply {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-apply:hover {
+            background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-cancel {
+            background: #e0e0e0;
+            color: #333;
+        }
+        
+        .btn-cancel:hover {
+            background: #d0d0d0;
+        }
+        
+        .success-message {
+            background: #d4edda;
+            color: #155724;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            border: 1px solid #c3e6cb;
+            display: none;
+        }
+        
+        .char-hint {
+            font-size: 11px;
+            color: #999;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚙️ Onion.Press Settings</h1>
+        <p class="subtitle">Configure your Onion.Press installation</p>
+        
+        <div class="success-message" id="successMessage">
+            ✓ Settings saved successfully!
+        </div>
+        
+        <form id="settingsForm">
+            <!-- Vanity Prefix -->
+            <div class="setting-group">
+                <h3>🎯 Vanity Onion Address Prefix</h3>
+                <p>Customize your .onion address prefix. Only lowercase a-z and numbers 2-7 allowed (base32). Longer prefixes take exponentially longer to generate.</p>
+                <div class="input-group">
+                    <input type="text" id="vanityPrefix" name="vanityPrefix" pattern="[a-z2-7]{2,7}" maxlength="7" required>
+                    <span class="char-hint">2-7 characters</span>
+                </div>
+                <div class="warning" id="vanityWarning" style="display:none;">
+                    <strong>⚠️ Warning:</strong> Changing the vanity prefix requires regenerating your .onion address. This will give you a completely new URL and your old address will stop working!
+                </div>
+            </div>
+            
+            <!-- Internet Archive Plugin -->
+            <div class="setting-group">
+                <h3>📚 Internet Archive Link Fixer Plugin</h3>
+                <p>Automatically install and activate the Internet Archive Wayback Machine Link Fixer plugin. Helps combat link rot by archiving your outbound links and redirecting to archived versions when links break.</p>
+                <div class="input-group">
+                    <label>
+                        <input type="checkbox" id="installIaPlugin" name="installIaPlugin">
+                        Install Internet Archive Plugin
+                    </label>
+                </div>
+            </div>
+            
+            <!-- Update on Launch -->
+            <div class="setting-group">
+                <h3>🔄 Auto-Update Docker Images</h3>
+                <p>Automatically check for and download updated WordPress, MariaDB, and Tor container images when launching the app. Ensures you have the latest security patches and features.</p>
+                <div class="input-group">
+                    <label>
+                        <input type="checkbox" id="updateOnLaunch" name="updateOnLaunch">
+                        Update on Launch
+                    </label>
+                </div>
+            </div>
+            
+            <!-- Launch on Login -->
+            <div class="setting-group">
+                <h3>🚀 Launch on Login</h3>
+                <p>Start Onion.Press automatically when you log in to macOS. The app will appear in your menu bar and your WordPress site will start automatically.</p>
+                <div class="input-group">
+                    <label>
+                        <input type="checkbox" id="launchOnLogin" name="launchOnLogin">
+                        Launch on Login
+                    </label>
+                </div>
+                <p style="margin-top: 10px; font-size: 12px; color: #999;">
+                    Note: You'll need to manually add/remove Onion.Press in System Settings → General → Login Items
+                </p>
+            </div>
+            
+            <div class="buttons">
+                <button type="button" class="btn-cancel" onclick="window.close()">Cancel</button>
+                <button type="submit" class="btn-apply">Apply Changes</button>
+            </div>
+        </form>
+    </div>
+    
+    <script>
+        // Load current settings
+        let originalVanityPrefix = '';
+        
+        async function loadSettings() {
+            try {
+                const response = await fetch('/settings');
+                const settings = await response.json();
+                
+                document.getElementById('vanityPrefix').value = settings.VANITY_PREFIX;
+                originalVanityPrefix = settings.VANITY_PREFIX;
+                
+                document.getElementById('installIaPlugin').checked = settings.INSTALL_IA_PLUGIN === 'yes';
+                document.getElementById('updateOnLaunch').checked = settings.UPDATE_ON_LAUNCH === 'yes';
+                document.getElementById('launchOnLogin').checked = settings.LAUNCH_ON_LOGIN === 'yes';
+            } catch (error) {
+                console.error('Error loading settings:', error);
+            }
+        }
+        
+        // Check if vanity prefix changed
+        document.getElementById('vanityPrefix').addEventListener('input', function(e) {
+            const warning = document.getElementById('vanityWarning');
+            if (e.target.value !== originalVanityPrefix) {
+                warning.style.display = 'block';
+            } else {
+                warning.style.display = 'none';
+            }
+        });
+        
+        // Handle form submission
+        document.getElementById('settingsForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const settings = {
+                VANITY_PREFIX: document.getElementById('vanityPrefix').value,
+                INSTALL_IA_PLUGIN: document.getElementById('installIaPlugin').checked ? 'yes' : 'no',
+                UPDATE_ON_LAUNCH: document.getElementById('updateOnLaunch').checked ? 'yes' : 'no',
+                LAUNCH_ON_LOGIN: document.getElementById('launchOnLogin').checked ? 'yes' : 'no'
+            };
+            
+            try {
+                const response = await fetch('/settings', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(settings)
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    document.getElementById('successMessage').style.display = 'block';
+                    setTimeout(() => {
+                        window.close();
+                    }, 1500);
+                }
+            } catch (error) {
+                console.error('Error saving settings:', error);
+                alert('Error saving settings. Please try again.');
+            }
+        });
+        
+        // Load settings on page load
+        loadSettings();
+    </script>
+</body>
+</html>

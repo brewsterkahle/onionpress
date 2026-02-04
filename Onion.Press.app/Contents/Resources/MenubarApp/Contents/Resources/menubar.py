@@ -1271,115 +1271,97 @@ class OnionPressApp(rumps.App):
 
     @rumps.clicked("Settings...")
     def open_settings(self, _):
-        """Show settings dialog with Apply/Cancel buttons"""
-        # Read current settings
-        vanity_prefix = self.read_config_value("VANITY_PREFIX", "op2")
-        install_ia_plugin = self.read_config_value("INSTALL_IA_PLUGIN", "yes")
-        update_on_launch = self.read_config_value("UPDATE_ON_LAUNCH", "no")
-        launch_on_login = self.read_config_value("LAUNCH_ON_LOGIN", "no")
+        """Open web-based settings interface"""
+        # Start settings web server in background thread
+        threading.Thread(target=self.run_settings_server, daemon=True).start()
 
-        # Show settings in a series of dialogs (rumps doesn't support complex forms)
-        # First show current settings and ask if they want to change
-        current_settings = f"""Current Settings:
+        # Wait a moment for server to start
+        time.sleep(0.5)
 
-Vanity Prefix: {vanity_prefix}
-Install IA Plugin: {install_ia_plugin}
-Update on Launch: {update_on_launch}
-Launch on Login: {launch_on_login}
+        # Open settings page in browser
+        subprocess.run(["open", "http://localhost:9876/"])
 
-Would you like to change these settings?"""
+    def run_settings_server(self):
+        """Run a simple HTTP server for settings UI"""
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import json
 
-        response = rumps.alert(
-            title="Onion.Press Settings",
-            message=current_settings,
-            ok="Change Settings",
-            cancel="Cancel"
-        )
+        app = self
 
-        if response == 0:  # Cancel clicked
-            return
+        class SettingsHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                # Suppress server logs
+                pass
 
-        # Vanity Prefix
-        window = rumps.Window(
-            title="Vanity Prefix",
-            message="Enter vanity prefix (2-7 chars, lowercase a-z and 2-7 only).\nLonger = slower generation. Changes require regenerating your .onion address!",
-            default_text=vanity_prefix,
-            ok="Next",
-            cancel="Cancel"
-        )
-        response = window.run()
-        if response.clicked == 0:  # Cancel
-            return
-        new_vanity_prefix = response.text.strip().lower() if response.text else vanity_prefix
+            def do_GET(self):
+                if self.path == '/':
+                    # Serve settings HTML
+                    self.send_response(200)
+                    self.send_header('Content-type', 'text/html')
+                    self.end_headers()
 
-        # Install IA Plugin
-        ia_response = rumps.alert(
-            title="Internet Archive Plugin",
-            message="Install Internet Archive Wayback Machine Link Fixer plugin?\n\nHelps combat link rot by archiving your links.",
-            ok="Yes",
-            cancel="No"
-        )
-        new_install_ia_plugin = "yes" if ia_response == 1 else "no"
+                    # Read HTML template
+                    html_path = os.path.join(app.resources_dir, 'settings.html')
+                    with open(html_path, 'r') as f:
+                        self.wfile.write(f.read().encode())
 
-        # Update on Launch
-        update_response = rumps.alert(
-            title="Update on Launch",
-            message="Automatically update Docker images when launching?\n\nEnsures latest security patches.",
-            ok="Yes",
-            cancel="No"
-        )
-        new_update_on_launch = "yes" if update_response == 1 else "no"
+                elif self.path == '/settings':
+                    # Return current settings as JSON
+                    settings = {
+                        'VANITY_PREFIX': app.read_config_value('VANITY_PREFIX', 'op2'),
+                        'INSTALL_IA_PLUGIN': app.read_config_value('INSTALL_IA_PLUGIN', 'yes'),
+                        'UPDATE_ON_LAUNCH': app.read_config_value('UPDATE_ON_LAUNCH', 'no'),
+                        'LAUNCH_ON_LOGIN': app.read_config_value('LAUNCH_ON_LOGIN', 'no')
+                    }
 
-        # Launch on Login
-        login_response = rumps.alert(
-            title="Launch on Login",
-            message="Start Onion.Press automatically when you log in to macOS?",
-            ok="Yes",
-            cancel="No"
-        )
-        new_launch_on_login = "yes" if login_response == 1 else "no"
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(settings).encode())
 
-        # Show summary and confirm
-        summary = f"""Apply these changes?
+                else:
+                    self.send_response(404)
+                    self.end_headers()
 
-Vanity Prefix: {vanity_prefix} → {new_vanity_prefix}
-Install IA Plugin: {install_ia_plugin} → {new_install_ia_plugin}
-Update on Launch: {update_on_launch} → {new_update_on_launch}
-Launch on Login: {launch_on_login} → {new_launch_on_login}"""
+            def do_POST(self):
+                if self.path == '/settings':
+                    # Save new settings
+                    content_length = int(self.headers['Content-Length'])
+                    post_data = self.rfile.read(content_length)
+                    settings = json.loads(post_data.decode())
 
-        if new_vanity_prefix != vanity_prefix:
-            summary += "\n\n⚠️ WARNING: Changing vanity prefix requires regenerating your .onion address (will change your site URL!)"
+                    # Get old values for comparison
+                    old_launch_on_login = app.read_config_value('LAUNCH_ON_LOGIN', 'no')
 
-        final_response = rumps.alert(
-            title="Confirm Changes",
-            message=summary,
-            ok="Apply",
-            cancel="Cancel"
-        )
+                    # Write new values
+                    app.write_config_value('VANITY_PREFIX', settings['VANITY_PREFIX'])
+                    app.write_config_value('INSTALL_IA_PLUGIN', settings['INSTALL_IA_PLUGIN'])
+                    app.write_config_value('UPDATE_ON_LAUNCH', settings['UPDATE_ON_LAUNCH'])
+                    app.write_config_value('LAUNCH_ON_LOGIN', settings['LAUNCH_ON_LOGIN'])
 
-        if final_response == 0:  # Cancel
-            return
+                    # Handle launch on login change
+                    if settings['LAUNCH_ON_LOGIN'] != old_launch_on_login:
+                        threading.Thread(target=app.sync_launch_on_login, daemon=True).start()
 
-        # Apply changes
-        self.write_config_value("VANITY_PREFIX", new_vanity_prefix)
-        self.write_config_value("INSTALL_IA_PLUGIN", new_install_ia_plugin)
-        self.write_config_value("UPDATE_ON_LAUNCH", new_update_on_launch)
-        self.write_config_value("LAUNCH_ON_LOGIN", new_launch_on_login)
+                    app.log("Settings updated via web interface")
 
-        # Handle launch on login change
-        if new_launch_on_login != launch_on_login:
-            threading.Thread(target=self.sync_launch_on_login, daemon=True).start()
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'success': True}).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
 
-        # Show success message
-        success_msg = "Settings saved successfully!"
-        if new_vanity_prefix != vanity_prefix:
-            success_msg += "\n\nTo use the new vanity prefix:\n1. Export your private key (backup)\n2. Stop Onion.Press\n3. Delete tor-keys volume\n4. Restart to generate new address"
-
-        rumps.notification(
-            title="Onion.Press",
-            subtitle="Settings Updated",
-            message=success_msg
-        )
+        # Run server (will auto-stop when browser closes)
+        try:
+            server = HTTPServer(('localhost', 9876), SettingsHandler)
+            server.timeout = 0.5
+            # Run for max 5 minutes then auto-stop
+            for _ in range(600):
+                server.handle_request()
+        except:
+            pass
 
     @rumps.clicked("Export Private Key...")
     def export_key(self, _):
