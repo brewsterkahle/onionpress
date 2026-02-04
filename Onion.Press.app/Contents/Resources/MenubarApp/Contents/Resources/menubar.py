@@ -205,7 +205,7 @@ class OnionPressApp(rumps.App):
             try:
                 # Create window (no I/O) - taller for better spacing, no close button
                 window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-                    AppKit.NSMakeRect(0, 0, 300, 250),
+                    AppKit.NSMakeRect(0, 0, 300, 350),
                     AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
                     AppKit.NSBackingStoreBuffered,
                     False
@@ -217,10 +217,10 @@ class OnionPressApp(rumps.App):
                 window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
 
                 # Create content view
-                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 250))
+                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 350))
 
                 # Add "Launching..." text (no I/O) - moved down
-                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(50, 80, 200, 30))
+                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(50, 60, 200, 30))
                 text_field.setStringValue_("Launching Onion.Press...")
                 text_field.setBezeled_(False)
                 text_field.setDrawsBackground_(False)
@@ -245,11 +245,11 @@ class OnionPressApp(rumps.App):
                 except:
                     pass
 
-                # Add logo in background (I/O happens after window shows) - moved to top
+                # Add logo in background (I/O happens after window shows) - moved to top, 2x larger
                 def add_logo():
                     icon_path = os.path.join(self.resources_dir, "app-icon.png")
                     if os.path.exists(icon_path):
-                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(100, 140, 100, 100))
+                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(50, 130, 200, 200))
                         image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
                         if image:
                             image_view.setImage_(image)
