@@ -185,9 +185,6 @@ class OnionPressApp(rumps.App):
         # Ensure Docker is available
         threading.Thread(target=self.ensure_docker_available, daemon=True).start()
 
-        # Sync launch on login setting
-        threading.Thread(target=self.sync_launch_on_login, daemon=True).start()
-
         # Start status checker
         self.start_status_checker()
 
@@ -464,26 +461,6 @@ class OnionPressApp(rumps.App):
 
         self.start_service(None)
 
-    def is_login_item(self):
-        """Check if app is currently in login items"""
-        try:
-            # Use sfltool to check login items (no permissions required)
-            result = subprocess.run(
-                ["sfltool", "dumpbtm"],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                timeout=5
-            )
-
-            if result.returncode == 0:
-                output = result.stdout.lower()
-                return 'onion.press' in output or 'onion-press' in output
-            return False
-        except Exception as e:
-            self.log(f"Error checking login items: {e}")
-            return False
 
     def add_login_item(self):
         """Add app to login items - prompts user to add manually"""
@@ -524,41 +501,6 @@ class OnionPressApp(rumps.App):
             self.log(f"Error prompting login item removal: {e}")
             return False
 
-    def sync_launch_on_login(self):
-        """Sync LAUNCH_ON_LOGIN config with macOS login items"""
-        time.sleep(2)  # Brief delay to let app initialize
-
-        try:
-            # Read config
-            config_file = os.path.join(self.app_support, "config")
-            launch_on_login_enabled = False
-
-            if os.path.exists(config_file):
-                try:
-                    with open(config_file, 'r') as f:
-                        for line in f:
-                            if line.startswith('LAUNCH_ON_LOGIN='):
-                                value = line.split('=', 1)[1].strip().lower()
-                                launch_on_login_enabled = (value == 'yes')
-                                break
-                except:
-                    pass
-
-            # Check current system state
-            is_currently_login_item = self.is_login_item()
-
-            # Sync if needed
-            if launch_on_login_enabled and not is_currently_login_item:
-                self.log("LAUNCH_ON_LOGIN=yes but not in login items - adding...")
-                self.add_login_item()
-            elif not launch_on_login_enabled and is_currently_login_item:
-                self.log("LAUNCH_ON_LOGIN=no but in login items - removing...")
-                self.remove_login_item()
-            else:
-                self.log(f"Launch on login state synced (enabled={launch_on_login_enabled})")
-
-        except Exception as e:
-            self.log(f"Error syncing launch on login: {e}")
 
     def run_command(self, command):
         """Run a command and return output"""
