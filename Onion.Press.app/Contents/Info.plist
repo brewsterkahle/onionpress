@@ -19,9 +19,9 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.2.33</string>
+    <string>2.2.34</string>
     <key>CFBundleVersion</key>
-    <string>50</string>
+    <string>51</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>

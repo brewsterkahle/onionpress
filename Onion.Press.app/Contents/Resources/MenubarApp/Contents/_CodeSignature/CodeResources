@@ -786,7 +786,7 @@
 		</data>
 		<key>Resources/lib/python314.zip</key>
 		<data>
-		eCg2Yb0jctIUBpiOthNDtF40Apw=
+		KhZY/YiW6JBNDBDs3GmVD1q2OJQ=
 		</data>
 		<key>Resources/menubar-icon-running.png</key>
 		<data>
@@ -802,7 +802,7 @@
 		</data>
 		<key>Resources/menubar.py</key>
 		<data>
-		EifCC6zTLiq+zfEUy4hAzMeb4V8=
+		40ODb4oaD98/FQiHvq9rqeI1C1g=
 		</data>
 		<key>Resources/openssl.ca/cert.pem</key>
 		<data>
@@ -814,7 +814,7 @@
 		</data>
 		<key>Resources/site.pyc</key>
 		<data>
-		Zv06LaOwytcuedZV3xbkaov1wFs=
+		cbqPAvchUd8vlU16BlthMqFXCnM=
 		</data>
 		<key>Resources/zlib.cpython-314-darwin.so</key>
 		<data>
@@ -3050,11 +3050,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			eCg2Yb0jctIUBpiOthNDtF40Apw=
+			KhZY/YiW6JBNDBDs3GmVD1q2OJQ=
 			</data>
 			<key>hash2</key>
 			<data>
-			94oiEwy2eQK0Z7NFlFk0oZSMMqGefkTPM1oh06tOFPw=
+			fsQ1SScrWyauxIpUYqF1ehcOBUtjHpxgLSd0/TLtl9Y=
 			</data>
 		</dict>
 		<key>Resources/menubar-icon-running.png</key>
@@ -3094,11 +3094,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			EifCC6zTLiq+zfEUy4hAzMeb4V8=
+			40ODb4oaD98/FQiHvq9rqeI1C1g=
 			</data>
 			<key>hash2</key>
 			<data>
-			BBieiTbNnO2PnCE306ylarkg5acyQUX6Uw98WGv4uCE=
+			oqyvRYK9l0HzYuhM265PYxyTK2LzhycZYOR59Tn+sQw=
 			</data>
 		</dict>
 		<key>Resources/openssl.ca/cert.pem</key>
@@ -3127,11 +3127,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			Zv06LaOwytcuedZV3xbkaov1wFs=
+			cbqPAvchUd8vlU16BlthMqFXCnM=
 			</data>
 			<key>hash2</key>
 			<data>
-			pp4yEMghwsujs6z/dnwGcQ12yAHV77YGF0sen58ABrc=
+			yK5N5Bn+Xaey2H4V5hhBiOVJ8QwaHunsZQtxU6kQrVs=
 			</data>
 		</dict>
 		<key>Resources/zlib.cpython-314-darwin.so</key>

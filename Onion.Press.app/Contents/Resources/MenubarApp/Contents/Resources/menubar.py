@@ -214,6 +214,7 @@ class OnionPressApp(rumps.App):
                 window.setLevel_(AppKit.NSFloatingWindowLevel)
                 window.center()
                 window.setReleasedWhenClosed_(False)  # Keep window object alive
+                window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
 
                 # Create content view
                 content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 250))
@@ -697,11 +698,17 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
-            # Check 3: Verify hidden service descriptor has been uploaded
-            # This is critical - Tor can be bootstrapped but the HS descriptor might not be published yet
-            if "Uploaded rendezvous descriptor" not in result.stdout and "Uploading descriptor" not in result.stdout:
+            # Check 3: Verify hidden service keys exist (descriptor upload message is unreliable)
+            # If hostname exists and Tor bootstrapped, the service should be reachable
+            keys_check = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "ls", "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"],
+                capture_output=True,
+                timeout=5,
+                env=docker_env
+            )
+            if keys_check.returncode != 0:
                 if log_result:
-                    self.log(f"✗ Hidden service descriptor not uploaded yet")
+                    self.log(f"✗ Hidden service keys not found")
                 return False
 
             # Check 4: Verify no critical errors in recent logs

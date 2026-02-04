@@ -1,6 +1,7 @@
 services:
   tor:
     image: goldy/tor-hidden-service:v0.4.7.12-54c0e54
+    platform: linux/amd64
     container_name: onionpress-tor
     environment:
       # WordPress is the service name we're exposing
