@@ -44,7 +44,7 @@ Create these pages in WordPress (Pages → Add New):
 <!-- Hero Section -->
 <div class="hero">
   <h1>★ ✨ ONION.PRESS ✨ ★</h1>
-  <p style="font-size: 24px; font-family: 'Press Start 2P', cursive;">Your Website on the Dark Web</p>
+  <p style="font-size: 24px; font-weight: bold;">Your Website on the Dark Web</p>
   <p style="font-size: 18px;">No Servers • No Surveillance • Free</p>
   <br>
   <a href="/download" class="wp-element-button">💾 DOWNLOAD NOW</a>
@@ -282,11 +282,11 @@ Change colors in the CSS variables at the top of `custom-retro-style.css`:
 
 ### Font Options
 
-The CSS uses two retro fonts:
-- **Press Start 2P** - Pixelated, bold (for headings)
-- **VT323** - Terminal style (for code/counter)
+The CSS uses web-safe fonts (no external requests for privacy):
+- **Impact / Arial Black** - Bold, uppercase (for headings)
+- **Courier New** - Monospace, terminal style (for code/counter)
 
-Both load from Google Fonts automatically.
+These fonts are pre-installed on all computers, so no external downloads needed!
 
 ### Accessibility
 
@@ -313,14 +313,6 @@ Remember: Tor is slower than regular internet.
 1. Clear WordPress cache
 2. Hard refresh browser (Cmd+Shift+R)
 3. Check for CSS syntax errors
-
-### Fonts not loading?
-
-The fonts load from Google Fonts. If Tor blocks this:
-
-1. Download fonts manually
-2. Upload to WordPress Media Library
-3. Update CSS to use local font files
 
 ### Mobile layout broken?
 

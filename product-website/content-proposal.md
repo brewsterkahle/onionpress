@@ -8,7 +8,7 @@
 - Custom CSS for late 90s/early 2000s aesthetic
 - Bright colors (magenta, cyan, yellow)
 - Bold borders and tables
-- Pixelated fonts and graphics
+- Web-safe fonts only (Impact, Courier New - no external requests for privacy)
 - Animated GIFs (tastefully used)
 - Classic blue hyperlinks
 - Tiled backgrounds (optional)
