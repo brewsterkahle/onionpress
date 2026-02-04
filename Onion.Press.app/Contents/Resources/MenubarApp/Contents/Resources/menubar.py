@@ -203,22 +203,23 @@ class OnionPressApp(rumps.App):
         """Show non-blocking launch splash with logo - no I/O blocking"""
         def show():
             try:
-                # Create window (no I/O)
+                # Create window (no I/O) - taller for better spacing
                 window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-                    AppKit.NSMakeRect(0, 0, 300, 200),
-                    AppKit.NSWindowStyleMaskTitled,
+                    AppKit.NSMakeRect(0, 0, 300, 250),
+                    AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable,
                     AppKit.NSBackingStoreBuffered,
                     False
                 )
                 window.setTitle_("Onion.Press")
                 window.setLevel_(AppKit.NSFloatingWindowLevel)
                 window.center()
+                window.setReleasedWhenClosed_(False)  # Keep window object alive
 
                 # Create content view
-                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 200))
+                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 250))
 
-                # Add "Launching..." text (no I/O)
-                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(50, 100, 200, 30))
+                # Add "Launching..." text (no I/O) - moved down
+                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(50, 80, 200, 30))
                 text_field.setStringValue_("Launching Onion.Press...")
                 text_field.setBezeled_(False)
                 text_field.setDrawsBackground_(False)
@@ -229,8 +230,8 @@ class OnionPressApp(rumps.App):
                 text_field.setFont_(font)
                 content_view.addSubview_(text_field)
 
-                # Add "View Log" button (no I/O)
-                view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(90, 50, 120, 32))
+                # Add "View Log" button (no I/O) - moved down
+                view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(90, 30, 120, 32))
                 view_log_button.setTitle_("View Log")
                 view_log_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
                 view_log_button.setTarget_(self)
@@ -242,11 +243,18 @@ class OnionPressApp(rumps.App):
 
                 self.launch_splash = window
 
-                # Add logo in background (I/O happens after window shows)
+                # Log splash creation
+                try:
+                    with open(self.log_file, 'a') as f:
+                        f.write(f"DEBUG: Launch splash created and shown\n")
+                except:
+                    pass
+
+                # Add logo in background (I/O happens after window shows) - moved to top
                 def add_logo():
                     icon_path = os.path.join(self.resources_dir, "app-icon.png")
                     if os.path.exists(icon_path):
-                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(100, 130, 100, 100))
+                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(100, 140, 100, 100))
                         image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
                         if image:
                             image_view.setImage_(image)
@@ -264,10 +272,12 @@ class OnionPressApp(rumps.App):
         def dismiss():
             if self.launch_splash:
                 try:
+                    self.log("Dismissing launch splash")
+                    self.launch_splash.orderOut_(None)
                     self.launch_splash.close()
                     self.launch_splash = None
-                except:
-                    pass
+                except Exception as e:
+                    self.log(f"Error dismissing launch splash: {e}")
 
         # Dismiss on main thread
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(dismiss)
