@@ -540,7 +540,7 @@
             const counterAPI = '/wp-content/plugins/onionpress-hit-counter/standalone-counter.php';
             let hasIncremented = false;
 
-            function updateDisplay(formattedCount) {
+            function updateDisplay(formattedCount, animate = true) {
                 const digits = formattedCount.split('');
                 const digitElements = document.querySelectorAll('.counter-digit');
 
@@ -550,14 +550,44 @@
 
                     if (currentDigit !== newDigit) {
                         const inner = elem.querySelector('.digit-inner');
-                        elem.classList.add('spinning');
 
-                        setTimeout(() => {
+                        if (animate) {
+                            // Animate the change
+                            elem.classList.add('spinning');
+
+                            setTimeout(() => {
+                                inner.textContent = newDigit;
+                                elem.setAttribute('data-digit', newDigit);
+                                elem.classList.remove('spinning');
+                            }, 300);
+                        } else {
+                            // Update instantly without animation
                             inner.textContent = newDigit;
                             elem.setAttribute('data-digit', newDigit);
-                            elem.classList.remove('spinning');
-                        }, 300);
+                        }
                     }
+                });
+            }
+
+            function initializeCounter() {
+                // First, get current count without incrementing
+                fetch(counterAPI + '?action=get')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Set initial display without animation
+                        updateDisplay(data.formatted, false);
+
+                        // Now increment the counter
+                        setTimeout(() => {
+                            incrementCounter();
+                        }, 100);
+                    }
+                })
+                .catch(error => {
+                    console.error('Hit counter init error:', error);
+                    // If init fails, just increment anyway
+                    incrementCounter();
                 });
             }
 
@@ -570,18 +600,19 @@
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        updateDisplay(data.formatted);
+                        // Animate the increment
+                        updateDisplay(data.formatted, true);
                         hasIncremented = true;
                     }
                 })
                 .catch(error => console.error('Hit counter error:', error));
             }
 
-            // Increment on page load
+            // Initialize on page load
             if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', incrementCounter);
+                document.addEventListener('DOMContentLoaded', initializeCounter);
             } else {
-                incrementCounter();
+                initializeCounter();
             }
         })();
         </script>
