@@ -1237,8 +1237,23 @@ class OnionPressApp(rumps.App):
             return 'Unknown'
 
     @rumps.clicked("Settings...")
-    def open_settings(self, _):
-        """Open config file in default text editor"""
+    def read_config_value(self, key, default=""):
+        """Read a value from the config file"""
+        config_file = os.path.join(self.app_support, "config")
+        if not os.path.exists(config_file):
+            return default
+        try:
+            with open(config_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split('=', 1)[1]
+        except:
+            pass
+        return default
+
+    def write_config_value(self, key, value):
+        """Write a value to the config file"""
         config_file = os.path.join(self.app_support, "config")
 
         # Create default config if it doesn't exist
@@ -1247,10 +1262,137 @@ class OnionPressApp(rumps.App):
             if os.path.exists(config_template):
                 subprocess.run(["cp", config_template, config_file])
 
+        # Read all lines
+        lines = []
         if os.path.exists(config_file):
-            subprocess.run(["open", "-t", config_file])
-        else:
-            rumps.alert("Settings file not found")
+            with open(config_file, 'r') as f:
+                lines = f.readlines()
+
+        # Update or add the key
+        found = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith(f"{key}="):
+                lines[i] = f"{key}={value}\n"
+                found = True
+                break
+
+        if not found:
+            lines.append(f"{key}={value}\n")
+
+        # Write back
+        with open(config_file, 'w') as f:
+            f.writelines(lines)
+
+    def open_settings(self, _):
+        """Show settings dialog with Apply/Cancel buttons"""
+        # Read current settings
+        vanity_prefix = self.read_config_value("VANITY_PREFIX", "op2")
+        install_ia_plugin = self.read_config_value("INSTALL_IA_PLUGIN", "yes")
+        update_on_launch = self.read_config_value("UPDATE_ON_LAUNCH", "no")
+        launch_on_login = self.read_config_value("LAUNCH_ON_LOGIN", "no")
+
+        # Show settings in a series of dialogs (rumps doesn't support complex forms)
+        # First show current settings and ask if they want to change
+        current_settings = f"""Current Settings:
+
+Vanity Prefix: {vanity_prefix}
+Install IA Plugin: {install_ia_plugin}
+Update on Launch: {update_on_launch}
+Launch on Login: {launch_on_login}
+
+Would you like to change these settings?"""
+
+        response = rumps.alert(
+            title="Onion.Press Settings",
+            message=current_settings,
+            ok="Change Settings",
+            cancel="Cancel"
+        )
+
+        if response == 0:  # Cancel clicked
+            return
+
+        # Vanity Prefix
+        window = rumps.Window(
+            title="Vanity Prefix",
+            message="Enter vanity prefix (2-7 chars, lowercase a-z and 2-7 only).\nLonger = slower generation. Changes require regenerating your .onion address!",
+            default_text=vanity_prefix,
+            ok="Next",
+            cancel="Cancel"
+        )
+        response = window.run()
+        if response.clicked == 0:  # Cancel
+            return
+        new_vanity_prefix = response.text.strip().lower() if response.text else vanity_prefix
+
+        # Install IA Plugin
+        ia_response = rumps.alert(
+            title="Internet Archive Plugin",
+            message="Install Internet Archive Wayback Machine Link Fixer plugin?\n\nHelps combat link rot by archiving your links.",
+            ok="Yes",
+            cancel="No"
+        )
+        new_install_ia_plugin = "yes" if ia_response == 1 else "no"
+
+        # Update on Launch
+        update_response = rumps.alert(
+            title="Update on Launch",
+            message="Automatically update Docker images when launching?\n\nEnsures latest security patches.",
+            ok="Yes",
+            cancel="No"
+        )
+        new_update_on_launch = "yes" if update_response == 1 else "no"
+
+        # Launch on Login
+        login_response = rumps.alert(
+            title="Launch on Login",
+            message="Start Onion.Press automatically when you log in to macOS?",
+            ok="Yes",
+            cancel="No"
+        )
+        new_launch_on_login = "yes" if login_response == 1 else "no"
+
+        # Show summary and confirm
+        summary = f"""Apply these changes?
+
+Vanity Prefix: {vanity_prefix} → {new_vanity_prefix}
+Install IA Plugin: {install_ia_plugin} → {new_install_ia_plugin}
+Update on Launch: {update_on_launch} → {new_update_on_launch}
+Launch on Login: {launch_on_login} → {new_launch_on_login}"""
+
+        if new_vanity_prefix != vanity_prefix:
+            summary += "\n\n⚠️ WARNING: Changing vanity prefix requires regenerating your .onion address (will change your site URL!)"
+
+        final_response = rumps.alert(
+            title="Confirm Changes",
+            message=summary,
+            ok="Apply",
+            cancel="Cancel"
+        )
+
+        if final_response == 0:  # Cancel
+            return
+
+        # Apply changes
+        self.write_config_value("VANITY_PREFIX", new_vanity_prefix)
+        self.write_config_value("INSTALL_IA_PLUGIN", new_install_ia_plugin)
+        self.write_config_value("UPDATE_ON_LAUNCH", new_update_on_launch)
+        self.write_config_value("LAUNCH_ON_LOGIN", new_launch_on_login)
+
+        # Handle launch on login change
+        if new_launch_on_login != launch_on_login:
+            threading.Thread(target=self.sync_launch_on_login, daemon=True).start()
+
+        # Show success message
+        success_msg = "Settings saved successfully!"
+        if new_vanity_prefix != vanity_prefix:
+            success_msg += "\n\nTo use the new vanity prefix:\n1. Export your private key (backup)\n2. Stop Onion.Press\n3. Delete tor-keys volume\n4. Restart to generate new address"
+
+        rumps.notification(
+            title="Onion.Press",
+            subtitle="Settings Updated",
+            message=success_msg
+        )
 
     @rumps.clicked("Export Private Key...")
     def export_key(self, _):
