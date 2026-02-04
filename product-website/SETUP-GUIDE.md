@@ -20,7 +20,18 @@ The site uses **Twenty Twenty-Four** (comes with WordPress by default)
 1. Go to Appearance → Themes
 2. Activate "Twenty Twenty-Four"
 
-## Step 2: Add Custom CSS
+## Step 2: Install Self-Hosted Fonts
+
+**Important**: Install fonts BEFORE adding CSS!
+
+Follow the complete guide in `FONT-SETUP.md` to:
+1. Download Press Start 2P and VT323 fonts
+2. Convert to web formats (WOFF2/WOFF)
+3. Upload to WordPress at `/wp-content/uploads/fonts/`
+
+This ensures privacy - no external font requests!
+
+## Step 3: Add Custom CSS
 
 1. Go to Appearance → Customize
 2. Click "Additional CSS"
@@ -28,9 +39,9 @@ The site uses **Twenty Twenty-Four** (comes with WordPress by default)
 4. Paste into the Additional CSS box
 5. Click "Publish"
 
-You should immediately see the retro styling take effect!
+You should immediately see the retro styling take effect (with pixel fonts!)
 
-## Step 3: Create Pages
+## Step 4: Create Pages
 
 Create these pages in WordPress (Pages → Add New):
 
@@ -187,7 +198,7 @@ See `content-proposal.md` for full content. Key sections:
 - Ways to donate (Internet Archive, GitHub Sponsors)
 - Other ways to help (star, share, contribute)
 
-## Step 4: Create Menu
+## Step 5: Create Menu
 
 1. Go to Appearance → Menus
 2. Create a new menu called "Main Menu"
@@ -202,14 +213,14 @@ See `content-proposal.md` for full content. Key sections:
 4. Set as Primary Menu
 5. Save Menu
 
-## Step 5: Customize Site Identity
+## Step 6: Customize Site Identity
 
 1. Go to Appearance → Customize → Site Identity
 2. Site Title: "ONION.PRESS"
 3. Tagline: "Your Website on the Dark Web"
 4. Upload site icon (if you have one)
 
-## Step 6: Optional Graphics
+## Step 7: Optional Graphics
 
 ### Create/Find These Graphics:
 
@@ -234,14 +245,14 @@ See `content-proposal.md` for full content. Key sections:
 2. Upload graphics
 3. Insert into pages using Block Editor
 
-## Step 7: Test Mobile Responsiveness
+## Step 8: Test Mobile Responsiveness
 
 1. Use browser dev tools (F12)
 2. Toggle device toolbar
 3. Test on phone and tablet sizes
 4. Adjust CSS if needed
 
-## Step 8: Export to Git
+## Step 9: Export to Git
 
 Once you're happy with the site:
 
@@ -282,11 +293,14 @@ Change colors in the CSS variables at the top of `custom-retro-style.css`:
 
 ### Font Options
 
-The CSS uses web-safe fonts (no external requests for privacy):
-- **Impact / Arial Black** - Bold, uppercase (for headings)
-- **Courier New** - Monospace, terminal style (for code/counter)
+The CSS uses self-hosted retro pixel fonts:
+- **Press Start 2P** - Authentic 80s arcade/game font (headings/buttons)
+- **VT323** - Classic terminal font (code blocks/counter)
 
-These fonts are pre-installed on all computers, so no external downloads needed!
+Both fonts are served from your WordPress installation (no external requests).
+Fallbacks to Impact and Courier New if fonts aren't loaded yet.
+
+See `FONT-SETUP.md` for installation instructions.
 
 ### Accessibility
 

@@ -1,21 +1,26 @@
 # Quick Start: Product Website Management
 
-## First Time: Export Your Current Site
+## First Time: Building the Product Website
 
-If you have the Onion.Press product website running and want to save it to git:
+If you want to build the retro product website from scratch:
 
-```bash
-# 1. Make sure Onion.Press is running
-# 2. Export the site
-cd product-website/scripts
-./export-site.sh
+1. **Install fonts** (see `FONT-SETUP.md`):
+   - Download Press Start 2P and VT323
+   - Upload to WordPress at `/wp-content/uploads/fonts/`
 
-# 3. Commit to git
-cd ../..
-git add product-website/
-git commit -m "Initial export of product website"
-git push
-```
+2. **Follow the build guide** (see `SETUP-GUIDE.md`):
+   - Add custom CSS
+   - Create pages with provided content
+   - Set up navigation
+
+3. **Export to git**:
+   ```bash
+   cd product-website/scripts
+   ./export-site.sh
+   git add product-website/
+   git commit -m "Initial product website build"
+   git push
+   ```
 
 ## Deploy to a New Instance
 

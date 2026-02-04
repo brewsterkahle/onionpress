@@ -2,8 +2,29 @@
  * Onion.Press Product Website - Retro 90s/2000s Styling
  * Add this to WordPress via Appearance > Customize > Additional CSS
  *
- * Privacy-First: Uses only web-safe fonts (no external requests)
+ * Privacy-First: Self-hosted fonts (no external requests)
+ * Download fonts and upload to WordPress Media Library before using this CSS
  */
+
+/* Self-hosted retro pixel font for headings */
+@font-face {
+    font-family: 'PressStart2P';
+    src: url('/wp-content/uploads/fonts/PressStart2P-Regular.woff2') format('woff2'),
+         url('/wp-content/uploads/fonts/PressStart2P-Regular.woff') format('woff');
+    font-weight: normal;
+    font-style: normal;
+    font-display: swap;
+}
+
+/* Self-hosted terminal/monospace font */
+@font-face {
+    font-family: 'VT323';
+    src: url('/wp-content/uploads/fonts/VT323-Regular.woff2') format('woff2'),
+         url('/wp-content/uploads/fonts/VT323-Regular.woff') format('woff');
+    font-weight: normal;
+    font-style: normal;
+    font-display: swap;
+}
 
 /* Root variables for easy color changes */
 :root {
@@ -33,14 +54,13 @@ body {
 }
 */
 
-/* Headings with bold retro font (web-safe, no external requests) */
+/* Headings with pixel font */
 h1, h2, h3 {
-    font-family: Impact, 'Arial Black', 'Franklin Gothic Bold', sans-serif;
+    font-family: 'PressStart2P', Impact, 'Arial Black', sans-serif;
     text-transform: uppercase;
     line-height: 1.4;
     margin-top: 2em;
     margin-bottom: 1em;
-    letter-spacing: 2px;
 }
 
 h1 {
@@ -98,8 +118,8 @@ article,
 .wp-element-button,
 button,
 input[type="submit"] {
-    font-family: Impact, 'Arial Black', sans-serif !important;
-    font-size: 14px !important;
+    font-family: 'PressStart2P', Impact, 'Arial Black', sans-serif !important;
+    font-size: 12px !important;
     background: var(--retro-magenta) !important;
     color: var(--retro-white) !important;
     border: 3px solid var(--retro-black) !important;
@@ -108,7 +128,6 @@ input[type="submit"] {
     cursor: pointer !important;
     box-shadow: 5px 5px 0px var(--retro-black) !important;
     text-decoration: none !important;
-    letter-spacing: 2px !important;
 }
 
 .wp-block-button__link:hover,
@@ -136,9 +155,8 @@ th, td {
 th {
     background: var(--retro-magenta);
     color: var(--retro-white);
-    font-family: Impact, 'Arial Black', sans-serif;
-    font-size: 14px;
-    letter-spacing: 1px;
+    font-family: 'PressStart2P', Impact, 'Arial Black', sans-serif;
+    font-size: 12px;
 }
 
 tr:nth-child(even) {
@@ -170,12 +188,11 @@ blockquote {
 
 /* Code blocks */
 code, pre {
-    font-family: 'Courier New', Courier, monospace;
+    font-family: 'VT323', 'Courier New', Courier, monospace;
     background: var(--retro-black);
     color: var(--retro-cyan);
     padding: 2px 6px;
     border: 2px solid var(--retro-magenta);
-    font-size: 14px;
 }
 
 pre {
@@ -199,11 +216,10 @@ img {
 }
 
 .site-title {
-    font-family: Impact, 'Arial Black', sans-serif !important;
+    font-family: 'PressStart2P', Impact, 'Arial Black', sans-serif !important;
     font-size: 32px !important;
     color: var(--retro-cyan) !important;
     text-shadow: 3px 3px 0px var(--retro-magenta) !important;
-    letter-spacing: 3px !important;
 }
 
 /* Navigation */
@@ -228,8 +244,8 @@ nav a:hover {
     border-top: 5px solid var(--retro-magenta);
     padding: 30px;
     text-align: center;
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 16px;
+    font-family: 'VT323', 'Courier New', Courier, monospace;
+    font-size: 18px;
 }
 
 .site-footer a {
@@ -238,7 +254,7 @@ nav a:hover {
 
 /* Visitor counter style */
 .visitor-counter {
-    font-family: 'Courier New', Courier, monospace;
+    font-family: 'VT323', 'Courier New', Courier, monospace;
     background: var(--retro-black);
     color: var(--retro-cyan);
     padding: 10px 20px;
@@ -246,21 +262,18 @@ nav a:hover {
     display: inline-block;
     font-size: 24px;
     letter-spacing: 5px;
-    font-weight: bold;
 }
 
 /* Badge styling */
 .retro-badge {
     display: inline-block;
     border: 3px solid var(--retro-black);
-    padding: 10px 15px;
+    padding: 10px;
     background: var(--retro-yellow);
-    font-family: Impact, 'Arial Black', sans-serif;
-    font-size: 11px;
+    font-family: 'PressStart2P', Impact, 'Arial Black', sans-serif;
+    font-size: 10px;
     margin: 10px;
     box-shadow: 3px 3px 0px var(--retro-black);
-    letter-spacing: 1px;
-    font-weight: bold;
 }
 
 /* Feature boxes (3-column grid) */
@@ -299,7 +312,6 @@ nav a:hover {
     text-shadow: 3px 3px 0px var(--retro-black);
     border: none;
     background: transparent;
-    letter-spacing: 3px;
 }
 
 /* Animated blink effect (use sparingly!) */
