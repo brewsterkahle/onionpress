@@ -519,14 +519,14 @@
         </div>
 
         <!-- Hit Counter -->
-        <div id="hit-counter-container" style="text-align: center; margin: 60px 0; opacity: 0; transition: opacity 0.3s;">
+        <div id="hit-counter-container" style="text-align: center; margin: 60px 0;">
             <div class="hit-counter-display">
-                <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
-                <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
-                <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
-                <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
-                <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
-                <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
+                <span class="counter-digit" data-digit="0"><span class="digit-inner" style="opacity: 0; transition: opacity 0.3s;">0</span></span>
+                <span class="counter-digit" data-digit="0"><span class="digit-inner" style="opacity: 0; transition: opacity 0.3s;">0</span></span>
+                <span class="counter-digit" data-digit="0"><span class="digit-inner" style="opacity: 0; transition: opacity 0.3s;">0</span></span>
+                <span class="counter-digit" data-digit="0"><span class="digit-inner" style="opacity: 0; transition: opacity 0.3s;">0</span></span>
+                <span class="counter-digit" data-digit="0"><span class="digit-inner" style="opacity: 0; transition: opacity 0.3s;">0</span></span>
+                <span class="counter-digit" data-digit="0"><span class="digit-inner" style="opacity: 0; transition: opacity 0.3s;">0</span></span>
             </div>
             <div class="hit-counter-label">
                 <span style="font-size: 18px;">👁️</span>
@@ -578,8 +578,10 @@
                         // Set initial display without animation
                         updateDisplay(data.formatted, false);
 
-                        // Show the counter now that it has the right value
-                        document.getElementById('hit-counter-container').style.opacity = '1';
+                        // Show the digits now that they have the right value
+                        document.querySelectorAll('.digit-inner').forEach(el => {
+                            el.style.opacity = '1';
+                        });
 
                         // Now increment the counter
                         setTimeout(() => {
@@ -590,7 +592,9 @@
                 .catch(error => {
                     console.error('Hit counter init error:', error);
                     // If init fails, just show and increment anyway
-                    document.getElementById('hit-counter-container').style.opacity = '1';
+                    document.querySelectorAll('.digit-inner').forEach(el => {
+                        el.style.opacity = '1';
+                    });
                     incrementCounter();
                 });
             }
