@@ -195,6 +195,12 @@ install_ia_plugin() {
         return 0
     fi
 
+    # Check if installation scripts exist
+    if [ ! -d "$SCRIPTS_DIR" ] || [ ! -f "$SCRIPTS_DIR/install_plugin.py" ]; then
+        log "Plugin installation scripts not available, skipping"
+        return 0
+    fi
+
     log "Checking Internet Archive Wayback Machine Link Fixer plugin..."
 
     cd "$DOCKER_DIR"
