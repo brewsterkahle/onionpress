@@ -1229,7 +1229,8 @@ class OnionPressApp(rumps.App):
                 message="Edit the config file that opens.\n\nWhen you're done:\n1. Save the file (⌘S)\n2. Close the editor\n3. Restart Onion.Press from the menu bar\n\nYour changes will then take effect.",
                 ok="Open Config File"
             )
-            subprocess.run(["open", "-t", config_file])
+            # Open in TextEdit and bring it to the front
+            subprocess.run(["open", "-a", "TextEdit", config_file])
             self.log("Opened config file in text editor")
         else:
             rumps.alert("Settings file not found")
