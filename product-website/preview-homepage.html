@@ -519,7 +519,7 @@
         </div>
 
         <!-- Hit Counter -->
-        <div id="hit-counter-container" style="text-align: center; margin: 60px 0;">
+        <div id="hit-counter-container" style="text-align: center; margin: 60px 0; opacity: 0; transition: opacity 0.3s;">
             <div class="hit-counter-display">
                 <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
                 <span class="counter-digit" data-digit="0"><span class="digit-inner">0</span></span>
@@ -578,6 +578,9 @@
                         // Set initial display without animation
                         updateDisplay(data.formatted, false);
 
+                        // Show the counter now that it has the right value
+                        document.getElementById('hit-counter-container').style.opacity = '1';
+
                         // Now increment the counter
                         setTimeout(() => {
                             incrementCounter();
@@ -586,7 +589,8 @@
                 })
                 .catch(error => {
                     console.error('Hit counter init error:', error);
-                    // If init fails, just increment anyway
+                    // If init fails, just show and increment anyway
+                    document.getElementById('hit-counter-container').style.opacity = '1';
                     incrementCounter();
                 });
             }
