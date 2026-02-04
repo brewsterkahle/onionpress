@@ -28,6 +28,7 @@ services:
           define('FORCE_SSL_ADMIN', false);
     volumes:
       - wordpress-data:/var/www/html
+      - onionpress-data:/var/lib/onionpress
     depends_on:
       - db
     restart: unless-stopped
@@ -53,10 +54,13 @@ services:
 volumes:
   tor-keys:
     name: onionpress-tor-keys
+    external: true
   wordpress-data:
     name: onionpress-wordpress-data
   db-data:
     name: onionpress-db-data
+  onionpress-data:
+    name: onionpress-persistent-data
 
 networks:
   onionpress-network:
