@@ -599,6 +599,8 @@ class OnionPressApp(rumps.App):
                 ["curl", "-s", "--max-time", "3", "http://localhost:8080"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=5
             )
             if result.returncode == 0:
