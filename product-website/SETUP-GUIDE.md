@@ -55,8 +55,8 @@ Create these pages in WordPress (Pages → Add New):
 <!-- Hero Section -->
 <div class="hero">
   <h1>★ ✨ ONION.PRESS ✨ ★</h1>
-  <p style="font-size: 24px; font-weight: bold;">Your Website on the Dark Web</p>
-  <p style="font-size: 18px;">No Servers • No Surveillance • Free</p>
+  <p style="font-size: 24px; font-weight: bold;">Your Own Corner of the Internet</p>
+  <p style="font-size: 18px;">Private • Fun • Under Your Control</p>
   <br>
   <a href="/download" class="wp-element-button">💾 DOWNLOAD NOW</a>
   <a href="/how-it-works" class="wp-element-button" style="background: #00FFFF !important;">📖 LEARN MORE</a>
@@ -217,7 +217,7 @@ See `content-proposal.md` for full content. Key sections:
 
 1. Go to Appearance → Customize → Site Identity
 2. Site Title: "ONION.PRESS"
-3. Tagline: "Your Website on the Dark Web"
+3. Tagline: "Your Own Corner of the Internet"
 4. Upload site icon (if you have one)
 
 ## Step 7: Optional Graphics

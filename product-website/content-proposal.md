@@ -35,8 +35,8 @@ Border:     #000000 3px solid
 ┌─────────────────────────────────────────┐
 │  ★ ✨ ONION.PRESS ✨ ★                   │
 │                                         │
-│  Your Website on the Dark Web          │
-│  No Servers • No Surveillance • Free   │
+│  Your Own Corner of the Internet       │
+│  Private • Fun • Under Your Control    │
 │                                         │
 │  [💾 DOWNLOAD NOW]  [📖 LEARN MORE]    │
 │                                         │
@@ -52,12 +52,12 @@ Border:     #000000 3px solid
 
 **Key Features Section**:
 1. 🏠 **Your Own .onion Site**
-   - Get your unique dark web address
-   - Like GeoCities, but anonymous
+   - Get your unique internet address
+   - Like GeoCities, but you're in charge
 
-2. 🔒 **Private by Default**
-   - No tracking, no ads, no surveillance
-   - Tor keeps you anonymous
+2. 🎨 **Create Freely**
+   - No tracking, no ads, no corporate overlords
+   - Make weird, wonderful things
 
 3. 💾 **All Yours**
    - Run WordPress on your Mac
@@ -203,19 +203,20 @@ Border:     #000000 3px solid
 
 Remember the early web? When anyone could make a homepage? When the internet was weird and wonderful and *yours*?
 
-That spirit lives on in the dark web.
+That spirit is alive and well on Tor.
 
 Onion.Press brings the magic of self-hosted websites to everyone. No coding. No servers to rent. No tech company watching your every move.
 
-Just you, your Mac, and your corner of the internet.
+Just you, your Mac, and your own bright corner of the internet.
 
 **Why Tor?**
 
-The dark web isn't just for criminals. It's for:
-- 🗣️ **Free speech** - Publish without government censorship
+Tor isn't dark - it's colorful, creative, and under YOUR control! It's for:
+- 🎨 **Creativity** - Build weird, wonderful things
+- 🗣️ **Free Expression** - Publish without corporate censorship
 - 🔒 **Privacy** - No tracking, no data collection
-- 🌍 **Access** - Reach people behind firewalls
-- ✨ **Creativity** - Build weird, wonderful things
+- 🌍 **Connection** - Reach people everywhere
+- ✨ **Fun** - Bring back the playful web
 
 **Why WordPress?**
 
