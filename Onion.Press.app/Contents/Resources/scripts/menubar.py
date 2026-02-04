@@ -203,10 +203,10 @@ class OnionPressApp(rumps.App):
         """Show non-blocking launch splash with logo - no I/O blocking"""
         def show():
             try:
-                # Create window (no I/O) - taller for better spacing
+                # Create window (no I/O) - taller for better spacing, no close button
                 window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
                     AppKit.NSMakeRect(0, 0, 300, 250),
-                    AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable,
+                    AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
                     AppKit.NSBackingStoreBuffered,
                     False
                 )
@@ -214,6 +214,7 @@ class OnionPressApp(rumps.App):
                 window.setLevel_(AppKit.NSFloatingWindowLevel)
                 window.center()
                 window.setReleasedWhenClosed_(False)  # Keep window object alive
+                window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
 
                 # Create content view
                 content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 250))
@@ -230,23 +231,7 @@ class OnionPressApp(rumps.App):
                 text_field.setFont_(font)
                 content_view.addSubview_(text_field)
 
-                # Add "View Log" button (no I/O) - moved down
-                # Create a helper class for the button callback
-                class ButtonTarget(AppKit.NSObject):
-                    @objc.IBAction
-                    def buttonClicked_(self, sender):
-                        subprocess.run(["open", "-a", "Console", log_file_path])
-
-                log_file_path = self.log_file
-                button_target = ButtonTarget.alloc().init()
-                view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(90, 30, 120, 32))
-                view_log_button.setTitle_("View Log")
-                view_log_button.setBezelStyle_(AppKit.NSBezelStyleRounded)
-                view_log_button.setTarget_(button_target)
-                view_log_button.setAction_("buttonClicked:")
-                content_view.addSubview_(view_log_button)
-                # Keep reference to prevent garbage collection
-                window.button_target = button_target
+                # View Log button removed for now - was causing splash to not appear
 
                 window.setContentView_(content_view)
                 window.makeKeyAndOrderFront_(None)
