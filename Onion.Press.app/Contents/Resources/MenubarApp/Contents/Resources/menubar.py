@@ -152,11 +152,14 @@ class OnionPressApp(rumps.App):
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation
 
         # Menu items
+        # Store reference to browser menu item so we can update its title
+        self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
+
         self.menu = [
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
-            rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser),
+            self.browser_menu_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -175,6 +178,9 @@ class OnionPressApp(rumps.App):
             rumps.separator,
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
+
+        # Update browser menu item title based on what's available
+        self.update_browser_menu_title()
 
         # Ensure Docker is available
         threading.Thread(target=self.ensure_docker_available, daemon=True).start()
@@ -970,7 +976,18 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=check_for_brave, daemon=True).start()
 
-    @rumps.clicked("Open in Tor Browser")
+    def update_browser_menu_title(self):
+        """Update the browser menu item title based on which browser is available"""
+        tor_browser_path = "/Applications/Tor Browser.app"
+        brave_browser_path = "/Applications/Brave Browser.app"
+
+        if os.path.exists(tor_browser_path):
+            self.browser_menu_item.title = "Open in Tor Browser"
+        elif os.path.exists(brave_browser_path):
+            self.browser_menu_item.title = "Open in Brave Browser"
+        else:
+            self.browser_menu_item.title = "Open in Tor Browser"
+
     def open_tor_browser(self, _):
         """Open the onion address in Tor Browser or Brave Browser"""
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
@@ -1480,6 +1497,9 @@ DO NOT share these words with anyone."""
                         release_url = data.get('html_url', 'https://github.com/brewsterkahle/onion.press/releases/latest')
                         subprocess.run(["open", release_url])
         except Exception as e:
+            self.log(f"Update check failed: {e}")
+            import traceback
+            self.log(traceback.format_exc())
             rumps.alert(
                 title="Update Check Failed",
                 message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onion.press/releases"
