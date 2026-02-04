@@ -285,7 +285,7 @@ class OnionPressApp(rumps.App):
 
         # macOS version
         try:
-            result = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
             macos_version = result.stdout.strip() if result.returncode == 0 else "Unknown"
             self.log(f"macOS version: {macos_version}")
         except:
@@ -295,7 +295,7 @@ class OnionPressApp(rumps.App):
         try:
             colima_bin = os.path.join(self.bin_dir, "colima")
             if os.path.exists(colima_bin):
-                result = subprocess.run([colima_bin, "version"], capture_output=True, text=True, timeout=5)
+                result = subprocess.run([colima_bin, "version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
                 colima_version = result.stdout.strip().split('\n')[0] if result.returncode == 0 else "Unknown"
                 self.log(f"Colima version: {colima_version}")
         except:
@@ -305,7 +305,7 @@ class OnionPressApp(rumps.App):
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             if os.path.exists(docker_bin):
-                result = subprocess.run([docker_bin, "--version"], capture_output=True, text=True, timeout=5)
+                result = subprocess.run([docker_bin, "--version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
                 docker_version = result.stdout.strip() if result.returncode == 0 else "Unknown"
                 self.log(f"Docker version: {docker_version}")
         except:
@@ -315,7 +315,7 @@ class OnionPressApp(rumps.App):
         try:
             compose_bin = os.path.join(self.bin_dir, "docker-compose")
             if os.path.exists(compose_bin):
-                result = subprocess.run([compose_bin, "version"], capture_output=True, text=True, timeout=5)
+                result = subprocess.run([compose_bin, "version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
                 compose_version = result.stdout.strip().split('\n')[0] if result.returncode == 0 else "Unknown"
                 self.log(f"Docker Compose version: {compose_version}")
         except:
@@ -650,6 +650,8 @@ class OnionPressApp(rumps.App):
                  "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=5,
                 env=docker_env
             )
@@ -670,6 +672,8 @@ class OnionPressApp(rumps.App):
                 [docker_bin, "logs", "--tail", "50", "onionpress-tor"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=5,
                 env=docker_env
             )
@@ -1093,6 +1097,8 @@ class OnionPressApp(rumps.App):
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=5
                 )
                 images = result.stdout.strip().split('\n')
@@ -1422,6 +1428,8 @@ DO NOT share these words with anyone."""
                 [docker_bin, "compose", "-f", docker_compose_file, "pull"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=300,  # 5 minute timeout
                 env=env
             )
@@ -1603,6 +1611,8 @@ DO NOT share these words with anyone."""
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=5
                 )
                 current_images = result.stdout.strip().split('\n')
@@ -1764,6 +1774,8 @@ GitHub: github.com/brewsterkahle/onion.press"""
                      "onionpress-db-data"],
                     capture_output=True,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                     timeout=30,
                     env={"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
                 )
