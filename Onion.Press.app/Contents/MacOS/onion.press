@@ -252,7 +252,8 @@ fix_onionpress_permissions() {
     cd "$DOCKER_DIR"
 
     # Ensure the directory exists and is owned by www-data
-    if docker compose exec -T wordpress sh -c 'chown -R www-data:www-data /var/lib/onionpress && chmod 755 /var/lib/onionpress' 2>>"$LOG_FILE"; then
+    # Use 750 (rwxr-x---) to prevent other users from reading the directory
+    if docker compose exec -T wordpress sh -c 'chown -R www-data:www-data /var/lib/onionpress && chmod 750 /var/lib/onionpress' 2>>"$LOG_FILE"; then
         log "✓ Onionpress data directory permissions fixed"
         return 0
     else
