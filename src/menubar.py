@@ -762,9 +762,7 @@ class OnionPressApp(rumps.App):
             wait_time = 120  # Wait 2 minutes after bootstrap for descriptor upload/propagation
 
             if time_since_bootstrap < wait_time:
-                remaining = int(wait_time - time_since_bootstrap)
-                if log_result:
-                    self.log(f"✗ Waiting for descriptor upload/propagation ({remaining}s remaining)")
+                # Still waiting - don't spam the log with countdown messages
                 return False
 
             # Check 4: Verify no critical errors in recent logs
