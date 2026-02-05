@@ -196,6 +196,8 @@ for binary in colima docker docker-compose limactl; do
         lipo "$binary" -thin arm64 -output "${binary}.arm64"
         mv "$binary" "${binary}.universal"
         mv "${binary}.arm64" "$binary"
+        # Delete the universal binary to save space in DMG
+        rm "${binary}.universal"
     fi
 done
 
