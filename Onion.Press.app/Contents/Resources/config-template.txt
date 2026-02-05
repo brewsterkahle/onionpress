@@ -59,17 +59,19 @@ UPDATE_ON_LAUNCH=no
 #
 LAUNCH_ON_LOGIN=no
 
-# Prevent Mac Sleep While Running
-# Default: "yes" (keeps Mac awake while service is running)
+# Prevent Mac Sleep While Running (AC Power Only)
+# Default: "yes" (keeps Mac awake when plugged in)
 #
 # When enabled, Onion.Press will prevent your Mac from sleeping while the
-# WordPress + Tor service is running. This ensures your .onion site remains
-# accessible 24/7 without interruption.
+# WordPress + Tor service is running AND you're plugged into AC power.
+# This ensures your .onion site remains accessible 24/7 when connected to power.
 #
-# Uses the built-in 'caffeinate' command to prevent system sleep.
-# Display can still sleep, only system sleep is prevented.
+# IMPORTANT: On battery power, your Mac will sleep normally to preserve battery.
+# Your site will go offline when running on battery and Mac sleeps.
 #
-# Set to "no" to allow your Mac to sleep (your site will go offline when asleep).
-# Note: Does not prevent sleep when service is stopped.
+# Uses the built-in 'caffeinate' command with -s flag (AC power only).
+# Display sleep is not affected - screen can still turn off.
+#
+# Set to "no" to allow your Mac to sleep even when plugged in.
 #
 PREVENT_SLEEP=yes

@@ -357,15 +357,13 @@ class OnionPressApp(rumps.App):
 
         try:
             # Start caffeinate in background
-            # -d: prevent display sleep (optional, can be removed if you want display to sleep)
-            # -i: prevent system idle sleep
-            # -s: prevent system sleep when on AC power
+            # -s: prevent system sleep when on AC power (battery power allows normal sleep)
             self.caffeinate_process = subprocess.Popen(
-                ["caffeinate", "-i", "-s"],
+                ["caffeinate", "-s"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
-            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - Mac will stay awake while service runs")
+            self.log(f"Started caffeinate (PID {self.caffeinate_process.pid}) - Mac will stay awake while plugged in")
         except Exception as e:
             self.log(f"Failed to start caffeinate: {e}")
 
