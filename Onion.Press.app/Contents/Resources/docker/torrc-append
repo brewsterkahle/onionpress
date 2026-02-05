@@ -1,0 +1,2 @@
+# Enable info-level logging to see hidden service descriptor uploads
+Log info stdout

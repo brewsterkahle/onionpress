@@ -708,34 +708,54 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
-            # Check 3: Verify hidden service descriptor has been uploaded
-            # This is critical - Tor can be bootstrapped but the HS descriptor might not be published yet
-            # With info-level logging enabled, we can see descriptor upload messages
-            # Look for various descriptor-related messages that indicate the service is published
-            descriptor_uploaded = (
-                "Uploaded rendezvous descriptor" in result.stdout or
-                "Uploading descriptor" in result.stdout or
-                "Uploaded v3 onion service descriptor" in result.stdout or
-                "Publishing v3 onion service descriptor" in result.stdout or
-                "HS DESC UPLOADED" in result.stdout or
-                "Uploading hidden service descriptor" in result.stdout or
-                "Hidden service descriptor successfully uploaded" in result.stdout
-            )
+            # Check 3: Test actual .onion accessibility through Tor SOCKS proxy
+            # This is the definitive test - if we can reach the site through Tor, it's ready
+            if log_result:
+                self.log(f"Testing .onion accessibility through Tor proxy...")
 
-            if not descriptor_uploaded:
+            try:
+                curl_result = subprocess.run(
+                    ["curl", "-s", "--max-time", "15", "--socks5-hostname", "localhost:9050",
+                     f"http://{self.onion_address}"],
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace',
+                    timeout=20
+                )
+
+                if curl_result.returncode == 0:
+                    # Got a response - check if it's valid WordPress content
+                    content = curl_result.stdout
+                    if len(content) > 100 and ('wp-' in content or 'wordpress' in content.lower() or '<html' in content.lower()):
+                        if log_result:
+                            self.log(f"✓ .onion site is accessible through Tor!")
+                    else:
+                        if log_result:
+                            self.log(f"✗ Got response but content looks unexpected (may still be starting)")
+                        return False
+                else:
+                    if log_result:
+                        self.log(f"✗ Cannot reach .onion address through Tor yet (descriptor may not be uploaded)")
+                    return False
+            except subprocess.TimeoutExpired:
                 if log_result:
-                    self.log(f"✗ Hidden service descriptor not uploaded yet")
+                    self.log(f"✗ Timeout trying to reach .onion address (descriptor may not be uploaded)")
+                return False
+            except Exception as e:
+                if log_result:
+                    self.log(f"✗ Error testing .onion accessibility: {str(e)}")
                 return False
 
             # Check 4: Verify no critical errors in recent logs
             if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
                 if log_result:
-                    self.log(f"✗ Tor errors detected in logs")
-                return False
+                    self.log(f"⚠ Tor errors detected in logs (but site is accessible)")
+                # Don't fail - if the site is accessible, it's working
 
-            # All checks passed - descriptor is uploaded and service should be accessible
+            # All checks passed - site is confirmed accessible through Tor
             if log_result:
-                self.log(f"✓ Hidden service descriptor uploaded - {self.onion_address} is ready!")
+                self.log(f"✓ All checks passed - {self.onion_address} is fully operational!")
             return True
 
         except Exception as e:

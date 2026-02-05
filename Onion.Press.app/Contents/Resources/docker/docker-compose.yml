@@ -7,8 +7,6 @@ services:
       # WordPress is the service name we're exposing
       - WORDPRESS_PORTS=80:80
       - WORDPRESS_VERSION=3
-      # Enable info-level logging to see descriptor uploads
-      - TOR_LOG_LEVEL=info
     volumes:
       - tor-keys:/var/lib/tor/hidden_service/
     depends_on:
@@ -16,8 +14,6 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
-    ports:
-      - "127.0.0.1:9050:9050"
 
   wordpress:
     image: wordpress:6.7

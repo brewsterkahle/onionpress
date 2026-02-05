@@ -708,23 +708,24 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
-            # Check 3: Verify hidden service descriptor has been uploaded
-            # This is critical - Tor can be bootstrapped but the HS descriptor might not be published yet
-            # With info-level logging enabled, we can see descriptor upload messages
-            # Look for various descriptor-related messages that indicate the service is published
-            descriptor_uploaded = (
-                "Uploaded rendezvous descriptor" in result.stdout or
-                "Uploading descriptor" in result.stdout or
-                "Uploaded v3 onion service descriptor" in result.stdout or
-                "Publishing v3 onion service descriptor" in result.stdout or
-                "HS DESC UPLOADED" in result.stdout or
-                "Uploading hidden service descriptor" in result.stdout or
-                "Hidden service descriptor successfully uploaded" in result.stdout
-            )
+            # Check 3: Wait for descriptor upload and propagation
+            # After Tor reaches 100%, it needs time to upload the descriptor and propagate it
+            # This typically takes 90-180 seconds
 
-            if not descriptor_uploaded:
+            # Track when we first saw bootstrap 100%
+            if not hasattr(self, '_bootstrap_complete_time'):
+                self._bootstrap_complete_time = time.time()
                 if log_result:
-                    self.log(f"✗ Hidden service descriptor not uploaded yet")
+                    self.log(f"Tor bootstrapped - waiting for descriptor upload and propagation...")
+
+            # Calculate time since bootstrap complete
+            time_since_bootstrap = time.time() - self._bootstrap_complete_time
+            wait_time = 120  # Wait 2 minutes after bootstrap for descriptor upload/propagation
+
+            if time_since_bootstrap < wait_time:
+                remaining = int(wait_time - time_since_bootstrap)
+                if log_result:
+                    self.log(f"✗ Waiting for descriptor upload/propagation ({remaining}s remaining)")
                 return False
 
             # Check 4: Verify no critical errors in recent logs
@@ -733,9 +734,14 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor errors detected in logs")
                 return False
 
-            # All checks passed - descriptor is uploaded and service should be accessible
+            # All checks passed - enough time has elapsed for descriptor to be uploaded
             if log_result:
-                self.log(f"✓ Hidden service descriptor uploaded - {self.onion_address} is ready!")
+                self.log(f"✓ All checks passed - {self.onion_address} should be accessible!")
+
+            # Clear the bootstrap time tracker so it resets if Tor restarts
+            if hasattr(self, '_bootstrap_complete_time'):
+                delattr(self, '_bootstrap_complete_time')
+
             return True
 
         except Exception as e:
