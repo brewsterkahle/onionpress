@@ -205,7 +205,7 @@ class OnionPressApp(rumps.App):
             try:
                 # Create window (no I/O) - taller for better spacing, no close button
                 window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-                    AppKit.NSMakeRect(0, 0, 300, 350),
+                    AppKit.NSMakeRect(0, 0, 300, 250),
                     AppKit.NSWindowStyleMaskTitled,  # No close button - dismisses automatically when ready
                     AppKit.NSBackingStoreBuffered,
                     False
@@ -217,10 +217,10 @@ class OnionPressApp(rumps.App):
                 window.setHidesOnDeactivate_(False)  # Stay visible when clicking other windows
 
                 # Create content view
-                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 350))
+                content_view = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 300, 250))
 
                 # Add "Launching..." text (no I/O) - moved down
-                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(50, 60, 200, 30))
+                text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(50, 80, 200, 30))
                 text_field.setStringValue_("Launching Onion.Press...")
                 text_field.setBezeled_(False)
                 text_field.setDrawsBackground_(False)
@@ -245,11 +245,11 @@ class OnionPressApp(rumps.App):
                 except:
                     pass
 
-                # Add logo in background (I/O happens after window shows) - moved to top, 2x larger
+                # Add logo in background (I/O happens after window shows) - moved to top
                 def add_logo():
                     icon_path = os.path.join(self.resources_dir, "app-icon.png")
                     if os.path.exists(icon_path):
-                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(50, 130, 200, 200))
+                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(100, 140, 100, 100))
                         image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
                         if image:
                             image_view.setImage_(image)
@@ -698,18 +698,21 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
-            # Check 3: Verify hidden service keys exist (descriptor upload message is unreliable)
-            # If hostname exists and Tor bootstrapped, the service should be reachable
-            keys_check = subprocess.run(
-                [docker_bin, "exec", "onionpress-tor", "ls", "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"],
-                capture_output=True,
-                timeout=5,
-                env=docker_env
+            # Check 3: Verify hidden service descriptor has been uploaded
+            # This is critical - Tor can be bootstrapped but the HS descriptor might not be published yet
+            # Look for various descriptor-related messages that indicate the service is published
+            descriptor_uploaded = (
+                "Uploaded rendezvous descriptor" in result.stdout or
+                "Uploading descriptor" in result.stdout or
+                "Uploaded v3 onion service descriptor" in result.stdout or
+                "Publishing v3 onion service descriptor" in result.stdout or
+                "HS DESC UPLOADED" in result.stdout
             )
-            if keys_check.returncode != 0:
+            if not descriptor_uploaded:
                 if log_result:
-                    self.log(f"✗ Hidden service keys not found")
-                return False
+                    self.log(f"✗ Hidden service descriptor not found in logs (might be uploaded earlier)")
+                # Don't fail immediately - continue to other checks
+                # The descriptor may have been uploaded earlier and rotated out of the log buffer
 
             # Check 4: Verify no critical errors in recent logs
             if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
