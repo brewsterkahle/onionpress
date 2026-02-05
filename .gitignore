@@ -37,3 +37,10 @@ onion.press.app/Contents/Resources/share/
 build/onion.press.dmg
 py2app_build/
 py2app_dist/
+
+# MenubarApp bundle (built from src/ during build)
+Onion.Press.app/Contents/Resources/MenubarApp/
+
+# Bundled binaries (Onion.Press.app version)
+Onion.Press.app/Contents/Resources/bin/
+Onion.Press.app/Contents/Resources/share/

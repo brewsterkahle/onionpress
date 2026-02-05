@@ -228,7 +228,7 @@ echo "Container runtime binaries installed successfully"
 # end users don't need Python/pip installed.
 echo ""
 echo "Building standalone MenubarApp with py2app..."
-SCRIPTS_DIR="$APP_PATH/Contents/Resources/scripts"
+SCRIPTS_DIR="$PROJECT_DIR/src"
 MENUBAR_BUILD_DIR=$(mktemp -d)
 
 # Create a temporary venv for the py2app build (so we don't require

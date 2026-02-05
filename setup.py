@@ -5,10 +5,14 @@ import sys
 import os
 from setuptools import setup
 
-# Override build directories to avoid conflicts with build/ scripts
-sys.argv.extend(['--dist-dir=py2app_dist', '--bdist-base=py2app_build'])
+# Default build directories if not specified on command line
+# (avoid conflicts with build/ scripts directory)
+if '--dist-dir' not in ' '.join(sys.argv):
+    sys.argv.extend(['--dist-dir=py2app_dist'])
+if '--bdist-base' not in ' '.join(sys.argv):
+    sys.argv.extend(['--bdist-base=py2app_build'])
 
-APP = ['Onion.Press.app/Contents/Resources/scripts/menubar.py']
+APP = ['src/menubar.py']
 DATA_FILES = [
     ('', [
         'Onion.Press.app/Contents/Resources/app-icon.png',
