@@ -90,7 +90,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.31"
+        self.version = "2.2.47"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -502,16 +502,6 @@ class OnionPressApp(rumps.App):
             pass
 
         self.log("=" * 60)
-
-    def request_applescript_permission(self):
-        """No longer needed - we use native APIs for all operations.
-
-        - Dialogs: Native NSAlert and rumps.Window (no osascript)
-        - Login items: Native LaunchServices API (no osascript)
-        - All functionality works without System Events permission
-        """
-        # Skip permission check - no longer needed
-        pass
 
     def start_web_log_capture(self):
         """Start capturing WordPress logs to a file"""
@@ -987,12 +977,6 @@ class OnionPressApp(rumps.App):
                 input=self.onion_address.encode(),
                 check=True
             )
-            # Notification disabled
-            # rumps.notification(
-            #     title="Onion.Press",
-            #     subtitle="Address Copied",
-            #     message=f"Copied {self.onion_address} to clipboard"
-            # )
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
@@ -1150,12 +1134,6 @@ class OnionPressApp(rumps.App):
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
                 self.log(f"Opened {url} in Brave Browser (Tor mode)")
-                # Notification disabled
-                # rumps.notification(
-                #     title="Onion.Press",
-                #     subtitle="Opening in Brave Browser",
-                #     message="Opening in Private Window with Tor"
-                # )
             else:
                 # Neither browser is installed - offer download options
                 response = rumps.alert(
@@ -1192,12 +1170,6 @@ class OnionPressApp(rumps.App):
                 self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
-                # Notification disabled
-                # rumps.notification(
-                #     title="Onion.Press",
-                #     subtitle="Opening in Brave Browser",
-                #     message="Opening in Private Window with Tor"
-                # )
             else:
                 self.log("Neither Tor Browser nor Brave Browser installed - showing download dialog")
                 # Dismiss setup dialog and launch splash before showing browser download dialog
@@ -1295,11 +1267,11 @@ class OnionPressApp(rumps.App):
                             )
                         self.log(f"Docker compose up completed with exit code: {result.returncode}")
                         if result.returncode == 0:
-                            self.show_notification("Containers started!", "WordPress is starting...")
+                            self.log("Containers started")
 
                     threading.Thread(target=pull_and_start, daemon=True).start()
-                    # Monitor for completion
-                    self.monitor_image_downloads()
+                    # Monitor downloads in background (don't block WordPress health polling)
+                    threading.Thread(target=self.monitor_image_downloads, daemon=True).start()
                 except Exception as e:
                     self.log(f"Error starting containers: {e}")
 
@@ -1584,12 +1556,12 @@ DO NOT share these words with anyone."""
             rumps.alert("No mnemonic provided")
             return
 
-        # Validate word count
-        word_count = len(mnemonic.split())
-        if word_count != 47:
+        # Validate word count (48 words + | separator = 49 tokens)
+        word_count = len([w for w in mnemonic.split() if w != '|'])
+        if word_count != 48:
             rumps.alert(
                 title="Invalid Mnemonic",
-                message=f"Expected 47 words, got {word_count} words.\n\nPlease check your mnemonic and try again."
+                message=f"Expected 48 words (two 24-word mnemonics separated by |), got {word_count} words.\n\nPlease check your mnemonic and try again."
             )
             return
 
@@ -1627,14 +1599,7 @@ DO NOT share these words with anyone."""
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
         try:
-            if show_notifications:
-                self.log("Checking for Docker image updates...")
-                # Notification disabled
-                # rumps.notification(
-                #     title="Onion.Press",
-                #     subtitle="Checking for Updates",
-                #     message="Checking for updated container images..."
-                # )
+            self.log("Checking for Docker image updates...")
 
             docker_bin = os.path.join(self.bin_dir, "docker")
             docker_compose_file = os.path.join(self.parent_resources_dir, "docker", "docker-compose.yml")
@@ -1658,50 +1623,16 @@ DO NOT share these words with anyone."""
 
             if result.returncode == 0:
                 self.log("Docker images updated successfully")
-
-                # Check if any images were actually updated by comparing output
                 if "Downloaded" in result.stdout or "Pulled" in result.stdout:
-                    if show_notifications:
-                        # Notification disabled
-                        # rumps.notification(
-                        #     title="Onion.Press",
-                        #     subtitle="Updates Downloaded",
-                        #     message="Container images updated. Restart the service to apply updates."
-                        # )
-                        pass
                     return True
                 else:
-                    if show_notifications:
-                        # Notification disabled
-                        # rumps.notification(
-                        #     title="Onion.Press",
-                        #     subtitle="Already Up to Date",
-                        #     message="All container images are current."
-                        # )
-                        pass
                     return False
             else:
                 self.log(f"Failed to update Docker images: {result.stderr}")
-                if show_notifications:
-                    # Notification disabled
-                    # rumps.notification(
-                    #     title="Onion.Press",
-                    #     subtitle="Update Failed",
-                    #     message="Could not update container images. Check logs for details."
-                    # )
-                    pass
                 return False
 
         except Exception as e:
             self.log(f"Error updating Docker images: {e}")
-            if show_notifications:
-                # Notification disabled
-                # rumps.notification(
-                #     title="Onion.Press",
-                #     subtitle="Update Error",
-                #     message=f"Error updating containers: {str(e)}"
-                # )
-                pass
             return False
 
     @rumps.clicked("Check for Updates...")
@@ -1759,11 +1690,6 @@ DO NOT share these words with anyone."""
                 message=f"You're running the latest version (v{self.version})\nAll container images are up to date."
             )
 
-    def show_notification(self, message, subtitle=""):
-        """Show a macOS notification (thread-safe via main queue dispatch)"""
-        # Notifications disabled - no-op
-        pass
-
     def show_setup_dialog(self):
         """Show a persistent setup dialog during first run that stays until service is ready"""
         try:
@@ -1801,12 +1727,7 @@ DO NOT share these words with anyone."""
         except Exception as e:
             self.log(f"Error showing setup dialog: {e}")
             self.setup_dialog_showing = False
-            # Fallback to notification if dialog fails
-            try:
-                self.show_notification("Setting up onion.press for first use...",
-                                     "Console.app opened to show progress. Downloading images (2-5 min)")
-            except Exception:
-                pass
+            self.log("Setup dialog fallback - dialog failed to show")
 
     def dismiss_setup_dialog(self):
         """Dismiss the setup dialog if it's showing"""
@@ -1844,17 +1765,10 @@ DO NOT share these words with anyone."""
                     if not images_to_check[image_name]:
                         if any(image_name in img for img in current_images):
                             images_to_check[image_name] = True
-                            if image_name == 'wordpress':
-                                self.show_notification("Downloaded WordPress container")
-                            elif image_name == 'mariadb':
-                                self.show_notification("Downloaded database container")
-                            elif image_name == 'tor':
-                                self.show_notification("Downloaded Tor container")
                             self.log(f"Image downloaded: {image_name}")
 
                 # If all images are downloaded, we're done
                 if all(images_to_check.values()):
-                    self.show_notification("All containers downloaded!", "Starting services...")
                     self.log("All images downloaded")
                     break
 
@@ -1985,27 +1899,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
                 env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
                 env["LIMA_INSTANCE"] = "onionpress"
                 subprocess.run([colima_bin, "delete", "-f"], capture_output=True, timeout=60, env=env)
-
-                # Remove Docker volumes
-                self.log("Uninstall: Removing Docker volumes...")
-                docker_bin = os.path.join(self.bin_dir, "docker")
-                result = subprocess.run(
-                    [docker_bin, "volume", "rm",
-                     "onionpress-tor-keys",
-                     "onionpress-wordpress-data",
-                     "onionpress-db-data"],
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
-                    timeout=30,
-                    env={"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
-                )
-
-                if result.returncode == 0:
-                    self.log("Uninstall: Docker volumes removed successfully")
-                else:
-                    self.log(f"Uninstall: Docker volume removal failed: {result.stderr}")
+                # Note: Docker volumes lived inside the Colima VM and are deleted with it
 
                 # Step 3: Remove data directory (but keep it until after we show dialog)
                 self.log("Uninstall: Preparing to remove data directory...")
@@ -2042,7 +1936,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.31 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.47 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
