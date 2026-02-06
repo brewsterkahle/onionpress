@@ -460,6 +460,7 @@ class OnionPressApp(rumps.App):
         """Log version information for all components at startup"""
         self.log("=" * 60)
         self.log(f"Onion.Press v{self.version} starting up")
+        self.startup_time = time.time()
         self.log("=" * 60)
 
         # macOS version
@@ -876,7 +877,8 @@ class OnionPressApp(rumps.App):
 
                 if ready_now and not previous_ready:
                     self.is_ready = True
-                    self.log("✓ System fully operational")
+                    elapsed = int(time.time() - self.startup_time)
+                    self.log(f"✓ System fully operational (launched in {elapsed}s)")
                     self.last_status_logged = current_status
 
                     # Dismiss setup dialog if it's showing
