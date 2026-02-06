@@ -9,6 +9,12 @@
 - Docker containers (tor, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onion.press/onion.press.log` and `~/.onion.press/launcher.log`
 
+## Why py2app
+- Modern Macs do NOT ship a usable Python — `/usr/bin/python3` is just a shim that prompts to install Xcode CLI Tools
+- Apple removed Python 2 in macOS 12.3 and has no commitment to shipping Python 3 long-term
+- py2app bundles the Python interpreter + all dependencies into a self-contained .app so the user never needs to know Python is involved
+- This is essential for a consumer app — cannot ask non-technical users to install Xcode Command Line Tools
+
 ## Build & Release Process
 - MenubarApp built with py2app via `setup.py` (extracted from `build/build-dmg-simple.sh` lines 228-276)
 - Must copy `key_manager.py` and `bip39_words.py` to venv site-packages before build
