@@ -794,37 +794,34 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
-            # Check 3: Wait for descriptor upload and propagation
-            # After Tor reaches 100%, it needs time to upload the descriptor and propagate it
-            # This typically takes 90-180 seconds
-
-            # Track when we first saw bootstrap 100%
-            if not hasattr(self, '_bootstrap_complete_time'):
-                self._bootstrap_complete_time = time.time()
-                if log_result:
-                    self.log(f"Tor bootstrapped - waiting for descriptor upload and propagation...")
-
-            # Calculate time since bootstrap complete
-            time_since_bootstrap = time.time() - self._bootstrap_complete_time
-            wait_time = 120  # Wait 2 minutes after bootstrap for descriptor upload/propagation
-
-            if time_since_bootstrap < wait_time:
-                # Still waiting - don't spam the log with countdown messages
-                return False
-
-            # Check 4: Verify no critical errors in recent logs
+            # Check 3: Verify no critical errors in recent logs
             if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
                 if log_result:
                     self.log(f"✗ Tor errors detected in logs")
                 return False
 
-            # All checks passed - enough time has elapsed for descriptor to be uploaded
-            if log_result:
-                self.log(f"✓ All checks passed - {self.onion_address} should be accessible!")
+            # Check 4: Verify WordPress is reachable from Tor container
+            # (SOCKS proxy at 127.0.0.1:9050 doesn't work through Colima VM
+            # port forwarding, so we test the actual path: tor -> wordpress
+            # over the Docker network using docker exec + wget)
+            probe_result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor",
+                 "wget", "-q", "-O", "/dev/null", "--timeout=5",
+                 "http://wordpress:80/"],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10,
+                env=docker_env
+            )
+            if probe_result.returncode != 0:
+                if log_result:
+                    self.log(f"✗ WordPress not reachable from Tor container")
+                return False
 
-            # Clear the bootstrap time tracker so it resets if Tor restarts
-            if hasattr(self, '_bootstrap_complete_time'):
-                delattr(self, '_bootstrap_complete_time')
+            if log_result:
+                self.log(f"✓ Onion service verified: {self.onion_address}")
 
             return True
 
@@ -877,32 +874,24 @@ class OnionPressApp(rumps.App):
                 previous_ready = self.is_ready
                 ready_now = wordpress_ready and tor_reachable
 
-                # If just became ready, wait 20 seconds before showing as ready
-                # This gives the Tor network time to fully propagate the onion service
                 if ready_now and not previous_ready:
-                    self.log("✓ System checks passed - waiting 20 seconds for Tor network propagation...")
+                    self.is_ready = True
+                    self.log("✓ System fully operational")
                     self.last_status_logged = current_status
 
-                    def delayed_ready():
-                        time.sleep(20)
-                        self.is_ready = True
-                        self.log("✓ System fully operational - reducing check frequency")
+                    # Dismiss setup dialog if it's showing
+                    self.dismiss_setup_dialog()
 
-                        # Dismiss setup dialog if it's showing
-                        self.dismiss_setup_dialog()
+                    # Auto-open Tor Browser on first ready (if installed)
+                    if not self.auto_opened_browser:
+                        self.auto_opened_browser = True
+                        self.auto_open_browser()
 
-                        # Auto-open Tor Browser on first ready (if installed)
-                        if not self.auto_opened_browser:
-                            self.auto_opened_browser = True
-                            self.auto_open_browser()
+                    # Force menu update (changes icon to green)
+                    self.update_menu()
 
-                        # Force menu update (changes icon to green)
-                        self.update_menu()
-
-                        # Dismiss splash AFTER icon turns green
-                        self.dismiss_launch_splash()
-
-                    threading.Thread(target=delayed_ready, daemon=True).start()
+                    # Dismiss splash AFTER icon turns green
+                    self.dismiss_launch_splash()
                 elif ready_now:
                     # Already was ready, keep it ready
                     self.is_ready = True
@@ -1312,7 +1301,16 @@ class OnionPressApp(rumps.App):
                 except Exception as e:
                     self.log(f"Error starting containers: {e}")
 
-            time.sleep(2)
+            # Poll until WordPress is responding (replaces fixed sleep)
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                if self.check_wordpress_health(log_result=False):
+                    self.log(f"WordPress responding after {waited}s")
+                    break
+                time.sleep(2)
+                waited += 2
+
             self.check_status()
 
             # Start caffeinate to prevent sleep while service runs
@@ -1348,7 +1346,16 @@ class OnionPressApp(rumps.App):
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
-            time.sleep(3)
+
+            # Poll until WordPress is responding (replaces fixed sleep)
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                if self.check_wordpress_health(log_result=False):
+                    self.log(f"WordPress responding after restart ({waited}s)")
+                    break
+                time.sleep(2)
+                waited += 2
 
             # Check status after restart
             self.check_status()

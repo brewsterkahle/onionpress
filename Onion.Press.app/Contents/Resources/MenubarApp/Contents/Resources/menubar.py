@@ -794,37 +794,34 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ Tor not fully bootstrapped yet")
                 return False
 
-            # Check 3: Wait for descriptor upload and propagation
-            # After Tor reaches 100%, it needs time to upload the descriptor and propagate it
-            # This typically takes 90-180 seconds
-
-            # Track when we first saw bootstrap 100%
-            if not hasattr(self, '_bootstrap_complete_time'):
-                self._bootstrap_complete_time = time.time()
-                if log_result:
-                    self.log(f"Tor bootstrapped - waiting for descriptor upload and propagation...")
-
-            # Calculate time since bootstrap complete
-            time_since_bootstrap = time.time() - self._bootstrap_complete_time
-            wait_time = 120  # Wait 2 minutes after bootstrap for descriptor upload/propagation
-
-            if time_since_bootstrap < wait_time:
-                # Still waiting - don't spam the log with countdown messages
-                return False
-
-            # Check 4: Verify no critical errors in recent logs
+            # Check 3: Verify no critical errors in recent logs
             if "ERROR" in result.stdout or "failed to publish" in result.stdout.lower():
                 if log_result:
                     self.log(f"✗ Tor errors detected in logs")
                 return False
 
-            # All checks passed - enough time has elapsed for descriptor to be uploaded
-            if log_result:
-                self.log(f"✓ All checks passed - {self.onion_address} should be accessible!")
+            # Check 4: Verify WordPress is reachable from Tor container
+            # (SOCKS proxy at 127.0.0.1:9050 doesn't work through Colima VM
+            # port forwarding, so we test the actual path: tor -> wordpress
+            # over the Docker network using docker exec + wget)
+            probe_result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor",
+                 "wget", "-q", "-O", "/dev/null", "--timeout=5",
+                 "http://wordpress:80/"],
+                capture_output=True,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                timeout=10,
+                env=docker_env
+            )
+            if probe_result.returncode != 0:
+                if log_result:
+                    self.log(f"✗ WordPress not reachable from Tor container")
+                return False
 
-            # Clear the bootstrap time tracker so it resets if Tor restarts
-            if hasattr(self, '_bootstrap_complete_time'):
-                delattr(self, '_bootstrap_complete_time')
+            if log_result:
+                self.log(f"✓ Onion service verified: {self.onion_address}")
 
             return True
 
@@ -877,32 +874,24 @@ class OnionPressApp(rumps.App):
                 previous_ready = self.is_ready
                 ready_now = wordpress_ready and tor_reachable
 
-                # If just became ready, wait 20 seconds before showing as ready
-                # This gives the Tor network time to fully propagate the onion service
                 if ready_now and not previous_ready:
-                    self.log("✓ System checks passed - waiting 20 seconds for Tor network propagation...")
+                    self.is_ready = True
+                    self.log("✓ System fully operational")
                     self.last_status_logged = current_status
 
-                    def delayed_ready():
-                        time.sleep(20)
-                        self.is_ready = True
-                        self.log("✓ System fully operational - reducing check frequency")
+                    # Dismiss setup dialog if it's showing
+                    self.dismiss_setup_dialog()
 
-                        # Dismiss setup dialog if it's showing
-                        self.dismiss_setup_dialog()
+                    # Auto-open Tor Browser on first ready (if installed)
+                    if not self.auto_opened_browser:
+                        self.auto_opened_browser = True
+                        self.auto_open_browser()
 
-                        # Auto-open Tor Browser on first ready (if installed)
-                        if not self.auto_opened_browser:
-                            self.auto_opened_browser = True
-                            self.auto_open_browser()
+                    # Force menu update (changes icon to green)
+                    self.update_menu()
 
-                        # Force menu update (changes icon to green)
-                        self.update_menu()
-
-                        # Dismiss splash AFTER icon turns green
-                        self.dismiss_launch_splash()
-
-                    threading.Thread(target=delayed_ready, daemon=True).start()
+                    # Dismiss splash AFTER icon turns green
+                    self.dismiss_launch_splash()
                 elif ready_now:
                     # Already was ready, keep it ready
                     self.is_ready = True
@@ -996,11 +985,12 @@ class OnionPressApp(rumps.App):
                 input=self.onion_address.encode(),
                 check=True
             )
-            rumps.notification(
-                title="Onion.Press",
-                subtitle="Address Copied",
-                message=f"Copied {self.onion_address} to clipboard"
-            )
+            # Notification disabled
+            # rumps.notification(
+            #     title="Onion.Press",
+            #     subtitle="Address Copied",
+            #     message=f"Copied {self.onion_address} to clipboard"
+            # )
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
@@ -1158,12 +1148,12 @@ class OnionPressApp(rumps.App):
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
                 self.log(f"Opened {url} in Brave Browser (Tor mode)")
-                # Show notification to let user know Brave is being used
-                rumps.notification(
-                    title="Onion.Press",
-                    subtitle="Opening in Brave Browser",
-                    message="Opening in Private Window with Tor"
-                )
+                # Notification disabled
+                # rumps.notification(
+                #     title="Onion.Press",
+                #     subtitle="Opening in Brave Browser",
+                #     message="Opening in Private Window with Tor"
+                # )
             else:
                 # Neither browser is installed - offer download options
                 response = rumps.alert(
@@ -1200,12 +1190,12 @@ class OnionPressApp(rumps.App):
                 self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
-                # Show notification to let user know Brave is being used
-                rumps.notification(
-                    title="Onion.Press",
-                    subtitle="Opening in Brave Browser",
-                    message="Opening in Private Window with Tor"
-                )
+                # Notification disabled
+                # rumps.notification(
+                #     title="Onion.Press",
+                #     subtitle="Opening in Brave Browser",
+                #     message="Opening in Private Window with Tor"
+                # )
             else:
                 self.log("Neither Tor Browser nor Brave Browser installed - showing download dialog")
                 # Dismiss setup dialog and launch splash before showing browser download dialog
@@ -1311,7 +1301,16 @@ class OnionPressApp(rumps.App):
                 except Exception as e:
                     self.log(f"Error starting containers: {e}")
 
-            time.sleep(2)
+            # Poll until WordPress is responding (replaces fixed sleep)
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                if self.check_wordpress_health(log_result=False):
+                    self.log(f"WordPress responding after {waited}s")
+                    break
+                time.sleep(2)
+                waited += 2
+
             self.check_status()
 
             # Start caffeinate to prevent sleep while service runs
@@ -1347,7 +1346,16 @@ class OnionPressApp(rumps.App):
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
-            time.sleep(3)
+
+            # Poll until WordPress is responding (replaces fixed sleep)
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                if self.check_wordpress_health(log_result=False):
+                    self.log(f"WordPress responding after restart ({waited}s)")
+                    break
+                time.sleep(2)
+                waited += 2
 
             # Check status after restart
             self.check_status()
@@ -1619,11 +1627,12 @@ DO NOT share these words with anyone."""
         try:
             if show_notifications:
                 self.log("Checking for Docker image updates...")
-                rumps.notification(
-                    title="Onion.Press",
-                    subtitle="Checking for Updates",
-                    message="Checking for updated container images..."
-                )
+                # Notification disabled
+                # rumps.notification(
+                #     title="Onion.Press",
+                #     subtitle="Checking for Updates",
+                #     message="Checking for updated container images..."
+                # )
 
             docker_bin = os.path.join(self.bin_dir, "docker")
             docker_compose_file = os.path.join(self.parent_resources_dir, "docker", "docker-compose.yml")
@@ -1651,38 +1660,46 @@ DO NOT share these words with anyone."""
                 # Check if any images were actually updated by comparing output
                 if "Downloaded" in result.stdout or "Pulled" in result.stdout:
                     if show_notifications:
-                        rumps.notification(
-                            title="Onion.Press",
-                            subtitle="Updates Downloaded",
-                            message="Container images updated. Restart the service to apply updates."
-                        )
+                        # Notification disabled
+                        # rumps.notification(
+                        #     title="Onion.Press",
+                        #     subtitle="Updates Downloaded",
+                        #     message="Container images updated. Restart the service to apply updates."
+                        # )
+                        pass
                     return True
                 else:
                     if show_notifications:
-                        rumps.notification(
-                            title="Onion.Press",
-                            subtitle="Already Up to Date",
-                            message="All container images are current."
-                        )
+                        # Notification disabled
+                        # rumps.notification(
+                        #     title="Onion.Press",
+                        #     subtitle="Already Up to Date",
+                        #     message="All container images are current."
+                        # )
+                        pass
                     return False
             else:
                 self.log(f"Failed to update Docker images: {result.stderr}")
                 if show_notifications:
-                    rumps.notification(
-                        title="Onion.Press",
-                        subtitle="Update Failed",
-                        message="Could not update container images. Check logs for details."
-                    )
+                    # Notification disabled
+                    # rumps.notification(
+                    #     title="Onion.Press",
+                    #     subtitle="Update Failed",
+                    #     message="Could not update container images. Check logs for details."
+                    # )
+                    pass
                 return False
 
         except Exception as e:
             self.log(f"Error updating Docker images: {e}")
             if show_notifications:
-                rumps.notification(
-                    title="Onion.Press",
-                    subtitle="Update Error",
-                    message=f"Error updating containers: {str(e)}"
-                )
+                # Notification disabled
+                # rumps.notification(
+                #     title="Onion.Press",
+                #     subtitle="Update Error",
+                #     message=f"Error updating containers: {str(e)}"
+                # )
+                pass
             return False
 
     @rumps.clicked("Check for Updates...")
@@ -1742,16 +1759,8 @@ DO NOT share these words with anyone."""
 
     def show_notification(self, message, subtitle=""):
         """Show a macOS notification (thread-safe via main queue dispatch)"""
-        def _notify():
-            try:
-                rumps.notification(
-                    title="Onion.Press Setup",
-                    subtitle=subtitle,
-                    message=message
-                )
-            except Exception:
-                pass
-        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_notify)
+        # Notifications disabled - no-op
+        pass
 
     def show_setup_dialog(self):
         """Show a persistent setup dialog during first run that stays until service is ready"""

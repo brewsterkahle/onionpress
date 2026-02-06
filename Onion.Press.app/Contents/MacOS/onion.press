@@ -422,21 +422,75 @@ get_status() {
     docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
 }
 
-# Function to get onion address
+# Function to get onion address (non-blocking, single attempt)
 get_onion_address() {
     cd "$DOCKER_DIR"
+    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+    if [ ! -z "$ONION_ADDR" ]; then
+        echo "$ONION_ADDR"
+        return 0
+    fi
+    echo "Generating..."
+    return 1
+}
 
-    # Wait for tor container to generate the address
-    for i in {1..30}; do
-        ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-        if [ ! -z "$ONION_ADDR" ]; then
-            echo "$ONION_ADDR"
+# Function to wait for services to be ready using active probing
+wait_for_services() {
+    cd "$DOCKER_DIR"
+    local max_wait=120
+    local waited=0
+    local wp_ready=false
+    local onion_ready=false
+    local onion_addr=""
+
+    log "Waiting for services to be ready (polling with curl)..."
+
+    while [ $waited -lt $max_wait ]; do
+        # Step 1: Get onion address if we don't have it yet
+        if [ -z "$onion_addr" ] || [ "$onion_addr" = "Generating..." ]; then
+            onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+        fi
+
+        # Step 2: Check if WordPress is responding locally
+        if [ "$wp_ready" = false ]; then
+            if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
+                log "✓ WordPress is responding on localhost:8080"
+                wp_ready=true
+            fi
+        fi
+
+        # Step 3: Check Tor bootstrap and WordPress reachable from Tor container
+        # (SOCKS proxy doesn't work through Colima VM port forwarding,
+        # so we test the actual path: tor -> wordpress via Docker network)
+        if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+            # Check Tor is bootstrapped
+            if docker compose logs tor 2>/dev/null | grep -q "Bootstrapped 100% (done)"; then
+                # Check WordPress is reachable from Tor container
+                if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
+                    log "✓ Onion service ready: ${onion_addr}"
+                    onion_ready=true
+                fi
+            fi
+        fi
+
+        # Both ready — done
+        if [ "$wp_ready" = true ] && [ "$onion_ready" = true ]; then
+            log "All services are ready after ${waited}s"
+            ONION_ADDR="$onion_addr"
             return 0
         fi
-        sleep 1
+
+        sleep 2
+        waited=$((waited + 2))
     done
 
-    echo "Generating..."
+    # Timed out — report what we have
+    log "WARNING: Services not fully ready after ${max_wait}s (wp=${wp_ready}, onion=${onion_ready})"
+    if [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
+        ONION_ADDR="$onion_addr"
+    else
+        ONION_ADDR="Generating..."
+    fi
     return 1
 }
 
@@ -477,11 +531,8 @@ main() {
             # Start containers
             start_containers
 
-            # Wait a bit for services to start
-            sleep 3
-
-            # Get onion address
-            ONION_ADDR=$(get_onion_address)
+            # Actively poll until services are ready (replaces fixed sleep)
+            wait_for_services
 
             log "onion.press is running!"
             log "Onion address: $ONION_ADDR"
@@ -496,8 +547,8 @@ main() {
         restart)
             setup_db_passwords
             stop_containers
-            sleep 2
             start_containers
+            wait_for_services
             ;;
 
         status)
