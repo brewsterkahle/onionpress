@@ -233,7 +233,7 @@ install_ia_plugin() {
 
             # Try to activate immediately if WordPress is configured
             if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
-                "internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.ph p" >>"$LOG_FILE" 2>&1; then
+                "internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php" >>"$LOG_FILE" 2>&1; then
                 log "✓ Plugin automatically activated!"
             else
                 log "Plugin will auto-activate after WordPress setup"
@@ -499,9 +499,7 @@ main() {
     case "${1:-start}" in
         start)
             # Detect container runtime
-            RUNTIME=$(detect_container_runtime)
-
-            if [ $? -ne 0 ]; then
+            if ! RUNTIME=$(detect_container_runtime); then
                 install_docker
                 exit $?
             fi

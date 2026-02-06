@@ -5,7 +5,6 @@ Converts Tor v3 Ed25519 private keys to/from BIP39 mnemonic words with checksums
 """
 
 import subprocess
-import base64
 
 try:
     from mnemonic import Mnemonic
