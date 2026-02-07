@@ -253,10 +253,20 @@ cp "$SCRIPTS_DIR/bip39_words.py" "$SITE_PACKAGES/"
 
 # Run py2app build using the root setup.py
 cd "$PROJECT_DIR"
-"$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
+if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
     --dist-dir "$MENUBAR_BUILD_DIR/dist" \
     --bdist-base "$MENUBAR_BUILD_DIR/build" \
-    2>&1
+    2>&1; then
+    # py2app uses distutils.spawn(dry_run=...) which setuptools 81+ removed.
+    # Retry with older setuptools until py2app ships a fix.
+    echo "py2app failed — retrying with setuptools<81..."
+    "$MENUBAR_BUILD_DIR/venv/bin/pip" install 'setuptools<81'
+    rm -rf "$MENUBAR_BUILD_DIR/build" "$MENUBAR_BUILD_DIR/dist"
+    "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
+        --dist-dir "$MENUBAR_BUILD_DIR/dist" \
+        --bdist-base "$MENUBAR_BUILD_DIR/build" \
+        2>&1
+fi
 
 # Install the built MenubarApp into the app bundle
 MENUBAR_APP_DIR="$APP_PATH/Contents/Resources/MenubarApp"

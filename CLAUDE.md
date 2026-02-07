@@ -21,7 +21,7 @@
 - After editing `src/menubar.py`, rebuild binary and replace `Onion.Press.app/Contents/Resources/MenubarApp/`
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - Version must be bumped in: `src/menubar.py` (2 places), `setup.py`, `Onion.Press.app/Contents/Info.plist`
-- **py2app requires `setuptools<81`** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app still uses. Pin with `pip install 'setuptools<81'` before `pip install py2app`.
+- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
