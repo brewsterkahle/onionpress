@@ -1613,6 +1613,13 @@ class OnionPressApp(rumps.App):
             rumps.alert("No key provided")
             return
 
+        # Normalize whitespace: for base64 keys, collapse all whitespace
+        # (text field may wrap and insert newlines); for BIP39, normalize to single spaces
+        if key_text.startswith('onionpress:'):
+            key_text = ''.join(key_text.split())
+        else:
+            key_text = ' '.join(key_text.split())
+
         # Try to import (auto-detects format)
         try:
             key_bytes, coordinator = key_manager.import_key(key_text)
@@ -1620,15 +1627,15 @@ class OnionPressApp(rumps.App):
             if coordinator:
                 self.log(f"Key imported with coordinator: {coordinator}")
 
-            # Stop the service first
-            subprocess.run([self.launcher_script, "stop"], capture_output=True)
-            time.sleep(2)
-
-            # Write the new key
+            # Write the new key while container is still running
+            # (docker cp requires the container to exist)
+            self.log("Import: writing new key...")
             key_manager.write_private_key(key_bytes)
 
-            # Restart the service
-            time.sleep(3)
+            # Restart the service to pick up the new key
+            self.log("Import: restarting service...")
+            subprocess.run([self.launcher_script, "stop"], capture_output=True)
+            time.sleep(2)
             subprocess.run([self.launcher_script, "start"], capture_output=True)
 
             rumps.alert(
@@ -1641,6 +1648,7 @@ class OnionPressApp(rumps.App):
             self.check_status()
 
         except Exception as e:
+            self.log(f"Import failed: {e}")
             rumps.alert(
                 title="Import Failed",
                 message=f"Could not import private key:\n\n{str(e)}\n\nYour original key has not been changed."
