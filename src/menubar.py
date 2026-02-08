@@ -1442,49 +1442,8 @@ class OnionPressApp(rumps.App):
         else:
             rumps.alert("Settings file not found")
 
-    def generate_qr_nsimage(self, data_string, size=200):
-        """Generate a QR code as an NSImage with OnionPress icon in the center."""
-        import segno
-        from io import BytesIO
-
-        # Use highest error correction so the center logo doesn't break scanning
-        qr = segno.make(data_string, error='H')
-        buf = BytesIO()
-        qr.save(buf, kind='png', scale=8, border=2)
-        png_data = buf.getvalue()
-
-        ns_data = AppKit.NSData.dataWithBytes_length_(png_data, len(png_data))
-        qr_image = AppKit.NSImage.alloc().initWithData_(ns_data)
-        qr_image.setSize_(AppKit.NSMakeSize(size, size))
-
-        # Overlay app icon in the center
-        icon_path = os.path.join(self.resources_dir, "app-icon.png")
-        if os.path.exists(icon_path):
-            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-            if icon:
-                icon_size = size * 0.22  # ~22% of QR size fits within error correction
-                icon_rect = AppKit.NSMakeRect(
-                    (size - icon_size) / 2, (size - icon_size) / 2,
-                    icon_size, icon_size)
-                qr_image.lockFocus()
-                # Draw white rounded background behind icon for contrast
-                white_pad = icon_size * 1.15
-                white_rect = AppKit.NSMakeRect(
-                    (size - white_pad) / 2, (size - white_pad) / 2,
-                    white_pad, white_pad)
-                path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                    white_rect, white_pad * 0.18, white_pad * 0.18)
-                AppKit.NSColor.whiteColor().setFill()
-                path.fill()
-                icon.drawInRect_fromRect_operation_fraction_(
-                    icon_rect, AppKit.NSZeroRect,
-                    AppKit.NSCompositingOperationSourceOver, 1.0)
-                qr_image.unlockFocus()
-
-        return qr_image
-
     def show_export_dialog(self, base64_key, mnemonic):
-        """Show export dialog with QR code, base64 key, and recovery words option."""
+        """Show export dialog with base64 key and recovery words option."""
         while True:
             alert = AppKit.NSAlert.alloc().init()
             alert.setMessageText_("Private Key Backup")
@@ -1497,27 +1456,9 @@ class OnionPressApp(rumps.App):
                 if icon:
                     alert.setIcon_(icon)
 
-            # Build accessory view with QR + key text
+            # Build accessory view with key text
             container = AppKit.NSView.alloc().initWithFrame_(
-                AppKit.NSMakeRect(0, 0, 420, 340))
-
-            # QR code image
-            try:
-                qr_image = self.generate_qr_nsimage(base64_key, size=200)
-                image_view = AppKit.NSImageView.alloc().initWithFrame_(
-                    AppKit.NSMakeRect(110, 140, 200, 200))
-                image_view.setImage_(qr_image)
-                image_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
-                container.addSubview_(image_view)
-            except Exception as e:
-                self.log(f"QR generation failed: {e}")
-
-            # Label
-            label = AppKit.NSTextField.labelWithString_(
-                "Scan this QR code or copy the key below:")
-            label.setFrame_(AppKit.NSMakeRect(10, 110, 400, 20))
-            label.setAlignment_(AppKit.NSTextAlignmentCenter)
-            container.addSubview_(label)
+                AppKit.NSMakeRect(0, 0, 420, 120))
 
             # Base64 key text field (selectable, monospaced, read-only)
             text_field = AppKit.NSTextField.alloc().initWithFrame_(
@@ -1535,7 +1476,7 @@ class OnionPressApp(rumps.App):
 
             # Security warning
             warning = AppKit.NSTextField.labelWithString_(
-                "DO NOT share this key with anyone.")
+                "DO NOT share this key with anyone you don't trust.")
             warning.setFrame_(AppKit.NSMakeRect(10, 5, 400, 18))
             warning.setAlignment_(AppKit.NSTextAlignmentCenter)
             warning.setTextColor_(AppKit.NSColor.systemRedColor())
@@ -1582,7 +1523,7 @@ class OnionPressApp(rumps.App):
 
     @rumps.clicked("Export Private Key...")
     def export_key(self, _):
-        """Export Tor private key as base64 with QR code and BIP39 recovery words"""
+        """Export Tor private key as base64 with BIP39 recovery words"""
         if not self.is_running:
             rumps.alert(
                 title="Service Not Running",
