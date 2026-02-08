@@ -1,14 +1,14 @@
 <div align="center">
-  <img src="logo.png" alt="onion.press logo" width="400">
+  <img src="logo.png" alt="onionpress logo" width="400">
 
-  **[Product Page](https://brewsterkahle.github.io/onion.press/)**
+  **[Product Page](https://brewsterkahle.github.io/onionpress/)**
 </div>
 
-# Onion.Press
+# OnionPress
 
 **Easy and free self-hosted web server for macOS**
 
-onion.press is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network.
+onionpress is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network.
 
 ⚠️ This is **not** a securely-anonymous publishing tool-- maybe someday, but not yet.
 
@@ -33,9 +33,9 @@ onion.press is a macOS application that bundles WordPress with a Tor onion servi
 
 ## Installation
 
-1. Download the latest `onion.press.dmg` from the [releases page](https://github.com/brewsterkahle/onion.press/releases)
-2. Open the DMG and drag `Onion.Press.app` to your Applications folder
-3. Launch Onion.Press from Applications
+1. Download the latest `onionpress.dmg` from the [releases page](https://github.com/brewsterkahle/onionpress/releases)
+2. Open the DMG and drag `OnionPress.app` to your Applications folder
+3. Launch OnionPress from Applications
 4. On first launch:
    - The app will generate your onion address (starting with "op2") - takes < 1 second
    - The app will initialize its bundled container runtime (Colima) - takes ~2-3 minutes
@@ -50,11 +50,11 @@ Since this app is not code-signed with an Apple Developer certificate, macOS on 
 **Method 1 - System Settings (Recommended):**
 1. Open the app when in your Applications folder - you'll see a security warning.  Hit Done.
 2. Open **System Settings** → **Privacy & Security**
-3. Scroll down and click **"Open Anyway"** next to the Onion.Press warning
+3. Scroll down and click **"Open Anyway"** next to the OnionPress warning
 4. Click **"Open Anyway"** in the confirmation dialog, and enter your computer's password
 
 **Method 2 - Right-Click:**
-1. Right-click (or Control-click) on the Onion.Press app in you Application folder
+1. Right-click (or Control-click) on the OnionPress app in you Application folder
 2. Select **"Open"**
 3. Click **"Open"** in the dialog
 
@@ -63,7 +63,7 @@ Since this app is not code-signed with an Apple Developer certificate, macOS on 
 If you're comfortable with the terminal, you can remove the quarantine flag:
 ```bash
 # After moving to Applications folder
-xattr -cr /Applications/Onion.Press.app
+xattr -cr /Applications/OnionPress.app
 ```
 This removes macOS's quarantine attribute and allows the app to launch without warnings.
 
@@ -71,7 +71,7 @@ This removes macOS's quarantine attribute and allows the app to launch without w
 
 ### Menu Bar Controls
 
-Once installed, onion.press appears in your menu bar with an onion icon (🧅):
+Once installed, onionpress appears in your menu bar with an onion icon (🧅):
 
 - **Copy Onion Address**: Copy your .onion URL to clipboard
 - **Open in Tor Browser**: Launch Tor Browser with your site (requires Tor Browser to be installed)
@@ -86,29 +86,29 @@ Once installed, onion.press appears in your menu bar with an onion icon (🧅):
 
 **Manual Updates** (Recommended):
 Click "Check for Updates..." in the menu to:
-1. Check for new Onion.Press app versions
+1. Check for new OnionPress app versions
 2. Download updated WordPress, MariaDB, and Tor container images
 3. Apply security patches and new features
 
 **Automatic Updates** (Optional):
-Enable automatic Docker image updates on launch by editing `~/.onion.press/config`:
+Enable automatic Docker image updates on launch by editing `~/.onionpress/config`:
 ```bash
 UPDATE_ON_LAUNCH=yes
 ```
 
-When enabled, onion.press will check for and download updated container images each time you launch the app. This ensures you have the latest security patches without manual intervention.
+When enabled, onionpress will check for and download updated container images each time you launch the app. This ensures you have the latest security patches without manual intervention.
 
 **Note**: After updating container images, restart the service from the menu bar to apply updates.
 
 ### Launch on Login
 
-Have your WordPress site start automatically when you log in to macOS by editing `~/.onion.press/config`:
+Have your WordPress site start automatically when you log in to macOS by editing `~/.onionpress/config`:
 ```bash
 LAUNCH_ON_LOGIN=yes
 ```
 
 When enabled:
-- Onion.Press automatically launches when you log in
+- OnionPress automatically launches when you log in
 - Your WordPress site starts automatically in the background
 - The menu bar app appears and shows your status
 
@@ -123,7 +123,7 @@ The app automatically syncs this setting with macOS login items. You can also ma
 3. Copy your onion address and paste it into Tor Browser
 4. Complete the WordPress setup wizard
 
-**Vanity Address Configuration**: You can customize the prefix in `~/.onion.press/config` before first launch. See the config file for details on generation times for different prefix lengths.
+**Vanity Address Configuration**: You can customize the prefix in `~/.onionpress/config` before first launch. See the config file for details on generation times for different prefix lengths.
 
 ### Private Key Backup & Restore
 
@@ -147,14 +147,14 @@ Your onion address is derived from a private key. You can back up and restore th
 
 ### Internet Archive Wayback Machine Link Fixer
 
-Onion.Press automatically installs and activates the [Internet Archive Wayback Machine Link Fixer plugin](https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/), which helps combat link rot by:
+OnionPress automatically installs and activates the [Internet Archive Wayback Machine Link Fixer plugin](https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/), which helps combat link rot by:
 
 - Automatically scanning your posts for outbound links
 - Creating archived versions in the Wayback Machine
 - Redirecting to archived versions when links break
 - Archiving your own posts on every update
 
-**The plugin is enabled by default.** To disable automatic installation, edit `~/.onion.press/config` before first launch:
+**The plugin is enabled by default.** To disable automatic installation, edit `~/.onionpress/config` before first launch:
 ```bash
 INSTALL_IA_PLUGIN=no
 ```
@@ -200,7 +200,7 @@ For testing purposes, your WordPress site is also available at:
 
 ## Architecture
 
-onion.press uses:
+onionpress uses:
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
 - **Tor**: Hidden service container that exposes WordPress as an onion service
@@ -210,7 +210,7 @@ onion.press uses:
 - **Docker CLI**: Container management tools (bundled)
 
 All data is stored in:
-- `~/.onion.press/` - Application data, logs, config, and Colima VM
+- `~/.onionpress/` - Application data, logs, config, and Colima VM
 - Docker volumes for WordPress, database, and Tor keys
 
 ## Building from Source
@@ -218,22 +218,22 @@ All data is stored in:
 To build the DMG installer:
 
 ```bash
-cd onion.press
+cd onionpress
 ./build/build-dmg.sh
 ```
 
-This will create `onion.press.dmg` in the `build/` directory.
+This will create `onionpress.dmg` in the `build/` directory.
 
 ## Troubleshooting
 
 ### "macOS version too old"
-Onion.Press requires macOS 13 (Ventura) or later for Apple's native virtualization framework.
+OnionPress requires macOS 13 (Ventura) or later for Apple's native virtualization framework.
 
 ### Containers won't start
 Check the logs via the menu bar app or run:
 ```bash
-tail -f ~/.onion.press/onion.press.log
-tail -f ~/.onion.press/colima/colima.log
+tail -f ~/.onionpress/onionpress.log
+tail -f ~/.onionpress/colima/colima.log
 ```
 
 ### Onion address not generating
@@ -248,12 +248,12 @@ Wait 30-60 seconds for Tor to generate your onion address. Check logs if it take
 ## Uninstalling
 
 1. Click Uninstall from the menu bar app 
-2. Quit Onion.Press
-3. Move `Onion.Press.app` to Trash
+2. Quit OnionPress
+3. Move `OnionPress.app` to Trash
    or
-1. Quit Onion.Press
-2. Move `Onion.Press.app` to Trash
-3. Remove data directory: `rm -rf ~/.onion.press`
+1. Quit OnionPress
+2. Move `OnionPress.app` to Trash
+3. Remove data directory: `rm -rf ~/.onionpress`
 4. Remove Docker volumes:
    ```bash
    docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data

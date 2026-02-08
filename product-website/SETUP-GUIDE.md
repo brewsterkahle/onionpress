@@ -1,10 +1,10 @@
-# Building the Onion.Press Product Website
+# Building the OnionPress Product Website
 
 This guide explains how to create the retro-styled product website in WordPress.
 
 ## Prerequisites
 
-1. Onion.Press installed and running
+1. OnionPress installed and running
 2. Access to WordPress admin at http://localhost:8080/wp-admin
 3. Internet connection (for downloading theme and fonts)
 
@@ -132,7 +132,7 @@ See `content-proposal.md` for full content. Key sections:
 
 **Content**: Step-by-step guide with emojis
 
-1. Download Onion.Press
+1. Download OnionPress
 2. Install & Launch
 3. First Launch Magic
 4. Your Site is Live!
@@ -146,9 +146,9 @@ See `content-proposal.md` for full content. Key sections:
 
 ```html
 <div style="text-align: center; margin: 40px 0;">
-  <a href="https://github.com/brewsterkahle/onion.press/releases/latest" class="wp-element-button" style="font-size: 20px !important; padding: 30px 60px !important;">
+  <a href="https://github.com/brewsterkahle/onionpress/releases/latest" class="wp-element-button" style="font-size: 20px !important; padding: 30px 60px !important;">
     💾 DOWNLOAD FOR MAC<br>
-    <small style="font-family: Courier;">onion.press.dmg (82 MB)</small><br>
+    <small style="font-family: Courier;">onionpress.dmg (82 MB)</small><br>
     <small style="font-family: Courier;">macOS 13+ | Intel & M-series</small>
   </a>
 </div>
@@ -184,7 +184,7 @@ See `content-proposal.md` for full content. Key sections:
   <h3>❓ Need Help?</h3>
   <br>
   <p style="font-size: 18px;">Open an issue on GitHub:</p>
-  <a href="https://github.com/brewsterkahle/onion.press/issues" class="wp-element-button">OPEN AN ISSUE</a>
+  <a href="https://github.com/brewsterkahle/onionpress/issues" class="wp-element-button">OPEN AN ISSUE</a>
 </div>
 ```
 

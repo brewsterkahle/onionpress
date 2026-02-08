@@ -5,13 +5,13 @@
 ## Project Structure
 
 ```
-onion.press/
-├── onion.press.app/          # macOS application bundle
+onionpress/
+├── onionpress.app/          # macOS application bundle
 │   └── Contents/
 │       ├── Info.plist        # App metadata
 │       ├── MacOS/
 │       │   ├── launcher      # Bootstrap script (launches Python app)
-│       │   └── onion.press   # Container management script
+│       │   └── onionpress   # Container management script
 │       └── Resources/
 │           ├── bin/          # Bundled binaries (Colima, Docker CLI, mkp224o, etc.)
 │           ├── share/        # Lima templates and support files
@@ -43,15 +43,15 @@ onion.press/
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/brewsterkahle/onion.press.git
-   cd onion.press
+   git clone https://github.com/brewsterkahle/onionpress.git
+   cd onionpress
    ```
 
 2. Install Python dependencies (for testing menu bar app):
    ```bash
    python3 -m venv venv
    source venv/bin/activate
-   pip install -r onion.press.app/Contents/Resources/scripts/requirements.txt
+   pip install -r onionpress.app/Contents/Resources/scripts/requirements.txt
    ```
 
 3. Ensure a container runtime is running (for development testing):
@@ -74,7 +74,7 @@ onion.press/
 make test
 
 # Run the app
-open onion.press.app
+open onionpress.app
 
 # Or install to Applications for testing
 make install
@@ -84,7 +84,7 @@ make install
 
 1. **Test Docker Compose setup:**
    ```bash
-   cd onion.press.app/Contents/Resources/docker
+   cd onionpress.app/Contents/Resources/docker
    docker compose up -d
    docker compose ps
    docker compose logs
@@ -93,16 +93,16 @@ make install
 
 2. **Test container management script:**
    ```bash
-   cd onion.press.app/Contents/MacOS
-   ./onion.press start
-   ./onion.press status
-   ./onion.press address
-   ./onion.press stop
+   cd onionpress.app/Contents/MacOS
+   ./onionpress start
+   ./onionpress status
+   ./onionpress address
+   ./onionpress stop
    ```
 
 3. **Test menu bar app:**
    ```bash
-   cd onion.press.app/Contents/Resources/scripts
+   cd onionpress.app/Contents/Resources/scripts
    python3 menubar.py
    ```
 
@@ -118,19 +118,19 @@ make build-simple
 make build
 ```
 
-The DMG will be created at `build/onion.press.dmg`.
+The DMG will be created at `build/onionpress.dmg`.
 
 ### Debugging
 
 #### View application logs:
 ```bash
-tail -f ~/.onion.press/onion.press.log
-tail -f ~/.onion.press/launcher.log
+tail -f ~/.onionpress/onionpress.log
+tail -f ~/.onionpress/launcher.log
 ```
 
 #### View container logs:
 ```bash
-cd onion.press.app/Contents/Resources/docker
+cd onionpress.app/Contents/Resources/docker
 docker compose logs -f
 ```
 
@@ -150,11 +150,11 @@ docker compose exec tor cat /var/lib/tor/hidden_service/wordpress/hostname
 ### 1. Launcher Script (`MacOS/launcher`)
 
 - Checks for Python 3
-- Creates virtual environment at `~/.onion.press/venv`
+- Creates virtual environment at `~/.onionpress/venv`
 - Installs Python dependencies
 - Launches menu bar app
 
-### 2. Container Management Script (`MacOS/onion.press`)
+### 2. Container Management Script (`MacOS/onionpress`)
 
 - Uses bundled Colima container runtime (in production builds)
 - Falls back to system Docker if available (useful for development)
@@ -234,14 +234,14 @@ docker compose exec tor cat /var/lib/tor/hidden_service/wordpress/hostname
 ### "Permission denied" errors
 Make scripts executable:
 ```bash
-chmod +x onion.press.app/Contents/MacOS/*
+chmod +x onionpress.app/Contents/MacOS/*
 ```
 
 ### Python dependencies won't install
 Clear venv and reinstall:
 ```bash
-rm -rf ~/.onion.press/venv
-open onion.press.app  # Will recreate venv
+rm -rf ~/.onionpress/venv
+open onionpress.app  # Will recreate venv
 ```
 
 ### Containers won't start
@@ -266,7 +266,7 @@ Before releasing a new version:
 - [ ] Update version in `Info.plist` (CFBundleShortVersionString and CFBundleVersion)
 - [ ] Update `CHANGELOG.md` with new features
 - [ ] Update `README.md` if needed
-- [ ] Test on clean macOS install (remove ~/.onion.press first)
+- [ ] Test on clean macOS install (remove ~/.onionpress first)
 - [ ] Test on Apple Silicon Mac (ARM64) - primary platform
 - [ ] Verify bundled Colima initializes correctly
 - [ ] Verify vanity address generation works (check for "op2" prefix)
@@ -290,14 +290,14 @@ Before releasing a new version:
 - **Smaller footprint**: Colima (~8MB) + Lima (~29MB) + Docker CLI (~37MB) = ~75MB bundled
 - **Privacy-focused**: No telemetry or accounts required
 - **Native performance**: Uses Apple's Virtualization.Framework (VZ backend)
-- **Fully isolated**: Each app has its own container environment in `~/.onion.press/`
+- **Fully isolated**: Each app has its own container environment in `~/.onionpress/`
 - **Open source**: MIT/Apache licensed components
 
 ### Why mkp224o for vanity addresses?
 - **Fast generation**: Can generate 3-character prefixes in < 1 second
 - **v3 onion support**: Works with modern Tor onion services
 - **Customizable**: Users can configure their own prefix
-- **Branding**: "op2" prefix makes onion.press services easily identifiable
+- **Branding**: "op2" prefix makes onionpress services easily identifiable
 
 ### Why Python/rumps for menu bar?
 - Simple API for menu bar apps

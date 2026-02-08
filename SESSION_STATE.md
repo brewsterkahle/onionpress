@@ -1,10 +1,10 @@
-# onion.press Session State - 2026-01-31
+# onionpress Session State - 2026-01-31
 
 ## Current Status
 
 **Latest Version**: v2.0.7 (build 8)
 **DMG Built**: Yes (117M)
-**GitHub Release**: Published at https://github.com/brewsterkahle/onion.press/releases/tag/v2.0.7
+**GitHub Release**: Published at https://github.com/brewsterkahle/onionpress/releases/tag/v2.0.7
 **Git Status**: All changes committed and pushed
 
 ## Recent Work Completed
@@ -26,16 +26,16 @@
 ## Files Modified in This Session
 
 ### New Files Created
-- `onion.press.app/Contents/Resources/scripts/bip39_words.py` - BIP39 wordlist (2048 words)
-- `onion.press.app/Contents/Resources/scripts/key_manager.py` - Key backup/restore functions
+- `onionpress.app/Contents/Resources/scripts/bip39_words.py` - BIP39 wordlist (2048 words)
+- `onionpress.app/Contents/Resources/scripts/key_manager.py` - Key backup/restore functions
 - `SESSION_SUMMARY.md` - Previous session summary
 - `SESSION_STATE.md` - This file
 
 ### Modified Files
-- `onion.press.app/Contents/Resources/scripts/menubar.py` - Added Export/Import Key menu items
-- `onion.press.app/Contents/Resources/AppIcon.icns` - Updated to purple onion character
-- `onion.press.app/Contents/Resources/app-icon.png` - Updated source icon
-- `onion.press.app/Contents/Info.plist` - Version 2.0.7, build 8
+- `onionpress.app/Contents/Resources/scripts/menubar.py` - Added Export/Import Key menu items
+- `onionpress.app/Contents/Resources/AppIcon.icns` - Updated to purple onion character
+- `onionpress.app/Contents/Resources/app-icon.png` - Updated source icon
+- `onionpress.app/Contents/Info.plist` - Version 2.0.7, build 8
 - `README.md` - Added Private Key Backup section, updated version
 - `CHANGELOG.md` - Added v2.0.6 and v2.0.7 entries
 
@@ -54,7 +54,7 @@
 
 ## Running Services
 
-- onion.press app: Currently running with menubar icon
+- onionpress app: Currently running with menubar icon
 - Docker containers: onionpress-tor, onionpress-wordpress, onionpress-db
 - Current onion address: op22ciycvgpcvzjy7iiycx3shg7ibnuqxhdncfzpwh7zchfqihuoqlqd.onion
 
@@ -68,7 +68,7 @@ master prepare derive park sick answer memory detail steak rescue hungry glow mo
 
 ## Branding Assets Location
 
-All source files in: `/Users/brewster/tmp/claude/onion.press/assets/branding/`
+All source files in: `/Users/brewster/tmp/claude/onionpress/assets/branding/`
 - logo-full-with-text.png (1024x1024) - Full logo with text
 - icon-app-rounded.png (1024x1024) - Rounded icon with background
 - icon-face-transparent.png (1024x1024) - **Currently used for app icon**
@@ -77,7 +77,7 @@ All source files in: `/Users/brewster/tmp/claude/onion.press/assets/branding/`
 
 ## Build Information
 
-**DMG Location**: `/Users/brewster/tmp/claude/onion.press/build/onion.press.dmg`
+**DMG Location**: `/Users/brewster/tmp/claude/onionpress/build/onionpress.dmg`
 **Build Script**: `./build/build-dmg-simple.sh`
 **Build Time**: ~2-3 minutes (includes compiling mkp224o)
 
@@ -86,16 +86,16 @@ All source files in: `/Users/brewster/tmp/claude/onion.press/assets/branding/`
 ```
 Branch: main
 Latest commit: c3fe768 "Update app icon to purple onion character for better visibility"
-Remote: https://github.com/brewsterkahle/onion.press.git
+Remote: https://github.com/brewsterkahle/onionpress.git
 Tags: v2.0.0 through v2.0.7 (all pushed)
 Status: Clean (all changes committed)
 ```
 
 ## Environment
 
-- Working directory: /Users/brewster/tmp/claude/onion.press
-- App installed: /Applications/onion.press.app
-- Data directory: ~/.onion.press/
+- Working directory: /Users/brewster/tmp/claude/onionpress
+- App installed: /Applications/onionpress.app
+- Data directory: ~/.onionpress/
 - Container runtime: Bundled Colima
 
 ## Token Usage
@@ -118,7 +118,7 @@ Possible future enhancements:
 
 1. Everything is committed and pushed to GitHub
 2. Latest DMG is built and released (v2.0.7)
-3. App is installed in /Applications/onion.press.app
+3. App is installed in /Applications/onionpress.app
 4. All Docker volumes preserved (WordPress data, database, Tor keys)
 5. Simply launch the app to continue
 

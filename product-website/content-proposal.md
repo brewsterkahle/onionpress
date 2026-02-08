@@ -1,4 +1,4 @@
-# Onion.Press Product Website - Content Proposal
+# OnionPress Product Website - Content Proposal
 
 ## Theme & Design
 
@@ -72,7 +72,7 @@ Border:     #000000 3px solid
 
 ### 2. FEATURES PAGE
 
-**Title**: What Makes Onion.Press Special?
+**Title**: What Makes OnionPress Special?
 
 **Content**:
 
@@ -101,7 +101,7 @@ Border:     #000000 3px solid
 
 **Retro Features** (Coming Soon!)
 - 90s visitor counter
-- Webring support - link to other Onion.Press sites
+- Webring support - link to other OnionPress sites
 - Animated GIFs from gifcities.org
 - Bring back the old web!
 
@@ -113,7 +113,7 @@ Border:     #000000 3px solid
 
 **Steps** (with screenshots):
 
-1. **Download Onion.Press**
+1. **Download OnionPress**
    - One file, 80MB
    - Compatible with Mac (Intel & Apple Silicon)
    - macOS 13 or later
@@ -124,7 +124,7 @@ Border:     #000000 3px solid
    - It lives in your menubar
 
 3. **First Launch Magic**
-   - Onion.Press downloads WordPress
+   - OnionPress downloads WordPress
    - Sets up Tor hidden service
    - Generates your .onion address
    - Takes ~2 minutes
@@ -150,7 +150,7 @@ Border:     #000000 3px solid
 
 ### 4. DOWNLOAD PAGE
 
-**Title**: Get Onion.Press
+**Title**: Get OnionPress
 
 **Latest Release**: v2.2.33
 
@@ -159,7 +159,7 @@ Border:     #000000 3px solid
 ┌────────────────────────────────┐
 │  💾 DOWNLOAD FOR MAC           │
 │                                │
-│  onion.press.dmg (82 MB)       │
+│  onionpress.dmg (82 MB)       │
 │                                │
 │  macOS 13+ | Intel & M-series  │
 └────────────────────────────────┘
@@ -169,12 +169,12 @@ Border:     #000000 3px solid
 
 1. Download the .dmg file above
 2. Open the .dmg file
-3. Drag "Onion.Press.app" to your Applications folder
-4. Open Onion.Press from Applications
+3. Drag "OnionPress.app" to your Applications folder
+4. Open OnionPress from Applications
 5. Click "Open" when macOS asks for confirmation
 
 **First Launch**:
-- Onion.Press will download containers (~500 MB)
+- OnionPress will download containers (~500 MB)
 - This happens once, takes a few minutes
 - Menubar icon turns purple when ready
 - Click the icon to view your site!
@@ -190,14 +190,14 @@ Border:     #000000 3px solid
 - [Link to FAQ]
 
 **Source Code**:
-- GitHub: https://github.com/brewsterkahle/onion.press
+- GitHub: https://github.com/brewsterkahle/onionpress
 - License: MIT (free and open source)
 
 ---
 
 ### 5. ABOUT PAGE
 
-**Title**: About Onion.Press
+**Title**: About OnionPress
 
 **Mission**:
 
@@ -205,7 +205,7 @@ Remember the early web? When anyone could make a homepage? When the internet was
 
 That spirit is alive and well on Tor.
 
-Onion.Press brings the magic of self-hosted websites to everyone. No coding. No servers to rent. No tech company watching your every move.
+OnionPress brings the magic of self-hosted websites to everyone. No coding. No servers to rent. No tech company watching your every move.
 
 Just you, your Mac, and your own bright corner of the internet.
 
@@ -228,11 +228,11 @@ WordPress powers 40% of the web. It's:
 
 **The Story**:
 
-Onion.Press was created at the Internet Archive as an experiment: What if everyone could run their own Tor hidden service as easily as installing an app?
+OnionPress was created at the Internet Archive as an experiment: What if everyone could run their own Tor hidden service as easily as installing an app?
 
 The dark web shouldn't require technical expertise. Publishing online shouldn't require trusting a corporation with your data.
 
-So we built Onion.Press.
+So we built OnionPress.
 
 **Open Source**:
 
@@ -268,7 +268,7 @@ Created at Internet Archive.
 │                                     │
 │  Open an issue on GitHub:           │
 │  github.com/brewsterkahle/          │
-│  onion.press/issues                 │
+│  onionpress/issues                 │
 └─────────────────────────────────────┘
 ```
 
@@ -290,11 +290,11 @@ Please check:
 
 ### 7. DONATE PAGE
 
-**Title**: Support Onion.Press
+**Title**: Support OnionPress
 
 **Mission First**:
 
-Onion.Press is free, open source, and always will be. We don't collect data, show ads, or charge for features.
+OnionPress is free, open source, and always will be. We don't collect data, show ads, or charge for features.
 
 But development takes time and coffee ☕
 
@@ -309,7 +309,7 @@ But development takes time and coffee ☕
 **Ways to Donate**:
 
 **Internet Archive**:
-Onion.Press is a project of the Internet Archive.
+OnionPress is a project of the Internet Archive.
 
 [Donate to Internet Archive →]
 
@@ -325,14 +325,14 @@ Can't donate? You can still help!
 
 - ⭐ **Star** the project on GitHub
 - 🐛 **Report bugs** to make it better
-- 💬 **Share** Onion.Press with friends
+- 💬 **Share** OnionPress with friends
 - 📝 **Write** about your experience
 - 🔧 **Contribute** code or documentation
 - 🌐 **Build** something cool and share it
 
 **Thank You!**
 
-Every contribution, big or small, helps keep Onion.Press free and improving.
+Every contribution, big or small, helps keep OnionPress free and improving.
 
 Together we're bringing back the weird, wonderful, independent web.
 
@@ -346,7 +346,7 @@ Together we're bringing back the weird, wonderful, independent web.
 3. **tor-badge.png** - "Powered by Tor" badge
 4. **best-viewed.gif** - "Best viewed with Tor Browser 800x600"
 5. **under-construction.gif** - Rotating barrier (ironic/fun)
-6. **webring.png** - "Member of Onion.Press Webring"
+6. **webring.png** - "Member of OnionPress Webring"
 
 ### Feature Icons (pixel art style):
 - 🏠 House (your own site)
@@ -376,7 +376,7 @@ Together we're bringing back the weird, wonderful, independent web.
 Common questions and answers
 
 ### Showcase
-Sites built with Onion.Press (with permission)
+Sites built with OnionPress (with permission)
 
 ### Blog
 Updates, tutorials, news
@@ -391,7 +391,7 @@ Simple: "We don't collect any data. Period."
 **Every Page Footer**:
 ```
 ┌─────────────────────────────────────────────────┐
-│  Onion.Press v2.2.33                            │
+│  OnionPress v2.2.33                            │
 │  Made at Internet Archive • Open Source (MIT)   │
 │  GitHub | Download | Donate                     │
 │                                                 │

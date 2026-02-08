@@ -1,11 +1,11 @@
 <?php
 /**
- * Plugin Name: Onion.Press Hit Counter
- * Plugin URI: https://github.com/brewsterkahle/onion.press
+ * Plugin Name: OnionPress Hit Counter
+ * Plugin URI: https://github.com/brewsterkahle/onionpress
  * Description: Retro-style animated hit counter with persistent storage that survives reboots and upgrades
  * Version: 1.0.0
- * Author: Onion.Press
- * Author URI: https://github.com/brewsterkahle/onion.press
+ * Author: OnionPress
+ * Author URI: https://github.com/brewsterkahle/onionpress
  * License: AGPL-3.0
  * Text Domain: onionpress-hit-counter
  */

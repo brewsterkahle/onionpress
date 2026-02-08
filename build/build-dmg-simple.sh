@@ -1,17 +1,17 @@
 #!/bin/bash
 
-# Simple DMG build script for onion.press (without fancy customization)
+# Simple DMG build script for onionpress (without fancy customization)
 
 set -e
 
-echo "Building onion.press DMG installer (simple mode)..."
+echo "Building onionpress DMG installer (simple mode)..."
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
-APP_PATH="$PROJECT_DIR/Onion.Press.app"
-DMG_NAME="onion.press.dmg"
+APP_PATH="$PROJECT_DIR/OnionPress.app"
+DMG_NAME="onionpress.dmg"
 DMG_PATH="$BUILD_DIR/$DMG_NAME"
 
 echo "Project directory: $PROJECT_DIR"
@@ -19,7 +19,7 @@ echo "App path: $APP_PATH"
 
 # Check if app bundle exists
 if [ ! -d "$APP_PATH" ]; then
-    echo "ERROR: Onion.Press.app not found at $APP_PATH"
+    echo "ERROR: OnionPress.app not found at $APP_PATH"
     exit 1
 fi
 
@@ -302,11 +302,11 @@ ln -s /Applications "$TEMP_DIR/Applications"
 
 # Create a README for the DMG
 cat > "$TEMP_DIR/README.txt" <<EOF
-onion.press - WordPress + Tor Hidden Service
+onionpress - WordPress + Tor Hidden Service
 
 INSTALLATION:
-1. Drag Onion.Press.app to the Applications folder
-2. Open Onion.Press from Applications
+1. Drag OnionPress.app to the Applications folder
+2. Open OnionPress from Applications
 3. Follow the on-screen setup instructions
 
 REQUIREMENTS:
@@ -325,24 +325,24 @@ FIRST LAUNCH:
 - Subsequent launches are instant
 
 USAGE:
-- onion.press appears in your menu bar (OP icon)
+- onionpress appears in your menu bar (OP icon)
 - Click the icon to view your onion address
 - Use Tor Browser to access your WordPress site
 
 NOTES:
 - This app uses Apple's native virtualization framework (VZ)
-- All container data is isolated and stored in ~/.onion.press/
+- All container data is isolated and stored in ~/.onionpress/
 - No need to install Docker Desktop separately
 
 For more information and troubleshooting:
-https://github.com/brewsterkahle/onion.press
+https://github.com/brewsterkahle/onionpress
 EOF
 
 echo "Creating DMG..."
 
 # Create compressed DMG directly
 hdiutil create \
-    -volname "onion.press" \
+    -volname "onionpress" \
     -srcfolder "$TEMP_DIR" \
     -ov \
     -format UDZO \
@@ -362,6 +362,6 @@ echo "   Size: $FINAL_SIZE"
 echo ""
 echo "To test the DMG:"
 echo "   1. Open the DMG: open '$DMG_PATH'"
-echo "   2. Drag Onion.Press.app to Applications"
+echo "   2. Drag OnionPress.app to Applications"
 echo "   3. Launch from Applications folder"
 echo ""

@@ -24,14 +24,14 @@ If you want to build the retro product website from scratch:
 
 ## Deploy to a New Instance
 
-If you want to load the product website on a fresh Onion.Press installation:
+If you want to load the product website on a fresh OnionPress installation:
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/brewsterkahle/onion.press.git
-cd onion.press
+git clone https://github.com/brewsterkahle/onionpress.git
+cd onionpress
 
-# 2. Start Onion.Press (use the app or run the launcher)
+# 2. Start OnionPress (use the app or run the launcher)
 
 # 3. Wait for it to fully start (check menubar icon is purple)
 
@@ -81,7 +81,7 @@ cd product-website/scripts
 - Users and roles
 
 ✅ **Portable:**
-- Works on any Onion.Press instance
+- Works on any OnionPress instance
 - URLs automatically updated to new onion address
 
 ❌ **Not saved:**

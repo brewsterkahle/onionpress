@@ -291,7 +291,7 @@ install_docker() {
         log "ERROR: Failed to initialize container runtime"
         echo "ERROR: Failed to initialize container runtime." >&2
         echo "Check the logs for details: $LOG_FILE" >&2
-        echo "Or file an issue at: https://github.com/brewsterkahle/onion.press/issues" >&2
+        echo "Or file an issue at: https://github.com/brewsterkahle/onionpress/issues" >&2
         exit 1
     fi
 }

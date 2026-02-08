@@ -1,4 +1,4 @@
-# onion.press v2.0.0 - Session Summary
+# onionpress v2.0.0 - Session Summary
 
 **Date**: January 31, 2026
 **Status**: ✅ COMPLETE - v2.0.0 Released on GitHub
@@ -7,15 +7,15 @@
 
 ## 🎯 What We Accomplished
 
-Successfully bundled Colima container runtime into onion.press, eliminating the Docker Desktop dependency. The app is now a **single 82MB DMG** with everything included!
+Successfully bundled Colima container runtime into onionpress, eliminating the Docker Desktop dependency. The app is now a **single 82MB DMG** with everything included!
 
 ---
 
 ## 📦 Release Information
 
 - **Version**: v2.0.0
-- **Release URL**: https://github.com/brewsterkahle/onion.press/releases/tag/v2.0.0
-- **DMG Download**: https://github.com/brewsterkahle/onion.press/releases/download/v2.0.0/onion.press-v2.0.0.dmg
+- **Release URL**: https://github.com/brewsterkahle/onionpress/releases/tag/v2.0.0
+- **DMG Download**: https://github.com/brewsterkahle/onionpress/releases/download/v2.0.0/onionpress-v2.0.0.dmg
 - **DMG Size**: 82MB (compressed), 167MB (uncompressed)
 - **Commit**: `4648e51` - Release v2.0.0: Bundle Colima container runtime for single-DMG installation
 
@@ -36,23 +36,23 @@ Successfully bundled Colima container runtime into onion.press, eliminating the 
    - Bundles into `Contents/Resources/bin/`
    - Updates DMG README.txt
 
-2. **onion.press.app/Contents/MacOS/launcher**
+2. **onionpress.app/Contents/MacOS/launcher**
    - Sets up bundled binaries in PATH
    - Initializes Colima with VZ backend on first run
    - Checks macOS version requirement (13+)
    - Auto-starts Colima VM if stopped
 
-3. **onion.press.app/Contents/MacOS/onion.press**
+3. **onionpress.app/Contents/MacOS/onionpress**
    - Prefers bundled Colima over system Docker
    - Auto-starts Colima if not running
    - Removed Docker Desktop download prompts
 
-4. **onion.press.app/Contents/Resources/scripts/menubar.py**
+4. **onionpress.app/Contents/Resources/scripts/menubar.py**
    - Uses bundled Colima exclusively
    - Sets up proper environment variables
    - Simplified runtime detection
 
-5. **onion.press.app/Contents/Info.plist**
+5. **onionpress.app/Contents/Info.plist**
    - Version: 2.0.0
    - Minimum macOS: 13.0 (Ventura)
 
@@ -96,13 +96,13 @@ Successfully bundled Colima container runtime into onion.press, eliminating the 
 1. Download 50MB app DMG
 2. Separately download Docker Desktop (~600MB)
 3. Install Docker Desktop (requires admin password)
-4. Launch onion.press
+4. Launch onionpress
 5. App auto-launches Docker Desktop
 
 ### After (v2.0.0)
 1. Download single 82MB DMG (everything included!)
 2. Drag to Applications
-3. Launch onion.press
+3. Launch onionpress
 4. Automatic Colima initialization (2-3 minutes, one-time)
 5. Done!
 
@@ -113,17 +113,17 @@ Successfully bundled Colima container runtime into onion.press, eliminating the 
 ## 📂 Project Structure
 
 ```
-/Users/brewster/tmp/claude/onion.press/
+/Users/brewster/tmp/claude/onionpress/
 ├── build/
 │   ├── build-dmg-simple.sh        # Downloads & bundles binaries
 │   ├── validate-bundle.sh         # Validates bundle
-│   └── onion.press-v2.0.0.dmg     # Final DMG (82MB)
-├── onion.press.app/
+│   └── onionpress-v2.0.0.dmg     # Final DMG (82MB)
+├── onionpress.app/
 │   └── Contents/
 │       ├── Info.plist             # v2.0.0, macOS 13.0+
 │       ├── MacOS/
 │       │   ├── launcher           # Initializes Colima
-│       │   └── onion.press        # Service management
+│       │   └── onionpress        # Service management
 │       └── Resources/
 │           ├── bin/               # (gitignored, created during build)
 │           │   ├── colima         # 17MB universal
@@ -158,10 +158,10 @@ LIMA_INSTANCE="onionpress"
 ```
 
 ### Data Storage
-- App data: `~/.onion.press/`
-- Colima VM: `~/.onion.press/colima/`
+- App data: `~/.onionpress/`
+- Colima VM: `~/.onionpress/colima/`
 - Docker volumes: Standard Docker volume storage
-- Logs: `~/.onion.press/launcher.log`, `~/.onion.press/onion.press.log`
+- Logs: `~/.onionpress/launcher.log`, `~/.onionpress/onionpress.log`
 
 ---
 
@@ -170,18 +170,18 @@ LIMA_INSTANCE="onionpress"
 ### Option 1: Download from GitHub
 ```bash
 # Download the DMG
-curl -L -o ~/Desktop/onion.press-v2.0.0.dmg \
-  https://github.com/brewsterkahle/onion.press/releases/download/v2.0.0/onion.press-v2.0.0.dmg
+curl -L -o ~/Desktop/onionpress-v2.0.0.dmg \
+  https://github.com/brewsterkahle/onionpress/releases/download/v2.0.0/onionpress-v2.0.0.dmg
 
 # Mount and test
-open ~/Desktop/onion.press-v2.0.0.dmg
+open ~/Desktop/onionpress-v2.0.0.dmg
 ```
 
 ### Option 2: Build from Source
 ```bash
 # Fresh clone
-git clone https://github.com/brewsterkahle/onion.press.git
-cd onion.press
+git clone https://github.com/brewsterkahle/onionpress.git
+cd onionpress
 
 # Build
 ./build/build-dmg-simple.sh
@@ -190,7 +190,7 @@ cd onion.press
 ./build/validate-bundle.sh
 
 # Test
-open build/onion.press.dmg
+open build/onionpress.dmg
 ```
 
 ---
@@ -278,10 +278,10 @@ If you want to continue improving:
 
 ## 🔗 Quick Reference Links
 
-- **Repository**: https://github.com/brewsterkahle/onion.press
-- **Release**: https://github.com/brewsterkahle/onion.press/releases/tag/v2.0.0
-- **Download DMG**: https://github.com/brewsterkahle/onion.press/releases/download/v2.0.0/onion.press-v2.0.0.dmg
-- **Changelog**: https://github.com/brewsterkahle/onion.press/compare/v1.0.1...v2.0.0
+- **Repository**: https://github.com/brewsterkahle/onionpress
+- **Release**: https://github.com/brewsterkahle/onionpress/releases/tag/v2.0.0
+- **Download DMG**: https://github.com/brewsterkahle/onionpress/releases/download/v2.0.0/onionpress-v2.0.0.dmg
+- **Changelog**: https://github.com/brewsterkahle/onionpress/compare/v1.0.1...v2.0.0
 - **Colima Project**: https://github.com/abiosoft/colima
 - **Lima Project**: https://github.com/lima-vm/lima
 
