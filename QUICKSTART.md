@@ -56,13 +56,13 @@ This will:
 Add this to your `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-alias onion-press="/Applications/onionpress.app/Contents/MacOS/onionpress"
+alias onionpress="/Applications/onionpress.app/Contents/MacOS/onionpress"
 ```
 
 Then you can just run:
 ```bash
-onion-press start
-onion-press address
+onionpress start
+onionpress address
 ```
 
 ## Accessing Your WordPress Site
@@ -137,7 +137,7 @@ rm -rf ~/.onionpress
 
 1. Stop the service:
    ```bash
-   /Applications/onionpress.app/Contents/MacOS/onion-press-cli stop
+   /Applications/onionpress.app/Contents/MacOS/onionpress-cli stop
    ```
 
 2. Remove the app:

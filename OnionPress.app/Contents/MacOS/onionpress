@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# onion.press launcher script
+# OnionPress launcher script
 # This script manages the WordPress + Tor hidden service containers
 
 set -e
@@ -11,7 +11,7 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 DOCKER_DIR="$RESOURCES_DIR/docker"
 SCRIPTS_DIR="$RESOURCES_DIR/scripts"
-DATA_DIR="$HOME/.onion.press"
+DATA_DIR="$HOME/.onionpress"
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
@@ -60,7 +60,7 @@ export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
 
 # Log file
-LOG_FILE="$DATA_DIR/onion.press.log"
+LOG_FILE="$DATA_DIR/onionpress.log"
 
 # Function to log messages
 log() {
@@ -338,7 +338,7 @@ update_images() {
 
 # Function to start containers
 start_containers() {
-    log "Starting onion.press containers..."
+    log "Starting OnionPress containers..."
 
     cd "$DOCKER_DIR"
 
@@ -409,7 +409,7 @@ start_containers() {
 
 # Function to stop containers
 stop_containers() {
-    log "Stopping onion.press containers..."
+    log "Stopping OnionPress containers..."
     cd "$DOCKER_DIR"
     docker compose down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
@@ -508,7 +508,7 @@ main() {
 
             # Create symlink for Docker socket if needed
             # Colima forwards the socket to ~/.colima/default/docker.sock
-            # but we configure DOCKER_HOST to use ~/.onion.press/colima/default/docker.sock
+            # but we configure DOCKER_HOST to use ~/.onionpress/colima/default/docker.sock
             # Create symlink to bridge this gap
             SOCKET_DIR="$COLIMA_HOME/default"
             SOCKET_PATH="$SOCKET_DIR/docker.sock"
@@ -532,10 +532,10 @@ main() {
             # Actively poll until services are ready (replaces fixed sleep)
             wait_for_services
 
-            log "onion.press is running!"
+            log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
             log "Local access: http://localhost:8080"
-            log "onion.press is now running! Check the menu bar for status."
+            log "OnionPress is now running! Check the menu bar for status."
             ;;
 
         stop)
