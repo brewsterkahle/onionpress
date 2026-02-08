@@ -1442,9 +1442,122 @@ class OnionPressApp(rumps.App):
         else:
             rumps.alert("Settings file not found")
 
+    def generate_qr_nsimage(self, data_string, size=200):
+        """Generate a QR code as an NSImage using segno."""
+        import segno
+        from io import BytesIO
+
+        qr = segno.make(data_string)
+        buf = BytesIO()
+        # Scale to fill size; border=2 keeps it compact
+        qr.save(buf, kind='png', scale=8, border=2)
+        png_data = buf.getvalue()
+
+        ns_data = AppKit.NSData.dataWithBytes_length_(png_data, len(png_data))
+        ns_image = AppKit.NSImage.alloc().initWithData_(ns_data)
+        ns_image.setSize_(AppKit.NSMakeSize(size, size))
+        return ns_image
+
+    def show_export_dialog(self, base64_key, mnemonic):
+        """Show export dialog with QR code, base64 key, and recovery words option."""
+        while True:
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Private Key Backup")
+            alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
+
+            # Set app icon
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
+
+            # Build accessory view with QR + key text
+            container = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 420, 340))
+
+            # QR code image
+            try:
+                qr_image = self.generate_qr_nsimage(base64_key, size=200)
+                image_view = AppKit.NSImageView.alloc().initWithFrame_(
+                    AppKit.NSMakeRect(110, 140, 200, 200))
+                image_view.setImage_(qr_image)
+                image_view.setImageScaling_(AppKit.NSImageScaleProportionallyUpOrDown)
+                container.addSubview_(image_view)
+            except Exception as e:
+                self.log(f"QR generation failed: {e}")
+
+            # Label
+            label = AppKit.NSTextField.labelWithString_(
+                "Scan this QR code or copy the key below:")
+            label.setFrame_(AppKit.NSMakeRect(10, 110, 400, 20))
+            label.setAlignment_(AppKit.NSTextAlignmentCenter)
+            container.addSubview_(label)
+
+            # Base64 key text field (selectable, monospaced, read-only)
+            text_field = AppKit.NSTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(10, 30, 400, 72))
+            text_field.setStringValue_(base64_key)
+            text_field.setEditable_(False)
+            text_field.setSelectable_(True)
+            text_field.setBordered_(True)
+            text_field.setBezeled_(True)
+            text_field.setFont_(
+                AppKit.NSFont.monospacedSystemFontOfSize_weight_(11, AppKit.NSFontWeightRegular))
+            text_field.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
+            text_field.setUsesSingleLineMode_(False)
+            container.addSubview_(text_field)
+
+            # Security warning
+            warning = AppKit.NSTextField.labelWithString_(
+                "DO NOT share this key with anyone.")
+            warning.setFrame_(AppKit.NSMakeRect(10, 5, 400, 18))
+            warning.setAlignment_(AppKit.NSTextAlignmentCenter)
+            warning.setTextColor_(AppKit.NSColor.systemRedColor())
+            warning.setFont_(AppKit.NSFont.boldSystemFontOfSize_(12))
+            container.addSubview_(warning)
+
+            alert.setAccessoryView_(container)
+
+            # Buttons: Done (default), Copy Key, Show Recovery Words
+            alert.addButtonWithTitle_("Done").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Copy Key")
+            alert.addButtonWithTitle_("Show Recovery Words")
+
+            response = alert.runModal()
+            button_index = response - 1000
+
+            if button_index == 1:  # Copy Key
+                subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
+                continue  # re-show dialog
+            elif button_index == 2:  # Show Recovery Words
+                # Format mnemonic for display
+                words = mnemonic.split()
+                word_count = len([w for w in words if w != '|'])
+                formatted_lines = []
+                for i in range(0, len(words), 6):
+                    formatted_lines.append(' '.join(words[i:i+6]))
+                formatted_mnemonic = '\n'.join(formatted_lines)
+
+                bip_alert = AppKit.NSAlert.alloc().init()
+                bip_alert.setMessageText_("Recovery Words (BIP39)")
+                bip_alert.setInformativeText_(
+                    f"These {word_count} words are an alternative backup of your key.\n\n"
+                    f"{formatted_mnemonic}\n\n"
+                    "Store them in a safe place.")
+                bip_alert.addButtonWithTitle_("Back")
+                if os.path.exists(icon_path):
+                    bip_icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                    if bip_icon:
+                        bip_alert.setIcon_(bip_icon)
+                bip_alert.runModal()
+                continue  # re-show main dialog
+            else:  # Done
+                break
+
     @rumps.clicked("Export Private Key...")
     def export_key(self, _):
-        """Export Tor private key as BIP39 mnemonic words with authentication"""
+        """Export Tor private key as base64 with QR code and BIP39 recovery words"""
         if not self.is_running:
             rumps.alert(
                 title="Service Not Running",
@@ -1452,20 +1565,20 @@ class OnionPressApp(rumps.App):
             )
             return
 
-        # Show security warning dialog first (native NSAlert - no permissions needed)
+        # Show security warning dialog first
         button_index = self.show_native_alert(
             title="Export Private Key",
-            message="⚠️ SECURITY WARNING ⚠️\n\nYou are about to export your private key. This key controls your onion address and website identity.\n\nANYONE with these backup words can:\n• Impersonate your onion address\n• Take over your site identity\n• Restore your address on another computer\n\nOnly export if you understand the security implications.\n\nContinue with export?",
+            message="SECURITY WARNING\n\nYou are about to export your private key. This key controls your onion address and website identity.\n\nANYONE with this key can:\n\u2022 Impersonate your onion address\n\u2022 Take over your site identity\n\u2022 Restore your address on another computer\n\nOnly export if you understand the security implications.\n\nContinue with export?",
             buttons=["Cancel", "I Understand - Continue"],
             default_button=0,
             cancel_button=0,
             style="warning"
         )
 
-        if button_index != 1:  # User didn't click "I Understand - Continue"
+        if button_index != 1:
             return
 
-        # Second confirmation for extra safety (no admin privileges needed)
+        # Second confirmation
         button_index = self.show_native_alert(
             title="Final Confirmation",
             message="This is your final confirmation.\n\nAre you absolutely sure you want to export your private key?",
@@ -1475,44 +1588,22 @@ class OnionPressApp(rumps.App):
             style="warning"
         )
 
-        if button_index != 1:  # User didn't click "Yes, Export Key"
+        if button_index != 1:
             return
 
         try:
-            # Get the mnemonic
-            mnemonic = key_manager.export_key_as_mnemonic()
+            # Extract key once, generate both formats
+            key_bytes = key_manager.extract_private_key()
+            base64_key = key_manager.bytes_to_base64_key(key_bytes)
+            mnemonic = key_manager.bytes_to_mnemonic(key_bytes)
 
-            # Count actual words (excluding separator)
-            word_count = len([w for w in mnemonic.split() if w != '|'])
+            # Copy base64 key to clipboard
+            subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
 
-            # Format for display with line breaks every 6 words
-            words = mnemonic.split()
-            formatted_lines = []
-            for i in range(0, len(words), 6):
-                formatted_lines.append(' '.join(words[i:i+6]))
-            formatted_mnemonic = '\n'.join(formatted_lines)
+            # Show the export dialog with QR + key + recovery words
+            self.show_export_dialog(base64_key, mnemonic)
 
-            # Show the mnemonic with warning
-            message = f"""⚠️ IMPORTANT: Keep these words safe and private!
-
-These {word_count} words represent your private key and onion address. Anyone with these words can restore your exact onion address and impersonate your site.
-
-{formatted_mnemonic}
-
-The words have been copied to your clipboard.
-
-Store them in a safe place - you can use them to restore your onion address on a new installation.
-
-DO NOT share these words with anyone."""
-
-            subprocess.run(["pbcopy"], input=mnemonic.encode(), check=True)
-
-            rumps.alert(
-                title="Private Key Backup",
-                message=message
-            )
-
-            # Clear clipboard after user dismisses dialog (security: don't leave mnemonic in clipboard)
+            # Clear clipboard after dialog dismissed
             subprocess.run(["pbcopy"], input=b"", check=False)
 
         except Exception as e:
@@ -1523,11 +1614,11 @@ DO NOT share these words with anyone."""
 
     @rumps.clicked("Import Private Key...")
     def import_key(self, _):
-        """Import Tor private key from BIP39 mnemonic words"""
+        """Import Tor private key from base64 key or BIP39 mnemonic words"""
         # Warning dialog
         response = rumps.alert(
             title="Import Private Key",
-            message="⚠️ WARNING: Importing a private key will replace your current onion address!\n\nYour WordPress site will be accessible at a different .onion address after import.\n\nMake sure you have backed up your current key first.\n\nContinue?",
+            message="WARNING: Importing a private key will replace your current onion address!\n\nYour WordPress site will be accessible at a different .onion address after import.\n\nMake sure you have backed up your current key first.\n\nContinue?",
             ok="Continue",
             cancel="Cancel"
         )
@@ -1535,10 +1626,10 @@ DO NOT share these words with anyone."""
         if response != 1:  # Cancel clicked
             return
 
-        # Get mnemonic from user
+        # Get key from user (accepts either format)
         window = rumps.Window(
             title="Import Private Key",
-            message="Paste your BIP39 mnemonic words below (48 words, two 24-word mnemonics separated by |):",
+            message="Paste your key below.\n\nAccepted formats:\n\u2022 Base64 key (onionpress:2:XXXX-XXXX-...)\n\u2022 BIP39 recovery words (48 words separated by |)",
             default_text="",
             ok="Import",
             cancel="Cancel",
@@ -1550,25 +1641,18 @@ DO NOT share these words with anyone."""
         if not response.clicked:  # Cancel
             return
 
-        mnemonic = response.text.strip()
+        key_text = response.text.strip()
 
-        if not mnemonic:
-            rumps.alert("No mnemonic provided")
+        if not key_text:
+            rumps.alert("No key provided")
             return
 
-        # Validate word count (48 words + | separator = 49 tokens)
-        word_count = len([w for w in mnemonic.split() if w != '|'])
-        if word_count != 48:
-            rumps.alert(
-                title="Invalid Mnemonic",
-                message=f"Expected 48 words (two 24-word mnemonics separated by |), got {word_count} words.\n\nPlease check your mnemonic and try again."
-            )
-            return
-
-        # Try to import
+        # Try to import (auto-detects format)
         try:
-            # Convert mnemonic to key bytes
-            key_bytes = key_manager.import_key_from_mnemonic(mnemonic)
+            key_bytes, coordinator = key_manager.import_key(key_text)
+
+            if coordinator:
+                self.log(f"Key imported with coordinator: {coordinator}")
 
             # Stop the service first
             subprocess.run([self.launcher_script, "stop"], capture_output=True)

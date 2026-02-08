@@ -1,3 +1,4 @@
 rumps>=0.4.0
 pyobjc>=9.0
 mnemonic>=0.20
+segno>=1.5.0

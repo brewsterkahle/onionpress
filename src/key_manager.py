@@ -4,6 +4,7 @@ Key Management for onionpress
 Converts Tor v3 Ed25519 private keys to/from BIP39 mnemonic words with checksums
 """
 
+import base64
 import subprocess
 
 try:
@@ -74,6 +75,84 @@ def mnemonic_to_bytes(mnemonic):
         raise ValueError(f"Invalid key size after decoding: {len(key_bytes)} bytes (expected 64)")
 
     return key_bytes
+
+def bytes_to_base64_key(key_bytes):
+    """
+    Encode 64-byte key to compact base64 transport format.
+    Format: onionpress:2:XXXX-XXXX-...-XXXX
+    Hyphens every 4 chars for readability.
+    """
+    if len(key_bytes) != 64:
+        raise ValueError(f"Expected 64 bytes, got {len(key_bytes)}")
+
+    b64 = base64.b64encode(key_bytes).decode('ascii')
+    # Insert hyphens every 4 characters
+    chunked = '-'.join(b64[i:i+4] for i in range(0, len(b64), 4))
+    return f"onionpress:2:{chunked}"
+
+def base64_key_to_bytes(key_string):
+    """
+    Decode base64 transport format back to 64-byte key.
+    Accepts: onionpress:2:XXXX-XXXX-...[-XXXX][@coordinator.onion]
+    Returns: (key_bytes, coordinator_or_None)
+    """
+    key_string = key_string.strip()
+
+    if not key_string.startswith('onionpress:'):
+        raise ValueError("Invalid format: must start with 'onionpress:'")
+
+    # Strip prefix
+    rest = key_string[len('onionpress:'):]
+
+    # Parse version
+    if not rest.startswith('2:'):
+        version = rest.split(':')[0]
+        raise ValueError(f"Unsupported key format version '{version}' (expected '2')")
+
+    payload = rest[2:]  # skip '2:'
+
+    # Check for optional @coordinator suffix
+    coordinator = None
+    if '@' in payload:
+        payload, coordinator = payload.rsplit('@', 1)
+        coordinator = coordinator.strip()
+        if not coordinator:
+            coordinator = None
+
+    # Strip hyphens and decode
+    b64 = payload.replace('-', '')
+
+    try:
+        key_bytes = base64.b64decode(b64)
+    except Exception:
+        raise ValueError("Invalid base64 data in key string")
+
+    if len(key_bytes) != 64:
+        raise ValueError(f"Invalid key size after decoding: {len(key_bytes)} bytes (expected 64)")
+
+    return (key_bytes, coordinator)
+
+def import_key(text):
+    """
+    Auto-detect key format and import.
+    Accepts either base64 (onionpress:2:...) or BIP39 mnemonic (48 words with |).
+    Returns: (key_bytes, coordinator_or_None)
+    """
+    text = text.strip()
+
+    if text.startswith('onionpress:'):
+        key_bytes, coordinator = base64_key_to_bytes(text)
+    else:
+        key_bytes = import_key_from_mnemonic(text)
+        coordinator = None
+
+    # Sanity checks
+    if key_bytes == b'\x00' * 64:
+        raise ValueError("Invalid key: all zeros")
+    if key_bytes == b'\xFF' * 64:
+        raise ValueError("Invalid key: all ones")
+
+    return (key_bytes, coordinator)
 
 def extract_private_key():
     """
