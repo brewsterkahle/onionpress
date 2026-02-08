@@ -203,7 +203,7 @@ For testing purposes, your WordPress site is also available at:
 onionpress uses:
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
-- **Tor**: Hidden service container that exposes WordPress as an onion service
+- **Tor**: Onion service container that exposes WordPress as a .onion site
 - **mkp224o**: Vanity onion address generator (generates addresses with custom prefixes)
 - **Colima**: Bundled container runtime using Apple's virtualization framework
 - **Lima**: VM management layer (bundled)

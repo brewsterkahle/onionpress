@@ -35,7 +35,7 @@ case "${1:-help}" in
         ;;
     *)
         cat <<EOF
-OnionPress - WordPress + Tor Hidden Service
+OnionPress - WordPress + Tor Onion Service
 
 Usage: onionpress-cli [command]
 

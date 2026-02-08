@@ -172,7 +172,7 @@ docker compose exec tor cat /var/lib/tor/hidden_service/wordpress/hostname
 ### 4. Docker Compose Configuration (`Resources/docker/docker-compose.yml`)
 
 Three services:
-- **tor**: Hidden service container (exposes WordPress)
+- **tor**: Onion service container (exposes WordPress)
 - **wordpress**: WordPress container
 - **db**: MariaDB database
 

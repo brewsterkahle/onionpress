@@ -70,7 +70,7 @@ This allows the same export to work on any OnionPress instance with different on
 
 - WordPress core files (these are in the Docker image)
 - Docker containers or configuration
-- Tor hidden service keys (each instance generates its own)
+- Tor onion service keys (each instance generates its own)
 
 ## Workflow
 

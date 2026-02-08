@@ -757,7 +757,7 @@ class OnionPressApp(rumps.App):
 
             if result.returncode != 0:
                 if log_result:
-                    self.log(f"✗ Hidden service hostname file not found")
+                    self.log(f"✗ Onion service hostname file not found")
                 return False
 
             hostname = result.stdout.strip()
@@ -1701,7 +1701,7 @@ DO NOT share these words with anyone."""
                 try:
                     alert = AppKit.NSAlert.alloc().init()
                     alert.setMessageText_("OnionPress Setup")
-                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor hidden service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
+                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
                     alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
 
                     btn_dismiss = alert.addButtonWithTitle_("Dismiss")

@@ -125,7 +125,7 @@ Border:     #000000 3px solid
 
 3. **First Launch Magic**
    - OnionPress downloads WordPress
-   - Sets up Tor hidden service
+   - Sets up Tor onion service
    - Generates your .onion address
    - Takes ~2 minutes
 
@@ -142,7 +142,7 @@ Border:     #000000 3px solid
 **Under the Hood** (for curious folks):
 - Uses Colima (lightweight containers)
 - WordPress 6.7 + MariaDB database
-- Tor hidden service (v3 onions)
+- Tor onion service (v3 onions)
 - All runs locally on your Mac
 - No cloud, no servers, no data leaves your machine
 
@@ -228,7 +228,7 @@ WordPress powers 40% of the web. It's:
 
 **The Story**:
 
-OnionPress was created at the Internet Archive as an experiment: What if everyone could run their own Tor hidden service as easily as installing an app?
+OnionPress was created at the Internet Archive as an experiment: What if everyone could run their own Tor onion service as easily as installing an app?
 
 The dark web shouldn't require technical expertise. Publishing online shouldn't require trusting a corporation with your data.
 

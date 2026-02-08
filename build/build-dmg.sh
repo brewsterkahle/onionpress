@@ -76,7 +76,7 @@ ln -s /Applications "$TEMP_DIR/Applications"
 
 # Create a README for the DMG
 cat > "$TEMP_DIR/README.txt" <<EOF
-onionpress - WordPress + Tor Hidden Service
+onionpress - WordPress + Tor Onion Service
 
 INSTALLATION:
 1. Drag onionpress.app to the Applications folder
