@@ -170,6 +170,7 @@ class OnionPressApp(rumps.App):
         self.last_status_logged = None  # Track last logged status to avoid spam
         self.auto_opened_browser = False  # Track if we've auto-opened browser this session
         self.setup_dialog_showing = False  # Track if setup dialog is currently showing
+        self.setup_alert = None  # Reference to NSAlert for programmatic dismissal
         self.monitoring_tor_install = False  # Track if we're monitoring for Tor Browser installation
         self.caffeinate_process = None  # Process handle for caffeinate to prevent sleep
 
@@ -1699,33 +1700,55 @@ DO NOT share these words with anyone."""
             # Dismiss any existing dialog first
             self.dismiss_setup_dialog()
 
-            # Show native dialog in background thread so it doesn't block
-            def show_and_monitor():
+            # Create and show dialog on main thread, storing reference for programmatic dismissal
+            def create_and_show():
                 try:
-                    # Show native alert dialog (no osascript = no permission prompts)
-                    button_index = self.show_native_alert(
-                        title="OnionPress Setup",
-                        message="Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor hidden service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.",
-                        buttons=["Dismiss", "Cancel Setup"],
-                        default_button=0,
-                        cancel_button=1,
-                        style="informational"
-                    )
+                    alert = AppKit.NSAlert.alloc().init()
+                    alert.setMessageText_("OnionPress Setup")
+                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor hidden service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
+                    alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
 
-                    # If user clicked Cancel Setup (button index 1)
-                    if button_index == 1:
-                        self.log("User cancelled setup - stopping services")
-                        subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
-                        self.setup_dialog_showing = False
-                    elif button_index == 0:
-                        self.log("User dismissed setup dialog")
-                        self.setup_dialog_showing = False
+                    btn_dismiss = alert.addButtonWithTitle_("Dismiss")
+                    btn_dismiss.setKeyEquivalent_("\r")
+                    btn_cancel = alert.addButtonWithTitle_("Cancel Setup")
+                    btn_cancel.setKeyEquivalent_("\x1b")
+
+                    # Set app icon
+                    icon_path = os.path.join(self.resources_dir, "app-icon.png")
+                    if os.path.exists(icon_path):
+                        icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                        if icon:
+                            alert.setIcon_(icon)
+
+                    # Store reference so dismiss_setup_dialog can close it
+                    self.setup_alert = alert
+
+                    # runModal blocks until button click or abortModal
+                    response = alert.runModal()
+
+                    # Close the alert window
+                    alert.window().close()
+                    self.setup_alert = None
+
+                    # NSModalResponseAbort = -1001 (from abortModal call)
+                    if response == AppKit.NSModalResponseAbort:
+                        self.log("Setup dialog auto-dismissed (service ready)")
+                    else:
+                        button_index = response - 1000
+                        if button_index == 1:
+                            self.log("User cancelled setup - stopping services")
+                            subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+                        elif button_index == 0:
+                            self.log("User dismissed setup dialog")
+
+                    self.setup_dialog_showing = False
                 except Exception as e:
                     self.log(f"Error in setup dialog: {e}")
                     self.setup_dialog_showing = False
+                    self.setup_alert = None
 
             self.setup_dialog_showing = True
-            threading.Thread(target=show_and_monitor, daemon=True).start()
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(create_and_show)
             self.log("Setup dialog shown (native NSAlert)")
         except Exception as e:
             self.log(f"Error showing setup dialog: {e}")
@@ -1737,8 +1760,15 @@ DO NOT share these words with anyone."""
         if self.setup_dialog_showing:
             self.setup_dialog_showing = False
             self.log("Setup dialog marked for dismissal")
-            # Note: Native NSAlert dialogs close when user clicks a button
-            # We can't programmatically force-close them, but they auto-close on completion
+
+            # stopModal() and abortModal() can be called from any thread
+            # to interrupt the runModal() loop on the main thread
+            try:
+                if self.setup_alert:
+                    AppKit.NSApp.abortModal()
+                    self.log("Setup dialog dismissed programmatically")
+            except Exception as e:
+                self.log(f"Error dismissing setup dialog: {e}")
 
     def monitor_image_downloads(self):
         """Monitor Docker image downloads and show progress notifications"""
