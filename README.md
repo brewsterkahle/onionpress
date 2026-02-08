@@ -6,7 +6,7 @@
 
 # OnionPress
 
-**Easy and free self-hosted web server for macOS**
+**Run your own website from your Mac. Just Works. Free, forever.**
 
 onionpress is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network.
 

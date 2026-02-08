@@ -1896,7 +1896,7 @@ class OnionPressApp(rumps.App):
         """Show about dialog"""
         about_text = f"""OnionPress v{self.version}
 
-Easy and free self-hosted web server for macOS
+Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
