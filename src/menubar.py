@@ -1443,20 +1443,45 @@ class OnionPressApp(rumps.App):
             rumps.alert("Settings file not found")
 
     def generate_qr_nsimage(self, data_string, size=200):
-        """Generate a QR code as an NSImage using segno."""
+        """Generate a QR code as an NSImage with OnionPress icon in the center."""
         import segno
         from io import BytesIO
 
-        qr = segno.make(data_string)
+        # Use highest error correction so the center logo doesn't break scanning
+        qr = segno.make(data_string, error='H')
         buf = BytesIO()
-        # Scale to fill size; border=2 keeps it compact
         qr.save(buf, kind='png', scale=8, border=2)
         png_data = buf.getvalue()
 
         ns_data = AppKit.NSData.dataWithBytes_length_(png_data, len(png_data))
-        ns_image = AppKit.NSImage.alloc().initWithData_(ns_data)
-        ns_image.setSize_(AppKit.NSMakeSize(size, size))
-        return ns_image
+        qr_image = AppKit.NSImage.alloc().initWithData_(ns_data)
+        qr_image.setSize_(AppKit.NSMakeSize(size, size))
+
+        # Overlay app icon in the center
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        if os.path.exists(icon_path):
+            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+            if icon:
+                icon_size = size * 0.22  # ~22% of QR size fits within error correction
+                icon_rect = AppKit.NSMakeRect(
+                    (size - icon_size) / 2, (size - icon_size) / 2,
+                    icon_size, icon_size)
+                qr_image.lockFocus()
+                # Draw white rounded background behind icon for contrast
+                white_pad = icon_size * 1.15
+                white_rect = AppKit.NSMakeRect(
+                    (size - white_pad) / 2, (size - white_pad) / 2,
+                    white_pad, white_pad)
+                path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                    white_rect, white_pad * 0.18, white_pad * 0.18)
+                AppKit.NSColor.whiteColor().setFill()
+                path.fill()
+                icon.drawInRect_fromRect_operation_fraction_(
+                    icon_rect, AppKit.NSZeroRect,
+                    AppKit.NSCompositingOperationSourceOver, 1.0)
+                qr_image.unlockFocus()
+
+        return qr_image
 
     def show_export_dialog(self, base64_key, mnemonic):
         """Show export dialog with QR code, base64 key, and recovery words option."""
