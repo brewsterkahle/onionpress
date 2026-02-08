@@ -103,15 +103,11 @@ class OnionPressApp(rumps.App):
 
         # Do slow I/O operations in background after icon appears
         def background_init():
-            # Rotate log file on startup to avoid confusion with old sessions
-            if os.path.exists(self.log_file):
-                # Keep only the last session as backup
-                backup_log = os.path.join(self.app_support, "onionpress.log.prev")
-                try:
-                    import shutil
-                    shutil.move(self.log_file, backup_log)
-                except OSError:
-                    pass  # If rotation fails, just append
+            # Append to existing log file (continuous log across sessions)
+            with open(self.log_file, 'a') as f:
+                f.write(f"\n{'=' * 60}\n")
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] === New session starting ===\n")
+                f.write(f"{'=' * 60}\n")
 
             # Debug logging
             with open(self.log_file, 'a') as f:
