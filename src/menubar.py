@@ -90,7 +90,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.51"
+        self.version = "2.2.52"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1965,7 +1965,7 @@ GitHub: github.com/brewsterkahle/onionpress"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.51 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.52 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
