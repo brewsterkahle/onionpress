@@ -1,5 +1,5 @@
 #!/bin/bash
-# Export Onion.Press product website to git repository
+# Export OnionPress product website to git repository
 # This captures the complete WordPress site for version control
 
 set -e
@@ -10,16 +10,16 @@ CONTENT_DIR="$PRODUCT_WEBSITE_DIR/content"
 DATABASE_DIR="$PRODUCT_WEBSITE_DIR/database"
 
 # Docker environment
-export DOCKER_HOST="unix://$HOME/.onion.press/colima/default/docker.sock"
-export DOCKER_CONFIG="$HOME/.onion.press/docker-config"
+export DOCKER_HOST="unix://$HOME/.onionpress/colima/default/docker.sock"
+export DOCKER_CONFIG="$HOME/.onionpress/docker-config"
 
-echo "=== Exporting Onion.Press Product Website ==="
+echo "=== Exporting OnionPress Product Website ==="
 echo
 
 # Check if WordPress is running
 if ! docker ps --format '{{.Names}}' | grep -q '^onionpress-wordpress$'; then
     echo "Error: WordPress container is not running"
-    echo "Please start Onion.Press first"
+    echo "Please start OnionPress first"
     exit 1
 fi
 

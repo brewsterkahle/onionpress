@@ -11,17 +11,17 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Onion.Press</string>
+    <string>OnionPress</string>
     <key>CFBundleDisplayName</key>
-    <string>Onion.Press</string>
+    <string>OnionPress</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.2.49</string>
+    <string>2.2.50</string>
     <key>CFBundleVersion</key>
-    <string>62</string>
+    <string>63</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>

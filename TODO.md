@@ -6,7 +6,7 @@
 
 - **Support replication and service backup** - Enable users to replicate their WordPress content and backup their onion service. Potential approaches:
   - Integration with Wayback Machine for content archiving
-  - Client-to-onion.press server-to-server communication/coordination
+  - Client-to-onionpress server-to-server communication/coordination
   - Distributed backup across multiple onion services
   - Automatic snapshots to Internet Archive
   - Cross-service replication protocol
@@ -41,8 +41,8 @@
   - Crawl homepages at session start to test which are active
   - Rotate through active sites (need graphic design)
   - Auto-discover other homepage URLs to expand the ring
-  - Maintain local state of webring members so that it is not a hosted service that someone else can see rings, also maintain the availability status of the other members so your site only shows Onion.Press services that are up
-  - **Webring reliability**: When adding an Onion.Press to your webring, support adding keys to replicate their content and serve it on their address for robustness (backup hosting)
+  - Maintain local state of webring members so that it is not a hosted service that someone else can see rings, also maintain the availability status of the other members so your site only shows OnionPress services that are up
+  - **Webring reliability**: When adding an OnionPress to your webring, support adding keys to replicate their content and serve it on their address for robustness (backup hosting)
 - **Animated GIF from gifcities.org** - Add "hello?hello?" animated GIF for retro aesthetic
 
 ## Technical Improvements

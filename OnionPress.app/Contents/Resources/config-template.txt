@@ -1,5 +1,5 @@
-# onion.press Configuration
-# This file is automatically copied to ~/.onion.press/config on first run
+# onionpress Configuration
+# This file is automatically copied to ~/.onionpress/config on first run
 
 # Vanity Onion Address Prefix
 # Default: "op2" (generates addresses like op2xxxxxxxxxxxxx.onion)
@@ -14,11 +14,11 @@
 # - 6+ chars: hours to days
 #
 # To use a custom prefix:
-# 1. Stop onion.press
-# 2. Edit this file: ~/.onion.press/config
-# 3. Delete ~/.onion.press/vanity-keys directory
+# 1. Stop onionpress
+# 2. Edit this file: ~/.onionpress/config
+# 3. Delete ~/.onionpress/vanity-keys directory
 # 4. Delete the tor-keys volume: docker volume rm onionpress-tor-keys
-# 5. Restart onion.press (will generate new vanity address)
+# 5. Restart onionpress (will generate new vanity address)
 #
 VANITY_PREFIX=op2
 
@@ -39,7 +39,7 @@ INSTALL_IA_PLUGIN=yes
 # Update Docker Images on Launch
 # Default: "no" (manual updates only via Check for Updates menu)
 #
-# When enabled, onion.press will automatically check for and download updated
+# When enabled, onionpress will automatically check for and download updated
 # WordPress, MariaDB, and Tor container images when the app launches.
 # This ensures you have the latest security patches and features.
 #
@@ -51,7 +51,7 @@ UPDATE_ON_LAUNCH=no
 # Launch on Login
 # Default: "no" (manual launch required)
 #
-# When enabled, Onion.Press will automatically start when you log in to macOS.
+# When enabled, OnionPress will automatically start when you log in to macOS.
 # The app will appear in your menu bar and your WordPress site will start automatically.
 #
 # Set to "yes" to launch on login.
@@ -62,7 +62,7 @@ LAUNCH_ON_LOGIN=no
 # Prevent Mac Sleep While Running (AC Power Only)
 # Default: "yes" (keeps Mac awake when plugged in)
 #
-# When enabled, Onion.Press will prevent your Mac from sleeping while the
+# When enabled, OnionPress will prevent your Mac from sleeping while the
 # WordPress + Tor service is running AND you're plugged into AC power.
 # This ensures your .onion site remains accessible 24/7 when connected to power.
 #

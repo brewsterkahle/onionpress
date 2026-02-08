@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-onion.press Menu Bar Application
+onionpress Menu Bar Application
 Provides a simple menu bar interface to control the WordPress + Tor onion service
 """
 
@@ -33,7 +33,7 @@ def parse_version(version_str):
 class OnionPressApp(rumps.App):
     def __init__(self):
         # Get paths first (fast - no I/O)
-        self.app_support = os.path.expanduser("~/.onion.press")
+        self.app_support = os.path.expanduser("~/.onionpress")
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
 
         # When running as py2app bundle, __file__ is in Contents/Resources/
@@ -41,8 +41,8 @@ class OnionPressApp(rumps.App):
         if getattr(sys, 'frozen', False):
             # Running as py2app bundle
             # __file__ is like: .../MenubarApp/Contents/Resources/menubar.py (in zip)
-            # MenubarApp is nested inside Onion.Press.app
-            # Structure: Onion.Press.app/Contents/Resources/MenubarApp/Contents/Resources/menubar.py
+            # MenubarApp is nested inside OnionPress.app
+            # Structure: OnionPress.app/Contents/Resources/MenubarApp/Contents/Resources/menubar.py
             menubar_resources_dir = os.path.join(os.environ.get('RESOURCEPATH', ''))
             if not menubar_resources_dir:
                 # Fallback: get from bundle structure
@@ -52,15 +52,15 @@ class OnionPressApp(rumps.App):
             # Keep menubar resources for icons
             self.resources_dir = menubar_resources_dir
 
-            # Navigate to parent Onion.Press.app bundle for launcher script and bin dir
-            # MenubarApp/Contents/Resources -> MenubarApp/Contents -> MenubarApp -> Onion.Press.app/Resources -> Onion.Press.app/Contents
+            # Navigate to parent OnionPress.app bundle for launcher script and bin dir
+            # MenubarApp/Contents/Resources -> MenubarApp/Contents -> MenubarApp -> OnionPress.app/Resources -> OnionPress.app/Contents
             menubar_contents = os.path.dirname(menubar_resources_dir)  # MenubarApp/Contents
             menubar_app = os.path.dirname(menubar_contents)  # MenubarApp
-            parent_resources = os.path.dirname(menubar_app)  # Onion.Press.app/Contents/Resources
+            parent_resources = os.path.dirname(menubar_app)  # OnionPress.app/Contents/Resources
             self.parent_resources_dir = parent_resources  # Store for accessing docker/ and other parent resources
-            self.contents_dir = os.path.dirname(parent_resources)  # Onion.Press.app/Contents
+            self.contents_dir = os.path.dirname(parent_resources)  # OnionPress.app/Contents
             self.macos_dir = os.path.join(self.contents_dir, "MacOS")
-            self.launcher_script = os.path.join(self.macos_dir, "onion.press")
+            self.launcher_script = os.path.join(self.macos_dir, "onionpress")
             self.bin_dir = os.path.join(parent_resources, "bin")
         else:
             # Running as regular Python script
@@ -68,11 +68,11 @@ class OnionPressApp(rumps.App):
             self.parent_resources_dir = self.resources_dir  # Same as resources_dir when not bundled
             self.contents_dir = os.path.dirname(self.resources_dir)
             self.macos_dir = os.path.join(self.contents_dir, "MacOS")
-            self.launcher_script = os.path.join(self.macos_dir, "onion.press")
+            self.launcher_script = os.path.join(self.macos_dir, "onionpress")
             self.bin_dir = os.path.join(self.resources_dir, "bin")
         self.colima_home = os.path.join(self.app_support, "colima")
         self.info_plist = os.path.join(self.contents_dir, "Info.plist")
-        self.log_file = os.path.join(self.app_support, "onion.press.log")
+        self.log_file = os.path.join(self.app_support, "onionpress.log")
 
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None)
@@ -90,7 +90,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.48"
+        self.version = "2.2.50"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -106,7 +106,7 @@ class OnionPressApp(rumps.App):
             # Rotate log file on startup to avoid confusion with old sessions
             if os.path.exists(self.log_file):
                 # Keep only the last session as backup
-                backup_log = os.path.join(self.app_support, "onion.press.log.prev")
+                backup_log = os.path.join(self.app_support, "onionpress.log.prev")
                 try:
                     import shutil
                     shutil.move(self.log_file, backup_log)
@@ -195,7 +195,7 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("Import Private Key...", callback=self.import_key),
             rumps.separator,
             rumps.MenuItem("Check for Updates...", callback=self.check_for_updates),
-            rumps.MenuItem("About Onion.Press", callback=self.show_about),
+            rumps.MenuItem("About OnionPress", callback=self.show_about),
             rumps.MenuItem("Uninstall...", callback=self.uninstall),
             rumps.separator,
             rumps.MenuItem("Quit", callback=self.quit_app),
@@ -221,7 +221,7 @@ class OnionPressApp(rumps.App):
                     AppKit.NSBackingStoreBuffered,
                     False
                 )
-                window.setTitle_("Onion.Press")
+                window.setTitle_("OnionPress")
                 window.setLevel_(AppKit.NSFloatingWindowLevel)
                 window.center()
                 window.setReleasedWhenClosed_(False)  # Keep window object alive
@@ -232,7 +232,7 @@ class OnionPressApp(rumps.App):
 
                 # Add "Launching..." text (no I/O)
                 text_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(60, 120, 200, 30))
-                text_field.setStringValue_("Launching Onion.Press...")
+                text_field.setStringValue_("Launching OnionPress...")
                 text_field.setBezeled_(False)
                 text_field.setDrawsBackground_(False)
                 text_field.setEditable_(False)
@@ -328,7 +328,7 @@ class OnionPressApp(rumps.App):
         self.dismiss_launch_splash()
 
     def log(self, message):
-        """Write log message to onion.press.log file"""
+        """Write log message to onionpress.log file"""
         try:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             log_message = f"[{timestamp}] {message}\n"
@@ -459,7 +459,7 @@ class OnionPressApp(rumps.App):
     def log_version_info(self):
         """Log version information for all components at startup"""
         self.log("=" * 60)
-        self.log(f"Onion.Press v{self.version} starting up")
+        self.log(f"OnionPress v{self.version} starting up")
         self.startup_time = time.time()
         self.log("=" * 60)
 
@@ -642,7 +642,7 @@ class OnionPressApp(rumps.App):
             # Modern macOS doesn't allow programmatic login item addition without prompts
             rumps.alert(
                 title="Enable Launch on Login",
-                message="Please add Onion.Press to Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Click the + button\n4. Select Onion.Press.app from Applications\n\nNote: You can also disable this setting in the config file.",
+                message="Please add OnionPress to Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Click the + button\n4. Select OnionPress.app from Applications\n\nNote: You can also disable this setting in the config file.",
                 ok="Open System Settings"
             )
 
@@ -661,7 +661,7 @@ class OnionPressApp(rumps.App):
             # Open System Settings to Login Items
             rumps.alert(
                 title="Disable Launch on Login",
-                message="Please remove Onion.Press from Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Select Onion.Press\n4. Click the - button to remove it",
+                message="Please remove OnionPress from Login Items:\n\n1. System Settings will open\n2. Go to General → Login Items\n3. Select OnionPress\n4. Click the - button to remove it",
                 ok="Open System Settings"
             )
 
@@ -1020,7 +1020,7 @@ class OnionPressApp(rumps.App):
                     address = self.onion_address
                     try:
                         button_index = self.show_native_alert(
-                            title="Onion.Press",
+                            title="OnionPress",
                             message=f"Tor Browser is now installed!\n\nWould you like to open your site?\n\n{address}",
                             buttons=["Open Site", "Later"],
                             default_button=0,
@@ -1082,7 +1082,7 @@ class OnionPressApp(rumps.App):
                     address = self.onion_address
                     try:
                         button_index = self.show_native_alert(
-                            title="Onion.Press",
+                            title="OnionPress",
                             message=f"Brave Browser is now installed!\n\nWould you like to open your site?\n\n{address}",
                             buttons=["Open Site", "Later"],
                             default_button=0,
@@ -1181,7 +1181,7 @@ class OnionPressApp(rumps.App):
                 address = self.onion_address
                 try:
                     button_index = self.show_native_alert(
-                        title="Onion.Press",
+                        title="OnionPress",
                         message=f"Your site is ready!\n\n{address}\n\nTo visit your site, you need Tor Browser or Brave Browser.\n\nWould you like to download one now?",
                         buttons=["Download Tor Browser", "Download Brave Browser", "Later"],
                         default_button=0,
@@ -1342,7 +1342,7 @@ class OnionPressApp(rumps.App):
     @rumps.clicked("View Logs")
     def view_logs(self, _):
         """Open logs in Console.app"""
-        log_file = os.path.join(self.app_support, "onion.press.log")
+        log_file = os.path.join(self.app_support, "onionpress.log")
         if os.path.exists(log_file):
             subprocess.run(["open", "-a", "Console", log_file])
         else:
@@ -1436,7 +1436,7 @@ class OnionPressApp(rumps.App):
             # Show helpful dialog first
             rumps.alert(
                 title="Opening Settings",
-                message="Edit the config file that opens.\n\nWhen you're done:\n1. Save the file (⌘S)\n2. Close the editor\n3. Restart Onion.Press from the menu bar\n\nYour changes will then take effect.",
+                message="Edit the config file that opens.\n\nWhen you're done:\n1. Save the file (⌘S)\n2. Close the editor\n3. Restart OnionPress from the menu bar\n\nYour changes will then take effect.",
                 ok="Open Config File"
             )
             # Open in TextEdit and bring it to the front
@@ -1645,9 +1645,9 @@ DO NOT share these words with anyone."""
         app_update_available = False
         try:
             # Fetch latest release from GitHub using curl to avoid permission prompts
-            url = "https://api.github.com/repos/brewsterkahle/onion.press/releases/latest"
+            url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
             result = subprocess.run(
-                ["curl", "-s", "-H", "User-Agent: onion.press", "--max-time", "10", url],
+                ["curl", "-s", "-H", "User-Agent: onionpress", "--max-time", "10", url],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -1663,12 +1663,12 @@ DO NOT share these words with anyone."""
                     app_update_available = True
                     response = rumps.alert(
                         title="App Update Available",
-                        message=f"A new version of onion.press is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nWould you like to download it?",
+                        message=f"A new version of onionpress is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nWould you like to download it?",
                         ok="Download Update",
                         cancel="Later"
                     )
                     if response == 1:  # OK clicked
-                        release_url = data.get('html_url', 'https://github.com/brewsterkahle/onion.press/releases/latest')
+                        release_url = data.get('html_url', 'https://github.com/brewsterkahle/onionpress/releases/latest')
                         subprocess.run(["open", release_url])
         except Exception as e:
             self.log(f"Update check failed: {e}")
@@ -1676,7 +1676,7 @@ DO NOT share these words with anyone."""
             self.log(traceback.format_exc())
             rumps.alert(
                 title="Update Check Failed",
-                message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onion.press/releases"
+                message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onionpress/releases"
             )
 
         # Check for Docker image updates
@@ -1704,8 +1704,8 @@ DO NOT share these words with anyone."""
                 try:
                     # Show native alert dialog (no osascript = no permission prompts)
                     button_index = self.show_native_alert(
-                        title="Onion.Press Setup",
-                        message="Setting up Onion.Press for first use...\n\n• Downloading container images\n• Configuring Tor hidden service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.",
+                        title="OnionPress Setup",
+                        message="Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor hidden service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.",
                         buttons=["Dismiss", "Cancel Setup"],
                         default_button=0,
                         cancel_button=1,
@@ -1781,10 +1781,10 @@ DO NOT share these words with anyone."""
 
             time.sleep(3)
 
-    @rumps.clicked("About Onion.Press")
+    @rumps.clicked("About OnionPress")
     def show_about(self, _):
         """Show about dialog"""
-        about_text = f"""Onion.Press v{self.version}
+        about_text = f"""OnionPress v{self.version}
 
 Easy and free self-hosted web server for macOS
 WordPress + Tor Onion Service
@@ -1800,11 +1800,11 @@ Features:
 Created by Brewster Kahle
 License: AGPL v3
 
-GitHub: github.com/brewsterkahle/onion.press"""
+GitHub: github.com/brewsterkahle/onionpress"""
 
         # Use native NSAlert - no permissions needed, shows custom icon
         self.show_native_alert(
-            title="About Onion.Press",
+            title="About OnionPress",
             message=about_text,
             buttons=["OK"],
             default_button=0,
@@ -1813,7 +1813,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
-        """Uninstall Onion.Press with mandatory key backup prompt"""
+        """Uninstall OnionPress with mandatory key backup prompt"""
         # Step 1: Show critical warning about key loss (native NSAlert - no permissions)
         button_index = self.show_native_alert(
             title="Uninstall Warning",
@@ -1894,7 +1894,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
 
                 # Delete Colima VM (cleaner than pkill, properly removes VM)
-                # Only affects Onion.Press instance, not system Colima
+                # Only affects OnionPress instance, not system Colima
                 self.log("Uninstall: Deleting Colima VM...")
                 colima_bin = os.path.join(self.bin_dir, "colima")
                 env = os.environ.copy()
@@ -1918,7 +1918,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
                 # Use show_native_alert which already handles main thread
                 self.show_native_alert(
                     title="Uninstall Complete",
-                    message="Onion.Press has been uninstalled.\n\nFinal step: Move Onion.Press.app to the Trash.\n\nClick OK to quit.",
+                    message="OnionPress has been uninstalled.\n\nFinal step: Move OnionPress.app to the Trash.\n\nClick OK to quit.",
                     buttons=["OK"]
                 )
                 rumps.quit_application()
@@ -1927,7 +1927,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
                 # Show error and quit
                 self.show_native_alert(
                     title="Uninstall Error",
-                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onion.press directory\n• Docker volumes (if they exist)",
+                    message=f"An error occurred during uninstall:\n\n{str(e)}\n\nYou may need to manually remove:\n• ~/.onionpress directory\n• Docker volumes (if they exist)",
                     buttons=["OK"]
                 )
                 rumps.quit_application()
@@ -1939,7 +1939,7 @@ GitHub: github.com/brewsterkahle/onion.press"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.48 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.50 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

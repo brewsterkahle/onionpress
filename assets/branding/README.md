@@ -1,6 +1,6 @@
-# onion.press Branding Assets
+# onionpress Branding Assets
 
-Full resolution source images for the onion.press brand.
+Full resolution source images for the onionpress brand.
 
 ## Files
 

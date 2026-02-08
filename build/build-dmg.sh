@@ -1,27 +1,27 @@
 #!/bin/bash
 
-# Build script for onion.press DMG installer
+# Build script for onionpress DMG installer
 
 set -e
 
-echo "Building onion.press DMG installer..."
+echo "Building onionpress DMG installer..."
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
-APP_PATH="$PROJECT_DIR/onion.press.app"
-DMG_NAME="onion.press.dmg"
+APP_PATH="$PROJECT_DIR/onionpress.app"
+DMG_NAME="onionpress.dmg"
 DMG_PATH="$BUILD_DIR/$DMG_NAME"
 TEMP_DMG="$BUILD_DIR/temp.dmg"
-VOLUME_NAME="onion.press"
+VOLUME_NAME="onionpress"
 
 echo "Project directory: $PROJECT_DIR"
 echo "App path: $APP_PATH"
 
 # Check if app bundle exists
 if [ ! -d "$APP_PATH" ]; then
-    echo "ERROR: onion.press.app not found at $APP_PATH"
+    echo "ERROR: onionpress.app not found at $APP_PATH"
     exit 1
 fi
 
@@ -76,11 +76,11 @@ ln -s /Applications "$TEMP_DIR/Applications"
 
 # Create a README for the DMG
 cat > "$TEMP_DIR/README.txt" <<EOF
-onion.press - WordPress + Tor Hidden Service
+onionpress - WordPress + Tor Hidden Service
 
 INSTALLATION:
-1. Drag onion.press.app to the Applications folder
-2. Open onion.press from Applications
+1. Drag onionpress.app to the Applications folder
+2. Open onionpress from Applications
 3. Follow the on-screen setup instructions
 
 REQUIREMENTS:
@@ -88,7 +88,7 @@ REQUIREMENTS:
 - Python 3 (built into macOS 12.3+)
 - Internet connection for first-time setup
 
-For more information, visit: https://github.com/yourusername/onion.press
+For more information, visit: https://github.com/yourusername/onionpress
 EOF
 
 # Calculate size needed for DMG
@@ -131,7 +131,7 @@ tell application "Finder"
         set background picture of viewOptions to file ".background:background.png"
 
         -- Set icon positions
-        set position of item "onion.press.app" of container window to {150, 200}
+        set position of item "onionpress.app" of container window to {150, 200}
         set position of item "Applications" of container window to {450, 200}
 
         close
@@ -170,6 +170,6 @@ echo "   Size: $FINAL_SIZE"
 echo ""
 echo "To test the DMG:"
 echo "   1. Open the DMG: open '$DMG_PATH'"
-echo "   2. Drag onion.press.app to Applications"
+echo "   2. Drag onionpress.app to Applications"
 echo "   3. Launch from Applications folder"
 echo ""

@@ -1,4 +1,4 @@
-# Self-Hosted Font Setup for Onion.Press Product Website
+# Self-Hosted Font Setup for OnionPress Product Website
 
 This guide explains how to download and install retro fonts locally in WordPress for privacy.
 
@@ -77,7 +77,7 @@ You should have these files:
 
 1. **Create fonts directory via Docker**:
    ```bash
-   export DOCKER_HOST="unix://$HOME/.onion.press/colima/default/docker.sock"
+   export DOCKER_HOST="unix://$HOME/.onionpress/colima/default/docker.sock"
    docker exec onionpress-wordpress mkdir -p /var/www/html/wp-content/uploads/fonts
    ```
 

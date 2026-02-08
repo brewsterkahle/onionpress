@@ -27,7 +27,7 @@ done
 ```
 
 ### 3. Docker Socket Path
-**Problem**: Colima forwards socket to `~/.colima/docker.sock` but app expects `~/.onion.press/colima/default/docker.sock`
+**Problem**: Colima forwards socket to `~/.colima/docker.sock` but app expects `~/.onionpress/colima/default/docker.sock`
 **Fix**: Launcher script creates the symlink on first run
 **Status**: ✅ This is handled automatically by launcher initialization
 
@@ -59,4 +59,4 @@ After rebuilding:
 
 **App is now fully functional!** ✅
 
-The installed app at `/Applications/onion.press.app` is working correctly with all fixes applied. Future DMG builds should incorporate the binary architecture fix in the build script.
+The installed app at `/Applications/onionpress.app` is working correctly with all fixes applied. Future DMG builds should incorporate the binary architecture fix in the build script.

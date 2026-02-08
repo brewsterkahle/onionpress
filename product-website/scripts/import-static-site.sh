@@ -1,5 +1,5 @@
 #!/bin/bash
-# Import static product website to a running Onion.Press instance
+# Import static product website to a running OnionPress instance
 # This deploys the retro product website as a static HTML page
 
 set -e
@@ -8,16 +8,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRODUCT_WEBSITE_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Docker environment
-export DOCKER_HOST="unix://$HOME/.onion.press/colima/default/docker.sock"
-export DOCKER_CONFIG="$HOME/.onion.press/docker-config"
+export DOCKER_HOST="unix://$HOME/.onionpress/colima/default/docker.sock"
+export DOCKER_CONFIG="$HOME/.onionpress/docker-config"
 
-echo "=== Importing Onion.Press Product Website ==="
+echo "=== Importing OnionPress Product Website ==="
 echo
 
 # Check if WordPress container is running
 if ! docker ps --format '{{.Names}}' | grep -q '^onionpress-wordpress$'; then
     echo "Error: WordPress container is not running"
-    echo "Please start Onion.Press first and wait for it to be ready (purple icon)"
+    echo "Please start OnionPress first and wait for it to be ready (purple icon)"
     exit 1
 fi
 

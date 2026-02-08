@@ -19,7 +19,7 @@ ENV/
 env/
 
 # User data
-.onion.press/
+.onionpress/
 
 # IDE
 .vscode/
@@ -30,17 +30,17 @@ env/
 *.log
 
 # Bundled binaries (downloaded during build)
-onion.press.app/Contents/Resources/bin/
-onion.press.app/Contents/Resources/share/
+onionpress.app/Contents/Resources/bin/
+onionpress.app/Contents/Resources/share/
 
 # Build artifacts
-build/onion.press.dmg
+build/onionpress.dmg
 py2app_build/
 py2app_dist/
 
 # MenubarApp bundle (built from src/ during build)
-Onion.Press.app/Contents/Resources/MenubarApp/
+OnionPress.app/Contents/Resources/MenubarApp/
 
-# Bundled binaries (Onion.Press.app version)
-Onion.Press.app/Contents/Resources/bin/
-Onion.Press.app/Contents/Resources/share/
+# Bundled binaries (OnionPress.app version)
+OnionPress.app/Contents/Resources/bin/
+OnionPress.app/Contents/Resources/share/

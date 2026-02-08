@@ -1,5 +1,5 @@
 """
-py2app setup script for Onion.Press menubar application
+py2app setup script for OnionPress menubar application
 """
 import sys
 import os
@@ -15,22 +15,22 @@ if '--bdist-base' not in ' '.join(sys.argv):
 APP = ['src/menubar.py']
 DATA_FILES = [
     ('', [
-        'Onion.Press.app/Contents/Resources/app-icon.png',
-        'Onion.Press.app/Contents/Resources/menubar-icon-stopped.png',
-        'Onion.Press.app/Contents/Resources/menubar-icon-starting.png',
-        'Onion.Press.app/Contents/Resources/menubar-icon-running.png',
+        'OnionPress.app/Contents/Resources/app-icon.png',
+        'OnionPress.app/Contents/Resources/menubar-icon-stopped.png',
+        'OnionPress.app/Contents/Resources/menubar-icon-starting.png',
+        'OnionPress.app/Contents/Resources/menubar-icon-running.png',
     ]),
 ]
 
 OPTIONS = {
     'argv_emulation': False,
-    'iconfile': 'Onion.Press.app/Contents/Resources/AppIcon.icns',
+    'iconfile': 'OnionPress.app/Contents/Resources/AppIcon.icns',
     'plist': {
         'CFBundleName': 'menubar',
-        'CFBundleDisplayName': 'Onion.Press',
+        'CFBundleDisplayName': 'OnionPress',
         'CFBundleIdentifier': 'press.onion.app',
-        'CFBundleVersion': '2.2.49',
-        'CFBundleShortVersionString': '2.2.49',
+        'CFBundleVersion': '2.2.50',
+        'CFBundleShortVersionString': '2.2.50',
         'LSUIElement': True,  # Run as menu bar app (no dock icon)
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
@@ -50,7 +50,7 @@ OPTIONS = {
 }
 
 setup(
-    name='Onion.Press',
+    name='OnionPress',
     app=APP,
     data_files=DATA_FILES,
     options={'py2app': OPTIONS},

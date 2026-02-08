@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy the product homepage from git to the running Onion.Press instance
+# Deploy the product homepage from git to the running OnionPress instance
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

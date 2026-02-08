@@ -13,11 +13,11 @@ PLUGIN_PATH="$2"
 echo "Activating plugin: ${PLUGIN_PATH}"
 
 # Set up Docker environment
-export DOCKER_HOST="unix://${HOME}/.onion.press/colima/default/docker.sock"
-export DOCKER_CONFIG="${HOME}/.onion.press/docker-config"
+export DOCKER_HOST="unix://${HOME}/.onionpress/colima/default/docker.sock"
+export DOCKER_CONFIG="${HOME}/.onionpress/docker-config"
 
 # Get docker binary path
-DOCKER_BIN="/Applications/Onion.Press.app/Contents/Resources/bin/docker"
+DOCKER_BIN="/Applications/OnionPress.app/Contents/Resources/bin/docker"
 if [ ! -f "$DOCKER_BIN" ]; then
     DOCKER_BIN="docker"  # Fallback to system docker
 fi

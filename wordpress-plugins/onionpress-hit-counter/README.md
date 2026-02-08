@@ -1,4 +1,4 @@
-# Onion.Press Hit Counter Plugin
+# OnionPress Hit Counter Plugin
 
 Retro-style animated hit counter with persistent storage that survives reboots and upgrades.
 
@@ -14,10 +14,10 @@ Retro-style animated hit counter with persistent storage that survives reboots a
 
 ### Via Docker (Recommended)
 
-The plugin is pre-installed with Onion.Press. Simply activate it in WordPress:
+The plugin is pre-installed with OnionPress. Simply activate it in WordPress:
 
 1. Go to **Plugins → Installed Plugins**
-2. Find "Onion.Press Hit Counter"
+2. Find "OnionPress Hit Counter"
 3. Click **Activate**
 
 ### Manual Installation
@@ -72,7 +72,7 @@ Add this shortcode to any page or post:
 
 ## Adding to Product Website
 
-To add the hit counter to the Onion.Press product website homepage:
+To add the hit counter to the OnionPress product website homepage:
 
 1. **Option A: WordPress Page**
    - Create a WordPress page
@@ -103,7 +103,7 @@ This location is mounted as a Docker volume (`onionpress-persistent-data`) ensur
 
 ## Export/Import
 
-The counter data is automatically included when exporting your site using the Onion.Press export script:
+The counter data is automatically included when exporting your site using the OnionPress export script:
 
 ```bash
 cd product-website/scripts
@@ -197,8 +197,8 @@ volumes:
 
 ## License
 
-AGPL-3.0 - Same as Onion.Press
+AGPL-3.0 - Same as OnionPress
 
 ## Credits
 
-Built for Onion.Press - bringing back the retro web! 💜
+Built for OnionPress - bringing back the retro web! 💜

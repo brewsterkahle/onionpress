@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# Validation script for onion.press bundle
+# Validation script for onionpress bundle
 
 set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_PATH="$PROJECT_DIR/onion.press.app"
+APP_PATH="$PROJECT_DIR/onionpress.app"
 
-echo "Validating onion.press bundle..."
+echo "Validating onionpress bundle..."
 
 # Check app bundle exists
 if [ ! -d "$APP_PATH" ]; then
@@ -67,8 +67,8 @@ if [ ! -f "$APP_PATH/Contents/MacOS/launcher" ]; then
     exit 1
 fi
 
-if [ ! -f "$APP_PATH/Contents/MacOS/onion.press" ]; then
-    echo "ERROR: onion.press script missing"
+if [ ! -f "$APP_PATH/Contents/MacOS/onionpress" ]; then
+    echo "ERROR: onionpress script missing"
     exit 1
 fi
 

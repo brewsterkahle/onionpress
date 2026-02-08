@@ -1,5 +1,5 @@
 /**
- * Onion.Press Hit Counter - Animated Odometer
+ * OnionPress Hit Counter - Animated Odometer
  */
 (function($) {
     'use strict';

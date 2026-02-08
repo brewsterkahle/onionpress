@@ -1,13 +1,13 @@
-# Onion.Press Project Memory
+# OnionPress Project Memory
 
 ## Meta
 - **This file (`CLAUDE.md`) is the project memory.** Store all new memories and notes here so they travel with the repo.
 
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
-- Launcher shell script at `Onion.Press.app/Contents/MacOS/onion.press`
+- Launcher shell script at `OnionPress.app/Contents/MacOS/onionpress`
 - Docker containers (tor, wordpress, mariadb) run inside Colima VM
-- Logs at `~/.onion.press/onion.press.log` and `~/.onion.press/launcher.log`
+- Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
 
 ## Why py2app
 - Modern Macs do NOT ship a usable Python — `/usr/bin/python3` is just a shim that prompts to install Xcode CLI Tools
@@ -18,9 +18,9 @@
 ## Build & Release Process
 - MenubarApp built with py2app via `setup.py` (extracted from `build/build-dmg-simple.sh` lines 228-276)
 - Must copy `key_manager.py` and `bip39_words.py` to venv site-packages before build
-- After editing `src/menubar.py`, rebuild binary and replace `Onion.Press.app/Contents/Resources/MenubarApp/`
+- After editing `src/menubar.py`, rebuild binary and replace `OnionPress.app/Contents/Resources/MenubarApp/`
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
-- Version must be bumped in: `src/menubar.py` (2 places), `setup.py`, `Onion.Press.app/Contents/Info.plist`
+- Version must be bumped in: `src/menubar.py` (2 places), `setup.py`, `OnionPress.app/Contents/Info.plist`
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Colima Networking Gotcha

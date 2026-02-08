@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# onion.press launcher - Initializes Colima and starts standalone menu bar app
+# onionpress launcher - Initializes Colima and starts standalone menu bar app
 
 set -e
 
@@ -9,7 +9,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
-DATA_DIR="$HOME/.onion.press"
+DATA_DIR="$HOME/.onionpress"
 BIN_DIR="$RESOURCES_DIR/bin"
 COLIMA_HOME="$DATA_DIR/colima"
 
@@ -33,7 +33,7 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-log "Starting onion.press launcher..."
+log "Starting onionpress launcher..."
 
 # Detect architecture (use sysctl to get actual hardware, not process architecture)
 # This is important because shell scripts may run under Rosetta on Apple Silicon
@@ -55,7 +55,7 @@ fi
 # Check if standalone menubar app exists
 if [ ! -f "$MENUBAR_APP/Contents/MacOS/menubar" ]; then
     log "ERROR: Standalone menubar app not found at $MENUBAR_APP/Contents/MacOS/menubar"
-    echo "ERROR: Application bundle is corrupted. Please reinstall Onion.Press." >&2
+    echo "ERROR: Application bundle is corrupted. Please reinstall OnionPress." >&2
     exit 1
 fi
 
@@ -75,7 +75,7 @@ initialize_colima() {
         MACOS_VERSION=$(sw_vers -productVersion | cut -d '.' -f 1)
         if [ "$MACOS_VERSION" -lt 13 ]; then
             log "ERROR: macOS 13+ required"
-            echo "ERROR: onion.press requires macOS 13 (Ventura) or later." >&2
+            echo "ERROR: onionpress requires macOS 13 (Ventura) or later." >&2
             echo "Your macOS version: $(sw_vers -productVersion)" >&2
             echo "The bundled container runtime uses Apple's virtualization framework which requires macOS 13+." >&2
             exit 1
@@ -127,7 +127,7 @@ initialize_colima
 
 # Create symlink for Docker socket if needed
 # Colima forwards the socket to ~/.colima/default/docker.sock
-# but we configure DOCKER_HOST to use ~/.onion.press/colima/default/docker.sock
+# but we configure DOCKER_HOST to use ~/.onionpress/colima/default/docker.sock
 # Create symlink to bridge this gap
 SOCKET_DIR="$COLIMA_HOME/default"
 SOCKET_PATH="$SOCKET_DIR/docker.sock"

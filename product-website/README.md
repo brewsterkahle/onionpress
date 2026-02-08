@@ -1,6 +1,6 @@
-# Onion.Press Product Website
+# OnionPress Product Website
 
-This directory contains the official Onion.Press product website - the WordPress site that showcases and documents the Onion.Press software.
+This directory contains the official OnionPress product website - the WordPress site that showcases and documents the OnionPress software.
 
 ## Directory Structure
 
@@ -39,7 +39,7 @@ git push
 
 ### Import Website to Fresh Instance
 
-Load the product website from git into a running Onion.Press instance:
+Load the product website from git into a running OnionPress instance:
 
 ```bash
 cd product-website/scripts
@@ -57,7 +57,7 @@ The database export uses placeholders for portability across different instances
 - `{{SITE_URL}}` - Replaced with the actual onion address
 - `{{ONION_ADDRESS}}` - Replaced with the .onion hostname
 
-This allows the same export to work on any Onion.Press instance with different onion addresses.
+This allows the same export to work on any OnionPress instance with different onion addresses.
 
 ### What Gets Exported
 
@@ -84,7 +84,7 @@ This allows the same export to work on any Onion.Press instance with different o
 
 ### Setting Up New Instance
 
-1. Install and start Onion.Press
+1. Install and start OnionPress
 2. Clone the repository
 3. Import: `cd product-website/scripts && ./import-site.sh`
 4. Access at your new onion address
@@ -131,8 +131,8 @@ Media files (images, PDFs) are stored in git. To keep the repository size manage
 
 ### Export fails: "WordPress container is not running"
 
-Start Onion.Press before exporting:
-1. Open the Onion.Press application
+Start OnionPress before exporting:
+1. Open the OnionPress application
 2. Wait for it to start (purple icon in menubar)
 3. Run export script again
 

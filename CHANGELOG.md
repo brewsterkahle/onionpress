@@ -1,12 +1,12 @@
 # Changelog
 
-All notable changes to onion.press will be documented in this file.
+All notable changes to onionpress will be documented in this file.
 
 ## [2.0.8] - 2026-01-31
 
 ### Changed
-- **Application name capitalized** - App bundle renamed from `onion.press.app` to `Onion.Press.app`
-- Updated all dialog titles, notifications, and menu items to use "Onion.Press" branding
+- **Application name capitalized** - App bundle renamed from `onionpress.app` to `OnionPress.app`
+- Updated all dialog titles, notifications, and menu items to use "OnionPress" branding
 - Better visual consistency with proper capitalization throughout the interface
 
 ## [2.0.7] - 2026-01-31
@@ -43,7 +43,7 @@ All notable changes to onion.press will be documented in this file.
 - Icon changes from **color** (running) to **grayscale** (stopped)
 - Removed "Restart" menu item (use Stop then Start instead)
 - Added "Quit" menu item with confirmation dialog
-- Dialogs now show custom onion.press icon instead of generic system icon
+- Dialogs now show custom onionpress icon instead of generic system icon
 
 ### Fixed
 - Menubar icon now has proper transparent background
@@ -66,7 +66,7 @@ All notable changes to onion.press will be documented in this file.
 - **Internet Archive Wayback Machine Link Fixer plugin** - Automatically installed and activated to combat link rot
 - Plugin helps preserve web links by creating archived versions and redirecting when links break
 - Automatic archiving of your own posts on every update
-- Configurable installation via `~/.onion.press/config` (INSTALL_IA_PLUGIN=yes/no, default: yes)
+- Configurable installation via `~/.onionpress/config` (INSTALL_IA_PLUGIN=yes/no, default: yes)
 - Plugin automatically activates after WordPress setup is complete
 
 ### Technical
@@ -79,14 +79,14 @@ All notable changes to onion.press will be documented in this file.
 ### Added
 - **Vanity onion addresses** - All new installations now generate addresses starting with "op2" for easy identification
 - Bundled mkp224o for vanity address generation (no external dependencies)
-- Configurable vanity prefix via `~/.onion.press/config` (default: "op2")
+- Configurable vanity prefix via `~/.onionpress/config` (default: "op2")
 - Fast generation: 3-character prefix takes under 1 second
 
 ### Technical
 - Integrated mkp224o v3 onion address generator into build process
 - Automatic vanity key generation on first launch
 - Config template for customizing vanity prefix
-- All onion.press services now easily identifiable by "op2" prefix
+- All onionpress services now easily identifiable by "op2" prefix
 - Base32 validation (only a-z, 2-7 characters allowed in onion addresses)
 
 ## [2.0.1] - 2026-01-31

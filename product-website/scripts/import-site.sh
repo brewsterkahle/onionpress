@@ -1,5 +1,5 @@
 #!/bin/bash
-# Import Onion.Press product website from git repository
+# Import OnionPress product website from git repository
 # This loads the complete WordPress site into a running instance
 
 set -e
@@ -10,16 +10,16 @@ CONTENT_DIR="$PRODUCT_WEBSITE_DIR/content"
 DATABASE_DIR="$PRODUCT_WEBSITE_DIR/database"
 
 # Docker environment
-export DOCKER_HOST="unix://$HOME/.onion.press/colima/default/docker.sock"
-export DOCKER_CONFIG="$HOME/.onion.press/docker-config"
+export DOCKER_HOST="unix://$HOME/.onionpress/colima/default/docker.sock"
+export DOCKER_CONFIG="$HOME/.onionpress/docker-config"
 
-echo "=== Importing Onion.Press Product Website ==="
+echo "=== Importing OnionPress Product Website ==="
 echo
 
 # Check if WordPress is running
 if ! docker ps --format '{{.Names}}' | grep -q '^onionpress-wordpress$'; then
     echo "Error: WordPress container is not running"
-    echo "Please start Onion.Press first"
+    echo "Please start OnionPress first"
     exit 1
 fi
 
