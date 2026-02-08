@@ -3,6 +3,14 @@
 ## Meta
 - **This file (`CLAUDE.md`) is the project memory.** Store all new memories and notes here so they travel with the repo.
 
+## Naming Rules (IMPORTANT)
+- The project is called **OnionPress** (one word, capital O and P). Never "Onion.Press", "onion.press", or "onion-press".
+- Data directory: `~/.onionpress/` (not `~/.onion.press/`)
+- GitHub repo: `brewsterkahle/onionpress`
+- Use **"onion service"** (not "hidden service") in all user-facing text. Tor Project deprecated "hidden service" terminology.
+  - Exception: file paths like `/var/lib/tor/hidden_service/` and Docker image names like `goldy/tor-hidden-service` cannot change — those are external identifiers.
+- When writing new code, docs, issues, or UI text, always use "OnionPress" and "onion service".
+
 ## Key Architecture
 - macOS menubar app (py2app built from `src/menubar.py`)
 - Launcher shell script at `OnionPress.app/Contents/MacOS/onionpress`
