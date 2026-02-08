@@ -1511,13 +1511,21 @@ class OnionPressApp(rumps.App):
                     f"These {word_count} words are an alternative backup of your key.\n\n"
                     f"{formatted_mnemonic}\n\n"
                     "Store them in a safe place.")
+                bip_alert.addButtonWithTitle_("Done").setKeyEquivalent_("\r")
                 bip_alert.addButtonWithTitle_("Back")
+                bip_alert.addButtonWithTitle_("Copy Words")
                 if os.path.exists(icon_path):
                     bip_icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
                     if bip_icon:
                         bip_alert.setIcon_(bip_icon)
-                bip_alert.runModal()
-                continue  # re-show main dialog
+                bip_response = bip_alert.runModal() - 1000
+                if bip_response == 2:  # Copy Words
+                    subprocess.run(["pbcopy"], input=mnemonic.encode(), check=True)
+                    continue  # re-show recovery words
+                elif bip_response == 1:  # Back
+                    continue  # re-show main dialog
+                else:  # Done
+                    break
             else:  # Done
                 break
 
@@ -1563,14 +1571,8 @@ class OnionPressApp(rumps.App):
             base64_key = key_manager.bytes_to_base64_key(key_bytes)
             mnemonic = key_manager.bytes_to_mnemonic(key_bytes)
 
-            # Copy base64 key to clipboard
-            subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
-
-            # Show the export dialog with QR + key + recovery words
+            # Show the export dialog
             self.show_export_dialog(base64_key, mnemonic)
-
-            # Clear clipboard after dialog dismissed
-            subprocess.run(["pbcopy"], input=b"", check=False)
 
         except Exception as e:
             rumps.alert(
