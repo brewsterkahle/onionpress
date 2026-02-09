@@ -1580,15 +1580,19 @@ class OnionPressApp(rumps.App):
             return
 
         try:
+            self.log("Export: extracting private key...")
             # Extract key once, generate both formats
             key_bytes = key_manager.extract_private_key()
             base64_key = key_manager.bytes_to_base64_key(key_bytes)
             mnemonic = key_manager.bytes_to_mnemonic(key_bytes)
+            self.log("Export: key extracted, showing export dialog")
 
             # Show the export dialog
             self.show_export_dialog(base64_key, mnemonic)
+            self.log("Export: dialog closed")
 
         except Exception as e:
+            self.log(f"Export failed: {e}")
             rumps.alert(
                 title="Export Failed",
                 message=f"Could not export private key:\n\n{str(e)}"
@@ -1637,6 +1641,7 @@ class OnionPressApp(rumps.App):
             key_text = ' '.join(key_text.split())
 
         # Validate the key format before starting the long operation
+        self.log("Import: validating key...")
         try:
             key_bytes, coordinator = key_manager.import_key(key_text)
         except Exception as e:
