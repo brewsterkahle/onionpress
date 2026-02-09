@@ -19,13 +19,25 @@ let proxyRunning = false;
 let onionAddress = null;
 let nativePort = null;
 
+// Detect which browser we're running in
+function detectBrowser() {
+  if (IS_FIREFOX) return "Firefox";
+  const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+  if (ua.includes("Edg/")) return "Microsoft Edge";
+  if (typeof navigator !== "undefined" && navigator.brave) return "Brave Browser";
+  return "Google Chrome";
+}
+
 // ---------------------------------------------------------------------------
 // Proxy status polling
 // ---------------------------------------------------------------------------
 
 async function checkProxyStatus() {
   try {
-    const resp = await fetch(STATUS_URL, { signal: AbortSignal.timeout(3000) });
+    const resp = await fetch(STATUS_URL, {
+      signal: AbortSignal.timeout(3000),
+      headers: { "X-OnionPress-Browser": detectBrowser() }
+    });
     if (resp.ok) {
       const data = await resp.json();
       proxyRunning = data.running === true;

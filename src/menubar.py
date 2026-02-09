@@ -1171,30 +1171,36 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=check_for_brave, daemon=True).start()
 
     def extension_connected_recently(self):
-        """Check if the browser extension was connected within the last 24 hours."""
+        """Check if a browser extension was active within the last 24 hours.
+
+        Returns the browser app name (e.g. "Firefox") if connected recently,
+        or None if not.
+        """
         marker = os.path.join(self.app_support, "extension-connected")
         try:
             if os.path.exists(marker):
                 with open(marker, 'r') as f:
-                    ts = int(f.read().strip())
-                return (time.time() - ts) < 86400
+                    data = json.loads(f.read().strip())
+                if (time.time() - data["timestamp"]) < 86400:
+                    return data.get("browser")
         except Exception:
             pass
-        return False
+        return None
 
     def update_browser_menu_title(self):
         """Update the browser menu item title based on which browser is available"""
         tor_browser_path = "/Applications/Tor Browser.app"
         brave_browser_path = "/Applications/Brave Browser.app"
 
-        if self.extension_connected_recently():
-            self.browser_menu_item.title = "Open in Browser"
-        elif os.path.exists(tor_browser_path):
-            self.browser_menu_item.title = "Open in Tor Browser"
+        ext_browser = self.extension_connected_recently()
+        if ext_browser:
+            self.browser_menu_item.title = f"Open in {ext_browser}"
         elif os.path.exists(brave_browser_path):
             self.browser_menu_item.title = "Open in Brave Browser"
-        else:
+        elif os.path.exists(tor_browser_path):
             self.browser_menu_item.title = "Open in Tor Browser"
+        else:
+            self.browser_menu_item.title = "Open in Browser"
 
     def open_tor_browser(self, _):
         """Open the onion address in the best available browser"""
@@ -1203,19 +1209,17 @@ class OnionPressApp(rumps.App):
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
 
-            if self.extension_connected_recently():
-                # Extension installed — open in default browser (proxy handles .onion)
-                subprocess.run(["open", url])
-                self.log(f"Opened {url} in default browser (extension + proxy)")
-            elif os.path.exists(tor_browser_path):
-                # Prefer Tor Browser if available
-                subprocess.run(["open", "-a", "Tor Browser", url])
-                self.log(f"Opened {url} in Tor Browser")
+            ext_browser = self.extension_connected_recently()
+            if ext_browser:
+                subprocess.run(["open", "-a", ext_browser, url])
+                self.log(f"Opened {url} in {ext_browser} (extension)")
             elif os.path.exists(brave_browser_path):
-                # Fallback to Brave Browser with Tor support
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
                 self.log(f"Opened {url} in Brave Browser (Tor mode)")
+            elif os.path.exists(tor_browser_path):
+                subprocess.run(["open", "-a", "Tor Browser", url])
+                self.log(f"Opened {url} in Tor Browser")
             else:
                 # No Tor-capable browser — offer options
                 try:
@@ -1250,17 +1254,18 @@ class OnionPressApp(rumps.App):
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
 
-            if self.extension_connected_recently():
-                # Extension installed — open in default browser
-                self.log(f"Auto-opening default browser (extension detected): {url}")
-                subprocess.run(["open", url])
-            elif os.path.exists(tor_browser_path):
-                self.log(f"Auto-opening Tor Browser: {url}")
-                subprocess.run(["open", "-a", "Tor Browser", url])
+            ext_browser = self.extension_connected_recently()
+            if ext_browser:
+                # Open in the specific browser that has the extension
+                self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
+                subprocess.run(["open", "-a", ext_browser, url])
             elif os.path.exists(brave_browser_path):
                 self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
+            elif os.path.exists(tor_browser_path):
+                self.log(f"Auto-opening Tor Browser: {url}")
+                subprocess.run(["open", "-a", "Tor Browser", url])
             else:
                 self.log("No Tor-capable browser found - showing options dialog")
                 self.dismiss_setup_dialog()

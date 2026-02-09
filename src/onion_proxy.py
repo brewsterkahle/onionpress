@@ -453,12 +453,15 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_status(self):
         """Return proxy status as JSON."""
-        # Write extension-connected marker when polled
+        # Write extension-connected marker when polled by the browser extension
         if self.server.data_dir:
             try:
-                marker = os.path.join(self.server.data_dir, "extension-connected")
-                with open(marker, 'w') as f:
-                    f.write(str(int(time.time())))
+                browser = self.headers.get('X-OnionPress-Browser', '')
+                if browser:
+                    marker = os.path.join(self.server.data_dir, "extension-connected")
+                    data = json.dumps({"timestamp": int(time.time()), "browser": browser})
+                    with open(marker, 'w') as f:
+                        f.write(data)
             except Exception:
                 pass
 
