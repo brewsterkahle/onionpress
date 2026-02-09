@@ -92,7 +92,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.54"
+        self.version = "2.2.55"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1001,6 +1001,7 @@ class OnionPressApp(rumps.App):
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
+                self.update_browser_menu_title()
             elif self.is_running and not self.is_ready:
                 # Containers running but WordPress not ready yet
                 self.icon = self.icon_starting
@@ -1284,7 +1285,14 @@ class OnionPressApp(rumps.App):
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
 
-            ext_browser = self.extension_connected_recently()
+            # Wait up to 5 more seconds for a browser extension to register
+            ext_browser = None
+            for i in range(5):
+                ext_browser = self.extension_connected_recently()
+                if ext_browser:
+                    break
+                self.log(f"Waiting for extension registration... ({i+1}/5)")
+                time.sleep(1)
             if ext_browser:
                 # Open in the specific browser that has the extension
                 self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
@@ -2176,7 +2184,7 @@ GitHub: github.com/brewsterkahle/onionpress"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.54 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.55 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

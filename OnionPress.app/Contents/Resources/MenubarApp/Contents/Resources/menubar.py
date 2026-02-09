@@ -92,7 +92,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.54"
+        self.version = "2.2.55"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -418,6 +418,7 @@ class OnionPressApp(rumps.App):
                 server.docker_env = docker_env
                 server.onion_address = self.onion_address
                 server.version = self.version
+                server.data_dir = self.app_support
                 server.log_func = self.log
                 self.proxy_server = server
                 self.log(f"Onion proxy listening on http://127.0.0.1:{onion_proxy.PROXY_PORT}")
@@ -1000,6 +1001,7 @@ class OnionPressApp(rumps.App):
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
+                self.update_browser_menu_title()
             elif self.is_running and not self.is_ready:
                 # Containers running but WordPress not ready yet
                 self.icon = self.icon_starting
@@ -1170,30 +1172,36 @@ class OnionPressApp(rumps.App):
         threading.Thread(target=check_for_brave, daemon=True).start()
 
     def extension_connected_recently(self):
-        """Check if the browser extension was connected within the last 24 hours."""
+        """Check if a browser extension was active within the last 24 hours.
+
+        Returns the browser app name (e.g. "Firefox") if connected recently,
+        or None if not.
+        """
         marker = os.path.join(self.app_support, "extension-connected")
         try:
             if os.path.exists(marker):
                 with open(marker, 'r') as f:
-                    ts = int(f.read().strip())
-                return (time.time() - ts) < 86400
+                    data = json.loads(f.read().strip())
+                if (time.time() - data["timestamp"]) < 86400:
+                    return data.get("browser")
         except Exception:
             pass
-        return False
+        return None
 
     def update_browser_menu_title(self):
         """Update the browser menu item title based on which browser is available"""
         tor_browser_path = "/Applications/Tor Browser.app"
         brave_browser_path = "/Applications/Brave Browser.app"
 
-        if self.extension_connected_recently():
-            self.browser_menu_item.title = "Open in Browser"
-        elif os.path.exists(tor_browser_path):
-            self.browser_menu_item.title = "Open in Tor Browser"
+        ext_browser = self.extension_connected_recently()
+        if ext_browser:
+            self.browser_menu_item.title = f"Open in {ext_browser}"
         elif os.path.exists(brave_browser_path):
             self.browser_menu_item.title = "Open in Brave Browser"
-        else:
+        elif os.path.exists(tor_browser_path):
             self.browser_menu_item.title = "Open in Tor Browser"
+        else:
+            self.browser_menu_item.title = "Open in Browser"
 
     def open_tor_browser(self, _):
         """Open the onion address in the best available browser"""
@@ -1202,42 +1210,70 @@ class OnionPressApp(rumps.App):
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
 
-            if self.extension_connected_recently():
-                # Extension installed — open in default browser (proxy handles .onion)
-                subprocess.run(["open", url])
-                self.log(f"Opened {url} in default browser (extension + proxy)")
-            elif os.path.exists(tor_browser_path):
-                # Prefer Tor Browser if available
-                subprocess.run(["open", "-a", "Tor Browser", url])
-                self.log(f"Opened {url} in Tor Browser")
+            ext_browser = self.extension_connected_recently()
+            if ext_browser:
+                subprocess.run(["open", "-a", ext_browser, url])
+                self.log(f"Opened {url} in {ext_browser} (extension)")
             elif os.path.exists(brave_browser_path):
-                # Fallback to Brave Browser with Tor support
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
                 self.log(f"Opened {url} in Brave Browser (Tor mode)")
+            elif os.path.exists(tor_browser_path):
+                subprocess.run(["open", "-a", "Tor Browser", url])
+                self.log(f"Opened {url} in Tor Browser")
             else:
-                # No Tor-capable browser — offer options
-                try:
-                    button_index = self.show_native_alert(
-                        title="Open Your Site",
-                        message="To visit .onion sites, install the OnionPress browser extension, or use Tor Browser or Brave Browser.",
-                        buttons=["Install Extension", "Download Tor Browser", "Download Brave Browser", "Cancel"],
-                        default_button=0,
-                        cancel_button=3,
-                        style="informational"
-                    )
-                    if button_index == 0:  # Install Extension
-                        subprocess.run(["open", "https://github.com/brewsterkahle/onionpress/releases/latest"])
-                    elif button_index == 1:  # Tor Browser
-                        subprocess.run(["open", "https://www.torproject.org/download/"])
-                        self.monitor_tor_browser_install()
-                    elif button_index == 2:  # Brave Browser
-                        subprocess.run(["open", "https://brave.com/download/"])
-                        self.monitor_brave_install()
-                except Exception as e:
-                    self.log(f"Browser dialog failed: {e}")
+                self.show_browser_install_dialog()
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
+
+    def show_browser_install_dialog(self):
+        """Show dialog with browser options based on what's installed."""
+        # Detect which extension-compatible browsers are installed
+        extension_browsers = {
+            "Firefox": "/Applications/Firefox.app",
+            "Google Chrome": "/Applications/Google Chrome.app",
+            "Brave Browser": "/Applications/Brave Browser.app",
+            "Microsoft Edge": "/Applications/Microsoft Edge.app",
+        }
+        installed = [name for name, path in extension_browsers.items()
+                     if os.path.exists(path)]
+
+        address = self.onion_address or ""
+        try:
+            if installed:
+                # Has a compatible browser — suggest installing the extension
+                browsers_str = ", ".join(installed)
+                button_index = self.show_native_alert(
+                    title="OnionPress",
+                    message=f"Your site is ready!\n\n{address}\n\nInstall the OnionPress extension for {browsers_str} to browse .onion sites.\n\nOr download Tor Browser for a dedicated solution.",
+                    buttons=["Install Extension", "Download Tor Browser", "Later"],
+                    default_button=0,
+                    cancel_button=2,
+                    style="informational"
+                )
+                if button_index == 0:
+                    subprocess.run(["open", "https://github.com/brewsterkahle/onionpress/releases/latest"])
+                elif button_index == 1:
+                    subprocess.run(["open", "https://www.torproject.org/download/"])
+                    self.monitor_tor_browser_install()
+            else:
+                # Safari-only user — don't mention extension
+                button_index = self.show_native_alert(
+                    title="OnionPress",
+                    message=f"Your site is ready!\n\n{address}\n\nTo visit .onion sites, download Tor Browser or Brave Browser (both are free).",
+                    buttons=["Download Tor Browser", "Download Brave Browser", "Later"],
+                    default_button=0,
+                    cancel_button=2,
+                    style="informational"
+                )
+                if button_index == 0:
+                    subprocess.run(["open", "https://www.torproject.org/download/"])
+                    self.monitor_tor_browser_install()
+                elif button_index == 1:
+                    subprocess.run(["open", "https://brave.com/download/"])
+                    self.monitor_brave_install()
+        except Exception as e:
+            self.log(f"Browser dialog failed: {e}")
 
     def auto_open_browser(self):
         """Automatically open a browser when service becomes ready"""
@@ -1249,41 +1285,30 @@ class OnionPressApp(rumps.App):
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
 
-            if self.extension_connected_recently():
-                # Extension installed — open in default browser
-                self.log(f"Auto-opening default browser (extension detected): {url}")
-                subprocess.run(["open", url])
-            elif os.path.exists(tor_browser_path):
-                self.log(f"Auto-opening Tor Browser: {url}")
-                subprocess.run(["open", "-a", "Tor Browser", url])
+            # Wait up to 5 more seconds for a browser extension to register
+            ext_browser = None
+            for i in range(5):
+                ext_browser = self.extension_connected_recently()
+                if ext_browser:
+                    break
+                self.log(f"Waiting for extension registration... ({i+1}/5)")
+                time.sleep(1)
+            if ext_browser:
+                # Open in the specific browser that has the extension
+                self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
+                subprocess.run(["open", "-a", ext_browser, url])
             elif os.path.exists(brave_browser_path):
                 self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
                 subprocess.run([brave_executable, "--tor", url])
+            elif os.path.exists(tor_browser_path):
+                self.log(f"Auto-opening Tor Browser: {url}")
+                subprocess.run(["open", "-a", "Tor Browser", url])
             else:
                 self.log("No Tor-capable browser found - showing options dialog")
                 self.dismiss_setup_dialog()
                 self.dismiss_launch_splash()
-                address = self.onion_address
-                try:
-                    button_index = self.show_native_alert(
-                        title="OnionPress",
-                        message=f"Your site is ready!\n\n{address}\n\nTo visit your site, install the OnionPress browser extension (works with Chrome, Firefox, Brave, Edge) or use Tor Browser.",
-                        buttons=["Install Extension", "Download Tor Browser", "Download Brave Browser", "Later"],
-                        default_button=0,
-                        cancel_button=3,
-                        style="informational"
-                    )
-                    if button_index == 0:  # Install Extension
-                        subprocess.run(["open", "https://github.com/brewsterkahle/onionpress/releases/latest"])
-                    elif button_index == 1:  # Download Tor Browser
-                        subprocess.run(["open", "https://www.torproject.org/download/"])
-                        self.monitor_tor_browser_install()
-                    elif button_index == 2:  # Download Brave Browser
-                        subprocess.run(["open", "https://brave.com/download/"])
-                        self.monitor_brave_install()
-                except Exception as e:
-                    self.log(f"Browser dialog failed: {e}")
+                self.show_browser_install_dialog()
 
     @rumps.clicked("Start")
     def start_service(self, _):
@@ -2159,7 +2184,7 @@ GitHub: github.com/brewsterkahle/onionpress"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.54 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.55 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
