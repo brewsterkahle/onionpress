@@ -90,7 +90,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.50"
+        self.version = "2.2.52"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -757,7 +757,7 @@ class OnionPressApp(rumps.App):
 
             if result.returncode != 0:
                 if log_result:
-                    self.log(f"✗ Hidden service hostname file not found")
+                    self.log(f"✗ Onion service hostname file not found")
                 return False
 
             hostname = result.stdout.strip()
@@ -1442,9 +1442,110 @@ class OnionPressApp(rumps.App):
         else:
             rumps.alert("Settings file not found")
 
+    def show_export_dialog(self, base64_key, mnemonic):
+        """Show export dialog with base64 key and recovery words option."""
+        # NSAlert dialogs lack an Edit menu, so Cmd+C doesn't work.
+        # Install a local event monitor to intercept Cmd+C and copy the key.
+        current_text = [base64_key]  # mutable so the handler can see updates
+        def handle_copy(event):
+            if (event.modifierFlags() & AppKit.NSEventModifierFlagCommand and
+                    event.charactersIgnoringModifiers() == 'c'):
+                subprocess.run(["pbcopy"], input=current_text[0].encode(), check=True)
+                return None  # consume the event (no beep)
+            return event
+        monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskKeyDown, handle_copy)
+
+        while True:
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Private Key Backup")
+            alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
+
+            # Set app icon
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
+
+            # Build accessory view with key text
+            container = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 420, 120))
+
+            # Base64 key text field (selectable, monospaced, read-only)
+            text_field = AppKit.NSTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(10, 30, 400, 72))
+            text_field.setStringValue_(base64_key)
+            text_field.setEditable_(False)
+            text_field.setSelectable_(True)
+            text_field.setBordered_(True)
+            text_field.setBezeled_(True)
+            text_field.setFont_(
+                AppKit.NSFont.monospacedSystemFontOfSize_weight_(11, AppKit.NSFontWeightRegular))
+            text_field.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
+            text_field.setUsesSingleLineMode_(False)
+            container.addSubview_(text_field)
+
+            # Security warning
+            warning = AppKit.NSTextField.labelWithString_(
+                "DO NOT share this key with anyone you don't trust.")
+            warning.setFrame_(AppKit.NSMakeRect(10, 5, 400, 18))
+            warning.setAlignment_(AppKit.NSTextAlignmentCenter)
+            warning.setTextColor_(AppKit.NSColor.systemRedColor())
+            warning.setFont_(AppKit.NSFont.boldSystemFontOfSize_(12))
+            container.addSubview_(warning)
+
+            alert.setAccessoryView_(container)
+
+            # Buttons: Done (default), Copy Key, Show Recovery Words
+            alert.addButtonWithTitle_("Done").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Copy Key")
+            alert.addButtonWithTitle_("Show Recovery Words")
+
+            response = alert.runModal()
+            button_index = response - 1000
+
+            if button_index == 1:  # Copy Key
+                subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
+                continue  # re-show dialog
+            elif button_index == 2:  # Show Recovery Words
+                current_text[0] = mnemonic  # Cmd+C copies words while this dialog is up
+                # Format mnemonic for display
+                words = mnemonic.split()
+                word_count = len([w for w in words if w != '|'])
+                formatted_lines = []
+                for i in range(0, len(words), 6):
+                    formatted_lines.append(' '.join(words[i:i+6]))
+                formatted_mnemonic = '\n'.join(formatted_lines)
+
+                bip_alert = AppKit.NSAlert.alloc().init()
+                bip_alert.setMessageText_("Recovery Words (BIP39)")
+                bip_alert.setInformativeText_(
+                    f"These {word_count} words are an alternative backup of your key.\n\n"
+                    f"{formatted_mnemonic}\n\n"
+                    "Store them in a safe place.")
+                bip_alert.addButtonWithTitle_("Done").setKeyEquivalent_("\r")
+                bip_alert.addButtonWithTitle_("Back")
+                bip_alert.addButtonWithTitle_("Copy Words")
+                if os.path.exists(icon_path):
+                    bip_icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                    if bip_icon:
+                        bip_alert.setIcon_(bip_icon)
+                bip_response = bip_alert.runModal() - 1000
+                if bip_response == 2:  # Copy Words
+                    subprocess.run(["pbcopy"], input=mnemonic.encode(), check=True)
+                    continue  # re-show recovery words
+                elif bip_response == 1:  # Back
+                    current_text[0] = base64_key  # restore Cmd+C to copy key
+                    continue  # re-show main dialog
+                else:  # Done
+                    break
+
+        AppKit.NSEvent.removeMonitor_(monitor)
+
     @rumps.clicked("Export Private Key...")
     def export_key(self, _):
-        """Export Tor private key as BIP39 mnemonic words with authentication"""
+        """Export Tor private key as base64 with BIP39 recovery words"""
         if not self.is_running:
             rumps.alert(
                 title="Service Not Running",
@@ -1452,20 +1553,20 @@ class OnionPressApp(rumps.App):
             )
             return
 
-        # Show security warning dialog first (native NSAlert - no permissions needed)
+        # Show security warning dialog first
         button_index = self.show_native_alert(
             title="Export Private Key",
-            message="⚠️ SECURITY WARNING ⚠️\n\nYou are about to export your private key. This key controls your onion address and website identity.\n\nANYONE with these backup words can:\n• Impersonate your onion address\n• Take over your site identity\n• Restore your address on another computer\n\nOnly export if you understand the security implications.\n\nContinue with export?",
+            message="SECURITY WARNING\n\nYou are about to export your private key. This key controls your onion address and website identity.\n\nANYONE with this key can:\n\u2022 Impersonate your onion address\n\u2022 Take over your site identity\n\u2022 Restore your address on another computer\n\nOnly export if you understand the security implications.\n\nContinue with export?",
             buttons=["Cancel", "I Understand - Continue"],
             default_button=0,
             cancel_button=0,
             style="warning"
         )
 
-        if button_index != 1:  # User didn't click "I Understand - Continue"
+        if button_index != 1:
             return
 
-        # Second confirmation for extra safety (no admin privileges needed)
+        # Second confirmation
         button_index = self.show_native_alert(
             title="Final Confirmation",
             message="This is your final confirmation.\n\nAre you absolutely sure you want to export your private key?",
@@ -1475,47 +1576,23 @@ class OnionPressApp(rumps.App):
             style="warning"
         )
 
-        if button_index != 1:  # User didn't click "Yes, Export Key"
+        if button_index != 1:
             return
 
         try:
-            # Get the mnemonic
-            mnemonic = key_manager.export_key_as_mnemonic()
+            self.log("Export: extracting private key...")
+            # Extract key once, generate both formats
+            key_bytes = key_manager.extract_private_key()
+            base64_key = key_manager.bytes_to_base64_key(key_bytes)
+            mnemonic = key_manager.bytes_to_mnemonic(key_bytes)
+            self.log("Export: key extracted, showing export dialog")
 
-            # Count actual words (excluding separator)
-            word_count = len([w for w in mnemonic.split() if w != '|'])
-
-            # Format for display with line breaks every 6 words
-            words = mnemonic.split()
-            formatted_lines = []
-            for i in range(0, len(words), 6):
-                formatted_lines.append(' '.join(words[i:i+6]))
-            formatted_mnemonic = '\n'.join(formatted_lines)
-
-            # Show the mnemonic with warning
-            message = f"""⚠️ IMPORTANT: Keep these words safe and private!
-
-These {word_count} words represent your private key and onion address. Anyone with these words can restore your exact onion address and impersonate your site.
-
-{formatted_mnemonic}
-
-The words have been copied to your clipboard.
-
-Store them in a safe place - you can use them to restore your onion address on a new installation.
-
-DO NOT share these words with anyone."""
-
-            subprocess.run(["pbcopy"], input=mnemonic.encode(), check=True)
-
-            rumps.alert(
-                title="Private Key Backup",
-                message=message
-            )
-
-            # Clear clipboard after user dismisses dialog (security: don't leave mnemonic in clipboard)
-            subprocess.run(["pbcopy"], input=b"", check=False)
+            # Show the export dialog
+            self.show_export_dialog(base64_key, mnemonic)
+            self.log("Export: dialog closed")
 
         except Exception as e:
+            self.log(f"Export failed: {e}")
             rumps.alert(
                 title="Export Failed",
                 message=f"Could not export private key:\n\n{str(e)}"
@@ -1523,11 +1600,11 @@ DO NOT share these words with anyone."""
 
     @rumps.clicked("Import Private Key...")
     def import_key(self, _):
-        """Import Tor private key from BIP39 mnemonic words"""
+        """Import Tor private key from base64 key or BIP39 mnemonic words"""
         # Warning dialog
         response = rumps.alert(
             title="Import Private Key",
-            message="⚠️ WARNING: Importing a private key will replace your current onion address!\n\nYour WordPress site will be accessible at a different .onion address after import.\n\nMake sure you have backed up your current key first.\n\nContinue?",
+            message="WARNING: Importing a private key will replace your current onion address!\n\nYour WordPress site will be accessible at a different .onion address after import.\n\nMake sure you have backed up your current key first.\n\nContinue?",
             ok="Continue",
             cancel="Cancel"
         )
@@ -1535,10 +1612,10 @@ DO NOT share these words with anyone."""
         if response != 1:  # Cancel clicked
             return
 
-        # Get mnemonic from user
+        # Get key from user (accepts either format)
         window = rumps.Window(
             title="Import Private Key",
-            message="Paste your BIP39 mnemonic words below (48 words, two 24-word mnemonics separated by |):",
+            message="Paste your key below.\n\nAccepted formats:\n\u2022 Base64 key (onionpress:2:XXXX-XXXX-...)\n\u2022 BIP39 recovery words (48 words separated by |)",
             default_text="",
             ok="Import",
             cancel="Cancel",
@@ -1550,51 +1627,74 @@ DO NOT share these words with anyone."""
         if not response.clicked:  # Cancel
             return
 
-        mnemonic = response.text.strip()
+        key_text = response.text.strip()
 
-        if not mnemonic:
-            rumps.alert("No mnemonic provided")
+        if not key_text:
+            rumps.alert("No key provided")
             return
 
-        # Validate word count (48 words + | separator = 49 tokens)
-        word_count = len([w for w in mnemonic.split() if w != '|'])
-        if word_count != 48:
-            rumps.alert(
-                title="Invalid Mnemonic",
-                message=f"Expected 48 words (two 24-word mnemonics separated by |), got {word_count} words.\n\nPlease check your mnemonic and try again."
-            )
-            return
+        # Normalize whitespace: for base64 keys, collapse all whitespace
+        # (text field may wrap and insert newlines); for BIP39, normalize to single spaces
+        if key_text.startswith('onionpress:'):
+            key_text = ''.join(key_text.split())
+        else:
+            key_text = ' '.join(key_text.split())
 
-        # Try to import
+        # Validate the key format before starting the long operation
+        self.log("Import: validating key...")
         try:
-            # Convert mnemonic to key bytes
-            key_bytes = key_manager.import_key_from_mnemonic(mnemonic)
-
-            # Stop the service first
-            subprocess.run([self.launcher_script, "stop"], capture_output=True)
-            time.sleep(2)
-
-            # Write the new key
-            key_manager.write_private_key(key_bytes)
-
-            # Restart the service
-            time.sleep(3)
-            subprocess.run([self.launcher_script, "start"], capture_output=True)
-
-            rumps.alert(
-                title="Import Successful",
-                message="Your private key has been imported successfully!\n\nThe service is restarting with your new onion address.\n\nPlease wait a moment for the address to appear in the menu."
-            )
-
-            # Trigger status check
-            time.sleep(2)
-            self.check_status()
-
+            key_bytes, coordinator = key_manager.import_key(key_text)
         except Exception as e:
+            self.log(f"Import validation failed: {e}")
             rumps.alert(
                 title="Import Failed",
-                message=f"Could not import private key:\n\n{str(e)}\n\nYour original key has not been changed."
+                message=f"Could not import private key:\n\n{str(e)}"
             )
+            return
+
+        if coordinator:
+            self.log(f"Key imported with coordinator: {coordinator}")
+
+        # Show progress notification and do the work in a background thread
+        rumps.notification(
+            title="Importing Key...",
+            subtitle="This takes about a minute.",
+            message="Writing key and restarting service."
+        )
+
+        def do_import():
+            try:
+                # Write the new key while container is still running
+                # (docker cp requires the container to exist)
+                self.log("Import: writing new key...")
+                key_manager.write_private_key(key_bytes)
+
+                # Restart the service to pick up the new key
+                self.log("Import: restarting service...")
+                subprocess.run([self.launcher_script, "stop"], capture_output=True)
+                time.sleep(2)
+                subprocess.run([self.launcher_script, "start"], capture_output=True)
+
+                self.log("Import: complete")
+                rumps.notification(
+                    title="Import Successful",
+                    subtitle="",
+                    message="Your private key has been imported. The service is restarting with your new onion address."
+                )
+
+                # Trigger status check
+                time.sleep(2)
+                self.check_status()
+
+            except Exception as e:
+                self.log(f"Import failed: {e}")
+                rumps.notification(
+                    title="Import Failed",
+                    subtitle="",
+                    message=f"Could not import private key: {str(e)}\n\nYour original key has not been changed."
+                )
+
+        threading.Thread(target=do_import, daemon=True).start()
 
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
@@ -1701,7 +1801,7 @@ DO NOT share these words with anyone."""
                 try:
                     alert = AppKit.NSAlert.alloc().init()
                     alert.setMessageText_("OnionPress Setup")
-                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor hidden service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
+                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
                     alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
 
                     btn_dismiss = alert.addButtonWithTitle_("Dismiss")
@@ -1812,7 +1912,7 @@ DO NOT share these words with anyone."""
         """Show about dialog"""
         about_text = f"""OnionPress v{self.version}
 
-Easy and free self-hosted web server for macOS
+Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
@@ -1965,7 +2065,7 @@ GitHub: github.com/brewsterkahle/onionpress"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.50 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.52 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
