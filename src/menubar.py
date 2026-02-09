@@ -1391,10 +1391,9 @@ class OnionPressApp(rumps.App):
             time.sleep(1)
             self.check_status()
 
-            # Stop caffeinate to allow Mac to sleep
+            # Stop background processes
+            self.stop_web_log_capture()
             self.stop_caffeinate()
-
-            # Stop onion proxy
             self.stop_onion_proxy()
 
         threading.Thread(target=stop, daemon=True).start()
@@ -2110,6 +2109,7 @@ GitHub: github.com/brewsterkahle/onionpress"""
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+                self.stop_web_log_capture()
                 self.stop_onion_proxy()
                 self.stop_caffeinate()
 
