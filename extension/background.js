@@ -8,7 +8,7 @@
 
 const PROXY_BASE = "http://localhost:9077";
 const NATIVE_HOST = "press.onion.onionpress";
-const ONION_RE = /^https?:\/\/([a-z2-7]{56}\.onion)(\/.*)?$/i;
+const ONION_RE = /^https?:\/\/((?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion)(\/.*)?$/i;
 
 let proxyRunning = false;
 let onionAddress = null;

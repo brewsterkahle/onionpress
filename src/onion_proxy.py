@@ -22,10 +22,10 @@ from socketserver import ThreadingMixIn
 from urllib.parse import quote, unquote
 
 PROXY_PORT = 9077
-ONION_PATTERN = re.compile(r'^[a-z2-7]{56}\.onion$')
+ONION_PATTERN = re.compile(r'^[a-z0-9.-]+\.onion$')
 # Match .onion URLs in HTML for rewriting
 ONION_URL_RE = re.compile(
-    r'(https?://)([a-z2-7]{56}\.onion)((?:/[^\s"\'<>]*)?)',
+    r'(https?://)((?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion)((?:/[^\s"\'<>]*)?)',
     re.IGNORECASE
 )
 
@@ -114,7 +114,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         cmd += [
             "onionpress-wordpress",
-            "curl", "-sD", "-",
+            "curl", "-sD", "-", "-L",
             "--socks5-hostname", "onionpress-tor:9050",
             "--max-time", "30",
         ]

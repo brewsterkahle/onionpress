@@ -10,7 +10,7 @@
   "use strict";
 
   const PROXY_BASE = "http://localhost:9077";
-  const ONION_RE = /https?:\/\/([a-z2-7]{56}\.onion)(\/[^\s"'<>]*)?/gi;
+  const ONION_RE = /https?:\/\/((?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion)(\/[^\s"'<>]*)?/gi;
 
   function toProxyUrl(match, host, path) {
     return `${PROXY_BASE}/proxy/${host.toLowerCase()}${path || "/"}`;
