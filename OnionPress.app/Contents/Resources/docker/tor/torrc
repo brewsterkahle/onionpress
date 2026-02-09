@@ -1,0 +1,4 @@
+SocksPort 0.0.0.0:9050
+HiddenServiceDir /var/lib/tor/hidden_service/wordpress
+HiddenServiceVersion 3
+HiddenServicePort 80 wordpress:80

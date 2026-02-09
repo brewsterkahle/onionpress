@@ -316,7 +316,7 @@ update_images() {
     cd "$DOCKER_DIR"
 
     # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("wordpress:6.7" "mariadb:11.6" "goldy/tor-hidden-service:v0.4.7.12-54c0e54")
+    local images=("wordpress:6.7" "mariadb:11.6")
     local updated=false
 
     for image in "${images[@]}"; do
@@ -387,7 +387,7 @@ start_containers() {
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d --build >> "$LOG_FILE" 2>&1; then
             break
         fi
         log "WARNING: 'docker compose up -d' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."

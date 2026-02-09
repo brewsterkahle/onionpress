@@ -1,14 +1,7 @@
 services:
   tor:
-    image: goldy/tor-hidden-service:v0.4.7.12-54c0e54
-    platform: linux/amd64
+    build: ./tor
     container_name: onionpress-tor
-    environment:
-      # WordPress is the service name we're exposing
-      - WORDPRESS_PORTS=80:80
-      - WORDPRESS_VERSION=3
-      # Enable SOCKS proxy so the app can test onion reachability
-      - TOR_SOCKS_PORT=9050
     volumes:
       - tor-keys:/var/lib/tor/hidden_service/
     depends_on:
