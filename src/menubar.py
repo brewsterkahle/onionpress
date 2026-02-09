@@ -2110,6 +2110,8 @@ GitHub: github.com/brewsterkahle/onionpress"""
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
                 subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+                self.stop_onion_proxy()
+                self.stop_caffeinate()
 
                 # Delete Colima VM (cleaner than pkill, properly removes VM)
                 # Only affects OnionPress instance, not system Colima
@@ -2185,6 +2187,9 @@ GitHub: github.com/brewsterkahle/onionpress"""
 
             # Stop caffeinate to allow Mac to sleep
             self.stop_caffeinate()
+
+            # Stop onion proxy
+            self.stop_onion_proxy()
 
             try:
                 colima_bin = os.path.join(self.bin_dir, "colima")
