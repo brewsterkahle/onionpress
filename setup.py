@@ -42,8 +42,9 @@ OPTIONS = {
     # not import. If you add a new local .py module, ADD IT HERE or the build
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
-    'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'bip39_words'],
-    'excludes': ['tkinter', 'test', 'unittest', 'urllib', 'urllib.request', 'urllib.error', 'http', 'http.client', 'http.server'],
+    'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'bip39_words',
+                 'onion_proxy', 'install_native_messaging'],
+    'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size
     'optimize': 2,  # Optimize Python bytecode

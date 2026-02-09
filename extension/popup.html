@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .header img {
+      width: 32px;
+      height: 32px;
+    }
+    .header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 8px;
+      margin-bottom: 10px;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.running { background: #9b59b6; }
+    .status-dot.starting { background: #f1c40f; }
+    .status-dot.stopped { background: #6c7293; }
+    .address {
+      font-family: "SF Mono", Monaco, Consolas, monospace;
+      font-size: 11px;
+      word-break: break-all;
+      color: #9b59b6;
+      padding: 8px 12px;
+      background: rgba(155,89,182,0.08);
+      border-radius: 6px;
+      margin-bottom: 10px;
+      cursor: pointer;
+    }
+    .address:hover {
+      background: rgba(155,89,182,0.15);
+    }
+    .help-link {
+      display: block;
+      text-align: center;
+      color: #6c7293;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    .help-link:hover {
+      color: #9b59b6;
+    }
+    .not-running {
+      text-align: center;
+      padding: 12px 0;
+    }
+    .not-running p {
+      margin-bottom: 10px;
+      color: #6c7293;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icons/icon-48.png" alt="">
+    <h1>OnionPress</h1>
+  </div>
+  <div id="content">
+    <div class="status-row">
+      <div class="status-dot stopped" id="status-dot"></div>
+      <span id="status-text">Checking...</span>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
