@@ -369,7 +369,7 @@ start_containers() {
             if ! docker run --rm \
                 -v onionpress-tor-keys:/dest \
                 --mount type=bind,source="$VANITY_DIR",target=/src \
-                alpine sh -c 'mkdir -p /dest/wordpress && cp -r /src/* /dest/wordpress/' >> "$LOG_FILE" 2>&1; then
+                alpine sh -c 'mkdir -p /dest/wordpress && cp -r /src/* /dest/wordpress/ && chown -R 100:101 /dest/wordpress && chmod 700 /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
                 log "ERROR: Failed to copy vanity keys to tor volume"
                 return 1
             fi
