@@ -113,14 +113,11 @@ initialize_colima() {
     fi
 }
 
-# Launch menubar app in background if first run (so icon appears immediately)
-# The menubar app will show gray icon and wait for services to be ready
-if [ "$FIRST_RUN" = true ]; then
-    log "Launching menu bar application in background during setup..."
-    arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1 &
-    MENUBAR_PID=$!
-    log "Menu bar app launched (PID: $MENUBAR_PID)"
-fi
+# Launch menubar app immediately so icon appears fast (gray = starting)
+log "Launching menu bar application..."
+arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1 &
+MENUBAR_PID=$!
+log "Menu bar app launched (PID: $MENUBAR_PID)"
 
 # Run initialization (menubar is now visible with gray icon during this)
 initialize_colima
@@ -142,14 +139,4 @@ if [ -S "$COLIMA_SOCKET" ]; then
     fi
 fi
 
-# Exit if first run (menubar app already launched in background)
-if [ "$FIRST_RUN" = true ]; then
-    log "Setup complete - menu bar app already running"
-    exit 0
-fi
-
-# For subsequent launches, start menu bar app in background
-log "Launching menu bar application..."
-arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1 &
-MENUBAR_PID=$!
-log "Menu bar app launched (PID: $MENUBAR_PID)"
+log "Setup complete"
