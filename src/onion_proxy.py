@@ -2,16 +2,20 @@
 """
 OnionPress Local Proxy Server
 
-A local HTTP proxy on localhost:9077 that fetches .onion content through
-a persistent PHP proxy running inside the WordPress container. The PHP
-proxy uses curl with Tor's SOCKS proxy over the Docker network.
+A local HTTP forward proxy on localhost:9077 that fetches .onion content
+through a persistent PHP proxy running inside the WordPress container.
 
-Flow: Browser → localhost:9077/proxy/{host}/{path}
+The browser extension configures the browser to use this as an HTTP proxy
+for .onion domains. The browser sends standard proxy requests:
+    GET http://xyz.onion/path HTTP/1.1
+and the address bar keeps showing the real .onion URL.
+
+Flow: Browser → http proxy localhost:9077
                 → localhost:8080/__op_proxy.php (PHP inside WordPress)
                 → socks5h://onionpress-tor:9050
                 → .onion site
 
-URL scheme: http://localhost:9077/proxy/{onion-host}/{path}
+Also supports direct access: http://localhost:9077/proxy/{host}/{path}
 Status endpoint: http://localhost:9077/status
 """
 
@@ -23,14 +27,15 @@ import threading
 import http.client
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from urllib.parse import urlparse
 
 PROXY_PORT = 9077
 PHP_PROXY_PORT = 8080  # WordPress container's mapped port
 PHP_PROXY_PATH = "/__op_proxy.php"
 ONION_PATTERN = re.compile(r'^[a-z0-9.-]+\.onion$')
-# Match .onion URLs in HTML for rewriting
-ONION_URL_RE = re.compile(
-    r'(https?://)((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)((?:/[^\s"\'<>]*)?)',
+# Match https .onion URLs in HTML for downgrading to http
+HTTPS_ONION_RE = re.compile(
+    r'https://((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)',
     re.IGNORECASE
 )
 
@@ -104,14 +109,24 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self._handle_status()
             return
 
-        # Parse /proxy/{onion-host}/{path}
-        if not self.path.startswith('/proxy/'):
+        # Determine if this is a standard HTTP proxy request or /proxy/ format
+        is_forward_proxy = False
+        if self.path.startswith('http://'):
+            # Standard HTTP forward proxy: GET http://host.onion/path
+            is_forward_proxy = True
+            parsed = urlparse(self.path)
+            onion_host = (parsed.hostname or '').lower()
+            onion_path = parsed.path or '/'
+            if parsed.query:
+                onion_path += '?' + parsed.query
+        elif self.path.startswith('/proxy/'):
+            # Direct access format: /proxy/{onion-host}/{path}
+            parts = self.path[len('/proxy/'):].split('/', 1)
+            onion_host = parts[0].lower()
+            onion_path = '/' + parts[1] if len(parts) > 1 else '/'
+        else:
             self.send_error(404, "Use /proxy/{onion-host}/{path} or /status")
             return
-
-        parts = self.path[len('/proxy/'):].split('/', 1)
-        onion_host = parts[0].lower()
-        onion_path = '/' + parts[1] if len(parts) > 1 else '/'
 
         # Validate .onion host
         if not ONION_PATTERN.match(onion_host):
@@ -143,9 +158,15 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         # Determine content type for link rewriting
         resp_content_type = resp_headers.get('content-type', 'application/octet-stream')
 
-        # Rewrite URLs in HTML so resources load through the proxy
+        # Rewrite URLs in HTML responses
         if 'text/html' in resp_content_type and body:
-            body = self._rewrite_onion_links(body, onion_host)
+            if is_forward_proxy:
+                # Forward proxy mode: just downgrade https→http for .onion URLs
+                # (the browser's proxy config handles routing automatically)
+                body = self._downgrade_https_onion(body)
+            else:
+                # /proxy/ format: full rewrite of .onion URLs and root-relative paths
+                body = self._rewrite_onion_links(body, onion_host)
 
         # Send response
         self.send_response(status)
@@ -184,11 +205,25 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         return status, resp_headers, body
 
+    def _downgrade_https_onion(self, body_bytes):
+        """Downgrade https .onion URLs to http in HTML.
+
+        In forward proxy mode, the browser handles routing automatically.
+        We just need to ensure .onion links use http (not https) so the
+        browser sends them as proxy requests rather than CONNECT tunnels.
+        """
+        try:
+            text = body_bytes.decode('utf-8', errors='replace')
+        except Exception:
+            return body_bytes
+        text = HTTPS_ONION_RE.sub(r'http://\1', text)
+        return text.encode('utf-8')
+
     def _rewrite_onion_links(self, body_bytes, onion_host):
-        """Rewrite URLs in HTML so resources load through the proxy.
+        """Rewrite URLs in HTML for /proxy/ format access.
 
         Two rewrites:
-        1. Absolute .onion URLs  → proxy URLs
+        1. Absolute .onion URLs  → /proxy/{host}/path
         2. Root-relative URLs (/path) → /proxy/{onion_host}/path
         """
         try:
@@ -198,9 +233,13 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         proxy_prefix = f"/proxy/{onion_host}"
 
-        # 1. Rewrite absolute .onion URLs
+        # 1. Rewrite absolute .onion URLs (both http and https)
+        ONION_URL_RE = re.compile(
+            r'(https?://)((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)((?:/[^\s"\'<>]*)?)',
+            re.IGNORECASE
+        )
+
         def replace_abs_onion(match):
-            _scheme = match.group(1)
             host = match.group(2)
             path = match.group(3) or ''
             return f"/proxy/{host}{path}"
@@ -208,17 +247,16 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         text = ONION_URL_RE.sub(replace_abs_onion, text)
 
         # 2. Rewrite root-relative URLs in src, href, action, srcset attributes
-        # Match: src="/path", href="/path", action="/path"
-        # But NOT src="//..." (protocol-relative) or src="http..." (absolute)
+        # But NOT already-rewritten /proxy/ URLs or protocol-relative //
         ROOT_REL_RE = re.compile(
-            r'((?:src|href|action|srcset)\s*=\s*["\'])(/(?!/)[^"\']*)',
+            r'((?:src|href|action|srcset)\s*=\s*["\'])(/(?!proxy/|/)[^"\']*)',
             re.IGNORECASE
         )
         text = ROOT_REL_RE.sub(rf'\1{proxy_prefix}\2', text)
 
         # Also rewrite url(/path) in inline CSS
         CSS_URL_RE = re.compile(
-            r'(url\(\s*["\']?)(/(?!/)[^"\')\s]+)',
+            r'(url\(\s*["\']?)(/(?!proxy/|/)[^"\')\s]+)',
             re.IGNORECASE
         )
         text = CSS_URL_RE.sub(rf'\1{proxy_prefix}\2', text)

@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Browse .onion sites in any browser. Requires OnionPress to be running.",
   "permissions": [
+    "proxy",
     "webRequest",
     "webRequestBlocking",
     "webNavigation",
@@ -23,7 +24,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://localhost:9077/*"],
+      "matches": ["*://*.onion/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

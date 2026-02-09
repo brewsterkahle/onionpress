@@ -1,67 +1,51 @@
 /**
  * OnionPress Content Script
  *
- * Runs on pages served through the proxy (localhost:9077).
- * Rewrites any remaining .onion links so they route through the proxy too.
- * Also rewrites src, action, and srcset attributes.
+ * With the proxy API approach, .onion URLs route through the proxy
+ * automatically. This script only needs to downgrade https .onion
+ * links to http in the DOM so the browser sends them as proxy
+ * requests rather than CONNECT tunnels.
  */
 
 (function () {
   "use strict";
 
-  const PROXY_BASE = "http://localhost:9077";
-  const ONION_RE = /https?:\/\/((?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion)(\/[^\s"'<>]*)?/gi;
+  const HTTPS_ONION_RE = /https:\/\/((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)/gi;
 
-  function toProxyUrl(match, host, path) {
-    return `${PROXY_BASE}/proxy/${host.toLowerCase()}${path || "/"}`;
-  }
-
-  function rewriteElement(el) {
-    // href (links, base)
-    if (el.href && ONION_RE.test(el.getAttribute("href"))) {
-      ONION_RE.lastIndex = 0;
-      el.setAttribute("href", el.getAttribute("href").replace(ONION_RE, toProxyUrl));
+  function downgradeElement(el) {
+    const href = el.getAttribute("href");
+    if (href && HTTPS_ONION_RE.test(href)) {
+      HTTPS_ONION_RE.lastIndex = 0;
+      el.setAttribute("href", href.replace(HTTPS_ONION_RE, "http://$1"));
     }
 
-    // src (images, scripts, iframes)
     const src = el.getAttribute("src");
-    if (src && ONION_RE.test(src)) {
-      ONION_RE.lastIndex = 0;
-      el.setAttribute("src", src.replace(ONION_RE, toProxyUrl));
+    if (src && HTTPS_ONION_RE.test(src)) {
+      HTTPS_ONION_RE.lastIndex = 0;
+      el.setAttribute("src", src.replace(HTTPS_ONION_RE, "http://$1"));
     }
 
-    // action (forms)
     const action = el.getAttribute("action");
-    if (action && ONION_RE.test(action)) {
-      ONION_RE.lastIndex = 0;
-      el.setAttribute("action", action.replace(ONION_RE, toProxyUrl));
-    }
-
-    // srcset (responsive images)
-    const srcset = el.getAttribute("srcset");
-    if (srcset && ONION_RE.test(srcset)) {
-      ONION_RE.lastIndex = 0;
-      el.setAttribute("srcset", srcset.replace(ONION_RE, toProxyUrl));
+    if (action && HTTPS_ONION_RE.test(action)) {
+      HTTPS_ONION_RE.lastIndex = 0;
+      el.setAttribute("action", action.replace(HTTPS_ONION_RE, "http://$1"));
     }
   }
 
-  // Initial pass over existing elements
-  function rewriteAll() {
-    const selectors = "a[href], img[src], script[src], link[href], iframe[src], form[action], source[srcset], source[src]";
-    document.querySelectorAll(selectors).forEach(rewriteElement);
+  function downgradeAll() {
+    document.querySelectorAll("a[href], img[src], script[src], link[href], iframe[src], form[action]")
+      .forEach(downgradeElement);
   }
 
-  rewriteAll();
+  downgradeAll();
 
-  // Watch for dynamically added elements
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
-        rewriteElement(node);
-        // Also check children
-        const selectors = "a[href], img[src], script[src], link[href], iframe[src], form[action], source[srcset], source[src]";
-        node.querySelectorAll?.(selectors)?.forEach(rewriteElement);
+        downgradeElement(node);
+        node.querySelectorAll?.("a[href], img[src], script[src], link[href], iframe[src], form[action]")
+          ?.forEach(downgradeElement);
       }
     }
   });
