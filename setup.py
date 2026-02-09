@@ -19,6 +19,7 @@ DATA_FILES = [
         'OnionPress.app/Contents/Resources/menubar-icon-stopped.png',
         'OnionPress.app/Contents/Resources/menubar-icon-starting.png',
         'OnionPress.app/Contents/Resources/menubar-icon-running.png',
+        'src/onion-forward.php',
     ]),
 ]
 

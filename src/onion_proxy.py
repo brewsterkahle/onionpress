@@ -2,11 +2,14 @@
 """
 OnionPress Local Proxy Server
 
-A local HTTP proxy on localhost:9077 that fetches .onion content via
-`docker exec onionpress-wordpress curl --socks5-hostname onionpress-tor:9050`.
-The WordPress container has curl and can reach Tor's SOCKS proxy over the
-Docker network. This allows any browser with the OnionPress extension to
-browse .onion sites transparently.
+A local HTTP proxy on localhost:9077 that fetches .onion content through
+a persistent PHP proxy running inside the WordPress container. The PHP
+proxy uses curl with Tor's SOCKS proxy over the Docker network.
+
+Flow: Browser → localhost:9077/proxy/{host}/{path}
+                → localhost:8080/__op_proxy.php (PHP inside WordPress)
+                → socks5h://onionpress-tor:9050
+                → .onion site
 
 URL scheme: http://localhost:9077/proxy/{onion-host}/{path}
 Status endpoint: http://localhost:9077/status
@@ -17,21 +20,69 @@ import re
 import subprocess
 import json
 import threading
+import http.client
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
-from urllib.parse import quote, unquote
 
 PROXY_PORT = 9077
+PHP_PROXY_PORT = 8080  # WordPress container's mapped port
+PHP_PROXY_PATH = "/__op_proxy.php"
 ONION_PATTERN = re.compile(r'^[a-z0-9.-]+\.onion$')
 # Match .onion URLs in HTML for rewriting
 ONION_URL_RE = re.compile(
-    r'(https?://)((?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion)((?:/[^\s"\'<>]*)?)',
+    r'(https?://)((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)((?:/[^\s"\'<>]*)?)',
     re.IGNORECASE
 )
 
 
+def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
+    """Copy the PHP proxy script into the WordPress container."""
+    try:
+        result = subprocess.run(
+            [docker_bin, "cp", php_script_path,
+             "onionpress-wordpress:/var/www/html/__op_proxy.php"],
+            capture_output=True, text=True, timeout=10, env=docker_env
+        )
+        if result.returncode == 0:
+            if log_func:
+                log_func("Installed PHP proxy in WordPress container")
+            return True
+        else:
+            if log_func:
+                log_func(f"Failed to install PHP proxy: {result.stderr}")
+            return False
+    except Exception as e:
+        if log_func:
+            log_func(f"Failed to install PHP proxy: {e}")
+        return False
+
+
+def check_php_proxy(log_func=None):
+    """Verify the PHP proxy is responding."""
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=5)
+        conn.request("GET", PHP_PROXY_PATH,
+                     headers={"X-OnionPress-Action": "status"})
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        if resp.status == 200:
+            data = json.loads(body)
+            if data.get("ok"):
+                if log_func:
+                    log_func("PHP proxy is responding")
+                return True
+        if log_func:
+            log_func(f"PHP proxy check failed: HTTP {resp.status}")
+        return False
+    except Exception as e:
+        if log_func:
+            log_func(f"PHP proxy not reachable: {e}")
+        return False
+
+
 class OnionProxyHandler(BaseHTTPRequestHandler):
-    """Handles proxy requests to .onion addresses via docker exec."""
+    """Handles proxy requests to .onion addresses via the PHP proxy."""
 
     # Suppress per-request log lines from BaseHTTPRequestHandler
     def log_message(self, format, *args):
@@ -72,153 +123,66 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         # Read POST body if present
         post_data = None
+        content_type = None
         if self.command == 'POST':
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 post_data = self.rfile.read(content_length)
+            content_type = self.headers.get('Content-Type', 'application/x-www-form-urlencoded')
 
-        # Fetch via docker exec
+        # Fetch via PHP proxy
         try:
-            stdout, stderr, returncode = self._docker_curl(
-                target_url, post_data=post_data, head_only=head_only
+            status, resp_headers, body = self._fetch_via_php(
+                target_url, post_data=post_data, content_type=content_type,
+                head_only=head_only
             )
         except Exception as e:
             self.send_error(502, f"Failed to fetch from Tor: {e}")
             return
 
-        if returncode != 0:
-            error_msg = stderr if stderr else f"curl exit code {returncode}"
-            # curl exit code 22 = HTTP error (4xx/5xx) - still has output with -D -
-            if returncode != 22 or not stdout:
-                self.send_error(502, f"Tor fetch failed: {error_msg}")
-                return
-
-        # Parse response: wget --save-headers puts HTTP headers then \r\n\r\n then body
-        self._send_proxied_response(stdout, onion_host, head_only)
-
-    def _docker_curl(self, url, post_data=None, head_only=False):
-        """Fetch a URL via curl in the WordPress container through Tor's SOCKS proxy.
-
-        Uses: docker exec onionpress-wordpress curl --socks5-hostname onionpress-tor:9050
-        This works because both containers share the Docker network, and curl
-        in the WordPress container can reach Tor's SOCKS port directly.
-        """
-        docker_bin = self.server.docker_bin
-        docker_env = self.server.docker_env
-
-        cmd = [docker_bin, "exec"]
-
-        # For POST with data, pipe through stdin
-        if post_data is not None:
-            cmd += ["-i"]
-
-        cmd += [
-            "onionpress-wordpress",
-            "curl", "-sD", "-", "-L",
-            "--socks5-hostname", "onionpress-tor:9050",
-            "--max-time", "30",
-        ]
-
-        if head_only:
-            cmd += ["-I"]
-
-        if post_data is not None:
-            content_type = self.headers.get('Content-Type', 'application/x-www-form-urlencoded')
-            cmd += [
-                "-H", f"Content-Type: {content_type}",
-                "--data-binary", "@-",
-            ]
-
-        cmd.append(url)
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            input=post_data if post_data is not None else None,
-            timeout=60,
-            env=docker_env
-        )
-        return result.stdout, result.stderr.decode('utf-8', errors='replace'), result.returncode
-
-    def _send_proxied_response(self, raw_output, onion_host, head_only=False):
-        """Parse curl -D - output and send to client.
-
-        When curl follows redirects (-L -D -), the output contains headers
-        from EVERY response in the chain. We need to find the LAST set of
-        headers (the final response) and use those.
-        """
-        # With -L -D -, curl outputs: headers1\r\n\r\nheaders2\r\n\r\nbody
-        # Each redirect adds another header block. Find the last HTTP/ line
-        # that starts a new response, then parse from there.
-        # Strategy: split on \r\n\r\n, find the last chunk that starts with HTTP/
-        sep = b'\r\n\r\n'
-        chunks = raw_output.split(sep)
-        if len(chunks) < 2:
-            # Try \n\n
-            sep = b'\n\n'
-            chunks = raw_output.split(sep)
-
-        if len(chunks) < 2:
-            # No headers found, send as raw body
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.end_headers()
-            if not head_only:
-                self.wfile.write(raw_output)
-            return
-
-        # Find the last chunk that looks like HTTP headers (starts with HTTP/)
-        last_header_idx = 0
-        for i, chunk in enumerate(chunks[:-1]):  # exclude last chunk (body)
-            if chunk.lstrip().startswith(b'HTTP/'):
-                last_header_idx = i
-
-        header_bytes = chunks[last_header_idx]
-        # Everything after the last header block is body
-        body = sep.join(chunks[last_header_idx + 1:])
-
-        # Parse status line and headers
-        header_text = header_bytes.decode('utf-8', errors='replace')
-        header_lines = header_text.split('\r\n') if '\r\n' in header_text else header_text.split('\n')
-
-        status_code = 200
-        if header_lines and header_lines[0].startswith('HTTP/'):
-            try:
-                status_code = int(header_lines[0].split()[1])
-            except (IndexError, ValueError):
-                pass
-            header_lines = header_lines[1:]
-
-        # Collect headers
-        content_type = 'application/octet-stream'
-        skip_headers = {'transfer-encoding', 'connection', 'keep-alive', 'content-length', 'location'}
-        response_headers = []
-        for line in header_lines:
-            if ':' in line:
-                name, value = line.split(':', 1)
-                name_lower = name.strip().lower()
-                if name_lower in skip_headers:
-                    continue
-                if name_lower == 'content-type':
-                    content_type = value.strip()
-                response_headers.append((name.strip(), value.strip()))
+        # Determine content type for link rewriting
+        resp_content_type = resp_headers.get('content-type', 'application/octet-stream')
 
         # Rewrite URLs in HTML so resources load through the proxy
-        is_html = 'text/html' in content_type
-        if is_html and body:
+        if 'text/html' in resp_content_type and body:
             body = self._rewrite_onion_links(body, onion_host)
 
         # Send response
-        self.send_response(status_code)
-        for name, value in response_headers:
-            self.send_header(name, value)
+        self.send_response(status)
+        # Forward selected headers
+        forward_headers = {'content-type', 'cache-control', 'etag',
+                           'last-modified', 'content-disposition'}
+        for name, value in resp_headers.items():
+            if name.lower() in forward_headers:
+                self.send_header(name, value)
         self.send_header('Content-Length', str(len(body)))
-        # Allow extension to read response
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
         if not head_only:
             self.wfile.write(body)
+
+    def _fetch_via_php(self, url, post_data=None, content_type=None, head_only=False):
+        """Fetch a URL through the PHP proxy in the WordPress container.
+
+        Makes an HTTP request to localhost:8080/__op_proxy.php with the
+        target URL in the X-OnionPress-URL header. No docker exec needed.
+        """
+        headers = {"X-OnionPress-URL": url}
+        if content_type:
+            headers["Content-Type"] = content_type
+
+        method = "HEAD" if head_only else ("POST" if post_data else "GET")
+
+        conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=60)
+        conn.request(method, PHP_PROXY_PATH, body=post_data, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        status = resp.status
+        conn.close()
+
+        return status, resp_headers, body
 
     def _rewrite_onion_links(self, body_bytes, onion_host):
         """Rewrite URLs in HTML so resources load through the proxy.
@@ -235,12 +199,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         proxy_prefix = f"/proxy/{onion_host}"
 
         # 1. Rewrite absolute .onion URLs
-        def replace_onion_url(match):
-            _scheme = match.group(1)
-            host = match.group(2)
-            path = match.group(3) or ''
-            return f"{proxy_prefix.rsplit(onion_host, 1)[0]}{host}{path}" if host != onion_host else f"{proxy_prefix}{path}"
-
         def replace_abs_onion(match):
             _scheme = match.group(1)
             host = match.group(2)
@@ -296,25 +254,6 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self.docker_env = None
         self.log_func = None
         super().__init__(*args, **kwargs)
-
-
-def start_proxy(docker_bin, docker_env, onion_address=None, version="unknown",
-                log_func=None, port=PROXY_PORT):
-    """Start the proxy server in the current thread (blocking).
-
-    Call this from a daemon thread. Returns the server instance.
-    """
-    server = ThreadingHTTPServer(("127.0.0.1", port), OnionProxyHandler)
-    server.docker_bin = docker_bin
-    server.docker_env = docker_env
-    server.onion_address = onion_address
-    server.version = version
-    server.log_func = log_func
-
-    if log_func:
-        log_func(f"Onion proxy listening on http://127.0.0.1:{port}")
-    server.serve_forever()
-    return server
 
 
 def stop_proxy(server):

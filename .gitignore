@@ -44,3 +44,6 @@ OnionPress.app/Contents/Resources/MenubarApp/
 # Bundled binaries (OnionPress.app version)
 OnionPress.app/Contents/Resources/bin/
 OnionPress.app/Contents/Resources/share/
+
+# Firefox extension testing copy
+extension-firefox/

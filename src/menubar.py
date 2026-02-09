@@ -401,6 +401,13 @@ class OnionPressApp(rumps.App):
         docker_env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
         docker_env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
 
+        # Install the PHP proxy script into the WordPress container
+        php_script = os.path.join(self.script_dir, "onion-forward.php")
+        if not os.path.exists(php_script):
+            # Fallback: check parent resources dir
+            php_script = os.path.join(self.parent_resources_dir, "onion-forward.php")
+        onion_proxy.install_php_proxy(docker_bin, docker_env, php_script, log_func=self.log)
+
         def run_proxy():
             try:
                 server = onion_proxy.ThreadingHTTPServer(
