@@ -453,6 +453,15 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_status(self):
         """Return proxy status as JSON."""
+        # Write extension-connected marker when polled
+        if self.server.data_dir:
+            try:
+                marker = os.path.join(self.server.data_dir, "extension-connected")
+                with open(marker, 'w') as f:
+                    f.write(str(int(time.time())))
+            except Exception:
+                pass
+
         cache_stats = self.server.cache.stats() if self.server.cache else {}
         info = {
             "running": True,
@@ -481,6 +490,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self.docker_bin = "docker"
         self.docker_env = None
         self.log_func = None
+        self.data_dir = None
         self.cache = ProxyCache()
         super().__init__(*args, **kwargs)
 

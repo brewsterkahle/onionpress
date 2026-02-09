@@ -418,6 +418,7 @@ class OnionPressApp(rumps.App):
                 server.docker_env = docker_env
                 server.onion_address = self.onion_address
                 server.version = self.version
+                server.data_dir = self.app_support
                 server.log_func = self.log
                 self.proxy_server = server
                 self.log(f"Onion proxy listening on http://127.0.0.1:{onion_proxy.PROXY_PORT}")
