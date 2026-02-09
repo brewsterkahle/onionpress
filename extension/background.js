@@ -4,11 +4,17 @@
  * Intercepts ALL .onion navigations and redirects them through the local
  * OnionPress proxy at localhost:9077.  Also connects to the native messaging
  * host to discover proxy port and service status.
+ *
+ * Chrome (manifest v3): uses webNavigation.onBeforeNavigate
+ * Firefox (manifest v2): uses webRequest.onBeforeRequest with blocking
  */
 
 const PROXY_BASE = "http://localhost:9077";
 const NATIVE_HOST = "press.onion.onionpress";
-const ONION_RE = /^https?:\/\/((?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion)(\/.*)?$/i;
+const ONION_RE = /^https?:\/\/([a-z0-9.-]+\.onion)(\/.*)?$/i;
+
+// Detect Firefox (manifest v2 with blocking webRequest)
+const IS_FIREFOX = typeof browser !== "undefined" && browser.runtime && browser.runtime.getBrowserInfo;
 
 let proxyRunning = false;
 let onionAddress = null;
@@ -44,7 +50,8 @@ checkProxyStatus();
 
 function connectNative() {
   try {
-    nativePort = chrome.runtime.connectNative(NATIVE_HOST);
+    const api = typeof browser !== "undefined" ? browser : chrome;
+    nativePort = api.runtime.connectNative(NATIVE_HOST);
     nativePort.onMessage.addListener((msg) => {
       if (msg.proxy_port) {
         // could override PROXY_BASE in the future
@@ -87,31 +94,55 @@ function toProxyUrl(url) {
   return `${PROXY_BASE}/proxy/${host}${path}`;
 }
 
-// Listen for navigations to .onion URLs (typed in address bar or link clicks)
-chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
-  // Only handle main frame and sub-frame navigations
-  if (details.frameId !== 0 && details.frameType !== "sub_frame") return;
+function getOfflineUrl() {
+  const api = typeof browser !== "undefined" ? browser : chrome;
+  return api.runtime.getURL("offline.html");
+}
 
-  const proxyUrl = toProxyUrl(details.url);
-  if (!proxyUrl) return;
+if (IS_FIREFOX) {
+  // Firefox: use blocking webRequest to redirect BEFORE DNS resolution
+  browser.webRequest.onBeforeRequest.addListener(
+    (details) => {
+      const proxyUrl = toProxyUrl(details.url);
+      if (!proxyUrl) return {};
 
-  // Check if proxy is running before redirecting
-  const up = await checkProxyStatus();
-  if (up) {
-    chrome.tabs.update(details.tabId, { url: proxyUrl });
-  } else {
-    // Show offline page
-    chrome.tabs.update(details.tabId, { url: chrome.runtime.getURL("offline.html") });
-  }
-}, {
-  url: [{ hostSuffix: ".onion" }]
-});
+      if (proxyRunning) {
+        return { redirectUrl: proxyUrl };
+      } else {
+        return { redirectUrl: getOfflineUrl() };
+      }
+    },
+    { urls: ["*://*.onion/*"] },
+    ["blocking"]
+  );
+} else {
+  // Chrome: use webNavigation (manifest v3 doesn't support blocking webRequest)
+  chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+    // Only handle main frame and sub-frame navigations
+    if (details.frameId !== 0 && details.frameType !== "sub_frame") return;
+
+    const proxyUrl = toProxyUrl(details.url);
+    if (!proxyUrl) return;
+
+    // Check if proxy is running before redirecting
+    const up = await checkProxyStatus();
+    if (up) {
+      chrome.tabs.update(details.tabId, { url: proxyUrl });
+    } else {
+      // Show offline page
+      chrome.tabs.update(details.tabId, { url: chrome.runtime.getURL("offline.html") });
+    }
+  }, {
+    url: [{ hostSuffix: ".onion" }]
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Handle messages from popup and content scripts
 // ---------------------------------------------------------------------------
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+const api = typeof browser !== "undefined" ? browser : chrome;
+api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "get_status") {
     checkProxyStatus().then(() => {
       sendResponse({

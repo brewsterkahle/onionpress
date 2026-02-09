@@ -141,26 +141,41 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         return result.stdout, result.stderr.decode('utf-8', errors='replace'), result.returncode
 
     def _send_proxied_response(self, raw_output, onion_host, head_only=False):
-        """Parse curl -D - output and send to client."""
-        # Split headers from body at first \r\n\r\n
-        header_end = raw_output.find(b'\r\n\r\n')
-        if header_end == -1:
-            # Try \n\n as fallback
-            header_end = raw_output.find(b'\n\n')
-            if header_end == -1:
-                # No headers found, send as raw body
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/octet-stream')
-                self.end_headers()
-                if not head_only:
-                    self.wfile.write(raw_output)
-                return
-            sep_len = 2
-        else:
-            sep_len = 4
+        """Parse curl -D - output and send to client.
 
-        header_bytes = raw_output[:header_end]
-        body = raw_output[header_end + sep_len:]
+        When curl follows redirects (-L -D -), the output contains headers
+        from EVERY response in the chain. We need to find the LAST set of
+        headers (the final response) and use those.
+        """
+        # With -L -D -, curl outputs: headers1\r\n\r\nheaders2\r\n\r\nbody
+        # Each redirect adds another header block. Find the last HTTP/ line
+        # that starts a new response, then parse from there.
+        # Strategy: split on \r\n\r\n, find the last chunk that starts with HTTP/
+        sep = b'\r\n\r\n'
+        chunks = raw_output.split(sep)
+        if len(chunks) < 2:
+            # Try \n\n
+            sep = b'\n\n'
+            chunks = raw_output.split(sep)
+
+        if len(chunks) < 2:
+            # No headers found, send as raw body
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.end_headers()
+            if not head_only:
+                self.wfile.write(raw_output)
+            return
+
+        # Find the last chunk that looks like HTTP headers (starts with HTTP/)
+        last_header_idx = 0
+        for i, chunk in enumerate(chunks[:-1]):  # exclude last chunk (body)
+            if chunk.lstrip().startswith(b'HTTP/'):
+                last_header_idx = i
+
+        header_bytes = chunks[last_header_idx]
+        # Everything after the last header block is body
+        body = sep.join(chunks[last_header_idx + 1:])
 
         # Parse status line and headers
         header_text = header_bytes.decode('utf-8', errors='replace')
@@ -176,7 +191,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         # Collect headers
         content_type = 'application/octet-stream'
-        skip_headers = {'transfer-encoding', 'connection', 'keep-alive', 'content-length'}
+        skip_headers = {'transfer-encoding', 'connection', 'keep-alive', 'content-length', 'location'}
         response_headers = []
         for line in header_lines:
             if ':' in line:
@@ -188,10 +203,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     content_type = value.strip()
                 response_headers.append((name.strip(), value.strip()))
 
-        # Rewrite .onion URLs in HTML
+        # Rewrite URLs in HTML so resources load through the proxy
         is_html = 'text/html' in content_type
         if is_html and body:
-            body = self._rewrite_onion_links(body)
+            body = self._rewrite_onion_links(body, onion_host)
 
         # Send response
         self.send_response(status_code)
@@ -205,22 +220,51 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
-    def _rewrite_onion_links(self, body_bytes):
-        """Rewrite .onion URLs in HTML to go through the proxy."""
+    def _rewrite_onion_links(self, body_bytes, onion_host):
+        """Rewrite URLs in HTML so resources load through the proxy.
+
+        Two rewrites:
+        1. Absolute .onion URLs  → proxy URLs
+        2. Root-relative URLs (/path) → /proxy/{onion_host}/path
+        """
         try:
             text = body_bytes.decode('utf-8', errors='replace')
         except Exception:
             return body_bytes
 
-        proxy_base = f"http://localhost:{self.server.server_port}/proxy"
+        proxy_prefix = f"/proxy/{onion_host}"
 
+        # 1. Rewrite absolute .onion URLs
         def replace_onion_url(match):
             _scheme = match.group(1)
             host = match.group(2)
             path = match.group(3) or ''
-            return f"{proxy_base}/{host}{path}"
+            return f"{proxy_prefix.rsplit(onion_host, 1)[0]}{host}{path}" if host != onion_host else f"{proxy_prefix}{path}"
 
-        text = ONION_URL_RE.sub(replace_onion_url, text)
+        def replace_abs_onion(match):
+            _scheme = match.group(1)
+            host = match.group(2)
+            path = match.group(3) or ''
+            return f"/proxy/{host}{path}"
+
+        text = ONION_URL_RE.sub(replace_abs_onion, text)
+
+        # 2. Rewrite root-relative URLs in src, href, action, srcset attributes
+        # Match: src="/path", href="/path", action="/path"
+        # But NOT src="//..." (protocol-relative) or src="http..." (absolute)
+        ROOT_REL_RE = re.compile(
+            r'((?:src|href|action|srcset)\s*=\s*["\'])(/(?!/)[^"\']*)',
+            re.IGNORECASE
+        )
+        text = ROOT_REL_RE.sub(rf'\1{proxy_prefix}\2', text)
+
+        # Also rewrite url(/path) in inline CSS
+        CSS_URL_RE = re.compile(
+            r'(url\(\s*["\']?)(/(?!/)[^"\')\s]+)',
+            re.IGNORECASE
+        )
+        text = CSS_URL_RE.sub(rf'\1{proxy_prefix}\2', text)
+
         return text.encode('utf-8')
 
     def _handle_status(self):
