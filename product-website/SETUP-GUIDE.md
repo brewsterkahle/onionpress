@@ -54,7 +54,7 @@ Create these pages in WordPress (Pages → Add New):
 ```html
 <!-- Hero Section -->
 <div class="hero">
-  <h1>★ ✨ ONION.PRESS ✨ ★</h1>
+  <h1>★ ✨ OnionPress ✨ ★</h1>
   <p style="font-size: 24px; font-weight: bold;">Your Own Corner of the Internet</p>
   <p style="font-size: 18px;">Private • Fun • Under Your Control</p>
   <br>
@@ -216,7 +216,7 @@ See `content-proposal.md` for full content. Key sections:
 ## Step 6: Customize Site Identity
 
 1. Go to Appearance → Customize → Site Identity
-2. Site Title: "ONION.PRESS"
+2. Site Title: "OnionPress"
 3. Tagline: "Your Own Corner of the Internet"
 4. Upload site icon (if you have one)
 

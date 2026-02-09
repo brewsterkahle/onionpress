@@ -11,7 +11,8 @@
     "nativeMessaging",
     "storage",
     "http://localhost:9077/*",
-    "*://*.onion/*"
+    "*://*.onion/*",
+    "<all_urls>"
   ],
   "browser_specific_settings": {
     "gecko": {

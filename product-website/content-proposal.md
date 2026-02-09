@@ -33,7 +33,7 @@ Border:     #000000 3px solid
 **Hero Section**:
 ```
 ┌─────────────────────────────────────────┐
-│  ★ ✨ ONION.PRESS ✨ ★                   │
+│  ★ ✨ OnionPress ✨ ★                     │
 │                                         │
 │  Your Own Corner of the Internet       │
 │  Private • Fun • Under Your Control    │

@@ -5,25 +5,15 @@
   "description": "Browse .onion sites in any browser. Requires OnionPress to be running.",
   "permissions": [
     "proxy",
-    "declarativeNetRequest",
-    "webNavigation",
     "nativeMessaging",
     "storage"
   ],
   "host_permissions": [
-    "http://localhost:9077/*",
-    "*://*.onion/*"
+    "http://localhost:9077/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://*.onion/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

@@ -1,20 +1,15 @@
 /**
  * OnionPress Background Service Worker
  *
- * Uses the browser's proxy API so .onion URLs stay in the address bar.
- * The browser sends .onion requests through our local proxy at localhost:9077
- * as standard HTTP proxy requests — no URL rewriting needed.
+ * Routes .onion URLs through Tor's SOCKS proxy at localhost:9050.
+ * This works just like Tor Browser — the browser connects through SOCKS,
+ * and Tor handles .onion resolution and end-to-end encryption.
  *
- * Firefox (manifest v2): browser.proxy.onRequest
- * Chrome  (manifest v3): chrome.proxy.settings with PAC script
- *
- * HTTPS .onion URLs are downgraded to HTTP before proxying, since:
- * - Tor already provides end-to-end encryption
- * - HTTPS would require CONNECT tunneling which is more complex
- * - The extension intercepts HTTPS .onion requests and redirects to HTTP
+ * Clearnet URLs always go DIRECT (normal browsing is never affected).
+ * When OnionPress is not running, all traffic goes DIRECT.
  */
 
-const PROXY_BASE = "http://localhost:9077";
+const STATUS_URL = "http://localhost:9077/status";
 const NATIVE_HOST = "press.onion.onionpress";
 
 // Detect Firefox (manifest v2 with proxy.onRequest)
@@ -30,7 +25,7 @@ let nativePort = null;
 
 async function checkProxyStatus() {
   try {
-    const resp = await fetch(`${PROXY_BASE}/status`, { signal: AbortSignal.timeout(3000) });
+    const resp = await fetch(STATUS_URL, { signal: AbortSignal.timeout(3000) });
     if (resp.ok) {
       const data = await resp.json();
       proxyRunning = data.running === true;
@@ -50,7 +45,7 @@ setInterval(checkProxyStatus, 15000);
 checkProxyStatus();
 
 // ---------------------------------------------------------------------------
-// Proxy configuration — route .onion through localhost:9077
+// Proxy configuration — route .onion through Tor SOCKS proxy
 // ---------------------------------------------------------------------------
 
 function updateProxyConfig() {
@@ -60,14 +55,14 @@ function updateProxyConfig() {
     return;
   }
 
-  // Chrome: set/clear PAC script
+  // Chrome: PAC script routes only .onion through Tor SOCKS proxy
   if (proxyRunning) {
     chrome.proxy.settings.set({
       value: {
         mode: "pac_script",
         pacScript: {
           data: `function FindProxyForURL(url, host) {
-            if (host.substring(host.length - 6) === ".onion") return "PROXY 127.0.0.1:9077";
+            if (host.substring(host.length - 6) === ".onion") return "SOCKS5 127.0.0.1:9050";
             return "DIRECT";
           }`
         }
@@ -80,64 +75,26 @@ function updateProxyConfig() {
 }
 
 // ---------------------------------------------------------------------------
-// Firefox: proxy.onRequest + HTTPS downgrade
+// Firefox: proxy.onRequest — SOCKS for .onion, DIRECT for everything else
 // ---------------------------------------------------------------------------
 
 if (IS_FIREFOX) {
-  // Route .onion HTTP requests through our proxy
   browser.proxy.onRequest.addListener(
     (details) => {
-      if (proxyRunning) {
-        return { type: "http", host: "127.0.0.1", port: 9077 };
+      if (!proxyRunning) {
+        return { type: "direct" };
       }
-      // Proxy not running — let it fail (shows browser error)
+      const url = new URL(details.url);
+      if (url.hostname.endsWith(".onion")) {
+        return { type: "socks", host: "127.0.0.1", port: 9050, proxyDNS: true };
+      }
       return { type: "direct" };
     },
-    { urls: ["http://*.onion/*"] }
+    { urls: ["<all_urls>"] }
   );
 
   browser.proxy.onError.addListener((error) => {
     console.error("OnionPress proxy error:", error.message);
-  });
-
-  // Downgrade HTTPS .onion → HTTP (safe: Tor encrypts the connection)
-  browser.webRequest.onBeforeRequest.addListener(
-    (details) => {
-      if (details.url.startsWith("https://")) {
-        return { redirectUrl: details.url.replace("https://", "http://") };
-      }
-      return {};
-    },
-    { urls: ["https://*.onion/*"] },
-    ["blocking"]
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Chrome: declarativeNetRequest for HTTPS downgrade + PAC proxy
-// ---------------------------------------------------------------------------
-
-if (!IS_FIREFOX) {
-  // Add dynamic rule to downgrade https .onion to http
-  chrome.declarativeNetRequest.updateDynamicRules({
-    addRules: [{
-      id: 1,
-      priority: 1,
-      action: {
-        type: "redirect",
-        redirect: {
-          transform: { scheme: "http" }
-        }
-      },
-      condition: {
-        regexFilter: "^https://[^/]*\\.onion(/|$)",
-        resourceTypes: [
-          "main_frame", "sub_frame", "stylesheet", "script",
-          "image", "font", "xmlhttprequest", "ping", "media", "other"
-        ]
-      }
-    }],
-    removeRuleIds: [1]
   });
 }
 
