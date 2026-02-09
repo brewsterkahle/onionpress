@@ -1444,6 +1444,18 @@ class OnionPressApp(rumps.App):
 
     def show_export_dialog(self, base64_key, mnemonic):
         """Show export dialog with base64 key and recovery words option."""
+        # NSAlert dialogs lack an Edit menu, so Cmd+C doesn't work.
+        # Install a local event monitor to intercept Cmd+C and copy the key.
+        current_text = [base64_key]  # mutable so the handler can see updates
+        def handle_copy(event):
+            if (event.modifierFlags() & AppKit.NSEventModifierFlagCommand and
+                    event.charactersIgnoringModifiers() == 'c'):
+                subprocess.run(["pbcopy"], input=current_text[0].encode(), check=True)
+                return None  # consume the event (no beep)
+            return event
+        monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskKeyDown, handle_copy)
+
         while True:
             alert = AppKit.NSAlert.alloc().init()
             alert.setMessageText_("Private Key Backup")
@@ -1497,6 +1509,7 @@ class OnionPressApp(rumps.App):
                 subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
                 continue  # re-show dialog
             elif button_index == 2:  # Show Recovery Words
+                current_text[0] = mnemonic  # Cmd+C copies words while this dialog is up
                 # Format mnemonic for display
                 words = mnemonic.split()
                 word_count = len([w for w in words if w != '|'])
@@ -1523,11 +1536,12 @@ class OnionPressApp(rumps.App):
                     subprocess.run(["pbcopy"], input=mnemonic.encode(), check=True)
                     continue  # re-show recovery words
                 elif bip_response == 1:  # Back
+                    current_text[0] = base64_key  # restore Cmd+C to copy key
                     continue  # re-show main dialog
                 else:  # Done
                     break
-            else:  # Done
-                break
+
+        AppKit.NSEvent.removeMonitor_(monitor)
 
     @rumps.clicked("Export Private Key...")
     def export_key(self, _):
@@ -1622,39 +1636,60 @@ class OnionPressApp(rumps.App):
         else:
             key_text = ' '.join(key_text.split())
 
-        # Try to import (auto-detects format)
+        # Validate the key format before starting the long operation
         try:
             key_bytes, coordinator = key_manager.import_key(key_text)
-
-            if coordinator:
-                self.log(f"Key imported with coordinator: {coordinator}")
-
-            # Write the new key while container is still running
-            # (docker cp requires the container to exist)
-            self.log("Import: writing new key...")
-            key_manager.write_private_key(key_bytes)
-
-            # Restart the service to pick up the new key
-            self.log("Import: restarting service...")
-            subprocess.run([self.launcher_script, "stop"], capture_output=True)
-            time.sleep(2)
-            subprocess.run([self.launcher_script, "start"], capture_output=True)
-
-            rumps.alert(
-                title="Import Successful",
-                message="Your private key has been imported successfully!\n\nThe service is restarting with your new onion address.\n\nPlease wait a moment for the address to appear in the menu."
-            )
-
-            # Trigger status check
-            time.sleep(2)
-            self.check_status()
-
         except Exception as e:
-            self.log(f"Import failed: {e}")
+            self.log(f"Import validation failed: {e}")
             rumps.alert(
                 title="Import Failed",
-                message=f"Could not import private key:\n\n{str(e)}\n\nYour original key has not been changed."
+                message=f"Could not import private key:\n\n{str(e)}"
             )
+            return
+
+        if coordinator:
+            self.log(f"Key imported with coordinator: {coordinator}")
+
+        # Show progress notification and do the work in a background thread
+        rumps.notification(
+            title="Importing Key...",
+            subtitle="This takes about a minute.",
+            message="Writing key and restarting service."
+        )
+
+        def do_import():
+            try:
+                # Write the new key while container is still running
+                # (docker cp requires the container to exist)
+                self.log("Import: writing new key...")
+                key_manager.write_private_key(key_bytes)
+
+                # Restart the service to pick up the new key
+                self.log("Import: restarting service...")
+                subprocess.run([self.launcher_script, "stop"], capture_output=True)
+                time.sleep(2)
+                subprocess.run([self.launcher_script, "start"], capture_output=True)
+
+                self.log("Import: complete")
+                rumps.notification(
+                    title="Import Successful",
+                    subtitle="",
+                    message="Your private key has been imported. The service is restarting with your new onion address."
+                )
+
+                # Trigger status check
+                time.sleep(2)
+                self.check_status()
+
+            except Exception as e:
+                self.log(f"Import failed: {e}")
+                rumps.notification(
+                    title="Import Failed",
+                    subtitle="",
+                    message=f"Could not import private key: {str(e)}\n\nYour original key has not been changed."
+                )
+
+        threading.Thread(target=do_import, daemon=True).start()
 
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
