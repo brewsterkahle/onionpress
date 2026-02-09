@@ -2,9 +2,11 @@
 """
 OnionPress Local Proxy Server
 
-A local HTTP proxy on localhost:9077 that fetches .onion content through
-the OnionPress Tor container via `docker exec`. This allows any browser
-with the OnionPress extension to browse .onion sites transparently.
+A local HTTP proxy on localhost:9077 that fetches .onion content via
+`docker exec onionpress-wordpress curl --socks5-hostname onionpress-tor:9050`.
+The WordPress container has curl and can reach Tor's SOCKS proxy over the
+Docker network. This allows any browser with the OnionPress extension to
+browse .onion sites transparently.
 
 URL scheme: http://localhost:9077/proxy/{onion-host}/{path}
 Status endpoint: http://localhost:9077/status
@@ -77,7 +79,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         # Fetch via docker exec
         try:
-            stdout, stderr, returncode = self._docker_wget(
+            stdout, stderr, returncode = self._docker_curl(
                 target_url, post_data=post_data, head_only=head_only
             )
         except Exception as e:
@@ -85,17 +87,22 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             return
 
         if returncode != 0:
-            error_msg = stderr if stderr else f"wget exit code {returncode}"
-            # wget exit code 8 = server error (4xx/5xx) - still has output with --save-headers
-            if returncode != 8 or not stdout:
+            error_msg = stderr if stderr else f"curl exit code {returncode}"
+            # curl exit code 22 = HTTP error (4xx/5xx) - still has output with -D -
+            if returncode != 22 or not stdout:
                 self.send_error(502, f"Tor fetch failed: {error_msg}")
                 return
 
         # Parse response: wget --save-headers puts HTTP headers then \r\n\r\n then body
         self._send_proxied_response(stdout, onion_host, head_only)
 
-    def _docker_wget(self, url, post_data=None, head_only=False):
-        """Fetch a URL via docker exec into the tor container."""
+    def _docker_curl(self, url, post_data=None, head_only=False):
+        """Fetch a URL via curl in the WordPress container through Tor's SOCKS proxy.
+
+        Uses: docker exec onionpress-wordpress curl --socks5-hostname onionpress-tor:9050
+        This works because both containers share the Docker network, and curl
+        in the WordPress container can reach Tor's SOCKS port directly.
+        """
         docker_bin = self.server.docker_bin
         docker_env = self.server.docker_env
 
@@ -106,20 +113,20 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             cmd += ["-i"]
 
         cmd += [
-            "onionpress-tor",
-            "wget", "--save-headers", "-q", "-O", "-",
-            "--timeout=30",
-            "--tries=1",
+            "onionpress-wordpress",
+            "curl", "-sD", "-",
+            "--socks5-hostname", "onionpress-tor:9050",
+            "--max-time", "30",
         ]
 
         if head_only:
-            cmd += ["--spider"]
+            cmd += ["-I"]
 
         if post_data is not None:
             content_type = self.headers.get('Content-Type', 'application/x-www-form-urlencoded')
             cmd += [
-                f"--header=Content-Type: {content_type}",
-                f"--post-data={post_data.decode('utf-8', errors='replace')}",
+                "-H", f"Content-Type: {content_type}",
+                "--data-binary", "@-",
             ]
 
         cmd.append(url)
@@ -127,13 +134,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         result = subprocess.run(
             cmd,
             capture_output=True,
+            input=post_data if post_data is not None else None,
             timeout=60,
             env=docker_env
         )
         return result.stdout, result.stderr.decode('utf-8', errors='replace'), result.returncode
 
     def _send_proxied_response(self, raw_output, onion_host, head_only=False):
-        """Parse wget --save-headers output and send to client."""
+        """Parse curl -D - output and send to client."""
         # Split headers from body at first \r\n\r\n
         header_end = raw_output.find(b'\r\n\r\n')
         if header_end == -1:
