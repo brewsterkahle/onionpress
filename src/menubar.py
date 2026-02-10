@@ -1495,10 +1495,13 @@ class OnionPressApp(rumps.App):
                     # Run in separate thread so it doesn't block
                     def pull_and_start():
                         # Don't capture output - let it stream to log file
+                        # Only start wordpress+db here; Tor is started by the
+                        # setup guard (after wp core install) or by the launcher
+                        # when WordPress is already installed.
                         docker_log = os.path.join(self.app_support, "docker-pull.log")
                         with open(docker_log, 'w') as log_file:
                             result = subprocess.run(
-                                [docker_bin, "compose", "up", "-d"],
+                                [docker_bin, "compose", "up", "-d", "wordpress", "db"],
                                 cwd=docker_dir,
                                 stdout=log_file,
                                 stderr=subprocess.STDOUT,
