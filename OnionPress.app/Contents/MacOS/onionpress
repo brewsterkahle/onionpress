@@ -416,7 +416,20 @@ start_containers() {
     done
 
     # Check if WordPress is already set up (admin account created)
-    if wp_is_installed; then
+    # Retry a few times — the DB may still be warming up even though
+    # WordPress HTTP is responding (wp core is-installed needs a live DB)
+    local wp_installed=false
+    local wp_check=0
+    while [ $wp_check -lt 5 ]; do
+        if wp_is_installed; then
+            wp_installed=true
+            break
+        fi
+        sleep 2
+        wp_check=$((wp_check + 1))
+    done
+
+    if $wp_installed; then
         log "WordPress is installed — starting Tor"
         docker compose up -d --build tor >> "$LOG_FILE" 2>&1
     else
