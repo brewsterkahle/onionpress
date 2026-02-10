@@ -220,6 +220,11 @@ class OnionPressApp(rumps.App):
         self._wp_installed = None  # None = unknown, True/False = checked
         self._setup_page_opened = False  # Track if we've opened the setup page
         self._port_conflict = False  # True if ports are in use by another instance
+        self._has_internet = True          # Host-level internet connectivity
+        self._last_bootstrap_pct = 0       # Last observed Tor bootstrap percentage
+        self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
+        self._yellow_since = None          # Timestamp when entered yellow state
+        self._was_ready = False            # Were we ever ready this session?
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1007,6 +1012,63 @@ class OnionPressApp(rumps.App):
             self.log("Service not running — starting service")
             self.start_service(None)
 
+    def check_internet_connectivity(self):
+        """Check if host has internet connectivity via TCP to well-known DNS resolvers.
+        Returns True if at least one resolver is reachable, False otherwise."""
+        for host in ("1.1.1.1", "8.8.8.8"):
+            try:
+                conn = socket.create_connection((host, 53), timeout=2)
+                conn.close()
+                return True
+            except (OSError, socket.timeout):
+                continue
+        return False
+
+    def _parse_bootstrap_percentage(self):
+        """Parse Tor bootstrap percentage from recent container logs.
+        Returns highest percentage found (0-100), or 0 if not parseable."""
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "--tail", "50", "onionpress-tor"],
+                capture_output=True, text=True, timeout=5
+            )
+            output = result.stdout + result.stderr
+            best = 0
+            for line in output.splitlines():
+                idx = line.find("Bootstrapped ")
+                if idx >= 0:
+                    rest = line[idx + len("Bootstrapped "):]
+                    pct_str = ""
+                    for ch in rest:
+                        if ch.isdigit():
+                            pct_str += ch
+                        else:
+                            break
+                    if pct_str:
+                        val = int(pct_str)
+                        if val > best:
+                            best = val
+            return best
+        except Exception:
+            return 0
+
+    @property
+    def display_state(self):
+        """Compute the display state from current variables.
+        Returns one of: 'stopped', 'available', 'offline', 'stuck', 'starting'."""
+        if not self.is_running:
+            return "stopped"
+        if self.is_ready:
+            return "available"
+        if not self._has_internet:
+            return "offline"
+        # Check for stuck: bootstrap stalled 2min+ (24 checks at 5s) or yellow 5min+
+        if self._bootstrap_stall_count >= 24:
+            return "stuck"
+        if self._yellow_since and (time.time() - self._yellow_since) > 300:
+            return "stuck"
+        return "starting"
+
     def check_status(self):
         """Check if containers are running and get onion address"""
         if self._port_conflict:
@@ -1054,44 +1116,79 @@ class OnionPressApp(rumps.App):
                 else:
                     self.onion_address = "Generating address..."
 
-                # Determine if we should do detailed checks and logging
-                # Only do detailed checks if we're not ready yet or status changed
-                current_status = (self.is_running, self.onion_address)
-                should_log = (current_status != self.last_status_logged) or not self.is_ready
+                # Check internet connectivity
+                had_internet = self._has_internet
+                self._has_internet = self.check_internet_connectivity()
+                if not self._has_internet and had_internet:
+                    self.log("Internet connectivity lost")
+                elif self._has_internet and not had_internet:
+                    self.log("Internet connectivity restored")
 
-                # Check if WordPress is ready and Tor is reachable
-                wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                if not self._has_internet:
+                    # No internet — skip expensive WordPress/Tor checks
+                    if self.is_ready:
+                        self.log("Going offline — no internet connection")
+                    self.is_ready = False
+                    # Track yellow/starting state
+                    if self._yellow_since is None:
+                        self._yellow_since = time.time()
+                else:
+                    # Internet available — do full health checks
+                    # Determine if we should do detailed checks and logging
+                    current_status = (self.is_running, self.onion_address)
+                    should_log = (current_status != self.last_status_logged) or not self.is_ready
 
-                # Check Tor reachability immediately - if it works in Tor Browser, show as ready
-                tor_reachable = self.check_tor_reachability(log_result=should_log)
+                    # Check if WordPress is ready and Tor is reachable
+                    wordpress_ready = self.check_wordpress_health(log_result=should_log)
+                    tor_reachable = self.check_tor_reachability(log_result=should_log)
 
-                previous_ready = self.is_ready
-                ready_now = wordpress_ready and tor_reachable
+                    previous_ready = self.is_ready
+                    ready_now = wordpress_ready and tor_reachable
 
-                if ready_now and not previous_ready:
-                    self.is_ready = True
-                    elapsed = int(time.time() - self.startup_time)
-                    self.log(f"✓ System fully operational (launched in {elapsed}s)")
-                    self.last_status_logged = current_status
+                    if ready_now and not previous_ready:
+                        self.is_ready = True
+                        self._was_ready = True
+                        self._bootstrap_stall_count = 0
+                        self._yellow_since = None
+                        elapsed = int(time.time() - self.startup_time)
+                        self.log(f"✓ System fully operational (launched in {elapsed}s)")
+                        self.last_status_logged = current_status
 
-                    # Dismiss setup dialog if it's showing
-                    self.dismiss_setup_dialog()
+                        # Dismiss setup dialog if it's showing
+                        self.dismiss_setup_dialog()
 
-                    # Auto-open Tor Browser on first ready (if installed)
-                    if not self.auto_opened_browser:
-                        self.auto_opened_browser = True
-                        self.auto_open_browser()
+                        # Auto-open Tor Browser on first ready (if installed)
+                        if not self.auto_opened_browser:
+                            self.auto_opened_browser = True
+                            self.auto_open_browser()
 
-                    # Force menu update (changes icon to green)
-                    self.update_menu()
+                        # Force menu update (changes icon to purple)
+                        self.update_menu()
 
-                    # Dismiss splash AFTER icon turns green
-                    self.dismiss_launch_splash()
-                elif ready_now:
-                    # Already was ready, keep it ready
-                    self.is_ready = True
-                    # Update last_status_logged to prevent repeated logging
-                    self.last_status_logged = current_status
+                        # Dismiss splash AFTER icon turns purple
+                        self.dismiss_launch_splash()
+                    elif ready_now:
+                        # Already was ready, keep it ready
+                        self.is_ready = True
+                        self._bootstrap_stall_count = 0
+                        self._yellow_since = None
+                        self.last_status_logged = current_status
+                    elif previous_ready and not ready_now:
+                        # Was ready, now failing — go to reconnecting state
+                        self.is_ready = False
+                        self._yellow_since = time.time()
+                        self._bootstrap_stall_count = 0
+                        self.log("Service became unreachable — reconnecting")
+                    else:
+                        # Not ready yet — track bootstrap progress for stuck detection
+                        pct = self._parse_bootstrap_percentage()
+                        if pct > self._last_bootstrap_pct:
+                            self._last_bootstrap_pct = pct
+                            self._bootstrap_stall_count = 0
+                        else:
+                            self._bootstrap_stall_count += 1
+                        if self._yellow_since is None:
+                            self._yellow_since = time.time()
 
                 # Start web log capture if not already running
                 if self.web_log_process is None:
@@ -1147,6 +1244,10 @@ class OnionPressApp(rumps.App):
                 self.auto_opened_browser = False  # Reset for next start
                 self._wp_installed = None  # Reset for next start
                 self._setup_page_opened = False
+                self._was_ready = False
+                self._last_bootstrap_pct = 0
+                self._bootstrap_stall_count = 0
+                self._yellow_since = None
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -1167,18 +1268,33 @@ class OnionPressApp(rumps.App):
         """Update menu items based on current state - thread-safe"""
         # Dispatch UI updates to main thread to avoid AppKit threading violations
         def do_update():
-            if self.is_running and self.is_ready:
-                # Fully operational
+            state = self.display_state
+            if state == "available":
                 self.icon = self.icon_running
                 self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
                 self.update_browser_menu_title()
-            elif self.is_running and not self.is_ready:
-                # Containers running but WordPress not ready yet
+            elif state == "starting":
                 self.icon = self.icon_starting
-                self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                pct = self._last_bootstrap_pct
+                if pct > 0:
+                    self.menu["Starting..."].title = f"Status: Connecting to Tor ({pct}%)..."
+                else:
+                    self.menu["Starting..."].title = "Status: Starting up, please wait..."
+                self.menu["Start"].set_callback(None)
+                self.menu["Stop"].set_callback(self.stop_service)
+                self.menu["Restart"].set_callback(self.restart_service)
+            elif state == "offline":
+                self.icon = self.icon_stopped
+                self.menu["Starting..."].title = "Status: Offline — no internet connection"
+                self.menu["Start"].set_callback(None)
+                self.menu["Stop"].set_callback(self.stop_service)
+                self.menu["Restart"].set_callback(self.restart_service)
+            elif state == "stuck":
+                self.icon = self.icon_stopped
+                self.menu["Starting..."].title = "Status: Stuck — try Restart"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
@@ -1204,11 +1320,14 @@ class OnionPressApp(rumps.App):
                     time.sleep(30)
                     continue
                 self.check_status()
-                # Check frequently when starting up, slowly when ready
-                if self.is_ready:
+                # Adaptive polling based on display state
+                state = self.display_state
+                if state == "available":
                     time.sleep(30)  # Check every 30 seconds when operational
+                elif state == "offline":
+                    time.sleep(10)  # Check every 10 seconds when offline (detect recovery)
                 else:
-                    time.sleep(5)   # Check every 5 seconds during startup
+                    time.sleep(5)   # Check every 5 seconds during startup/stuck
 
         thread = threading.Thread(target=checker, daemon=True)
         thread.start()
@@ -1615,6 +1734,10 @@ class OnionPressApp(rumps.App):
             # Mark as not ready during restart
             self.is_ready = False
             self.is_running = False
+            self._was_ready = False
+            self._last_bootstrap_pct = 0
+            self._bootstrap_stall_count = 0
+            self._yellow_since = None
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
