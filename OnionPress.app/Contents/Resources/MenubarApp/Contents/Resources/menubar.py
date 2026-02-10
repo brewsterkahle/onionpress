@@ -121,7 +121,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.59"
+        self.version = "2.2.61"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -976,6 +976,24 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ WordPress not reachable from Tor container")
                 return False
 
+            # Check 5: Verify onion service is actually reachable through Tor network
+            # This catches the case where Tor is bootstrapped but service descriptors
+            # haven't propagated yet (common after fresh install with new key)
+            probe_result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "curl", "-s", "--socks5-hostname", "onionpress-tor:9050",
+                 "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
+                 f"http://{self.onion_address}/"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=docker_env
+            )
+            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301", "302", "303"]:
+                if log_result:
+                    self.log(f"✗ Onion service not yet reachable through Tor network")
+                return False
+
             if log_result:
                 self.log(f"✓ Onion service verified: {self.onion_address}")
 
@@ -1000,7 +1018,7 @@ class OnionPressApp(rumps.App):
     def _signal_handler(self, signum, frame):
         """Handle SIGTERM/SIGINT — clean up PID file and exit"""
         self._remove_pid_file()
-        sys.exit(0)
+        os._exit(0)
 
     def handle_reopen(self):
         """Handle reopen signal from launcher (user double-clicked app while running)"""
@@ -2524,7 +2542,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.59 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.61 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

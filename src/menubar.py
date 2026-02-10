@@ -976,6 +976,24 @@ class OnionPressApp(rumps.App):
                     self.log(f"✗ WordPress not reachable from Tor container")
                 return False
 
+            # Check 5: Verify onion service is actually reachable through Tor network
+            # This catches the case where Tor is bootstrapped but service descriptors
+            # haven't propagated yet (common after fresh install with new key)
+            probe_result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "curl", "-s", "--socks5-hostname", "onionpress-tor:9050",
+                 "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
+                 f"http://{self.onion_address}/"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=docker_env
+            )
+            if probe_result.returncode != 0 or probe_result.stdout.strip() not in ["200", "301", "302", "303"]:
+                if log_result:
+                    self.log(f"✗ Onion service not yet reachable through Tor network")
+                return False
+
             if log_result:
                 self.log(f"✓ Onion service verified: {self.onion_address}")
 
