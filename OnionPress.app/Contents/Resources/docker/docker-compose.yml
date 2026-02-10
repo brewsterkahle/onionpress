@@ -13,7 +13,7 @@ services:
       - "127.0.0.1:9050:9050"
 
   wordpress:
-    image: wordpress:6.7
+    build: ./wordpress
     container_name: onionpress-wordpress
     environment:
       - WORDPRESS_DB_HOST=db:3306
