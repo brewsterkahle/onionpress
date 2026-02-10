@@ -2040,18 +2040,53 @@ Features:
 • Free and open source
 
 Created by Brewster Kahle
-License: AGPL v3
+License: AGPL v3"""
 
-GitHub: github.com/brewsterkahle/onionpress"""
+        github_url = "https://github.com/brewsterkahle/onionpress"
+        link_label = "GitHub: github.com/brewsterkahle/onionpress"
 
-        # Use native NSAlert - no permissions needed, shows custom icon
-        self.show_native_alert(
-            title="About OnionPress",
-            message=about_text,
-            buttons=["OK"],
-            default_button=0,
-            style="informational"
-        )
+        def show_dialog():
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("About OnionPress")
+            alert.setInformativeText_(about_text)
+            alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
+
+            btn = alert.addButtonWithTitle_("OK")
+            btn.setKeyEquivalent_("\r")
+
+            # Set app icon if available
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
+
+            # Create clickable GitHub link as accessory view
+            link_field = AppKit.NSTextField.labelWithString_("")
+            link_field.setSelectable_(True)
+            link_field.setAllowsEditingTextAttributes_(True)
+            link_field.setBordered_(False)
+            link_field.setDrawsBackground_(False)
+
+            # Build attributed string with clickable link
+            attr_str = AppKit.NSMutableAttributedString.alloc().initWithString_(link_label)
+            url = AppKit.NSURL.URLWithString_(github_url)
+            link_range = AppKit.NSMakeRange(len("GitHub: "), len(link_label) - len("GitHub: "))
+            attr_str.addAttribute_value_range_(AppKit.NSLinkAttributeName, url, link_range)
+            font = AppKit.NSFont.systemFontOfSize_(AppKit.NSFont.smallSystemFontSize())
+            full_range = AppKit.NSMakeRange(0, len(link_label))
+            attr_str.addAttribute_value_range_(AppKit.NSFontAttributeName, font, full_range)
+
+            link_field.setAttributedStringValue_(attr_str)
+            link_field.sizeToFit()
+            alert.setAccessoryView_(link_field)
+
+            alert.runModal()
+
+        if AppKit.NSThread.isMainThread():
+            show_dialog()
+        else:
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(show_dialog)
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
