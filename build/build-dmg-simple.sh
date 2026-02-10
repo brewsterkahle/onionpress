@@ -205,6 +205,22 @@ for binary in colima docker docker-compose limactl; do
     fi
 done
 
+# Re-sign limactl with virtualization entitlement — required for Apple VZ framework
+echo "Adding virtualization entitlement to limactl..."
+VZ_ENTITLEMENTS=$(mktemp)
+cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.virtualization</key>
+    <true/>
+</dict>
+</plist>
+VZEOF
+codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl"
+rm "$VZ_ENTITLEMENTS"
+
 # Create lima wrapper script
 echo "Creating lima wrapper script..."
 cat > "$BIN_DIR/lima" <<'EOF'
