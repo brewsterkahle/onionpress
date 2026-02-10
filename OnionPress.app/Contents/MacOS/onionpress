@@ -72,6 +72,11 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Check if WordPress core is installed (setup wizard completed)
+wp_is_installed() {
+    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1
+}
+
 # Function to generate and load database passwords
 setup_db_passwords() {
     local secrets_file="$DATA_DIR/secrets"
@@ -383,22 +388,40 @@ start_containers() {
     # Update images if enabled in config
     update_images
 
-    # Start containers with retry on transient failures (e.g. network hiccups during image pull)
+    # Always start WordPress and DB first
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d --build >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d --build wordpress db >> "$LOG_FILE" 2>&1; then
             break
         fi
-        log "WARNING: 'docker compose up -d' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        log "WARNING: 'docker compose up -d wordpress db' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
         if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: 'docker compose up -d' failed after $max_attempts attempts."
+            log "ERROR: 'docker compose up -d wordpress db' failed after $max_attempts attempts."
             return 1
         fi
         attempt=$((attempt + 1))
         sleep 5
     done
-    log "Containers starting (images will download if needed)"
+    log "WordPress and DB containers starting"
+
+    # Wait for WordPress container to be ready before checking install status
+    local wp_wait=0
+    while [ $wp_wait -lt 60 ]; do
+        if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+        wp_wait=$((wp_wait + 2))
+    done
+
+    # Check if WordPress is already set up (admin account created)
+    if wp_is_installed; then
+        log "WordPress is installed — starting Tor"
+        docker compose up -d --build tor >> "$LOG_FILE" 2>&1
+    else
+        log "WordPress not yet installed — waiting for setup (Tor NOT started)"
+    fi
 
     # Install Internet Archive Wayback Machine Link Fixer plugin
     install_ia_plugin
@@ -456,6 +479,12 @@ wait_for_services() {
             if curl -s --max-time 3 http://localhost:8080 >/dev/null 2>&1; then
                 log "✓ WordPress is responding on localhost:8080"
                 wp_ready=true
+
+                # If WordPress is not yet installed, skip waiting for Tor
+                if ! wp_is_installed; then
+                    log "WordPress not installed — setup required, skipping Tor wait"
+                    return 0
+                fi
             fi
         fi
 
@@ -558,13 +587,20 @@ main() {
             get_onion_address
             ;;
 
+        start-tor)
+            setup_db_passwords
+            cd "$DOCKER_DIR"
+            docker compose up -d tor >> "$LOG_FILE" 2>&1
+            log "Tor container started"
+            ;;
+
         logs)
             cd "$DOCKER_DIR"
             docker compose logs -f
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|logs}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|logs}"
             exit 1
             ;;
     esac
