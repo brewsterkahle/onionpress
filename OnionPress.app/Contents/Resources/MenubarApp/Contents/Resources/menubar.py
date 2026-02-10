@@ -15,6 +15,7 @@ import sys
 from datetime import datetime
 import AppKit
 import signal
+import socket
 import atexit
 
 # Add scripts directory to path for imports
@@ -120,7 +121,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.55"
+        self.version = "2.2.58"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -218,6 +219,7 @@ class OnionPressApp(rumps.App):
         self.proxy_thread = None  # Thread running the proxy server
         self._wp_installed = None  # None = unknown, True/False = checked
         self._setup_page_opened = False  # Track if we've opened the setup page
+        self._port_conflict = False  # True if ports are in use by another instance
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -363,9 +365,9 @@ class OnionPressApp(rumps.App):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(dismiss)
 
     def openLogFile_(self, sender):
-        """Action handler for View Log button"""
+        """Action handler for View Log button — open in Console.app for live tailing"""
         try:
-            subprocess.run(["open", self.log_file], check=False)
+            subprocess.run(["open", "-a", "Console", self.log_file], check=False)
         except Exception as e:
             self.log(f"Error opening log file: {e}")
 
@@ -694,6 +696,20 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Error checking Colima: {e}")
 
+    def check_port_conflict(self):
+        """Check if required ports are already in use by another process."""
+        ports = [8080, 9050, onion_proxy.PROXY_PORT]
+        in_use = []
+        for port in ports:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.bind(('127.0.0.1', port))
+                s.close()
+            except OSError:
+                in_use.append(port)
+        return in_use
+
     def auto_start(self):
         """Automatically start the service when the app launches"""
         time.sleep(1)  # Brief delay
@@ -727,6 +743,36 @@ class OnionPressApp(rumps.App):
 
         if waited >= max_wait:
             self.log("WARNING: Container runtime not ready after 3 minutes")
+
+        # Check for port conflicts (another user's OnionPress or other process)
+        # Only flag a conflict if ports are busy AND our own containers aren't running
+        in_use = self.check_port_conflict()
+        if in_use:
+            # Check if our containers are already running (normal restart case)
+            try:
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                result = subprocess.run(
+                    [docker_bin, "ps", "--format", "{{.Names}}"],
+                    capture_output=True, text=True, timeout=5, env=env
+                )
+                our_containers = result.stdout.strip()
+            except Exception:
+                our_containers = ""
+
+            if "onionpress-" not in our_containers:
+                ports_str = ', '.join(str(p) for p in in_use)
+                self.log(f"Port conflict detected: ports {ports_str} already in use by another process")
+                self._port_conflict = True
+                rumps.alert(
+                    title="OnionPress Cannot Start",
+                    message=f"Port(s) {ports_str} already in use.\n\n"
+                            "Another instance of OnionPress may be running, "
+                            "possibly under a different user account.\n\n"
+                            "Only one OnionPress can run at a time on this Mac."
+                )
+                self.menu["Starting..."].title = "Status: Port conflict"
+                return
 
         # Check if UPDATE_ON_LAUNCH is enabled
         config_file = os.path.join(self.app_support, "config")
@@ -963,6 +1009,8 @@ class OnionPressApp(rumps.App):
 
     def check_status(self):
         """Check if containers are running and get onion address"""
+        if self._port_conflict:
+            return
         with self._checking_lock:
             if self.checking:
                 return
@@ -1057,30 +1105,32 @@ class OnionPressApp(rumps.App):
                 if self.proxy_server is None:
                     self.start_onion_proxy()
                 elif self.proxy_server:
-                    # Update onion address on existing proxy
+                    # Update onion address and readiness on existing proxy
                     self.proxy_server.onion_address = self.onion_address
+                    self.proxy_server.tor_ready = self.is_ready
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
                     wp_installed = self.check_wp_installed()
                     if wp_installed:
+                        was_waiting = (self._wp_installed is False)
                         self._wp_installed = True
+                        if was_waiting:
+                            # Setup just completed — start Tor
+                            self.log("Setup complete — starting Tor")
+                            threading.Thread(
+                                target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
+                                daemon=True
+                            ).start()
                     elif not self._setup_page_opened:
                         # WordPress container is running but not installed — open setup page
                         self._wp_installed = False
                         self._setup_page_opened = True
                         self.log("WordPress not installed — opening setup page")
+                        # Dismiss dialogs before opening browser
+                        self.dismiss_setup_dialog()
+                        self.dismiss_launch_splash()
                         subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
-
-                # Detect setup completion and start Tor
-                if self._wp_installed is False:
-                    if self.check_wp_installed():
-                        self._wp_installed = True
-                        self.log("Setup complete — starting Tor")
-                        threading.Thread(
-                            target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
-                            daemon=True
-                        ).start()
             else:
                 # Log when stopping
                 if self.is_running or self.is_ready:
@@ -1150,6 +1200,9 @@ class OnionPressApp(rumps.App):
         """Start background thread to check status periodically"""
         def checker():
             while True:
+                if self._port_conflict:
+                    time.sleep(30)
+                    continue
                 self.check_status()
                 # Check frequently when starting up, slowly when ready
                 if self.is_ready:
@@ -2046,7 +2099,7 @@ class OnionPressApp(rumps.App):
                 try:
                     alert = AppKit.NSAlert.alloc().init()
                     alert.setMessageText_("OnionPress Setup")
-                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
+                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nThis window will close automatically to set up your WordPress.")
                     alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
 
                     btn_dismiss = alert.addButtonWithTitle_("Dismiss")
@@ -2348,7 +2401,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.55 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.58 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
