@@ -1000,7 +1000,7 @@ class OnionPressApp(rumps.App):
     def _signal_handler(self, signum, frame):
         """Handle SIGTERM/SIGINT — clean up PID file and exit"""
         self._remove_pid_file()
-        sys.exit(0)
+        os._exit(0)
 
     def handle_reopen(self):
         """Handle reopen signal from launcher (user double-clicked app while running)"""
