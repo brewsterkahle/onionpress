@@ -121,7 +121,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.63"
+        self.version = "2.2.64"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -624,6 +624,19 @@ class OnionPressApp(rumps.App):
 
         self.log("=" * 60)
 
+    def _web_log_reader_thread(self, process, raw_path, filtered_path):
+        """Read docker logs and write to both raw and filtered log files"""
+        try:
+            with open(raw_path, 'a') as raw_f, open(filtered_path, 'a') as filtered_f:
+                for line in process.stdout:
+                    raw_f.write(line)
+                    raw_f.flush()
+                    if "OnionPress-HealthCheck" not in line:
+                        filtered_f.write(line)
+                        filtered_f.flush()
+        except Exception:
+            pass
+
     def start_web_log_capture(self):
         """Start capturing WordPress logs to a file"""
         if self.web_log_process is not None:
@@ -631,26 +644,33 @@ class OnionPressApp(rumps.App):
 
         try:
             web_log_file = os.path.join(self.app_support, "wordpress-access.log")
+            visitors_log_file = os.path.join(self.app_support, "wordpress-visitors.log")
             docker_bin = os.path.join(self.bin_dir, "docker")
 
-            # Open log file for writing (kept as instance var so we can close it later)
-            self.web_log_file_handle = open(web_log_file, 'a')
-
-            # Start docker logs process in background
+            # Start docker logs process in background, capture stdout as text
             self.web_log_process = subprocess.Popen(
                 [docker_bin, "logs", "-f", "--tail", "100", "onionpress-wordpress"],
-                stdout=self.web_log_file_handle,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
                 env={
                     "DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"
                 }
             )
+
+            # Start reader thread that splits logs into raw + filtered files
+            self.web_log_thread = threading.Thread(
+                target=self._web_log_reader_thread,
+                args=(self.web_log_process, web_log_file, visitors_log_file),
+                daemon=True
+            )
+            self.web_log_thread.start()
+
             print(f"Started web log capture to {web_log_file}")
         except Exception as e:
             print(f"Error starting web log capture: {e}")
-            if hasattr(self, 'web_log_file_handle') and self.web_log_file_handle:
-                self.web_log_file_handle.close()
-                self.web_log_file_handle = None
             self.web_log_process = None
 
     def stop_web_log_capture(self):
@@ -665,13 +685,10 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     pass
             self.web_log_process = None
-            # Close the log file handle to avoid leaking it
-            if hasattr(self, 'web_log_file_handle') and self.web_log_file_handle:
-                try:
-                    self.web_log_file_handle.close()
-                except Exception:
-                    pass
-                self.web_log_file_handle = None
+            # Wait for reader thread to finish
+            if hasattr(self, 'web_log_thread') and self.web_log_thread:
+                self.web_log_thread.join(timeout=3)
+                self.web_log_thread = None
             print("Stopped web log capture")
 
     def ensure_docker_available(self):
@@ -863,7 +880,7 @@ class OnionPressApp(rumps.App):
                 self.log("Checking local access: http://localhost:8080")
             # Use curl instead of urllib to avoid "local network" permission prompt
             result = subprocess.run(
-                ["curl", "-s", "--max-time", "3", "http://localhost:8080"],
+                ["curl", "-s", "--max-time", "3", "-H", "User-Agent: OnionPress-HealthCheck", "http://localhost:8080"],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -963,6 +980,7 @@ class OnionPressApp(rumps.App):
             probe_result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor",
                  "wget", "-q", "-O", "/dev/null", "--timeout=5",
+                 "-U", "OnionPress-HealthCheck",
                  "http://wordpress:80/"],
                 capture_output=True,
                 text=True,
@@ -983,6 +1001,7 @@ class OnionPressApp(rumps.App):
                 [docker_bin, "exec", "onionpress-wordpress",
                  "curl", "-s", "--socks5-hostname", "onionpress-tor:9050",
                  "--max-time", "10", "-o", "/dev/null", "-w", "%{http_code}",
+                 "-H", "User-Agent: OnionPress-HealthCheck",
                  f"http://{self.onion_address}/"],
                 capture_output=True,
                 text=True,
@@ -1791,7 +1810,7 @@ class OnionPressApp(rumps.App):
             rumps.alert("Service not running. Please start the service first.")
             return
 
-        web_log_file = os.path.join(self.app_support, "wordpress-access.log")
+        web_log_file = os.path.join(self.app_support, "wordpress-visitors.log")
 
         # Ensure the log file exists
         if not os.path.exists(web_log_file):
@@ -1799,7 +1818,7 @@ class OnionPressApp(rumps.App):
             open(web_log_file, 'a').close()
             time.sleep(1)
 
-        # Open in Console.app
+        # Open in Console.app (filtered log excludes health check pings)
         subprocess.run(["open", "-a", "Console", web_log_file])
 
     def get_version(self):
@@ -2542,7 +2561,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.63 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.64 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
