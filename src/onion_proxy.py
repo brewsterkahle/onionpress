@@ -370,6 +370,16 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self._handle_request(head_only=True)
 
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests (Firefox requires this)."""
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-OnionPress-Browser')
+        self.send_header('Access-Control-Max-Age', '86400')
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
     def do_CONNECT(self):
         """Handle HTTPS tunneling for clearnet URLs."""
         try:
