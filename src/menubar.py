@@ -15,6 +15,7 @@ import sys
 from datetime import datetime
 import AppKit
 import signal
+import socket
 import atexit
 
 # Add scripts directory to path for imports
@@ -218,6 +219,7 @@ class OnionPressApp(rumps.App):
         self.proxy_thread = None  # Thread running the proxy server
         self._wp_installed = None  # None = unknown, True/False = checked
         self._setup_page_opened = False  # Track if we've opened the setup page
+        self._port_conflict = False  # True if ports are in use by another instance
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -694,6 +696,20 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Error checking Colima: {e}")
 
+    def check_port_conflict(self):
+        """Check if required ports are already in use by another process."""
+        ports = [8080, 9050, onion_proxy.PROXY_PORT]
+        in_use = []
+        for port in ports:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.bind(('127.0.0.1', port))
+                s.close()
+            except OSError:
+                in_use.append(port)
+        return in_use
+
     def auto_start(self):
         """Automatically start the service when the app launches"""
         time.sleep(1)  # Brief delay
@@ -727,6 +743,36 @@ class OnionPressApp(rumps.App):
 
         if waited >= max_wait:
             self.log("WARNING: Container runtime not ready after 3 minutes")
+
+        # Check for port conflicts (another user's OnionPress or other process)
+        # Only flag a conflict if ports are busy AND our own containers aren't running
+        in_use = self.check_port_conflict()
+        if in_use:
+            # Check if our containers are already running (normal restart case)
+            try:
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                result = subprocess.run(
+                    [docker_bin, "ps", "--format", "{{.Names}}"],
+                    capture_output=True, text=True, timeout=5, env=env
+                )
+                our_containers = result.stdout.strip()
+            except Exception:
+                our_containers = ""
+
+            if "onionpress-" not in our_containers:
+                ports_str = ', '.join(str(p) for p in in_use)
+                self.log(f"Port conflict detected: ports {ports_str} already in use by another process")
+                self._port_conflict = True
+                rumps.alert(
+                    title="OnionPress Cannot Start",
+                    message=f"Port(s) {ports_str} already in use.\n\n"
+                            "Another instance of OnionPress may be running, "
+                            "possibly under a different user account.\n\n"
+                            "Only one OnionPress can run at a time on this Mac."
+                )
+                self.menu["Starting..."].title = "Status: Port conflict"
+                return
 
         # Check if UPDATE_ON_LAUNCH is enabled
         config_file = os.path.join(self.app_support, "config")
@@ -963,6 +1009,8 @@ class OnionPressApp(rumps.App):
 
     def check_status(self):
         """Check if containers are running and get onion address"""
+        if self._port_conflict:
+            return
         with self._checking_lock:
             if self.checking:
                 return
@@ -1152,6 +1200,9 @@ class OnionPressApp(rumps.App):
         """Start background thread to check status periodically"""
         def checker():
             while True:
+                if self._port_conflict:
+                    time.sleep(30)
+                    continue
                 self.check_status()
                 # Check frequently when starting up, slowly when ready
                 if self.is_ready:
