@@ -205,14 +205,14 @@ SETUP_SUCCESS_HTML = '''<!DOCTYPE html>
     <h2>WordPress Configured!</h2>
     <p>Your admin account has been created.</p>
     <p id="tor-status"><span class="spinner"></span>Starting Tor onion service&hellip;</p>
-    <p class="status">Your .onion address will appear in the menu bar when ready.</p>
+    <p class="status">Your .onion address will appear in the menu bar when ready, which can be used in a Tor-capable browser (Tor Browser or Brave Browser in Tor mode or a browser running the OnionPress extension).</p>
   </div>
 </div>
 <script>
 (function() {
   var poll = setInterval(function() {
     fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
-      if (d.onion_address && d.onion_address.indexOf('.onion') !== -1) {
+      if (d.tor_ready) {
         clearInterval(poll);
         document.getElementById('tor-status').innerHTML = '&#x2705; Tor onion service started!';
       }
@@ -768,6 +768,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             "running": True,
             "proxy_port": self.server.server_port,
             "onion_address": self.server.onion_address,
+            "tor_ready": getattr(self.server, 'tor_ready', False),
             "version": self.server.version,
             "cache": cache_stats,
         }
@@ -787,6 +788,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
     def __init__(self, *args, **kwargs):
         self.onion_address = None
+        self.tor_ready = False
         self.version = "unknown"
         self.docker_bin = "docker"
         self.docker_env = None

@@ -1057,8 +1057,9 @@ class OnionPressApp(rumps.App):
                 if self.proxy_server is None:
                     self.start_onion_proxy()
                 elif self.proxy_server:
-                    # Update onion address on existing proxy
+                    # Update onion address and readiness on existing proxy
                     self.proxy_server.onion_address = self.onion_address
+                    self.proxy_server.tor_ready = self.is_ready
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
