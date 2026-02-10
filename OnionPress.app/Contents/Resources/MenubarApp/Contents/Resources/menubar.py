@@ -14,6 +14,8 @@ import plistlib
 import sys
 from datetime import datetime
 import AppKit
+import signal
+import atexit
 
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -37,6 +39,32 @@ class OnionPressApp(rumps.App):
         # Get paths first (fast - no I/O)
         self.app_support = os.path.expanduser("~/.onionpress")
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
+
+        # Single-instance safety net via PID file
+        self.pid_file = os.path.join(self.app_support, "menubar.pid")
+        os.makedirs(self.app_support, exist_ok=True)
+        if os.path.exists(self.pid_file):
+            try:
+                with open(self.pid_file) as f:
+                    old_pid = int(f.read().strip())
+                # Check if that PID is still alive
+                os.kill(old_pid, 0)
+                # Process is alive — signal reopen and exit
+                reopen_file = os.path.join(self.app_support, ".reopen")
+                with open(reopen_file, 'w') as f:
+                    f.write(str(os.getpid()))
+                sys.exit(0)
+            except (ProcessLookupError, ValueError, OSError):
+                # Stale PID file — continue launching
+                pass
+        # Write our PID
+        with open(self.pid_file, 'w') as f:
+            f.write(str(os.getpid()))
+        # Register cleanup for normal exit
+        atexit.register(self._remove_pid_file)
+        # Register signal handlers for clean removal on SIGTERM/SIGINT
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
 
         # When running as py2app bundle, __file__ is in Contents/Resources/
         # so we need to use that as resources_dir, not the parent
@@ -163,8 +191,17 @@ class OnionPressApp(rumps.App):
         # Start background initialization
         threading.Thread(target=background_init, daemon=True).start()
 
-        # State
-        self.onion_address = "Starting..."
+        # State — load cached onion address from previous run if available
+        cached_addr_file = os.path.join(self.app_support, "onion_address")
+        try:
+            with open(cached_addr_file) as f:
+                cached = f.read().strip()
+            if cached and cached.endswith('.onion'):
+                self.onion_address = cached
+            else:
+                self.onion_address = "Starting..."
+        except (OSError, IOError):
+            self.onion_address = "Starting..."
         self.is_running = False
         self.is_ready = False  # WordPress is ready to serve requests
         self.checking = False
@@ -879,6 +916,32 @@ class OnionPressApp(rumps.App):
                 self.log(f"✗ Tor status check failed: {str(e)}")
             return False
 
+    def _remove_pid_file(self):
+        """Remove PID file on exit"""
+        try:
+            if os.path.exists(self.pid_file):
+                with open(self.pid_file) as f:
+                    pid = int(f.read().strip())
+                if pid == os.getpid():
+                    os.remove(self.pid_file)
+        except Exception:
+            pass
+
+    def _signal_handler(self, signum, frame):
+        """Handle SIGTERM/SIGINT — clean up PID file and exit"""
+        self._remove_pid_file()
+        sys.exit(0)
+
+    def handle_reopen(self):
+        """Handle reopen signal from launcher (user double-clicked app while running)"""
+        self.log("Reopen signal received")
+        if self.is_running and self.is_ready:
+            self.log("Service is ready — opening browser")
+            self.open_tor_browser(None)
+        elif not self.is_running:
+            self.log("Service not running — starting service")
+            self.start_service(None)
+
     def check_status(self):
         """Check if containers are running and get onion address"""
         with self._checking_lock:
@@ -887,6 +950,15 @@ class OnionPressApp(rumps.App):
             self.checking = True
 
         try:
+            # Check for reopen signal from launcher
+            reopen_file = os.path.join(self.app_support, ".reopen")
+            if os.path.exists(reopen_file):
+                try:
+                    os.remove(reopen_file)
+                except OSError:
+                    pass
+                self.handle_reopen()
+
             # Check if containers are running
             status_json = self.run_command("status")
 
@@ -906,6 +978,12 @@ class OnionPressApp(rumps.App):
                 addr = self.run_command("address")
                 if addr and addr != "Generating...":
                     self.onion_address = addr.strip()
+                    # Cache address locally for instant availability on next launch
+                    try:
+                        with open(os.path.join(self.app_support, "onion_address"), 'w') as f:
+                            f.write(self.onion_address)
+                    except OSError:
+                        pass
                 else:
                     self.onion_address = "Generating address..."
 
@@ -971,7 +1049,9 @@ class OnionPressApp(rumps.App):
                     # Only dismiss setup dialog when actually stopping (not during startup)
                     self.dismiss_setup_dialog()
 
-                self.onion_address = "Not running"
+                # Keep cached address visible even when stopped — it's still valid
+                if not self.onion_address or self.onion_address in ["Starting...", "Generating address..."]:
+                    self.onion_address = "Not running"
                 self.is_ready = False
                 self.auto_opened_browser = False  # Reset for next start
 
@@ -1012,7 +1092,10 @@ class OnionPressApp(rumps.App):
             else:
                 # Stopped
                 self.icon = self.icon_stopped
-                self.menu["Starting..."].title = "Status: Stopped"
+                if self.onion_address and self.onion_address.endswith('.onion'):
+                    self.menu["Starting..."].title = f"Stopped — {self.onion_address}"
+                else:
+                    self.menu["Starting..."].title = "Status: Stopped"
                 self.menu["Start"].set_callback(self.start_service)
                 self.menu["Stop"].set_callback(None)
                 self.menu["Restart"].set_callback(None)
@@ -2264,6 +2347,9 @@ License: AGPL v3"""
                 self.log("Warning: Colima stop timed out")
             except Exception as e:
                 self.log(f"Warning: Colima stop failed: {e}")
+
+            # Remove PID file
+            self._remove_pid_file()
 
             # Now quit
             rumps.quit_application()

@@ -28,6 +28,8 @@
 	<string>public.app-category.utilities</string>
 	<key>LSHasLocalizedDisplayName</key>
 	<false/>
+	<key>LSMultipleInstancesProhibited</key>
+	<true/>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleScriptEnabled</key>
@@ -78,7 +80,7 @@
 	<key>PythonInfoDict</key>
 	<dict>
 		<key>PythonExecutable</key>
-		<string>/private/var/folders/lx/n1159d1x0g99f_pqm059zf3w0000gn/T/tmp.liYswI6uLB/venv/bin/python3</string>
+		<string>/private/var/folders/lx/n1159d1x0g99f_pqm059zf3w0000gn/T/tmp.pQtHvtH1tm/venv/bin/python3</string>
 		<key>PythonLongVersion</key>
 		<string>3.14.0 (main, Oct  7 2025, 09:34:52) [Clang 17.0.0 (clang-1700.3.19.1)]</string>
 		<key>PythonShortVersion</key>

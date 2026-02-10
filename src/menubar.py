@@ -191,8 +191,17 @@ class OnionPressApp(rumps.App):
         # Start background initialization
         threading.Thread(target=background_init, daemon=True).start()
 
-        # State
-        self.onion_address = "Starting..."
+        # State — load cached onion address from previous run if available
+        cached_addr_file = os.path.join(self.app_support, "onion_address")
+        try:
+            with open(cached_addr_file) as f:
+                cached = f.read().strip()
+            if cached and cached.endswith('.onion'):
+                self.onion_address = cached
+            else:
+                self.onion_address = "Starting..."
+        except (OSError, IOError):
+            self.onion_address = "Starting..."
         self.is_running = False
         self.is_ready = False  # WordPress is ready to serve requests
         self.checking = False
@@ -969,6 +978,12 @@ class OnionPressApp(rumps.App):
                 addr = self.run_command("address")
                 if addr and addr != "Generating...":
                     self.onion_address = addr.strip()
+                    # Cache address locally for instant availability on next launch
+                    try:
+                        with open(os.path.join(self.app_support, "onion_address"), 'w') as f:
+                            f.write(self.onion_address)
+                    except OSError:
+                        pass
                 else:
                     self.onion_address = "Generating address..."
 
@@ -1034,7 +1049,9 @@ class OnionPressApp(rumps.App):
                     # Only dismiss setup dialog when actually stopping (not during startup)
                     self.dismiss_setup_dialog()
 
-                self.onion_address = "Not running"
+                # Keep cached address visible even when stopped — it's still valid
+                if not self.onion_address or self.onion_address in ["Starting...", "Generating address..."]:
+                    self.onion_address = "Not running"
                 self.is_ready = False
                 self.auto_opened_browser = False  # Reset for next start
 
@@ -1075,7 +1092,10 @@ class OnionPressApp(rumps.App):
             else:
                 # Stopped
                 self.icon = self.icon_stopped
-                self.menu["Starting..."].title = "Status: Stopped"
+                if self.onion_address and self.onion_address.endswith('.onion'):
+                    self.menu["Starting..."].title = f"Stopped — {self.onion_address}"
+                else:
+                    self.menu["Starting..."].title = "Status: Stopped"
                 self.menu["Start"].set_callback(self.start_service)
                 self.menu["Stop"].set_callback(None)
                 self.menu["Restart"].set_callback(None)
