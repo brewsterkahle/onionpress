@@ -216,6 +216,8 @@ class OnionPressApp(rumps.App):
         self.caffeinate_process = None  # Process handle for caffeinate to prevent sleep
         self.proxy_server = None  # Onion proxy HTTP server instance
         self.proxy_thread = None  # Thread running the proxy server
+        self._wp_installed = None  # None = unknown, True/False = checked
+        self._setup_page_opened = False  # Track if we've opened the setup page
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -457,6 +459,7 @@ class OnionPressApp(rumps.App):
                 server.version = self.version
                 server.data_dir = self.app_support
                 server.log_func = self.log
+                server.launcher_script = self.launcher_script
                 self.proxy_server = server
                 self.log(f"Onion proxy listening on http://127.0.0.1:{onion_proxy.PROXY_PORT}")
                 server.serve_forever()
@@ -478,6 +481,22 @@ class OnionPressApp(rumps.App):
             finally:
                 self.proxy_server = None
                 self.proxy_thread = None
+
+    def check_wp_installed(self):
+        """Check if WordPress core is installed via wp-cli."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "core", "is-installed", "--allow-root"],
+                env=env, capture_output=True, timeout=10
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def show_native_alert(self, title, message, buttons=["OK"], default_button=0, cancel_button=None, style="informational"):
         """Show a native macOS alert dialog using AppKit (no permission prompts, shows custom icon)
@@ -1040,6 +1059,28 @@ class OnionPressApp(rumps.App):
                 elif self.proxy_server:
                     # Update onion address on existing proxy
                     self.proxy_server.onion_address = self.onion_address
+
+                # Check if WordPress setup is needed (first-run guard)
+                if self._wp_installed is not True and self.proxy_server:
+                    wp_installed = self.check_wp_installed()
+                    if wp_installed:
+                        self._wp_installed = True
+                    elif not self._setup_page_opened:
+                        # WordPress container is running but not installed — open setup page
+                        self._wp_installed = False
+                        self._setup_page_opened = True
+                        self.log("WordPress not installed — opening setup page")
+                        subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
+
+                # Detect setup completion and start Tor
+                if self._wp_installed is False:
+                    if self.check_wp_installed():
+                        self._wp_installed = True
+                        self.log("Setup complete — starting Tor")
+                        threading.Thread(
+                            target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
+                            daemon=True
+                        ).start()
             else:
                 # Log when stopping
                 if self.is_running or self.is_ready:
@@ -1054,6 +1095,8 @@ class OnionPressApp(rumps.App):
                     self.onion_address = "Not running"
                 self.is_ready = False
                 self.auto_opened_browser = False  # Reset for next start
+                self._wp_installed = None  # Reset for next start
+                self._setup_page_opened = False
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -1452,10 +1495,13 @@ class OnionPressApp(rumps.App):
                     # Run in separate thread so it doesn't block
                     def pull_and_start():
                         # Don't capture output - let it stream to log file
+                        # Only start wordpress+db here; Tor is started by the
+                        # setup guard (after wp core install) or by the launcher
+                        # when WordPress is already installed.
                         docker_log = os.path.join(self.app_support, "docker-pull.log")
                         with open(docker_log, 'w') as log_file:
                             result = subprocess.run(
-                                [docker_bin, "compose", "up", "-d"],
+                                [docker_bin, "compose", "up", "-d", "wordpress", "db"],
                                 cwd=docker_dir,
                                 stdout=log_file,
                                 stderr=subprocess.STDOUT,
