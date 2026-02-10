@@ -301,6 +301,16 @@ else
     echo "  Check setup.py 'includes' list."
 fi
 
+# Verify the built MenubarApp version matches src/menubar.py
+EXPECTED_VERSION=$(grep 'self\.version *= *"' "$PROJECT_DIR/src/menubar.py" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+BUILT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$MENUBAR_APP_DIR/Contents/Info.plist" 2>/dev/null)
+if [ "$EXPECTED_VERSION" != "$BUILT_VERSION" ]; then
+    echo "ERROR: Version mismatch! src/menubar.py has $EXPECTED_VERSION but built MenubarApp has $BUILT_VERSION"
+    echo "The py2app build may have used stale source. Aborting."
+    exit 1
+fi
+echo "  Version verified: $BUILT_VERSION"
+
 cd "$PROJECT_DIR"
 rm -rf "$MENUBAR_BUILD_DIR"
 echo "Standalone MenubarApp built successfully"
