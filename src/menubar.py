@@ -14,6 +14,8 @@ import plistlib
 import sys
 from datetime import datetime
 import AppKit
+import signal
+import atexit
 
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -37,6 +39,32 @@ class OnionPressApp(rumps.App):
         # Get paths first (fast - no I/O)
         self.app_support = os.path.expanduser("~/.onionpress")
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
+
+        # Single-instance safety net via PID file
+        self.pid_file = os.path.join(self.app_support, "menubar.pid")
+        os.makedirs(self.app_support, exist_ok=True)
+        if os.path.exists(self.pid_file):
+            try:
+                with open(self.pid_file) as f:
+                    old_pid = int(f.read().strip())
+                # Check if that PID is still alive
+                os.kill(old_pid, 0)
+                # Process is alive — signal reopen and exit
+                reopen_file = os.path.join(self.app_support, ".reopen")
+                with open(reopen_file, 'w') as f:
+                    f.write(str(os.getpid()))
+                sys.exit(0)
+            except (ProcessLookupError, ValueError, OSError):
+                # Stale PID file — continue launching
+                pass
+        # Write our PID
+        with open(self.pid_file, 'w') as f:
+            f.write(str(os.getpid()))
+        # Register cleanup for normal exit
+        atexit.register(self._remove_pid_file)
+        # Register signal handlers for clean removal on SIGTERM/SIGINT
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
 
         # When running as py2app bundle, __file__ is in Contents/Resources/
         # so we need to use that as resources_dir, not the parent
@@ -879,6 +907,32 @@ class OnionPressApp(rumps.App):
                 self.log(f"✗ Tor status check failed: {str(e)}")
             return False
 
+    def _remove_pid_file(self):
+        """Remove PID file on exit"""
+        try:
+            if os.path.exists(self.pid_file):
+                with open(self.pid_file) as f:
+                    pid = int(f.read().strip())
+                if pid == os.getpid():
+                    os.remove(self.pid_file)
+        except Exception:
+            pass
+
+    def _signal_handler(self, signum, frame):
+        """Handle SIGTERM/SIGINT — clean up PID file and exit"""
+        self._remove_pid_file()
+        sys.exit(0)
+
+    def handle_reopen(self):
+        """Handle reopen signal from launcher (user double-clicked app while running)"""
+        self.log("Reopen signal received")
+        if self.is_running and self.is_ready:
+            self.log("Service is ready — opening browser")
+            self.open_tor_browser(None)
+        elif not self.is_running:
+            self.log("Service not running — starting service")
+            self.start_service(None)
+
     def check_status(self):
         """Check if containers are running and get onion address"""
         with self._checking_lock:
@@ -887,6 +941,15 @@ class OnionPressApp(rumps.App):
             self.checking = True
 
         try:
+            # Check for reopen signal from launcher
+            reopen_file = os.path.join(self.app_support, ".reopen")
+            if os.path.exists(reopen_file):
+                try:
+                    os.remove(reopen_file)
+                except OSError:
+                    pass
+                self.handle_reopen()
+
             # Check if containers are running
             status_json = self.run_command("status")
 
@@ -2264,6 +2327,9 @@ License: AGPL v3"""
                 self.log("Warning: Colima stop timed out")
             except Exception as e:
                 self.log(f"Warning: Colima stop failed: {e}")
+
+            # Remove PID file
+            self._remove_pid_file()
 
             # Now quit
             rumps.quit_application()

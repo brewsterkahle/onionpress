@@ -113,6 +113,14 @@ initialize_colima() {
     fi
 }
 
+# Check if menubar app is already running
+if pgrep -f "MenubarApp/Contents/MacOS/menubar" >/dev/null 2>&1; then
+    log "Menubar app already running — triggering reopen"
+    # Signal the running instance to open browser by touching a sentinel file
+    touch "$DATA_DIR/.reopen"
+    exit 0
+fi
+
 # Launch menubar app immediately so icon appears fast (gray = starting)
 log "Launching menu bar application..."
 arch -"$HOST_ARCH" "$MENUBAR_APP/Contents/MacOS/menubar" >> "$LOG_FILE" 2>&1 &
