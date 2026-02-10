@@ -198,6 +198,8 @@ for binary in colima docker docker-compose limactl; do
         lipo "$binary" -thin arm64 -output "${binary}.arm64"
         mv "$binary" "${binary}.universal"
         mv "${binary}.arm64" "$binary"
+        # Re-sign with adhoc signature — macOS requires signed binaries on Apple Silicon
+        codesign -s - "$binary"
         # Delete the universal binary to save space in DMG
         rm "${binary}.universal"
     fi
