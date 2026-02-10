@@ -139,7 +139,7 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
         </tr>
       </table>
       <div class="submit-row">
-        <button type="submit" class="submit-btn" id="submit-btn">Install OnionPress</button>
+        <button type="submit" class="submit-btn" id="submit-btn">Configure OnionPress</button>
       </div>
     </form>
   </div>

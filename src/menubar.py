@@ -1064,23 +1064,24 @@ class OnionPressApp(rumps.App):
                 if self._wp_installed is not True and self.proxy_server:
                     wp_installed = self.check_wp_installed()
                     if wp_installed:
+                        was_waiting = (self._wp_installed is False)
                         self._wp_installed = True
+                        if was_waiting:
+                            # Setup just completed — start Tor
+                            self.log("Setup complete — starting Tor")
+                            threading.Thread(
+                                target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
+                                daemon=True
+                            ).start()
                     elif not self._setup_page_opened:
                         # WordPress container is running but not installed — open setup page
                         self._wp_installed = False
                         self._setup_page_opened = True
                         self.log("WordPress not installed — opening setup page")
+                        # Dismiss dialogs before opening browser
+                        self.dismiss_setup_dialog()
+                        self.dismiss_launch_splash()
                         subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
-
-                # Detect setup completion and start Tor
-                if self._wp_installed is False:
-                    if self.check_wp_installed():
-                        self._wp_installed = True
-                        self.log("Setup complete — starting Tor")
-                        threading.Thread(
-                            target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
-                            daemon=True
-                        ).start()
             else:
                 # Log when stopping
                 if self.is_running or self.is_ready:
@@ -2046,7 +2047,7 @@ class OnionPressApp(rumps.App):
                 try:
                     alert = AppKit.NSAlert.alloc().init()
                     alert.setMessageText_("OnionPress Setup")
-                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nConsole.app has been opened so you can watch the progress.\n\nThis window will close automatically when your site is ready.")
+                    alert.setInformativeText_("Setting up OnionPress for first use...\n\n• Downloading container images\n• Configuring Tor onion service\n• Starting WordPress\n\nThis may take 2-5 minutes depending on your internet speed.\n\nThis window will close automatically to set up your WordPress.")
                     alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
 
                     btn_dismiss = alert.addButtonWithTitle_("Dismiss")
