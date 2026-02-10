@@ -204,10 +204,22 @@ SETUP_SUCCESS_HTML = '''<!DOCTYPE html>
     <div class="success-icon">&#x2705;</div>
     <h2>WordPress Configured!</h2>
     <p>Your admin account has been created.</p>
-    <p><span class="spinner"></span>Starting Tor onion service&hellip;</p>
-    <p class="status">Your .onion address will appear in the menu bar when ready.<br>This page will close automatically.</p>
+    <p id="tor-status"><span class="spinner"></span>Starting Tor onion service&hellip;</p>
+    <p class="status">Your .onion address will appear in the menu bar when ready.</p>
   </div>
 </div>
+<script>
+(function() {
+  var poll = setInterval(function() {
+    fetch('/status').then(function(r) { return r.json(); }).then(function(d) {
+      if (d.onion_address && d.onion_address.indexOf('.onion') !== -1) {
+        clearInterval(poll);
+        document.getElementById('tor-status').innerHTML = '&#x2705; Tor onion service started!';
+      }
+    }).catch(function() {});
+  }, 3000);
+})();
+</script>
 </body>
 </html>'''
 

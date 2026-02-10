@@ -363,9 +363,9 @@ class OnionPressApp(rumps.App):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(dismiss)
 
     def openLogFile_(self, sender):
-        """Action handler for View Log button"""
+        """Action handler for View Log button — open in Console.app for live tailing"""
         try:
-            subprocess.run(["open", self.log_file], check=False)
+            subprocess.run(["open", "-a", "Console", self.log_file], check=False)
         except Exception as e:
             self.log(f"Error opening log file: {e}")
 
