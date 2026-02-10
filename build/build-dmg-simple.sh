@@ -193,6 +193,8 @@ cd "$BIN_DIR"
 for binary in colima docker docker-compose limactl; do
     if file "$binary" | grep -q "universal"; then
         echo "  Extracting ARM64 slice for $binary"
+        # Strip adhoc code signatures before lipo — macOS kills lipo on signed binaries
+        codesign --remove-signature "$binary" 2>/dev/null || true
         lipo "$binary" -thin arm64 -output "${binary}.arm64"
         mv "$binary" "${binary}.universal"
         mv "${binary}.arm64" "$binary"
