@@ -43,12 +43,9 @@ curl -L -o "$TEMP_BIN_DIR/colima-darwin-arm64" \
 
 chmod +x "$TEMP_BIN_DIR"/colima-*
 
-# Create universal binary
-echo "  Creating universal Colima binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/colima-darwin-amd64" \
-  "$TEMP_BIN_DIR/colima-darwin-arm64" \
-  -output "$TEMP_BIN_DIR/colima"
+# Rename Colima binaries with arch suffixes
+mv "$TEMP_BIN_DIR/colima-darwin-arm64" "$TEMP_BIN_DIR/colima-arm64"
+mv "$TEMP_BIN_DIR/colima-darwin-amd64" "$TEMP_BIN_DIR/colima-x86_64"
 
 # Download Lima binaries
 echo "  Downloading Lima binaries..."
@@ -61,21 +58,10 @@ mkdir -p "$TEMP_BIN_DIR/lima-amd64" "$TEMP_BIN_DIR/lima-arm64"
 tar xzf "$TEMP_BIN_DIR/lima-amd64.tar.gz" -C "$TEMP_BIN_DIR/lima-amd64"
 tar xzf "$TEMP_BIN_DIR/lima-arm64.tar.gz" -C "$TEMP_BIN_DIR/lima-arm64"
 
-# Create universal binaries for Lima components
-echo "  Creating universal Lima binaries..."
-for binary in limactl; do
-  if [ -f "$TEMP_BIN_DIR/lima-amd64/bin/$binary" ]; then
-    lipo -create \
-      "$TEMP_BIN_DIR/lima-amd64/bin/$binary" \
-      "$TEMP_BIN_DIR/lima-arm64/bin/$binary" \
-      -output "$TEMP_BIN_DIR/$binary"
-  fi
-done
-
-# Copy lima shell script (not a binary, just copy from arm64 version)
-if [ -f "$TEMP_BIN_DIR/lima-arm64/bin/lima" ]; then
-  cp "$TEMP_BIN_DIR/lima-arm64/bin/lima" "$TEMP_BIN_DIR/lima"
-fi
+# Copy arch-suffixed Lima binaries
+echo "  Preparing Lima binaries..."
+cp "$TEMP_BIN_DIR/lima-arm64/bin/limactl" "$TEMP_BIN_DIR/limactl-arm64"
+cp "$TEMP_BIN_DIR/lima-amd64/bin/limactl" "$TEMP_BIN_DIR/limactl-x86_64"
 
 # Download Docker CLI
 echo "  Downloading Docker CLI binaries..."
@@ -88,28 +74,22 @@ mkdir -p "$TEMP_BIN_DIR/docker-amd64" "$TEMP_BIN_DIR/docker-arm64"
 tar xzf "$TEMP_BIN_DIR/docker-amd64.tgz" -C "$TEMP_BIN_DIR/docker-amd64"
 tar xzf "$TEMP_BIN_DIR/docker-arm64.tgz" -C "$TEMP_BIN_DIR/docker-arm64"
 
-# Create universal binary for Docker CLI
-echo "  Creating universal Docker CLI binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/docker-amd64/docker/docker" \
-  "$TEMP_BIN_DIR/docker-arm64/docker/docker" \
-  -output "$TEMP_BIN_DIR/docker"
+# Copy arch-suffixed Docker CLI binaries
+echo "  Preparing Docker CLI binaries..."
+cp "$TEMP_BIN_DIR/docker-amd64/docker/docker" "$TEMP_BIN_DIR/docker-x86_64"
+cp "$TEMP_BIN_DIR/docker-arm64/docker/docker" "$TEMP_BIN_DIR/docker-cli-arm64"
+# Remove extracted directories before renaming to avoid mv-into-dir
+rm -rf "$TEMP_BIN_DIR/docker-arm64" "$TEMP_BIN_DIR/docker-amd64"
+mv "$TEMP_BIN_DIR/docker-cli-arm64" "$TEMP_BIN_DIR/docker-arm64"
 
 # Download Docker Compose plugin for both architectures
 echo "  Downloading Docker Compose plugin..."
-curl -L -o "$TEMP_BIN_DIR/docker-compose-amd64" \
-  "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64"
 curl -L -o "$TEMP_BIN_DIR/docker-compose-arm64" \
   "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-aarch64"
+curl -L -o "$TEMP_BIN_DIR/docker-compose-x86_64" \
+  "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64"
 
 chmod +x "$TEMP_BIN_DIR"/docker-compose-*
-
-# Create universal binary for Docker Compose
-echo "  Creating universal Docker Compose binary..."
-lipo -create \
-  "$TEMP_BIN_DIR/docker-compose-amd64" \
-  "$TEMP_BIN_DIR/docker-compose-arm64" \
-  -output "$TEMP_BIN_DIR/docker-compose"
 
 # Build mkp224o for vanity onion addresses
 echo "  Building mkp224o for vanity onion addresses..."
@@ -169,13 +149,14 @@ fi
 BIN_DIR="$APP_PATH/Contents/Resources/bin"
 mkdir -p "$BIN_DIR"
 
-echo "Installing binaries to app bundle..."
-cp "$TEMP_BIN_DIR/colima" "$BIN_DIR/colima"
-cp "$TEMP_BIN_DIR/limactl" "$BIN_DIR/limactl"
-cp "$TEMP_BIN_DIR/docker" "$BIN_DIR/docker"
-cp "$TEMP_BIN_DIR/docker-compose" "$BIN_DIR/docker-compose"
+echo "Installing arch-suffixed binaries to app bundle..."
+for binary in colima limactl docker docker-compose; do
+    cp "$TEMP_BIN_DIR/${binary}-arm64"   "$BIN_DIR/${binary}-arm64"
+    cp "$TEMP_BIN_DIR/${binary}-x86_64"  "$BIN_DIR/${binary}-x86_64"
+    echo "  ${binary}-arm64, ${binary}-x86_64 installed"
+done
 
-# Copy mkp224o if it was built
+# Copy mkp224o if it was built (native to build machine only)
 if [ -f "$TEMP_BIN_DIR/mkp224o" ]; then
     cp "$TEMP_BIN_DIR/mkp224o" "$BIN_DIR/mkp224o"
     echo "  mkp224o installed successfully"
@@ -185,28 +166,18 @@ fi
 
 chmod +x "$BIN_DIR"/*
 
-# Extract ARM64-only slices to prevent Rosetta emulation issues
-# Note: We keep universal binaries in source but extract ARM64 for the app
-# This prevents Lima/Colima from accidentally running under Rosetta
-echo "Extracting ARM64 slices from universal binaries..."
-cd "$BIN_DIR"
-for binary in colima docker docker-compose limactl; do
-    if file "$binary" | grep -q "universal"; then
-        echo "  Extracting ARM64 slice for $binary"
-        # Strip adhoc code signatures before lipo — macOS kills lipo on signed binaries
-        codesign --remove-signature "$binary" 2>/dev/null || true
-        lipo "$binary" -thin arm64 -output "${binary}.arm64"
-        mv "$binary" "${binary}.universal"
-        mv "${binary}.arm64" "$binary"
-        # Re-sign with adhoc signature — macOS requires signed binaries on Apple Silicon
-        codesign -s - "$binary"
-        # Delete the universal binary to save space in DMG
-        rm "${binary}.universal"
-    fi
+# Ad-hoc sign all Mach-O binaries
+echo "Signing binaries..."
+for binary in colima limactl docker docker-compose; do
+    codesign -s - --force "$BIN_DIR/${binary}-arm64"
+    codesign -s - --force "$BIN_DIR/${binary}-x86_64"
 done
+if [ -f "$BIN_DIR/mkp224o" ]; then
+    codesign -s - --force "$BIN_DIR/mkp224o"
+fi
 
 # Re-sign limactl with virtualization entitlement — required for Apple VZ framework
-echo "Adding virtualization entitlement to limactl..."
+echo "Adding virtualization entitlement to limactl binaries..."
 VZ_ENTITLEMENTS=$(mktemp)
 cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -218,8 +189,26 @@ cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
 </dict>
 </plist>
 VZEOF
-codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl"
+codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl-arm64"
+codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl-x86_64"
 rm "$VZ_ENTITLEMENTS"
+
+# Create architecture-detecting wrapper scripts
+# Each wrapper detects the host CPU and execs the matching binary
+echo "Creating architecture wrapper scripts..."
+for binary in colima limactl docker docker-compose; do
+    cat > "$BIN_DIR/$binary" <<'WRAPEOF'
+#!/bin/bash
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
+    exec "$DIR/$(basename "$0")-arm64" "$@"
+else
+    exec "$DIR/$(basename "$0")-x86_64" "$@"
+fi
+WRAPEOF
+    chmod +x "$BIN_DIR/$binary"
+    echo "  $binary wrapper created"
+done
 
 # Create lima wrapper script
 echo "Creating lima wrapper script..."
@@ -234,7 +223,7 @@ chmod +x "$BIN_DIR/lima"
 
 cd "$PROJECT_DIR"
 
-# Copy Lima share files
+# Copy Lima share files (identical across architectures, copy from arm64)
 echo "Copying Lima support files..."
 SHARE_DIR="$APP_PATH/Contents/Resources/share/lima"
 mkdir -p "$SHARE_DIR"

@@ -18,6 +18,13 @@ COLIMA_HOME="$DATA_DIR/colima"
 # Ensure data directory exists
 mkdir -p "$DATA_DIR"
 
+# Detect architecture (use sysctl to get actual hardware, not process architecture)
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
+    VM_ARCH="aarch64"
+elif [ "$(uname -m)" = "x86_64" ]; then
+    VM_ARCH="x86_64"
+fi
+
 # Create Docker config without credential store (avoids docker-credential-osxkeychain errors)
 mkdir -p "$DATA_DIR/docker-config"
 if [ ! -f "$DATA_DIR/docker-config/config.json" ]; then
@@ -284,8 +291,9 @@ install_docker() {
         --cpu 2 \
         --memory 4 \
         --disk 60 \
-        --arch aarch64 \
+        --arch "$VM_ARCH" \
         --network-address \
+        --rosetta=false \
         >> "$LOG_FILE" 2>&1
 
     if [ $? -eq 0 ]; then

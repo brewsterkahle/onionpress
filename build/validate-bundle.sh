@@ -6,9 +6,9 @@ set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-APP_PATH="$PROJECT_DIR/onionpress.app"
+APP_PATH="$PROJECT_DIR/OnionPress.app"
 
-echo "Validating onionpress bundle..."
+echo "Validating OnionPress bundle..."
 
 # Check app bundle exists
 if [ ! -d "$APP_PATH" ]; then
@@ -18,30 +18,66 @@ fi
 
 echo "✓ App bundle found"
 
-# Check binaries exist
+# Check arch-suffixed binaries and wrapper scripts
 BIN_DIR="$APP_PATH/Contents/Resources/bin"
-REQUIRED_BINARIES=("colima" "limactl" "docker")
+WRAPPED_BINARIES=("colima" "limactl" "docker" "docker-compose")
 
-for binary in "${REQUIRED_BINARIES[@]}"; do
+for binary in "${WRAPPED_BINARIES[@]}"; do
+    # Check wrapper script exists and is executable
     if [ ! -f "$BIN_DIR/$binary" ]; then
-        echo "ERROR: Missing binary: $binary"
+        echo "ERROR: Missing wrapper script: $binary"
         exit 1
     fi
-
     if [ ! -x "$BIN_DIR/$binary" ]; then
-        echo "ERROR: Binary not executable: $binary"
+        echo "ERROR: Wrapper script not executable: $binary"
         exit 1
     fi
-
-    # Check if universal binary
-    ARCHS=$(lipo -archs "$BIN_DIR/$binary")
-    if [[ ! "$ARCHS" =~ "x86_64" ]] || [[ ! "$ARCHS" =~ "arm64" ]]; then
-        echo "ERROR: Binary $binary is not universal (found: $ARCHS)"
+    # Verify it's a shell script, not a Mach-O binary
+    if file "$BIN_DIR/$binary" | grep -q "Mach-O"; then
+        echo "ERROR: $binary should be a wrapper script, but is a Mach-O binary"
         exit 1
     fi
+    echo "  ✓ $binary wrapper script present"
 
-    echo "✓ $binary is present and universal ($ARCHS)"
+    # Check arm64 binary
+    if [ ! -f "$BIN_DIR/${binary}-arm64" ]; then
+        echo "ERROR: Missing binary: ${binary}-arm64"
+        exit 1
+    fi
+    if [ ! -x "$BIN_DIR/${binary}-arm64" ]; then
+        echo "ERROR: Binary not executable: ${binary}-arm64"
+        exit 1
+    fi
+    ARCH=$(lipo -archs "$BIN_DIR/${binary}-arm64" 2>/dev/null || echo "unknown")
+    if [[ "$ARCH" != *"arm64"* ]]; then
+        echo "ERROR: ${binary}-arm64 does not contain arm64 (found: $ARCH)"
+        exit 1
+    fi
+    echo "  ✓ ${binary}-arm64 present ($ARCH)"
+
+    # Check x86_64 binary
+    if [ ! -f "$BIN_DIR/${binary}-x86_64" ]; then
+        echo "ERROR: Missing binary: ${binary}-x86_64"
+        exit 1
+    fi
+    if [ ! -x "$BIN_DIR/${binary}-x86_64" ]; then
+        echo "ERROR: Binary not executable: ${binary}-x86_64"
+        exit 1
+    fi
+    ARCH=$(lipo -archs "$BIN_DIR/${binary}-x86_64" 2>/dev/null || echo "unknown")
+    if [[ "$ARCH" != *"x86_64"* ]]; then
+        echo "ERROR: ${binary}-x86_64 does not contain x86_64 (found: $ARCH)"
+        exit 1
+    fi
+    echo "  ✓ ${binary}-x86_64 present ($ARCH)"
 done
+
+# Check lima wrapper script
+if [ ! -f "$BIN_DIR/lima" ] || [ ! -x "$BIN_DIR/lima" ]; then
+    echo "ERROR: lima wrapper script missing or not executable"
+    exit 1
+fi
+echo "  ✓ lima wrapper script present"
 
 # Check Lima share files
 SHARE_DIR="$APP_PATH/Contents/Resources/share/lima"
@@ -80,7 +116,7 @@ echo ""
 echo "Bundle size: $BUNDLE_SIZE"
 
 # Estimate DMG size
-echo "Expected DMG size: ~200-300MB (before compression)"
+echo "Expected DMG size: ~300-450MB (before compression)"
 
 echo ""
 echo "✅ Bundle validation passed!"

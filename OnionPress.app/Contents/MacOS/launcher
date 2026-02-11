@@ -93,6 +93,7 @@ initialize_colima() {
             --disk 60 \
             --arch "$VM_ARCH" \
             --network-address \
+            --rosetta=false \
             >> "$LOG_FILE" 2>&1
 
         if [ $? -eq 0 ]; then
