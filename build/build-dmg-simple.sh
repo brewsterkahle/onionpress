@@ -43,9 +43,12 @@ curl -L -o "$TEMP_BIN_DIR/colima-darwin-arm64" \
 
 chmod +x "$TEMP_BIN_DIR"/colima-*
 
-# Rename Colima binaries with arch suffixes
-mv "$TEMP_BIN_DIR/colima-darwin-arm64" "$TEMP_BIN_DIR/colima-arm64"
-mv "$TEMP_BIN_DIR/colima-darwin-amd64" "$TEMP_BIN_DIR/colima-x86_64"
+# Create universal Colima binary
+echo "  Creating universal Colima binary..."
+lipo -create \
+  "$TEMP_BIN_DIR/colima-darwin-arm64" \
+  "$TEMP_BIN_DIR/colima-darwin-amd64" \
+  -output "$TEMP_BIN_DIR/colima"
 
 # Download Lima binaries
 echo "  Downloading Lima binaries..."
@@ -58,10 +61,12 @@ mkdir -p "$TEMP_BIN_DIR/lima-amd64" "$TEMP_BIN_DIR/lima-arm64"
 tar xzf "$TEMP_BIN_DIR/lima-amd64.tar.gz" -C "$TEMP_BIN_DIR/lima-amd64"
 tar xzf "$TEMP_BIN_DIR/lima-arm64.tar.gz" -C "$TEMP_BIN_DIR/lima-arm64"
 
-# Copy arch-suffixed Lima binaries
-echo "  Preparing Lima binaries..."
-cp "$TEMP_BIN_DIR/lima-arm64/bin/limactl" "$TEMP_BIN_DIR/limactl-arm64"
-cp "$TEMP_BIN_DIR/lima-amd64/bin/limactl" "$TEMP_BIN_DIR/limactl-x86_64"
+# Create universal Lima binary
+echo "  Creating universal limactl binary..."
+lipo -create \
+  "$TEMP_BIN_DIR/lima-arm64/bin/limactl" \
+  "$TEMP_BIN_DIR/lima-amd64/bin/limactl" \
+  -output "$TEMP_BIN_DIR/limactl"
 
 # Download Docker CLI
 echo "  Downloading Docker CLI binaries..."
@@ -74,13 +79,13 @@ mkdir -p "$TEMP_BIN_DIR/docker-amd64" "$TEMP_BIN_DIR/docker-arm64"
 tar xzf "$TEMP_BIN_DIR/docker-amd64.tgz" -C "$TEMP_BIN_DIR/docker-amd64"
 tar xzf "$TEMP_BIN_DIR/docker-arm64.tgz" -C "$TEMP_BIN_DIR/docker-arm64"
 
-# Copy arch-suffixed Docker CLI binaries
-echo "  Preparing Docker CLI binaries..."
-cp "$TEMP_BIN_DIR/docker-amd64/docker/docker" "$TEMP_BIN_DIR/docker-x86_64"
-cp "$TEMP_BIN_DIR/docker-arm64/docker/docker" "$TEMP_BIN_DIR/docker-cli-arm64"
-# Remove extracted directories before renaming to avoid mv-into-dir
+# Create universal Docker CLI binary
+echo "  Creating universal Docker CLI binary..."
+lipo -create \
+  "$TEMP_BIN_DIR/docker-arm64/docker/docker" \
+  "$TEMP_BIN_DIR/docker-amd64/docker/docker" \
+  -output "$TEMP_BIN_DIR/docker"
 rm -rf "$TEMP_BIN_DIR/docker-arm64" "$TEMP_BIN_DIR/docker-amd64"
-mv "$TEMP_BIN_DIR/docker-cli-arm64" "$TEMP_BIN_DIR/docker-arm64"
 
 # Download Docker Compose plugin for both architectures
 echo "  Downloading Docker Compose plugin..."
@@ -90,6 +95,13 @@ curl -L -o "$TEMP_BIN_DIR/docker-compose-x86_64" \
   "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64"
 
 chmod +x "$TEMP_BIN_DIR"/docker-compose-*
+
+# Create universal Docker Compose binary
+echo "  Creating universal Docker Compose binary..."
+lipo -create \
+  "$TEMP_BIN_DIR/docker-compose-arm64" \
+  "$TEMP_BIN_DIR/docker-compose-x86_64" \
+  -output "$TEMP_BIN_DIR/docker-compose"
 
 # Build mkp224o for vanity onion addresses
 echo "  Building mkp224o for vanity onion addresses..."
@@ -150,28 +162,13 @@ BIN_DIR="$APP_PATH/Contents/Resources/bin"
 mkdir -p "$BIN_DIR"
 
 # Remove any leftover binaries from previous builds
-rm -f "$BIN_DIR"/*-arm64 "$BIN_DIR"/*-x86_64 "$BIN_DIR"/x86_64-binaries.tar.gz 2>/dev/null || true
+rm -f "$BIN_DIR"/*-arm64 "$BIN_DIR"/*-x86_64 "$BIN_DIR"/x86_64-binaries.tar.gz "$BIN_DIR"/intel-binaries.b64 2>/dev/null || true
 
-echo "Installing ARM64 binaries to app bundle..."
+echo "Installing universal binaries to app bundle..."
 for binary in colima limactl docker docker-compose; do
-    cp "$TEMP_BIN_DIR/${binary}-arm64" "$BIN_DIR/${binary}-arm64"
-    echo "  ${binary}-arm64 installed"
+    cp "$TEMP_BIN_DIR/$binary" "$BIN_DIR/$binary"
+    echo "  $binary installed ($(lipo -archs "$BIN_DIR/$binary"))"
 done
-
-# Pack x86_64 binaries into a base64-encoded tar archive.
-# macOS Gatekeeper scans inside .tar.gz for Mach-O binaries and triggers
-# a Rosetta install prompt on Apple Silicon. Base64 encoding the archive
-# makes it opaque to the scanner. Intel Macs decode+extract on first use.
-echo "Packing x86_64 binaries into encoded archive..."
-X86_STAGING=$(mktemp -d)
-for binary in colima limactl docker docker-compose; do
-    cp "$TEMP_BIN_DIR/${binary}-x86_64" "$X86_STAGING/${binary}-x86_64"
-done
-tar czf "$X86_STAGING/x86_64-binaries.tar.gz" -C "$X86_STAGING" \
-    colima-x86_64 limactl-x86_64 docker-x86_64 docker-compose-x86_64
-base64 < "$X86_STAGING/x86_64-binaries.tar.gz" > "$BIN_DIR/intel-binaries.b64"
-rm -rf "$X86_STAGING"
-echo "  intel-binaries.b64 created"
 
 # Copy mkp224o if it was built (native to build machine only)
 if [ -f "$TEMP_BIN_DIR/mkp224o" ]; then
@@ -183,17 +180,17 @@ fi
 
 chmod +x "$BIN_DIR"/*
 
-# Ad-hoc sign ARM64 binaries
+# Ad-hoc sign universal binaries
 echo "Signing binaries..."
 for binary in colima limactl docker docker-compose; do
-    codesign -s - --force "$BIN_DIR/${binary}-arm64"
+    codesign -s - --force "$BIN_DIR/$binary"
 done
 if [ -f "$BIN_DIR/mkp224o" ]; then
     codesign -s - --force "$BIN_DIR/mkp224o"
 fi
 
-# Re-sign limactl-arm64 with virtualization entitlement — required for Apple VZ framework
-echo "Adding virtualization entitlement to limactl-arm64..."
+# Re-sign limactl with virtualization entitlement — required for Apple VZ framework
+echo "Adding virtualization entitlement to limactl..."
 VZ_ENTITLEMENTS=$(mktemp)
 cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -205,50 +202,8 @@ cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
 </dict>
 </plist>
 VZEOF
-codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl-arm64"
+codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl"
 rm "$VZ_ENTITLEMENTS"
-
-# Create architecture-detecting wrapper scripts
-# ARM64: exec the -arm64 binary directly (already in bundle).
-# x86_64: decode base64 archive on first use, extract, sign, then exec.
-echo "Creating architecture wrapper scripts..."
-for binary in colima limactl docker docker-compose; do
-    cat > "$BIN_DIR/$binary" <<'WRAPEOF'
-#!/bin/bash
-DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-SELF="$(basename "$0")"
-if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
-    exec "$DIR/${SELF}-arm64" "$@"
-else
-    # Intel: decode and extract x86_64 binaries on first use
-    if [ ! -f "$DIR/${SELF}-x86_64" ]; then
-        base64 -d < "$DIR/intel-binaries.b64" | tar xzf - -C "$DIR" 2>/dev/null || true
-        chmod +x "$DIR"/*-x86_64 2>/dev/null || true
-        # Ad-hoc sign extracted binaries
-        for bin in "$DIR"/*-x86_64; do
-            codesign -s - --force "$bin" 2>/dev/null || true
-        done
-        # Add VZ entitlement to limactl-x86_64
-        VZ_ENT=$(mktemp)
-        cat > "$VZ_ENT" <<'ENTEOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.virtualization</key>
-    <true/>
-</dict>
-</plist>
-ENTEOF
-        codesign -s - --entitlements "$VZ_ENT" --force "$DIR/limactl-x86_64" 2>/dev/null || true
-        rm -f "$VZ_ENT"
-    fi
-    exec "$DIR/${SELF}-x86_64" "$@"
-fi
-WRAPEOF
-    chmod +x "$BIN_DIR/$binary"
-    echo "  $binary wrapper created"
-done
 
 # Create lima wrapper script
 echo "Creating lima wrapper script..."
@@ -323,27 +278,8 @@ MENUBAR_APP_DIR="$APP_PATH/Contents/Resources/MenubarApp"
 rm -rf "$MENUBAR_APP_DIR"
 mv "$MENUBAR_BUILD_DIR/dist/menubar.app" "$MENUBAR_APP_DIR"
 
-# Strip x86_64 slices from MenubarApp to prevent macOS Rosetta prompt.
-# py2app bundles universal (arm64+x86_64) Python and .so files; we only
-# need arm64 since the MenubarApp runs on the host Mac, not in a VM.
-echo "Stripping x86_64 slices from MenubarApp..."
-find "$MENUBAR_APP_DIR" -type f \( -name "*.so" -o -name "*.dylib" \) -exec sh -c '
-    for f; do
-        if lipo -archs "$f" 2>/dev/null | grep -q "x86_64"; then
-            codesign --remove-signature "$f" 2>/dev/null || true
-            lipo "$f" -thin arm64 -output "$f.arm64" 2>/dev/null && mv "$f.arm64" "$f"
-        fi
-    done
-' _ {} +
-# Also strip the main menubar executable
-MENUBAR_BIN="$MENUBAR_APP_DIR/Contents/MacOS/menubar"
-if file "$MENUBAR_BIN" | grep -q "universal"; then
-    codesign --remove-signature "$MENUBAR_BIN" 2>/dev/null || true
-    lipo "$MENUBAR_BIN" -thin arm64 -output "$MENUBAR_BIN.arm64" && mv "$MENUBAR_BIN.arm64" "$MENUBAR_BIN"
-fi
-# Re-sign everything
-find "$MENUBAR_APP_DIR" -type f \( -name "*.so" -o -name "*.dylib" -o -path "*/MacOS/menubar" \) -exec codesign -s - --force {} \;
-echo "  MenubarApp stripped to arm64-only"
+# Universal binaries in MenubarApp are fine — macOS runs the arm64 slice
+# natively on Apple Silicon without triggering a Rosetta prompt.
 
 # Verify key_manager was included
 if grep -rq "key_manager" "$MENUBAR_APP_DIR/Contents/Resources/" 2>/dev/null; then
