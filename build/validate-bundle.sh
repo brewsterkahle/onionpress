@@ -57,20 +57,20 @@ for binary in "${WRAPPED_BINARIES[@]}"; do
 
 done
 
-# Check x86_64 binaries archive
-if [ ! -f "$BIN_DIR/x86_64-binaries.tar.gz" ]; then
-    echo "ERROR: Missing x86_64-binaries.tar.gz archive"
+# Check x86_64 binaries archive (base64-encoded to hide from Gatekeeper)
+if [ ! -f "$BIN_DIR/intel-binaries.b64" ]; then
+    echo "ERROR: Missing intel-binaries.b64 archive"
     exit 1
 fi
 # Verify archive contains expected binaries
-X86_CONTENTS=$(tar tzf "$BIN_DIR/x86_64-binaries.tar.gz" | sort)
+X86_CONTENTS=$(base64 -d < "$BIN_DIR/intel-binaries.b64" | tar tzf - | sort)
 for binary in "${WRAPPED_BINARIES[@]}"; do
     if ! echo "$X86_CONTENTS" | grep -q "${binary}-x86_64"; then
-        echo "ERROR: x86_64-binaries.tar.gz missing ${binary}-x86_64"
+        echo "ERROR: intel-binaries.b64 missing ${binary}-x86_64"
         exit 1
     fi
 done
-echo "  ✓ x86_64-binaries.tar.gz present (contains all binaries)"
+echo "  ✓ intel-binaries.b64 present (contains all binaries)"
 
 # Verify no bare x86_64 Mach-O binaries in bundle (would trigger Rosetta prompt)
 for binary in "${WRAPPED_BINARIES[@]}"; do

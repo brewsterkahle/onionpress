@@ -158,17 +158,20 @@ for binary in colima limactl docker docker-compose; do
     echo "  ${binary}-arm64 installed"
 done
 
-# Pack x86_64 binaries into a tar archive so macOS doesn't scan them
-# as Mach-O and trigger a Rosetta install prompt on Apple Silicon.
-# Intel Macs extract these on first launch via the wrapper scripts.
-echo "Packing x86_64 binaries into archive..."
+# Pack x86_64 binaries into a base64-encoded tar archive.
+# macOS Gatekeeper scans inside .tar.gz for Mach-O binaries and triggers
+# a Rosetta install prompt on Apple Silicon. Base64 encoding the archive
+# makes it opaque to the scanner. Intel Macs decode+extract on first use.
+echo "Packing x86_64 binaries into encoded archive..."
 X86_STAGING=$(mktemp -d)
 for binary in colima limactl docker docker-compose; do
     cp "$TEMP_BIN_DIR/${binary}-x86_64" "$X86_STAGING/${binary}-x86_64"
 done
-tar czf "$BIN_DIR/x86_64-binaries.tar.gz" -C "$X86_STAGING" .
+tar czf "$X86_STAGING/x86_64-binaries.tar.gz" -C "$X86_STAGING" \
+    colima-x86_64 limactl-x86_64 docker-x86_64 docker-compose-x86_64
+base64 < "$X86_STAGING/x86_64-binaries.tar.gz" > "$BIN_DIR/intel-binaries.b64"
 rm -rf "$X86_STAGING"
-echo "  x86_64-binaries.tar.gz created"
+echo "  intel-binaries.b64 created"
 
 # Copy mkp224o if it was built (native to build machine only)
 if [ -f "$TEMP_BIN_DIR/mkp224o" ]; then
@@ -207,7 +210,7 @@ rm "$VZ_ENTITLEMENTS"
 
 # Create architecture-detecting wrapper scripts
 # ARM64: exec the -arm64 binary directly (already in bundle).
-# x86_64: extract from tar archive on first use, sign, then exec.
+# x86_64: decode base64 archive on first use, extract, sign, then exec.
 echo "Creating architecture wrapper scripts..."
 for binary in colima limactl docker docker-compose; do
     cat > "$BIN_DIR/$binary" <<'WRAPEOF'
@@ -217,9 +220,9 @@ SELF="$(basename "$0")"
 if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
     exec "$DIR/${SELF}-arm64" "$@"
 else
-    # Intel: extract x86_64 binaries from archive on first use
+    # Intel: decode and extract x86_64 binaries on first use
     if [ ! -f "$DIR/${SELF}-x86_64" ]; then
-        tar xzf "$DIR/x86_64-binaries.tar.gz" -C "$DIR" 2>/dev/null || true
+        base64 -d < "$DIR/intel-binaries.b64" | tar xzf - -C "$DIR" 2>/dev/null || true
         chmod +x "$DIR"/*-x86_64 2>/dev/null || true
         # Ad-hoc sign extracted binaries
         for bin in "$DIR"/*-x86_64; do
