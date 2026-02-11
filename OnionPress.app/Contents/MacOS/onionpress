@@ -303,7 +303,6 @@ install_docker() {
         --memory 4 \
         --disk 60 \
         --arch "$VM_ARCH" \
-        --network-address \
         $ROSETTA_FLAG \
         >> "$LOG_FILE" 2>&1
 
