@@ -263,11 +263,12 @@ chmod +x "$BIN_DIR/lima"
 
 cd "$PROJECT_DIR"
 
-# Copy Lima share files (identical across architectures, copy from arm64)
+# Copy Lima share files from both architectures (guest agent differs per arch)
 echo "Copying Lima support files..."
 SHARE_DIR="$APP_PATH/Contents/Resources/share/lima"
 mkdir -p "$SHARE_DIR"
 cp -R "$TEMP_BIN_DIR/lima-arm64/share/lima"/* "$SHARE_DIR/"
+cp -R "$TEMP_BIN_DIR/lima-amd64/share/lima"/* "$SHARE_DIR/"
 
 # Clean up temp directory
 rm -rf "$TEMP_BIN_DIR"
