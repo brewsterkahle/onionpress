@@ -21,6 +21,10 @@ ZIP_PATH="${DEST_DIR}/${PLUGIN_SLUG}.zip"
 echo "Downloading ${PLUGIN_SLUG} from WordPress.org..."
 echo "URL: ${PLUGIN_URL}"
 
+# Clear any inherited SSL overrides (e.g. py2app's __boot__.py) so curl
+# uses the macOS system CA bundle from the keychain.
+unset SSL_CERT_FILE SSL_CERT_DIR
+
 # Download plugin zip
 if ! curl -L -f --max-time 60 -o "$ZIP_PATH" "$PLUGIN_URL" 2>&1; then
     echo "Error downloading plugin"
