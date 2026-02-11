@@ -37,8 +37,17 @@ EOFCONFIG
 fi
 
 # Install docker-compose plugin: prefer bundled, fall back to system
+# Docker CLI invokes plugins as binaries directly (not through a shell),
+# so we must symlink to the arch-specific binary, not the wrapper script.
 mkdir -p "$DATA_DIR/docker-config/cli-plugins"
-if [ -f "$BIN_DIR/docker-compose" ] && [ ! -e "$DATA_DIR/docker-config/cli-plugins/docker-compose" ]; then
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
+    COMPOSE_BIN="$BIN_DIR/docker-compose-arm64"
+else
+    COMPOSE_BIN="$BIN_DIR/docker-compose-x86_64"
+fi
+if [ -f "$COMPOSE_BIN" ]; then
+    ln -sf "$COMPOSE_BIN" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
+elif [ -f "$BIN_DIR/docker-compose" ] && [ ! -e "$DATA_DIR/docker-config/cli-plugins/docker-compose" ]; then
     ln -sf "$BIN_DIR/docker-compose" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
 elif [ -L "$HOME/.docker/cli-plugins/docker-compose" ] && [ ! -e "$DATA_DIR/docker-config/cli-plugins/docker-compose" ]; then
     ln -sf "$HOME/.docker/cli-plugins/docker-compose" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
