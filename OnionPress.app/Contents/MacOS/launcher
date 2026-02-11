@@ -94,7 +94,7 @@ initialize_colima() {
         mkdir -p "$DATA_DIR/shared"
         ROSETTA_FLAG=""
         if [ "$HOST_ARCH" = "arm64" ]; then
-            ROSETTA_FLAG="--rosetta=false"
+            ROSETTA_FLAG="--vz-rosetta=false"
         fi
         "$BIN_DIR/colima" start \
             --vm-type vz \

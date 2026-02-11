@@ -294,7 +294,7 @@ install_docker() {
     # Should not happen if launcher worked, but handle it
     ROSETTA_FLAG=""
     if [ "$VM_ARCH" = "aarch64" ]; then
-        ROSETTA_FLAG="--rosetta=false"
+        ROSETTA_FLAG="--vz-rosetta=false"
     fi
     "$BIN_DIR/colima" start \
         --vm-type vz \
