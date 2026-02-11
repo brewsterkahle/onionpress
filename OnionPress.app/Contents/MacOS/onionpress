@@ -5,6 +5,13 @@
 
 set -e
 
+# Ensure we run natively on Apple Silicon (not under Rosetta).
+# Universal binaries inherit the parent's architecture, so if this script
+# was started under Rosetta we must re-exec to get native arm64 execution.
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1" && [ "$(uname -m)" = "x86_64" ]; then
+    exec arch -arm64 "$0" "$@"
+fi
+
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 APP_DIR="$(dirname "$SCRIPT_DIR")"

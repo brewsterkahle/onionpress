@@ -4,6 +4,14 @@
 
 set -e
 
+# Ensure we run natively on Apple Silicon (not under Rosetta).
+# macOS LaunchServices may start shell-script app executables under Rosetta
+# if it cached a previous version that contained x86_64-only binaries.
+# Universal binaries inherit the parent's architecture, so we must re-exec.
+if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1" && [ "$(uname -m)" = "x86_64" ]; then
+    exec arch -arm64 "$0" "$@"
+fi
+
 # Get directories
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
