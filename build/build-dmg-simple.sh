@@ -149,6 +149,9 @@ fi
 BIN_DIR="$APP_PATH/Contents/Resources/bin"
 mkdir -p "$BIN_DIR"
 
+# Remove any leftover binaries from previous builds
+rm -f "$BIN_DIR"/*-arm64 "$BIN_DIR"/*-x86_64 "$BIN_DIR"/x86_64-binaries.tar.gz 2>/dev/null || true
+
 echo "Installing ARM64 binaries to app bundle..."
 for binary in colima limactl docker docker-compose; do
     cp "$TEMP_BIN_DIR/${binary}-arm64" "$BIN_DIR/${binary}-arm64"
