@@ -319,6 +319,28 @@ MENUBAR_APP_DIR="$APP_PATH/Contents/Resources/MenubarApp"
 rm -rf "$MENUBAR_APP_DIR"
 mv "$MENUBAR_BUILD_DIR/dist/menubar.app" "$MENUBAR_APP_DIR"
 
+# Strip x86_64 slices from MenubarApp to prevent macOS Rosetta prompt.
+# py2app bundles universal (arm64+x86_64) Python and .so files; we only
+# need arm64 since the MenubarApp runs on the host Mac, not in a VM.
+echo "Stripping x86_64 slices from MenubarApp..."
+find "$MENUBAR_APP_DIR" -type f \( -name "*.so" -o -name "*.dylib" \) -exec sh -c '
+    for f; do
+        if lipo -archs "$f" 2>/dev/null | grep -q "x86_64"; then
+            codesign --remove-signature "$f" 2>/dev/null || true
+            lipo "$f" -thin arm64 -output "$f.arm64" 2>/dev/null && mv "$f.arm64" "$f"
+        fi
+    done
+' _ {} +
+# Also strip the main menubar executable
+MENUBAR_BIN="$MENUBAR_APP_DIR/Contents/MacOS/menubar"
+if file "$MENUBAR_BIN" | grep -q "universal"; then
+    codesign --remove-signature "$MENUBAR_BIN" 2>/dev/null || true
+    lipo "$MENUBAR_BIN" -thin arm64 -output "$MENUBAR_BIN.arm64" && mv "$MENUBAR_BIN.arm64" "$MENUBAR_BIN"
+fi
+# Re-sign everything
+find "$MENUBAR_APP_DIR" -type f \( -name "*.so" -o -name "*.dylib" -o -path "*/MacOS/menubar" \) -exec codesign -s - --force {} \;
+echo "  MenubarApp stripped to arm64-only"
+
 # Verify key_manager was included
 if grep -rq "key_manager" "$MENUBAR_APP_DIR/Contents/Resources/" 2>/dev/null; then
     echo "  key_manager: included"
