@@ -279,7 +279,16 @@ MENUBAR_BUILD_DIR=$(mktemp -d)
 
 # Create a temporary venv for the py2app build (so we don't require
 # py2app or other deps to be installed globally on the build machine)
-python3 -m venv "$MENUBAR_BUILD_DIR/venv"
+# Use python.org universal2 Python so the built app runs on both arm64 and Intel.
+# Falls back to system python3 if the universal build isn't installed.
+UNIVERSAL_PYTHON="/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
+if [ -x "$UNIVERSAL_PYTHON" ]; then
+    echo "Using universal2 Python: $UNIVERSAL_PYTHON"
+    "$UNIVERSAL_PYTHON" -m venv "$MENUBAR_BUILD_DIR/venv"
+else
+    echo "WARNING: universal2 Python not found, using system python3 (app may be arm64-only)"
+    python3 -m venv "$MENUBAR_BUILD_DIR/venv"
+fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install --upgrade pip
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt"

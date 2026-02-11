@@ -89,23 +89,33 @@ initialize_colima() {
             exit 1
         fi
 
-        # Initialize Colima with VZ backend
+        # Initialize Colima
         # Create minimal shared directory to avoid Downloads folder permission prompt
         mkdir -p "$DATA_DIR/shared"
-        ROSETTA_FLAG=""
         if [ "$HOST_ARCH" = "arm64" ]; then
-            ROSETTA_FLAG="--vz-rosetta=false"
+            # Apple Silicon: use VZ backend (Virtualization.framework)
+            "$BIN_DIR/colima" start \
+                --vm-type vz \
+                --mount-type virtiofs \
+                --mount "$DATA_DIR/shared:w" \
+                --cpu 2 \
+                --memory 4 \
+                --disk 60 \
+                --arch "$VM_ARCH" \
+                --vz-rosetta=false \
+                >> "$LOG_FILE" 2>&1
+        else
+            # Intel: use QEMU backend
+            "$BIN_DIR/colima" start \
+                --vm-type qemu \
+                --mount-type sshfs \
+                --mount "$DATA_DIR/shared:w" \
+                --cpu 2 \
+                --memory 4 \
+                --disk 60 \
+                --arch "$VM_ARCH" \
+                >> "$LOG_FILE" 2>&1
         fi
-        "$BIN_DIR/colima" start \
-            --vm-type vz \
-            --mount-type virtiofs \
-            --mount "$DATA_DIR/shared:w" \
-            --cpu 2 \
-            --memory 4 \
-            --disk 60 \
-            --arch "$VM_ARCH" \
-            $ROSETTA_FLAG \
-            >> "$LOG_FILE" 2>&1
 
         if [ $? -eq 0 ]; then
             touch "$COLIMA_HOME/.initialized"

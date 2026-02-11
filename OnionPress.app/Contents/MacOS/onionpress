@@ -292,19 +292,28 @@ install_docker() {
     log "Container runtime initialization required"
 
     # Should not happen if launcher worked, but handle it
-    ROSETTA_FLAG=""
     if [ "$VM_ARCH" = "aarch64" ]; then
-        ROSETTA_FLAG="--vz-rosetta=false"
+        # Apple Silicon: use VZ backend (Virtualization.framework)
+        "$BIN_DIR/colima" start \
+            --vm-type vz \
+            --mount-type virtiofs \
+            --cpu 2 \
+            --memory 4 \
+            --disk 60 \
+            --arch "$VM_ARCH" \
+            --vz-rosetta=false \
+            >> "$LOG_FILE" 2>&1
+    else
+        # Intel: use QEMU backend
+        "$BIN_DIR/colima" start \
+            --vm-type qemu \
+            --mount-type sshfs \
+            --cpu 2 \
+            --memory 4 \
+            --disk 60 \
+            --arch "$VM_ARCH" \
+            >> "$LOG_FILE" 2>&1
     fi
-    "$BIN_DIR/colima" start \
-        --vm-type vz \
-        --mount-type virtiofs \
-        --cpu 2 \
-        --memory 4 \
-        --disk 60 \
-        --arch "$VM_ARCH" \
-        $ROSETTA_FLAG \
-        >> "$LOG_FILE" 2>&1
 
     if [ $? -eq 0 ]; then
         touch "$COLIMA_HOME/.initialized"
