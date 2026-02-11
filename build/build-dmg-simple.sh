@@ -103,55 +103,94 @@ lipo -create \
   "$TEMP_BIN_DIR/docker-compose-x86_64" \
   -output "$TEMP_BIN_DIR/docker-compose"
 
-# Build mkp224o for vanity onion addresses
+# Build mkp224o as a universal binary for vanity onion addresses
 echo "  Building mkp224o for vanity onion addresses..."
 if command -v git >/dev/null 2>&1; then
     # Clone mkp224o
     git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || true
-    cd "$TEMP_BIN_DIR/mkp224o-src"
 
     # Check for required dependencies
     if command -v brew >/dev/null 2>&1; then
-        # Ensure libsodium is installed
         brew list libsodium >/dev/null 2>&1 || brew install libsodium
         brew list autoconf >/dev/null 2>&1 || brew install autoconf
         brew list automake >/dev/null 2>&1 || brew install automake
     fi
 
-    # Build mkp224o (use ref10 for ARM64 compatibility)
-    # Statically link libsodium so the binary works without Homebrew installed
     SODIUM_PREFIX=$(brew --prefix libsodium 2>/dev/null)
-    SODIUM_STATIC="$SODIUM_PREFIX/lib/libsodium.a"
 
-    # Configure and build, forcing static libsodium linking
-    if ./autogen.sh && \
-       CFLAGS="-I$SODIUM_PREFIX/include" \
-       ./configure --enable-ref10; then
+    # Build libsodium from source for x86_64 (Homebrew only has native arch)
+    echo "  Building libsodium for x86_64 cross-compilation..."
+    SODIUM_X86_DIR="$TEMP_BIN_DIR/libsodium-x86_64"
+    SODIUM_X86_SRC="$TEMP_BIN_DIR/libsodium-src"
+    SODIUM_VERSION=$(pkg-config --modversion libsodium 2>/dev/null || echo "1.0.20")
+    curl -L -o "$TEMP_BIN_DIR/libsodium.tar.gz" \
+      "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz" 2>/dev/null || \
+    curl -L -o "$TEMP_BIN_DIR/libsodium.tar.gz" \
+      "https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-stable.tar.gz" 2>/dev/null
+    mkdir -p "$SODIUM_X86_SRC"
+    tar xzf "$TEMP_BIN_DIR/libsodium.tar.gz" -C "$SODIUM_X86_SRC" --strip-components=1
+    cd "$SODIUM_X86_SRC"
+    ./configure --host=x86_64-apple-darwin --prefix="$SODIUM_X86_DIR" \
+        --disable-shared --enable-static \
+        CC="clang -arch x86_64" \
+        CFLAGS="-arch x86_64 -mmacosx-version-min=13.0" \
+        LDFLAGS="-arch x86_64" > /dev/null 2>&1
+    make -j"$(sysctl -n hw.ncpu)" > /dev/null 2>&1
+    make install > /dev/null 2>&1
+    echo "  ✓ libsodium x86_64 built"
 
-        # Modify the Makefile to force static linking
-        # Replace -lsodium with the full path to libsodium.a
-        # Use word boundary to avoid replacing libsodium in paths
-        sed -i.bak "s/ -lsodium/ ${SODIUM_STATIC////\\/}/g" GNUmakefile
+    # Run autogen once in the mkp224o source
+    cd "$TEMP_BIN_DIR/mkp224o-src"
+    ./autogen.sh > /dev/null 2>&1
 
-        if make; then
-            # Copy binary
-            cp mkp224o "$TEMP_BIN_DIR/mkp224o"
+    # Build mkp224o for arm64 (native)
+    echo "  Building mkp224o for arm64..."
+    MKP_ARM64_DIR="$TEMP_BIN_DIR/mkp224o-arm64"
+    mkdir -p "$MKP_ARM64_DIR"
+    cp -R "$TEMP_BIN_DIR/mkp224o-src"/* "$MKP_ARM64_DIR/"
+    cd "$MKP_ARM64_DIR"
+    CFLAGS="-arch arm64 -mmacosx-version-min=13.0 -I$SODIUM_PREFIX/include" \
+        LDFLAGS="-arch arm64" \
+        ./configure --host=aarch64-apple-darwin --enable-ref10 > /dev/null 2>&1
+    sed -i.bak "s| -lsodium| ${SODIUM_PREFIX}/lib/libsodium.a|g" GNUmakefile
+    make -j"$(sysctl -n hw.ncpu)" > /dev/null 2>&1
+    echo "  ✓ mkp224o arm64 built"
 
-            # Verify static linking worked
-            echo "  Checking mkp224o dependencies:"
-            if otool -L "$TEMP_BIN_DIR/mkp224o" | grep -q libsodium; then
-                echo "  ⚠️  WARNING: mkp224o still has dynamic libsodium dependency"
-                otool -L "$TEMP_BIN_DIR/mkp224o"
-            else
-                echo "  ✓ mkp224o successfully statically linked (no libsodium dependency)"
-            fi
+    # Build mkp224o for x86_64 (cross-compile)
+    echo "  Building mkp224o for x86_64..."
+    MKP_X86_DIR="$TEMP_BIN_DIR/mkp224o-x86_64"
+    mkdir -p "$MKP_X86_DIR"
+    cp -R "$TEMP_BIN_DIR/mkp224o-src"/* "$MKP_X86_DIR/"
+    cd "$MKP_X86_DIR"
+    CFLAGS="-arch x86_64 -mmacosx-version-min=13.0 -I$SODIUM_X86_DIR/include" \
+        LDFLAGS="-arch x86_64" \
+        CC="clang -arch x86_64" \
+        ./configure --host=x86_64-apple-darwin --enable-ref10 > /dev/null 2>&1
+    sed -i.bak "s| -lsodium| ${SODIUM_X86_DIR}/lib/libsodium.a|g" GNUmakefile
+    make -j"$(sysctl -n hw.ncpu)" > /dev/null 2>&1
+    echo "  ✓ mkp224o x86_64 built"
+
+    # Create universal binary
+    if [ -f "$MKP_ARM64_DIR/mkp224o" ] && [ -f "$MKP_X86_DIR/mkp224o" ]; then
+        lipo -create \
+            "$MKP_ARM64_DIR/mkp224o" \
+            "$MKP_X86_DIR/mkp224o" \
+            -output "$TEMP_BIN_DIR/mkp224o"
+        echo "  ✓ mkp224o universal binary created ($(lipo -archs "$TEMP_BIN_DIR/mkp224o"))"
+
+        # Verify static linking
+        if otool -L "$TEMP_BIN_DIR/mkp224o" | grep -q libsodium; then
+            echo "  ⚠️  WARNING: mkp224o still has dynamic libsodium dependency"
         else
-            echo "  WARNING: mkp224o make failed"
+            echo "  ✓ mkp224o statically linked (no libsodium dependency)"
         fi
+    elif [ -f "$MKP_ARM64_DIR/mkp224o" ]; then
+        echo "  WARNING: x86_64 build failed, using arm64-only mkp224o"
+        cp "$MKP_ARM64_DIR/mkp224o" "$TEMP_BIN_DIR/mkp224o"
     else
-        echo "  WARNING: mkp224o configure failed. Vanity onion address generation will not be available."
-        echo "  Users will get a random .onion address instead."
+        echo "  WARNING: mkp224o build failed"
     fi
+
     cd "$TEMP_BIN_DIR"
 else
     echo "  WARNING: git not found, skipping mkp224o build"

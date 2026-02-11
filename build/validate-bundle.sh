@@ -20,7 +20,7 @@ echo "✓ App bundle found"
 
 # Check universal binaries
 BIN_DIR="$APP_PATH/Contents/Resources/bin"
-UNIVERSAL_BINARIES=("colima" "limactl" "docker" "docker-compose")
+UNIVERSAL_BINARIES=("colima" "limactl" "docker" "docker-compose" "mkp224o")
 
 for binary in "${UNIVERSAL_BINARIES[@]}"; do
     if [ ! -f "$BIN_DIR/$binary" ]; then
