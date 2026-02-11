@@ -1050,16 +1050,18 @@ class OnionPressApp(rumps.App):
             self.start_service(None)
 
     def check_internet_connectivity(self):
-        """Check if host has internet connectivity via TCP to well-known DNS resolvers.
-        Returns True if at least one resolver is reachable, False otherwise."""
-        for host in ("1.1.1.1", "8.8.8.8"):
-            try:
-                conn = socket.create_connection((host, 53), timeout=2)
-                conn.close()
-                return True
-            except (OSError, socket.timeout):
-                continue
-        return False
+        """Check if host has internet connectivity.
+        Uses curl subprocess to avoid macOS 'local network' permission prompt
+        that Python's socket module triggers."""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "3", "-o", "/dev/null", "-w", "%{http_code}",
+                 "http://1.1.1.1/"],
+                capture_output=True, text=True, timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def _parse_bootstrap_percentage(self):
         """Parse Tor bootstrap percentage from recent container logs.
