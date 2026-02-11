@@ -84,6 +84,10 @@ initialize_colima() {
         # Initialize Colima with VZ backend
         # Create minimal shared directory to avoid Downloads folder permission prompt
         mkdir -p "$DATA_DIR/shared"
+        ROSETTA_FLAG=""
+        if [ "$HOST_ARCH" = "arm64" ]; then
+            ROSETTA_FLAG="--rosetta=false"
+        fi
         "$BIN_DIR/colima" start \
             --vm-type vz \
             --mount-type virtiofs \
@@ -93,7 +97,7 @@ initialize_colima() {
             --disk 60 \
             --arch "$VM_ARCH" \
             --network-address \
-            --rosetta=false \
+            $ROSETTA_FLAG \
             >> "$LOG_FILE" 2>&1
 
         if [ $? -eq 0 ]; then

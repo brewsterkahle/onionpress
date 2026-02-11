@@ -302,6 +302,10 @@ install_docker() {
     log "Container runtime initialization required"
 
     # Should not happen if launcher worked, but handle it
+    ROSETTA_FLAG=""
+    if [ "$VM_ARCH" = "aarch64" ]; then
+        ROSETTA_FLAG="--rosetta=false"
+    fi
     "$BIN_DIR/colima" start \
         --vm-type vz \
         --mount-type virtiofs \
@@ -310,7 +314,7 @@ install_docker() {
         --disk 60 \
         --arch "$VM_ARCH" \
         --network-address \
-        --rosetta=false \
+        $ROSETTA_FLAG \
         >> "$LOG_FILE" 2>&1
 
     if [ $? -eq 0 ]; then
