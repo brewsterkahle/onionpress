@@ -43,6 +43,14 @@ mkdir -p "$DATA_DIR/docker-config/cli-plugins"
 if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
     COMPOSE_BIN="$BIN_DIR/docker-compose-arm64"
 else
+    # Intel: extract x86_64 binaries from archive if not yet extracted
+    if [ ! -f "$BIN_DIR/docker-compose-x86_64" ] && [ -f "$BIN_DIR/x86_64-binaries.tar.gz" ]; then
+        tar xzf "$BIN_DIR/x86_64-binaries.tar.gz" -C "$BIN_DIR" 2>/dev/null || true
+        chmod +x "$BIN_DIR"/*-x86_64 2>/dev/null || true
+        for bin in "$BIN_DIR"/*-x86_64; do
+            codesign -s - --force "$bin" 2>/dev/null || true
+        done
+    fi
     COMPOSE_BIN="$BIN_DIR/docker-compose-x86_64"
 fi
 if [ -f "$COMPOSE_BIN" ]; then

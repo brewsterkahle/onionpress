@@ -55,22 +55,31 @@ for binary in "${WRAPPED_BINARIES[@]}"; do
     fi
     echo "  ✓ ${binary}-arm64 present ($ARCH)"
 
-    # Check x86_64 binary
-    if [ ! -f "$BIN_DIR/${binary}-x86_64" ]; then
-        echo "ERROR: Missing binary: ${binary}-x86_64"
-        exit 1
-    fi
-    if [ ! -x "$BIN_DIR/${binary}-x86_64" ]; then
-        echo "ERROR: Binary not executable: ${binary}-x86_64"
-        exit 1
-    fi
-    ARCH=$(lipo -archs "$BIN_DIR/${binary}-x86_64" 2>/dev/null || echo "unknown")
-    if [[ "$ARCH" != *"x86_64"* ]]; then
-        echo "ERROR: ${binary}-x86_64 does not contain x86_64 (found: $ARCH)"
-        exit 1
-    fi
-    echo "  ✓ ${binary}-x86_64 present ($ARCH)"
 done
+
+# Check x86_64 binaries archive
+if [ ! -f "$BIN_DIR/x86_64-binaries.tar.gz" ]; then
+    echo "ERROR: Missing x86_64-binaries.tar.gz archive"
+    exit 1
+fi
+# Verify archive contains expected binaries
+X86_CONTENTS=$(tar tzf "$BIN_DIR/x86_64-binaries.tar.gz" | sort)
+for binary in "${WRAPPED_BINARIES[@]}"; do
+    if ! echo "$X86_CONTENTS" | grep -q "${binary}-x86_64"; then
+        echo "ERROR: x86_64-binaries.tar.gz missing ${binary}-x86_64"
+        exit 1
+    fi
+done
+echo "  ✓ x86_64-binaries.tar.gz present (contains all binaries)"
+
+# Verify no bare x86_64 Mach-O binaries in bundle (would trigger Rosetta prompt)
+for binary in "${WRAPPED_BINARIES[@]}"; do
+    if [ -f "$BIN_DIR/${binary}-x86_64" ]; then
+        echo "ERROR: Bare x86_64 binary found: ${binary}-x86_64 (should be in archive only)"
+        exit 1
+    fi
+done
+echo "  ✓ No bare x86_64 Mach-O binaries in bundle"
 
 # Check lima wrapper script
 if [ ! -f "$BIN_DIR/lima" ] || [ ! -x "$BIN_DIR/lima" ]; then

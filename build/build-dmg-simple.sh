@@ -149,12 +149,23 @@ fi
 BIN_DIR="$APP_PATH/Contents/Resources/bin"
 mkdir -p "$BIN_DIR"
 
-echo "Installing arch-suffixed binaries to app bundle..."
+echo "Installing ARM64 binaries to app bundle..."
 for binary in colima limactl docker docker-compose; do
-    cp "$TEMP_BIN_DIR/${binary}-arm64"   "$BIN_DIR/${binary}-arm64"
-    cp "$TEMP_BIN_DIR/${binary}-x86_64"  "$BIN_DIR/${binary}-x86_64"
-    echo "  ${binary}-arm64, ${binary}-x86_64 installed"
+    cp "$TEMP_BIN_DIR/${binary}-arm64" "$BIN_DIR/${binary}-arm64"
+    echo "  ${binary}-arm64 installed"
 done
+
+# Pack x86_64 binaries into a tar archive so macOS doesn't scan them
+# as Mach-O and trigger a Rosetta install prompt on Apple Silicon.
+# Intel Macs extract these on first launch via the wrapper scripts.
+echo "Packing x86_64 binaries into archive..."
+X86_STAGING=$(mktemp -d)
+for binary in colima limactl docker docker-compose; do
+    cp "$TEMP_BIN_DIR/${binary}-x86_64" "$X86_STAGING/${binary}-x86_64"
+done
+tar czf "$BIN_DIR/x86_64-binaries.tar.gz" -C "$X86_STAGING" .
+rm -rf "$X86_STAGING"
+echo "  x86_64-binaries.tar.gz created"
 
 # Copy mkp224o if it was built (native to build machine only)
 if [ -f "$TEMP_BIN_DIR/mkp224o" ]; then
@@ -166,18 +177,17 @@ fi
 
 chmod +x "$BIN_DIR"/*
 
-# Ad-hoc sign all Mach-O binaries
+# Ad-hoc sign ARM64 binaries
 echo "Signing binaries..."
 for binary in colima limactl docker docker-compose; do
     codesign -s - --force "$BIN_DIR/${binary}-arm64"
-    codesign -s - --force "$BIN_DIR/${binary}-x86_64"
 done
 if [ -f "$BIN_DIR/mkp224o" ]; then
     codesign -s - --force "$BIN_DIR/mkp224o"
 fi
 
-# Re-sign limactl with virtualization entitlement — required for Apple VZ framework
-echo "Adding virtualization entitlement to limactl binaries..."
+# Re-sign limactl-arm64 with virtualization entitlement — required for Apple VZ framework
+echo "Adding virtualization entitlement to limactl-arm64..."
 VZ_ENTITLEMENTS=$(mktemp)
 cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -190,20 +200,44 @@ cat > "$VZ_ENTITLEMENTS" <<'VZEOF'
 </plist>
 VZEOF
 codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl-arm64"
-codesign -s - --entitlements "$VZ_ENTITLEMENTS" --force "$BIN_DIR/limactl-x86_64"
 rm "$VZ_ENTITLEMENTS"
 
 # Create architecture-detecting wrapper scripts
-# Each wrapper detects the host CPU and execs the matching binary
+# ARM64: exec the -arm64 binary directly (already in bundle).
+# x86_64: extract from tar archive on first use, sign, then exec.
 echo "Creating architecture wrapper scripts..."
 for binary in colima limactl docker docker-compose; do
     cat > "$BIN_DIR/$binary" <<'WRAPEOF'
 #!/bin/bash
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SELF="$(basename "$0")"
 if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
-    exec "$DIR/$(basename "$0")-arm64" "$@"
+    exec "$DIR/${SELF}-arm64" "$@"
 else
-    exec "$DIR/$(basename "$0")-x86_64" "$@"
+    # Intel: extract x86_64 binaries from archive on first use
+    if [ ! -f "$DIR/${SELF}-x86_64" ]; then
+        tar xzf "$DIR/x86_64-binaries.tar.gz" -C "$DIR" 2>/dev/null || true
+        chmod +x "$DIR"/*-x86_64 2>/dev/null || true
+        # Ad-hoc sign extracted binaries
+        for bin in "$DIR"/*-x86_64; do
+            codesign -s - --force "$bin" 2>/dev/null || true
+        done
+        # Add VZ entitlement to limactl-x86_64
+        VZ_ENT=$(mktemp)
+        cat > "$VZ_ENT" <<'ENTEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.virtualization</key>
+    <true/>
+</dict>
+</plist>
+ENTEOF
+        codesign -s - --entitlements "$VZ_ENT" --force "$DIR/limactl-x86_64" 2>/dev/null || true
+        rm -f "$VZ_ENT"
+    fi
+    exec "$DIR/${SELF}-x86_64" "$@"
 fi
 WRAPEOF
     chmod +x "$BIN_DIR/$binary"
