@@ -121,7 +121,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.74"
+        self.version = "2.2.75"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1965,7 +1965,9 @@ class OnionPressApp(rumps.App):
             response = alert.runModal()
             button_index = response - 1000
 
-            if button_index == 1:  # Copy Key
+            if button_index == 0:  # Done
+                break
+            elif button_index == 1:  # Copy Key
                 subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
                 continue  # re-show dialog
             elif button_index == 2:  # Show Recovery Words
@@ -2563,7 +2565,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.74 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.75 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
