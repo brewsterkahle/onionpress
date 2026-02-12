@@ -108,7 +108,7 @@ initialize_colima() {
                 --mount "$DATA_DIR/shared:w" \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
-                --disk 60 \
+                --disk 10 \
                 --arch "$VM_ARCH" \
                 --vz-rosetta=false \
                 >> "$LOG_FILE" 2>&1
@@ -120,7 +120,7 @@ initialize_colima() {
                 --mount "$DATA_DIR/shared:w" \
                 --cpu 2 \
                 --memory "$VM_MEMORY" \
-                --disk 60 \
+                --disk 10 \
                 --arch "$VM_ARCH" \
                 >> "$LOG_FILE" 2>&1
         fi

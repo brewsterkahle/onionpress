@@ -308,7 +308,7 @@ install_docker() {
             --mount-type virtiofs \
             --cpu 2 \
             --memory "$VM_MEMORY" \
-            --disk 60 \
+            --disk 10 \
             --arch "$VM_ARCH" \
             --vz-rosetta=false \
             >> "$LOG_FILE" 2>&1
@@ -319,7 +319,7 @@ install_docker() {
             --mount-type sshfs \
             --cpu 2 \
             --memory "$VM_MEMORY" \
-            --disk 60 \
+            --disk 10 \
             --arch "$VM_ARCH" \
             >> "$LOG_FILE" 2>&1
     fi
