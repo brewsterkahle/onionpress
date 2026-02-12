@@ -1965,7 +1965,9 @@ class OnionPressApp(rumps.App):
             response = alert.runModal()
             button_index = response - 1000
 
-            if button_index == 1:  # Copy Key
+            if button_index == 0:  # Done
+                break
+            elif button_index == 1:  # Copy Key
                 subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
                 continue  # re-show dialog
             elif button_index == 2:  # Show Recovery Words
