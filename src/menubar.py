@@ -122,7 +122,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.75"
+        self.version = "2.2.76"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -2473,11 +2473,6 @@ class OnionPressApp(rumps.App):
 
             time.sleep(3)
 
-            except Exception as e:
-                self.log(f"Error checking images: {e}")
-
-            time.sleep(3)
-
     @rumps.clicked("About OnionPress")
     def show_about(self, _):
         """Show about dialog"""
@@ -2674,7 +2669,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.75 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.76 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
