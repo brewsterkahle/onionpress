@@ -90,6 +90,14 @@ initialize_colima() {
         fi
 
         # Initialize Colima
+        # Read VM memory from config (default: 1 GB)
+        VM_MEMORY=1
+        if [ -f "$DATA_DIR/config" ]; then
+            config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ ! -z "$config_mem" ]; then
+                VM_MEMORY="$config_mem"
+            fi
+        fi
         # Create minimal shared directory to avoid Downloads folder permission prompt
         mkdir -p "$DATA_DIR/shared"
         if [ "$HOST_ARCH" = "arm64" ]; then
@@ -99,7 +107,7 @@ initialize_colima() {
                 --mount-type virtiofs \
                 --mount "$DATA_DIR/shared:w" \
                 --cpu 2 \
-                --memory 4 \
+                --memory "$VM_MEMORY" \
                 --disk 60 \
                 --arch "$VM_ARCH" \
                 --vz-rosetta=false \
@@ -111,7 +119,7 @@ initialize_colima() {
                 --mount-type sshfs \
                 --mount "$DATA_DIR/shared:w" \
                 --cpu 2 \
-                --memory 4 \
+                --memory "$VM_MEMORY" \
                 --disk 60 \
                 --arch "$VM_ARCH" \
                 >> "$LOG_FILE" 2>&1

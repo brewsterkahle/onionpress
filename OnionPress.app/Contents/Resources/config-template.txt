@@ -75,3 +75,14 @@ LAUNCH_ON_LOGIN=no
 # Set to "no" to allow your Mac to sleep even when plugged in.
 #
 PREVENT_SLEEP=yes
+
+# Virtual Machine Memory (GB)
+# Default: 1 (1 GB RAM for the container VM)
+#
+# The Linux VM that runs WordPress, Tor, and MariaDB containers.
+# 1 GB is sufficient for normal use. Increase if you run many plugins
+# or experience out-of-memory issues.
+#
+# Requires restart to take effect.
+#
+VM_MEMORY=1

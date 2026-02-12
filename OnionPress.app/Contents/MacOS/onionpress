@@ -291,6 +291,15 @@ fix_onionpress_permissions() {
 install_docker() {
     log "Container runtime initialization required"
 
+    # Read VM memory from config (default: 1 GB)
+    VM_MEMORY=1
+    if [ -f "$DATA_DIR/config" ]; then
+        config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_mem" ]; then
+            VM_MEMORY="$config_mem"
+        fi
+    fi
+
     # Should not happen if launcher worked, but handle it
     if [ "$VM_ARCH" = "aarch64" ]; then
         # Apple Silicon: use VZ backend (Virtualization.framework)
@@ -298,7 +307,7 @@ install_docker() {
             --vm-type vz \
             --mount-type virtiofs \
             --cpu 2 \
-            --memory 4 \
+            --memory "$VM_MEMORY" \
             --disk 60 \
             --arch "$VM_ARCH" \
             --vz-rosetta=false \
@@ -309,7 +318,7 @@ install_docker() {
             --vm-type qemu \
             --mount-type sshfs \
             --cpu 2 \
-            --memory 4 \
+            --memory "$VM_MEMORY" \
             --disk 60 \
             --arch "$VM_ARCH" \
             >> "$LOG_FILE" 2>&1
