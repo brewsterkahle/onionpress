@@ -25,6 +25,7 @@ sys.path.insert(0, script_dir)
 import key_manager
 import onion_proxy
 import install_native_messaging
+import setup_window
 
 
 def parse_version(version_str):
@@ -1668,66 +1669,29 @@ class OnionPressApp(rumps.App):
                 # First run if we don't have wordpress/mysql/tor images
                 if not any('wordpress' in img for img in images):
                     first_run = True
-                    self.log("First run detected - opening Console to show progress")
-                    # Open Console.app with the log file so user can see what's happening
-                    try:
-                        subprocess.run(["open", "-a", "Console", self.log_file], capture_output=True)
-                        self.log("Console.app opened to show setup progress")
-                    except Exception as e:
-                        self.log(f"Failed to open Console.app: {e}")
-                    # Show persistent setup dialog
-                    self.show_setup_dialog()
             except Exception:
                 pass
 
-            # Start the service
-            subprocess.run([self.launcher_script, "start"])
-
-            # If first run, start containers directly (which will pull images automatically)
+            # First run: show welcome screen and wait for user to click Continue
             if first_run:
-                self.log("Starting containers (will download images automatically)...")
-                docker_dir = os.path.join(self.parent_resources_dir, "docker")
-                try:
-                    # Run docker compose up which will automatically pull missing images
-                    env = os.environ.copy()
-                    env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
-                    # Load database passwords from secrets file into env
-                    secrets_file = os.path.join(self.app_support, "secrets")
-                    if os.path.exists(secrets_file):
-                        with open(secrets_file, 'r') as sf:
-                            for line in sf:
-                                line = line.strip()
-                                if line and not line.startswith('#') and '=' in line:
-                                    key, val = line.split('=', 1)
-                                    # Strip surrounding single quotes
-                                    env[key] = val.strip("'")
-                    # Use the bundled docker binary
-                    docker_bin = os.path.join(self.bin_dir, "docker")
-                    # Run in separate thread so it doesn't block
-                    def pull_and_start():
-                        # Don't capture output - let it stream to log file
-                        # Only start wordpress+db here; Tor is started by the
-                        # setup guard (after wp core install) or by the launcher
-                        # when WordPress is already installed.
-                        docker_log = os.path.join(self.app_support, "docker-pull.log")
-                        with open(docker_log, 'w') as log_file:
-                            result = subprocess.run(
-                                [docker_bin, "compose", "up", "-d", "wordpress", "db"],
-                                cwd=docker_dir,
-                                stdout=log_file,
-                                stderr=subprocess.STDOUT,
-                                timeout=600,  # 10 minute timeout for image downloads
-                                env=env
-                            )
-                        self.log(f"Docker compose up completed with exit code: {result.returncode}")
-                        if result.returncode == 0:
-                            self.log("Containers started")
+                self.log("First run detected - showing welcome screen")
+                self.setup_dialog_showing = True
 
-                    threading.Thread(target=pull_and_start, daemon=True).start()
-                    # Monitor downloads in background (don't block WordPress health polling)
-                    threading.Thread(target=self.monitor_image_downloads, daemon=True).start()
-                except Exception as e:
-                    self.log(f"Error starting containers: {e}")
+                def on_continue():
+                    self.log("User confirmed setup - starting installation")
+                    threading.Thread(target=self._run_first_time_setup, daemon=True).start()
+
+                def on_cancel():
+                    self.log("User cancelled setup")
+                    self.menu["Starting..."].title = "Status: Stopped"
+                    setup_window.close_setup_progress()
+                    self.setup_dialog_showing = False
+
+                setup_window.show_welcome_screen(on_continue=on_continue, on_cancel=on_cancel)
+                return
+
+            # Not first run: start the service normally
+            subprocess.run([self.launcher_script, "start"])
 
             # Poll until WordPress is responding (replaces fixed sleep)
             max_wait = 60
@@ -1745,6 +1709,122 @@ class OnionPressApp(rumps.App):
             self.start_caffeinate()
 
         threading.Thread(target=start, daemon=True).start()
+
+    def _run_first_time_setup(self):
+        """Run first-time setup with progress window: launcher, pull images, then wait for ready."""
+        progress_window = setup_window.get_setup_window()
+        # Window already transitioned to progress view by Continue button
+
+        try:
+            # Step 0: System check
+            progress_window.set_step(0, "in_progress")
+            progress_window.set_status("Checking system requirements")
+            progress_window.add_log("CHECKING MACOS VERSION...", "progress")
+            time.sleep(0.3)
+            try:
+                ver = subprocess.run(
+                    ["sw_vers", "-productVersion"],
+                    capture_output=True, text=True, timeout=5
+                )
+                progress_window.add_log(f"MACOS {ver.stdout.strip()} DETECTED", "ok")
+            except Exception:
+                progress_window.add_log("MACOS DETECTED", "ok")
+            progress_window.add_log("PYTHON 3 FOUND", "ok")
+            time.sleep(0.3)
+            progress_window.complete_step(0)
+
+            # Step 1: Runtime init
+            progress_window.set_step(1, "in_progress")
+            progress_window.set_status("Initializing container runtime")
+            progress_window.add_log("STARTING COLIMA VM...", "progress")
+            subprocess.run([self.launcher_script, "start"])
+            time.sleep(1)
+            progress_window.add_log("VM INITIALIZED", "ok")
+            progress_window.complete_step(1)
+
+            # Step 2: Download images
+            progress_window.set_step(2, "in_progress")
+            progress_window.set_status("Downloading container images")
+            progress_window.add_log("FETCHING CONTAINER IMAGES...", "progress")
+        except Exception as e:
+            self.log(f"Error in _run_first_time_setup: {e}")
+            progress_window.add_log(f"ERROR: {e}", "error")
+
+        docker_dir = os.path.join(self.parent_resources_dir, "docker")
+        try:
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            secrets_file = os.path.join(self.app_support, "secrets")
+            if os.path.exists(secrets_file):
+                with open(secrets_file, 'r') as sf:
+                    for line in sf:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, val = line.split('=', 1)
+                            env[key] = val.strip("'")
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            docker_log = os.path.join(self.app_support, "docker-pull.log")
+
+            def pull_and_start():
+                with open(docker_log, 'w') as log_file:
+                    result = subprocess.run(
+                        [docker_bin, "compose", "up", "-d", "wordpress", "db"],
+                        cwd=docker_dir,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        timeout=600,
+                        env=env
+                    )
+                self.log(f"Docker compose up completed with exit code: {result.returncode}")
+                if result.returncode == 0:
+                    progress_window.set_status("Generating vanity onion address")
+                    progress_window.set_detail("Finding address...")
+                    self.show_notification("Containers started", "WordPress is starting...")
+
+            threading.Thread(target=pull_and_start, daemon=True).start()
+            self.monitor_image_downloads(progress_window)
+        except Exception as e:
+            self.log(f"Error starting containers: {e}")
+            progress_window.set_status(f"Error: {e}")
+
+        # Poll until WordPress is responding
+        max_wait = 60
+        waited = 0
+        while waited < max_wait:
+            if self.check_wordpress_health(log_result=False):
+                self.log(f"WordPress responding after {waited}s")
+                break
+            time.sleep(2)
+            waited += 2
+
+        self.check_status()
+        self.start_caffeinate()
+
+        # Complete setup window when service is ready
+        def wait_for_ready():
+            for _ in range(120):
+                time.sleep(1)
+                if self.is_ready and self.onion_address and self.onion_address not in ("Starting...", "Not running", "Generating address..."):
+                    progress_window.set_step(3, "in_progress")
+                    progress_window.add_log(f"ADDRESS: {self.onion_address[:25]}...", "ok")
+                    progress_window.complete_step(3)
+                    progress_window.set_step(4, "in_progress")
+                    progress_window.set_status("Starting services")
+                    progress_window.add_log("ALL CONTAINERS RUNNING", "ok")
+                    progress_window.complete_step(4)
+                    progress_window.set_step(5, "in_progress")
+                    progress_window.set_status("Finalizing setup")
+                    progress_window.add_log("VERIFYING TOR CIRCUIT...", "progress")
+                    progress_window.add_log("ONION SERVICE PUBLISHED", "ok")
+                    progress_window.complete_step(5)
+                    progress_window.set_modem_active(False)
+                    progress_window.show_completion(self.onion_address)
+                    time.sleep(4)
+                    setup_window.close_setup_progress()
+                    self.setup_dialog_showing = False
+                    break
+
+        threading.Thread(target=wait_for_ready, daemon=True).start()
 
     @rumps.clicked("Stop")
     def stop_service(self, _):
@@ -2314,13 +2394,14 @@ class OnionPressApp(rumps.App):
             self.log("Setup dialog fallback - dialog failed to show")
 
     def dismiss_setup_dialog(self):
-        """Dismiss the setup dialog if it's showing"""
+        """Dismiss the setup dialog if it's showing (native alert or setup progress window)"""
         if self.setup_dialog_showing:
             self.setup_dialog_showing = False
             self.log("Setup dialog marked for dismissal")
-
-            # stopModal() and abortModal() can be called from any thread
-            # to interrupt the runModal() loop on the main thread
+            try:
+                setup_window.hide_setup_progress()
+            except Exception:
+                pass
             try:
                 if self.setup_alert:
                     AppKit.NSApp.abortModal()
@@ -2328,8 +2409,10 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Error dismissing setup dialog: {e}")
 
-    def monitor_image_downloads(self):
-        """Monitor Docker image downloads and show progress notifications"""
+    def monitor_image_downloads(self, progress_window=None):
+        """Monitor Docker image downloads and show progress notifications.
+        If progress_window is provided (first-time setup), update its log and progress bar.
+        """
         images_to_check = {
             'wordpress': False,
             'mariadb': False,
@@ -2341,6 +2424,10 @@ class OnionPressApp(rumps.App):
         # Check for images every 3 seconds for up to 10 minutes
         for i in range(200):
             try:
+                if progress_window:
+                    estimated_progress = min(0.9, i / 60)
+                    progress_window.set_progress(estimated_progress, "DOWNLOADING")
+
                 result = subprocess.run(
                     ["docker", "images", "--format", "{{.Repository}}"],
                     capture_output=True,
@@ -2351,21 +2438,43 @@ class OnionPressApp(rumps.App):
                 )
                 current_images = result.stdout.strip().split('\n')
 
-                # Check each image
                 for image_name in images_to_check:
                     if not images_to_check[image_name]:
                         if any(image_name in img for img in current_images):
                             images_to_check[image_name] = True
                             self.log(f"Image downloaded: {image_name}")
+                            if progress_window:
+                                if image_name == 'wordpress':
+                                    progress_window.add_log("WORDPRESS IMAGE READY", "ok")
+                                    progress_window.set_progress(0.4, "WORDPRESS OK")
+                                elif image_name == 'mariadb':
+                                    progress_window.add_log("MARIADB IMAGE READY", "ok")
+                                    progress_window.set_progress(0.7, "MARIADB OK")
+                                elif image_name == 'tor':
+                                    progress_window.add_log("TOR IMAGE READY", "ok")
+                                    progress_window.set_progress(0.95, "TOR OK")
 
-                # If all images are downloaded, we're done
+                # When using progress window, step 2 completes when wordpress + mariadb are ready (first compose only pulls those)
+                all_needed = images_to_check['wordpress'] and images_to_check['mariadb']
+                if progress_window and all_needed:
+                    self.log("Required images ready (wordpress + mariadb)")
+                    progress_window.set_progress(1.0, "COMPLETE")
+                    progress_window.add_log("ALL IMAGES DOWNLOADED", "ok")
+                    progress_window.complete_step(2)
+                    progress_window.set_status("Generating vanity onion address")
+                    progress_window.add_log("GENERATING VANITY PREFIX...", "progress")
+                    break
                 if all(images_to_check.values()):
                     self.log("All images downloaded")
                     break
 
             except Exception as e:
                 self.log(f"Error checking images: {e}")
-                pass
+
+            time.sleep(3)
+
+            except Exception as e:
+                self.log(f"Error checking images: {e}")
 
             time.sleep(3)
 

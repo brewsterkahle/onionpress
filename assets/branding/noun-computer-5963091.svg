@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128pt" height="128pt" version="1.1" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+ <path d="m16 88h6v6h-6z"/>
+ <path d="m106 88v-12h-6v6h-72v-6h-6v12z"/>
+ <path d="m22 4h84v6h-84z"/>
+ <path d="m34 16h60v6h-60z"/>
+ <path d="m16 10h6v66h-6z"/>
+ <path d="m106 10h6v66h-6z"/>
+ <path d="m34 70h60v6h-60z"/>
+ <path d="m94 22h6v48h-6z"/>
+ <path d="m10 94h6v6h-6z"/>
+ <path d="m4 100h6v18h-6z"/>
+ <path d="m106 88h6v6h-6z"/>
+ <path d="m112 94h6v6h-6z"/>
+ <path d="m118 100h6v18h-6z"/>
+ <path d="m10 118h108v6h-108z"/>
+ <path d="m28 94h6v6h-6z"/>
+ <path d="m40 94h6v6h-6z"/>
+ <path d="m52 94h6v6h-6z"/>
+ <path d="m34 106h6v6h-6z"/>
+ <path d="m22 106h6v6h-6z"/>
+ <path d="m58 106h6v6h-6z"/>
+ <path d="m46 106h6v6h-6z"/>
+ <path d="m64 94h6v6h-6z"/>
+ <path d="m76 94h6v6h-6z"/>
+ <path d="m88 94h6v6h-6z"/>
+ <path d="m70 106h6v6h-6z"/>
+ <path d="m94 106h6v6h-6z"/>
+ <path d="m82 106h6v6h-6z"/>
+ <path d="m28 22h6v48h-6z"/>
+</svg>

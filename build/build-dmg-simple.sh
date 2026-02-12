@@ -303,6 +303,7 @@ fi
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
 cp "$SCRIPTS_DIR/key_manager.py" "$SITE_PACKAGES/"
 cp "$SCRIPTS_DIR/bip39_words.py" "$SITE_PACKAGES/"
+cp "$SCRIPTS_DIR/setup_window.py" "$SITE_PACKAGES/"
 
 # Run py2app build using the root setup.py
 cd "$PROJECT_DIR"

@@ -21,6 +21,10 @@ DATA_FILES = [
         'OnionPress.app/Contents/Resources/menubar-icon-running.png',
         'src/onion-forward.php',
     ]),
+    ('assets/branding', [
+        'assets/branding/noun-computer-5963091.svg',
+        'assets/branding/logo.png',
+    ]),
 ]
 
 OPTIONS = {
@@ -46,7 +50,7 @@ OPTIONS = {
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
     'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'bip39_words',
-                 'onion_proxy', 'install_native_messaging'],
+                 'onion_proxy', 'install_native_messaging', 'setup_window'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size
