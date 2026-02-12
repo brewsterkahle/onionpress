@@ -54,14 +54,14 @@ async function checkProxyStatus() {
 }
 
 // Poll rapidly at startup (every 2s for 30s) so the proxy learns about us
-// quickly, then switch to normal 15s interval
+// quickly, then switch to normal 60s interval
 let startupPollCount = 0;
 const startupInterval = setInterval(() => {
   checkProxyStatus();
   startupPollCount++;
   if (startupPollCount >= 15) {
     clearInterval(startupInterval);
-    setInterval(checkProxyStatus, 15000);
+    setInterval(checkProxyStatus, 60000);
   }
 }, 2000);
 checkProxyStatus();
