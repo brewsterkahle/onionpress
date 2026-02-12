@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OnionPress - my self-hosted blog</title>
+    <title>OnionPress - Your Decentralized Web Server</title>
+    <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/icon-face-transparent.png">
     <style>
         /* Reset and base styles */
         * {
@@ -158,10 +159,12 @@
         }
 
         .hero-subtitle {
-            font-size: 28px;
+            font-size: 20px;
             font-weight: bold;
-            margin: 20px 0;
+            margin: 20px auto;
             text-shadow: 2px 2px 0px var(--retro-black);
+            max-width: 700px;
+            line-height: 1.5;
         }
 
         .hero-tagline {
@@ -208,7 +211,7 @@
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 20px;
-            margin: 40px 0;
+            margin: 20px 0 40px 0;
         }
 
         .feature-box {
@@ -258,6 +261,18 @@
             padding-left: 20px;
             margin: 40px 0 20px 0;
             text-transform: uppercase;
+        }
+
+        /* Pillar sections */
+        .pillar-section {
+            margin: 50px 0;
+        }
+
+        .pillar-description {
+            font-size: 18px;
+            margin: 10px 0 20px 28px;
+            line-height: 1.6;
+            color: #333;
         }
 
         /* Visitor counter */
@@ -417,20 +432,6 @@
             animation: spin-heart 2.5s infinite;
         }
 
-        /* Under Construction Banner - GeoCities Style */
-        .construction-banner {
-            text-align: center;
-            padding: 20px;
-            background: var(--retro-black);
-        }
-
-        .construction-banner img {
-            display: inline-block;
-            image-rendering: pixelated;
-            image-rendering: -moz-crisp-edges;
-            image-rendering: crisp-edges;
-        }
-
         /* Responsive */
         @media (max-width: 768px) {
             .hero h1 {
@@ -438,7 +439,7 @@
             }
 
             .hero-subtitle {
-                font-size: 20px;
+                font-size: 16px;
             }
 
             .site-title {
@@ -474,71 +475,106 @@
 <body>
     <!-- Header -->
     <header class="site-header">
-        <div style="text-align: center; margin-bottom: 20px;">
+        <div style="text-align: center; margin-bottom: 20px; display: flex; align-items: center; justify-content: center; gap: 20px;">
+            <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
             <picture>
-                <source srcset="/logo.webp" type="image/webp">
-                <img src="/logo.webp" alt="OnionPress" style="max-width: 400px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0, 0, 0, 0.3));">
+                <source srcset="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/logo.webp" type="image/webp">
+                <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/logo.png" alt="OnionPress" style="max-width: 280px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0, 0, 0, 0.3));">
             </picture>
+            <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
         </div>
-        <div class="site-tagline">Run your own website from your Mac. Just Works. Free, forever.</div>
+        <div class="site-tagline">Your Decentralized Web Server</div>
     </header>
-
-    <!-- Under Construction Banner -->
-    <div class="construction-banner">
-        <img src="construction.gif" alt="Under Construction" width="77" height="107">
-    </div>
 
     <!-- Main Content -->
     <div class="container">
         <!-- Hero Section -->
         <div class="hero">
+            <div class="hero-subtitle">
+                OnionPress turns your Mac into a web server with its own permanent address on the open Tor network. No hosting company. No monthly bill. No one can take it down but you.
+            </div>
             <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="button"><span class="spinning-heart">💜</span> 💾 Download to Mac Now 💾 <span class="spinning-heart">💜</span></a>
+            <a href="https://addons.mozilla.org/addon/onionpress/" class="button button-secondary" style="font-size: 13px; padding: 10px 20px;">🦊 Firefox Extension</a>
             <div style="margin-top: 30px; font-size: 18px; font-weight: bold;">
                 Your Site is viewable by anyone with a Tor or Brave Browser
             </div>
         </div>
 
-        <!-- Features Grid -->
-        <h2>
-            <img src="/icon-face-transparent.png" class="onion-bullet" alt="">
-            Why OnionPress?
-        </h2>
-
-        <div class="feature-grid">
-            <div class="feature-box">
-                <div class="feature-icon">🏠</div>
-                <h3>Your Wordpress Site</h3>
-                <p>Get your unique internet address. Like GeoCities, but you're in charge. Accessible via Tor Browser and Brave Browser's Tor Mode.</p>
+        <!-- Pillar 1: Robust -->
+        <div class="pillar-section">
+            <h2>
+                <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/icon-face-transparent.png" class="onion-bullet" alt="">
+                Robust
+            </h2>
+            <div class="pillar-description">Always up, because it is backed up and served on the Internet Archive's Wayback Machine by default, and a friend can run a mirror to make it available when your machine is not up.</div>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">🏠</div>
+                    <h3>Runs on Your Mac</h3>
+                    <p>Your laptop is your web server. No cloud, no hosting company, no middleman. Open the lid and you're live.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🔑</div>
+                    <h3>Yours Forever</h3>
+                    <p>Your own site address on the open Web. Backed up automatically, movable to a new machine, your site keeps the same URL forever.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Works Anywhere</h3>
+                    <p>Tor punches through firewalls and NATs. Home network, coffee shop, campus Wi-Fi -- it just works.</p>
+                </div>
             </div>
+        </div>
 
-            <div class="feature-box">
-                <div class="feature-icon">🎨</div>
-                <h3>Create Freely</h3>
-                <p>No tracking, no ads, no corporate overlords. Make weird, wonderful things.</p>
+        <!-- Pillar 2: Private -->
+        <div class="pillar-section">
+            <h2>
+                <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/icon-face-transparent.png" class="onion-bullet" alt="">
+                Private but Social
+            </h2>
+            <div class="pillar-description">You control what you publish. Connect with Readers.</div>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">🛡️</div>
+                    <h3>Private by Default</h3>
+                    <p>No analytics, no cookies, no ads. Your readers aren't the product.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">💬</div>
+                    <h3>Connect with Readers</h3>
+                    <p>Follow the posts of your readers. Build a community around your site on your own terms.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🆓</div>
+                    <h3>Free as in Freedom</h3>
+                    <p>Free and Open Source AGPL 3. No fees, no subscriptions, no strings attached.</p>
+                </div>
             </div>
+        </div>
 
-            <div class="feature-box">
-                <div class="feature-icon">💾</div>
-                <h3>All Yours</h3>
-                <p>Run WordPress on your Mac. Visible even on home or institutional networks. You control everything.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">🆓</div>
-                <h3>Forever Free</h3>
-                <p>No hosting fees. No monthly charges. Free and Open source software.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">⚡</div>
-                <h3>Easy Setup</h3>
-                <p>Download, install, launch. Your site is live in 5 minutes.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">🌐</div>
-                <h3>Full WordPress</h3>
-                <p>Familiar interface. Any theme. Any plugin. Total freedom.</p>
+        <!-- Pillar 3: Fun -->
+        <div class="pillar-section">
+            <h2>
+                <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/icon-face-transparent.png" class="onion-bullet" alt="">
+                Fun
+            </h2>
+            <div class="pillar-description">Customizable WordPress with built-in retro features.</div>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">⚡</div>
+                    <h3>Five-Minute Setup</h3>
+                    <p>Download, install, launch. Your site is live before your coffee gets cold.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🎨</div>
+                    <h3>Full WordPress</h3>
+                    <p>Familiar interface. Any theme, any plugin. Total creative freedom.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">💾</div>
+                    <h3>Your Own Corner of the Web</h3>
+                    <p>Like GeoCities, but it's really yours. Make it weird. Make it wonderful. Make it you.</p>
+                </div>
             </div>
         </div>
 
@@ -691,7 +727,7 @@
         <!-- Quick Info -->
         <div style="border: 3px solid var(--retro-black); padding: 30px; margin: 40px 0; background: #FFFFE0;">
             <h2 style="border: none; margin-top: 0;">
-                <img src="/icon-face-transparent.png" class="onion-bullet" alt="">
+                <img src="https://raw.githubusercontent.com/brewsterkahle/onionpress/main/docs/icon-face-transparent.png" class="onion-bullet" alt="">
                 Get Started in 3 Steps
             </h2>
             <ol style="font-size: 18px; line-height: 2;">
@@ -717,6 +753,7 @@
         </div>
         <div style="margin-bottom: 15px;">
             <a href="https://github.com/brewsterkahle/onionpress#readme">How it Works</a> |
+            <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">Locking the Web Open</a> |
             <a href="https://donate.torproject.org/">Donate</a>
         </div>
         <div style="margin-top: 15px; font-size: 12px;">
