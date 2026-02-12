@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OnionPress - my self-hosted blog</title>
+    <title>OnionPress - Your Decentralized Web Server</title>
+    <link rel="icon" type="image/png" href="icon-face-transparent.png">
     <style>
         /* Reset and base styles */
         * {
@@ -158,10 +159,12 @@
         }
 
         .hero-subtitle {
-            font-size: 28px;
+            font-size: 20px;
             font-weight: bold;
-            margin: 20px 0;
+            margin: 20px auto;
             text-shadow: 2px 2px 0px var(--retro-black);
+            max-width: 700px;
+            line-height: 1.5;
         }
 
         .hero-tagline {
@@ -208,7 +211,7 @@
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 20px;
-            margin: 40px 0;
+            margin: 20px 0 40px 0;
         }
 
         .feature-box {
@@ -260,6 +263,113 @@
             text-transform: uppercase;
         }
 
+        /* Pillar sections */
+        .pillar-section {
+            margin: 50px 0;
+        }
+
+        .pillar-description {
+            font-size: 18px;
+            margin: 10px 0 20px 28px;
+            line-height: 1.6;
+            color: #333;
+        }
+
+        /* Visitor counter */
+        .visitor-counter {
+            font-family: 'Courier New', Courier, monospace;
+            background: var(--retro-black);
+            color: var(--onion-pink);
+            padding: 15px 30px;
+            border: 3px solid var(--onion-purple);
+            display: inline-block;
+            font-size: 28px;
+            letter-spacing: 5px;
+            font-weight: bold;
+            margin: 20px 0;
+        }
+
+        /* Hit Counter Styles */
+        .hit-counter-display {
+            display: inline-flex;
+            gap: 2px;
+            background: #000;
+            padding: 15px 20px;
+            border: 3px solid var(--onion-purple);
+            border-radius: 8px;
+            box-shadow:
+                inset 0 0 20px rgba(0, 0, 0, 0.5),
+                0 5px 15px rgba(0, 0, 0, 0.3);
+            margin-bottom: 10px;
+        }
+
+        .counter-digit {
+            display: inline-block;
+            width: 40px;
+            height: 60px;
+            background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 100%);
+            border: 2px solid #444;
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+            box-shadow:
+                inset 0 2px 4px rgba(255, 255, 255, 0.1),
+                inset 0 -2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        .digit-inner {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            font-size: 36px;
+            font-weight: bold;
+            color: var(--onion-pink);
+            text-shadow:
+                0 0 10px var(--onion-pink),
+                0 0 20px var(--onion-pink);
+            transition: transform 0.3s ease-out;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        /* Hide digits until they have content */
+        .digit-inner:empty {
+            opacity: 0;
+        }
+
+        .counter-digit.spinning .digit-inner {
+            animation: digitSpin 0.6s ease-in-out;
+        }
+
+        @keyframes digitSpin {
+            0% {
+                transform: translateY(0) rotateX(0deg);
+                opacity: 1;
+            }
+            50% {
+                transform: translateY(-30px) rotateX(90deg);
+                opacity: 0.5;
+            }
+            51% {
+                transform: translateY(30px) rotateX(-90deg);
+                opacity: 0.5;
+            }
+            100% {
+                transform: translateY(0) rotateX(0deg);
+                opacity: 1;
+            }
+        }
+
+        .hit-counter-label {
+            margin-top: 8px;
+            font-size: 14px;
+            color: #666;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
         /* Badges */
         .badge-container {
             text-align: center;
@@ -300,6 +410,16 @@
             color: var(--onion-pink);
         }
 
+        /* Blink animation (optional, use sparingly!) */
+        @keyframes blink {
+            0%, 50%, 100% { opacity: 1; }
+            25%, 75% { opacity: 0; }
+        }
+
+        .blink {
+            animation: blink 2s infinite;
+        }
+
         /* Spinning heart animation - vertical axis flip */
         @keyframes spin-heart {
             0% { transform: rotateY(0deg); }
@@ -312,18 +432,6 @@
             animation: spin-heart 2.5s infinite;
         }
 
-        /* Under Construction Banner - GeoCities Style */
-        .construction-banner {
-            text-align: center;
-            padding: 15px;
-            background: var(--retro-black);
-            color: var(--onion-orange);
-            font-family: Impact, 'Arial Black', sans-serif;
-            font-size: 14px;
-            text-transform: uppercase;
-            letter-spacing: 3px;
-        }
-
         /* Responsive */
         @media (max-width: 768px) {
             .hero h1 {
@@ -331,7 +439,7 @@
             }
 
             .hero-subtitle {
-                font-size: 20px;
+                font-size: 16px;
             }
 
             .site-title {
@@ -367,75 +475,254 @@
 <body>
     <!-- Header -->
     <header class="site-header">
-        <div style="text-align: center; margin-bottom: 20px;">
+        <div style="text-align: center; margin-bottom: 20px; display: flex; align-items: center; justify-content: center; gap: 20px;">
+            <img src="construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
             <picture>
                 <source srcset="logo.webp" type="image/webp">
-                <img src="logo.png" alt="OnionPress" style="max-width: 400px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0, 0, 0, 0.3));">
+                <img src="logo.png" alt="OnionPress" style="max-width: 280px; width: 100%; height: auto; filter: drop-shadow(5px 5px 0px rgba(0, 0, 0, 0.3));">
             </picture>
+            <img src="construction.gif" alt="Under Construction" width="77" height="107" style="image-rendering: pixelated;">
         </div>
-        <div class="site-tagline">Run your own website from your Mac. Just Works. Free, forever.</div>
+        <div class="site-tagline">Your Decentralized Web Server</div>
     </header>
-
-    <!-- Under Construction Banner -->
-    <div class="construction-banner">
-        <img src="construction.gif" alt="Under Construction" width="77" height="107">
-    </div>
 
     <!-- Main Content -->
     <div class="container">
         <!-- Hero Section -->
         <div class="hero">
+            <div class="hero-subtitle">
+                OnionPress turns your Mac into a web server with its own permanent address on the open Tor network. No hosting company. No monthly bill. No one can take it down but you.
+            </div>
             <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="button"><span class="spinning-heart">💜</span> 💾 Download to Mac Now 💾 <span class="spinning-heart">💜</span></a>
-            <br>
-            <a href="https://addons.mozilla.org/addon/onionpress/" class="button button-secondary" style="font-size: 13px; padding: 10px 20px; box-shadow: 3px 3px 0px var(--retro-black);">🦊 Firefox Extension</a>
+            <a href="https://addons.mozilla.org/addon/onionpress/" class="button button-secondary" style="font-size: 13px; padding: 10px 20px;">🦊 Firefox Extension</a>
             <div style="margin-top: 30px; font-size: 18px; font-weight: bold;">
-                Your Site is viewable by anyone with a Tor or Brave Browser or Firefox
+                Your Site is viewable by anyone with a Tor or Brave Browser
             </div>
         </div>
 
-        <!-- Features Grid -->
-        <h2>
-            <img src="icon-face-transparent.png" class="onion-bullet" alt="">
-            Why OnionPress?
-        </h2>
-
-        <div class="feature-grid">
-            <div class="feature-box">
-                <div class="feature-icon">🏠</div>
-                <h3>Your Wordpress Site</h3>
-                <p>Get your unique internet address. Like GeoCities, but you're in charge. Accessible via Tor Browser and Brave Browser's Tor Mode.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">🎨</div>
-                <h3>Create Freely</h3>
-                <p>No tracking, no ads, no corporate overlords. Make weird, wonderful things.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">💾</div>
-                <h3>All Yours</h3>
-                <p>Run WordPress on your Mac. Visible even on home or institutional networks. You control everything.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">🆓</div>
-                <h3>Forever Free</h3>
-                <p>No hosting fees. No monthly charges. Free and Open source software.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">⚡</div>
-                <h3>Easy Setup</h3>
-                <p>Download, install, launch. Your site is live in 5 minutes.</p>
-            </div>
-
-            <div class="feature-box">
-                <div class="feature-icon">🌐</div>
-                <h3>Full WordPress</h3>
-                <p>Familiar interface. Any theme. Any plugin. Total freedom.</p>
+        <!-- Pillar 1: Robust -->
+        <div class="pillar-section">
+            <h2>
+                <img src="icon-face-transparent.png" class="onion-bullet" alt="">
+                Robust
+            </h2>
+            <div class="pillar-description">Always up, because it is backed up and served on the Internet Archive's Wayback Machine by default, and a friend can run a mirror to make it available when your machine is not up.</div>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">🏠</div>
+                    <h3>Runs on Your Mac</h3>
+                    <p>Your laptop is your web server. No cloud, no hosting company, no middleman. Open the lid and you're live.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🔑</div>
+                    <h3>Yours Forever</h3>
+                    <p>Your own site address on the open Web. Backed up automatically, movable to a new machine, your site keeps the same URL forever.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🌐</div>
+                    <h3>Works Anywhere</h3>
+                    <p>Tor punches through firewalls and NATs. Home network, coffee shop, campus Wi-Fi -- it just works.</p>
+                </div>
             </div>
         </div>
+
+        <!-- Pillar 2: Private -->
+        <div class="pillar-section">
+            <h2>
+                <img src="icon-face-transparent.png" class="onion-bullet" alt="">
+                Private but Social
+            </h2>
+            <div class="pillar-description">You control what you publish. Connect with Readers.</div>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">🛡️</div>
+                    <h3>Private by Default</h3>
+                    <p>No analytics, no cookies, no ads. Your readers aren't the product.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">💬</div>
+                    <h3>Connect with Readers</h3>
+                    <p>Follow the posts of your readers. Build a community around your site on your own terms.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🆓</div>
+                    <h3>Free as in Freedom</h3>
+                    <p>Free and Open Source AGPL 3. No fees, no subscriptions, no strings attached.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pillar 3: Fun -->
+        <div class="pillar-section">
+            <h2>
+                <img src="icon-face-transparent.png" class="onion-bullet" alt="">
+                Fun
+            </h2>
+            <div class="pillar-description">Customizable WordPress with built-in retro features.</div>
+            <div class="feature-grid">
+                <div class="feature-box">
+                    <div class="feature-icon">⚡</div>
+                    <h3>Five-Minute Setup</h3>
+                    <p>Download, install, launch. Your site is live before your coffee gets cold.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">🎨</div>
+                    <h3>Full WordPress</h3>
+                    <p>Familiar interface. Any theme, any plugin. Total creative freedom.</p>
+                </div>
+                <div class="feature-box">
+                    <div class="feature-icon">💾</div>
+                    <h3>Your Own Corner of the Web</h3>
+                    <p>Like GeoCities, but it's really yours. Make it weird. Make it wonderful. Make it you.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Hit Counter -->
+        <div id="hit-counter-container" style="text-align: center; margin: 60px 0;">
+            <div class="hit-counter-display">
+                <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+                <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+                <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+                <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+                <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+                <span class="counter-digit" data-digit=""><span class="digit-inner"></span></span>
+            </div>
+            <div class="hit-counter-label">
+                <span style="font-size: 18px;">👁️</span>
+                <span>VISITORS</span>
+            </div>
+        </div>
+
+        <script>
+        // Hit Counter Implementation
+        (function() {
+            const counterAPI = '/wp-content/plugins/onionpress-hit-counter/standalone-counter.php';
+            let hasIncremented = false;
+            let currentCount = 0;
+            let pollingInterval = null;
+
+            function updateDisplay(formattedCount, animate = true) {
+                const digits = formattedCount.split('');
+                const digitElements = document.querySelectorAll('.counter-digit');
+
+                digitElements.forEach((elem, index) => {
+                    const currentDigit = elem.getAttribute('data-digit');
+                    const newDigit = digits[index];
+
+                    if (currentDigit !== newDigit) {
+                        const inner = elem.querySelector('.digit-inner');
+
+                        // Don't animate if current digit is empty (first load)
+                        const shouldAnimate = animate && currentDigit !== '';
+
+                        if (shouldAnimate) {
+                            // Animate the change
+                            elem.classList.add('spinning');
+
+                            setTimeout(() => {
+                                inner.textContent = newDigit;
+                                elem.setAttribute('data-digit', newDigit);
+                                elem.classList.remove('spinning');
+                            }, 300);
+                        } else {
+                            // Update instantly without animation
+                            inner.textContent = newDigit;
+                            elem.setAttribute('data-digit', newDigit);
+                        }
+                    }
+                });
+            }
+
+            function initializeCounter() {
+                console.log('[Hit Counter] Initializing counter...');
+                // First, get current count without incrementing
+                fetch(counterAPI + '?action=get')
+                .then(response => {
+                    console.log('[Hit Counter] GET response status:', response.status);
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('[Hit Counter] GET response data:', data);
+                    if (data.success) {
+                        // Set initial display without animation
+                        updateDisplay(data.formatted, false);
+                        currentCount = data.count;
+                        console.log('[Hit Counter] Initial display set to:', data.formatted);
+
+                        // Now increment the counter
+                        setTimeout(() => {
+                            incrementCounter();
+                        }, 100);
+                    }
+                })
+                .catch(error => {
+                    console.error('[Hit Counter] Init error:', error);
+                    // If init fails, just increment anyway
+                    incrementCounter();
+                });
+            }
+
+            function incrementCounter() {
+                if (hasIncremented) {
+                    console.log('[Hit Counter] Already incremented, skipping');
+                    return;
+                }
+
+                console.log('[Hit Counter] Incrementing counter...');
+                fetch(counterAPI + '?action=increment', {
+                    method: 'POST'
+                })
+                .then(response => {
+                    console.log('[Hit Counter] POST response status:', response.status);
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('[Hit Counter] POST response data:', data);
+                    if (data.success) {
+                        // Animate the increment
+                        updateDisplay(data.formatted, true);
+                        currentCount = data.count;
+                        hasIncremented = true;
+                        console.log('[Hit Counter] Counter incremented to:', data.formatted);
+
+                        // Start polling for updates from other visitors
+                        startPolling();
+                    }
+                })
+                .catch(error => console.error('[Hit Counter] Increment error:', error));
+            }
+
+            function checkForUpdates() {
+                fetch(counterAPI + '?action=get')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success && data.count > currentCount) {
+                        console.log('[Hit Counter] New visitor detected! Count:', data.count);
+                        // Someone else visited, animate the update
+                        updateDisplay(data.formatted, true);
+                        currentCount = data.count;
+                    }
+                })
+                .catch(error => console.error('[Hit Counter] Poll error:', error));
+            }
+
+            function startPolling() {
+                // Poll every 2 seconds to check for new visitors
+                if (!pollingInterval) {
+                    pollingInterval = setInterval(checkForUpdates, 2000);
+                    console.log('[Hit Counter] Started polling for updates');
+                }
+            }
+
+            // Initialize on page load
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', initializeCounter);
+            } else {
+                initializeCounter();
+            }
+        })();
+        </script>
 
         <!-- Quick Info -->
         <div style="border: 3px solid var(--retro-black); padding: 30px; margin: 40px 0; background: #FFFFE0;">
@@ -446,14 +733,12 @@
             <ol style="font-size: 18px; line-height: 2;">
                 <li><strong>Download</strong> the OnionPress app (82 MB)</li>
                 <li><strong>Install</strong> and launch from your Applications folder<br>
-                    <small style="font-size: 14px;">(Work through the <a href="https://github.com/brewsterkahle/onionpress#macos-security-warning" style="color: var(--onion-dark-purple);">security prompts</a> - we'll guide you step-by-step)</small>
+                    <small style="font-size: 14px;">(Work through the <a href="https://github.com/brewsterkahle/onionpress#requirements" style="color: var(--onion-dark-purple);">security prompts</a> - we'll guide you step-by-step)</small>
                 </li>
                 <li><strong>Create</strong> your first post and share your OnionPress address!</li>
             </ol>
             <div style="text-align: center; margin-top: 30px;">
                 <a href="https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.dmg" class="button"><span class="spinning-heart">💜</span> 💾 Download to Mac Now 💾 <span class="spinning-heart">💜</span></a>
-                <br>
-                <a href="https://addons.mozilla.org/addon/onionpress/" class="button button-secondary" style="font-size: 13px; padding: 10px 20px; box-shadow: 3px 3px 0px var(--retro-black);">🦊 Firefox Extension</a>
             </div>
         </div>
     </div>
@@ -468,6 +753,7 @@
         </div>
         <div style="margin-bottom: 15px;">
             <a href="https://github.com/brewsterkahle/onionpress#readme">How it Works</a> |
+            <a href="http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/">Locking the Web Open</a> |
             <a href="https://donate.torproject.org/">Donate</a>
         </div>
         <div style="margin-top: 15px; font-size: 12px;">
