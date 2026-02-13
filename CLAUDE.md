@@ -31,6 +31,10 @@
 - Version must be bumped in: `src/menubar.py` (2 places), `setup.py`, `OnionPress.app/Contents/Info.plist`
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
+## Security
+- **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
+- Do not commit or log database passwords.
+
 ## Colima VM Sandboxing
 - The VM is restricted to only mount `~/.onionpress/` (via `--mount "$DATA_DIR:w"`), NOT the full home directory
 - This limits blast radius if a container (e.g., WordPress) is compromised — attacker cannot read `~/Documents`, `~/.ssh/`, etc.

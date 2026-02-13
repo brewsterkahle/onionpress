@@ -371,10 +371,12 @@ echo "Generating DMG background image..."
 DMG_BG_DIR="$TEMP_DIR/.background"
 mkdir -p "$DMG_BG_DIR"
 LOGO_PATH="$PROJECT_DIR/assets/branding/logo.png"
+STORY_PATH="$PROJECT_DIR/assets/branding/story.png"
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install Pillow >/dev/null 2>&1
 "$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/create-dmg-background.py" \
     "$DMG_BG_DIR/dmg-background.png" \
-    --logo "$LOGO_PATH" 2>&1 || {
+    --logo "$LOGO_PATH" \
+    --story "$STORY_PATH" 2>&1 || {
     echo "WARNING: Could not generate DMG background"
     echo "         Building plain DMG instead"
     rm -rf "$DMG_BG_DIR"
@@ -385,9 +387,9 @@ rm -rf "$MENUBAR_BUILD_DIR"
 
 echo "Creating styled DMG..."
 
-# Calculate DMG size (app size + 20MB headroom)
+# Calculate DMG size (app size + 80MB headroom for hi-res background)
 APP_SIZE_KB=$(du -sk "$TEMP_DIR" | cut -f1)
-DMG_SIZE_KB=$((APP_SIZE_KB + 20480))
+DMG_SIZE_KB=$((APP_SIZE_KB + 81920))
 
 # Step 1: Create read-write DMG
 RW_DMG_PATH="$BUILD_DIR/onionpress-rw.dmg"
@@ -429,13 +431,13 @@ tell application "Finder"
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set the bounds of container window to {100, 100, 740, 580}
+        set the bounds of container window to {100, 100, 740, 720}
         set viewOptions to the icon view options of container window
         set arrangement of viewOptions to not arranged
         set icon size of viewOptions to 128
         set background picture of viewOptions to file ".background:dmg-background.png"
-        set position of item "OnionPress.app" of container window to {160, 300}
-        set position of item "Applications" of container window to {480, 300}
+        set position of item "OnionPress.app" of container window to {160, 245}
+        set position of item "Applications" of container window to {480, 245}
         close
         open
         delay 2
