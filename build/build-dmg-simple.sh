@@ -349,7 +349,6 @@ fi
 echo "  Version verified: $BUILT_VERSION"
 
 cd "$PROJECT_DIR"
-rm -rf "$MENUBAR_BUILD_DIR"
 echo "Standalone MenubarApp built successfully"
 # Clean up old builds
 echo "Cleaning up old builds..."
@@ -367,57 +366,104 @@ cp -R "$APP_PATH" "$TEMP_DIR/"
 echo "Creating Applications folder symlink..."
 ln -s /Applications "$TEMP_DIR/Applications"
 
-# Create a README for the DMG
-cat > "$TEMP_DIR/README.txt" <<EOF
-onionpress - WordPress + Tor Onion Service
+# Generate DMG background image using the py2app build venv (still alive)
+echo "Generating DMG background image..."
+DMG_BG_DIR="$TEMP_DIR/.background"
+mkdir -p "$DMG_BG_DIR"
+LOGO_PATH="$PROJECT_DIR/assets/branding/logo.png"
+"$MENUBAR_BUILD_DIR/venv/bin/pip" install Pillow >/dev/null 2>&1
+"$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/create-dmg-background.py" \
+    "$DMG_BG_DIR/dmg-background.png" \
+    --logo "$LOGO_PATH" 2>&1 || {
+    echo "WARNING: Could not generate DMG background"
+    echo "         Building plain DMG instead"
+    rm -rf "$DMG_BG_DIR"
+}
 
-INSTALLATION:
-1. Drag OnionPress.app to the Applications folder
-2. Open OnionPress from Applications
-3. Follow the on-screen setup instructions
+# Now clean up the py2app build venv
+rm -rf "$MENUBAR_BUILD_DIR"
 
-REQUIREMENTS:
-- macOS 13.0 (Ventura) or later
-- Internet connection for first-time setup
+echo "Creating styled DMG..."
 
-WHAT'S INCLUDED:
-- Colima container runtime (bundled)
-- Docker CLI tools (bundled)
-- All dependencies included - no external Docker installation needed!
+# Calculate DMG size (app size + 20MB headroom)
+APP_SIZE_KB=$(du -sk "$TEMP_DIR" | cut -f1)
+DMG_SIZE_KB=$((APP_SIZE_KB + 20480))
 
-FIRST LAUNCH:
-- First launch will initialize the container runtime (~2-3 minutes)
-- Download of WordPress containers (~1GB) will begin automatically
-- Setup takes 3-5 minutes on first run
-- Subsequent launches are instant
-
-USAGE:
-- onionpress appears in your menu bar (OP icon)
-- Click the icon to view your onion address
-- Use Tor Browser to access your WordPress site
-
-NOTES:
-- This app uses Apple's native virtualization framework (VZ)
-- All container data is isolated and stored in ~/.onionpress/
-- No need to install Docker Desktop separately
-
-For more information and troubleshooting:
-https://github.com/brewsterkahle/onionpress
-EOF
-
-echo "Creating DMG..."
-
-# Create compressed DMG directly
+# Step 1: Create read-write DMG
+RW_DMG_PATH="$BUILD_DIR/onionpress-rw.dmg"
+rm -f "$RW_DMG_PATH"
 hdiutil create \
-    -volname "onionpress" \
+    -volname "OnionPress" \
     -srcfolder "$TEMP_DIR" \
     -ov \
+    -format UDRW \
+    -size "${DMG_SIZE_KB}k" \
+    "$RW_DMG_PATH"
+
+# Clean up source temp dir (contents are now in the DMG)
+rm -rf "$TEMP_DIR"
+
+# Step 2: Mount the read-write DMG
+# Eject any existing volume with the same name to avoid collisions
+echo "Mounting DMG for styling..."
+hdiutil detach "/Volumes/OnionPress" -quiet 2>/dev/null || true
+MOUNT_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG_PATH")
+DEVICE=$(echo "$MOUNT_OUTPUT" | grep '/dev/' | head -1 | awk '{print $1}')
+MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | sed 's/.*\/Volumes/\/Volumes/')
+# Extract just the volume name (basename of mount point)
+VOL_NAME=$(basename "$MOUNT_POINT")
+
+echo "  Mounted at: $MOUNT_POINT (volume: $VOL_NAME)"
+
+# Step 3: Apply Finder styling via AppleScript (if background exists)
+if [ -f "$MOUNT_POINT/.background/dmg-background.png" ]; then
+    echo "Applying Finder window styling..."
+
+    # Give Finder a moment to index the volume
+    sleep 2
+
+    osascript <<APPLESCRIPT
+tell application "Finder"
+    tell disk "$VOL_NAME"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {100, 100, 740, 580}
+        set viewOptions to the icon view options of container window
+        set arrangement of viewOptions to not arranged
+        set icon size of viewOptions to 128
+        set background picture of viewOptions to file ".background:dmg-background.png"
+        set position of item "OnionPress.app" of container window to {160, 300}
+        set position of item "Applications" of container window to {480, 300}
+        close
+        open
+        delay 2
+        close
+    end tell
+end tell
+APPLESCRIPT
+    echo "  Finder styling applied"
+else
+    echo "  No background image found, skipping Finder styling"
+fi
+
+# Step 4: Finalize — set permissions and unmount
+echo "Finalizing DMG..."
+chmod -Rf go-w "$MOUNT_POINT" 2>/dev/null || true
+sync
+hdiutil detach "$MOUNT_POINT" -quiet
+
+# Step 5: Convert to compressed read-only DMG
+echo "Compressing DMG..."
+rm -f "$DMG_PATH"
+hdiutil convert "$RW_DMG_PATH" \
     -format UDZO \
     -imagekey zlib-level=9 \
-    "$DMG_PATH"
+    -o "$DMG_PATH"
 
-# Clean up
-rm -rf "$TEMP_DIR"
+# Clean up read-write DMG
+rm -f "$RW_DMG_PATH"
 
 # Get final size
 FINAL_SIZE=$(du -h "$DMG_PATH" | cut -f1)
