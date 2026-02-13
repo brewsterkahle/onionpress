@@ -1,4 +1,4 @@
-FROM alpine:3.21
+FROM alpine:latest
 RUN apk add --no-cache tor wget su-exec
 COPY torrc /etc/tor/torrc
 COPY entrypoint.sh /entrypoint.sh

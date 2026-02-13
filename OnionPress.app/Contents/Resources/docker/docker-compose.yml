@@ -36,13 +36,14 @@ services:
       - "127.0.0.1:8080:80"
 
   db:
-    image: mariadb:11.6
+    image: mariadb:latest
     container_name: onionpress-db
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_DATABASE=wordpress
       - MYSQL_USER=wordpress
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MARIADB_AUTO_UPGRADE=1
     volumes:
       - db-data:/var/lib/mysql
     restart: unless-stopped

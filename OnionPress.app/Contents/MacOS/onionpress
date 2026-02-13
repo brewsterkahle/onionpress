@@ -357,7 +357,7 @@ update_images() {
     cd "$DOCKER_DIR"
 
     # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("wordpress:6.7" "mariadb:11.6")
+    local images=("wordpress:latest" "mariadb:latest")
     local updated=false
 
     for image in "${images[@]}"; do
