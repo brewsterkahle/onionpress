@@ -31,6 +31,13 @@
 - Version must be bumped in: `src/menubar.py` (2 places), `setup.py`, `OnionPress.app/Contents/Info.plist`
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
+## Colima VM Sandboxing
+- The VM is restricted to only mount `~/.onionpress/` (via `--mount "$DATA_DIR:w"`), NOT the full home directory
+- This limits blast radius if a container (e.g., WordPress) is compromised — attacker cannot read `~/Documents`, `~/.ssh/`, etc.
+- The only host bind mount needed is for vanity key import (`~/.onionpress/shared/vanity-keys/`)
+- All other container data uses Docker named volumes (which live inside the VM)
+- **Do not add additional `--mount` flags without considering security implications**
+
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
 - **For ANY communication over Tor from the Mac, always use `docker exec` into the tor container** — this is reliable

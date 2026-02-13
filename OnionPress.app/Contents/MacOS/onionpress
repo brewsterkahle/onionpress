@@ -306,6 +306,7 @@ install_docker() {
         "$BIN_DIR/colima" start \
             --vm-type vz \
             --mount-type virtiofs \
+            --mount "$DATA_DIR:w" \
             --cpu 2 \
             --memory "$VM_MEMORY" \
             --disk 10 \
@@ -317,6 +318,7 @@ install_docker() {
         "$BIN_DIR/colima" start \
             --vm-type qemu \
             --mount-type sshfs \
+            --mount "$DATA_DIR:w" \
             --cpu 2 \
             --memory "$VM_MEMORY" \
             --disk 10 \
