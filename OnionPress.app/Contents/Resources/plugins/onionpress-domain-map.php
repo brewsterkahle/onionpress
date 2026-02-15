@@ -39,4 +39,13 @@ if (
     // Network-level URLs (admin bar, network admin links, etc.).
     add_filter( 'network_home_url', 'onionpress_rewrite_url' );
     add_filter( 'network_site_url', 'onionpress_rewrite_url' );
+
+    // Asset URLs (themes, plugins, wp-content, wp-includes).
+    add_filter( 'content_url',           'onionpress_rewrite_url' );
+    add_filter( 'plugins_url',           'onionpress_rewrite_url' );
+    add_filter( 'theme_file_uri',        'onionpress_rewrite_url' );
+    add_filter( 'style_loader_src',      'onionpress_rewrite_url' );
+    add_filter( 'script_loader_src',     'onionpress_rewrite_url' );
+    add_filter( 'wp_get_attachment_url', 'onionpress_rewrite_url' );
+    add_filter( 'includes_url',          'onionpress_rewrite_url' );
 }

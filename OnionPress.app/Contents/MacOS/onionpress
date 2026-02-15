@@ -398,8 +398,10 @@ ensure_multisite() {
     log "Converting single-site WordPress to multisite..."
 
     # Convert to multisite (subdirectory mode)
+    # --url=http://localhost is required because WP_HOME uses $_SERVER['HTTP_HOST']
+    # which is undefined in CLI context, causing WP to store "http:" as the domain
     if ! docker exec onionpress-wordpress wp core multisite-convert \
-        --allow-root >> "$LOG_FILE" 2>&1; then
+        --url=http://localhost --allow-root >> "$LOG_FILE" 2>&1; then
         log "WARNING: wp core multisite-convert failed (may already be multisite)"
     fi
 
