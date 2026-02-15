@@ -724,7 +724,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 f"--admin_user={username}",
                 f"--admin_password={password}",
                 f"--admin_email={email}",
-                "--subdomains=false",
                 "--skip-email",
                 "--allow-root"
             ]
