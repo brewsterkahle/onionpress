@@ -711,27 +711,81 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Run wp core install
+        # Run wp core multisite-install (subdirectory mode)
         try:
-            cmd = [
-                self.server.docker_bin, "exec", "onionpress-wordpress",
-                "wp", "core", "install",
+            docker = self.server.docker_bin
+            denv = self.server.docker_env
+            wp_exec = [docker, "exec", "onionpress-wordpress"]
+
+            cmd = wp_exec + [
+                "wp", "core", "multisite-install",
                 "--url=http://localhost",
                 f"--title={title}",
                 f"--admin_user={username}",
                 f"--admin_password={password}",
                 f"--admin_email={email}",
+                "--subdomains=false",
                 "--skip-email",
                 "--allow-root"
             ]
             result = subprocess.run(
-                cmd, env=self.server.docker_env,
+                cmd, env=denv,
                 capture_output=True, text=True, timeout=30
             )
 
             if result.returncode == 0:
                 if self.server.log_func:
-                    self.server.log_func(f"WordPress installed successfully via setup page")
+                    self.server.log_func("WordPress multisite installed via setup page")
+
+                # Set multisite constants in wp-config.php
+                multisite_constants = [
+                    ("MULTISITE", "true"),
+                    ("SUBDOMAIN_INSTALL", "false"),
+                    ("DOMAIN_CURRENT_SITE", "'localhost'"),
+                    ("PATH_CURRENT_SITE", "'/'"),
+                    ("SITE_ID_CURRENT_SITE", "1"),
+                    ("BLOG_ID_CURRENT_SITE", "1"),
+                    ("SUNRISE", "true"),
+                ]
+                for const_name, const_value in multisite_constants:
+                    subprocess.run(
+                        wp_exec + [
+                            "wp", "config", "set", const_name, const_value,
+                            "--raw", "--type=constant", "--allow-root"
+                        ],
+                        env=denv, capture_output=True, text=True, timeout=10
+                    )
+
+                # Write .htaccess with multisite rewrite rules
+                htaccess_rules = (
+                    "# BEGIN WordPress Multisite\\n"
+                    "RewriteEngine On\\n"
+                    "RewriteBase /\\n"
+                    "RewriteRule ^index\\\\.php$ - [L]\\n"
+                    "\\n"
+                    "# add a trailing slash to /wp-admin\\n"
+                    "RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\\n"
+                    "\\n"
+                    "RewriteCond %{REQUEST_FILENAME} -f [OR]\\n"
+                    "RewriteCond %{REQUEST_FILENAME} -d\\n"
+                    "RewriteRule ^ - [L]\\n"
+                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]\\n"
+                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\\\.php)$ $2 [L]\\n"
+                    "RewriteRule . index.php [L]\\n"
+                    "# END WordPress Multisite\\n"
+                )
+                subprocess.run(
+                    wp_exec + [
+                        "bash", "-c",
+                        f"printf '{htaccess_rules}' > /var/www/html/.htaccess && "
+                        "chown www-data:www-data /var/www/html/.htaccess"
+                    ],
+                    env=denv, capture_output=True, text=True, timeout=10
+                )
+
+                if self.server.log_func:
+                    self.server.log_func("Multisite constants and .htaccess configured")
+
                 body = SETUP_SUCCESS_HTML.encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -740,7 +794,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             else:
                 if self.server.log_func:
-                    self.server.log_func(f"wp core install failed: {result.stderr}")
+                    self.server.log_func(f"wp core multisite-install failed: {result.stderr}")
                 error_msg = result.stderr.strip() or "Unknown error"
                 body = f'<html><body><h1>Setup Failed</h1><p>{error_msg}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
                 self.send_response(500)

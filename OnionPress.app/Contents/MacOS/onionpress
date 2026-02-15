@@ -379,6 +379,105 @@ update_images() {
     return 0
 }
 
+# Function to ensure WordPress multisite is active (runs on every startup)
+ensure_multisite() {
+    # Skip if WordPress is not installed yet
+    if ! wp_is_installed; then
+        log "WordPress not installed yet — skipping multisite check"
+        return 0
+    fi
+
+    cd "$DOCKER_DIR"
+
+    # Check if multisite is already active
+    if docker exec onionpress-wordpress wp core is-installed --network --allow-root >/dev/null 2>&1; then
+        log "✓ WordPress multisite already active"
+        return 0
+    fi
+
+    log "Converting single-site WordPress to multisite..."
+
+    # Convert to multisite (subdirectory mode)
+    if ! docker exec onionpress-wordpress wp core multisite-convert \
+        --allow-root >> "$LOG_FILE" 2>&1; then
+        log "WARNING: wp core multisite-convert failed (may already be multisite)"
+    fi
+
+    # Set multisite constants
+    local constants=(
+        "MULTISITE:true"
+        "SUBDOMAIN_INSTALL:false"
+        "DOMAIN_CURRENT_SITE:'localhost'"
+        "PATH_CURRENT_SITE:'/'"
+        "SITE_ID_CURRENT_SITE:1"
+        "BLOG_ID_CURRENT_SITE:1"
+        "SUNRISE:true"
+    )
+
+    for entry in "${constants[@]}"; do
+        local name="${entry%%:*}"
+        local value="${entry#*:}"
+        docker exec onionpress-wordpress wp config set "$name" "$value" \
+            --raw --type=constant --allow-root >> "$LOG_FILE" 2>&1
+    done
+
+    # Write .htaccess with multisite rewrite rules
+    docker exec onionpress-wordpress bash -c 'cat > /var/www/html/.htaccess << "HTEOF"
+# BEGIN WordPress Multisite
+RewriteEngine On
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+
+# add a trailing slash to /wp-admin
+RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]
+
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]
+RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\.php)$ $2 [L]
+RewriteRule . index.php [L]
+# END WordPress Multisite
+HTEOF
+chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1
+
+    log "✓ WordPress multisite conversion complete"
+    return 0
+}
+
+# Function to install multisite domain mapping PHP files into the container
+install_multisite_domain_map() {
+    local plugins_dir="$RESOURCES_DIR/plugins"
+
+    # Copy sunrise.php → wp-content/sunrise.php
+    if [ -f "$plugins_dir/onionpress-sunrise.php" ]; then
+        if docker cp "$plugins_dir/onionpress-sunrise.php" \
+            onionpress-wordpress:/var/www/html/wp-content/sunrise.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/sunrise.php >> "$LOG_FILE" 2>&1
+            log "✓ sunrise.php installed"
+        else
+            log "WARNING: Failed to copy sunrise.php"
+        fi
+    fi
+
+    # Copy domain-map mu-plugin → wp-content/mu-plugins/
+    if [ -f "$plugins_dir/onionpress-domain-map.php" ]; then
+        docker exec onionpress-wordpress mkdir -p \
+            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1
+        if docker cp "$plugins_dir/onionpress-domain-map.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-domain-map.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-domain-map.php >> "$LOG_FILE" 2>&1
+            log "✓ onionpress-domain-map.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-domain-map.php"
+        fi
+    fi
+
+    return 0
+}
+
 # Function to start containers
 start_containers() {
     log "Starting OnionPress containers..."
@@ -476,6 +575,12 @@ start_containers() {
 
     # Install Internet Archive Wayback Machine Link Fixer plugin
     install_ia_plugin
+
+    # Install multisite domain mapping PHP files (sunrise.php + mu-plugin)
+    install_multisite_domain_map
+
+    # Ensure multisite is active (converts single-site installs if needed)
+    ensure_multisite
 
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
