@@ -122,7 +122,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.83"
+        self.version = "2.2.84"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -226,16 +226,21 @@ class OnionPressApp(rumps.App):
         self._bootstrap_stall_count = 0    # Consecutive checks with no bootstrap progress
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
+        self.healthcheck_address = None    # Healthcheck .onion address
+        self.relay_messages = []           # Messages received from OnionRelay
+        self._relay_alert_shown = False    # Whether we've shown the relay alert icon
 
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
+        self.relay_alert_item = rumps.MenuItem("Relay Alerts", callback=self.view_relay_alerts)
 
         self.menu = [
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
             self.browser_menu_item,
+            self.relay_alert_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -464,6 +469,7 @@ class OnionPressApp(rumps.App):
                 server.docker_bin = docker_bin
                 server.docker_env = docker_env
                 server.onion_address = self.onion_address
+                server.healthcheck_address = self.healthcheck_address
                 server.version = self.version
                 server.data_dir = self.app_support
                 server.log_func = self.log
@@ -1244,7 +1250,16 @@ class OnionPressApp(rumps.App):
                 elif self.proxy_server:
                     # Update onion address and readiness on existing proxy
                     self.proxy_server.onion_address = self.onion_address
+                    self.proxy_server.healthcheck_address = self.healthcheck_address
                     self.proxy_server.tor_ready = self.is_ready
+
+                # Read healthcheck address if not yet known
+                if self.healthcheck_address is None and self.is_ready:
+                    self.read_healthcheck_address()
+
+                # Poll for relay messages from healthcheck service
+                if self.is_ready:
+                    self.poll_relay_messages()
 
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
@@ -1288,6 +1303,9 @@ class OnionPressApp(rumps.App):
                 self._last_bootstrap_pct = 0
                 self._bootstrap_stall_count = 0
                 self._yellow_since = None
+                self.healthcheck_address = None
+                self.relay_messages = []
+                self._relay_alert_shown = False
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -1309,6 +1327,18 @@ class OnionPressApp(rumps.App):
         # Dispatch UI updates to main thread to avoid AppKit threading violations
         def do_update():
             state = self.display_state
+
+            # Relay alert indicator: show "!" next to icon when messages exist
+            if self.relay_messages:
+                self.title = "!"
+                count = len(self.relay_messages)
+                self.relay_alert_item.title = f"Relay Alerts ({count})"
+                self.relay_alert_item.set_callback(self.view_relay_alerts)
+            else:
+                self.title = ""
+                self.relay_alert_item.title = "Relay Alerts"
+                self.relay_alert_item.set_callback(None)
+
             if state == "available":
                 self.icon = self.icon_running
                 self.menu["Starting..."].title = f"Address: {self.onion_address}"
@@ -1351,6 +1381,145 @@ class OnionPressApp(rumps.App):
 
         # Execute on main thread
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
+
+    def read_healthcheck_address(self):
+        """Read the healthcheck .onion address from the tor container."""
+        try:
+            # First try the cached file written by the launcher
+            hc_file = os.path.join(self.app_support, "healthcheck-address")
+            if os.path.exists(hc_file):
+                with open(hc_file) as f:
+                    addr = f.read().strip()
+                if addr and addr.endswith('.onion'):
+                    self.healthcheck_address = addr
+                    self.log(f"Healthcheck address: {addr}")
+                    return
+
+            # Fall back to reading from container
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor",
+                 "cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
+                capture_output=True, text=True, timeout=10, env=env
+            )
+            if result.returncode == 0:
+                addr = result.stdout.strip()
+                if addr and addr.endswith('.onion'):
+                    self.healthcheck_address = addr
+                    # Cache for next time
+                    try:
+                        with open(hc_file, 'w') as f:
+                            f.write(addr)
+                    except OSError:
+                        pass
+                    self.log(f"Healthcheck address: {addr}")
+        except Exception as e:
+            self.log(f"Failed to read healthcheck address: {e}")
+
+    def poll_relay_messages(self):
+        """Poll for messages from the OnionRelay via the healthcheck service."""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+
+            # List message files in the container
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor",
+                 "ls", "/var/lib/tor/healthcheck-messages/"],
+                capture_output=True, text=True, timeout=10, env=env
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                # No messages — clear any existing alerts
+                if self.relay_messages:
+                    self.relay_messages = []
+                    self._relay_alert_shown = False
+                return
+
+            files = result.stdout.strip().split('\n')
+            json_files = [f for f in files if f.endswith('.json')]
+            if not json_files:
+                if self.relay_messages:
+                    self.relay_messages = []
+                    self._relay_alert_shown = False
+                return
+
+            # Read all message files
+            messages = []
+            for fname in json_files:
+                try:
+                    r = subprocess.run(
+                        [docker_bin, "exec", "onionpress-tor",
+                         "cat", f"/var/lib/tor/healthcheck-messages/{fname}"],
+                        capture_output=True, text=True, timeout=5, env=env
+                    )
+                    if r.returncode == 0 and r.stdout.strip():
+                        msg = json.loads(r.stdout.strip())
+                        messages.append(msg)
+                except Exception:
+                    continue
+
+            if messages and messages != self.relay_messages:
+                self.relay_messages = messages
+                if not self._relay_alert_shown:
+                    self._relay_alert_shown = True
+                    self.log(f"Received {len(messages)} message(s) from OnionRelay")
+                    # Show notification for the latest message
+                    latest = messages[-1]
+                    msg_type = latest.get("type", "unknown")
+                    msg_text = latest.get("message", "New message from OnionRelay")
+                    rumps.notification(
+                        title="OnionPress Alert",
+                        subtitle=msg_type.replace("_", " ").title(),
+                        message=msg_text
+                    )
+        except Exception as e:
+            # Don't spam logs — relay polling failures are expected when container is starting
+            pass
+
+    def view_relay_alerts(self, _):
+        """Show relay alert messages and offer to dismiss them."""
+        if not self.relay_messages:
+            rumps.alert("No relay alerts.")
+            return
+
+        # Build summary of all messages
+        lines = []
+        for msg in self.relay_messages:
+            msg_type = msg.get("type", "unknown").replace("_", " ").title()
+            msg_text = msg.get("message", "")
+            lines.append(f"[{msg_type}] {msg_text}")
+        summary = "\n".join(lines)
+
+        response = rumps.alert(
+            title=f"Relay Alerts ({len(self.relay_messages)})",
+            message=summary,
+            ok="Dismiss All",
+            cancel="Close"
+        )
+
+        if response == 1:  # "Dismiss All" clicked
+            self.log("Dismissing relay alerts")
+            self.relay_messages = []
+            self._relay_alert_shown = False
+            # Delete message files from container
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+                subprocess.run(
+                    [docker_bin, "exec", "onionpress-tor",
+                     "sh", "-c", "rm -f /var/lib/tor/healthcheck-messages/*.json"],
+                    capture_output=True, timeout=10, env=env
+                )
+            except Exception:
+                pass
+            self.update_menu()
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
@@ -2669,7 +2838,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.83 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.84 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
