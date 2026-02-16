@@ -1,166 +1,18 @@
 #!/usr/bin/env python3
 """
-Key Management for onionpress
-Converts Tor v3 Ed25519 private keys to/from BIP39 mnemonic words with checksums
+Key Management for OnionPress
+Extract and write Tor v3 Ed25519 private keys to/from the onionpress-tor container.
 """
 
-import base64
 import subprocess
 
-try:
-    from mnemonic import Mnemonic
-except ImportError:
-    raise ImportError(
-        "Required 'mnemonic' package is not installed. "
-        "Install it with: pip3 install mnemonic"
-    )
-
-# Initialize BIP39 mnemonic encoder with English wordlist
-mnemo = Mnemonic("english")
-
-def bytes_to_mnemonic(key_bytes):
-    """
-    Convert 64-byte Ed25519 key to BIP39 mnemonic words with proper checksums
-
-    Ed25519 keys are 64 bytes (512 bits). We split this into two 32-byte chunks:
-    - First 32 bytes → 24-word mnemonic (with checksum)
-    - Second 32 bytes → 24-word mnemonic (with checksum)
-    Total: 48 words with proper BIP39 checksums for validation
-    """
-    if len(key_bytes) != 64:
-        raise ValueError(f"Expected 64 bytes, got {len(key_bytes)}")
-
-    # Split key into two 32-byte (256-bit) chunks
-    first_half = key_bytes[:32]
-    second_half = key_bytes[32:]
-
-    # Convert each half to BIP39 mnemonic (24 words each with checksum)
-    mnemonic_first = mnemo.to_mnemonic(first_half)
-    mnemonic_second = mnemo.to_mnemonic(second_half)
-
-    # Combine with separator
-    return f"{mnemonic_first} | {mnemonic_second}"
-
-def mnemonic_to_bytes(mnemonic):
-    """
-    Convert BIP39 mnemonic words back to 64-byte Ed25519 key
-    Validates checksums before returning
-    Returns exactly 64 bytes
-    """
-    # Split the two 24-word mnemonics
-    if '|' not in mnemonic:
-        raise ValueError("Invalid mnemonic format. Expected two 24-word mnemonics separated by '|'")
-
-    parts = mnemonic.split('|')
-    if len(parts) != 2:
-        raise ValueError("Invalid mnemonic format. Expected exactly two mnemonics separated by '|'")
-
-    mnemonic_first = parts[0].strip()
-    mnemonic_second = parts[1].strip()
-
-    # Validate both mnemonics (includes checksum validation)
-    if not mnemo.check(mnemonic_first):
-        raise ValueError("Invalid mnemonic (first half): checksum validation failed")
-    if not mnemo.check(mnemonic_second):
-        raise ValueError("Invalid mnemonic (second half): checksum validation failed")
-
-    # Convert back to bytes
-    first_half = mnemo.to_entropy(mnemonic_first)
-    second_half = mnemo.to_entropy(mnemonic_second)
-
-    # Combine to get 64-byte key
-    key_bytes = first_half + second_half
-
-    if len(key_bytes) != 64:
-        raise ValueError(f"Invalid key size after decoding: {len(key_bytes)} bytes (expected 64)")
-
-    return key_bytes
-
-def bytes_to_base64_key(key_bytes):
-    """
-    Encode 64-byte key to compact base64 transport format.
-    Format: onionpress:2:XXXX-XXXX-...-XXXX
-    Hyphens every 4 chars for readability.
-    """
-    if len(key_bytes) != 64:
-        raise ValueError(f"Expected 64 bytes, got {len(key_bytes)}")
-
-    b64 = base64.b64encode(key_bytes).decode('ascii')
-    # Insert hyphens every 4 characters
-    chunked = '-'.join(b64[i:i+4] for i in range(0, len(b64), 4))
-    return f"onionpress:2:{chunked}"
-
-def base64_key_to_bytes(key_string):
-    """
-    Decode base64 transport format back to 64-byte key.
-    Accepts: onionpress:2:XXXX-XXXX-...[-XXXX][@coordinator.onion]
-    Returns: (key_bytes, coordinator_or_None)
-    """
-    key_string = key_string.strip()
-
-    if not key_string.startswith('onionpress:'):
-        raise ValueError("Invalid format: must start with 'onionpress:'")
-
-    # Strip prefix
-    rest = key_string[len('onionpress:'):]
-
-    # Parse version
-    if not rest.startswith('2:'):
-        version = rest.split(':')[0]
-        raise ValueError(f"Unsupported key format version '{version}' (expected '2')")
-
-    payload = rest[2:]  # skip '2:'
-
-    # Check for optional @coordinator suffix
-    coordinator = None
-    if '@' in payload:
-        payload, coordinator = payload.rsplit('@', 1)
-        coordinator = coordinator.strip()
-        if not coordinator:
-            coordinator = None
-
-    # Strip hyphens and decode
-    b64 = payload.replace('-', '')
-
-    try:
-        key_bytes = base64.b64decode(b64)
-    except Exception:
-        raise ValueError("Invalid base64 data in key string")
-
-    if len(key_bytes) != 64:
-        raise ValueError(f"Invalid key size after decoding: {len(key_bytes)} bytes (expected 64)")
-
-    return (key_bytes, coordinator)
-
-def import_key(text):
-    """
-    Auto-detect key format and import.
-    Accepts either base64 (onionpress:2:...) or BIP39 mnemonic (48 words with |).
-    Returns: (key_bytes, coordinator_or_None)
-    """
-    text = text.strip()
-
-    if text.startswith('onionpress:'):
-        key_bytes, coordinator = base64_key_to_bytes(text)
-    else:
-        key_bytes = import_key_from_mnemonic(text)
-        coordinator = None
-
-    # Sanity checks
-    if key_bytes == b'\x00' * 64:
-        raise ValueError("Invalid key: all zeros")
-    if key_bytes == b'\xFF' * 64:
-        raise ValueError("Invalid key: all ones")
-
-    return (key_bytes, coordinator)
 
 def extract_private_key():
     """
-    Extract the Tor v3 private key from the running container
-    Returns the raw key bytes (64 bytes)
+    Extract the Tor v3 private key from the running container.
+    Returns the raw key bytes (64 bytes).
     """
     try:
-        # Read the secret key file from the Tor container
         result = subprocess.run(
             ['docker', 'exec', 'onionpress-tor', 'cat',
              '/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key'],
@@ -172,12 +24,10 @@ def extract_private_key():
             raise Exception("Could not read Tor private key from container")
 
         # The key file format is:
-        # "== ed25519v1-secret: type0 =="
+        # "== ed25519v1-secret: type0 ==" (32-byte header)
         # followed by 64 bytes of key data
         key_data = result.stdout
 
-        # Find the key data (skip the header)
-        # The header is 32 bytes, then 64 bytes of actual key
         expected_header = b'== ed25519v1-secret: type0 =='
         if len(key_data) == 96:
             header = key_data[:32]
@@ -196,44 +46,10 @@ def extract_private_key():
     except Exception as e:
         raise Exception(f"Failed to extract private key: {e}")
 
-def export_key_as_mnemonic():
-    """
-    Export the current Tor private key as BIP39 mnemonic words
-    Returns 48 words (two 24-word mnemonics) with proper checksums
-    """
-    key_bytes = extract_private_key()
-    return bytes_to_mnemonic(key_bytes)
-
-def import_key_from_mnemonic(mnemonic):
-    """
-    Import a Tor private key from BIP39 mnemonic words
-    Validates checksums and key format
-    Returns the key bytes ready to be written to the container
-    """
-    # mnemonic_to_bytes already validates:
-    # - Checksum for both halves
-    # - 64-byte total length
-    # - BIP39 word validity
-    key_bytes = mnemonic_to_bytes(mnemonic)
-
-    # Additional Ed25519 validation
-    # The key should be 64 bytes (512 bits) for Ed25519 private key
-    if len(key_bytes) != 64:
-        raise ValueError(f"Invalid Ed25519 key size: {len(key_bytes)} bytes (expected 64)")
-
-    # Basic sanity check - key shouldn't be all zeros
-    if key_bytes == b'\x00' * 64:
-        raise ValueError("Invalid key: all zeros")
-
-    # Basic sanity check - key shouldn't be all 0xFF
-    if key_bytes == b'\xFF' * 64:
-        raise ValueError("Invalid key: all ones")
-
-    return key_bytes
 
 def write_private_key(key_bytes):
     """
-    Write a new private key to the Tor container using secure Python file I/O
+    Write a new private key to the Tor container using secure Python file I/O.
     This will change your onion address!
     """
     import tempfile
@@ -241,24 +57,18 @@ def write_private_key(key_bytes):
 
     try:
         # The Tor key file format includes a 32-byte header
-        # Header: "== ed25519v1-secret: type0 =="
         header = b'== ed25519v1-secret: type0 =='
-
-        # Pad header to 32 bytes
         header = header.ljust(32, b'\x00')
-
-        # Combine header + key
         full_key = header + key_bytes
 
         # Write to a temporary file with restricted permissions
         with tempfile.NamedTemporaryFile(mode='wb', delete=False) as temp_file:
             temp_path = temp_file.name
-            # Set restrictive permissions immediately
             os.chmod(temp_path, 0o600)
             temp_file.write(full_key)
 
         try:
-            # Copy file to container using docker cp (safer than shell pipeline)
+            # Copy file to container using docker cp
             result = subprocess.run(
                 ['docker', 'cp', temp_path,
                  'onionpress-tor:/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key'],
@@ -287,20 +97,17 @@ def write_private_key(key_bytes):
             return True
 
         finally:
-            # Securely delete temporary file (multi-pass for SSD wear leveling)
+            # Securely delete temporary file (multi-pass overwrite)
             if os.path.exists(temp_path):
                 file_len = len(full_key)
-                # Pass 1: overwrite with random bytes
                 with open(temp_path, 'wb') as f:
                     f.write(os.urandom(file_len))
                     f.flush()
                     os.fsync(f.fileno())
-                # Pass 2: overwrite with zeros
                 with open(temp_path, 'wb') as f:
                     f.write(b'\x00' * file_len)
                     f.flush()
                     os.fsync(f.fileno())
-                # Pass 3: overwrite with ones
                 with open(temp_path, 'wb') as f:
                     f.write(b'\xff' * file_len)
                     f.flush()
@@ -310,20 +117,15 @@ def write_private_key(key_bytes):
     except Exception as e:
         raise Exception(f"Failed to write private key: {e}")
 
-if __name__ == "__main__":
-    # Test the functionality
-    import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] == 'export':
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == 'extract':
         try:
-            mnemonic = export_key_as_mnemonic()
-            print("Your private key as mnemonic words:")
-            print()
-            print(mnemonic)
-            print()
-            print(f"({len(mnemonic.split())} words)")
+            key_bytes = extract_private_key()
+            print(f"Successfully extracted {len(key_bytes)}-byte private key")
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     else:
-        print("Usage: key_manager.py export")
+        print("Usage: key_manager.py extract")

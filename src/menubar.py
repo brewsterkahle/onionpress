@@ -23,6 +23,7 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, script_dir)
 
 import key_manager
+import backup_manager
 import onion_proxy
 import install_native_messaging
 import setup_window
@@ -250,8 +251,8 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("View Web Usage Log", callback=self.view_web_log),
             rumps.MenuItem("Settings...", callback=self.open_settings),
             rumps.separator,
-            rumps.MenuItem("Export Private Key...", callback=self.export_key),
-            rumps.MenuItem("Import Private Key...", callback=self.import_key),
+            rumps.MenuItem("Backup...", callback=self.backup),
+            rumps.MenuItem("Restore...", callback=self.restore),
             rumps.separator,
             rumps.MenuItem("Check for Updates...", callback=self.check_for_updates),
             rumps.MenuItem("About OnionPress", callback=self.show_about),
@@ -2151,261 +2152,242 @@ class OnionPressApp(rumps.App):
         else:
             rumps.alert("Settings file not found")
 
-    def show_export_dialog(self, base64_key, mnemonic):
-        """Show export dialog with base64 key and recovery words option."""
-        # NSAlert dialogs lack an Edit menu, so Cmd+C doesn't work.
-        # Install a local event monitor to intercept Cmd+C and copy the key.
-        current_text = [base64_key]  # mutable so the handler can see updates
-        def handle_copy(event):
-            if (event.modifierFlags() & AppKit.NSEventModifierFlagCommand and
-                    event.charactersIgnoringModifiers() == 'c'):
-                subprocess.run(["pbcopy"], input=current_text[0].encode(), check=True)
-                return None  # consume the event (no beep)
-            return event
-        monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
-            AppKit.NSEventMaskKeyDown, handle_copy)
-
-        while True:
-            alert = AppKit.NSAlert.alloc().init()
-            alert.setMessageText_("Private Key Backup")
-            alert.setAlertStyle_(AppKit.NSAlertStyleInformational)
-
-            # Set app icon
-            icon_path = os.path.join(self.resources_dir, "app-icon.png")
-            if os.path.exists(icon_path):
-                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                if icon:
-                    alert.setIcon_(icon)
-
-            # Build accessory view with key text
-            container = AppKit.NSView.alloc().initWithFrame_(
-                AppKit.NSMakeRect(0, 0, 420, 120))
-
-            # Base64 key text field (selectable, monospaced, read-only)
-            text_field = AppKit.NSTextField.alloc().initWithFrame_(
-                AppKit.NSMakeRect(10, 30, 400, 72))
-            text_field.setStringValue_(base64_key)
-            text_field.setEditable_(False)
-            text_field.setSelectable_(True)
-            text_field.setBordered_(True)
-            text_field.setBezeled_(True)
-            text_field.setFont_(
-                AppKit.NSFont.monospacedSystemFontOfSize_weight_(11, AppKit.NSFontWeightRegular))
-            text_field.setLineBreakMode_(AppKit.NSLineBreakByCharWrapping)
-            text_field.setUsesSingleLineMode_(False)
-            container.addSubview_(text_field)
-
-            # Security warning
-            warning = AppKit.NSTextField.labelWithString_(
-                "DO NOT share this key with anyone you don't trust.")
-            warning.setFrame_(AppKit.NSMakeRect(10, 5, 400, 18))
-            warning.setAlignment_(AppKit.NSTextAlignmentCenter)
-            warning.setTextColor_(AppKit.NSColor.systemRedColor())
-            warning.setFont_(AppKit.NSFont.boldSystemFontOfSize_(12))
-            container.addSubview_(warning)
-
-            alert.setAccessoryView_(container)
-
-            # Buttons: Done (default), Copy Key, Show Recovery Words
-            alert.addButtonWithTitle_("Done").setKeyEquivalent_("\r")
-            alert.addButtonWithTitle_("Copy Key")
-            alert.addButtonWithTitle_("Show Recovery Words")
-
-            response = alert.runModal()
-            button_index = response - 1000
-
-            if button_index == 0:  # Done
-                break
-            elif button_index == 1:  # Copy Key
-                subprocess.run(["pbcopy"], input=base64_key.encode(), check=True)
-                continue  # re-show dialog
-            elif button_index == 2:  # Show Recovery Words
-                current_text[0] = mnemonic  # Cmd+C copies words while this dialog is up
-                # Format mnemonic for display
-                words = mnemonic.split()
-                word_count = len([w for w in words if w != '|'])
-                formatted_lines = []
-                for i in range(0, len(words), 6):
-                    formatted_lines.append(' '.join(words[i:i+6]))
-                formatted_mnemonic = '\n'.join(formatted_lines)
-
-                bip_alert = AppKit.NSAlert.alloc().init()
-                bip_alert.setMessageText_("Recovery Words (BIP39)")
-                bip_alert.setInformativeText_(
-                    f"These {word_count} words are an alternative backup of your key.\n\n"
-                    f"{formatted_mnemonic}\n\n"
-                    "Store them in a safe place.")
-                bip_alert.addButtonWithTitle_("Done").setKeyEquivalent_("\r")
-                bip_alert.addButtonWithTitle_("Back")
-                bip_alert.addButtonWithTitle_("Copy Words")
-                if os.path.exists(icon_path):
-                    bip_icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                    if bip_icon:
-                        bip_alert.setIcon_(bip_icon)
-                bip_response = bip_alert.runModal() - 1000
-                if bip_response == 2:  # Copy Words
-                    subprocess.run(["pbcopy"], input=mnemonic.encode(), check=True)
-                    continue  # re-show recovery words
-                elif bip_response == 1:  # Back
-                    current_text[0] = base64_key  # restore Cmd+C to copy key
-                    continue  # re-show main dialog
-                else:  # Done
-                    break
-
-        AppKit.NSEvent.removeMonitor_(monitor)
-
-    @rumps.clicked("Export Private Key...")
-    def export_key(self, _):
-        """Export Tor private key as base64 with BIP39 recovery words"""
+    @rumps.clicked("Backup...")
+    def backup(self, _):
+        """Create a full backup of OnionPress (Tor keys, database, wp-content)"""
         if not self.is_running:
             rumps.alert(
                 title="Service Not Running",
-                message="Please start the service first before exporting the private key."
+                message="Please start the service first before creating a backup."
             )
             return
 
-        # Show security warning dialog first
-        button_index = self.show_native_alert(
-            title="Export Private Key",
-            message="SECURITY WARNING\n\nYou are about to export your private key. This key controls your onion address and website identity.\n\nANYONE with this key can:\n\u2022 Impersonate your onion address\n\u2022 Take over your site identity\n\u2022 Restore your address on another computer\n\nOnly export if you understand the security implications.\n\nContinue with export?",
-            buttons=["Cancel", "I Understand - Continue"],
-            default_button=0,
-            cancel_button=0,
-            style="warning"
-        )
+        # Show credentials dialog using AppKit accessory view
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("Backup OnionPress")
+        alert.setInformativeText_(
+            "Enter your WordPress administrator credentials.\n"
+            "The password will be used to encrypt the backup.")
 
-        if button_index != 1:
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        if os.path.exists(icon_path):
+            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+            if icon:
+                alert.setIcon_(icon)
+
+        # Build accessory view with username and password fields
+        container = AppKit.NSView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 300, 70))
+
+        user_label = AppKit.NSTextField.labelWithString_("Username:")
+        user_label.setFrame_(AppKit.NSMakeRect(0, 48, 80, 18))
+        container.addSubview_(user_label)
+
+        user_field = AppKit.NSTextField.alloc().initWithFrame_(
+            AppKit.NSMakeRect(85, 44, 210, 24))
+        user_field.setStringValue_("admin")
+        container.addSubview_(user_field)
+
+        pass_label = AppKit.NSTextField.labelWithString_("Password:")
+        pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
+        container.addSubview_(pass_label)
+
+        pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+            AppKit.NSMakeRect(85, 14, 210, 24))
+        container.addSubview_(pass_field)
+
+        alert.setAccessoryView_(container)
+        alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
+        alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+
+        # Make username field first responder
+        alert.window().setInitialFirstResponder_(user_field)
+        user_field.setNextKeyView_(pass_field)
+
+        response = alert.runModal()
+        if response != 1000:  # Not "Backup"
             return
 
-        # Second confirmation
-        button_index = self.show_native_alert(
-            title="Final Confirmation",
-            message="This is your final confirmation.\n\nAre you absolutely sure you want to export your private key?",
-            buttons=["Cancel", "Yes, Export Key"],
-            default_button=0,
-            cancel_button=0,
-            style="warning"
-        )
+        username = user_field.stringValue().strip()
+        password = pass_field.stringValue()
 
-        if button_index != 1:
+        if not username or not password:
+            rumps.alert(title="Missing Credentials",
+                        message="Both username and password are required.")
             return
 
-        try:
-            self.log("Export: extracting private key...")
-            # Extract key once, generate both formats
-            key_bytes = key_manager.extract_private_key()
-            base64_key = key_manager.bytes_to_base64_key(key_bytes)
-            mnemonic = key_manager.bytes_to_mnemonic(key_bytes)
-            self.log("Export: key extracted, showing export dialog")
-
-            # Show the export dialog
-            self.show_export_dialog(base64_key, mnemonic)
-            self.log("Export: dialog closed")
-
-        except Exception as e:
-            self.log(f"Export failed: {e}")
-            rumps.alert(
-                title="Export Failed",
-                message=f"Could not export private key:\n\n{str(e)}"
-            )
-
-    @rumps.clicked("Import Private Key...")
-    def import_key(self, _):
-        """Import Tor private key from base64 key or BIP39 mnemonic words"""
-        # Warning dialog
-        response = rumps.alert(
-            title="Import Private Key",
-            message="WARNING: Importing a private key will replace your current onion address!\n\nYour WordPress site will be accessible at a different .onion address after import.\n\nMake sure you have backed up your current key first.\n\nContinue?",
-            ok="Continue",
-            cancel="Cancel"
-        )
-
-        if response != 1:  # Cancel clicked
+        # Verify credentials
+        self.log("Backup: verifying credentials...")
+        ok, err = backup_manager.verify_wp_admin(username, password)
+        if not ok:
+            self.log(f"Backup: credential verification failed: {err}")
+            rumps.alert(title="Verification Failed", message=err)
             return
 
-        # Get key from user (accepts either format)
-        window = rumps.Window(
-            title="Import Private Key",
-            message="Paste your key below.\n\nAccepted formats:\n\u2022 Base64 key (onionpress:2:XXXX-XXXX-...)\n\u2022 BIP39 recovery words (48 words separated by |)",
-            default_text="",
-            ok="Import",
-            cancel="Cancel",
-            dimensions=(400, 100)
-        )
+        # Show NSSavePanel for output location
+        panel = AppKit.NSSavePanel.savePanel()
+        panel.setTitle_("Save Backup")
+        panel.setNameFieldStringValue_(
+            backup_manager.backup_filename(self.onion_address, username))
+        panel.setDirectoryURL_(
+            AppKit.NSURL.fileURLWithPath_(os.path.expanduser("~/Desktop/")))
+        panel.setAllowedContentTypes_([
+            AppKit.UTType.typeWithFilenameExtension_("zip")])
 
-        response = window.run()
-
-        if not response.clicked:  # Cancel
+        if panel.runModal() != 1:  # NSModalResponseOK
             return
 
-        key_text = response.text.strip()
+        output_path = panel.URL().path()
 
-        if not key_text:
-            rumps.alert("No key provided")
-            return
-
-        # Normalize whitespace: for base64 keys, collapse all whitespace
-        # (text field may wrap and insert newlines); for BIP39, normalize to single spaces
-        if key_text.startswith('onionpress:'):
-            key_text = ''.join(key_text.split())
-        else:
-            key_text = ' '.join(key_text.split())
-
-        # Validate the key format before starting the long operation
-        self.log("Import: validating key...")
-        try:
-            key_bytes, coordinator = key_manager.import_key(key_text)
-        except Exception as e:
-            self.log(f"Import validation failed: {e}")
-            rumps.alert(
-                title="Import Failed",
-                message=f"Could not import private key:\n\n{str(e)}"
-            )
-            return
-
-        if coordinator:
-            self.log(f"Key imported with coordinator: {coordinator}")
-
-        # Show progress notification and do the work in a background thread
+        # Run backup in background
         rumps.notification(
-            title="Importing Key...",
-            subtitle="This takes about a minute.",
-            message="Writing key and restarting service."
+            title="Backup Started",
+            subtitle="",
+            message="Creating backup archive. This may take a few minutes for large sites."
         )
 
-        def do_import():
+        def do_backup():
             try:
-                # Write the new key while container is still running
-                # (docker cp requires the container to exist)
-                self.log("Import: writing new key...")
-                key_manager.write_private_key(key_bytes)
-
-                # Restart the service to pick up the new key
-                self.log("Import: restarting service...")
-                subprocess.run([self.launcher_script, "stop"], capture_output=True)
-                time.sleep(2)
-                subprocess.run([self.launcher_script, "start"], capture_output=True)
-
-                self.log("Import: complete")
+                backup_manager.create_backup(
+                    self.onion_address, username, password,
+                    output_path, self.version, self.log)
                 rumps.notification(
-                    title="Import Successful",
+                    title="Backup Complete",
                     subtitle="",
-                    message="Your private key has been imported. The service is restarting with your new onion address."
-                )
+                    message=f"Backup saved to {os.path.basename(output_path)}")
+            except Exception as e:
+                self.log(f"Backup failed: {e}")
+                rumps.notification(
+                    title="Backup Failed",
+                    subtitle="",
+                    message=str(e))
 
-                # Trigger status check
+        threading.Thread(target=do_backup, daemon=True).start()
+
+    @rumps.clicked("Restore...")
+    def restore(self, _):
+        """Restore OnionPress from a backup zip"""
+        if not self.is_running:
+            rumps.alert(
+                title="Service Not Running",
+                message="Please start the service first before restoring a backup."
+            )
+            return
+
+        # File picker for .zip
+        panel = AppKit.NSOpenPanel.openPanel()
+        panel.setTitle_("Select OnionPress Backup")
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowsMultipleSelection_(False)
+        panel.setAllowedContentTypes_([
+            AppKit.UTType.typeWithFilenameExtension_("zip")])
+
+        if panel.runModal() != 1:  # NSModalResponseOK
+            return
+
+        zip_path = panel.URL().path()
+
+        # Prompt for password
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("Enter Backup Password")
+        alert.setInformativeText_(
+            "Enter the password that was used when this backup was created.")
+
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        if os.path.exists(icon_path):
+            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+            if icon:
+                alert.setIcon_(icon)
+
+        pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 300, 24))
+        alert.setAccessoryView_(pass_field)
+        alert.addButtonWithTitle_("Continue").setKeyEquivalent_("\r")
+        alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+        alert.window().setInitialFirstResponder_(pass_field)
+
+        response = alert.runModal()
+        if response != 1000:
+            return
+
+        password = pass_field.stringValue()
+        if not password:
+            rumps.alert(title="No Password", message="A password is required.")
+            return
+
+        # Validate zip by reading metadata
+        try:
+            metadata = backup_manager.read_backup_metadata(zip_path, password)
+        except ValueError as e:
+            rumps.alert(title="Invalid Backup", message=str(e))
+            return
+        except Exception as e:
+            self.log(f"Restore: failed to read backup metadata: {e}")
+            rumps.alert(title="Invalid Backup",
+                        message=f"Could not read backup: {e}")
+            return
+
+        # Show confirmation with backup details
+        addr = metadata.get('onion_address', 'unknown')
+        date = metadata.get('backup_date', 'unknown')
+        user = metadata.get('username', 'unknown')
+        ver = metadata.get('onionpress_version', 'unknown')
+
+        button_index = self.show_native_alert(
+            title="Confirm Restore",
+            message=(
+                f"You are about to restore from this backup:\n\n"
+                f"Onion address: {addr}\n"
+                f"Backup date: {date}\n"
+                f"Username: {user}\n"
+                f"OnionPress version: {ver}\n\n"
+                f"WARNING: This will overwrite your current site, "
+                f"database, and onion address. This cannot be undone."),
+            buttons=["Cancel", "Restore"],
+            default_button=0,
+            cancel_button=0,
+            style="critical"
+        )
+
+        if button_index != 1:
+            return
+
+        # Run restore in background
+        rumps.notification(
+            title="Restore Started",
+            subtitle="",
+            message="Restoring from backup. This may take a few minutes."
+        )
+
+        def do_restore():
+            try:
+                backup_manager.restore_from_backup(
+                    zip_path, password, self.log)
+
+                # Restart service to pick up restored keys
+                self.log("Restore: restarting service...")
+                subprocess.run([self.launcher_script, "restart"],
+                               capture_output=True, timeout=60)
+
+                # Update onion address from restored data
+                self.onion_address = metadata.get('onion_address', self.onion_address)
+
                 time.sleep(2)
                 self.check_status()
 
-            except Exception as e:
-                self.log(f"Import failed: {e}")
                 rumps.notification(
-                    title="Import Failed",
+                    title="Restore Complete",
                     subtitle="",
-                    message=f"Could not import private key: {str(e)}\n\nYour original key has not been changed."
-                )
+                    message=f"Site restored successfully. Onion address: {addr}")
+            except Exception as e:
+                self.log(f"Restore failed: {e}")
+                rumps.notification(
+                    title="Restore Failed",
+                    subtitle="",
+                    message=str(e))
 
-        threading.Thread(target=do_import, daemon=True).start()
+        threading.Thread(target=do_restore, daemon=True).start()
 
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
@@ -2709,11 +2691,11 @@ License: AGPL v3"""
 
     @rumps.clicked("Uninstall...")
     def uninstall(self, _):
-        """Uninstall OnionPress with mandatory key backup prompt"""
-        # Step 1: Show critical warning about key loss (native NSAlert - no permissions)
+        """Uninstall OnionPress with mandatory backup prompt"""
+        # Step 1: Show critical warning about data loss (native NSAlert - no permissions)
         button_index = self.show_native_alert(
             title="Uninstall Warning",
-            message="⚠️ CRITICAL WARNING ⚠️\n\nUninstalling will PERMANENTLY DELETE:\n• Your onion address and private key\n• All WordPress content and data\n• Database and configuration\n\nYOUR ONION ADDRESS CANNOT BE RECOVERED unless you have a backup of your private key.\n\nDo you want to backup your private key before uninstalling?",
+            message="CRITICAL WARNING\n\nUninstalling will PERMANENTLY DELETE:\n\u2022 Your onion address and private key\n\u2022 All WordPress content and data\n\u2022 Database and configuration\n\nYour site CANNOT BE RECOVERED unless you have a backup.\n\nDo you want to create a backup before uninstalling?",
             buttons=["Cancel", "No, Delete Everything", "Yes, Backup First"],
             default_button=2,
             cancel_button=0,
@@ -2724,29 +2706,28 @@ License: AGPL v3"""
             return
 
         if button_index == 2:  # Yes, Backup First
-            # User wants to backup key first - call export function
-                self.log("User chose to backup key before uninstall")
-                if self.is_running:
-                    self.export_key(None)
-                else:
-                    rumps.alert(
-                        title="Service Not Running",
-                        message="Cannot export key while service is stopped.\n\nPlease start the service first, then try uninstall again to backup your key."
-                    )
-                    return
-
-                # After export, ask again if they want to continue with uninstall
-                button_index = self.show_native_alert(
-                    title="Confirm Uninstall",
-                    message="Key backup complete.\n\nProceed with uninstall?\n\nThis will permanently delete all data.",
-                    buttons=["Cancel", "Proceed with Uninstall"],
-                    default_button=0,
-                    cancel_button=0,
-                    style="warning"
+            self.log("User chose to backup before uninstall")
+            if self.is_running:
+                self.backup(None)
+            else:
+                rumps.alert(
+                    title="Service Not Running",
+                    message="Cannot create a backup while service is stopped.\n\nPlease start the service first, then try uninstall again."
                 )
+                return
 
-                if button_index != 1:  # User didn't click "Proceed"
-                    return
+            # After backup, ask again if they want to continue with uninstall
+            button_index = self.show_native_alert(
+                title="Confirm Uninstall",
+                message="Proceed with uninstall?\n\nThis will permanently delete all data.",
+                buttons=["Cancel", "Proceed with Uninstall"],
+                default_button=0,
+                cancel_button=0,
+                style="warning"
+            )
+
+            if button_index != 1:  # User didn't click "Proceed"
+                return
 
         # Step 2: Final confirmation with explicit acknowledgment
         # Use rumps.Window for text input (no osascript, no permissions needed)
