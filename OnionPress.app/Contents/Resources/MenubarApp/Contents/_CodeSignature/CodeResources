@@ -18,7 +18,7 @@
 		</data>
 		<key>Resources/__pycache__/site.cpython-314.pyc</key>
 		<data>
-		ep9lHrsLeaZlVLgg/+mR7y6LePs=
+		qbPOgEC7+Bho0nNkDePZD9sMFNk=
 		</data>
 		<key>Resources/app-icon.png</key>
 		<data>
@@ -46,15 +46,15 @@
 		</data>
 		<key>Resources/lib/python3.14/AppKit/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		LPGa2BwnrQVOkdXKPHjw4Od+gJc=
+		3GTQ2jdmCtpN/V+jUtw188G4cJI=
 		</data>
 		<key>Resources/lib/python3.14/AppKit/__pycache__/_metadata.cpython-314.pyc</key>
 		<data>
-		3gCrMws1SrgcJNI+yWhEMAe/ojk=
+		Ac9liAKIwE0EM7jiDrFGkd+zR9A=
 		</data>
 		<key>Resources/lib/python3.14/AppKit/__pycache__/_nsapp.cpython-314.pyc</key>
 		<data>
-		otYoRbHAm5YDegClotj3y4Eda1I=
+		S6zcdqm7/YvxfTMS8LYLr4RuHaE=
 		</data>
 		<key>Resources/lib/python3.14/AppKit/_inlines.cpython-314-darwin.so</key>
 		<data>
@@ -416,205 +416,137 @@
 		<data>
 		BdhmrGhenhwI6K6lTqCOtn9nzx0=
 		</data>
-		<key>Resources/lib/python3.14/mnemonic/__init__.py</key>
-		<data>
-		c2lv8noJXlztJHi0I22k7Rsog3I=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/__pycache__/__init__.cpython-314.pyc</key>
-		<data>
-		CM15/A2YQ6pDdQ+N93mwgEgWHJI=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/__pycache__/mnemonic.cpython-314.pyc</key>
-		<data>
-		/MYe6kHWxyUbl+uFvqhA+e93odg=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/mnemonic.py</key>
-		<data>
-		4jkV+7mWINumvnqKDFIvqkc1KJ8=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/py.typed</key>
-		<data>
-		TXu3odmwizLG/7r85ECVnQvBl4g=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/chinese_simplified.txt</key>
-		<data>
-		+QLufpbOSN5kBK32RPpA4mDZSf8=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/chinese_traditional.txt</key>
-		<data>
-		M+QBvqY/g6XqhNeN3HFhgJ73fws=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/czech.txt</key>
-		<data>
-		M6Cbm8mHqqhWD/74oXRZyZxj7Uo=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/english.txt</key>
-		<data>
-		stUkGuAnoOQPBqM9kJgJoZDyEP4=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/french.txt</key>
-		<data>
-		vNge2BkGvatX2XAKI0E6fiJIfQ4=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/italian.txt</key>
-		<data>
-		xiFOsc7Hse6Muh8xesYSxRiBRIo=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/japanese.txt</key>
-		<data>
-		pOwdpsEajCURlcetkIF92m/mRIg=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/korean.txt</key>
-		<data>
-		bFxfOOdWc9HOog8nAEaK3BY9hps=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/portuguese.txt</key>
-		<data>
-		Rycnhns5ShyRaGkMQVsAlNw6M4M=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/russian.txt</key>
-		<data>
-		d5K1Wxg4+qiSjCUo0wTCBE7Nh78=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/spanish.txt</key>
-		<data>
-		uZIF0klw4K2o4hgqGmjx60OclaE=
-		</data>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/turkish.txt</key>
-		<data>
-		wK7c2Cl/tYRWwKYIVOBLVH38lXY=
-		</data>
 		<key>Resources/lib/python3.14/objc/__init__.py</key>
 		<data>
 		RJQxb6ziztaQHcfKyxxYVJJMIHM=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		w90PbcuVt9gltiN3eHoBWZ0VrmE=
+		tM938IUKbt4yzDjAZQNIVYWbG5Q=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_bridges.cpython-314.pyc</key>
 		<data>
-		sqhmKzpzZPvg6glGng8saA2rNew=
+		11T5AS4OBcJh0+gltTUY9fKBVxY=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_bridgesupport.cpython-314.pyc</key>
 		<data>
-		3qELwjlAC9UkgPBjgpvzc13mNNs=
+		0IDXmP9bi8Nik9YFT/aXYRGpZqE=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_callable_docstr.cpython-314.pyc</key>
 		<data>
-		DQpT4m1O8fTkjYPX5ZrKGpBKIFc=
+		FzIX5wHoy1njL/V2NGYEufcxK+o=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_category.cpython-314.pyc</key>
 		<data>
-		XaNdpi0M7J6qs+i88fETaKhmMyY=
+		Ra9QQAueQnFu+gwdGsCzq+h+ykU=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_compat.cpython-314.pyc</key>
 		<data>
-		j1IrmA01J3mtyG23E4oCsoaFgyo=
+		NnGSwQN2WoI4qfsFPaOlVw28o0Q=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_context.cpython-314.pyc</key>
 		<data>
-		vD7zvmYpca7wHNbFQGAmmGbrexI=
+		F4GOnvWzNz/CGIV2a1N64GoaANk=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience.cpython-314.pyc</key>
 		<data>
-		4Xb4ZGyqQ3B90lPMyInaWqwIPxs=
+		mK+Zz8+uBQBXXgeiATBQBeW8hDA=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_mapping.cpython-314.pyc</key>
 		<data>
-		DJgejN81L4ZaagYaNXOoI6Yqgv8=
+		Lc+iSRVQDTBg1fBrjT9zZZUzbLM=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsarray.cpython-314.pyc</key>
 		<data>
-		G3gITxz5D0afo6oKWy4GlA1BX00=
+		A5tyCLGvpiLH5AA7mOcbusJe/3U=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsdata.cpython-314.pyc</key>
 		<data>
-		guwdSWJpL+SYZ/0YFQaUWAOgCNY=
+		jusGBaPWeE5Y2lxrB5mQvaR/U2c=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsdecimal.cpython-314.pyc</key>
 		<data>
-		p54n6I5Gi2g1pwKbKUJ/oLvxYv4=
+		nC1bRu+0Kk0QHtHcjcB9m/cniXM=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsdictionary.cpython-314.pyc</key>
 		<data>
-		uB0fGJr6LbCpMnwErKoFlxmpBV0=
+		QKy6CvgZrebzv6+AwU7u/dyicRk=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsobject.cpython-314.pyc</key>
 		<data>
-		c1wP2OqqbmLWVglYnyByVCiALFY=
+		Ppng+xBTlXN549V1qnKVFxwXq6o=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsset.cpython-314.pyc</key>
 		<data>
-		mMlVjixUgn5H2JBbiBcBkAw/J+8=
+		T5Bqq01QtiwX3dMqcNxPmeHmIkk=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsstring.cpython-314.pyc</key>
 		<data>
-		+i4NiUvOEVhY64Q4xYsHfwVPtQM=
+		B1l+yLhPfVt+354qvkVSAnyQyO4=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_sequence.cpython-314.pyc</key>
 		<data>
-		Bw0ixKofdDP4LGkLVq8gULZBAlI=
+		CoHNXO6l/dE3eYR8pq57EzTLkzo=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_descriptors.cpython-314.pyc</key>
 		<data>
-		EVyrT7pMZsaCfMUDuAnmBefTG70=
+		V7bfs6lcOVEE7HHW/MaNsQOV4bo=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_dyld.cpython-314.pyc</key>
 		<data>
-		oW4+KnHiFkuSCFuw3eUQzwugiyk=
+		RB12ioaUkn9gLAcB56AeBEII69Q=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_framework.cpython-314.pyc</key>
 		<data>
-		7g1TdIw/F5s6bxo25HtbgbnAoA0=
+		UCyRW+yhY4RzxdJZPoK9ufCF5OA=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_informal_protocol.cpython-314.pyc</key>
 		<data>
-		CypRYPZOpGuuZAp/WCbGKs8TTa8=
+		6T2VOL9rmvRp3c7BziC+ZvtThyw=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_lazyimport.cpython-314.pyc</key>
 		<data>
-		mYk/F/y7Kjicu4057FBmB/tnKu8=
+		eOqfLBn6KOJdE6FMjbfMxfgaWSs=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_locking.cpython-314.pyc</key>
 		<data>
-		lGdpRn4897/oxmp6JE2B2dTPi4A=
+		BTpJgfCdnjF80Eyb+wSKcEtDBZs=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_new.cpython-314.pyc</key>
 		<data>
-		AoMQmBjlzD1c9V4gBQiDW+a8ZXY=
+		e5teqBWrqKd2Mfbw6d71syMnB4I=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_properties.cpython-314.pyc</key>
 		<data>
-		n/TrBiOn0xgfCx/JsJNq39L73K8=
+		fObHCml+jI1EyKMNMjffTZj2UCE=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_protocols.cpython-314.pyc</key>
 		<data>
-		fWN/EVXIeweVLG4vvOrH9QZriWA=
+		x6ZMWWjXS3RJ2bJ5o8zDYLyofig=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_pycoder.cpython-314.pyc</key>
 		<data>
-		CChIxe+UzD3EMQ4UQ61c3xXSml8=
+		I4LsKqd2ciu2fbsgopieG1t7DAc=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_pythonify.cpython-314.pyc</key>
 		<data>
-		QI2zQpl5IFDhzLjIIwBBRv1Kj7w=
+		Q1I+Qa9M8Hc0iLbOmGss8lT0Uw0=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_structtype.cpython-314.pyc</key>
 		<data>
-		9c0Wk601lpR3erFF3HexehQ/OmQ=
+		PO9K7FRkPMV6V0VG/+SlbJFv1g0=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_transform.cpython-314.pyc</key>
 		<data>
-		5//3+ELVzudUFP0vAnjh/lO6IpQ=
+		CTU5DHcLgOhOBSlesFyusPjTjUM=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/_types.cpython-314.pyc</key>
 		<data>
-		PuhPP4myMrswAtbDnt4bExP+PQg=
+		uujXv9AsyDXPsIWRyy7QDFkp0+I=
 		</data>
 		<key>Resources/lib/python3.14/objc/__pycache__/simd.cpython-314.pyc</key>
 		<data>
-		dZqEA9hKD0BQIFxk/r+Z991xYXM=
+		IiMPu2VHMojRKF0vpUUQBdepf6w=
 		</data>
 		<key>Resources/lib/python3.14/objc/_bridges.py</key>
 		<data>
@@ -754,39 +686,39 @@
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		hPpC/0QLRXRFEO8mewKDIY1it1k=
+		UhKFOnh7z57L8MfWvel9ib4bAmE=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/_internal.cpython-314.pyc</key>
 		<data>
-		pSNiE2rrtJa0bUPo9K1j8wrQh54=
+		/Fr2RxABTNkctUkQVF7pb1zdV50=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/compat.cpython-314.pyc</key>
 		<data>
-		oaw49HMCapmHlCXJI+Eg2K5IsIo=
+		vZk+4MYEaYhOxhs5YKVuaAOhRtY=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/events.cpython-314.pyc</key>
 		<data>
-		g5aF+HIagOVbkkEvsSLn0GZlYUY=
+		JFJoqUIvnugYc7tkUBEfJ1J9h6s=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/exceptions.cpython-314.pyc</key>
 		<data>
-		keFG6nkuK20ZiVUf3qy1vaj2x6Q=
+		eqreH3JO3LrjO+Bm+dUNEWbaUe0=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/notifications.cpython-314.pyc</key>
 		<data>
-		EwoKEZqIKNyp2cvvNiR9/SN7vOI=
+		uUcIKJX19Xpfoc2TFxVLY+4DxDE=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/rumps.cpython-314.pyc</key>
 		<data>
-		FJ5GhNZ6oruMF8HH35qiICoxnOc=
+		MSq7up4Kbm5yyDvd+aTjWqG5b10=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/text_field.cpython-314.pyc</key>
 		<data>
-		7ebxIsYyoTWQ6hOWDTlhkwM7GdU=
+		d3r+HfUQU+Wbt4DLfZ6B76C8TWI=
 		</data>
 		<key>Resources/lib/python3.14/rumps/__pycache__/utils.cpython-314.pyc</key>
 		<data>
-		XnZ+Ho4eKzlJ05Wi21OL9+EskiE=
+		TpbJaBxHd5GPysRegi1uJVobDF8=
 		</data>
 		<key>Resources/lib/python3.14/rumps/_internal.py</key>
 		<data>
@@ -814,11 +746,11 @@
 		</data>
 		<key>Resources/lib/python3.14/rumps/packages/__pycache__/__init__.cpython-314.pyc</key>
 		<data>
-		2ESzVgMlWzrrn/YwG/GHEIn3Jqk=
+		3MzKISUcTytiOvS8KclfJWLc0ro=
 		</data>
 		<key>Resources/lib/python3.14/rumps/packages/__pycache__/ordereddict.cpython-314.pyc</key>
 		<data>
-		jVTC/fNaecx8PlNfX+t67JeoeZ8=
+		/QafjuUtQuGObu9tSx/H1597jGs=
 		</data>
 		<key>Resources/lib/python3.14/rumps/packages/ordereddict.py</key>
 		<data>
@@ -838,7 +770,7 @@
 		</data>
 		<key>Resources/lib/python314.zip</key>
 		<data>
-		KVzqxgyx+dn1svK+DVBm5F0BKxc=
+		v+GXvIx2Ntam5Xg0OmQNHoovhlg=
 		</data>
 		<key>Resources/menubar-icon-running.png</key>
 		<data>
@@ -854,7 +786,7 @@
 		</data>
 		<key>Resources/menubar.py</key>
 		<data>
-		cdJj2IDAO0sC3TfTdplZ40ekGY0=
+		KFYurzLIEooNU/43vna+m9k9iu8=
 		</data>
 		<key>Resources/onion-forward.php</key>
 		<data>
@@ -862,7 +794,7 @@
 		</data>
 		<key>Resources/site.pyc</key>
 		<data>
-		t+lvX/kA3JrvRJKbiG9VXBBavKA=
+		ORek7KT9c35Z8dyEQFiVQFfdclw=
 		</data>
 		<key>Resources/zlib.cpython-314-darwin.so</key>
 		<data>
@@ -958,11 +890,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			ep9lHrsLeaZlVLgg/+mR7y6LePs=
+			qbPOgEC7+Bho0nNkDePZD9sMFNk=
 			</data>
 			<key>hash2</key>
 			<data>
-			lOH2BaaPBOHFN+V7WHCSnMlOTBobO4XtOPPrAo0J4Pw=
+			63VBpH2s3N1GGDKXko/U1EuZ/caIDeKzjnQMU7iR1po=
 			</data>
 		</dict>
 		<key>Resources/app-icon.png</key>
@@ -1035,33 +967,33 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			LPGa2BwnrQVOkdXKPHjw4Od+gJc=
+			3GTQ2jdmCtpN/V+jUtw188G4cJI=
 			</data>
 			<key>hash2</key>
 			<data>
-			aRNOZt3G56vlbWcSy7nVBUSRhWckLggFMUIrW6RrtY0=
+			XskfGrw7Fp7V+jXTpRMRDVwn+7Ui50VaxQjC7rbXn8c=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/AppKit/__pycache__/_metadata.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			3gCrMws1SrgcJNI+yWhEMAe/ojk=
+			Ac9liAKIwE0EM7jiDrFGkd+zR9A=
 			</data>
 			<key>hash2</key>
 			<data>
-			Yy4Y7CoaaIX45kc+Cyhc+j7UXpj87uehelwoyTKRm+E=
+			Wg4QBBBiQ7SsvDpNsJpV1mG9rgAdXmwjZvsuOOpVAEE=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/AppKit/__pycache__/_nsapp.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			otYoRbHAm5YDegClotj3y4Eda1I=
+			S6zcdqm7/YvxfTMS8LYLr4RuHaE=
 			</data>
 			<key>hash2</key>
 			<data>
-			RClIpc3L0n1IzbUPfL8I05oCLsVlCDzqiqjyUvYcAOg=
+			fxflftFrKD4/e8Q2g5M9iQ3/ItojLs/CX35I4OeAYrQ=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/AppKit/_inlines.cpython-314-darwin.so</key>
@@ -2054,193 +1986,6 @@
 			DNYvEKvd05DzwAHDCY3N62aCR/H33TjZcCbSgmUtcSQ=
 			</data>
 		</dict>
-		<key>Resources/lib/python3.14/mnemonic/__init__.py</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			c2lv8noJXlztJHi0I22k7Rsog3I=
-			</data>
-			<key>hash2</key>
-			<data>
-			xlJLxkmLgN4zK/WNEA067BEEL7tVkIWqC8JZVbLq9o0=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/__pycache__/__init__.cpython-314.pyc</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			CM15/A2YQ6pDdQ+N93mwgEgWHJI=
-			</data>
-			<key>hash2</key>
-			<data>
-			W4azsHgVEjRkRe/azSDS7dmPL8q4zP0O3DWFCCgq3xc=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/__pycache__/mnemonic.cpython-314.pyc</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			/MYe6kHWxyUbl+uFvqhA+e93odg=
-			</data>
-			<key>hash2</key>
-			<data>
-			gMO+YamhmodvWrVq6pvbhN8wQCQUwVUZUAYC1ll+4rw=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/mnemonic.py</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			4jkV+7mWINumvnqKDFIvqkc1KJ8=
-			</data>
-			<key>hash2</key>
-			<data>
-			Qtrx+087Q+tAKErdddgy44S746qm0ArmjIhQuKCm11s=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/py.typed</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			TXu3odmwizLG/7r85ECVnQvBl4g=
-			</data>
-			<key>hash2</key>
-			<data>
-			bWew9mHgMy8LqMu7RuqQXFXLBxh2CRx0dUbSx+3wE48=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/chinese_simplified.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			+QLufpbOSN5kBK32RPpA4mDZSf8=
-			</data>
-			<key>hash2</key>
-			<data>
-			XFlCeSvYNAy4snzVkvEBXt9WqMWyYnbuGKSCQo58VyY=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/chinese_traditional.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			M+QBvqY/g6XqhNeN3HFhgJ73fws=
-			</data>
-			<key>hash2</key>
-			<data>
-			QXsms9hQCkrj1ZcX1wEZUttvwvuEuAfz+UrHNOicG18=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/czech.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			M6Cbm8mHqqhWD/74oXRZyZxj7Uo=
-			</data>
-			<key>hash2</key>
-			<data>
-			foDhYcPpPZVUwu+3jU486/j8cn6cUuA7g7lEBr3Mlfw=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/english.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			stUkGuAnoOQPBqM9kJgJoZDyEP4=
-			</data>
-			<key>hash2</key>
-			<data>
-			L17tU6Rye0v4iA2PPxme/JDlhQNkbZ/47/Oi7Tsk29o=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/french.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			vNge2BkGvatX2XAKI0E6fiJIfQ4=
-			</data>
-			<key>hash2</key>
-			<data>
-			68OVmreAGh32usT6fZcGUvHfdraDzS9AA8lBxj1Rflk=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/italian.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			xiFOsc7Hse6Muh8xesYSxRiBRIo=
-			</data>
-			<key>hash2</key>
-			<data>
-			05LEn9twCiTNH86yN8H2XcwSj2s0qKrLWLWThLXGSMI=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/japanese.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			pOwdpsEajCURlcetkIF92m/mRIg=
-			</data>
-			<key>hash2</key>
-			<data>
-			Lu0K70kikeBhYz162BF/GisD64CinQ5OMResJSjQX/0=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/korean.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			bFxfOOdWc9HOog8nAEaK3BY9hps=
-			</data>
-			<key>hash2</key>
-			<data>
-			npX4bBZ96I9FDwqvieh/ZiSlf5c8Z7UW4zjo6LiJf2A=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/portuguese.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			Rycnhns5ShyRaGkMQVsAlNw6M4M=
-			</data>
-			<key>hash2</key>
-			<data>
-			JoXpwZTIKuZ+ELpZ2epTRaI9wJPpInb8U2H2Zn15zT8=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/russian.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			d5K1Wxg4+qiSjCUo0wTCBE7Nh78=
-			</data>
-			<key>hash2</key>
-			<data>
-			B/Ea8/B/0T2NdIWfREjYvKjx2dM23EhCUx7OoIMQOiY=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/spanish.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			uZIF0klw4K2o4hgqGmjx60OclaE=
-			</data>
-			<key>hash2</key>
-			<data>
-			RoRqWgE50ePLdyk+UhwoZfe824LETo0KBqLNDsukjAs=
-			</data>
-		</dict>
-		<key>Resources/lib/python3.14/mnemonic/wordlist/turkish.txt</key>
-		<dict>
-			<key>hash</key>
-			<data>
-			wK7c2Cl/tYRWwKYIVOBLVH38lXY=
-			</data>
-			<key>hash2</key>
-			<data>
-			p9ycd5E3JhBse4uqAit+F2AdEYrPQKpgqx+8nJGzg6w=
-			</data>
-		</dict>
 		<key>Resources/lib/python3.14/objc/__init__.py</key>
 		<dict>
 			<key>hash</key>
@@ -2256,352 +2001,352 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			w90PbcuVt9gltiN3eHoBWZ0VrmE=
+			tM938IUKbt4yzDjAZQNIVYWbG5Q=
 			</data>
 			<key>hash2</key>
 			<data>
-			u/rNe0l45ULoaEEb1zDevLF5JMuBE17oP8F9T6/j7YU=
+			gkoAwvXV5gZYQe/sWM6l2WvqEouK6l5kXgSwa3Mcftw=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_bridges.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			sqhmKzpzZPvg6glGng8saA2rNew=
+			11T5AS4OBcJh0+gltTUY9fKBVxY=
 			</data>
 			<key>hash2</key>
 			<data>
-			tSncif2ScA/VxxgZORCRi0jCpJ10j1WcQ0jXk6UJY2E=
+			CAbMs30sAbqXf8Jx8mD1vX1/xk4wuWem0AJyUoP55sg=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_bridgesupport.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			3qELwjlAC9UkgPBjgpvzc13mNNs=
+			0IDXmP9bi8Nik9YFT/aXYRGpZqE=
 			</data>
 			<key>hash2</key>
 			<data>
-			TZ4Y0sefT4nYuTG5eAckZl1mMhLR1qQRaKWDCr7oZeM=
+			cWUungWArFJJHUT/UUBF6xnqlpg/ICYU6ZMQ4KdasLE=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_callable_docstr.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			DQpT4m1O8fTkjYPX5ZrKGpBKIFc=
+			FzIX5wHoy1njL/V2NGYEufcxK+o=
 			</data>
 			<key>hash2</key>
 			<data>
-			EG5qudgSwO739DAXxTv+m4Um86JJksLMIX1P0XCWdPE=
+			hTwp7hQhIEfF+4HkmGTEJ4y51FXENOS6IvX3w2MRlqQ=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_category.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			XaNdpi0M7J6qs+i88fETaKhmMyY=
+			Ra9QQAueQnFu+gwdGsCzq+h+ykU=
 			</data>
 			<key>hash2</key>
 			<data>
-			MK8r629LsaVBKBBoOATXspXz+c1tq9RwadipghFX3NY=
+			3TghPG4DQEUDHt3q3pDiGtvHSyf66MWj4JjS0qMEszk=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_compat.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			j1IrmA01J3mtyG23E4oCsoaFgyo=
+			NnGSwQN2WoI4qfsFPaOlVw28o0Q=
 			</data>
 			<key>hash2</key>
 			<data>
-			V+z3157TQhiNLI2EW9I3bczySwqGhu4e+oB30fjXuLQ=
+			gfc1kqcG1rnDjhoFn0Xk0p7E6bPAGcTEWEVhy1TIel0=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_context.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			vD7zvmYpca7wHNbFQGAmmGbrexI=
+			F4GOnvWzNz/CGIV2a1N64GoaANk=
 			</data>
 			<key>hash2</key>
 			<data>
-			dz4W+Sd5vDcRqb5fmK1XDLwArDmOzMytk7HsOwRzrLU=
+			CMFlmZlb4+T2LMcjcgoCuzTqnMXh6nZQXF/bwQVvsec=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			4Xb4ZGyqQ3B90lPMyInaWqwIPxs=
+			mK+Zz8+uBQBXXgeiATBQBeW8hDA=
 			</data>
 			<key>hash2</key>
 			<data>
-			nnMHqdtIbC/vrHaTE3ZzkxRQojP+IRXWDlK65azhrRs=
+			ie3aX40Zv6X+BjIk7zQ9goXpTzHgrh4ZeqtkbA2T3+Y=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_mapping.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			DJgejN81L4ZaagYaNXOoI6Yqgv8=
+			Lc+iSRVQDTBg1fBrjT9zZZUzbLM=
 			</data>
 			<key>hash2</key>
 			<data>
-			8oedr9w44MusfdiBZ5mVTR0RlVOLE3xryW97+v8cDxU=
+			ZWAdVN93gGjRMscFLwXei4YfA+qS+QGzybEZ+0QJhYk=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsarray.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			G3gITxz5D0afo6oKWy4GlA1BX00=
+			A5tyCLGvpiLH5AA7mOcbusJe/3U=
 			</data>
 			<key>hash2</key>
 			<data>
-			DoISSNmKi5Y+u/QszjCa9BsYW/UphfUswgan6Rigna0=
+			Uzf8bVFU37wzgiuJlBh3Wb7vLEqLFAUdPVqN//ejFxw=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsdata.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			guwdSWJpL+SYZ/0YFQaUWAOgCNY=
+			jusGBaPWeE5Y2lxrB5mQvaR/U2c=
 			</data>
 			<key>hash2</key>
 			<data>
-			glE4F5wINhUJy+UYKvD0nXzO4sAWY1b+NdGJaFupNCM=
+			N/+kIOyRp7s3ZcaXfuBaArSfdBfXDN2jwOhSiyyQUR0=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsdecimal.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			p54n6I5Gi2g1pwKbKUJ/oLvxYv4=
+			nC1bRu+0Kk0QHtHcjcB9m/cniXM=
 			</data>
 			<key>hash2</key>
 			<data>
-			JuKDAfLxpJSogQpuMGw0CgJSeViNU16EMfRt5+wzrYo=
+			EE24vELeToOpRmXev4vAmWZuoWHN3bhjEIVb4jjbWRI=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsdictionary.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			uB0fGJr6LbCpMnwErKoFlxmpBV0=
+			QKy6CvgZrebzv6+AwU7u/dyicRk=
 			</data>
 			<key>hash2</key>
 			<data>
-			KqVrE3RzkRA88gAHe6UBhb3E/rynFBh2QsxH/Hqk2FQ=
+			qQmCufa5DSoTgoBCzbwybCVCTxBl+eK1U7h0RXga4X0=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsobject.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			c1wP2OqqbmLWVglYnyByVCiALFY=
+			Ppng+xBTlXN549V1qnKVFxwXq6o=
 			</data>
 			<key>hash2</key>
 			<data>
-			gIZaxxFwsazo/5w+1O0i/MmVwAPqjQQOlRdI62kvcZU=
+			UzzOnLPKt44G5OtE3Oski6v4fSE8Pyy06jgKrsJtj8o=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsset.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			mMlVjixUgn5H2JBbiBcBkAw/J+8=
+			T5Bqq01QtiwX3dMqcNxPmeHmIkk=
 			</data>
 			<key>hash2</key>
 			<data>
-			1vMW0FgHFy/QbmXl1Dv4ZnuHJTAXXkFUXLPb4SVng2w=
+			aorSEhZS9AlK2/BrsUl2hBZ38REv5pMMHEqMG91Q5K4=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_nsstring.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			+i4NiUvOEVhY64Q4xYsHfwVPtQM=
+			B1l+yLhPfVt+354qvkVSAnyQyO4=
 			</data>
 			<key>hash2</key>
 			<data>
-			gpPIyJf8KXkAwczFlfeStngbJwnLGnZZBR3GEYGsTdo=
+			iF8pXywCtIMQTMprPPbEz+BZf2+Fe1fEMxGdQIlCzr4=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_convenience_sequence.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			Bw0ixKofdDP4LGkLVq8gULZBAlI=
+			CoHNXO6l/dE3eYR8pq57EzTLkzo=
 			</data>
 			<key>hash2</key>
 			<data>
-			hJYR6XcKx7/WnTL1ctuVFcYNlG2xMREHNz11lj3U5tc=
+			2h3j5To0HAwSx5yvALstC4dIT5vWaA/xCgtJ/8AQqsE=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_descriptors.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			EVyrT7pMZsaCfMUDuAnmBefTG70=
+			V7bfs6lcOVEE7HHW/MaNsQOV4bo=
 			</data>
 			<key>hash2</key>
 			<data>
-			WyoivF+9kC3iiOOB+L8yfxLDGc46dFYT11P8eMF2M2g=
+			j3iyOCaD2aHqr3HWhtsWMApYk6XOYVHRZGZB9wh0Nhc=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_dyld.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			oW4+KnHiFkuSCFuw3eUQzwugiyk=
+			RB12ioaUkn9gLAcB56AeBEII69Q=
 			</data>
 			<key>hash2</key>
 			<data>
-			TRSSqM78KbqnC/qhhUYx5UzdIlz7Ym8J5cn3wjZr8/k=
+			CJtWMHkNPD1ayw54bMMrJRDHJFOa4RPjonc81S2BBpI=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_framework.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			7g1TdIw/F5s6bxo25HtbgbnAoA0=
+			UCyRW+yhY4RzxdJZPoK9ufCF5OA=
 			</data>
 			<key>hash2</key>
 			<data>
-			X8wkQY8uwpjQ4X12jqYWdbboSZyaq2PpTR3HrurEsqM=
+			jaqAOHGltd+IJVoqJSuo3cMBumdLw4hn2FieSx59qZw=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_informal_protocol.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			CypRYPZOpGuuZAp/WCbGKs8TTa8=
+			6T2VOL9rmvRp3c7BziC+ZvtThyw=
 			</data>
 			<key>hash2</key>
 			<data>
-			2N5CwlCMYq4QA+eKsF8jMvG+NVqK56MqpIQgJ/ICHPs=
+			1p08HJFwTnubipWnzpBeoJJCRnc/w/McVBTmnOz0mXs=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_lazyimport.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			mYk/F/y7Kjicu4057FBmB/tnKu8=
+			eOqfLBn6KOJdE6FMjbfMxfgaWSs=
 			</data>
 			<key>hash2</key>
 			<data>
-			aOu1f216MS5TVM5sdzp7DL3KsQDH2RWmNejLj7o8nlI=
+			wSZ0BwOSzWjIker5KMVAngPT5LMA8qcOlObJo7+XtN8=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_locking.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			lGdpRn4897/oxmp6JE2B2dTPi4A=
+			BTpJgfCdnjF80Eyb+wSKcEtDBZs=
 			</data>
 			<key>hash2</key>
 			<data>
-			Bn2+tFgyejTbmvOYt2VyLQZLrO7Yx+Ie5aH3wvYVbXU=
+			EE6AeBzSNRywKxfTSedr6rRN8vf/Mm14ljjS0rHuZmA=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_new.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			AoMQmBjlzD1c9V4gBQiDW+a8ZXY=
+			e5teqBWrqKd2Mfbw6d71syMnB4I=
 			</data>
 			<key>hash2</key>
 			<data>
-			Dxbg1IpI4i/Tqd/vz0ZeEhGVxBE34LwpNHOgR4hIxzI=
+			Gz3kO3rMwyKrCWvv6xPF6A+TSzYWfCtISmOzRcKImBM=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_properties.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			n/TrBiOn0xgfCx/JsJNq39L73K8=
+			fObHCml+jI1EyKMNMjffTZj2UCE=
 			</data>
 			<key>hash2</key>
 			<data>
-			/H6wLHwZv7I4iDCWQUbt2uCfISpcgXtlxxcM8TimbZg=
+			2SPXYxvn5rksN69jy1lir7UYgCxC49/OZPOEeEnmVGs=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_protocols.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			fWN/EVXIeweVLG4vvOrH9QZriWA=
+			x6ZMWWjXS3RJ2bJ5o8zDYLyofig=
 			</data>
 			<key>hash2</key>
 			<data>
-			uuwY+/xVVEWKhQOr6bC70fMABNVxdaKkUoXEWE3iPT0=
+			dzitcgNdJtZ9Y5OHjKDM2Zhzv4Xte8A0NyVpPHTpmVA=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_pycoder.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			CChIxe+UzD3EMQ4UQ61c3xXSml8=
+			I4LsKqd2ciu2fbsgopieG1t7DAc=
 			</data>
 			<key>hash2</key>
 			<data>
-			c/IDBqoGqQYVkrcDz4fJQ5tbC0nopyEdpV+5yG0Wokw=
+			Bfu9MVQvj4Tlpf1WdE9NCd8S8EvQUOzhz7qnEpCrYog=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_pythonify.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			QI2zQpl5IFDhzLjIIwBBRv1Kj7w=
+			Q1I+Qa9M8Hc0iLbOmGss8lT0Uw0=
 			</data>
 			<key>hash2</key>
 			<data>
-			qtqaVn+C1A6vTONiL/k9P0MVbaTv8GcoWbln+dIyVKQ=
+			Z1bmD7BPDyd5oCykEu7G9MiGN0nLgdjx3FBpOMHEmUM=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_structtype.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			9c0Wk601lpR3erFF3HexehQ/OmQ=
+			PO9K7FRkPMV6V0VG/+SlbJFv1g0=
 			</data>
 			<key>hash2</key>
 			<data>
-			iUCW1dt5ewxbD1s1oJaOqEzpw6E82L4mVRqsfQS95c8=
+			LHeyWmYqUyZy31eaj2eRP6XigzSWqh06NmfymKMJuSk=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_transform.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			5//3+ELVzudUFP0vAnjh/lO6IpQ=
+			CTU5DHcLgOhOBSlesFyusPjTjUM=
 			</data>
 			<key>hash2</key>
 			<data>
-			KRcAs/7adWY7nqiB2I7kaiqEUMY2l57zZ21rlu5kRmM=
+			oqGoySWMl+fLeN0rXFl30ZYcWydAJjrX+d1JcAu+MZM=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/_types.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			PuhPP4myMrswAtbDnt4bExP+PQg=
+			uujXv9AsyDXPsIWRyy7QDFkp0+I=
 			</data>
 			<key>hash2</key>
 			<data>
-			ndI9m8Ho24gNz3+RAWI1c4LL0GkkVf2tmslLi1y7oiE=
+			IL9eKkjSxiWT+8xiX2lkO/f7pdzLclTVNrgus58P/pw=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/__pycache__/simd.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			dZqEA9hKD0BQIFxk/r+Z991xYXM=
+			IiMPu2VHMojRKF0vpUUQBdepf6w=
 			</data>
 			<key>hash2</key>
 			<data>
-			PTraiNmeN1L7SfnVCiqsGbgO12YxO7SzFI7ILsDH4fM=
+			SxhG3yZSRl0K1iUGcdaxPBU/0zJWEh+WjxF+QOXXXw0=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/objc/_bridges.py</key>
@@ -2982,99 +2727,99 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			hPpC/0QLRXRFEO8mewKDIY1it1k=
+			UhKFOnh7z57L8MfWvel9ib4bAmE=
 			</data>
 			<key>hash2</key>
 			<data>
-			gqivq1eS56h4gJ0eYww/cd88qOqxkir9EyaML/OVU+A=
+			HqrPCSmEmeHly9y8wA+0ombMnfIXiT57XSoKJYYvUuY=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/_internal.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			pSNiE2rrtJa0bUPo9K1j8wrQh54=
+			/Fr2RxABTNkctUkQVF7pb1zdV50=
 			</data>
 			<key>hash2</key>
 			<data>
-			c4KGA7RjjUpBgoj/lujtLp3AWkpI43bYy+6BnWl3nJk=
+			TfBPN+HOo+tFI6bPxc+hOvkTHSZzvoxzoxSzb5vGStY=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/compat.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			oaw49HMCapmHlCXJI+Eg2K5IsIo=
+			vZk+4MYEaYhOxhs5YKVuaAOhRtY=
 			</data>
 			<key>hash2</key>
 			<data>
-			4Bc9MvQAwhgN23IqpQzLWCbfAniuUGfM27QmN6DkS/8=
+			H2GLjApNRqgK28gZLdxm3NxXgG77zdOB0GIzmgDNDGc=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/events.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			g5aF+HIagOVbkkEvsSLn0GZlYUY=
+			JFJoqUIvnugYc7tkUBEfJ1J9h6s=
 			</data>
 			<key>hash2</key>
 			<data>
-			YaBw+xn0kzkDJ9O/czd8ePn2Gh0/5hX79pNoouZeri4=
+			5bDKd7YROm9nCn5MeQ8iFXefJTcARfYWJ4l4BByMGfs=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/exceptions.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			keFG6nkuK20ZiVUf3qy1vaj2x6Q=
+			eqreH3JO3LrjO+Bm+dUNEWbaUe0=
 			</data>
 			<key>hash2</key>
 			<data>
-			iijPDuzJGoDIRE0hPlmS5W2uPDpBMCjK7bjIRPfC/Uo=
+			pKH0MtRR1JGM5NdXz4pUcFv5TLb/16cKWVdMZ+LGxZY=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/notifications.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			EwoKEZqIKNyp2cvvNiR9/SN7vOI=
+			uUcIKJX19Xpfoc2TFxVLY+4DxDE=
 			</data>
 			<key>hash2</key>
 			<data>
-			gOClqj+6cPIeLhJ3ayTS828aC/Kz3fCjwBtc+FgewGw=
+			ZwaGYreKusvXymKBCOIC0Z9/wzw4Xc7F2UsN0iOtCXc=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/rumps.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			FJ5GhNZ6oruMF8HH35qiICoxnOc=
+			MSq7up4Kbm5yyDvd+aTjWqG5b10=
 			</data>
 			<key>hash2</key>
 			<data>
-			KwQWRSRgc98P0PyE+qdZQtL312atCpWhwbTJ+nk0aiI=
+			8/JTdB4QyOEAHQRF/ljGHdpQgXWoEhDhjPobBIaZQ+0=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/text_field.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			7ebxIsYyoTWQ6hOWDTlhkwM7GdU=
+			d3r+HfUQU+Wbt4DLfZ6B76C8TWI=
 			</data>
 			<key>hash2</key>
 			<data>
-			1v3f6C9AH6c9e666dbcpoJGxs2K2so+95TuDwtE7q+E=
+			oxTsw57MLVKKAStQlajTHD/LQVjka+PjbT5ffnjg11g=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/__pycache__/utils.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			XnZ+Ho4eKzlJ05Wi21OL9+EskiE=
+			TpbJaBxHd5GPysRegi1uJVobDF8=
 			</data>
 			<key>hash2</key>
 			<data>
-			BfrgGG4BsCZFrzGxCndZTKN1+Wy5kuz9FkND0ghbr6o=
+			bdXvha9LMZeHVKfwpakVDK0rPaZKwdbXWg3diQIVuj0=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/_internal.py</key>
@@ -3147,22 +2892,22 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			2ESzVgMlWzrrn/YwG/GHEIn3Jqk=
+			3MzKISUcTytiOvS8KclfJWLc0ro=
 			</data>
 			<key>hash2</key>
 			<data>
-			zpBhCoNcGSmqCl8V8eNqCxTh5CccAvq4R5SVQ+8+LGk=
+			mrs9s/oh16j2rOr2FagrSpRzszv/VpqbVIYWM5HhavA=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/packages/__pycache__/ordereddict.cpython-314.pyc</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			jVTC/fNaecx8PlNfX+t67JeoeZ8=
+			/QafjuUtQuGObu9tSx/H1597jGs=
 			</data>
 			<key>hash2</key>
 			<data>
-			eVwhzpuV8JATYHedGXTs7IU/SylDozJIKXoyQ0tsUbs=
+			e3W/ssbs6bABlVah+0EQP9aPfdqRvLmkUMIaw9ZnxDg=
 			</data>
 		</dict>
 		<key>Resources/lib/python3.14/rumps/packages/ordereddict.py</key>
@@ -3218,11 +2963,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			KVzqxgyx+dn1svK+DVBm5F0BKxc=
+			v+GXvIx2Ntam5Xg0OmQNHoovhlg=
 			</data>
 			<key>hash2</key>
 			<data>
-			+8d6kFY98BjyyX74iECvB6xfIfeqYdVwhqfoPvhW4WU=
+			pxbt4MyhdwNWwXq/IjChL9HIgciDPRWEEnk3bN/27CA=
 			</data>
 		</dict>
 		<key>Resources/menubar-icon-running.png</key>
@@ -3262,11 +3007,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			cdJj2IDAO0sC3TfTdplZ40ekGY0=
+			KFYurzLIEooNU/43vna+m9k9iu8=
 			</data>
 			<key>hash2</key>
 			<data>
-			bfZgLAr1SdgQGvkAKEV6ProxjRzrVfpVQ1o9DAudDp0=
+			0KUo6NiS6FPo9g/+u/xhu6rdibf6kfMKVUgV4phK5KE=
 			</data>
 		</dict>
 		<key>Resources/onion-forward.php</key>
@@ -3284,11 +3029,11 @@
 		<dict>
 			<key>hash</key>
 			<data>
-			t+lvX/kA3JrvRJKbiG9VXBBavKA=
+			ORek7KT9c35Z8dyEQFiVQFfdclw=
 			</data>
 			<key>hash2</key>
 			<data>
-			39qONh4EgT3eP4xwAkznGwzMUyj/JmLvZVqLo/8lcdw=
+			egVc4UVd16PDzCeUMMv5RZ4VtrS+Bwp5x8FS5Q2oNvI=
 			</data>
 		</dict>
 		<key>Resources/zlib.cpython-314-darwin.so</key>
