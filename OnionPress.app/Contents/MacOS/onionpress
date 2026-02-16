@@ -615,6 +615,20 @@ get_onion_address() {
     return 1
 }
 
+# Function to get healthcheck onion address (non-blocking, single attempt)
+get_healthcheck_address() {
+    cd "$DOCKER_DIR"
+    local addr
+    addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/healthcheck/hostname 2>/dev/null || echo "")
+    if [ ! -z "$addr" ]; then
+        echo "$addr"
+        # Save to data dir for menubar app to read
+        echo "$addr" > "$DATA_DIR/healthcheck-address"
+        return 0
+    fi
+    return 1
+}
+
 # Function to wait for services to be ready using active probing
 wait_for_services() {
     cd "$DOCKER_DIR"
@@ -664,6 +678,10 @@ wait_for_services() {
         if [ "$wp_ready" = true ] && [ "$onion_ready" = true ]; then
             log "All services are ready after ${waited}s"
             ONION_ADDR="$onion_addr"
+            # Read and save healthcheck address
+            if hc_addr=$(get_healthcheck_address); then
+                log "Healthcheck address: ${hc_addr}"
+            fi
             return 0
         fi
 

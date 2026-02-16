@@ -1,5 +1,12 @@
 SocksPort 0.0.0.0:9050
+
+# Content service (vanity address → WordPress)
 HiddenServiceDir /var/lib/tor/hidden_service/wordpress
 HiddenServiceVersion 3
 HiddenServicePort 80 wordpress:81
 HiddenServiceExportCircuitID haproxy
+
+# Healthcheck service (auto-generated address → status responder)
+HiddenServiceDir /var/lib/tor/hidden_service/healthcheck
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:8081

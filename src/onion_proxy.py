@@ -831,6 +831,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             "running": True,
             "proxy_port": self.server.server_port,
             "onion_address": self.server.onion_address,
+            "healthcheck_address": getattr(self.server, 'healthcheck_address', None),
             "tor_ready": getattr(self.server, 'tor_ready', False),
             "version": self.server.version,
             "cache": cache_stats,
@@ -851,6 +852,7 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
     def __init__(self, *args, **kwargs):
         self.onion_address = None
+        self.healthcheck_address = None
         self.tor_ready = False
         self.version = "unknown"
         self.docker_bin = "docker"
