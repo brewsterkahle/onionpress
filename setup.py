@@ -43,13 +43,13 @@ OPTIONS = {
         'LSApplicationCategoryType': 'public.app-category.utilities',
         'NSLocalNetworkUsageDescription': 'OnionPress runs a local web server on your Mac to connect your browser to your onion service. No other devices on your network are accessed.',
     },
-    'packages': ['rumps', 'objc', 'AppKit', 'mnemonic'],
+    'packages': ['rumps', 'objc', 'AppKit'],
     # CRITICAL: Local modules that menubar.py imports at runtime.
     # py2app cannot auto-detect these because it runs menubar.py via exec(),
     # not import. If you add a new local .py module, ADD IT HERE or the build
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
-    'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'bip39_words',
+    'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'backup_manager',
                  'onion_proxy', 'install_native_messaging', 'setup_window'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
