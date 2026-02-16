@@ -5,6 +5,8 @@
 
 HEALTHCHECK_PORT=8081
 MESSAGES_DIR="/var/lib/tor/healthcheck-messages"
+MESSAGES_MAX=100
+MESSAGES_TTL=86400  # 24 hours in seconds
 CONTENT_HOSTNAME_FILE="/var/lib/tor/hidden_service/wordpress/hostname"
 HEALTHCHECK_HOSTNAME_FILE="/var/lib/tor/hidden_service/healthcheck/hostname"
 VERSION_FILE="/var/lib/tor/healthcheck-version"
@@ -19,8 +21,40 @@ get_version() {
     fi
 }
 
+# Delete messages older than MESSAGES_TTL
+cleanup_old_messages() {
+    local now
+    now=$(date +%s)
+    for f in "$MESSAGES_DIR"/*.json; do
+        [ -f "$f" ] || continue
+        # Filename is timestamp.json — extract the seconds portion
+        local basename="${f##*/}"
+        local file_ts="${basename%.json}"
+        # Strip nanosecond suffix if present (keep first 10 digits)
+        file_ts=$(echo "$file_ts" | cut -c1-10)
+        if [ "$((now - file_ts))" -gt "$MESSAGES_TTL" ] 2>/dev/null; then
+            rm -f "$f"
+        fi
+    done
+}
+
+# Enforce max message count, deleting oldest first
+enforce_message_cap() {
+    local count
+    count=$(ls -1 "$MESSAGES_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" -gt "$MESSAGES_MAX" ]; then
+        local excess=$((count - MESSAGES_MAX))
+        ls -1 "$MESSAGES_DIR"/*.json | sort | head -n "$excess" | while read f; do
+            rm -f "$f"
+        done
+    fi
+}
+
 # Handle GET — return status JSON
 handle_get() {
+    # Clean up expired messages before responding
+    cleanup_old_messages
+
     # Read addresses
     local content_address=""
     local healthcheck_address=""
@@ -119,6 +153,9 @@ handle_post() {
         printf "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nEmpty body."
         return
     fi
+
+    # Enforce cap before writing new message
+    enforce_message_cap
 
     # Save message with timestamp-based filename
     local ts
