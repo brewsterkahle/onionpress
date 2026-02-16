@@ -233,12 +233,14 @@ class OnionPressApp(rumps.App):
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
+        self.relay_alert_item = rumps.MenuItem("Relay Alerts", callback=self.view_relay_alerts)
 
         self.menu = [
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
             self.browser_menu_item,
+            self.relay_alert_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -1325,6 +1327,18 @@ class OnionPressApp(rumps.App):
         # Dispatch UI updates to main thread to avoid AppKit threading violations
         def do_update():
             state = self.display_state
+
+            # Relay alert indicator: show "!" next to icon when messages exist
+            if self.relay_messages:
+                self.title = "!"
+                count = len(self.relay_messages)
+                self.relay_alert_item.title = f"Relay Alerts ({count})"
+                self.relay_alert_item.set_callback(self.view_relay_alerts)
+            else:
+                self.title = ""
+                self.relay_alert_item.title = "Relay Alerts"
+                self.relay_alert_item.set_callback(None)
+
             if state == "available":
                 self.icon = self.icon_running
                 self.menu["Starting..."].title = f"Address: {self.onion_address}"
@@ -1466,6 +1480,46 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             # Don't spam logs — relay polling failures are expected when container is starting
             pass
+
+    def view_relay_alerts(self, _):
+        """Show relay alert messages and offer to dismiss them."""
+        if not self.relay_messages:
+            rumps.alert("No relay alerts.")
+            return
+
+        # Build summary of all messages
+        lines = []
+        for msg in self.relay_messages:
+            msg_type = msg.get("type", "unknown").replace("_", " ").title()
+            msg_text = msg.get("message", "")
+            lines.append(f"[{msg_type}] {msg_text}")
+        summary = "\n".join(lines)
+
+        response = rumps.alert(
+            title=f"Relay Alerts ({len(self.relay_messages)})",
+            message=summary,
+            ok="Dismiss All",
+            cancel="Close"
+        )
+
+        if response == 1:  # "Dismiss All" clicked
+            self.log("Dismissing relay alerts")
+            self.relay_messages = []
+            self._relay_alert_shown = False
+            # Delete message files from container
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+                subprocess.run(
+                    [docker_bin, "exec", "onionpress-tor",
+                     "sh", "-c", "rm -f /var/lib/tor/healthcheck-messages/*.json"],
+                    capture_output=True, timeout=10, env=env
+                )
+            except Exception:
+                pass
+            self.update_menu()
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
