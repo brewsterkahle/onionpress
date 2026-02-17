@@ -37,6 +37,78 @@ def parse_version(version_str):
         return (0,)
 
 
+def _main_thread(func):
+    """Run func on the main thread (required for AppKit UI updates)."""
+    AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(func)
+
+
+class _BackupProgressWindow:
+    """A small floating window that shows backup/restore progress."""
+
+    def __init__(self, title):
+        self._title = title
+        self._window = None
+        self._status_field = None
+
+    def show(self):
+        w = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            AppKit.NSMakeRect(0, 0, 380, 120),
+            AppKit.NSWindowStyleMaskTitled,
+            AppKit.NSBackingStoreBuffered,
+            False
+        )
+        w.setTitle_(self._title)
+        w.setLevel_(AppKit.NSFloatingWindowLevel)
+        w.center()
+        w.setReleasedWhenClosed_(False)
+        w.setHidesOnDeactivate_(False)
+
+        content = AppKit.NSView.alloc().initWithFrame_(AppKit.NSMakeRect(0, 0, 380, 120))
+
+        # Spinner
+        spinner = AppKit.NSProgressIndicator.alloc().initWithFrame_(
+            AppKit.NSMakeRect(20, 75, 24, 24))
+        spinner.setStyle_(1)  # NSProgressIndicatorStyleSpinning
+        spinner.startAnimation_(None)
+        content.addSubview_(spinner)
+        self._spinner = spinner
+
+        # Title label
+        title_label = AppKit.NSTextField.labelWithString_(self._title + "...")
+        title_label.setFrame_(AppKit.NSMakeRect(52, 77, 300, 20))
+        title_label.setFont_(AppKit.NSFont.boldSystemFontOfSize_(14))
+        content.addSubview_(title_label)
+
+        # Status text
+        status = AppKit.NSTextField.labelWithString_("Starting...")
+        status.setFrame_(AppKit.NSMakeRect(20, 20, 340, 45))
+        status.setFont_(AppKit.NSFont.systemFontOfSize_(12))
+        status.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+        status.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+        content.addSubview_(status)
+        self._status_field = status
+
+        w.setContentView_(content)
+        w.makeKeyAndOrderFront_(None)
+        AppKit.NSApp.activateIgnoringOtherApps_(True)
+        self._window = w
+
+    def update(self, message):
+        if self._status_field:
+            self._status_field.setStringValue_(message)
+
+    def finish(self, message):
+        # Close the progress window and show a simple alert
+        if self._window:
+            self._window.orderOut_(None)
+            self._window = None
+        alert = AppKit.NSAlert.alloc().init()
+        alert.setMessageText_("Done")
+        alert.setInformativeText_(message)
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
+
+
 class OnionPressApp(rumps.App):
     def __init__(self):
         # Get paths first (fast - no I/O)
@@ -1346,6 +1418,8 @@ class OnionPressApp(rumps.App):
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
+                self.menu["Backup..."].set_callback(self.backup)
+                self.menu["Restore..."].set_callback(self.restore)
                 self.update_browser_menu_title()
             elif state == "starting":
                 self.icon = self.icon_starting
@@ -1357,18 +1431,24 @@ class OnionPressApp(rumps.App):
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
+                self.menu["Backup..."].set_callback(self.backup)
+                self.menu["Restore..."].set_callback(self.restore)
             elif state == "offline":
                 self.icon = self.icon_stopped
                 self.menu["Starting..."].title = "Status: Offline — no internet connection"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
+                self.menu["Backup..."].set_callback(self.backup)
+                self.menu["Restore..."].set_callback(self.restore)
             elif state == "stuck":
                 self.icon = self.icon_stopped
                 self.menu["Starting..."].title = "Status: Stuck — try Restart"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
+                self.menu["Backup..."].set_callback(self.backup)
+                self.menu["Restore..."].set_callback(self.restore)
             else:
                 # Stopped
                 self.icon = self.icon_stopped
@@ -1379,6 +1459,8 @@ class OnionPressApp(rumps.App):
                 self.menu["Start"].set_callback(self.start_service)
                 self.menu["Stop"].set_callback(None)
                 self.menu["Restart"].set_callback(None)
+                self.menu["Backup..."].set_callback(None)
+                self.menu["Restore..."].set_callback(None)
 
         # Execute on main thread
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(do_update)
@@ -2155,13 +2237,6 @@ class OnionPressApp(rumps.App):
     @rumps.clicked("Backup...")
     def backup(self, _):
         """Create a full backup of OnionPress (Tor keys, database, wp-content)"""
-        if not self.is_running:
-            rumps.alert(
-                title="Service Not Running",
-                message="Please start the service first before creating a backup."
-            )
-            return
-
         # Show credentials dialog using AppKit accessory view
         alert = AppKit.NSAlert.alloc().init()
         alert.setMessageText_("Backup OnionPress")
@@ -2230,7 +2305,7 @@ class OnionPressApp(rumps.App):
         panel.setNameFieldStringValue_(
             backup_manager.backup_filename(self.onion_address, username))
         panel.setDirectoryURL_(
-            AppKit.NSURL.fileURLWithPath_(os.path.expanduser("~/Desktop/")))
+            AppKit.NSURL.fileURLWithPath_(os.path.expanduser("~/Downloads/")))
         panel.setAllowedContentTypes_([
             AppKit.UTType.typeWithFilenameExtension_("zip")])
 
@@ -2239,41 +2314,34 @@ class OnionPressApp(rumps.App):
 
         output_path = panel.URL().path()
 
-        # Run backup in background
-        rumps.notification(
-            title="Backup Started",
-            subtitle="",
-            message="Creating backup archive. This may take a few minutes for large sites."
-        )
+        # Show progress window (stored on self to prevent garbage collection)
+        self._progress_window = _BackupProgressWindow("Backing Up OnionPress")
+        self._progress_window.show()
 
         def do_backup():
+            pw = self._progress_window
             try:
+                def log_and_update(msg):
+                    self.log(msg)
+                    display = msg.replace("Backup: ", "") if msg.startswith("Backup: ") else msg
+                    _main_thread(lambda: pw.update(display))
+
                 backup_manager.create_backup(
                     self.onion_address, username, password,
-                    output_path, self.version, self.log)
-                rumps.notification(
-                    title="Backup Complete",
-                    subtitle="",
-                    message=f"Backup saved to {os.path.basename(output_path)}")
+                    output_path, self.version, log_and_update)
+
+                size_mb = os.path.getsize(output_path) / (1024 * 1024)
+                msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
+                _main_thread(lambda: pw.finish(msg))
             except Exception as e:
                 self.log(f"Backup failed: {e}")
-                rumps.notification(
-                    title="Backup Failed",
-                    subtitle="",
-                    message=str(e))
+                _main_thread(lambda: pw.finish(f"Backup failed: {e}"))
 
         threading.Thread(target=do_backup, daemon=True).start()
 
     @rumps.clicked("Restore...")
     def restore(self, _):
         """Restore OnionPress from a backup zip"""
-        if not self.is_running:
-            rumps.alert(
-                title="Service Not Running",
-                message="Please start the service first before restoring a backup."
-            )
-            return
-
         # File picker for .zip
         panel = AppKit.NSOpenPanel.openPanel()
         panel.setTitle_("Select OnionPress Backup")
@@ -2288,11 +2356,26 @@ class OnionPressApp(rumps.App):
 
         zip_path = panel.URL().path()
 
+        # Try to extract username from backup filename
+        # Format: OnionPress-<addr>-<username>-<date>.zip
+        zip_name = os.path.basename(zip_path)
+        backup_user = None
+        if zip_name.startswith("OnionPress-") and zip_name.endswith(".zip"):
+            parts = zip_name[len("OnionPress-"):-len(".zip")].split("-")
+            if len(parts) >= 3:
+                # parts[0] = addr prefix, parts[1] = username, rest = date
+                backup_user = parts[1]
+
         # Prompt for password
         alert = AppKit.NSAlert.alloc().init()
         alert.setMessageText_("Enter Backup Password")
-        alert.setInformativeText_(
-            "Enter the password that was used when this backup was created.")
+        if backup_user:
+            alert.setInformativeText_(
+                f"Enter the password of '{backup_user}' that was used "
+                f"when this backup was created.")
+        else:
+            alert.setInformativeText_(
+                "Enter the password that was used when this backup was created.")
 
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
         if os.path.exists(icon_path):
@@ -2353,19 +2436,22 @@ class OnionPressApp(rumps.App):
         if button_index != 1:
             return
 
-        # Run restore in background
-        rumps.notification(
-            title="Restore Started",
-            subtitle="",
-            message="Restoring from backup. This may take a few minutes."
-        )
+        # Show progress window (stored on self to prevent garbage collection)
+        self._progress_window = _BackupProgressWindow("Restoring OnionPress")
+        self._progress_window.show()
 
         def do_restore():
+            pw = self._progress_window
             try:
-                backup_manager.restore_from_backup(
-                    zip_path, password, self.log)
+                def log_and_update(msg):
+                    self.log(msg)
+                    display = msg.replace("Restore: ", "") if msg.startswith("Restore: ") else msg
+                    _main_thread(lambda: pw.update(display))
 
-                # Restart service to pick up restored keys
+                backup_manager.restore_from_backup(
+                    zip_path, password, log_and_update)
+
+                _main_thread(lambda: pw.update("Restarting service..."))
                 self.log("Restore: restarting service...")
                 subprocess.run([self.launcher_script, "restart"],
                                capture_output=True, timeout=60)
@@ -2376,16 +2462,12 @@ class OnionPressApp(rumps.App):
                 time.sleep(2)
                 self.check_status()
 
-                rumps.notification(
-                    title="Restore Complete",
-                    subtitle="",
-                    message=f"Site restored successfully. Onion address: {addr}")
+                restored_addr = self.onion_address or addr
+                _main_thread(lambda: pw.finish(
+                    f"Site restored successfully.\nOnion address: {restored_addr}"))
             except Exception as e:
                 self.log(f"Restore failed: {e}")
-                rumps.notification(
-                    title="Restore Failed",
-                    subtitle="",
-                    message=str(e))
+                _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
 
         threading.Thread(target=do_restore, daemon=True).start()
 

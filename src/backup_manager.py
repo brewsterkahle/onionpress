@@ -96,14 +96,19 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             with open(os.path.join(tor_dir, keyfile), 'wb') as f:
                 f.write(result.stdout)
 
-        # 2. Dump WordPress database via WP-CLI
+        # 2. Dump WordPress database via mariadb-dump in the db container
+        # (wp db export uses mysqldump which isn't in the WordPress container)
         log_func("Backup: exporting database...")
         db_dir = os.path.join(staging, 'database')
         os.makedirs(db_dir)
 
+        db_creds = _get_db_credentials()
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'db', 'export', '-', '--allow-root'],
+            ['docker', 'exec', 'onionpress-db',
+             'mariadb-dump',
+             '-u', db_creds['user'],
+             '-p' + db_creds['password'],
+             db_creds['name']],
             capture_output=True, timeout=120
         )
         if result.returncode != 0:
@@ -225,20 +230,26 @@ def restore_from_backup(zip_path, password, log_func):
                 capture_output=True, timeout=10, check=True
             )
 
-        # 2. Restore database
+        # 2. Restore database via mariadb CLI in the db container
         log_func("Restore: importing database...")
         sql_path = os.path.join(db_dir, 'wordpress.sql')
         if not os.path.exists(sql_path):
             raise Exception("Backup is missing wordpress.sql")
 
-        # Copy SQL into container then import
+        db_creds = _get_db_credentials()
+
+        # Copy SQL into db container then import
         subprocess.run(
-            ['docker', 'cp', sql_path, 'onionpress-wordpress:/tmp/wordpress.sql'],
+            ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
             capture_output=True, timeout=30, check=True
         )
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'db', 'import', '/tmp/wordpress.sql', '--allow-root'],
+            ['docker', 'exec', 'onionpress-db',
+             'mariadb',
+             '-u', db_creds['user'],
+             '-p' + db_creds['password'],
+             db_creds['name'],
+             '-e', 'source /tmp/wordpress.sql'],
             capture_output=True, timeout=120
         )
         if result.returncode != 0:
@@ -246,7 +257,7 @@ def restore_from_backup(zip_path, password, log_func):
 
         # Clean up SQL file in container
         subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress', 'rm', '-f', '/tmp/wordpress.sql'],
+            ['docker', 'exec', 'onionpress-db', 'rm', '-f', '/tmp/wordpress.sql'],
             capture_output=True, timeout=10
         )
 
@@ -270,6 +281,25 @@ def restore_from_backup(zip_path, password, log_func):
 
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _get_db_credentials():
+    """Read WordPress database credentials from wp-config.php via WP-CLI."""
+    creds = {}
+    for field in ('DB_NAME', 'DB_USER', 'DB_PASSWORD'):
+        result = subprocess.run(
+            ['docker', 'exec', 'onionpress-wordpress',
+             'wp', 'config', 'get', field, '--allow-root'],
+            capture_output=True, timeout=15
+        )
+        if result.returncode != 0:
+            raise Exception(f"Could not read {field} from WordPress config")
+        creds[field] = result.stdout.decode(errors='replace').strip()
+    return {
+        'name': creds['DB_NAME'],
+        'user': creds['DB_USER'],
+        'password': creds['DB_PASSWORD'],
+    }
 
 
 def _find_dir(staging, name):

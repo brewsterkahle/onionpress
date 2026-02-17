@@ -178,7 +178,13 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             f.write('    printf "fake-secret-key-data-32-bytes-xx"; exit 0\n')
             f.write('elif [[ "$1" == "exec" && "$*" == *"hs_ed25519_public_key"* ]]; then\n')
             f.write('    printf "fake-public-key-data-32-bytes-xx"; exit 0\n')
-            f.write('elif [[ "$1" == "exec" && "$*" == *"wp db export"* ]]; then\n')
+            f.write('elif [[ "$1" == "exec" && "$*" == *"wp config get DB_NAME"* ]]; then\n')
+            f.write('    echo "wordpress"; exit 0\n')
+            f.write('elif [[ "$1" == "exec" && "$*" == *"wp config get DB_USER"* ]]; then\n')
+            f.write('    echo "wordpress"; exit 0\n')
+            f.write('elif [[ "$1" == "exec" && "$*" == *"wp config get DB_PASSWORD"* ]]; then\n')
+            f.write('    echo "testpass123"; exit 0\n')
+            f.write('elif [[ "$1" == "exec" && "$*" == *"mariadb-dump"* ]]; then\n')
             f.write('    echo "CREATE TABLE wp_posts; INSERT INTO wp_posts VALUES (1);"; exit 0\n')
             f.write('elif [[ "$1" == "cp" ]]; then\n')
             # For `docker cp container:/path dest`, create the dest with sample content
@@ -307,12 +313,17 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.logs = []
 
-        # Create a fake docker that succeeds for all commands
+        # Create a fake docker that handles wp config get and succeeds otherwise
         self.fake_bin = os.path.join(self.tmpdir, "bin")
         os.makedirs(self.fake_bin)
         fake_docker = os.path.join(self.fake_bin, "docker")
         with open(fake_docker, "w") as f:
-            f.write("#!/bin/bash\nexit 0\n")
+            f.write('#!/bin/bash\n')
+            f.write('if [[ "$*" == *"wp config get DB_NAME"* ]]; then echo "wordpress"; exit 0\n')
+            f.write('elif [[ "$*" == *"wp config get DB_USER"* ]]; then echo "wordpress"; exit 0\n')
+            f.write('elif [[ "$*" == *"wp config get DB_PASSWORD"* ]]; then echo "testpw"; exit 0\n')
+            f.write('fi\n')
+            f.write('exit 0\n')
         os.chmod(fake_docker, 0o755)
 
         self.orig_path = os.environ.get("PATH", "")
