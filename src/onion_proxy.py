@@ -537,6 +537,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 self.send_header(name, value)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Referrer-Policy', 'no-referrer')
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
@@ -757,6 +758,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
                 # Write .htaccess with multisite rewrite rules
                 htaccess_rules = (
+                    "# Privacy: prevent onion address leaking in Referer headers\\n"
+                    "Header set Referrer-Policy \\\"no-referrer\\\"\\n"
+                    "\\n"
                     "# BEGIN WordPress Multisite\\n"
                     "RewriteEngine On\\n"
                     "RewriteBase /\\n"
