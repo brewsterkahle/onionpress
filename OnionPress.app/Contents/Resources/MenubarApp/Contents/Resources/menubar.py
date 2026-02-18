@@ -570,7 +570,10 @@ class OnionPressApp(rumps.App):
                 self.proxy_thread = None
 
     def check_wp_installed(self):
-        """Check if WordPress core is installed via wp-cli."""
+        """Check if WordPress core is installed via wp-cli.
+
+        Returns True (installed), False (not installed), or None (container not ready).
+        """
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -583,7 +586,7 @@ class OnionPressApp(rumps.App):
             )
             return result.returncode == 0
         except Exception:
-            return False
+            return None
 
     def show_native_alert(self, title, message, buttons=["OK"], default_button=0, cancel_button=None, style="informational"):
         """Show a native macOS alert dialog using AppKit (no permission prompts, shows custom icon)
@@ -1347,8 +1350,8 @@ class OnionPressApp(rumps.App):
                                 target=lambda: subprocess.run([self.launcher_script, "start-tor"]),
                                 daemon=True
                             ).start()
-                    elif not self._setup_page_opened:
-                        # WordPress container is running but not installed — open setup page
+                    elif wp_installed is False and not self._setup_page_opened:
+                        # WordPress container responded but WP not installed — open setup page
                         self._wp_installed = False
                         self._setup_page_opened = True
                         self.log("WordPress not installed — opening setup page")
