@@ -292,6 +292,7 @@ class OnionPressApp(rumps.App):
         self.proxy_server = None  # Onion proxy HTTP server instance
         self.proxy_thread = None  # Thread running the proxy server
         self._wp_installed = None  # None = unknown, True/False = checked
+        self._wp_not_installed_count = 0  # Consecutive "not installed" results
         self._setup_page_opened = False  # Track if we've opened the setup page
         self._port_conflict = False  # True if ports are in use by another instance
         self._has_internet = True          # Host-level internet connectivity
@@ -1279,10 +1280,11 @@ class OnionPressApp(rumps.App):
                         # Dismiss setup dialog if it's showing
                         self.dismiss_setup_dialog()
 
-                        # Auto-open Tor Browser on first ready (if installed)
+                        # Auto-open browser on first ready (runs in background
+                        # so the monitoring loop can continue and start the proxy)
                         if not self.auto_opened_browser:
                             self.auto_opened_browser = True
-                            self.auto_open_browser()
+                            threading.Thread(target=self.auto_open_browser, daemon=True).start()
 
                         # Force menu update (changes icon to purple)
                         self.update_menu()
@@ -1351,14 +1353,21 @@ class OnionPressApp(rumps.App):
                                 daemon=True
                             ).start()
                     elif wp_installed is False and not self._setup_page_opened:
-                        # WordPress container responded but WP not installed — open setup page
-                        self._wp_installed = False
-                        self._setup_page_opened = True
-                        self.log("WordPress not installed — opening setup page")
-                        # Dismiss dialogs before opening browser
-                        self.dismiss_setup_dialog()
-                        self.dismiss_launch_splash()
-                        subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
+                        # WordPress container responded but WP not installed.
+                        # Require 5 consecutive "not installed" results before opening
+                        # the setup page — the DB may still be warming up.
+                        self._wp_not_installed_count += 1
+                        if self._wp_not_installed_count >= 5:
+                            self._wp_installed = False
+                            self._setup_page_opened = True
+                            self.log("WordPress not installed — opening setup page")
+                            # Dismiss dialogs before opening browser
+                            self.dismiss_setup_dialog()
+                            self.dismiss_launch_splash()
+                            subprocess.run(["open", f"http://localhost:{onion_proxy.PROXY_PORT}/setup"])
+                    else:
+                        # Reset counter on None (container not ready) or True
+                        self._wp_not_installed_count = 0
             else:
                 # Log when stopping
                 if self.is_running or self.is_ready:
@@ -1374,6 +1383,7 @@ class OnionPressApp(rumps.App):
                 self.is_ready = False
                 self.auto_opened_browser = False  # Reset for next start
                 self._wp_installed = None  # Reset for next start
+                self._wp_not_installed_count = 0
                 self._setup_page_opened = False
                 self._was_ready = False
                 self._last_bootstrap_pct = 0
@@ -1870,13 +1880,49 @@ class OnionPressApp(rumps.App):
 
     def auto_open_browser(self):
         """Automatically open a browser when service becomes ready"""
-        # Wait for Tor circuits to stabilize before opening browser
-        self.log("Waiting 10s for Tor circuits to stabilize before opening browser...")
-        time.sleep(10)
+        # Wait until the onion service is actually reachable before opening
+        # the browser. Poll via docker exec into the tor container (the same
+        # path the launcher uses) instead of a fixed sleep.
+        if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
+            return
+
+        self.log("Waiting for onion service to become reachable before opening browser...")
+
+        # Test the actual .onion address through the SOCKS proxy on the Mac.
+        # This is the same path the browser uses, so it only succeeds once
+        # the onion service is fully published on the Tor network.
+        onion_url = f"http://{self.onion_address}/"
+        reachable = False
+        for attempt in range(30):  # Up to 90s (30 x 3s)
+            try:
+                result = subprocess.run(
+                    ["curl", "--socks5-hostname", "127.0.0.1:9050",
+                     "-s", "-o", "/dev/null", "--max-time", "10",
+                     onion_url],
+                    capture_output=True, timeout=15
+                )
+                if result.returncode == 0:
+                    reachable = True
+                    self.log(f"Onion service reachable via Tor after {(attempt + 1) * 3}s")
+                    break
+            except Exception:
+                pass
+            time.sleep(3)
+
+        if not reachable:
+            self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
+
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
             tor_browser_path = "/Applications/Tor Browser.app"
             brave_browser_path = "/Applications/Brave Browser.app"
             url = f"http://{self.onion_address}"
+
+            # Wait for the onion proxy to start (it runs in the monitoring
+            # loop which continues in parallel now)
+            for i in range(15):
+                if self.proxy_server is not None:
+                    break
+                time.sleep(1)
 
             # Wait up to 5 more seconds for a browser extension to register
             ext_browser = None
@@ -1887,8 +1933,25 @@ class OnionPressApp(rumps.App):
                 self.log(f"Waiting for extension registration... ({i+1}/5)")
                 time.sleep(1)
             if ext_browser:
-                # Open in the specific browser that has the extension
+                # Launch browser first so the extension can poll /status
+                # and configure its SOCKS proxy before we navigate.
                 self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
+                subprocess.run(["open", "-a", ext_browser])
+                # Wait for extension to poll /status and set up SOCKS routing.
+                # Extension polls every 3s when proxy was down (recovery mode).
+                marker = os.path.join(self.app_support, "extension-connected")
+                for i in range(30):
+                    try:
+                        with open(marker, 'r') as f:
+                            data = json.loads(f.read().strip())
+                        if (time.time() - data["timestamp"]) < 5:
+                            self.log(f"Extension active after {i+1}s, opening .onion URL")
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                else:
+                    self.log("Extension did not poll within 30s, opening .onion URL anyway")
                 subprocess.run(["open", "-a", ext_browser, url])
             elif os.path.exists(brave_browser_path):
                 self.log(f"Auto-opening Brave Browser (Tor mode): {url}")

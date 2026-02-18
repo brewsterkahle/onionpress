@@ -53,18 +53,44 @@ async function checkProxyStatus() {
   return false;
 }
 
-// Poll rapidly at startup (every 2s for 30s) so the proxy learns about us
-// quickly, then switch to normal 60s interval
+// Adaptive polling: rapid at startup and when proxy goes down, slow when stable
+let normalInterval = null;
+let recoveryInterval = null;
+
+function startNormalPolling() {
+  if (recoveryInterval) { clearInterval(recoveryInterval); recoveryInterval = null; }
+  if (!normalInterval) {
+    normalInterval = setInterval(checkAndAdapt, 60000);
+  }
+}
+
+function startRecoveryPolling() {
+  // Poll every 3s until proxy comes back (re-enters normal after success)
+  if (recoveryInterval) return;
+  if (normalInterval) { clearInterval(normalInterval); normalInterval = null; }
+  recoveryInterval = setInterval(checkAndAdapt, 3000);
+}
+
+async function checkAndAdapt() {
+  const ok = await checkProxyStatus();
+  if (ok && recoveryInterval) {
+    startNormalPolling();
+  } else if (!ok && !recoveryInterval) {
+    startRecoveryPolling();
+  }
+}
+
+// Rapid startup polling (every 2s for 30s), then switch to adaptive
 let startupPollCount = 0;
 const startupInterval = setInterval(() => {
-  checkProxyStatus();
+  checkAndAdapt();
   startupPollCount++;
   if (startupPollCount >= 15) {
     clearInterval(startupInterval);
-    setInterval(checkProxyStatus, 60000);
+    if (proxyRunning) { startNormalPolling(); } else { startRecoveryPolling(); }
   }
 }, 2000);
-checkProxyStatus();
+checkAndAdapt();
 
 // ---------------------------------------------------------------------------
 // Proxy configuration — route .onion through Tor SOCKS proxy
