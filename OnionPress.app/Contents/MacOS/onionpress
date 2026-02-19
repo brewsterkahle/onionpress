@@ -219,6 +219,197 @@ generate_vanity_address() {
     return 0
 }
 
+# Function to import a pre-generated vanity key
+import_key() {
+    local key_b32="$1"
+
+    # Show help if no argument or --help
+    if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
+        cat <<'HELPEOF'
+Usage: onionpress import-key <base32-secret-key>
+
+Import a pre-generated ed25519 vanity key for your onion service.
+
+The base32 key should encode the 64-byte expanded ed25519 secret key.
+OnionPress will derive the .onion address automatically.
+
+HOW TO GET THE KEY FROM mkp224o OUTPUT:
+
+  OnionPress stores vanity keys in ~/.onionpress/shared/vanity-keys/.
+  Each address has its own directory containing hs_ed25519_secret_key.
+  Encode that file to base32:
+
+    python3 -c "import base64; print(base64.b32encode(open('$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
+
+  If you ran mkp224o yourself, substitute the path to your output directory.
+
+  OnionPress accepts both the full file (96 bytes with header) and the
+  64-byte key alone (read()[32:]).
+
+EXAMPLE:
+
+  KEY=$(python3 -c "import base64; print(base64.b32encode(open('$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
+  ./onionpress import-key "$KEY"
+
+WHAT THIS COMMAND DOES:
+
+  1. Decodes the base32 key and validates it is exactly 64 bytes
+  2. Derives the .onion address from the public key portion
+  3. Writes key files to ~/.onionpress/shared/vanity-keys/<address>/
+     - hs_ed25519_secret_key  (32-byte header + 64-byte key)
+     - hs_ed25519_public_key  (32-byte header + 32-byte pubkey)
+     - hostname               (the .onion address)
+  4. On next start, OnionPress will use this key
+
+NOTE: If OnionPress has already started and created a tor-keys volume,
+you must stop OnionPress and delete the volume first:
+
+    ./onionpress stop
+    docker volume rm onionpress-tor-keys
+
+HELPEOF
+        return 0
+    fi
+
+    # Check if tor-keys volume already exists
+    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-tor-keys$'; then
+        echo "ERROR: onionpress-tor-keys volume already exists." >&2
+        echo "" >&2
+        echo "OnionPress has already created a tor key volume. To import a new key:" >&2
+        echo "  1. Stop OnionPress:  ./onionpress stop" >&2
+        echo "  2. Delete the volume: docker volume rm onionpress-tor-keys" >&2
+        echo "  3. Re-run:           ./onionpress import-key <key>" >&2
+        return 1
+    fi
+
+    # Decode base32, validate length, derive public key and address — all in one python3 call
+    # The public key must be derived via ed25519 scalar multiplication (not a simple slice)
+    local result
+    result=$(python3 -c "
+import base64, hashlib, sys, binascii
+
+key_b32 = sys.argv[1]
+
+# Decode base32
+try:
+    key_bytes = base64.b32decode(key_b32, casefold=True)
+except Exception as e:
+    print(f'ERROR: Invalid base32 encoding: {e}', file=sys.stderr)
+    sys.exit(1)
+
+# Accept 96 bytes (full file with 32-byte header) or 64 bytes (key only)
+if len(key_bytes) == 96 and key_bytes[:29] == b'== ed25519v1-secret: type0 ==':
+    key_bytes = key_bytes[32:]
+elif len(key_bytes) != 64:
+    print(f'ERROR: Key must be exactly 64 bytes (or 96 with header), got {len(key_bytes)}', file=sys.stderr)
+    sys.exit(1)
+
+# Derive public key from expanded secret key via ed25519 scalar multiplication
+p = 2**255 - 19
+def inv(x): return pow(x, p-2, p)
+d = -121665 * inv(121666) % p
+
+def recover_x(y, sign):
+    x2 = (y*y-1) * inv(d*y*y+1) % p
+    x = pow(x2, (p+3)//8, p)
+    if (x*x - x2) % p != 0:
+        x = x * pow(2, (p-1)//4, p) % p
+    if x % 2 != sign: x = p - x
+    return x
+
+By = 4 * inv(5) % p
+Bx = recover_x(By, 0)
+B = (Bx, By, 1, Bx*By % p)
+
+def point_add(P, Q):
+    x1,y1,z1,t1 = P; x2,y2,z2,t2 = Q
+    a=(y1-x1)*(y2-x2)%p; b=(y1+x1)*(y2+x2)%p
+    c=2*t1*t2*d%p; dd=2*z1*z2%p
+    e=b-a; f=dd-c; g=dd+c; h=b+a
+    return (e*f%p, g*h%p, f*g%p, e*h%p)
+
+def scalar_mult(s, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1: Q = point_add(Q, P)
+        P = point_add(P, P)
+        s >>= 1
+    return Q
+
+def encode_point(P):
+    x,y,z,_ = P; zi = inv(z)
+    x,y = x*zi%p, y*zi%p
+    r = bytearray(y.to_bytes(32,'little'))
+    r[31] ^= (x&1) << 7
+    return bytes(r)
+
+scalar = int.from_bytes(key_bytes[:32], 'little')
+pubkey = encode_point(scalar_mult(scalar, B))
+
+# Derive .onion address (v3 spec)
+checksum = hashlib.sha3_256(b'.onion checksum' + pubkey + b'\x03').digest()[:2]
+address = base64.b32encode(pubkey + checksum + b'\x03').decode().lower() + '.onion'
+
+# Output: address on line 1, hex key on line 2, hex pubkey on line 3
+print(address)
+print(binascii.hexlify(key_bytes).decode())
+print(binascii.hexlify(pubkey).decode())
+" "$key_b32" 2>&1)
+
+    if [ $? -ne 0 ]; then
+        echo "$result" >&2
+        return 1
+    fi
+
+    # Parse python output
+    local address hex_key hex_pubkey
+    address=$(echo "$result" | sed -n '1p')
+    hex_key=$(echo "$result" | sed -n '2p')
+    hex_pubkey=$(echo "$result" | sed -n '3p')
+
+    if [ -z "$address" ] || [ -z "$hex_key" ] || [ -z "$hex_pubkey" ]; then
+        echo "ERROR: Failed to derive address from key" >&2
+        return 1
+    fi
+
+    # Create output directory
+    local output_dir="$DATA_DIR/shared/vanity-keys/$address"
+    mkdir -p "$output_dir"
+
+    # Write hs_ed25519_secret_key: 32-byte header + 64-byte key
+    # Header: "== ed25519v1-secret: type0 ==\x00\x00\x00" (32 bytes)
+    python3 -c "
+import binascii, sys
+header = b'== ed25519v1-secret: type0 ==\x00\x00\x00'
+key = binascii.unhexlify(sys.argv[1])
+sys.stdout.buffer.write(header + key)
+" "$hex_key" > "$output_dir/hs_ed25519_secret_key"
+
+    # Write hs_ed25519_public_key: 32-byte header + 32-byte pubkey
+    # Header: "== ed25519v1-public: type0 ==\x00\x00\x00" (32 bytes)
+    python3 -c "
+import binascii, sys
+header = b'== ed25519v1-public: type0 ==\x00\x00\x00'
+pubkey = binascii.unhexlify(sys.argv[1])
+sys.stdout.buffer.write(header + pubkey)
+" "$hex_pubkey" > "$output_dir/hs_ed25519_public_key"
+
+    # Write hostname file
+    echo "$address" > "$output_dir/hostname"
+
+    # Set restrictive permissions
+    chmod 600 "$output_dir/hs_ed25519_secret_key"
+    chmod 600 "$output_dir/hs_ed25519_public_key"
+    chmod 644 "$output_dir/hostname"
+
+    log "Imported vanity key for address: $address"
+    echo "Imported key for: $address"
+    echo "Key files written to: $output_dir"
+    echo ""
+    echo "Start OnionPress to use this address."
+    return 0
+}
+
 # Function to install and activate Internet Archive Wayback Machine Link Fixer plugin
 install_ia_plugin() {
     # Check if plugin installation is enabled in config
@@ -823,13 +1014,17 @@ main() {
             log "Tor container started"
             ;;
 
+        import-key)
+            import_key "$2"
+            ;;
+
         logs)
             cd "$DOCKER_DIR"
             docker compose logs -f
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|start-tor|logs}"
+            echo "Usage: $0 {start|stop|restart|status|address|start-tor|import-key|logs}"
             exit 1
             ;;
     esac
