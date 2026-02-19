@@ -21,18 +21,18 @@
 
 # === Variables set by makesetup ===
 
-MODBUILT_NAMES=      array  _asyncio  _bisect  _csv  _heapq  _json  _lsprof  _pickle  _queue  _random  _remote_debugging  _struct  _interpreters  _interpchannels  _interpqueues  _zoneinfo  math  cmath  _statistics  _decimal  binascii  _bz2  _lzma  _zstd  zlib  _dbm  readline  _md5  _sha1  _sha2  _sha3  _blake2  _hmac  pyexpat  _elementtree  _codecs_cn  _codecs_hk  _codecs_iso2022  _codecs_jp  _codecs_kr  _codecs_tw  _multibytecodec  unicodedata  fcntl  grp  mmap  _posixsubprocess  resource  select  _socket  syslog  termios  _posixshmem  _multiprocessing  _ctypes  _curses  _curses_panel  _sqlite3  _ssl  _hashlib  _uuid  _scproxy  xxsubtype  _xxtestfuzz  _testbuffer  _testinternalcapi  _testcapi  _testlimitedcapi  _testclinic  _testclinic_limited  _testimportmultiple  _testmultiphase  _testsinglephase  _ctypes_test  xxlimited  xxlimited_35  atexit  faulthandler  posix  _signal  _tracemalloc  _suggestions  _datetime  _codecs  _collections  errno  _io  itertools  _sre  _sysconfig  _thread  time  _types  _typing  _weakref  _abc  _functools  _locale  _opcode  _operator  _stat  _symtable  pwd
-MODSHARED_NAMES=    array _asyncio _bisect _csv _heapq _json _lsprof _pickle _queue _random _remote_debugging _struct _interpreters _interpchannels _interpqueues _zoneinfo math cmath _statistics _decimal binascii _bz2 _lzma _zstd zlib _dbm readline _md5 _sha1 _sha2 _sha3 _blake2 _hmac pyexpat _elementtree _codecs_cn _codecs_hk _codecs_iso2022 _codecs_jp _codecs_kr _codecs_tw _multibytecodec unicodedata fcntl grp mmap _posixsubprocess resource select _socket syslog termios _posixshmem _multiprocessing _ctypes _curses _curses_panel _sqlite3 _ssl _hashlib _uuid _scproxy xxsubtype _xxtestfuzz _testbuffer _testinternalcapi _testcapi _testlimitedcapi _testclinic _testclinic_limited _testimportmultiple _testmultiphase _testsinglephase _ctypes_test xxlimited xxlimited_35
+MODBUILT_NAMES=      array  _asyncio  _bisect  _csv  _heapq  _json  _lsprof  _pickle  _queue  _random  _remote_debugging  _struct  _interpreters  _interpchannels  _interpqueues  _zoneinfo  math  cmath  _statistics  _decimal  binascii  _bz2  _lzma  _zstd  zlib  _dbm  readline  _md5  _sha1  _sha2  _sha3  _blake2  _hmac  pyexpat  _elementtree  _codecs_cn  _codecs_hk  _codecs_iso2022  _codecs_jp  _codecs_kr  _codecs_tw  _multibytecodec  unicodedata  fcntl  grp  mmap  _posixsubprocess  resource  select  _socket  syslog  termios  _posixshmem  _multiprocessing  _ctypes  _curses  _curses_panel  _sqlite3  _ssl  _hashlib  _uuid  _tkinter  _scproxy  xxsubtype  _xxtestfuzz  _testbuffer  _testinternalcapi  _testcapi  _testlimitedcapi  _testclinic  _testclinic_limited  _testimportmultiple  _testmultiphase  _testsinglephase  _ctypes_test  xxlimited  xxlimited_35  atexit  faulthandler  posix  _signal  _tracemalloc  _suggestions  _datetime  _codecs  _collections  errno  _io  itertools  _sre  _sysconfig  _thread  time  _types  _typing  _weakref  _abc  _functools  _locale  _opcode  _operator  _stat  _symtable  pwd
+MODSHARED_NAMES=    array _asyncio _bisect _csv _heapq _json _lsprof _pickle _queue _random _remote_debugging _struct _interpreters _interpchannels _interpqueues _zoneinfo math cmath _statistics _decimal binascii _bz2 _lzma _zstd zlib _dbm readline _md5 _sha1 _sha2 _sha3 _blake2 _hmac pyexpat _elementtree _codecs_cn _codecs_hk _codecs_iso2022 _codecs_jp _codecs_kr _codecs_tw _multibytecodec unicodedata fcntl grp mmap _posixsubprocess resource select _socket syslog termios _posixshmem _multiprocessing _ctypes _curses _curses_panel _sqlite3 _ssl _hashlib _uuid _tkinter _scproxy xxsubtype _xxtestfuzz _testbuffer _testinternalcapi _testcapi _testlimitedcapi _testclinic _testclinic_limited _testimportmultiple _testmultiphase _testsinglephase _ctypes_test xxlimited xxlimited_35
 MODDISABLED_NAMES= 
 MODOBJS=             Modules/atexitmodule.o  Modules/faulthandler.o  Modules/posixmodule.o  Modules/signalmodule.o  Modules/_tracemalloc.o  Modules/_suggestions.o  Modules/_datetimemodule.o  Modules/_codecsmodule.o  Modules/_collectionsmodule.o  Modules/errnomodule.o  Modules/_io/_iomodule.o Modules/_io/iobase.o Modules/_io/fileio.o Modules/_io/bytesio.o Modules/_io/bufferedio.o Modules/_io/textio.o Modules/_io/stringio.o  Modules/itertoolsmodule.o  Modules/_sre/sre.o  Modules/_sysconfig.o  Modules/_threadmodule.o  Modules/timemodule.o  Modules/_typesmodule.o  Modules/_typingmodule.o  Modules/_weakref.o  Modules/_abc.o  Modules/_functoolsmodule.o  Modules/_localemodule.o  Modules/_opcode.o  Modules/_operator.o  Modules/_stat.o  Modules/symtablemodule.o  Modules/pwdmodule.o
 MODLIBS=           $(LOCALMODLIBS) $(BASEMODLIBS)
 
 # === Variables set by configure
 VERSION=	3.14
-srcdir=		.
-
-abs_srcdir=	/private/tmp/pythonA3.14-20251009-32471-db682m/Python-3.14.0
-abs_builddir=	/private/tmp/pythonA3.14-20251009-32471-db682m/Python-3.14.0
+srcdir=		/Users/nad/build_macos_installer/installer/variant/binaries/build_source
+VPATH=		/Users/nad/build_macos_installer/installer/variant/binaries/build_source
+abs_srcdir=	/Users/nad/build_macos_installer/installer/variant/binaries/build_source
+abs_builddir=	/Users/nad/build_macos_installer/installer/variant/binaries/build/_bld/python
 
 
 CC=		clang
@@ -53,9 +53,9 @@ PGO_PROF_USE_FLAG=-fprofile-instr-use="$(shell pwd)/code.profclangd"
 LLVM_PROF_MERGER= /usr/bin/xcrun llvm-profdata merge -output="$(shell pwd)/code.profclangd" "$(shell pwd)"/*.profclangr 
 LLVM_PROF_FILE=LLVM_PROFILE_FILE="$(shell pwd)/code-%p.profclangr"
 LLVM_PROF_ERR=no
-DTRACE=         /usr/sbin/dtrace
+DTRACE=         
 DFLAGS=         
-DTRACE_HEADERS= Include/pydtrace_probes.h
+DTRACE_HEADERS= 
 DTRACE_OBJS=    
 DSYMUTIL=       
 DSYMUTIL_PATH=  
@@ -84,21 +84,21 @@ MAKESETUP=      $(srcdir)/Modules/makesetup
 # Compiler options
 OPT=		-DNDEBUG -g -O3 -Wall
 BASECFLAGS=	 -fno-strict-overflow -Wsign-compare -Wunreachable-code -fno-common -dynamic
-BASECPPFLAGS=	
-CONFIGURE_CFLAGS=	
+BASECPPFLAGS=	-IObjects -IInclude -IPython
+CONFIGURE_CFLAGS=	-arch arm64 -arch x86_64 
 # CFLAGS_NODIST is used for building the interpreter and stdlib C extensions.
 # Use it when a compiler flag should _not_ be part of the distutils CFLAGS
 # once Python is installed (Issue #21121).
-CONFIGURE_CFLAGS_NODIST=-I/opt/homebrew/include -flto=thin -std=c11 -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wstrict-prototypes -Werror=implicit-function-declaration -fvisibility=hidden -Werror=unguarded-availability
+CONFIGURE_CFLAGS_NODIST= -flto=full -std=c11 -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wstrict-prototypes -Werror=implicit-function-declaration -fvisibility=hidden -Werror=unguarded-availability -D_Py_TIER2=3 -D_Py_JIT
 # LDFLAGS_NODIST is used in the same manner as CFLAGS_NODIST.
 # Use it when a linker flag should _not_ be part of the distutils LDFLAGS
 # once Python is installed (bpo-35257)
-CONFIGURE_LDFLAGS_NODIST=-L/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/lib -flto=thin -Wl,-export_dynamic -Wl,-object_path_lto,"$@".lto -g
+CONFIGURE_LDFLAGS_NODIST= -flto=full -Wl,-export_dynamic -Wl,-object_path_lto,"$@".lto -g
 # LDFLAGS_NOLTO is an extra flag to disable lto. It is used to speed up building
 # of _bootstrap_python and _freeze_module tools, which don't need LTO.
 CONFIGURE_LDFLAGS_NOLTO=-flto=thin
-CONFIGURE_CPPFLAGS=	-I/opt/homebrew/include
-CONFIGURE_LDFLAGS=	
+CONFIGURE_CPPFLAGS=	
+CONFIGURE_LDFLAGS=	-arch arm64 -arch x86_64 
 # Avoid assigning CFLAGS, LDFLAGS, etc. so users can use them on the
 # command line to append to these values without stomping the pre-set
 # values.
@@ -115,7 +115,7 @@ NO_AS_NEEDED=
 CCSHARED=	
 # LINKFORSHARED are the flags passed to the $(CC) command that links
 # the python executable -- this is only needed for a few systems
-LINKFORSHARED=	-Wl,-stack_size,1000000  -framework CoreFoundation $(PYTHONFRAMEWORKINSTALLDIR)/Versions/$(VERSION)/$(PYTHONFRAMEWORK)
+LINKFORSHARED=	-Wl,-stack_size,1000000  -framework CoreFoundation $(PYTHONFRAMEWORKDIR)/Versions/$(VERSION)/$(PYTHONFRAMEWORK)
 ARFLAGS=	rcs
 # Extra C flags added for building the interpreter object files.
 CFLAGSFORSHARED=$(CCSHARED)
@@ -137,7 +137,7 @@ MULTIARCH=	darwin
 MULTIARCH_CPPFLAGS = -DMULTIARCH=\"darwin\"
 
 # Install prefix for architecture-independent files
-prefix=		/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14
+prefix=		/Library/Frameworks/Python.framework/Versions/3.14
 
 # Install prefix for architecture-dependent files
 exec_prefix=	${prefix}
@@ -150,7 +150,7 @@ host_exec_prefix= 	${exec_prefix}
 
 
 # Install prefix for data files
-datarootdir=    /opt/homebrew/opt/python@3.14/share
+datarootdir=    ${prefix}/share
 
 # Expanded directories
 BINDIR=		${exec_prefix}/bin
@@ -185,23 +185,23 @@ EXPORTSFROM=
 
 # Executable suffix (.exe on Windows and Mac OS X)
 EXE=		
-BUILDEXE=	.exe
+BUILDEXE=	
 
 # Name of the patch file to apply for app store compliance
 APP_STORE_COMPLIANCE_PATCH=
 
 # Short name and location for Mac OS X Python framework
-UNIVERSALSDK=
+UNIVERSALSDK=/
 PYTHONFRAMEWORK=	Python
 PYTHONFRAMEWORKDIR=	Python.framework
-PYTHONFRAMEWORKPREFIX=	/opt/homebrew/opt/python@3.14/Frameworks
-PYTHONFRAMEWORKINSTALLDIR= /opt/homebrew/opt/python@3.14/Frameworks/Python.framework
-PYTHONFRAMEWORKINSTALLNAMEPREFIX= /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14
+PYTHONFRAMEWORKPREFIX=	/Library/Frameworks
+PYTHONFRAMEWORKINSTALLDIR= /Library/Frameworks/Python.framework
+PYTHONFRAMEWORKINSTALLNAMEPREFIX= /Library/Frameworks/Python.framework/Versions/3.14
 RESSRCDIR= Mac/Resources/framework
 # macOS deployment target selected during configure, to be checked
 # by distutils. The export statement is needed to ensure that the
 # deployment target is active during build.
-MACOSX_DEPLOYMENT_TARGET=26
+MACOSX_DEPLOYMENT_TARGET=10.15
 export MACOSX_DEPLOYMENT_TARGET
 
 # iOS Deployment target selected during configure. Unlike macOS, the iOS
@@ -217,10 +217,10 @@ STRIPFLAG=-s
 LIPO_32BIT_FLAGS=
 
 # Flags to lipo to produce an intel-64-only universal executable
-LIPO_INTEL64_FLAGS=
+LIPO_INTEL64_FLAGS=-extract x86_64
 
 # Environment to run shared python without installed libraries
-RUNSHARED=       DYLD_FRAMEWORK_PATH=/private/tmp/pythonA3.14-20251009-32471-db682m/Python-3.14.0
+RUNSHARED=       DYLD_FRAMEWORK_PATH=/Users/nad/build_macos_installer/installer/variant/binaries/build/_bld/python
 
 # ensurepip options
 ENSUREPIP=      no
@@ -232,8 +232,8 @@ LIBEXPAT_A= Modules/expat/libexpat.a
 # HACL* build configuration
 LIBHACL_CFLAGS=-I$(srcdir)/Modules/_hacl -I$(srcdir)/Modules/_hacl/include -D_BSD_SOURCE -D_DEFAULT_SOURCE $(PY_STDMODULE_CFLAGS) $(CCSHARED)
 LIBHACL_LDFLAGS=
-LIBHACL_BLAKE2_SIMD128_CFLAGS= -DHACL_CAN_COMPILE_VEC128
-LIBHACL_BLAKE2_SIMD256_CFLAGS= -DHACL_CAN_COMPILE_VEC256
+LIBHACL_BLAKE2_SIMD128_CFLAGS=-msse -msse2 -msse3 -msse4.1 -msse4.2 -DHACL_CAN_COMPILE_VEC128
+LIBHACL_BLAKE2_SIMD256_CFLAGS=-mavx2 -DHACL_CAN_COMPILE_VEC256
 
 # Module state, compiler flags and linker flags
 # Empty CFLAGS and LDFLAGS are omitted.
@@ -295,10 +295,10 @@ MODULE__SCPROXY_LDFLAGS=-framework SystemConfiguration -framework CoreFoundation
 MODULE_SYSLOG_STATE=yes
 MODULE_TERMIOS_STATE=yes
 MODULE_PYEXPAT_STATE=yes
-MODULE_PYEXPAT_CFLAGS=
-MODULE_PYEXPAT_LDFLAGS=-lexpat
+MODULE_PYEXPAT_CFLAGS=-I$(srcdir)/Modules/expat
+MODULE_PYEXPAT_LDFLAGS=-lm $(LIBEXPAT_A)
 MODULE__ELEMENTTREE_STATE=yes
-MODULE__ELEMENTTREE_CFLAGS=
+MODULE__ELEMENTTREE_CFLAGS=-I$(srcdir)/Modules/expat
 MODULE__CODECS_CN_STATE=yes
 MODULE__CODECS_HK_STATE=yes
 MODULE__CODECS_ISO2022_STATE=yes
@@ -326,30 +326,32 @@ MODULE__HMAC_STATE=yes
 MODULE__HMAC_CFLAGS=-I$(srcdir)/Modules/_hacl -I$(srcdir)/Modules/_hacl/include -D_BSD_SOURCE -D_DEFAULT_SOURCE $(PY_STDMODULE_CFLAGS) $(CCSHARED)
 MODULE__HMAC_LDFLAGS=$(LIBHACL_HMAC_LIB_SHARED)
 MODULE__CTYPES_STATE=yes
-MODULE__CTYPES_CFLAGS=-fno-strict-overflow -I/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk/usr/include/ffi -DUSING_APPLE_OS_LIBFFI=1 -DUSING_MALLOC_CLOSURE_DOT_C=1
+MODULE__CTYPES_CFLAGS=-fno-strict-overflow -I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/ffi -DUSING_APPLE_OS_LIBFFI=1 -DUSING_MALLOC_CLOSURE_DOT_C=1
 MODULE__CTYPES_LDFLAGS=-lffi -ldl
 MODULE__CURSES_STATE=yes
-MODULE__CURSES_CFLAGS=-D_DARWIN_C_SOURCE -D_XOPEN_SOURCE_EXTENDED=1
-MODULE__CURSES_LDFLAGS=-lncurses
+MODULE__CURSES_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include -D_XOPEN_SOURCE_EXTENDED=1
+MODULE__CURSES_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lncurses
 
 MODULE__CURSES_PANEL_STATE=yes
-MODULE__CURSES_PANEL_CFLAGS= -D_DARWIN_C_SOURCE -D_XOPEN_SOURCE_EXTENDED=1
-MODULE__CURSES_PANEL_LDFLAGS=-lpanel -lncurses
+MODULE__CURSES_PANEL_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include -I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include -D_XOPEN_SOURCE_EXTENDED=1
+MODULE__CURSES_PANEL_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lpanel -L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lncurses
 
 MODULE__DECIMAL_STATE=yes
-MODULE__DECIMAL_CFLAGS=-I/opt/homebrew/Cellar/mpdecimal/4.0.1/include
-MODULE__DECIMAL_LDFLAGS=-L/opt/homebrew/Cellar/mpdecimal/4.0.1/lib -lmpdec -lm
+MODULE__DECIMAL_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include
+MODULE__DECIMAL_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lmpdec -lm
 MODULE__DBM_STATE=yes
 MODULE__DBM_CFLAGS=-DUSE_NDBM
 MODULE__DBM_LDFLAGS=
-MODULE__GDBM_STATE=disabled
+MODULE__GDBM_STATE=missing
 MODULE_READLINE_STATE=yes
-MODULE_READLINE_CFLAGS=-I/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk/usr/include/editline
-MODULE_READLINE_LDFLAGS=-ledit
+MODULE_READLINE_CFLAGS=
+MODULE_READLINE_LDFLAGS=-lreadline
 MODULE__SQLITE3_STATE=yes
-MODULE__SQLITE3_CFLAGS=-I/opt/homebrew/opt/sqlite/include -I$(srcdir)/Modules/_sqlite
-MODULE__SQLITE3_LDFLAGS=-L/opt/homebrew/opt/sqlite/lib -lsqlite3
-MODULE__TKINTER_STATE=n/a
+MODULE__SQLITE3_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include -I$(srcdir)/Modules/_sqlite
+MODULE__SQLITE3_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lsqlite3
+MODULE__TKINTER_STATE=yes
+MODULE__TKINTER_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include -Wno-strict-prototypes -DWITH_APPINIT=1
+MODULE__TKINTER_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -ltcl -ltk
 MODULE__UUID_STATE=yes
 MODULE__UUID_CFLAGS=
 MODULE__UUID_LDFLAGS=
@@ -363,17 +365,17 @@ MODULE__BZ2_STATE=yes
 MODULE__BZ2_CFLAGS=
 MODULE__BZ2_LDFLAGS=-lbz2
 MODULE__LZMA_STATE=yes
-MODULE__LZMA_CFLAGS=-I/opt/homebrew/Cellar/xz/5.8.1/include
-MODULE__LZMA_LDFLAGS=-L/opt/homebrew/Cellar/xz/5.8.1/lib -llzma
+MODULE__LZMA_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include
+MODULE__LZMA_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -llzma
 MODULE__ZSTD_STATE=yes
-MODULE__ZSTD_CFLAGS=-I/opt/homebrew/opt/zstd/include
-MODULE__ZSTD_LDFLAGS=-L/opt/homebrew/opt/zstd/lib -lzstd
+MODULE__ZSTD_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include
+MODULE__ZSTD_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lzstd
 MODULE__SSL_STATE=yes
-MODULE__SSL_CFLAGS=-I/opt/homebrew/opt/openssl@3/include
-MODULE__SSL_LDFLAGS=-L/opt/homebrew/opt/openssl@3/lib  -lssl -lcrypto
+MODULE__SSL_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include
+MODULE__SSL_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib  -lssl -lcrypto
 MODULE__HASHLIB_STATE=yes
-MODULE__HASHLIB_CFLAGS=-I/opt/homebrew/opt/openssl@3/include
-MODULE__HASHLIB_LDFLAGS=-L/opt/homebrew/opt/openssl@3/lib   -lcrypto
+MODULE__HASHLIB_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include
+MODULE__HASHLIB_LDFLAGS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib   -lcrypto
 MODULE__TESTCAPI_STATE=yes
 MODULE__TESTCAPI_LDFLAGS=
 MODULE__TESTCLINIC_STATE=yes
@@ -387,7 +389,7 @@ MODULE__TESTSINGLEPHASE_STATE=yes
 MODULE_XXSUBTYPE_STATE=yes
 MODULE__XXTESTFUZZ_STATE=yes
 MODULE__CTYPES_TEST_STATE=yes
-MODULE__CTYPES_TEST_CFLAGS=-I/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk/usr/include/ffi -DUSING_APPLE_OS_LIBFFI=1 -DUSING_MALLOC_CLOSURE_DOT_C=1
+MODULE__CTYPES_TEST_CFLAGS=-I/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/ffi -DUSING_APPLE_OS_LIBFFI=1 -DUSING_MALLOC_CLOSURE_DOT_C=1
 MODULE__CTYPES_TEST_LDFLAGS=-lffi -ldl 
 MODULE_XXLIMITED_STATE=yes
 MODULE_XXLIMITED_35_STATE=yes
@@ -406,7 +408,7 @@ EXEMODE=	755
 FILEMODE=	644
 
 # configure script arguments
-CONFIG_ARGS=	 '--prefix=/opt/homebrew/opt/python@3.14' '--enable-ipv6' '--datarootdir=/opt/homebrew/opt/python@3.14/share' '--datadir=/opt/homebrew/opt/python@3.14/share' '--without-ensurepip' '--enable-loadable-sqlite-extensions' '--with-openssl=/opt/homebrew/opt/openssl@3' '--enable-optimizations' '--with-system-expat' '--with-system-libmpdec' '--with-readline=editline' '--with-lto' '--enable-framework=/opt/homebrew/opt/python@3.14/Frameworks' '--with-dtrace' '--with-dbmliborder=ndbm' 'MACOSX_DEPLOYMENT_TARGET=26' 'CFLAGS_NODIST=-I/opt/homebrew/include' 'LDFLAGS_NODIST=-L/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/lib' 'CPPFLAGS=-I/opt/homebrew/include' 'py_cv_module__tkinter=n/a' 'PKG_CONFIG_PATH=/opt/homebrew/opt/pkgconf/lib/pkgconfig:/opt/homebrew/opt/mpdecimal/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/readline/lib/pkgconfig:/opt/homebrew/opt/sqlite/lib/pkgconfig:/opt/homebrew/opt/xz/lib/pkgconfig:/opt/homebrew/opt/lz4/lib/pkgconfig:/opt/homebrew/opt/zstd/lib/pkgconfig' 'PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/opt/homebrew/Library/Homebrew/os/mac/pkgconfig/26' 'CC=clang'
+CONFIG_ARGS=	 '--enable-framework' '--with-framework-name=Python' '--enable-universalsdk=/' '--with-universal-archs=universal2' '--enable-optimizations' '--with-lto=full' '--with-computed-gotos' '--enable-experimental-jit=yes-off' '--without-ensurepip' '--with-system-libmpdec' '--with-openssl=/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local' 'PYTHON_FOR_REGEN=/usr/local/bin/python3.12' 'CURSES_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'CURSES_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lncurses' 'PANEL_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'PANEL_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lpanel' 'LIBLZMA_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'LIBLZMA_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -llzma' 'LIBMPDEC_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'LIBMPDEC_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lmpdec -lm' 'LIBSQLITE3_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'LIBSQLITE3_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lsqlite3' 'LIBZSTD_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'LIBZSTD_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -lzstd' 'TCLTK_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include' 'TCLTK_LIBS=-L/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/lib -ltcl -ltk' 'CC=clang'
 
 
 # Subdirectories with code
@@ -452,7 +454,7 @@ BUILDPYTHON=	python$(BUILDEXE)
 
 HOSTRUNNER= 
 
-PYTHON_FOR_REGEN?=python3
+PYTHON_FOR_REGEN?=/usr/local/bin/python3.12
 UPDATE_FILE=$(PYTHON_FOR_REGEN) $(srcdir)/Tools/build/update_file.py
 PYTHON_FOR_BUILD=./$(BUILDPYTHON) -E
 # Single-platform builds depend on $(BUILDPYTHON). Cross builds use an
@@ -490,7 +492,7 @@ COVERAGE_REPORT_OPTIONS=--rc lcov_branch_coverage=1 --branch-coverage --title "C
 
 LOCALMODLIBS= $(MODULE_ATEXIT_LDFLAGS) $(MODULE_FAULTHANDLER_LDFLAGS) $(MODULE_POSIX_LDFLAGS) $(MODULE__SIGNAL_LDFLAGS) $(MODULE__TRACEMALLOC_LDFLAGS) $(MODULE__SUGGESTIONS_LDFLAGS) $(MODULE__DATETIME_LDFLAGS) $(MODULE__CODECS_LDFLAGS) $(MODULE__COLLECTIONS_LDFLAGS) $(MODULE_ERRNO_LDFLAGS) $(MODULE__IO_LDFLAGS) $(MODULE_ITERTOOLS_LDFLAGS) $(MODULE__SRE_LDFLAGS) $(MODULE__SYSCONFIG_LDFLAGS) $(MODULE__THREAD_LDFLAGS) $(MODULE_TIME_LDFLAGS) $(MODULE__TYPES_LDFLAGS) $(MODULE__TYPING_LDFLAGS) $(MODULE__WEAKREF_LDFLAGS) $(MODULE__ABC_LDFLAGS) $(MODULE__FUNCTOOLS_LDFLAGS) $(MODULE__LOCALE_LDFLAGS) $(MODULE__OPCODE_LDFLAGS) $(MODULE__OPERATOR_LDFLAGS) $(MODULE__STAT_LDFLAGS) $(MODULE__SYMTABLE_LDFLAGS) $(MODULE_PWD_LDFLAGS)
 BASEMODLIBS=
-SHAREDMODS= Modules/array$(EXT_SUFFIX) Modules/_asyncio$(EXT_SUFFIX) Modules/_bisect$(EXT_SUFFIX) Modules/_csv$(EXT_SUFFIX) Modules/_heapq$(EXT_SUFFIX) Modules/_json$(EXT_SUFFIX) Modules/_lsprof$(EXT_SUFFIX) Modules/_pickle$(EXT_SUFFIX) Modules/_queue$(EXT_SUFFIX) Modules/_random$(EXT_SUFFIX) Modules/_remote_debugging$(EXT_SUFFIX) Modules/_struct$(EXT_SUFFIX) Modules/_interpreters$(EXT_SUFFIX) Modules/_interpchannels$(EXT_SUFFIX) Modules/_interpqueues$(EXT_SUFFIX) Modules/_zoneinfo$(EXT_SUFFIX) Modules/math$(EXT_SUFFIX) Modules/cmath$(EXT_SUFFIX) Modules/_statistics$(EXT_SUFFIX) Modules/_decimal$(EXT_SUFFIX) Modules/binascii$(EXT_SUFFIX) Modules/_bz2$(EXT_SUFFIX) Modules/_lzma$(EXT_SUFFIX) Modules/_zstd$(EXT_SUFFIX) Modules/zlib$(EXT_SUFFIX) Modules/_dbm$(EXT_SUFFIX) Modules/readline$(EXT_SUFFIX) Modules/_md5$(EXT_SUFFIX) Modules/_sha1$(EXT_SUFFIX) Modules/_sha2$(EXT_SUFFIX) Modules/_sha3$(EXT_SUFFIX) Modules/_blake2$(EXT_SUFFIX) Modules/_hmac$(EXT_SUFFIX) Modules/pyexpat$(EXT_SUFFIX) Modules/_elementtree$(EXT_SUFFIX) Modules/_codecs_cn$(EXT_SUFFIX) Modules/_codecs_hk$(EXT_SUFFIX) Modules/_codecs_iso2022$(EXT_SUFFIX) Modules/_codecs_jp$(EXT_SUFFIX) Modules/_codecs_kr$(EXT_SUFFIX) Modules/_codecs_tw$(EXT_SUFFIX) Modules/_multibytecodec$(EXT_SUFFIX) Modules/unicodedata$(EXT_SUFFIX) Modules/fcntl$(EXT_SUFFIX) Modules/grp$(EXT_SUFFIX) Modules/mmap$(EXT_SUFFIX) Modules/_posixsubprocess$(EXT_SUFFIX) Modules/resource$(EXT_SUFFIX) Modules/select$(EXT_SUFFIX) Modules/_socket$(EXT_SUFFIX) Modules/syslog$(EXT_SUFFIX) Modules/termios$(EXT_SUFFIX) Modules/_posixshmem$(EXT_SUFFIX) Modules/_multiprocessing$(EXT_SUFFIX) Modules/_ctypes$(EXT_SUFFIX) Modules/_curses$(EXT_SUFFIX) Modules/_curses_panel$(EXT_SUFFIX) Modules/_sqlite3$(EXT_SUFFIX) Modules/_ssl$(EXT_SUFFIX) Modules/_hashlib$(EXT_SUFFIX) Modules/_uuid$(EXT_SUFFIX) Modules/_scproxy$(EXT_SUFFIX) Modules/xxsubtype$(EXT_SUFFIX) Modules/_xxtestfuzz$(EXT_SUFFIX) Modules/_testbuffer$(EXT_SUFFIX) Modules/_testinternalcapi$(EXT_SUFFIX) Modules/_testcapi$(EXT_SUFFIX) Modules/_testlimitedcapi$(EXT_SUFFIX) Modules/_testclinic$(EXT_SUFFIX) Modules/_testclinic_limited$(EXT_SUFFIX) Modules/_testimportmultiple$(EXT_SUFFIX) Modules/_testmultiphase$(EXT_SUFFIX) Modules/_testsinglephase$(EXT_SUFFIX) Modules/_ctypes_test$(EXT_SUFFIX) Modules/xxlimited$(EXT_SUFFIX) Modules/xxlimited_35$(EXT_SUFFIX)
+SHAREDMODS= Modules/array$(EXT_SUFFIX) Modules/_asyncio$(EXT_SUFFIX) Modules/_bisect$(EXT_SUFFIX) Modules/_csv$(EXT_SUFFIX) Modules/_heapq$(EXT_SUFFIX) Modules/_json$(EXT_SUFFIX) Modules/_lsprof$(EXT_SUFFIX) Modules/_pickle$(EXT_SUFFIX) Modules/_queue$(EXT_SUFFIX) Modules/_random$(EXT_SUFFIX) Modules/_remote_debugging$(EXT_SUFFIX) Modules/_struct$(EXT_SUFFIX) Modules/_interpreters$(EXT_SUFFIX) Modules/_interpchannels$(EXT_SUFFIX) Modules/_interpqueues$(EXT_SUFFIX) Modules/_zoneinfo$(EXT_SUFFIX) Modules/math$(EXT_SUFFIX) Modules/cmath$(EXT_SUFFIX) Modules/_statistics$(EXT_SUFFIX) Modules/_decimal$(EXT_SUFFIX) Modules/binascii$(EXT_SUFFIX) Modules/_bz2$(EXT_SUFFIX) Modules/_lzma$(EXT_SUFFIX) Modules/_zstd$(EXT_SUFFIX) Modules/zlib$(EXT_SUFFIX) Modules/_dbm$(EXT_SUFFIX) Modules/readline$(EXT_SUFFIX) Modules/_md5$(EXT_SUFFIX) Modules/_sha1$(EXT_SUFFIX) Modules/_sha2$(EXT_SUFFIX) Modules/_sha3$(EXT_SUFFIX) Modules/_blake2$(EXT_SUFFIX) Modules/_hmac$(EXT_SUFFIX) Modules/pyexpat$(EXT_SUFFIX) Modules/_elementtree$(EXT_SUFFIX) Modules/_codecs_cn$(EXT_SUFFIX) Modules/_codecs_hk$(EXT_SUFFIX) Modules/_codecs_iso2022$(EXT_SUFFIX) Modules/_codecs_jp$(EXT_SUFFIX) Modules/_codecs_kr$(EXT_SUFFIX) Modules/_codecs_tw$(EXT_SUFFIX) Modules/_multibytecodec$(EXT_SUFFIX) Modules/unicodedata$(EXT_SUFFIX) Modules/fcntl$(EXT_SUFFIX) Modules/grp$(EXT_SUFFIX) Modules/mmap$(EXT_SUFFIX) Modules/_posixsubprocess$(EXT_SUFFIX) Modules/resource$(EXT_SUFFIX) Modules/select$(EXT_SUFFIX) Modules/_socket$(EXT_SUFFIX) Modules/syslog$(EXT_SUFFIX) Modules/termios$(EXT_SUFFIX) Modules/_posixshmem$(EXT_SUFFIX) Modules/_multiprocessing$(EXT_SUFFIX) Modules/_ctypes$(EXT_SUFFIX) Modules/_curses$(EXT_SUFFIX) Modules/_curses_panel$(EXT_SUFFIX) Modules/_sqlite3$(EXT_SUFFIX) Modules/_ssl$(EXT_SUFFIX) Modules/_hashlib$(EXT_SUFFIX) Modules/_uuid$(EXT_SUFFIX) Modules/_tkinter$(EXT_SUFFIX) Modules/_scproxy$(EXT_SUFFIX) Modules/xxsubtype$(EXT_SUFFIX) Modules/_xxtestfuzz$(EXT_SUFFIX) Modules/_testbuffer$(EXT_SUFFIX) Modules/_testinternalcapi$(EXT_SUFFIX) Modules/_testcapi$(EXT_SUFFIX) Modules/_testlimitedcapi$(EXT_SUFFIX) Modules/_testclinic$(EXT_SUFFIX) Modules/_testclinic_limited$(EXT_SUFFIX) Modules/_testimportmultiple$(EXT_SUFFIX) Modules/_testmultiphase$(EXT_SUFFIX) Modules/_testsinglephase$(EXT_SUFFIX) Modules/_ctypes_test$(EXT_SUFFIX) Modules/xxlimited$(EXT_SUFFIX) Modules/xxlimited_35$(EXT_SUFFIX)
 PYTHONPATH=$(COREPYTHONPATH)
 COREPYTHONPATH=$(DESTPATH)$(SITEPATH)$(TESTPATH)
 TESTPATH=
@@ -841,8 +843,8 @@ LIBHACL_SHA3_OBJS= \
 LIBHACL_SHA3_LIB_STATIC=Modules/_hacl/libHacl_Hash_SHA3.a
 LIBHACL_SHA3_LIB_SHARED=$(LIBHACL_SHA3_OBJS)
 
-LIBHACL_BLAKE2_SIMD128_OBJS=
-LIBHACL_BLAKE2_SIMD256_OBJS=
+LIBHACL_BLAKE2_SIMD128_OBJS=Modules/_hacl/Hacl_Hash_Blake2s_Simd128_universal2.o
+LIBHACL_BLAKE2_SIMD256_OBJS=Modules/_hacl/Hacl_Hash_Blake2b_Simd256_universal2.o
 LIBHACL_BLAKE2_OBJS= \
 		Modules/_hacl/Hacl_Hash_Blake2s.o \
 		Modules/_hacl/Hacl_Hash_Blake2b.o \
@@ -1602,7 +1604,7 @@ PYTHON_HEADERS= \
 
 ##########################################################################
 # Build static libmpdec.a
-LIBMPDEC_CFLAGS=-I/opt/homebrew/Cellar/mpdecimal/4.0.1/include $(PY_STDMODULE_CFLAGS) $(CCSHARED)
+LIBMPDEC_CFLAGS=-I/Users/nad/build_macos_installer/installer/variant/binaries/build/libraries/usr/local/include $(PY_STDMODULE_CFLAGS) $(CCSHARED)
 
 # "%.o: %c" is not portable
 Modules/_decimal/libmpdec/basearith.o: $(srcdir)/Modules/_decimal/libmpdec/basearith.c $(LIBMPDEC_HEADERS) $(PYTHON_HEADERS)
@@ -1656,7 +1658,7 @@ $(LIBMPDEC_A): $(LIBMPDEC_OBJS)
 
 ##########################################################################
 # Build static libexpat.a
-LIBEXPAT_CFLAGS= $(PY_STDMODULE_CFLAGS) $(CCSHARED)
+LIBEXPAT_CFLAGS=-I$(srcdir)/Modules/expat $(PY_STDMODULE_CFLAGS) $(CCSHARED)
 
 Modules/expat/xmlparse.o: $(srcdir)/Modules/expat/xmlparse.c $(LIBEXPAT_HEADERS) $(PYTHON_HEADERS)
 	$(CC) -c $(LIBEXPAT_CFLAGS) -o $@ $(srcdir)/Modules/expat/xmlparse.c
@@ -3275,14 +3277,14 @@ JIT_DEPS = \
 		pyconfig.h
 
 jit_stencils.h: $(JIT_DEPS)
-	
+	$(PYTHON_FOR_REGEN) $(srcdir)/Tools/jit/build.py aarch64-apple-darwin x86_64-apple-darwin --output-dir . --pyconfig-dir . --cflags=""
 
-Python/jit.o: $(srcdir)/Python/jit.c 
+Python/jit.o: $(srcdir)/Python/jit.c jit_stencils.h
 	$(CC) -c $(PY_CORE_CFLAGS) -o $@ $<
 
 .PHONY: regen-jit
 regen-jit:
-	
+	$(PYTHON_FOR_REGEN) $(srcdir)/Tools/jit/build.py aarch64-apple-darwin x86_64-apple-darwin --output-dir . --pyconfig-dir . --cflags=""
 
 # Some make's put the object file in the current directory
 .c.o:
@@ -3511,13 +3513,13 @@ MODULE__CURSES_PANEL_DEPS=$(srcdir)/Include/py_curses.h
 MODULE__DATETIME_DEPS=$(srcdir)/Include/datetime.h
 MODULE_CMATH_DEPS=$(srcdir)/Modules/_math.h
 MODULE_MATH_DEPS=$(srcdir)/Modules/_math.h
-MODULE_PYEXPAT_DEPS=
+MODULE_PYEXPAT_DEPS=$(LIBEXPAT_HEADERS) $(LIBEXPAT_A)
 MODULE_UNICODEDATA_DEPS=$(srcdir)/Modules/unicodedata_db.h $(srcdir)/Modules/unicodename_db.h
 MODULE__CTYPES_DEPS=$(srcdir)/Modules/_ctypes/ctypes.h
 MODULE__CTYPES_TEST_DEPS=$(srcdir)/Modules/_ctypes/_ctypes_test_generated.c.h
 MODULE__CTYPES_MALLOC_CLOSURE=_ctypes/malloc_closure.c
 MODULE__DECIMAL_DEPS=$(srcdir)/Modules/_decimal/docstrings.h 
-MODULE__ELEMENTTREE_DEPS=$(srcdir)/Modules/pyexpat.c 
+MODULE__ELEMENTTREE_DEPS=$(srcdir)/Modules/pyexpat.c $(LIBEXPAT_HEADERS) $(LIBEXPAT_A)
 MODULE__HASHLIB_DEPS=$(srcdir)/Modules/hashlib.h
 MODULE__IO_DEPS=$(srcdir)/Modules/_io/_iomodule.h
 
@@ -3699,6 +3701,9 @@ Modules/_hashopenssl.o: $(srcdir)/Modules/_hashopenssl.c $(MODULE__HASHLIB_DEPS)
 Modules/_hashlib$(EXT_SUFFIX):  Modules/_hashopenssl.o $(MODULE__HASHLIB_LDEPS); $(BLDSHARED)  Modules/_hashopenssl.o $(MODULE__HASHLIB_LDFLAGS) $(LIBPYTHON) -o Modules/_hashlib$(EXT_SUFFIX)
 Modules/_uuidmodule.o: $(srcdir)/Modules/_uuidmodule.c $(MODULE__UUID_DEPS) $(MODULE_DEPS_SHARED) $(PYTHON_HEADERS); $(CC) $(MODULE__UUID_CFLAGS) $(PY_STDMODULE_CFLAGS) $(CCSHARED) -c $(srcdir)/Modules/_uuidmodule.c -o Modules/_uuidmodule.o
 Modules/_uuid$(EXT_SUFFIX):  Modules/_uuidmodule.o $(MODULE__UUID_LDEPS); $(BLDSHARED)  Modules/_uuidmodule.o $(MODULE__UUID_LDFLAGS) $(LIBPYTHON) -o Modules/_uuid$(EXT_SUFFIX)
+Modules/_tkinter.o: $(srcdir)/Modules/_tkinter.c $(MODULE__TKINTER_DEPS) $(MODULE_DEPS_SHARED) $(PYTHON_HEADERS); $(CC) $(MODULE__TKINTER_CFLAGS) $(PY_STDMODULE_CFLAGS) $(CCSHARED) -c $(srcdir)/Modules/_tkinter.c -o Modules/_tkinter.o
+Modules/tkappinit.o: $(srcdir)/Modules/tkappinit.c $(MODULE__TKINTER_DEPS) $(MODULE_DEPS_SHARED) $(PYTHON_HEADERS); $(CC) $(MODULE__TKINTER_CFLAGS) $(PY_STDMODULE_CFLAGS) $(CCSHARED) -c $(srcdir)/Modules/tkappinit.c -o Modules/tkappinit.o
+Modules/_tkinter$(EXT_SUFFIX):  Modules/_tkinter.o Modules/tkappinit.o $(MODULE__TKINTER_LDEPS); $(BLDSHARED)  Modules/_tkinter.o Modules/tkappinit.o $(MODULE__TKINTER_LDFLAGS) $(LIBPYTHON) -o Modules/_tkinter$(EXT_SUFFIX)
 Modules/_scproxy.o: $(srcdir)/Modules/_scproxy.c $(MODULE__SCPROXY_DEPS) $(MODULE_DEPS_SHARED) $(PYTHON_HEADERS); $(CC) $(MODULE__SCPROXY_CFLAGS) $(PY_STDMODULE_CFLAGS) $(CCSHARED) -c $(srcdir)/Modules/_scproxy.c -o Modules/_scproxy.o
 Modules/_scproxy$(EXT_SUFFIX):  Modules/_scproxy.o $(MODULE__SCPROXY_LDEPS); $(BLDSHARED)  Modules/_scproxy.o $(MODULE__SCPROXY_LDFLAGS) $(LIBPYTHON) -o Modules/_scproxy$(EXT_SUFFIX)
 Modules/xxsubtype.o: $(srcdir)/Modules/xxsubtype.c $(MODULE_XXSUBTYPE_DEPS) $(MODULE_DEPS_SHARED) $(PYTHON_HEADERS); $(CC) $(MODULE_XXSUBTYPE_CFLAGS) $(PY_STDMODULE_CFLAGS) $(CCSHARED) -c $(srcdir)/Modules/xxsubtype.c -o Modules/xxsubtype.o

@@ -109,6 +109,224 @@ class _BackupProgressWindow:
         alert.runModal()
 
 
+class _LogViewerWindow:
+    """A read-only log viewer window with live tailing."""
+
+    _instances = {}  # file_path -> instance (singleton per file)
+
+    @classmethod
+    def show_for_file(cls, file_path, title):
+        """Show (or refocus) a log viewer for the given file."""
+        existing = cls._instances.get(file_path)
+        if existing and existing._window and existing._window.isVisible():
+            existing._window.makeKeyAndOrderFront_(None)
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+            return existing
+        inst = cls(file_path, title)
+        cls._instances[file_path] = inst
+        inst._show()
+        return inst
+
+    @classmethod
+    def close_all(cls):
+        """Close all open log viewer windows and stop their polling threads."""
+        for inst in list(cls._instances.values()):
+            inst._stop()
+        cls._instances.clear()
+
+    def __init__(self, file_path, title):
+        self._file_path = file_path
+        self._title = title
+        self._window = None
+        self._text_view = None
+        self._offset = 0
+        self._running = False
+
+    def _show(self):
+        style = (AppKit.NSWindowStyleMaskTitled
+                 | AppKit.NSWindowStyleMaskClosable
+                 | AppKit.NSWindowStyleMaskResizable
+                 | AppKit.NSWindowStyleMaskMiniaturizable)
+        w = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            AppKit.NSMakeRect(0, 0, 720, 480), style,
+            AppKit.NSBackingStoreBuffered, False)
+        w.setTitle_(self._title)
+        w.setLevel_(AppKit.NSNormalWindowLevel)
+        w.center()
+        w.setReleasedWhenClosed_(False)
+        w.setHidesOnDeactivate_(False)
+
+        # Scroll view fills the window
+        scroll = AppKit.NSScrollView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 720, 480))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setHasHorizontalScroller_(False)
+        scroll.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
+
+        # Text view
+        tv = AppKit.NSTextView.alloc().initWithFrame_(
+            AppKit.NSMakeRect(0, 0, 720, 480))
+        tv.setEditable_(False)
+        tv.setSelectable_(True)
+        tv.setFont_(AppKit.NSFont.fontWithName_size_("Menlo", 12))
+        tv.setTextColor_(AppKit.NSColor.textColor())
+        tv.setBackgroundColor_(AppKit.NSColor.textBackgroundColor())
+        tv.setAutoresizingMask_(AppKit.NSViewWidthSizable)
+        # Allow horizontal scrolling for long lines
+        tv.setHorizontallyResizable_(False)
+        tv.textContainer().setWidthTracksTextView_(True)
+
+        scroll.setDocumentView_(tv)
+        w.setContentView_(scroll)
+
+        self._window = w
+        self._text_view = tv
+
+        # Load initial content (last 500 lines)
+        self._load_initial()
+
+        # Ensure the app has an Edit menu so Cmd+C/A/V work in the text view.
+        # LSUIElement apps have no menu bar by default, so standard key
+        # equivalents are not wired up without this.
+        self._ensure_edit_menu()
+
+        w.makeKeyAndOrderFront_(None)
+        AppKit.NSApp.activateIgnoringOtherApps_(True)
+
+        # Start polling thread
+        self._running = True
+        t = threading.Thread(target=self._poll_loop, daemon=True)
+        t.start()
+
+    def _load_initial(self):
+        """Read last 500 lines of the file and display them."""
+        try:
+            if not os.path.exists(self._file_path):
+                self._offset = 0
+                return
+            with open(self._file_path, 'r', encoding='utf-8', errors='replace') as f:
+                # Seek backwards to find last 500 lines
+                f.seek(0, 2)
+                file_size = f.tell()
+                if file_size == 0:
+                    self._offset = 0
+                    return
+                # Read in chunks from the end to find 500 newlines
+                chunk_size = 8192
+                lines_found = 0
+                pos = file_size
+                while pos > 0 and lines_found < 500:
+                    read_size = min(chunk_size, pos)
+                    pos -= read_size
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+                    lines_found += chunk.count('\n')
+                # Now read from pos to end
+                f.seek(pos)
+                content = f.read()
+                # If we overshot, trim to last 500 lines
+                if lines_found > 500:
+                    lines = content.split('\n')
+                    content = '\n'.join(lines[-(500 + 1):])
+                self._offset = file_size
+            if content:
+                self._text_view.textStorage().mutableString().appendString_(content)
+                # Scroll to bottom
+                end = self._text_view.textStorage().length()
+                self._text_view.scrollRangeToVisible_(AppKit.NSMakeRange(end, 0))
+        except Exception:
+            self._offset = 0
+
+    def _is_near_bottom(self):
+        """Check if the scroll position is near the bottom."""
+        scroll_view = self._text_view.enclosingScrollView()
+        if not scroll_view:
+            return True
+        clip = scroll_view.contentView()
+        doc_height = self._text_view.frame().size.height
+        clip_height = clip.bounds().size.height
+        scroll_y = clip.bounds().origin.y
+        # "Near bottom" = within 50 points of the end
+        return (scroll_y + clip_height) >= (doc_height - 50)
+
+    def _poll_loop(self):
+        """Background thread: poll file for new content every 1.5s."""
+        while self._running:
+            time.sleep(1.5)
+            # Check if window is still visible
+            if not self._running:
+                break
+            try:
+                visible = self._window and self._window.isVisible()
+            except Exception:
+                visible = False
+            if not visible:
+                self._running = False
+                # Remove from instances
+                _LogViewerWindow._instances.pop(self._file_path, None)
+                break
+            try:
+                if not os.path.exists(self._file_path):
+                    continue
+                file_size = os.path.getsize(self._file_path)
+                if file_size < self._offset:
+                    # File was truncated — reload
+                    self._offset = 0
+                    def reload():
+                        self._text_view.textStorage().mutableString().setString_("")
+                        self._load_initial()
+                    _main_thread(reload)
+                    continue
+                if file_size == self._offset:
+                    continue
+                # Read new content
+                with open(self._file_path, 'r', encoding='utf-8',
+                           errors='replace') as f:
+                    f.seek(self._offset)
+                    new_content = f.read()
+                self._offset = file_size
+                if new_content:
+                    def append(text=new_content):
+                        was_near = self._is_near_bottom()
+                        self._text_view.textStorage().mutableString().appendString_(text)
+                        if was_near:
+                            end = self._text_view.textStorage().length()
+                            self._text_view.scrollRangeToVisible_(
+                                AppKit.NSMakeRange(end, 0))
+                    _main_thread(append)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _ensure_edit_menu():
+        """Add a hidden Edit menu so standard key equivalents work."""
+        main_menu = AppKit.NSApp.mainMenu()
+        if not main_menu:
+            main_menu = AppKit.NSMenu.alloc().init()
+            AppKit.NSApp.setMainMenu_(main_menu)
+        # Check if Edit menu already exists
+        for i in range(main_menu.numberOfItems()):
+            if main_menu.itemAtIndex_(i).title() == "Edit":
+                return
+        edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "c")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "a")
+        edit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Edit", None, "")
+        edit_item.setSubmenu_(edit_menu)
+        main_menu.addItem_(edit_item)
+
+    def _stop(self):
+        """Stop polling and close the window."""
+        self._running = False
+        if self._window:
+            try:
+                self._window.orderOut_(None)
+            except Exception:
+                pass
+
+
 class OnionPressApp(rumps.App):
     def __init__(self):
         # Get paths first (fast - no I/O)
@@ -450,9 +668,9 @@ class OnionPressApp(rumps.App):
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(dismiss)
 
     def openLogFile_(self, sender):
-        """Action handler for View Log button — open in Console.app for live tailing"""
+        """Action handler for View Log button — open in built-in log viewer"""
         try:
-            subprocess.run(["open", "-a", "Console", self.log_file], check=False)
+            _LogViewerWindow.show_for_file(self.log_file, "OnionPress Log")
         except Exception as e:
             self.log(f"Error opening log file: {e}")
 
@@ -2196,16 +2414,16 @@ class OnionPressApp(rumps.App):
 
     @rumps.clicked("View Logs")
     def view_logs(self, _):
-        """Open logs in Console.app"""
+        """Open logs in built-in log viewer"""
         log_file = os.path.join(self.app_support, "onionpress.log")
         if os.path.exists(log_file):
-            subprocess.run(["open", "-a", "Console", log_file])
+            _LogViewerWindow.show_for_file(log_file, "OnionPress Log")
         else:
             rumps.alert("No logs available yet")
 
     @rumps.clicked("View Web Usage Log")
     def view_web_log(self, _):
-        """Open WordPress access log in Console.app"""
+        """Open WordPress access log in built-in log viewer"""
         if not self.is_running:
             rumps.alert("Service not running. Please start the service first.")
             return
@@ -2218,8 +2436,8 @@ class OnionPressApp(rumps.App):
             open(web_log_file, 'a').close()
             time.sleep(1)
 
-        # Open in Console.app (filtered log excludes health check pings)
-        subprocess.run(["open", "-a", "Console", web_log_file])
+        # Open in built-in log viewer (filtered log excludes health check pings)
+        _LogViewerWindow.show_for_file(web_log_file, "OnionPress Web Usage Log")
 
     def get_version(self):
         """Get version from Info.plist"""
@@ -2979,6 +3197,9 @@ License: AGPL v3"""
         self.monitoring_tor_install = False
         self.dismiss_setup_dialog()
         self.stop_web_log_capture()
+
+        # Close any open log viewer windows
+        _LogViewerWindow.close_all()
 
         # Update menu to show we're quitting (must be on main thread)
         def update_and_cleanup():
