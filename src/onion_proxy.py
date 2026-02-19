@@ -768,32 +768,33 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     )
 
                 # Write .htaccess with multisite rewrite rules
-                htaccess_rules = (
-                    "# Privacy: prevent onion address leaking in Referer headers\\n"
-                    "Header set Referrer-Policy \\\"no-referrer\\\"\\n"
-                    "\\n"
-                    "# BEGIN WordPress Multisite\\n"
-                    "RewriteEngine On\\n"
-                    "RewriteBase /\\n"
-                    "RewriteRule ^index\\\\.php$ - [L]\\n"
-                    "\\n"
-                    "# add a trailing slash to /wp-admin\\n"
-                    "RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\\n"
-                    "\\n"
-                    "RewriteCond %{REQUEST_FILENAME} -f [OR]\\n"
-                    "RewriteCond %{REQUEST_FILENAME} -d\\n"
-                    "RewriteRule ^ - [L]\\n"
-                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]\\n"
-                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\\\.php)$ $2 [L]\\n"
-                    "RewriteRule . index.php [L]\\n"
-                    "# END WordPress Multisite\\n"
+                htaccess_content = (
+                    "# Privacy: prevent onion address leaking in Referer headers\n"
+                    'Header set Referrer-Policy "no-referrer"\n'
+                    "\n"
+                    "# BEGIN WordPress Multisite\n"
+                    "RewriteEngine On\n"
+                    "RewriteBase /\n"
+                    "RewriteRule ^index\\.php$ - [L]\n"
+                    "\n"
+                    "# add a trailing slash to /wp-admin\n"
+                    "RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\n"
+                    "\n"
+                    "RewriteCond %{REQUEST_FILENAME} -f [OR]\n"
+                    "RewriteCond %{REQUEST_FILENAME} -d\n"
+                    "RewriteRule ^ - [L]\n"
+                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]\n"
+                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\.php)$ $2 [L]\n"
+                    "RewriteRule . index.php [L]\n"
+                    "# END WordPress Multisite\n"
                 )
                 subprocess.run(
                     wp_exec + [
                         "bash", "-c",
-                        f"printf '{htaccess_rules}' > /var/www/html/.htaccess && "
+                        "cat > /var/www/html/.htaccess && "
                         "chown www-data:www-data /var/www/html/.htaccess"
                     ],
+                    input=htaccess_content,
                     env=denv, capture_output=True, text=True, timeout=10
                 )
 
