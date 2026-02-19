@@ -19,11 +19,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.2.91</string>
+	<string>2.2.92</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>2.2.91</string>
+	<string>2.2.92</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSHasLocalizedDisplayName</key>
@@ -82,7 +82,7 @@
 	<key>PythonInfoDict</key>
 	<dict>
 		<key>PythonExecutable</key>
-		<string>/private/var/folders/lx/n1159d1x0g99f_pqm059zf3w0000gn/T/tmp.hfgTbab8Qa/venv/bin/python3</string>
+		<string>/private/var/folders/lx/n1159d1x0g99f_pqm059zf3w0000gn/T/tmp.7RBGVXM7xJ/venv/bin/python3</string>
 		<key>PythonLongVersion</key>
 		<string>3.14.0 (v3.14.0:ebf955df7a8, Oct  7 2025, 08:20:14) [Clang 16.0.0 (clang-1600.0.26.6)]</string>
 		<key>PythonShortVersion</key>
