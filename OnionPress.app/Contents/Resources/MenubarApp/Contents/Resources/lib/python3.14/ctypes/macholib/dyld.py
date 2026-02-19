@@ -19,14 +19,14 @@ __all__ = [
 
 # These are the defaults as per man dyld(1)
 #
-DEFAULT_FRAMEWORK_FALLBACK = [
+DEFAULT_FRAMEWORK_FALLBACK = [ '/opt/homebrew/Frameworks',
     os.path.expanduser("~/Library/Frameworks"),
     "/Library/Frameworks",
     "/Network/Library/Frameworks",
     "/System/Library/Frameworks",
 ]
 
-DEFAULT_LIBRARY_FALLBACK = [
+DEFAULT_LIBRARY_FALLBACK = [ '/opt/homebrew/lib', '/opt/homebrew/opt/openssl@3/lib',
     os.path.expanduser("~/lib"),
     "/usr/local/lib",
     "/lib",

@@ -195,7 +195,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.88"
+        self.version = "2.2.89"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1933,10 +1933,7 @@ class OnionPressApp(rumps.App):
                 self.log(f"Waiting for extension registration... ({i+1}/5)")
                 time.sleep(1)
             if ext_browser:
-                # Launch browser first so the extension can poll /status
-                # and configure its SOCKS proxy before we navigate.
                 self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
-                subprocess.run(["open", "-a", ext_browser])
                 # Wait for extension to poll /status and set up SOCKS routing.
                 # Extension polls every 3s when proxy was down (recovery mode).
                 marker = os.path.join(self.app_support, "extension-connected")
@@ -1952,7 +1949,9 @@ class OnionPressApp(rumps.App):
                     time.sleep(1)
                 else:
                     self.log("Extension did not poll within 30s, opening .onion URL anyway")
+                # Open URL and activate browser window
                 subprocess.run(["open", "-a", ext_browser, url])
+                subprocess.run(["osascript", "-e", f'tell application "{ext_browser}" to activate'])
             elif os.path.exists(brave_browser_path):
                 self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
                 brave_executable = os.path.join(brave_browser_path, "Contents", "MacOS", "Brave Browser")
@@ -2175,6 +2174,7 @@ class OnionPressApp(rumps.App):
             self._last_bootstrap_pct = 0
             self._bootstrap_stall_count = 0
             self._yellow_since = None
+            self.auto_opened_browser = False  # Re-open browser after restart
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
@@ -2624,11 +2624,16 @@ class OnionPressApp(rumps.App):
         """Check for Docker updates in background thread"""
         images_updated = self.update_docker_images(show_notifications=True)
 
-        # Show final summary if no app update was available
+        # Show final summary if no app update was available.
+        # Must dispatch to main thread — rumps.alert() fails silently
+        # from background threads.
         if not app_update_available and not images_updated:
-            rumps.alert(
-                title="No Updates Available",
-                message=f"You're running the latest version (v{self.version})\nAll container images are up to date."
+            version = self.version
+            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: rumps.alert(
+                    title="No Updates Available",
+                    message=f"You're running the latest version (v{version})\nAll container images are up to date."
+                )
             )
 
     def show_setup_dialog(self):
@@ -2967,7 +2972,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.88 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.89 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
