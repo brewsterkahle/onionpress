@@ -414,7 +414,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.93"
+        self.version = "2.2.95"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -523,6 +523,7 @@ class OnionPressApp(rumps.App):
         self.relay_messages = []           # Messages received from OnionRelay
         self._relay_alert_shown = False    # Whether we've shown the relay alert icon
         self.is_cellar = False             # True if this instance is the OnionCellar
+        self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
         self._cellar_registration_started = False  # Whether registration thread is running
 
@@ -1576,6 +1577,15 @@ class OnionPressApp(rumps.App):
                         self._cellar_registration_started = True
                         cellar.start_registration_thread(self)
 
+                # OnionCellar: poll lock status and update menu
+                if self.is_cellar and self.is_ready:
+                    was_locked = self.cellar_locked
+                    self.cellar_locked = not cellar._is_cellar_unlocked(self)
+                    if was_locked != self.cellar_locked:
+                        status = "locked" if self.cellar_locked else "unlocked"
+                        self.log(f"OnionCellar: cellar is now {status}")
+                        self.update_menu()
+
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
                     wp_installed = self.check_wp_installed()
@@ -1667,7 +1677,8 @@ class OnionPressApp(rumps.App):
             if state == "available":
                 self.icon = self.icon_running
                 if self.is_cellar:
-                    self.menu["Starting..."].title = f"OnionCellar: {self.onion_address}"
+                    lock_icon = "Locked" if self.cellar_locked else "Unlocked"
+                    self.menu["Starting..."].title = f"OnionCellar [{lock_icon}]: {self.onion_address}"
                 else:
                     self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
@@ -3223,7 +3234,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.93 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.95 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
