@@ -28,7 +28,7 @@ services:
           define('WP_HOME', 'http://' . $$_SERVER['HTTP_HOST']);
           define('WP_SITEURL', 'http://' . $$_SERVER['HTTP_HOST']);
           define('FORCE_SSL_ADMIN', false);
-          define('WP_ALLOW_MULTISITE', true);
+          defined('WP_ALLOW_MULTISITE') or define('WP_ALLOW_MULTISITE', true);
           define('COOKIE_DOMAIN', $$_SERVER['HTTP_HOST']);
     volumes:
       - wordpress-data:/var/www/html
