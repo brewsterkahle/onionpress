@@ -1092,12 +1092,15 @@ class OnionPressApp(rumps.App):
                 ports_str = ', '.join(str(p) for p in in_use)
                 self.log(f"Port conflict detected: ports {ports_str} already in use by another process")
                 self._port_conflict = True
-                rumps.alert(
-                    title="OnionPress Cannot Start",
-                    message=f"Port(s) {ports_str} already in use.\n\n"
-                            "Another instance of OnionPress may be running, "
-                            "possibly under a different user account.\n\n"
-                            "Only one OnionPress can run at a time on this Mac."
+                # Must dispatch to main thread — rumps.alert() requires it
+                AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
+                    lambda: rumps.alert(
+                        title="OnionPress Cannot Start",
+                        message=f"Port(s) {ports_str} already in use.\n\n"
+                                "Another instance of OnionPress may be running, "
+                                "possibly under a different user account.\n\n"
+                                "Only one OnionPress can run at a time on this Mac."
+                    )
                 )
                 self.menu["Starting..."].title = "Status: Port conflict"
                 return
