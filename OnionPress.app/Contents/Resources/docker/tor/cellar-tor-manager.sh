@@ -139,6 +139,7 @@ ${marker}
 HiddenServiceDir ${SERVICE_DIR}
 HiddenServiceVersion 3
 HiddenServicePort 80 127.0.0.1:${REDIRECT_PORT}
+HiddenServiceNumIntroductionPoints 1
 EOF
         echo "Added HiddenServiceDir for ${CONTENT_ADDRESS}"
     fi
