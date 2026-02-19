@@ -1878,11 +1878,20 @@ class OnionPressApp(rumps.App):
         ws = AppKit.NSWorkspace.sharedWorkspace()
         nc = ws.notificationCenter()
         nc.addObserverForName_object_queue_usingBlock_(
+            AppKit.NSWorkspaceWillSleepNotification,
+            None,
+            AppKit.NSOperationQueue.mainQueue(),
+            lambda notification: self.handle_sleep())
+        nc.addObserverForName_object_queue_usingBlock_(
             AppKit.NSWorkspaceDidWakeNotification,
             None,
             AppKit.NSOperationQueue.mainQueue(),
             lambda notification: self.handle_wake())
-        self.log("Registered for system wake notifications")
+        self.log("Registered for system sleep/wake notifications")
+
+    def handle_sleep(self):
+        """Log when system is going to sleep"""
+        self.log("System going to sleep")
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
