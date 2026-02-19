@@ -313,7 +313,6 @@ install_docker() {
             --mount "$DATA_DIR:w" \
             --cpu 2 \
             --memory "$VM_MEMORY" \
-            --disk 10 \
             --arch "$VM_ARCH" \
             --vz-rosetta=false \
             >> "$LOG_FILE" 2>&1
@@ -325,7 +324,6 @@ install_docker() {
             --mount "$DATA_DIR:w" \
             --cpu 2 \
             --memory "$VM_MEMORY" \
-            --disk 10 \
             --arch "$VM_ARCH" \
             >> "$LOG_FILE" 2>&1
     fi

@@ -128,7 +128,7 @@
 #define HAVE_BUILTIN_ATOMIC 1
 
 /* Define to 1 if you have the <bzlib.h> header file. */
-/* #undef HAVE_BZLIB_H */
+#define HAVE_BZLIB_H 1
 
 /* Define to 1 if you have the 'chflags' function. */
 #define HAVE_CHFLAGS 1
@@ -925,7 +925,7 @@
 /* #undef HAVE_PANEL */
 
 /* Define if you have the 'panelw' library */
-/* #undef HAVE_PANELW */
+#define HAVE_PANELW 1
 
 /* Define to 1 if you have the <panel.h> header file. */
 #define HAVE_PANEL_H 1
@@ -1053,7 +1053,7 @@
 /* #undef HAVE_PWRITEV2 */
 
 /* Define to 1 if you have the <readline/readline.h> header file. */
-/* #undef HAVE_READLINE_READLINE_H */
+#define HAVE_READLINE_READLINE_H 1
 
 /* Define to 1 if you have the 'readlink' function. */
 #define HAVE_READLINK 1
@@ -1648,7 +1648,7 @@
 #define HAVE_ZLIB_COPY 1
 
 /* Define to 1 if you have the <zlib.h> header file. */
-/* #undef HAVE_ZLIB_H */
+#define HAVE_ZLIB_H 1
 
 /* Define to 1 if you have the <zstd.h> header file. */
 /* #undef HAVE_ZSTD_H */
@@ -1710,7 +1710,7 @@
 /* #undef PY_HAVE_PERF_TRAMPOLINE */
 
 /* Define to 1 to build the sqlite module with loadable extensions support. */
-#define PY_SQLITE_ENABLE_LOAD_EXTENSION 1
+/* #undef PY_SQLITE_ENABLE_LOAD_EXTENSION */
 
 /* Define if SQLite was compiled with the serialize API */
 #define PY_SQLITE_HAVE_SERIALIZE 1
@@ -1836,7 +1836,7 @@
 /* #undef TM_IN_SYS_TIME */
 
 /* Define if you want to use computed gotos in ceval.c. */
-/* #undef USE_COMPUTED_GOTOS */
+#define USE_COMPUTED_GOTOS 1
 
 /* Enable extensions on AIX, Interix, z/OS.  */
 #ifndef _ALL_SOURCE
@@ -1931,7 +1931,7 @@
 
 
 /* Define if WINDOW in curses.h offers a field _flags. */
-#define WINDOW_HAS_FLAGS 1
+/* #undef WINDOW_HAS_FLAGS */
 
 /* Define if you want build the _decimal module using a coroutine-local rather
    than a thread-local context */
@@ -1941,7 +1941,7 @@
 #define WITH_DOC_STRINGS 1
 
 /* Define if you want to compile in DTrace support */
-#define WITH_DTRACE 1
+/* #undef WITH_DTRACE */
 
 /* Define if you want to use the new-style (Openstep, Rhapsody, MacOS) dynamic
    linker (dyld) instead of the old-style (NextStep) dynamic linker (rld).
@@ -1949,7 +1949,7 @@
 #define WITH_DYLD 1
 
 /* Define to build the readline module against libedit. */
-#define WITH_EDITLINE 1
+/* #undef WITH_EDITLINE */
 
 /* Define to 1 if libintl is needed for locale functions. */
 /* #undef WITH_LIBINTL */
@@ -2019,10 +2019,10 @@
 #define _Py_FFI_SUPPORT_C_COMPLEX 1
 
 /* HACL* library can compile SIMD128 implementations */
-/* #undef _Py_HACL_CAN_COMPILE_VEC128 */
+#define _Py_HACL_CAN_COMPILE_VEC128 1
 
 /* HACL* library can compile SIMD256 implementations */
-/* #undef _Py_HACL_CAN_COMPILE_VEC256 */
+#define _Py_HACL_CAN_COMPILE_VEC256 1
 
 /* Define if year with century should be normalized for strftime. */
 /* #undef _Py_NORMALIZE_CENTURY */

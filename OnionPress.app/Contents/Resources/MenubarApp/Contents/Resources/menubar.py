@@ -2157,8 +2157,12 @@ class OnionPressApp(rumps.App):
                 time.sleep(1)
             if ext_browser:
                 self.log(f"Auto-opening {ext_browser} (extension detected): {url}")
+                # Open the browser first (without the URL) so the extension
+                # background script starts and can poll /status to set up
+                # SOCKS routing BEFORE we navigate to the .onion address.
+                subprocess.run(["open", "-a", ext_browser])
                 # Wait for extension to poll /status and set up SOCKS routing.
-                # Extension polls every 3s when proxy was down (recovery mode).
+                # Extension polls every 2s at startup, every 15s thereafter.
                 marker = os.path.join(self.app_support, "extension-connected")
                 for i in range(30):
                     try:
@@ -2172,7 +2176,7 @@ class OnionPressApp(rumps.App):
                     time.sleep(1)
                 else:
                     self.log("Extension did not poll within 30s, opening .onion URL anyway")
-                # Open URL and activate browser window
+                # Now open the .onion URL — extension should have SOCKS routing active
                 subprocess.run(["open", "-a", ext_browser, url])
                 subprocess.run(["osascript", "-e", f'tell application "{ext_browser}" to activate'])
             elif os.path.exists(brave_browser_path):
@@ -2319,7 +2323,7 @@ class OnionPressApp(rumps.App):
                 if result.returncode == 0:
                     progress_window.set_status("Generating vanity onion address")
                     progress_window.set_detail("Finding address...")
-                    self.show_notification("Containers started", "WordPress is starting...")
+                    rumps.notification(title="OnionPress", subtitle="Containers started", message="WordPress is starting...")
 
             threading.Thread(target=pull_and_start, daemon=True).start()
             self.monitor_image_downloads(progress_window)
