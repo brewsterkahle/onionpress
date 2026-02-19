@@ -705,16 +705,37 @@ install_cellar_plugin() {
             onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1; then
             docker exec onionpress-wordpress chown www-data:www-data \
                 /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1
-            # Create cellar data directory inside container
-            docker exec onionpress-wordpress mkdir -p \
-                /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1
-            docker exec onionpress-wordpress chown -R www-data:www-data \
-                /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1
             log "✓ onionpress-cellar-register.php mu-plugin installed"
         else
             log "WARNING: Failed to copy onionpress-cellar-register.php"
         fi
     fi
+
+    # Install cellar crypto helper library
+    if [ -f "$plugins_dir/onionpress-cellar-crypto.php" ]; then
+        if docker cp "$plugins_dir/onionpress-cellar-crypto.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-cellar-crypto.php >> "$LOG_FILE" 2>&1
+            log "✓ onionpress-cellar-crypto.php installed"
+        else
+            log "WARNING: Failed to copy onionpress-cellar-crypto.php"
+        fi
+    fi
+
+    # Create cellar data directory inside containers
+    docker exec onionpress-wordpress mkdir -p \
+        /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1
+    docker exec onionpress-wordpress chown -R www-data:www-data \
+        /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1
+
+    # Ensure cellar starts locked — delete unlocked key file
+    # (functionally equivalent to tmpfs: key is lost on restart)
+    docker exec onionpress-wordpress rm -f \
+        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1
+    docker exec onionpress-tor rm -f \
+        /var/lib/onionpress/cellar/.master-key-unlocked >> "$LOG_FILE" 2>&1
+    log "✓ Cellar locked on startup (master key cleared)"
 
     return 0
 }

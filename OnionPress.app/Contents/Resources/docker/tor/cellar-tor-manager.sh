@@ -14,6 +14,7 @@
 TORRC="/etc/tor/torrc"
 CELLAR_KEYS_DIR="/var/lib/onionpress/cellar/keys"
 CELLAR_SERVICES_DIR="/var/lib/tor/hidden_service/cellar"
+CELLAR_UNLOCKED_FILE="/var/lib/onionpress/cellar/.master-key-unlocked"
 REDIRECT_PORT=8082
 
 usage() {
@@ -40,11 +41,55 @@ fi
 # Create a safe directory name from the address (use the address itself)
 SERVICE_DIR="${CELLAR_SERVICES_DIR}/${CONTENT_ADDRESS}"
 
+# Decrypt an .enc file using the master key (AES-256-GCM).
+# Format: [12-byte IV][16-byte tag][ciphertext]
+# Writes decrypted output to $2.
+decrypt_file() {
+    local enc_file="$1"
+    local out_file="$2"
+    local master_key_hex
+
+    master_key_hex=$(od -A n -t x1 "$CELLAR_UNLOCKED_FILE" | tr -d ' \n')
+
+    local file_size
+    file_size=$(wc -c < "$enc_file")
+
+    # Extract IV (first 12 bytes), tag (next 16 bytes), ciphertext (rest)
+    local iv_hex tag_hex
+    iv_hex=$(dd if="$enc_file" bs=1 count=12 2>/dev/null | od -A n -t x1 | tr -d ' \n')
+    tag_hex=$(dd if="$enc_file" bs=1 skip=12 count=16 2>/dev/null | od -A n -t x1 | tr -d ' \n')
+
+    # ciphertext starts at byte 28
+    local ct_size=$((file_size - 28))
+    dd if="$enc_file" bs=1 skip=28 count="$ct_size" 2>/dev/null | \
+        openssl enc -d -aes-256-gcm \
+            -K "$master_key_hex" \
+            -iv "$iv_hex" \
+            -tag "$tag_hex" \
+            -out "$out_file" 2>/dev/null
+
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to decrypt ${enc_file}"
+        return 1
+    fi
+    return 0
+}
+
 do_takeover() {
     local keys_src="${CELLAR_KEYS_DIR}/${CONTENT_ADDRESS}"
 
-    # Check that keys exist
-    if [ ! -f "${keys_src}/hs_ed25519_secret_key" ]; then
+    # Check for encrypted keys (.enc) or plaintext (legacy)
+    local have_encrypted=false
+    local have_plaintext=false
+
+    if [ -f "${keys_src}/hs_ed25519_secret_key.enc" ]; then
+        have_encrypted=true
+    fi
+    if [ -f "${keys_src}/hs_ed25519_secret_key" ]; then
+        have_plaintext=true
+    fi
+
+    if [ "$have_encrypted" = false ] && [ "$have_plaintext" = false ]; then
         echo "ERROR: No keys found for ${CONTENT_ADDRESS}"
         exit 1
     fi
@@ -52,10 +97,29 @@ do_takeover() {
     # Create the HiddenServiceDir
     mkdir -p "$SERVICE_DIR"
 
-    # Copy keys
-    cp "${keys_src}/hs_ed25519_secret_key" "${SERVICE_DIR}/"
-    cp "${keys_src}/hs_ed25519_public_key" "${SERVICE_DIR}/"
-    cp "${keys_src}/hostname" "${SERVICE_DIR}/"
+    if [ "$have_encrypted" = true ]; then
+        # Encrypted keys — need master key to be unlocked
+        if [ ! -f "$CELLAR_UNLOCKED_FILE" ]; then
+            echo "ERROR: Cellar is locked — cannot decrypt keys"
+            exit 2
+        fi
+
+        # Decrypt each key file to the service directory
+        if ! decrypt_file "${keys_src}/hs_ed25519_secret_key.enc" "${SERVICE_DIR}/hs_ed25519_secret_key"; then
+            echo "ERROR: Failed to decrypt secret key for ${CONTENT_ADDRESS}"
+            exit 1
+        fi
+        if ! decrypt_file "${keys_src}/hs_ed25519_public_key.enc" "${SERVICE_DIR}/hs_ed25519_public_key"; then
+            echo "ERROR: Failed to decrypt public key for ${CONTENT_ADDRESS}"
+            exit 1
+        fi
+        cp "${keys_src}/hostname" "${SERVICE_DIR}/"
+    else
+        # Plaintext keys (legacy / backward compat during migration)
+        cp "${keys_src}/hs_ed25519_secret_key" "${SERVICE_DIR}/"
+        cp "${keys_src}/hs_ed25519_public_key" "${SERVICE_DIR}/"
+        cp "${keys_src}/hostname" "${SERVICE_DIR}/"
+    fi
 
     # Set correct ownership and permissions (tor user = uid 100)
     chown -R tor:tor "$SERVICE_DIR"

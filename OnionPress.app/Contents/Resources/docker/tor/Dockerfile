@@ -1,5 +1,5 @@
 FROM alpine:latest
-RUN apk add --no-cache tor wget su-exec socat
+RUN apk add --no-cache tor wget su-exec socat openssl
 COPY torrc /etc/tor/torrc
 COPY entrypoint.sh /entrypoint.sh
 COPY healthcheck-server.sh /healthcheck-server.sh

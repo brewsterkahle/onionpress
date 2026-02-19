@@ -77,6 +77,20 @@ def _run_docker_raw(app, args, timeout=15):
         return False, b""
 
 
+def _run_docker_rc(app, args, timeout=15):
+    """Run a docker command and return (returncode, stdout).
+    Unlike _run_docker, returns the actual return code rather than a bool."""
+    try:
+        result = subprocess.run(
+            [_docker_bin(app)] + args,
+            capture_output=True, text=True, timeout=timeout,
+            env=_docker_env(app)
+        )
+        return result.returncode, result.stdout.strip()
+    except Exception:
+        return -1, ""
+
+
 # ---------------------------------------------------------------------------
 # Registration client (runs on normal OnionPress instances)
 # ---------------------------------------------------------------------------
@@ -184,6 +198,15 @@ def register_with_cellar(app):
                     "content_address": content_addr,
                 })
                 return
+            if resp.get("locked"):
+                app.log("OnionCellar: cellar is locked, deferring registration (will retry on next startup)")
+                _save_registration_status(app, {
+                    "registered": False,
+                    "locked": True,
+                    "last_attempt": datetime.now(timezone.utc).isoformat(),
+                    "cellar_address": CELLAR_ADDRESS,
+                })
+                return
         except json.JSONDecodeError:
             pass
 
@@ -211,6 +234,15 @@ def is_cellar_instance(onion_address):
     if not onion_address or not onion_address.endswith('.onion'):
         return False
     return onion_address.strip() == CELLAR_ADDRESS.strip()
+
+
+def _is_cellar_unlocked(app):
+    """Check if the cellar master key is currently unlocked."""
+    ok, _ = _run_docker(app, [
+        "exec", "onionpress-tor",
+        "test", "-f", f"{CELLAR_DATA_DIR}/.master-key-unlocked"
+    ])
+    return ok
 
 
 def _read_registry(app):
@@ -258,22 +290,26 @@ def _check_content(app, content_address):
 
 
 def _do_takeover(app, entry):
-    """Take over a failed instance's .onion address."""
+    """Take over a failed instance's .onion address.
+    Returns: 'ok', 'locked', or 'failed'."""
     content_addr = entry["content_address"]
     app.log(f"OnionCellar: Taking over {content_addr}")
 
     # Use cellar-tor-manager.sh inside the tor container to add the address
-    ok, output = _run_docker(app, [
+    rc, output = _run_docker_rc(app, [
         "exec", "onionpress-tor",
         "/cellar-tor-manager.sh", "takeover", content_addr
     ], timeout=30)
 
-    if ok:
+    if rc == 0:
         app.log(f"OnionCellar: Takeover complete for {content_addr}")
+        return "ok"
+    elif rc == 2:
+        app.log(f"OnionCellar: Cellar locked, deferring takeover for {content_addr}")
+        return "locked"
     else:
         app.log(f"OnionCellar: Takeover failed for {content_addr}: {output}")
-
-    return ok
+        return "failed"
 
 
 def _do_release(app, entry):
@@ -356,15 +392,23 @@ def cellar_poller(app):
                     modified = True
 
                     if new_fail_count >= FAIL_THRESHOLD and not takeover_active:
-                        # Double-check: also test the content address
-                        content_ok = _check_content(app, content_addr)
-                        if not content_ok:
-                            if _do_takeover(app, entry):
-                                entry["takeover_active"] = True
-                                entry["status"] = "taken_over"
-                            else:
-                                entry["status"] = "takeover_failed"
+                        # Check if cellar is unlocked before attempting takeover
+                        if not _is_cellar_unlocked(app):
+                            entry["status"] = "takeover_deferred_locked"
                             modified = True
+                        else:
+                            # Double-check: also test the content address
+                            content_ok = _check_content(app, content_addr)
+                            if not content_ok:
+                                result = _do_takeover(app, entry)
+                                if result == "ok":
+                                    entry["takeover_active"] = True
+                                    entry["status"] = "taken_over"
+                                elif result == "locked":
+                                    entry["status"] = "takeover_deferred_locked"
+                                else:
+                                    entry["status"] = "takeover_failed"
+                                modified = True
 
                 # Update timestamp
                 entry["last_healthcheck"] = datetime.now(timezone.utc).isoformat()
