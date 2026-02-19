@@ -27,6 +27,7 @@ import backup_manager
 import onion_proxy
 import install_native_messaging
 import setup_window
+import cellar
 
 
 def parse_version(version_str):
@@ -521,6 +522,9 @@ class OnionPressApp(rumps.App):
         self.healthcheck_address = None    # Healthcheck .onion address
         self.relay_messages = []           # Messages received from OnionRelay
         self._relay_alert_shown = False    # Whether we've shown the relay alert icon
+        self.is_cellar = False             # True if this instance is the OnionCellar
+        self._cellar_checked = False       # Whether cellar mode has been checked
+        self._cellar_registration_started = False  # Whether registration thread is running
 
         # Menu items
         # Store reference to browser menu item so we can update its title
@@ -1557,6 +1561,18 @@ class OnionPressApp(rumps.App):
                 if self.is_ready:
                     self.poll_relay_messages()
 
+                # OnionCellar: detect cellar mode and start registration/polling
+                if self.is_ready and not self._cellar_checked:
+                    self._cellar_checked = True
+                    if cellar.is_cellar_instance(self.onion_address):
+                        self.is_cellar = True
+                        self.log("OnionCellar mode activated")
+                        cellar.start_cellar_poller(self)
+                        self.update_menu()
+                    elif not self._cellar_registration_started:
+                        self._cellar_registration_started = True
+                        cellar.start_registration_thread(self)
+
                 # Check if WordPress setup is needed (first-run guard)
                 if self._wp_installed is not True and self.proxy_server:
                     wp_installed = self.check_wp_installed()
@@ -1610,6 +1626,8 @@ class OnionPressApp(rumps.App):
                 self.healthcheck_address = None
                 self.relay_messages = []
                 self._relay_alert_shown = False
+                self._cellar_checked = False
+                self._cellar_registration_started = False
 
                 # Stop web log capture if running
                 if self.web_log_process is not None:
@@ -1645,7 +1663,10 @@ class OnionPressApp(rumps.App):
 
             if state == "available":
                 self.icon = self.icon_running
-                self.menu["Starting..."].title = f"Address: {self.onion_address}"
+                if self.is_cellar:
+                    self.menu["Starting..."].title = f"OnionCellar: {self.onion_address}"
+                else:
+                    self.menu["Starting..."].title = f"Address: {self.onion_address}"
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)

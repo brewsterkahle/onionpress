@@ -50,7 +50,7 @@ OPTIONS = {
     # will appear to succeed but the app will crash at launch with
     # "ModuleNotFoundError".
     'includes': ['subprocess', 'threading', 'os', 'time', 'json', 'key_manager', 'backup_manager',
-                 'onion_proxy', 'install_native_messaging', 'setup_window'],
+                 'onion_proxy', 'install_native_messaging', 'setup_window', 'cellar'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

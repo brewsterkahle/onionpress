@@ -4,8 +4,10 @@ services:
     container_name: onionpress-tor
     environment:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
+      - ONIONPRESS_CELLAR=${ONIONPRESS_CELLAR:-0}
     volumes:
       - tor-keys:/var/lib/tor/hidden_service/
+      - onionpress-data:/var/lib/onionpress
     depends_on:
       - wordpress
     restart: unless-stopped

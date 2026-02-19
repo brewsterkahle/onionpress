@@ -77,6 +77,23 @@ export DOCKER_CONFIG="$DATA_DIR/docker-config"
 ONIONPRESS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist" 2>/dev/null || echo "unknown")
 export ONIONPRESS_VERSION
 
+# OnionCellar mode detection — check if our .onion address matches the cellar address
+# This env var is passed to docker-compose and controls cellar-specific behavior
+export ONIONPRESS_CELLAR="0"
+
+detect_cellar_mode() {
+    local cellar_address="opcellarplaceholder.onion"
+    local our_address=""
+    our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+    our_address=$(echo "$our_address" | tr -d '\n\r ')
+    if [ "$our_address" = "$cellar_address" ]; then
+        export ONIONPRESS_CELLAR="1"
+        log "OnionCellar mode activated (address: $our_address)"
+        return 0
+    fi
+    return 1
+}
+
 # Log file
 LOG_FILE="$DATA_DIR/onionpress.log"
 
@@ -482,6 +499,35 @@ install_multisite_domain_map() {
     return 0
 }
 
+# Function to install OnionCellar registration mu-plugin (cellar mode only)
+install_cellar_plugin() {
+    if [ "$ONIONPRESS_CELLAR" != "1" ]; then
+        return 0
+    fi
+
+    local plugins_dir="$RESOURCES_DIR/plugins"
+
+    if [ -f "$plugins_dir/onionpress-cellar-register.php" ]; then
+        docker exec onionpress-wordpress mkdir -p \
+            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1
+        if docker cp "$plugins_dir/onionpress-cellar-register.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-cellar-register.php >> "$LOG_FILE" 2>&1
+            # Create cellar data directory inside container
+            docker exec onionpress-wordpress mkdir -p \
+                /var/lib/onionpress/cellar/keys >> "$LOG_FILE" 2>&1
+            docker exec onionpress-wordpress chown -R www-data:www-data \
+                /var/lib/onionpress/cellar >> "$LOG_FILE" 2>&1
+            log "✓ onionpress-cellar-register.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-cellar-register.php"
+        fi
+    fi
+
+    return 0
+}
+
 # Function to start containers
 start_containers() {
     log "Starting OnionPress containers..."
@@ -588,6 +634,11 @@ start_containers() {
 
     # Fix permissions for onionpress persistent data directory
     fix_onionpress_permissions
+
+    # Detect cellar mode and install cellar plugin if applicable
+    cd "$DOCKER_DIR"
+    detect_cellar_mode
+    install_cellar_plugin
 }
 
 # Function to stop containers
