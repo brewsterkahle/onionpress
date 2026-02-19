@@ -82,7 +82,7 @@ export ONIONPRESS_VERSION
 export ONIONPRESS_CELLAR="0"
 
 detect_cellar_mode() {
-    local cellar_address="opcellarplaceholder.onion"
+    local cellar_address="ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
     local our_address=""
     our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
     our_address=$(echo "$our_address" | tr -d '\n\r ')

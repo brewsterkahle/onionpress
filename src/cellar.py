@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 
 # The cellar's .onion address — placeholder until a real vanity address is generated
-CELLAR_ADDRESS = "opcellarplaceholder.onion"
+CELLAR_ADDRESS = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
 
 # Wayback Machine .onion address
 WAYBACK_ONION = "archivep75mbjunhxcn6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
@@ -32,7 +32,6 @@ CELLAR_KEYS_DIR = f"{CELLAR_DATA_DIR}/keys"
 HEALTHY_INTERVAL = 300       # 5 minutes when healthy
 FAST_POLL_INTERVAL = 15      # 15 seconds after recent failure/recovery
 LONG_FAIL_INTERVAL = 1800    # 30 minutes after prolonged failure
-RETRY_INTERVAL = 300         # 5 minutes between registration retries
 
 # Thresholds
 FAIL_THRESHOLD = 3           # consecutive failures before takeover
@@ -111,7 +110,7 @@ def register_with_cellar(app):
     """
     Register this instance with the OnionCellar.
     Sends content address, healthcheck address, and secret key to the cellar.
-    Called from a background thread; retries on failure.
+    Called from a background thread; tries once per app startup.
     """
     # Check if registration is disabled
     if app.read_config_value("REGISTER_WITH_CELLAR", "yes").lower() == "no":
@@ -122,86 +121,78 @@ def register_with_cellar(app):
     if getattr(app, 'is_cellar', False):
         return
 
+    content_addr = app.onion_address
+    hc_addr = app.healthcheck_address
+
+    if not content_addr or not content_addr.endswith('.onion'):
+        app.log("OnionCellar: no content address available, skipping registration")
+        return
+    if not hc_addr or not hc_addr.endswith('.onion'):
+        app.log("OnionCellar: no healthcheck address available, skipping registration")
+        return
+
     app.log("Registering with OnionCellar...")
 
-    while True:
-        if not app.is_ready:
-            time.sleep(30)
-            continue
+    # Extract the secret key (raw bytes)
+    try:
+        import key_manager
+        secret_key_bytes = key_manager.extract_private_key()
+    except Exception as e:
+        app.log(f"OnionCellar: failed to extract key: {e}")
+        return
 
-        content_addr = app.onion_address
-        hc_addr = app.healthcheck_address
+    # Also get the public key
+    ok, public_key_raw = _run_docker_raw(app, [
+        "exec", "onionpress-tor", "cat",
+        "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
+    ])
+    if not ok:
+        app.log("OnionCellar: failed to read public key")
+        return
 
-        if not content_addr or not content_addr.endswith('.onion'):
-            time.sleep(30)
-            continue
-        if not hc_addr or not hc_addr.endswith('.onion'):
-            time.sleep(30)
-            continue
+    # Build registration payload (keys as base64-encoded strings)
+    import base64
+    payload = json.dumps({
+        "content_address": content_addr,
+        "healthcheck_address": hc_addr,
+        "secret_key": base64.b64encode(secret_key_bytes).decode('ascii'),
+        "public_key": base64.b64encode(public_key_raw).decode('ascii'),
+        "version": getattr(app, 'version', 'unknown'),
+    })
 
-        # Extract the secret key (raw bytes)
+    # Send via wordpress container's curl through tor SOCKS proxy
+    # (per CLAUDE.md: use docker exec for all Tor communication)
+    ok, output = _run_docker(app, [
+        "exec", "onionpress-wordpress",
+        "curl", "-s", "-X", "POST",
+        "--socks5-hostname", "onionpress-tor:9050",
+        "-H", "Content-Type: application/json",
+        "-d", payload,
+        "--max-time", "30",
+        f"http://{CELLAR_ADDRESS}/register"
+    ], timeout=45)
+
+    if ok and output:
         try:
-            import key_manager
-            secret_key_bytes = key_manager.extract_private_key()
-        except Exception as e:
-            app.log(f"OnionCellar: failed to extract key: {e}")
-            time.sleep(RETRY_INTERVAL)
-            continue
+            resp = json.loads(output)
+            if resp.get("registered"):
+                app.log("OnionCellar: registration successful")
+                _save_registration_status(app, {
+                    "registered": True,
+                    "last_attempt": datetime.now(timezone.utc).isoformat(),
+                    "cellar_address": CELLAR_ADDRESS,
+                    "content_address": content_addr,
+                })
+                return
+        except json.JSONDecodeError:
+            pass
 
-        # Also get the public key
-        ok, public_key_raw = _run_docker_raw(app, [
-            "exec", "onionpress-tor", "cat",
-            "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
-        ])
-        if not ok:
-            app.log("OnionCellar: failed to read public key")
-            time.sleep(RETRY_INTERVAL)
-            continue
-
-        # Build registration payload (keys as hex-encoded strings)
-        import base64
-        payload = json.dumps({
-            "content_address": content_addr,
-            "healthcheck_address": hc_addr,
-            "secret_key": base64.b64encode(secret_key_bytes).decode('ascii'),
-            "public_key": base64.b64encode(public_key_raw).decode('ascii'),
-            "version": getattr(app, 'version', 'unknown'),
-        })
-
-        # Send via wordpress container's curl through tor SOCKS proxy
-        # (per CLAUDE.md: use docker exec for all Tor communication)
-        ok, output = _run_docker(app, [
-            "exec", "onionpress-wordpress",
-            "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "onionpress-tor:9050",
-            "-H", "Content-Type: application/json",
-            "-d", payload,
-            "--max-time", "30",
-            f"http://{CELLAR_ADDRESS}/register"
-        ], timeout=45)
-
-        if ok and output:
-            try:
-                resp = json.loads(output)
-                if resp.get("registered"):
-                    app.log("OnionCellar: registration successful")
-                    _save_registration_status(app, {
-                        "registered": True,
-                        "last_attempt": datetime.now(timezone.utc).isoformat(),
-                        "cellar_address": CELLAR_ADDRESS,
-                        "content_address": content_addr,
-                    })
-                    return
-            except json.JSONDecodeError:
-                pass
-
-        app.log(f"OnionCellar: registration failed, retrying in {RETRY_INTERVAL}s")
-        _save_registration_status(app, {
-            "registered": False,
-            "last_attempt": datetime.now(timezone.utc).isoformat(),
-            "cellar_address": CELLAR_ADDRESS,
-        })
-        time.sleep(RETRY_INTERVAL)
+    app.log("OnionCellar: registration failed (will retry on next startup)")
+    _save_registration_status(app, {
+        "registered": False,
+        "last_attempt": datetime.now(timezone.utc).isoformat(),
+        "cellar_address": CELLAR_ADDRESS,
+    })
 
 
 def start_registration_thread(app):
