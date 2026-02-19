@@ -414,7 +414,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.95"
+        self.version = "2.2.96"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -2197,7 +2197,7 @@ class OnionPressApp(rumps.App):
                 # SOCKS routing BEFORE we navigate to the .onion address.
                 subprocess.run(["open", "-a", ext_browser])
                 # Wait for extension to poll /status and set up SOCKS routing.
-                # Extension polls every 2s at startup, every 15s thereafter.
+                # Extension polls every 2s at startup, every 60s thereafter.
                 marker = os.path.join(self.app_support, "extension-connected")
                 for i in range(30):
                     try:
@@ -3234,7 +3234,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.95 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.96 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
