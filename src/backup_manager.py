@@ -126,17 +126,41 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             capture_output=True, timeout=300, check=True
         )
 
-        # 4. Write metadata
+        # 4. Backup cellar data if this is the OnionCellar instance
+        #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
+        is_cellar = False
+        cellar_check = subprocess.run(
+            ['docker', 'exec', 'onionpress-wordpress',
+             'test', '-f', '/var/lib/onionpress/cellar/master-key.json'],
+            capture_output=True, timeout=10
+        )
+        if cellar_check.returncode == 0:
+            log_func("Backup: copying OnionCellar data (encrypted keys, registry)...")
+            is_cellar = True
+            cellar_dir = os.path.join(staging, 'cellar')
+            subprocess.run(
+                ['docker', 'cp',
+                 'onionpress-wordpress:/var/lib/onionpress/cellar/.',
+                 cellar_dir],
+                capture_output=True, timeout=60, check=True
+            )
+            # Remove the ephemeral unlock file if it was copied
+            unlocked_file = os.path.join(cellar_dir, '.master-key-unlocked')
+            if os.path.exists(unlocked_file):
+                os.unlink(unlocked_file)
+
+        # 5. Write metadata
         metadata = {
             'onion_address': onion_address,
             'backup_date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'onionpress_version': version,
             'username': username,
+            'is_cellar': is_cellar,
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
-        # 5. Create password-protected zip using macOS system zip
+        # 6. Create password-protected zip using macOS system zip
         log_func("Backup: creating encrypted zip archive...")
         # Remove target if it already exists (zip would append otherwise)
         if os.path.exists(output_path):
@@ -275,6 +299,33 @@ def restore_from_backup(zip_path, password, log_func):
                  'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
                 capture_output=True, timeout=60
             )
+
+        # 4. Restore cellar data if present in backup
+        cellar_dir = _find_dir(staging, 'cellar')
+        if os.path.isdir(cellar_dir) and os.path.exists(os.path.join(cellar_dir, 'master-key.json')):
+            log_func("Restore: restoring OnionCellar data (encrypted keys, registry)...")
+            # Remove ephemeral unlock file if it somehow exists in the backup
+            unlocked_file = os.path.join(cellar_dir, '.master-key-unlocked')
+            if os.path.exists(unlocked_file):
+                os.unlink(unlocked_file)
+            # Ensure cellar directory exists in container
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'mkdir', '-p', '/var/lib/onionpress/cellar'],
+                capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ['docker', 'cp',
+                 cellar_dir + '/.',
+                 'onionpress-wordpress:/var/lib/onionpress/cellar/'],
+                capture_output=True, timeout=60, check=True
+            )
+            subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/cellar/'],
+                capture_output=True, timeout=30
+            )
+            log_func("Restore: OnionCellar data restored (cellar will be locked until admin login)")
 
         log_func("Restore: files restored successfully")
         return metadata
