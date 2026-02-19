@@ -370,13 +370,22 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self._handle_request(head_only=True)
 
+    def _get_cors_origin(self):
+        """Return the CORS origin header value if the request is from a browser extension."""
+        origin = self.headers.get('Origin', '')
+        if origin.startswith('moz-extension://') or origin.startswith('chrome-extension://'):
+            return origin
+        return None
+
     def do_OPTIONS(self):
-        """Handle CORS preflight requests (Firefox requires this)."""
+        """Handle CORS preflight requests (browser extensions only)."""
         self.send_response(204)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-OnionPress-Browser')
-        self.send_header('Access-Control-Max-Age', '86400')
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_header('Access-Control-Allow-Origin', cors_origin)
+            self.send_header('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-OnionPress-Browser')
+            self.send_header('Access-Control-Max-Age', '86400')
         self.send_header('Content-Length', '0')
         self.end_headers()
 
@@ -536,7 +545,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             if name.lower() in forward_headers:
                 self.send_header(name, value)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Access-Control-Allow-Origin', '*')
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_header('Access-Control-Allow-Origin', cors_origin)
         self.send_header('Referrer-Policy', 'no-referrer')
         self.end_headers()
         if not head_only:
@@ -819,10 +830,11 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
     def _handle_status(self):
         """Return proxy status as JSON."""
         # Write extension-connected marker when polled by the browser extension
+        ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
         if self.server.data_dir:
             try:
                 browser = self.headers.get('X-OnionPress-Browser', '')
-                if browser:
+                if browser and browser in ALLOWED_BROWSERS:
                     marker = os.path.join(self.server.data_dir, "extension-connected")
                     data = json.dumps({"timestamp": int(time.time()), "browser": browser})
                     with open(marker, 'w') as f:
@@ -844,7 +856,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Access-Control-Allow-Origin', '*')
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_header('Access-Control-Allow-Origin', cors_origin)
         self.end_headers()
         self.wfile.write(body)
 

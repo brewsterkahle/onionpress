@@ -1992,11 +1992,14 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=check_for_brave, daemon=True).start()
 
+    # Browsers we trust for open -a / osascript activate
+    ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
+
     def extension_connected_recently(self):
         """Check if a browser extension was active within the last 24 hours.
 
         Returns the browser app name (e.g. "Firefox") if connected recently,
-        or None if not.
+        or None if not. Only returns names from ALLOWED_BROWSERS.
         """
         marker = os.path.join(self.app_support, "extension-connected")
         try:
@@ -2004,7 +2007,9 @@ class OnionPressApp(rumps.App):
                 with open(marker, 'r') as f:
                     data = json.loads(f.read().strip())
                 if (time.time() - data["timestamp"]) < 86400:
-                    return data.get("browser")
+                    browser = data.get("browser")
+                    if browser in self.ALLOWED_BROWSERS:
+                        return browser
         except Exception:
             pass
         return None
