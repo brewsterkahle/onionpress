@@ -414,7 +414,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.96"
+        self.version = "2.2.97"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -559,6 +559,9 @@ class OnionPressApp(rumps.App):
 
         # Ensure Docker is available
         threading.Thread(target=self.ensure_docker_available, daemon=True).start()
+
+        # Listen for system wake to immediately mark Tor as reconnecting
+        self.register_wake_notification()
 
         # Start status checker
         self.start_status_checker()
@@ -1868,6 +1871,36 @@ class OnionPressApp(rumps.App):
                 )
             except Exception:
                 pass
+            self.update_menu()
+
+    def register_wake_notification(self):
+        """Register for macOS wake notification to immediately update icon"""
+        ws = AppKit.NSWorkspace.sharedWorkspace()
+        nc = ws.notificationCenter()
+        nc.addObserverForName_object_queue_usingBlock_(
+            AppKit.NSWorkspaceWillSleepNotification,
+            None,
+            AppKit.NSOperationQueue.mainQueue(),
+            lambda notification: self.handle_sleep())
+        nc.addObserverForName_object_queue_usingBlock_(
+            AppKit.NSWorkspaceDidWakeNotification,
+            None,
+            AppKit.NSOperationQueue.mainQueue(),
+            lambda notification: self.handle_wake())
+        self.log("Registered for system sleep/wake notifications")
+
+    def handle_sleep(self):
+        """Log when system is going to sleep"""
+        self.log("System going to sleep")
+
+    def handle_wake(self):
+        """Handle system wake — Tor circuits are dead, go yellow immediately"""
+        self.log("System wake detected — marking Tor as reconnecting")
+        if self.is_ready:
+            self.is_ready = False
+            self._last_bootstrap_pct = 0
+            self._bootstrap_stall_count = 0
+            self._yellow_since = time.time()
             self.update_menu()
 
     def start_status_checker(self):
@@ -3234,7 +3267,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.96 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.97 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
