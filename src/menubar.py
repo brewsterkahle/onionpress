@@ -2197,7 +2197,7 @@ class OnionPressApp(rumps.App):
                 # SOCKS routing BEFORE we navigate to the .onion address.
                 subprocess.run(["open", "-a", ext_browser])
                 # Wait for extension to poll /status and set up SOCKS routing.
-                # Extension polls every 2s at startup, every 15s thereafter.
+                # Extension polls every 2s at startup, every 60s thereafter.
                 marker = os.path.join(self.app_support, "extension-connected")
                 for i in range(30):
                     try:
