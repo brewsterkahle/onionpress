@@ -106,7 +106,7 @@ UPDATE_ON_LAUNCH=yes
 
 When enabled, onionpress will check for and download updated container images each time you launch the app. This ensures you have the latest security patches without manual intervention.
 
-**Note**: After updating container images, restart the service from the menu bar to apply updates.
+**Note**: Updated container images take effect the next time the service is started.
 
 ### Launch on Login
 

@@ -2912,18 +2912,21 @@ class OnionPressApp(rumps.App):
                 data = json.loads(result.stdout)
                 latest_version = data.get('tag_name', '').lstrip('v')
                 current_version = self.version
+                self.log(f"Update check: current={current_version}, latest={latest_version}")
 
                 if latest_version and parse_version(latest_version) > parse_version(current_version):
                     app_update_available = True
                     response = rumps.alert(
                         title="App Update Available",
-                        message=f"A new version of onionpress is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nWould you like to download it?",
+                        message=f"A new version of OnionPress is available!\n\nCurrent: v{current_version}\nLatest: v{latest_version}\n\nWould you like to download it?",
                         ok="Download Update",
                         cancel="Later"
                     )
                     if response == 1:  # OK clicked
                         release_url = data.get('html_url', 'https://github.com/brewsterkahle/onionpress/releases/latest')
                         subprocess.run(["open", release_url])
+            else:
+                self.log(f"Update check curl failed: exit={result.returncode} stderr={result.stderr.strip()}")
         except Exception as e:
             self.log(f"Update check failed: {e}")
             import traceback
@@ -2941,15 +2944,11 @@ class OnionPressApp(rumps.App):
         images_updated = self.update_docker_images(show_notifications=True)
 
         # Show final summary if no app update was available.
-        # Must dispatch to main thread — rumps.alert() fails silently
-        # from background threads.
         if not app_update_available and not images_updated:
             version = self.version
-            AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(
-                lambda: rumps.alert(
-                    title="No Updates Available",
-                    message=f"You're running the latest version (v{version})\nAll container images are up to date."
-                )
+            self.show_native_alert(
+                "No Updates Available",
+                f"You're running the latest version (v{version})\nAll container images are up to date."
             )
 
     def show_setup_dialog(self):
