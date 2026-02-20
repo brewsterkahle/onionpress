@@ -673,6 +673,34 @@ install_multisite_domain_map() {
         fi
     fi
 
+    # Ensure .htaccess has multisite rewrite rules (REST API needs these)
+    docker exec onionpress-wordpress bash -c 'cat > /var/www/html/.htaccess << '\''HTEOF'\''
+# Privacy: prevent onion address leaking in Referer headers
+<IfModule mod_headers.c>
+Header set Referrer-Policy "no-referrer"
+</IfModule>
+
+# BEGIN WordPress Multisite
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+
+# add a trailing slash to /wp-admin
+RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]
+
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]
+RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\.php)$ $2 [L]
+RewriteRule . index.php [L]
+# END WordPress Multisite
+HTEOF
+chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
+        log "✓ .htaccess multisite rewrite rules installed" || \
+        log "WARNING: Failed to write .htaccess"
+
     # Copy domain-map mu-plugin → wp-content/mu-plugins/
     if [ -f "$plugins_dir/onionpress-domain-map.php" ]; then
         docker exec onionpress-wordpress mkdir -p \

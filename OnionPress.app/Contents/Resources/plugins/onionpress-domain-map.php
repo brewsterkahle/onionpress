@@ -23,13 +23,12 @@ if (
 
     /**
      * Replace //localhost with //actual-host in a URL string.
-     * Handles both http://localhost/… and //localhost/… forms.
+     * Handles http://localhost, http://localhost/, and http://localhost/path
+     * but NOT //localhost:8080 (which is itself a valid access path).
      */
     function onionpress_rewrite_url( $url ) {
         global $onionpress_real_host;
-        // Replace //localhost (with optional trailing content) but not //localhost:8080
-        // since localhost:8080 is itself a valid access path.
-        return str_replace( '//localhost/', '//' . $onionpress_real_host . '/', $url );
+        return preg_replace( '#//localhost(?=/|$)#', '//' . $onionpress_real_host, $url );
     }
 
     // Single-site options (per-blog home & siteurl).

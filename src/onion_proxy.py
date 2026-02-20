@@ -770,10 +770,13 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 # Write .htaccess with multisite rewrite rules
                 htaccess_content = (
                     "# Privacy: prevent onion address leaking in Referer headers\n"
+                    "<IfModule mod_headers.c>\n"
                     'Header set Referrer-Policy "no-referrer"\n'
+                    "</IfModule>\n"
                     "\n"
                     "# BEGIN WordPress Multisite\n"
                     "RewriteEngine On\n"
+                    "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"
                     "RewriteBase /\n"
                     "RewriteRule ^index\\.php$ - [L]\n"
                     "\n"

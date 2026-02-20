@@ -5,6 +5,6 @@ RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh
     && chmod +x /usr/local/bin/wp
 
 # Enable mod_remoteip for PROXY protocol support and add port 81 listener
-RUN a2enmod remoteip rewrite
+RUN a2enmod remoteip rewrite headers
 COPY onionpress-proxy-protocol.conf /etc/apache2/conf-available/
 RUN a2enconf onionpress-proxy-protocol
