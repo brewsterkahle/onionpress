@@ -1902,6 +1902,25 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
+        # SIGHUP Tor so it rebuilds stale circuits immediately
+        threading.Thread(target=self._sighup_tor, daemon=True).start()
+
+    def _sighup_tor(self):
+        """Send SIGHUP to Tor container to force circuit rebuild after wake"""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
+                capture_output=True, text=True, env=env, timeout=10)
+            if result.returncode == 0:
+                self.log("Sent SIGHUP to Tor — rebuilding circuits")
+            else:
+                self.log(f"Failed to SIGHUP Tor: {result.stderr.strip()}")
+        except Exception as e:
+            self.log(f"Failed to SIGHUP Tor: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
