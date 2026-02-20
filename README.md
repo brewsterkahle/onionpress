@@ -20,8 +20,8 @@ onionpress is a macOS application that bundles WordPress with a Tor onion servic
 - 🌐 **No DNS Registration Needed**: Your .onion address works immediately - no domain registration, no DNS configuration
 - 🏠 **Works Behind Firewalls**: Runs on home, school, or work networks even behind firewalls or NAT - no port forwarding required
 - ✨ **Vanity Onion Addresses**: All installations generate addresses starting with "op2" for easy identification
-- 📚 **Internet Archive Integration**: Automatically installs the [Wayback Machine Link Fixer](https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/) plugin to combat link rot by default
-- 🐳 **Cyber Security from hacking**: Uses Docker containers for easy management and isolation
+- 📚 **Internet Archive Integration**: Automatically submits posts to be archived and installs the [Wayback Machine Link Fixer](https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/) plugin to submit links from posts to be archived.   Registers the onionpress's .onion address so that when onionpress is offline, the URL requests are fulfilled by the Wayback Machine.
+- 🐳 **Cyber Security from hacking**: Uses Docker containers inside a VM for easy management and isolation
 - 📱 **Menu Bar App**: Simple menu bar interface to control your site
 - 🚀 **One-Click Install**: Download the DMG, drag to Applications, and launch
 - 🌐 **Tor-Only Access**: Your site is only accessible through Tor (e.g. Tor and Brave Browsers)
