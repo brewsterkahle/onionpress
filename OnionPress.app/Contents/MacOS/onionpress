@@ -77,6 +77,16 @@ export DOCKER_CONFIG="$DATA_DIR/docker-config"
 ONIONPRESS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Info.plist" 2>/dev/null || echo "unknown")
 export ONIONPRESS_VERSION
 
+# Read Cloudflare Tunnel token from config (empty = disabled)
+CLOUDFLARE_TUNNEL_TOKEN=""
+if [ -f "$DATA_DIR/config" ]; then
+    _cf_token=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$DATA_DIR/config" | cut -d= -f2)
+    if [ ! -z "$_cf_token" ]; then
+        CLOUDFLARE_TUNNEL_TOKEN="$_cf_token"
+    fi
+fi
+export CLOUDFLARE_TUNNEL_TOKEN
+
 # OnionCellar mode detection — check if our .onion address matches the cellar address
 # This env var is passed to docker-compose and controls cellar-specific behavior
 export ONIONPRESS_CELLAR="0"
@@ -879,13 +889,23 @@ start_containers() {
     cd "$DOCKER_DIR"
     detect_cellar_mode
     install_cellar_plugin
+
+    # Conditionally start Cloudflare Tunnel
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        log "Cloudflare Tunnel enabled, starting cloudflared..."
+        docker compose --profile cloudflare up -d cloudflared >> "$LOG_FILE" 2>&1
+    else
+        # Stop cloudflared if it was previously running but token was removed
+        docker compose --profile cloudflare stop cloudflared 2>/dev/null || true
+    fi
 }
 
 # Function to stop containers
 stop_containers() {
     log "Stopping OnionPress containers..."
     cd "$DOCKER_DIR"
-    docker compose down 2>&1 | tee -a "$LOG_FILE"
+    # Stop cloudflared first if running (profile containers need --profile to be addressed)
+    docker compose --profile cloudflare down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
 }
 

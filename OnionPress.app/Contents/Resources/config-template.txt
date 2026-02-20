@@ -86,3 +86,24 @@ PREVENT_SLEEP=yes
 # Requires restart to take effect.
 #
 VM_MEMORY=1
+
+# Cloudflare Tunnel (Clearnet Access)
+# Expose your WordPress site on the regular internet with HTTPS via Cloudflare Tunnel.
+#
+# PRIVACY NOTE: This reveals your Mac's IP address to Cloudflare. Your site is
+# no longer anonymous — Cloudflare (and potentially law enforcement via Cloudflare)
+# can identify the origin server. Only enable this if you are comfortable with that.
+#
+# AVAILABILITY NOTE: Unlike the .onion address (where Tor + Wayback Machine provides
+# a fallback when your Mac is offline), clearnet access requires your Mac to be
+# running OnionPress continuously. When your Mac sleeps or OnionPress is stopped,
+# the clearnet URL will be unreachable.
+#
+# Setup:
+# 1. Create a free Cloudflare account and add your domain
+# 2. Go to Zero Trust > Networks > Tunnels > Create a tunnel
+# 3. Set the tunnel service to http://wordpress:80
+# 4. Copy the tunnel token and paste it below
+# 5. Restart OnionPress
+# Your .onion address continues to work alongside the clearnet domain.
+CLOUDFLARE_TUNNEL_TOKEN=

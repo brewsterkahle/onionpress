@@ -110,6 +110,79 @@ class _BackupProgressWindow:
         alert.runModal()
 
 
+class _LogViewerActions(AppKit.NSObject):
+    """Singleton handling custom log viewer menu actions."""
+
+    _shared = None
+
+    @classmethod
+    def shared(cls):
+        if cls._shared is None:
+            cls._shared = cls.alloc().init()
+        return cls._shared
+
+    @staticmethod
+    def _active_viewer():
+        key_win = AppKit.NSApp.keyWindow()
+        if not key_win:
+            return None
+        for inst in _LogViewerWindow._instances.values():
+            if inst._window is key_win:
+                return inst
+        return None
+
+    def clearLog_(self, sender):
+        viewer = self._active_viewer()
+        if viewer:
+            try:
+                open(viewer._file_path, 'w').close()
+                viewer._text_view.textStorage().mutableString().setString_("")
+                viewer._offset = 0
+            except Exception:
+                pass
+
+    def toggleWordWrap_(self, sender):
+        viewer = self._active_viewer()
+        if not viewer:
+            return
+        tv = viewer._text_view
+        container = tv.textContainer()
+        scroll = tv.enclosingScrollView()
+        if container.widthTracksTextView():
+            # Disable word wrap — enable horizontal scrolling
+            container.setWidthTracksTextView_(False)
+            container.setContainerSize_(AppKit.NSMakeSize(1e7, 1e7))
+            tv.setHorizontallyResizable_(True)
+            if scroll:
+                scroll.setHasHorizontalScroller_(True)
+        else:
+            # Enable word wrap
+            if scroll:
+                scroll.setHasHorizontalScroller_(False)
+                width = scroll.contentView().bounds().size.width
+            else:
+                width = tv.frame().size.width
+            container.setContainerSize_(AppKit.NSMakeSize(width, 1e7))
+            container.setWidthTracksTextView_(True)
+            tv.setHorizontallyResizable_(False)
+
+    def increaseFontSize_(self, sender):
+        viewer = self._active_viewer()
+        if viewer:
+            font = viewer._text_view.font()
+            new_size = min(font.pointSize() + 2, 36)
+            viewer._text_view.setFont_(
+                AppKit.NSFont.fontWithName_size_(font.fontName(), new_size))
+
+    def decreaseFontSize_(self, sender):
+        viewer = self._active_viewer()
+        if viewer:
+            font = viewer._text_view.font()
+            new_size = max(font.pointSize() - 2, 8)
+            viewer._text_view.setFont_(
+                AppKit.NSFont.fontWithName_size_(font.fontName(), new_size))
+
+
 class _LogViewerWindow:
     """A read-only log viewer window with live tailing."""
 
@@ -177,6 +250,8 @@ class _LogViewerWindow:
         # Allow horizontal scrolling for long lines
         tv.setHorizontallyResizable_(False)
         tv.textContainer().setWidthTracksTextView_(True)
+        tv.setUsesFindBar_(True)
+        tv.setIncrementalSearchingEnabled_(True)
 
         scroll.setDocumentView_(tv)
         w.setContentView_(scroll)
@@ -193,6 +268,7 @@ class _LogViewerWindow:
         self._ensure_edit_menu()
 
         w.makeKeyAndOrderFront_(None)
+        w.makeFirstResponder_(tv)
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
         # Start polling thread
@@ -301,22 +377,58 @@ class _LogViewerWindow:
 
     @staticmethod
     def _ensure_edit_menu():
-        """Add a hidden Edit menu so standard key equivalents work."""
+        """Add Edit and View menus so standard key equivalents work."""
         main_menu = AppKit.NSApp.mainMenu()
         if not main_menu:
             main_menu = AppKit.NSMenu.alloc().init()
             AppKit.NSApp.setMainMenu_(main_menu)
-        # Check if Edit menu already exists
+        # Check if menus already exist
         for i in range(main_menu.numberOfItems()):
             if main_menu.itemAtIndex_(i).title() == "Edit":
                 return
+
+        actions = _LogViewerActions.shared()
+
+        # Edit menu
         edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
         edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "c")
         edit_menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "a")
+        edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        find_item = edit_menu.addItemWithTitle_action_keyEquivalent_("Find\u2026", "performFindPanelAction:", "f")
+        find_item.setTag_(1)  # NSFindPanelActionShowFindPanel
+        find_next = edit_menu.addItemWithTitle_action_keyEquivalent_("Find Next", "performFindPanelAction:", "g")
+        find_next.setTag_(2)  # NSFindPanelActionNext
+        find_prev = edit_menu.addItemWithTitle_action_keyEquivalent_("Find Previous", "performFindPanelAction:", "G")
+        find_prev.setTag_(3)  # NSFindPanelActionPrevious
+        edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        clear_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Clear Log", "clearLog:", "k")
+        clear_item.setTarget_(actions)
+        edit_menu.addItem_(clear_item)
         edit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Edit", None, "")
         edit_item.setSubmenu_(edit_menu)
         main_menu.addItem_(edit_item)
+
+        # View menu
+        view_menu = AppKit.NSMenu.alloc().initWithTitle_("View")
+        wrap_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Toggle Word Wrap", "toggleWordWrap:", "")
+        wrap_item.setTarget_(actions)
+        view_menu.addItem_(wrap_item)
+        view_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        bigger = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Bigger", "increaseFontSize:", "=")
+        bigger.setTarget_(actions)
+        view_menu.addItem_(bigger)
+        smaller = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Smaller", "decreaseFontSize:", "-")
+        smaller.setTarget_(actions)
+        view_menu.addItem_(smaller)
+        view_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "View", None, "")
+        view_item.setSubmenu_(view_menu)
+        main_menu.addItem_(view_item)
 
     def _stop(self):
         """Stop polling and close the window."""
@@ -1077,8 +1189,16 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Container runtime not ready after 3 minutes")
 
         # Check for port conflicts (another user's OnionPress or other process)
-        # Only flag a conflict if ports are busy AND our own containers aren't running
+        # Only flag a conflict if ports are busy AND our own containers aren't running.
+        # Retry a few times since a previous instance may still be releasing ports.
         in_use = self.check_port_conflict()
+        if in_use:
+            for retry in range(5):
+                self.log(f"Ports {in_use} busy, waiting for previous instance to release ({retry+1}/5)...")
+                time.sleep(2)
+                in_use = self.check_port_conflict()
+                if not in_use:
+                    break
         if in_use:
             # Check if our containers are already running (normal restart case)
             try:
@@ -3298,11 +3418,14 @@ License: AGPL v3"""
         # Close any open log viewer windows
         _LogViewerWindow.close_all()
 
-        # Update menu to show we're quitting (must be on main thread)
-        def update_and_cleanup():
-            self.menu["Starting..."].title = "Stopping services..."
-            self.icon = self.icon_starting
+        # Show stopped icon and status during shutdown — stays visible until
+        # all services are actually stopped (prevents port conflicts on relaunch)
+        def show_stopping():
+            self.menu["Starting..."].title = "Quitting..."
+            self.icon = self.icon_stopped
+        _main_thread(show_stopping)
 
+        def cleanup_and_quit():
             # Small delay to ensure UI updates
             time.sleep(0.5)
 
@@ -3339,11 +3462,13 @@ License: AGPL v3"""
             # Remove PID file
             self._remove_pid_file()
 
-            # Now quit
-            rumps.quit_application()
+            self.log("Cleanup complete, exiting")
 
-        # Start cleanup thread
-        threading.Thread(target=update_and_cleanup, daemon=True).start()
+            # Now quit (must dispatch to main thread)
+            _main_thread(rumps.quit_application)
+
+        # Non-daemon thread so the app stays alive until cleanup finishes
+        threading.Thread(target=cleanup_and_quit, daemon=False).start()
 
 if __name__ == "__main__":
     OnionPressApp().run()

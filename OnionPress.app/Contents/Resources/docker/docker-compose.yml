@@ -25,8 +25,10 @@ services:
       - WORDPRESS_DB_PASSWORD=${WORDPRESS_DB_PASSWORD}
       - WORDPRESS_DB_NAME=wordpress
       - WORDPRESS_CONFIG_EXTRA=
-          define('WP_HOME', 'http://' . $$_SERVER['HTTP_HOST']);
-          define('WP_SITEURL', 'http://' . $$_SERVER['HTTP_HOST']);
+          $$scheme = 'http';
+          if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') $$scheme = 'https';
+          define('WP_HOME', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
+          define('WP_SITEURL', $$scheme . '://' . $$_SERVER['HTTP_HOST']);
           define('FORCE_SSL_ADMIN', false);
           defined('WP_ALLOW_MULTISITE') or define('WP_ALLOW_MULTISITE', true);
           define('COOKIE_DOMAIN', $$_SERVER['HTTP_HOST']);
@@ -55,6 +57,20 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: onionpress-cloudflared
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - onionpress-network
+    depends_on:
+      - wordpress
+    restart: unless-stopped
+    profiles:
+      - cloudflare
 
 volumes:
   tor-keys:

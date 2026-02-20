@@ -110,6 +110,79 @@ class _BackupProgressWindow:
         alert.runModal()
 
 
+class _LogViewerActions(AppKit.NSObject):
+    """Singleton handling custom log viewer menu actions."""
+
+    _shared = None
+
+    @classmethod
+    def shared(cls):
+        if cls._shared is None:
+            cls._shared = cls.alloc().init()
+        return cls._shared
+
+    @staticmethod
+    def _active_viewer():
+        key_win = AppKit.NSApp.keyWindow()
+        if not key_win:
+            return None
+        for inst in _LogViewerWindow._instances.values():
+            if inst._window is key_win:
+                return inst
+        return None
+
+    def clearLog_(self, sender):
+        viewer = self._active_viewer()
+        if viewer:
+            try:
+                open(viewer._file_path, 'w').close()
+                viewer._text_view.textStorage().mutableString().setString_("")
+                viewer._offset = 0
+            except Exception:
+                pass
+
+    def toggleWordWrap_(self, sender):
+        viewer = self._active_viewer()
+        if not viewer:
+            return
+        tv = viewer._text_view
+        container = tv.textContainer()
+        scroll = tv.enclosingScrollView()
+        if container.widthTracksTextView():
+            # Disable word wrap — enable horizontal scrolling
+            container.setWidthTracksTextView_(False)
+            container.setContainerSize_(AppKit.NSMakeSize(1e7, 1e7))
+            tv.setHorizontallyResizable_(True)
+            if scroll:
+                scroll.setHasHorizontalScroller_(True)
+        else:
+            # Enable word wrap
+            if scroll:
+                scroll.setHasHorizontalScroller_(False)
+                width = scroll.contentView().bounds().size.width
+            else:
+                width = tv.frame().size.width
+            container.setContainerSize_(AppKit.NSMakeSize(width, 1e7))
+            container.setWidthTracksTextView_(True)
+            tv.setHorizontallyResizable_(False)
+
+    def increaseFontSize_(self, sender):
+        viewer = self._active_viewer()
+        if viewer:
+            font = viewer._text_view.font()
+            new_size = min(font.pointSize() + 2, 36)
+            viewer._text_view.setFont_(
+                AppKit.NSFont.fontWithName_size_(font.fontName(), new_size))
+
+    def decreaseFontSize_(self, sender):
+        viewer = self._active_viewer()
+        if viewer:
+            font = viewer._text_view.font()
+            new_size = max(font.pointSize() - 2, 8)
+            viewer._text_view.setFont_(
+                AppKit.NSFont.fontWithName_size_(font.fontName(), new_size))
+
+
 class _LogViewerWindow:
     """A read-only log viewer window with live tailing."""
 
@@ -177,6 +250,8 @@ class _LogViewerWindow:
         # Allow horizontal scrolling for long lines
         tv.setHorizontallyResizable_(False)
         tv.textContainer().setWidthTracksTextView_(True)
+        tv.setUsesFindBar_(True)
+        tv.setIncrementalSearchingEnabled_(True)
 
         scroll.setDocumentView_(tv)
         w.setContentView_(scroll)
@@ -193,6 +268,7 @@ class _LogViewerWindow:
         self._ensure_edit_menu()
 
         w.makeKeyAndOrderFront_(None)
+        w.makeFirstResponder_(tv)
         AppKit.NSApp.activateIgnoringOtherApps_(True)
 
         # Start polling thread
@@ -301,22 +377,58 @@ class _LogViewerWindow:
 
     @staticmethod
     def _ensure_edit_menu():
-        """Add a hidden Edit menu so standard key equivalents work."""
+        """Add Edit and View menus so standard key equivalents work."""
         main_menu = AppKit.NSApp.mainMenu()
         if not main_menu:
             main_menu = AppKit.NSMenu.alloc().init()
             AppKit.NSApp.setMainMenu_(main_menu)
-        # Check if Edit menu already exists
+        # Check if menus already exist
         for i in range(main_menu.numberOfItems()):
             if main_menu.itemAtIndex_(i).title() == "Edit":
                 return
+
+        actions = _LogViewerActions.shared()
+
+        # Edit menu
         edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
         edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "c")
         edit_menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "a")
+        edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        find_item = edit_menu.addItemWithTitle_action_keyEquivalent_("Find\u2026", "performFindPanelAction:", "f")
+        find_item.setTag_(1)  # NSFindPanelActionShowFindPanel
+        find_next = edit_menu.addItemWithTitle_action_keyEquivalent_("Find Next", "performFindPanelAction:", "g")
+        find_next.setTag_(2)  # NSFindPanelActionNext
+        find_prev = edit_menu.addItemWithTitle_action_keyEquivalent_("Find Previous", "performFindPanelAction:", "G")
+        find_prev.setTag_(3)  # NSFindPanelActionPrevious
+        edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        clear_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Clear Log", "clearLog:", "k")
+        clear_item.setTarget_(actions)
+        edit_menu.addItem_(clear_item)
         edit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Edit", None, "")
         edit_item.setSubmenu_(edit_menu)
         main_menu.addItem_(edit_item)
+
+        # View menu
+        view_menu = AppKit.NSMenu.alloc().initWithTitle_("View")
+        wrap_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Toggle Word Wrap", "toggleWordWrap:", "")
+        wrap_item.setTarget_(actions)
+        view_menu.addItem_(wrap_item)
+        view_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        bigger = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Bigger", "increaseFontSize:", "=")
+        bigger.setTarget_(actions)
+        view_menu.addItem_(bigger)
+        smaller = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Smaller", "decreaseFontSize:", "-")
+        smaller.setTarget_(actions)
+        view_menu.addItem_(smaller)
+        view_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "View", None, "")
+        view_item.setSubmenu_(view_menu)
+        main_menu.addItem_(view_item)
 
     def _stop(self):
         """Stop polling and close the window."""
@@ -482,6 +594,12 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Native messaging install failed: {e}")
 
+            # Check if Cloudflare Tunnel is configured
+            cf_token = self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN")
+            if cf_token:
+                self.cloudflare_tunnel_enabled = True
+                self.log("Cloudflare Tunnel configured")
+
         # Start background initialization
         threading.Thread(target=background_init, daemon=True).start()
 
@@ -526,16 +644,19 @@ class OnionPressApp(rumps.App):
         self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
         self._cellar_registration_started = False  # Whether registration thread is running
+        self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
 
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
         self.relay_alert_item = rumps.MenuItem("Relay Alerts", callback=self.view_relay_alerts)
+        self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
+            self.clearnet_status_item,
             self.browser_menu_item,
             self.relay_alert_item,
             rumps.separator,
@@ -1077,8 +1198,16 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Container runtime not ready after 3 minutes")
 
         # Check for port conflicts (another user's OnionPress or other process)
-        # Only flag a conflict if ports are busy AND our own containers aren't running
+        # Only flag a conflict if ports are busy AND our own containers aren't running.
+        # Retry a few times since a previous instance may still be releasing ports.
         in_use = self.check_port_conflict()
+        if in_use:
+            for retry in range(5):
+                self.log(f"Ports {in_use} busy, waiting for previous instance to release ({retry+1}/5)...")
+                time.sleep(2)
+                in_use = self.check_port_conflict()
+                if not in_use:
+                    break
         if in_use:
             # Check if our containers are already running (normal restart case)
             try:
@@ -1421,6 +1550,19 @@ class OnionPressApp(rumps.App):
             return "stuck"
         return "starting"
 
+    def _read_config_value(self, key, default=""):
+        """Read a value from ~/.onionpress/config."""
+        config_file = os.path.join(self.app_support, "config")
+        try:
+            with open(config_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split("=", 1)[1]
+        except (OSError, IOError):
+            pass
+        return default
+
     def check_status(self):
         """Check if containers are running and get onion address"""
         if self._port_conflict:
@@ -1505,6 +1647,9 @@ class OnionPressApp(rumps.App):
                         elapsed = int(time.time() - self.startup_time)
                         self.log(f"✓ System fully operational (launched in {elapsed}s)")
                         self.last_status_logged = current_status
+
+                        # Re-read Cloudflare Tunnel config (may have changed since launch)
+                        self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
 
                         # Dismiss setup dialog if it's showing
                         self.dismiss_setup_dialog()
@@ -1676,6 +1821,13 @@ class OnionPressApp(rumps.App):
                 self.title = ""
                 self.relay_alert_item.title = "Relay Alerts"
                 self.relay_alert_item.set_callback(None)
+
+            # Show/hide clearnet status based on tunnel config and state
+            show_clearnet = (state == "available" and self.cloudflare_tunnel_enabled)
+            self.clearnet_status_item.title = "Clearnet: Active (via Cloudflare)" if show_clearnet else ""
+            # Hidden by setting callback to None (greyed out) — rumps doesn't support true hide,
+            # but an empty title with no callback is effectively invisible
+            self.clearnet_status_item.set_callback(None)
 
             if state == "available":
                 self.icon = self.icon_running
@@ -2395,6 +2547,8 @@ class OnionPressApp(rumps.App):
                         if line and not line.startswith('#') and '=' in line:
                             key, val = line.split('=', 1)
                             env[key] = val.strip("'")
+            # Pass Cloudflare Tunnel token (avoids docker-compose warning about undefined var)
+            env.setdefault("CLOUDFLARE_TUNNEL_TOKEN", self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
             docker_bin = os.path.join(self.bin_dir, "docker")
             docker_log = os.path.join(self.app_support, "docker-pull.log")
 
@@ -2899,9 +3053,11 @@ class OnionPressApp(rumps.App):
         app_update_available = False
         try:
             # Fetch latest release from GitHub using curl to avoid permission prompts
+            # --cacert needed because py2app bundle can't find CA certs (curl exit 77)
             url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
             result = subprocess.run(
-                ["curl", "-s", "-H", "User-Agent: onionpress", "--max-time", "10", url],
+                ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
+                 "-H", "User-Agent: onionpress", "--max-time", "10", url],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -3298,11 +3454,14 @@ License: AGPL v3"""
         # Close any open log viewer windows
         _LogViewerWindow.close_all()
 
-        # Update menu to show we're quitting (must be on main thread)
-        def update_and_cleanup():
-            self.menu["Starting..."].title = "Stopping services..."
-            self.icon = self.icon_starting
+        # Show stopped icon and status during shutdown — stays visible until
+        # all services are actually stopped (prevents port conflicts on relaunch)
+        def show_stopping():
+            self.menu["Starting..."].title = "Quitting..."
+            self.icon = self.icon_stopped
+        _main_thread(show_stopping)
 
+        def cleanup_and_quit():
             # Small delay to ensure UI updates
             time.sleep(0.5)
 
@@ -3339,11 +3498,13 @@ License: AGPL v3"""
             # Remove PID file
             self._remove_pid_file()
 
-            # Now quit
-            rumps.quit_application()
+            self.log("Cleanup complete, exiting")
 
-        # Start cleanup thread
-        threading.Thread(target=update_and_cleanup, daemon=True).start()
+            # Now quit (must dispatch to main thread)
+            _main_thread(rumps.quit_application)
+
+        # Non-daemon thread so the app stays alive until cleanup finishes
+        threading.Thread(target=cleanup_and_quit, daemon=False).start()
 
 if __name__ == "__main__":
     OnionPressApp().run()
