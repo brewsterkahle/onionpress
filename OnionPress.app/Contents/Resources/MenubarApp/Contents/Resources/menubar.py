@@ -414,7 +414,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.97"
+        self.version = "2.2.98"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1890,18 +1890,39 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Log when system is going to sleep"""
+        """Handle system sleep — release caffeinate so the Mac actually sleeps"""
         self.log("System going to sleep")
+        self.stop_caffeinate()
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
         self.log("System wake detected — marking Tor as reconnecting")
+        self.start_caffeinate()
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
             self._bootstrap_stall_count = 0
             self._yellow_since = time.time()
             self.update_menu()
+        # SIGHUP Tor so it rebuilds stale circuits immediately
+        threading.Thread(target=self._sighup_tor, daemon=True).start()
+
+    def _sighup_tor(self):
+        """Send SIGHUP to Tor container to force circuit rebuild after wake"""
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "exec", "onionpress-tor", "kill", "-HUP", "1"],
+                capture_output=True, text=True, env=env, timeout=10)
+            if result.returncode == 0:
+                self.log("Sent SIGHUP to Tor — rebuilding circuits")
+            else:
+                self.log(f"Failed to SIGHUP Tor: {result.stderr.strip()}")
+        except Exception as e:
+            self.log(f"Failed to SIGHUP Tor: {e}")
 
     def start_status_checker(self):
         """Start background thread to check status periodically"""
@@ -3267,7 +3288,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.97 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.98 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

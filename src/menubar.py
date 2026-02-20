@@ -414,7 +414,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.97"
+        self.version = "2.2.98"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1890,12 +1890,14 @@ class OnionPressApp(rumps.App):
         self.log("Registered for system sleep/wake notifications")
 
     def handle_sleep(self):
-        """Log when system is going to sleep"""
+        """Handle system sleep — release caffeinate so the Mac actually sleeps"""
         self.log("System going to sleep")
+        self.stop_caffeinate()
 
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
         self.log("System wake detected — marking Tor as reconnecting")
+        self.start_caffeinate()
         if self.is_ready:
             self.is_ready = False
             self._last_bootstrap_pct = 0
@@ -3286,7 +3288,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.97 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.98 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

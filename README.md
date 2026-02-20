@@ -71,16 +71,24 @@ This removes macOS's quarantine attribute and allows the app to launch without w
 
 ### Menu Bar Controls
 
-Once installed, onionpress appears in your menu bar with an onion icon (🧅):
+Once installed, OnionPress appears in your menu bar with an onion icon:
+- 🟣 **Purple** = running and available
+- 🟡 **Yellow** = starting or reconnecting
+- 🔴 **Red** = stopped or offline
+
+Menu items:
 
 - **Copy Onion Address**: Copy your .onion URL to clipboard
-- **Open in Tor Browser**: Launch Tor Browser with your site (requires Tor Browser to be installed)
-- **Start/Stop**: Control the WordPress service
-- **View Logs**: Open logs in Console.app for troubleshooting
-- **Settings**: Open configuration file for customization
-- **Export Private Key**: Backup your onion address as 47 BIP39 mnemonic words (like Bitcoin seed phrases)
-- **Import Private Key**: Restore your onion address from a mnemonic backup
-- **Check for Updates**: Check for new app versions and update WordPress, MariaDB, and Tor container images
+- **Open in Browser**: Open your site in Tor Browser, Brave, or your default browser with the OnionPress extension
+- **Start / Stop / Restart**: Control the WordPress service
+- **View Logs**: Open the OnionPress log in the built-in log viewer
+- **View Web Usage Log**: See WordPress access logs (who's visiting your site)
+- **Settings...**: Open configuration file for customization
+- **Backup...**: Create a full backup (Tor keys, database, wp-content) as a zip file
+- **Restore...**: Restore from a backup zip file
+- **Check for Updates...**: Check for new app versions and update WordPress, MariaDB, and Tor container images
+- **About OnionPress**: Version info and credits
+- **Uninstall...**: Remove OnionPress and all data (prompts for backup first)
 
 ### Keeping Your Site Updated
 
@@ -125,25 +133,23 @@ The app automatically syncs this setting with macOS login items. You can also ma
 
 **Vanity Address Configuration**: You can customize the prefix in `~/.onionpress/config` before first launch. See the config file for details on generation times for different prefix lengths.
 
-### Private Key Backup & Restore
+### Backup & Restore
 
-Your onion address is derived from a private key. You can back up and restore this key to:
-- Migrate your onion address to a new machine
-- Recover your address after reinstalling
-- Keep a secure backup of your identity
+OnionPress can create a full backup of your site including Tor keys (your .onion address), the WordPress database, and all wp-content (themes, plugins, uploads).
 
-**To backup your key:**
-1. Click "Export Private Key" in the menu bar
-2. You'll receive 47 BIP39 mnemonic words (like Bitcoin seed phrases)
-3. Write these words down and store them securely
-4. Anyone with these words can restore your exact onion address
+**To backup:**
+1. Click "Backup..." in the menu bar
+2. Enter your WordPress admin credentials (the password encrypts the backup)
+3. Choose a save location
+4. A zip file is created containing everything needed to restore
 
-**To restore a key:**
-1. Click "Import Private Key" in the menu bar
-2. Paste your 47 mnemonic words
-3. Your onion address will be restored
+**To restore:**
+1. Click "Restore..." in the menu bar
+2. Select a backup zip file
+3. Enter the password used when the backup was created
+4. Your site, onion address, and all content will be restored
 
-⚠️ **Security Note**: Keep your mnemonic words private and secure. Anyone with these words can impersonate your onion address.
+⚠️ **Security Note**: Backup files contain your Tor private key. Anyone with this file and the password can restore your exact onion address. Store backups securely.
 
 ### Internet Archive Wayback Machine Link Fixer
 

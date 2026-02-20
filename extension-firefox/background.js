@@ -29,7 +29,7 @@ function detectBrowser() {
 }
 
 // ---------------------------------------------------------------------------
-// Proxy status polling
+// Proxy status check (on-demand only — no background polling)
 // ---------------------------------------------------------------------------
 
 async function checkProxyStatus() {
@@ -53,44 +53,8 @@ async function checkProxyStatus() {
   return false;
 }
 
-// Adaptive polling: rapid at startup and when proxy goes down, slow when stable
-let normalInterval = null;
-let recoveryInterval = null;
-
-function startNormalPolling() {
-  if (recoveryInterval) { clearInterval(recoveryInterval); recoveryInterval = null; }
-  if (!normalInterval) {
-    normalInterval = setInterval(checkAndAdapt, 60000);
-  }
-}
-
-function startRecoveryPolling() {
-  // Poll every 3s until proxy comes back (re-enters normal after success)
-  if (recoveryInterval) return;
-  if (normalInterval) { clearInterval(normalInterval); normalInterval = null; }
-  recoveryInterval = setInterval(checkAndAdapt, 3000);
-}
-
-async function checkAndAdapt() {
-  const ok = await checkProxyStatus();
-  if (ok && recoveryInterval) {
-    startNormalPolling();
-  } else if (!ok && !recoveryInterval) {
-    startRecoveryPolling();
-  }
-}
-
-// Rapid startup polling (every 2s for 30s), then switch to adaptive
-let startupPollCount = 0;
-const startupInterval = setInterval(() => {
-  checkAndAdapt();
-  startupPollCount++;
-  if (startupPollCount >= 15) {
-    clearInterval(startupInterval);
-    if (proxyRunning) { startNormalPolling(); } else { startRecoveryPolling(); }
-  }
-}, 2000);
-checkAndAdapt();
+// Single check at startup to configure proxy routing
+checkProxyStatus();
 
 // ---------------------------------------------------------------------------
 // Proxy configuration — route .onion through Tor SOCKS proxy
