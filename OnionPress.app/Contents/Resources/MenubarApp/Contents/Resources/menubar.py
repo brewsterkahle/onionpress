@@ -2344,10 +2344,20 @@ class OnionPressApp(rumps.App):
 
     def auto_open_browser(self):
         """Automatically open a browser when service becomes ready"""
+        try:
+            self._auto_open_browser_inner()
+        except Exception as e:
+            self.log(f"ERROR in auto_open_browser: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+
+    def _auto_open_browser_inner(self):
+        """Inner implementation of auto_open_browser"""
         # Wait until the onion service is actually reachable before opening
         # the browser. Poll via docker exec into the tor container (the same
         # path the launcher uses) instead of a fixed sleep.
         if not self.onion_address or self.onion_address in ["Starting...", "Not running", "Generating address..."]:
+            self.log(f"auto_open_browser: skipping, onion_address={self.onion_address!r}")
             return
 
         self.log("Waiting for onion service to become reachable before opening browser...")
