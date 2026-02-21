@@ -2503,8 +2503,10 @@ class OnionPressApp(rumps.App):
         Called from a background thread before starting the launcher.
         Returns True if startup should proceed, False to abort.
         """
-        # Read configured prefix
-        prefix = self._read_config_value("ADDRESS_PREFIX", "op2").strip()
+        # Read configured prefix (fall back to old VANITY_PREFIX for migration)
+        prefix = self._read_config_value("ADDRESS_PREFIX", "").strip()
+        if not prefix:
+            prefix = self._read_config_value("VANITY_PREFIX", "op2").strip()
         if not prefix:
             prefix = "op2"
 

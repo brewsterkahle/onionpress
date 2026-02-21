@@ -865,9 +865,13 @@ start_containers() {
         log "First run detected - generating custom onion address..."
 
         # Read address prefix from config, default to "op2"
+        # Fall back to old VANITY_PREFIX for migration from older configs
         ADDRESS_PREFIX="op2"
         if [ -f "$DATA_DIR/config" ]; then
             CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            if [ -z "$CUSTOM_PREFIX" ]; then
+                CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            fi
             if [ ! -z "$CUSTOM_PREFIX" ]; then
                 ADDRESS_PREFIX="$CUSTOM_PREFIX"
             fi
