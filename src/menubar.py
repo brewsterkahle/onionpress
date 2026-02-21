@@ -524,7 +524,7 @@ class OnionPressApp(rumps.App):
         self.log_file = os.path.join(self.app_support, "onionpress.log")
 
         # Initialize rumps WITHOUT icon first (fastest possible)
-        super(OnionPressApp, self).__init__("", quit_button=None)
+        super(OnionPressApp, self).__init__("", quit_button=None, template=False)
 
         # Show launch splash IMMEDIATELY before any I/O
         self.launch_splash = None
