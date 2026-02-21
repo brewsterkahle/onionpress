@@ -789,6 +789,18 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy favicon mu-plugin
+    if [ -f "$plugins_dir/onionpress-favicon.php" ]; then
+        if docker cp "$plugins_dir/onionpress-favicon.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-favicon.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-favicon.php >> "$LOG_FILE" 2>&1
+            log "✓ onionpress-favicon.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-favicon.php"
+        fi
+    fi
+
     return 0
 }
 
