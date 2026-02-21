@@ -2052,6 +2052,7 @@ class OnionPressApp(rumps.App):
     def handle_wake(self):
         """Handle system wake — Tor circuits are dead, go yellow immediately"""
         self.log("System wake detected — marking Tor as reconnecting")
+        self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.start_caffeinate()
         if self.is_ready:
             self.is_ready = False
