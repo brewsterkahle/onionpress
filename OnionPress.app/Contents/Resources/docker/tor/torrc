@@ -5,6 +5,7 @@ HiddenServiceDir /var/lib/tor/hidden_service/wordpress
 HiddenServiceVersion 3
 HiddenServicePort 80 wordpress:81
 HiddenServiceExportCircuitID haproxy
+HiddenServiceNumIntroductionPoints 20
 
 # Healthcheck service (auto-generated address → status responder)
 HiddenServiceDir /var/lib/tor/hidden_service/healthcheck
