@@ -526,7 +526,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.104"
+        self.version = "2.2.105"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -1243,7 +1243,7 @@ class OnionPressApp(rumps.App):
         update_on_launch = False
         if os.path.exists(config_file):
             try:
-                with open(config_file, 'r') as f:
+                with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
                     for line in f:
                         if line.startswith('UPDATE_ON_LAUNCH='):
                             value = line.split('=', 1)[1].strip().lower()
@@ -1554,7 +1554,7 @@ class OnionPressApp(rumps.App):
         """Read a value from ~/.onionpress/config."""
         config_file = os.path.join(self.app_support, "config")
         try:
-            with open(config_file) as f:
+            with open(config_file, encoding='utf-8', errors='replace') as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith(f"{key}="):
@@ -1658,6 +1658,7 @@ class OnionPressApp(rumps.App):
                         # so the monitoring loop can continue and start the proxy)
                         if not self.auto_opened_browser:
                             self.auto_opened_browser = True
+                            self.log(f"DEBUG: Spawning auto_open_browser thread, onion_address={self.onion_address!r}")
                             threading.Thread(target=self.auto_open_browser, daemon=True).start()
 
                         # Force menu update (changes icon to purple)
@@ -1801,7 +1802,9 @@ class OnionPressApp(rumps.App):
             self.update_menu()
 
         except Exception as e:
-            print(f"Error checking status: {e}")
+            self.log(f"ERROR in check_status: {e}")
+            import traceback
+            self.log(traceback.format_exc())
         finally:
             self.checking = False
 
@@ -2716,7 +2719,7 @@ class OnionPressApp(rumps.App):
         if not os.path.exists(config_file):
             return default
         try:
-            with open(config_file, 'r') as f:
+            with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith(f"{key}="):
@@ -2738,7 +2741,7 @@ class OnionPressApp(rumps.App):
         # Read all lines
         lines = []
         if os.path.exists(config_file):
-            with open(config_file, 'r') as f:
+            with open(config_file, 'r', encoding='utf-8', errors='replace') as f:
                 lines = f.readlines()
 
         # Update or add the key
@@ -3453,7 +3456,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.104 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.105 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
