@@ -775,16 +775,14 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     pass
 
-                # Add logo in background (I/O happens after window shows)
-                def add_logo():
-                    icon_path = os.path.join(self.resources_dir, "app-icon.png")
-                    if os.path.exists(icon_path):
-                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
-                        image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                        if image:
-                            image_view.setImage_(image)
-                            content_view.addSubview_(image_view)
-                threading.Thread(target=add_logo, daemon=True).start()
+                # Add logo on main thread (fast local PNG load, avoids AppKit threading crash)
+                icon_path = os.path.join(self.resources_dir, "app-icon.png")
+                if os.path.exists(icon_path):
+                    image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
+                    image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                    if image:
+                        image_view.setImage_(image)
+                        content_view.addSubview_(image_view)
 
             except Exception as e:
                 pass  # Don't log yet, log file not ready
