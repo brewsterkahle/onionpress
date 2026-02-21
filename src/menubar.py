@@ -2563,11 +2563,21 @@ class OnionPressApp(rumps.App):
                 self.write_config_value("ADDRESS_PREFIX", current_prefix)
                 prefix = current_prefix
             else:
-                # Open config for editing
-                self.log("User chose to edit config — aborting start")
+                # Open config for editing and bring TextEdit to front
+                self.log("User chose to edit config — opening TextEdit")
                 config_file = os.path.join(self.app_support, "config")
-                subprocess.Popen(["open", "-e", config_file])
-                return False
+                subprocess.Popen(["open", "-a", "TextEdit", config_file])
+                subprocess.Popen(["osascript", "-e", 'tell application "TextEdit" to activate'])
+                # Show follow-up dialog — when dismissed, retry start
+                self.show_native_alert(
+                    "Edit Settings",
+                    "Edit the config file in TextEdit, then save it (⌘S).\n\nClick OK when you're done to restart.",
+                    buttons=["OK"],
+                    style="informational"
+                )
+                self.log("User finished editing — retrying start")
+                # Re-read config and retry from the top
+                return self.check_address_prefix_change()
 
         self.log(f"Prefix validation passed, checking current hostname (prefix={prefix})")
 
