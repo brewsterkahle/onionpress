@@ -335,7 +335,7 @@ function onionpress_cellar_super_admin_revoked($user_id) {
 
 /**
  * Migrate plaintext key files to encrypted format.
- * Scans cellar/keys/*/ for plaintext key files without .enc companions,
+ * Scans cellar/keys/ subdirectories for plaintext key files without .enc companions,
  * encrypts them, and removes the plaintext originals.
  */
 function onionpress_cellar_migrate_plaintext_keys($master_key) {

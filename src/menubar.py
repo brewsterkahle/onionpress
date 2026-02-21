@@ -2584,6 +2584,12 @@ class OnionPressApp(rumps.App):
 
         self.log(f"Prefix validation passed, checking current hostname (prefix={prefix})")
 
+        # Skip prefix check if a key import is pending — the launcher will handle it
+        pending_file = os.path.join(self.app_support, ".import-key-pending")
+        if os.path.exists(pending_file):
+            self.log("Key import pending — skipping prefix check (launcher will swap volume)")
+            return True
+
         # Try to get current hostname from tor-keys volume
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")

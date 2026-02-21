@@ -279,8 +279,10 @@ HELPEOF
         return 0
     fi
 
-    # Check if tor-keys volume already exists
+    # Check if tor-keys volume already exists (Docker may not be running)
+    local docker_available=false
     if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-tor-keys$'; then
+        docker_available=true
         echo "An onion address key already exists."
         echo ""
         # Get current address
@@ -309,7 +311,14 @@ HELPEOF
         # Remove old vanity-keys directory
         rm -rf "$DATA_DIR/shared/vanity-keys/"
         echo "Old keys removed."
+    elif [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+        # Docker not running but old vanity-keys exist — clean them up
+        rm -rf "$DATA_DIR/shared/vanity-keys/"
     fi
+
+    # Mark that a key was imported so next startup removes the old tor-keys volume
+    # (needed when Docker isn't running and we can't remove the volume now)
+    touch "$DATA_DIR/.import-key-pending"
 
     # Decode base32, validate length, derive public key and address — all in one python3 call
     # The public key must be derived via ed25519 scalar multiplication (not a simple slice)
@@ -431,11 +440,23 @@ sys.stdout.buffer.write(header + pubkey)
     chmod 600 "$output_dir/hs_ed25519_public_key"
     chmod 644 "$output_dir/hostname"
 
+    # Update ADDRESS_PREFIX in config to match the imported address
+    # so the startup prefix check doesn't flag a mismatch
+    local addr_prefix=$(echo "$address" | cut -c1-3)
+    if [ -f "$DATA_DIR/config" ]; then
+        if grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
+            sed -i '' "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
+        else
+            echo "ADDRESS_PREFIX=$addr_prefix" >> "$DATA_DIR/config"
+        fi
+        log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
+    fi
+
     log "Imported key for address: $address"
     echo "Imported key for: $address"
     echo "Key files written to: $output_dir"
     echo ""
-    echo "Start OnionPress to use this address."
+    echo "Launch OnionPress to use this address."
     return 0
 }
 
@@ -879,6 +900,13 @@ start_containers() {
 
     cd "$DOCKER_DIR"
 
+    # Handle pending key import (volume couldn't be removed when Docker wasn't running)
+    if [ -f "$DATA_DIR/.import-key-pending" ]; then
+        log "Pending key import detected — removing old tor-keys volume..."
+        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+        rm -f "$DATA_DIR/.import-key-pending"
+    fi
+
     # Check if this is first run (no tor keys exist)
     if ! docker volume ls | grep -q "onionpress-tor-keys"; then
         log "First run detected - generating custom onion address..."
@@ -907,11 +935,24 @@ start_containers() {
             ADDRESS_PREFIX="op2"
         fi
 
-        # Generate custom onion address
-        if VANITY_DIR=$(generate_vanity_address "$ADDRESS_PREFIX"); then
-            log "Custom onion address generated successfully"
+        # Check for pre-existing imported key before generating a new one
+        VANITY_DIR=""
+        if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+            VANITY_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
+            if [ -n "$VANITY_DIR" ]; then
+                log "Using pre-imported key: $(basename "$VANITY_DIR")"
+            fi
+        fi
 
-            # Create volume and copy keys
+        # Generate custom onion address if no imported key found
+        if [ -z "$VANITY_DIR" ]; then
+            if VANITY_DIR=$(generate_vanity_address "$ADDRESS_PREFIX"); then
+                log "Custom onion address generated successfully"
+            fi
+        fi
+
+        if [ -n "$VANITY_DIR" ]; then
+            # Create volume and copy keys (works for both imported and generated keys)
             if ! docker volume create onionpress-tor-keys >> "$LOG_FILE" 2>&1; then
                 log "ERROR: Failed to create tor-keys volume"
                 return 1
