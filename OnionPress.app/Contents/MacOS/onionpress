@@ -271,11 +271,9 @@ WHAT THIS COMMAND DOES:
      - hostname               (the .onion address)
   4. On next start, OnionPress will use this key
 
-NOTE: If OnionPress has already started and created a tor-keys volume,
-you must stop OnionPress and delete the volume first:
-
-    ./onionpress stop
-    docker volume rm onionpress-tor-keys
+NOTE: If an onion address already exists, you will be prompted to
+confirm the replacement. OnionPress will handle stopping and
+removing the old keys automatically.
 
 HELPEOF
         return 0
@@ -283,13 +281,34 @@ HELPEOF
 
     # Check if tor-keys volume already exists
     if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-tor-keys$'; then
-        echo "ERROR: onionpress-tor-keys volume already exists." >&2
-        echo "" >&2
-        echo "OnionPress has already created a tor key volume. To import a new key:" >&2
-        echo "  1. Stop OnionPress:  ./onionpress stop" >&2
-        echo "  2. Delete the volume: docker volume rm onionpress-tor-keys" >&2
-        echo "  3. Re-run:           ./onionpress import-key <key>" >&2
-        return 1
+        echo "An onion address key already exists."
+        echo ""
+        # Get current address
+        local current_addr
+        current_addr=$(docker run --rm -v onionpress-tor-keys:/keys alpine cat /keys/wordpress/hostname 2>/dev/null)
+        if [ -n "$current_addr" ]; then
+            echo "Current address: $current_addr"
+            echo ""
+        fi
+        echo "Importing a new key will REPLACE your current onion address."
+        echo "Your old address will stop working permanently."
+        echo ""
+        printf "Continue? [y/N] "
+        read -r confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            echo "Cancelled."
+            return 1
+        fi
+
+        # Stop OnionPress if running
+        echo "Stopping OnionPress..."
+        stop_containers 2>/dev/null
+        # Remove old volume
+        echo "Removing old tor-keys volume..."
+        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1
+        # Remove old vanity-keys directory
+        rm -rf "$DATA_DIR/shared/vanity-keys/"
+        echo "Old keys removed."
     fi
 
     # Decode base32, validate length, derive public key and address — all in one python3 call
