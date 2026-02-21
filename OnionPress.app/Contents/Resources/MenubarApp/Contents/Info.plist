@@ -80,9 +80,9 @@
 	<key>PythonInfoDict</key>
 	<dict>
 		<key>PythonExecutable</key>
-		<string>/private/var/folders/lx/n1159d1x0g99f_pqm059zf3w0000gn/T/tmp.ukyWsfTm0x/venv/bin/python3</string>
+		<string>/private/var/folders/f1/7rff3qf50r1_1zrvc_hrd76r0000gn/T/tmp.5OjGhyOHTj/venv/bin/python3</string>
 		<key>PythonLongVersion</key>
-		<string>3.14.0 (v3.14.0:ebf955df7a8, Oct  7 2025, 08:20:14) [Clang 16.0.0 (clang-1600.0.26.6)]</string>
+		<string>3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]</string>
 		<key>PythonShortVersion</key>
 		<string>3.1</string>
 		<key>py2app</key>

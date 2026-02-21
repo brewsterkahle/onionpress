@@ -17,6 +17,7 @@ import AppKit
 import signal
 import socket
 import atexit
+import re
 
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -243,8 +244,10 @@ class _LogViewerWindow:
             AppKit.NSMakeRect(0, 0, 720, 480))
         tv.setEditable_(False)
         tv.setSelectable_(True)
-        tv.setFont_(AppKit.NSFont.fontWithName_size_("Menlo", 12))
-        tv.setTextColor_(AppKit.NSColor.textColor())
+        self._log_font = AppKit.NSFont.fontWithName_size_("Menlo", 12)
+        self._log_text_color = AppKit.NSColor.textColor()
+        tv.setFont_(self._log_font)
+        tv.setTextColor_(self._log_text_color)
         tv.setBackgroundColor_(AppKit.NSColor.textBackgroundColor())
         tv.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         # Allow horizontal scrolling for long lines
@@ -308,7 +311,7 @@ class _LogViewerWindow:
                     content = '\n'.join(lines[-(500 + 1):])
                 self._offset = file_size
             if content:
-                self._text_view.textStorage().mutableString().appendString_(content)
+                self._append_attributed(content)
                 # Scroll to bottom
                 end = self._text_view.textStorage().length()
                 self._text_view.scrollRangeToVisible_(AppKit.NSMakeRange(end, 0))
@@ -326,6 +329,15 @@ class _LogViewerWindow:
         scroll_y = clip.bounds().origin.y
         # "Near bottom" = within 50 points of the end
         return (scroll_y + clip_height) >= (doc_height - 50)
+
+    def _append_attributed(self, text):
+        """Append text with correct font and color (respects dark mode)."""
+        attrs = {
+            AppKit.NSFontAttributeName: self._log_font,
+            AppKit.NSForegroundColorAttributeName: self._log_text_color,
+        }
+        astr = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+        self._text_view.textStorage().appendAttributedString_(astr)
 
     def _poll_loop(self):
         """Background thread: poll file for new content every 1.5s."""
@@ -351,7 +363,8 @@ class _LogViewerWindow:
                     # File was truncated — reload
                     self._offset = 0
                     def reload():
-                        self._text_view.textStorage().mutableString().setString_("")
+                        storage = self._text_view.textStorage()
+                        storage.deleteCharactersInRange_(AppKit.NSMakeRange(0, storage.length()))
                         self._load_initial()
                     _main_thread(reload)
                     continue
@@ -366,7 +379,7 @@ class _LogViewerWindow:
                 if new_content:
                     def append(text=new_content):
                         was_near = self._is_near_bottom()
-                        self._text_view.textStorage().mutableString().appendString_(text)
+                        self._append_attributed(text)
                         if was_near:
                             end = self._text_view.textStorage().length()
                             self._text_view.scrollRangeToVisible_(
@@ -511,7 +524,7 @@ class OnionPressApp(rumps.App):
         self.log_file = os.path.join(self.app_support, "onionpress.log")
 
         # Initialize rumps WITHOUT icon first (fastest possible)
-        super(OnionPressApp, self).__init__("", quit_button=None)
+        super(OnionPressApp, self).__init__("", quit_button=None, template=False)
 
         # Show launch splash IMMEDIATELY before any I/O
         self.launch_splash = None
@@ -526,7 +539,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.106"
+        self.version = "2.2.112"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -638,8 +651,8 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
         self.healthcheck_address = None    # Healthcheck .onion address
-        self.relay_messages = []           # Messages received from OnionRelay
-        self._relay_alert_shown = False    # Whether we've shown the relay alert icon
+        self.cellar_messages = []          # Messages received from OnionCellar
+        self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
         self.is_cellar = False             # True if this instance is the OnionCellar
         self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
@@ -649,7 +662,7 @@ class OnionPressApp(rumps.App):
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
-        self.relay_alert_item = rumps.MenuItem("Relay Alerts", callback=self.view_relay_alerts)
+        self.cellar_alert_item = rumps.MenuItem("Cellar Alerts", callback=self.view_cellar_alerts)
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -762,16 +775,14 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     pass
 
-                # Add logo in background (I/O happens after window shows)
-                def add_logo():
-                    icon_path = os.path.join(self.resources_dir, "app-icon.png")
-                    if os.path.exists(icon_path):
-                        image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
-                        image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-                        if image:
-                            image_view.setImage_(image)
-                            content_view.addSubview_(image_view)
-                threading.Thread(target=add_logo, daemon=True).start()
+                # Add logo on main thread (fast local PNG load, avoids AppKit threading crash)
+                icon_path = os.path.join(self.resources_dir, "app-icon.png")
+                if os.path.exists(icon_path):
+                    image_view = AppKit.NSImageView.alloc().initWithFrame_(AppKit.NSMakeRect(110, 180, 100, 100))
+                    image = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                    if image:
+                        image_view.setImage_(image)
+                        content_view.addSubview_(image_view)
 
             except Exception as e:
                 pass  # Don't log yet, log file not ready
@@ -1708,9 +1719,9 @@ class OnionPressApp(rumps.App):
                 if self.healthcheck_address is None and self.is_ready:
                     self.read_healthcheck_address()
 
-                # Poll for relay messages from healthcheck service
+                # Poll for cellar messages from healthcheck service
                 if self.is_ready:
-                    self.poll_relay_messages()
+                    self.poll_cellar_messages()
 
                 # OnionCellar: detect cellar mode and start registration/polling
                 if self.is_ready and not self._cellar_checked:
@@ -1784,8 +1795,8 @@ class OnionPressApp(rumps.App):
                 self._bootstrap_stall_count = 0
                 self._yellow_since = None
                 self.healthcheck_address = None
-                self.relay_messages = []
-                self._relay_alert_shown = False
+                self.cellar_messages = []
+                self._cellar_alert_shown = False
                 self._cellar_checked = False
                 self._cellar_registration_started = False
 
@@ -1812,21 +1823,20 @@ class OnionPressApp(rumps.App):
         def do_update():
             state = self.display_state
 
-            # Relay alert indicator: show "!" next to icon when messages exist
-            if self.relay_messages:
+            # Cellar alert indicator: show "!" next to icon when messages exist
+            if self.cellar_messages:
                 self.title = "!"
-                count = len(self.relay_messages)
-                self.relay_alert_item.title = f"Relay Alerts ({count})"
-                self.relay_alert_item.set_callback(self.view_relay_alerts)
-                if self.relay_alert_item.title not in self.menu:
-                    self.menu.insert_after("Copy Onion Address", self.relay_alert_item)
+                count = len(self.cellar_messages)
+                self.cellar_alert_item.title = f"Cellar Alerts ({count})"
+                self.cellar_alert_item.set_callback(self.view_cellar_alerts)
+                if self.cellar_alert_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self.cellar_alert_item)
             else:
                 self.title = ""
-                if "Relay Alerts" in self.menu:
-                    del self.menu["Relay Alerts"]
-                # Also remove if it had a count in the title
+                if "Cellar Alerts" in self.menu:
+                    del self.menu["Cellar Alerts"]
                 for key in list(self.menu.keys()):
-                    if isinstance(key, str) and key.startswith("Relay Alerts ("):
+                    if isinstance(key, str) and key.startswith("Cellar Alerts ("):
                         del self.menu[key]
 
             # Show/hide clearnet status based on tunnel config and state
@@ -1934,8 +1944,8 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Failed to read healthcheck address: {e}")
 
-    def poll_relay_messages(self):
-        """Poll for messages from the OnionRelay via the healthcheck service."""
+    def poll_cellar_messages(self):
+        """Poll for messages from the OnionCellar via the healthcheck service."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -1949,18 +1959,17 @@ class OnionPressApp(rumps.App):
                 capture_output=True, text=True, timeout=10, env=env
             )
             if result.returncode != 0 or not result.stdout.strip():
-                # No messages — clear any existing alerts
-                if self.relay_messages:
-                    self.relay_messages = []
-                    self._relay_alert_shown = False
+                if self.cellar_messages:
+                    self.cellar_messages = []
+                    self._cellar_alert_shown = False
                 return
 
             files = result.stdout.strip().split('\n')
             json_files = [f for f in files if f.endswith('.json')]
             if not json_files:
-                if self.relay_messages:
-                    self.relay_messages = []
-                    self._relay_alert_shown = False
+                if self.cellar_messages:
+                    self.cellar_messages = []
+                    self._cellar_alert_shown = False
                 return
 
             # Read all message files
@@ -1978,49 +1987,44 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     continue
 
-            if messages and messages != self.relay_messages:
-                self.relay_messages = messages
-                if not self._relay_alert_shown:
-                    self._relay_alert_shown = True
-                    self.log(f"Received {len(messages)} message(s) from OnionRelay")
-                    # Show notification for the latest message
+            if messages and messages != self.cellar_messages:
+                self.cellar_messages = messages
+                if not self._cellar_alert_shown:
+                    self._cellar_alert_shown = True
+                    self.log(f"Received {len(messages)} message(s) from OnionCellar")
                     latest = messages[-1]
                     msg_type = latest.get("type", "unknown")
-                    msg_text = latest.get("message", "New message from OnionRelay")
-                    rumps.notification(
-                        title="OnionPress Alert",
-                        subtitle=msg_type.replace("_", " ").title(),
-                        message=msg_text
-                    )
-        except Exception as e:
-            # Don't spam logs — relay polling failures are expected when container is starting
+                    msg_text = latest.get("message", "New message from OnionCellar")
+                    self.log(f"OnionCellar alert: {msg_type} - {msg_text}")
+        except Exception:
+            # Don't spam logs — cellar polling failures are expected when container is starting
             pass
 
-    def view_relay_alerts(self, _):
-        """Show relay alert messages and offer to dismiss them."""
-        if not self.relay_messages:
-            rumps.alert("No relay alerts.")
+    def view_cellar_alerts(self, _):
+        """Show cellar alert messages and offer to dismiss them."""
+        if not self.cellar_messages:
+            rumps.alert("No cellar alerts.")
             return
 
         # Build summary of all messages
         lines = []
-        for msg in self.relay_messages:
+        for msg in self.cellar_messages:
             msg_type = msg.get("type", "unknown").replace("_", " ").title()
             msg_text = msg.get("message", "")
             lines.append(f"[{msg_type}] {msg_text}")
         summary = "\n".join(lines)
 
         response = rumps.alert(
-            title=f"Relay Alerts ({len(self.relay_messages)})",
+            title=f"Cellar Alerts ({len(self.cellar_messages)})",
             message=summary,
             ok="Dismiss All",
             cancel="Close"
         )
 
         if response == 1:  # "Dismiss All" clicked
-            self.log("Dismissing relay alerts")
-            self.relay_messages = []
-            self._relay_alert_shown = False
+            self.log("Dismissing cellar alerts")
+            self.cellar_messages = []
+            self._cellar_alert_shown = False
             # Delete message files from container
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
@@ -2455,6 +2459,241 @@ class OnionPressApp(rumps.App):
                 self.dismiss_launch_splash()
                 self.show_browser_install_dialog()
 
+    def validate_address_prefix(self, prefix):
+        """Validate a address prefix string.
+
+        Returns:
+            (valid, error_message, suggestion) tuple.
+            suggestion is a corrected prefix string (or "" if no fix is possible).
+        """
+        if not prefix:
+            return (True, "", "")
+
+        # Build a suggested fix: lowercase, strip invalid chars, truncate to 5
+        suggested = re.sub(r'[^a-z2-7]', '', prefix.lower())[:5]
+
+        if len(prefix) > 5 and re.match(r'^[a-z2-7]+$', prefix):
+            # Valid chars but too long — suggest truncated version
+            return (False,
+                    f"Address prefix \"{prefix}\" is too long and would take "
+                    f"hours or days to generate ({len(prefix)} characters).\n\n"
+                    f"Maximum length is 5 characters.",
+                    suggested)
+
+        if not re.match(r'^[a-z2-7]+$', prefix):
+            # Has invalid characters — explain what's wrong and suggest a fix
+            has_upper = any(c.isupper() for c in prefix)
+            has_digits_089 = any(c in '0189' for c in prefix)
+
+            msg = f"Address prefix \"{prefix}\" contains invalid characters.\n\n"
+            msg += "Onion addresses use base32 encoding:\n"
+            msg += "  Allowed letters:  a-z\n"
+            msg += "  Allowed numbers:  2, 3, 4, 5, 6, 7\n"
+            msg += "  NOT allowed:  0, 1, 8, 9\n"
+
+            if has_upper:
+                msg += f"\nUppercase letters will be lowercased."
+            if has_digits_089:
+                bad_digits = sorted(set(c for c in prefix if c in '0189'))
+                msg += f"\nDigits {', '.join(bad_digits)} are not valid in base32 and will be removed."
+
+            return (False, msg, suggested)
+
+        return (True, "", prefix)
+
+    def check_address_prefix_change(self):
+        """Check if ADDRESS_PREFIX has changed and handle regeneration.
+
+        Called from a background thread before starting the launcher.
+        Returns True if startup should proceed, False to abort.
+        """
+        # Read configured prefix (fall back to old VANITY_PREFIX for migration)
+        prefix = self._read_config_value("ADDRESS_PREFIX", "").strip()
+        if not prefix:
+            prefix = self._read_config_value("VANITY_PREFIX", "op2").strip()
+        if not prefix:
+            prefix = "op2"
+
+        # Validate prefix
+        valid, error_msg, suggestion = self.validate_address_prefix(prefix)
+        if not valid:
+            self.log(f"Invalid ADDRESS_PREFIX: {prefix}")
+
+            # Try to determine the current working prefix from the onion address
+            current_prefix = "op2"  # fallback default
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+                result = subprocess.run(
+                    [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
+                     "alpine", "cat", "/keys/wordpress/hostname"],
+                    capture_output=True, text=True, env=env, timeout=15
+                )
+                hostname = result.stdout.strip().replace(".onion", "")
+                if hostname:
+                    # Extract the prefix that was used (first 3 chars as best guess)
+                    current_prefix = hostname[:3]
+            except Exception:
+                pass
+
+            # Build button list: Use suggestion (if different), Revert, Edit Again
+            # NSAlert supports max 3 buttons well
+            buttons = []
+            if suggestion and suggestion != current_prefix:
+                buttons.append(f"Use \"{suggestion}\"")
+            buttons.append(f"Revert to \"{current_prefix}\"")
+            buttons.append("Edit Again")
+            revert_idx = len(buttons) - 2
+            edit_idx = len(buttons) - 1
+
+            button_index = self.show_native_alert(
+                "Invalid Address Prefix",
+                error_msg + (f"\n\nSuggested prefix: \"{suggestion}\"" if suggestion and suggestion != current_prefix else ""),
+                buttons=buttons,
+                default_button=0,
+                cancel_button=edit_idx,
+                style="warning"
+            )
+
+            if suggestion and suggestion != current_prefix and button_index == 0:
+                self.log(f"User accepted suggested prefix: {suggestion}")
+                self.write_config_value("ADDRESS_PREFIX", suggestion)
+                prefix = suggestion
+            elif button_index == revert_idx:
+                self.log(f"User reverted to prefix: {current_prefix}")
+                self.write_config_value("ADDRESS_PREFIX", current_prefix)
+                prefix = current_prefix
+            else:
+                # Open config for editing and bring TextEdit to front
+                self.log("User chose to edit config — opening TextEdit")
+                config_file = os.path.join(self.app_support, "config")
+                subprocess.Popen(["open", "-a", "TextEdit", config_file])
+                subprocess.Popen(["osascript", "-e", 'tell application "TextEdit" to activate'])
+                # Show follow-up dialog — when dismissed, retry start
+                self.show_native_alert(
+                    "Edit Settings",
+                    "Edit the config file in TextEdit, then save it (⌘S).\n\nClick OK when you're done to restart.",
+                    buttons=["OK"],
+                    style="informational"
+                )
+                self.log("User finished editing — retrying start")
+                # Re-read config and retry from the top
+                return self.check_address_prefix_change()
+
+        self.log(f"Prefix validation passed, checking current hostname (prefix={prefix})")
+
+        # Skip prefix check if a key import is pending — the launcher will handle it
+        pending_file = os.path.join(self.app_support, ".import-key-pending")
+        if os.path.exists(pending_file):
+            self.log("Key import pending — skipping prefix check (launcher will swap volume)")
+            return True
+
+        # Try to get current hostname from tor-keys volume
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
+                 "alpine", "cat", "/keys/wordpress/hostname"],
+                capture_output=True, text=True, env=env, timeout=15
+            )
+            current_hostname = result.stdout.strip()
+        except Exception as e:
+            self.log(f"Could not read current hostname (likely first run): {e}")
+            return True  # No existing volume, proceed normally
+
+        if not current_hostname or not current_hostname.endswith(".onion"):
+            self.log("No existing onion address found, proceeding with first run")
+            return True
+
+        # Check if current hostname already matches the prefix
+        hostname_base = current_hostname.replace(".onion", "")
+        if hostname_base.startswith(prefix):
+            self.log(f"Address prefix '{prefix}' matches current address {current_hostname}")
+            return True
+
+        # Mismatch detected — determine old prefix for display
+        old_prefix = hostname_base[:len(prefix)] if len(hostname_base) >= len(prefix) else hostname_base[:3]
+        self.log(f"Address prefix changed: current address starts with '{old_prefix}', config says '{prefix}'")
+
+        # Show confirmation dialog with time estimates
+        time_estimates = (
+            "Estimated generation time:\n"
+            "  2 characters:  < 1 second\n"
+            "  3 characters:  < 1 second\n"
+            "  4 characters:  5-30 seconds\n"
+            "  5 characters:  10-30 minutes"
+        )
+
+        message = (
+            f"Your address prefix has changed from what was used to generate "
+            f"your current onion address.\n\n"
+            f"Current address:\n{current_hostname}\n\n"
+            f"New prefix: \"{prefix}\"\n\n"
+            f"Changing will generate a NEW onion address.\n"
+            f"Your current address will stop working permanently.\n\n"
+            f"{time_estimates}"
+        )
+
+        button_index = self.show_native_alert(
+            "Change Onion Address?",
+            message,
+            buttons=["Change Address", "Keep Current Address"],
+            default_button=1,
+            cancel_button=1,
+            style="warning"
+        )
+
+        if button_index == 0:
+            # User confirmed — delete old keys so launcher regenerates
+            self.log("User confirmed address prefix change — deleting old keys")
+
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+
+                # Delete vanity-keys directory
+                vanity_dir = os.path.join(self.app_support, "shared", "vanity-keys")
+                if os.path.exists(vanity_dir):
+                    import shutil
+                    shutil.rmtree(vanity_dir)
+                    self.log(f"Deleted vanity-keys directory: {vanity_dir}")
+
+                # Delete docker volume
+                subprocess.run(
+                    [docker_bin, "volume", "rm", "onionpress-tor-keys"],
+                    capture_output=True, text=True, env=env, timeout=15
+                )
+                self.log("Deleted onionpress-tor-keys volume")
+
+                # Clear cached onion address
+                cached_addr_file = os.path.join(self.app_support, "onion_address")
+                if os.path.exists(cached_addr_file):
+                    os.remove(cached_addr_file)
+                    self.log("Cleared cached onion address")
+
+            except Exception as e:
+                self.log(f"Error cleaning up old keys: {e}")
+                self.show_native_alert(
+                    "Error",
+                    f"Failed to remove old onion keys:\n\n{e}\n\nPlease try again or manually delete ~/.onionpress/shared/vanity-keys/ and run: docker volume rm onionpress-tor-keys",
+                    buttons=["OK"],
+                    style="critical"
+                )
+                return False
+
+            return True
+        else:
+            # User cancelled — don't start
+            self.log("User chose to keep current address — aborting start")
+            return False
+
     @rumps.clicked("Start")
     def start_service(self, _):
         """Start the WordPress + Tor service"""
@@ -2497,7 +2736,13 @@ class OnionPressApp(rumps.App):
                 setup_window.show_welcome_screen(on_continue=on_continue, on_cancel=on_cancel)
                 return
 
-            # Not first run: start the service normally
+            # Not first run: check if address prefix changed before starting
+            if not self.check_address_prefix_change():
+                self.log("Start aborted due to address prefix issue")
+                self.menu["Starting..."].title = "Status: Stopped"
+                return
+
+            # Start the service normally
             subprocess.run([self.launcher_script, "start"])
 
             # Poll until WordPress is responding (replaces fixed sleep)
@@ -2588,7 +2833,7 @@ class OnionPressApp(rumps.App):
                 if result.returncode == 0:
                     progress_window.set_status("Generating custom onion address")
                     progress_window.set_detail("Finding address...")
-                    rumps.notification(title="OnionPress", subtitle="Containers started", message="WordPress is starting...")
+                    self.log("Containers started, WordPress is starting...")
 
             threading.Thread(target=pull_and_start, daemon=True).start()
             self.monitor_image_downloads(progress_window)
@@ -2667,6 +2912,13 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = None
             self.auto_opened_browser = False  # Re-open browser after restart
+
+            # Check if address prefix changed before restarting
+            if not self.check_address_prefix_change():
+                self.log("Restart aborted due to address prefix issue")
+                self.menu["Starting..."].title = "Status: Stopped"
+                self.icon = self.icon_stopped
+                return
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
@@ -3465,7 +3717,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.106 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.112 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately

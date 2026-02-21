@@ -6,7 +6,7 @@
 	<dict>
 		<key>Resources/Info.plist</key>
 		<data>
-		ackaCJxJKKDP/QFJRo4o34qjlA4=
+		ORrEwNmaGsDxUD4993l524owhxU=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -15,21 +15,21 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			rcX+jjlsIHhKMcTkgB5Mvs7wWury7YxOxDjSSIBnNWY=
+			qlGK2eeBvYbOsrG+Xdok09HuJkcQVIPvWg58qI4AW1E=
 			</data>
 		</dict>
 		<key>include/python3.14/pyconfig.h</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			bjRONnPPPKUV1kC/Pmo8Bai5qEMJVsZu7eNux+RThAo=
+			6HW1RcXWWpWY8rP0qMLBqN+4H8e6rOJazCKq+vnitCE=
 			</data>
 		</dict>
 		<key>lib/python3.14/config-3.14-darwin/Makefile</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			EhVaAHG+UZfhAl1nshr14tSc7JDkc4BPp+8l5taTfG4=
+			0YcAfYYdFINE/5WwGhsPAVGFMXyz+kiOSIOX5jBB904=
 			</data>
 		</dict>
 	</dict>
