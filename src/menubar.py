@@ -2472,7 +2472,8 @@ class OnionPressApp(rumps.App):
         if len(prefix) > 5 and re.match(r'^[a-z2-7]+$', prefix):
             # Valid chars but too long — suggest truncated version
             return (False,
-                    f"Address prefix \"{prefix}\" is too long ({len(prefix)} characters).\n\n"
+                    f"Address prefix \"{prefix}\" is too long and would take "
+                    f"hours or days to generate ({len(prefix)} characters).\n\n"
                     f"Maximum length is 5 characters.",
                     suggested)
 
@@ -2514,31 +2515,61 @@ class OnionPressApp(rumps.App):
         valid, error_msg, suggestion = self.validate_address_prefix(prefix)
         if not valid:
             self.log(f"Invalid ADDRESS_PREFIX: {prefix}")
-            if suggestion:
-                # Offer to auto-correct
-                button_index = self.show_native_alert(
-                    "Invalid Address Prefix",
-                    error_msg + f"\n\nSuggested prefix: \"{suggestion}\"",
-                    buttons=[f"Use \"{suggestion}\"", "Cancel"],
-                    default_button=0,
-                    cancel_button=1,
-                    style="warning"
+
+            # Try to determine the current working prefix from the onion address
+            current_prefix = "op2"  # fallback default
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+                result = subprocess.run(
+                    [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
+                     "alpine", "cat", "/keys/wordpress/hostname"],
+                    capture_output=True, text=True, env=env, timeout=15
                 )
-                if button_index == 0:
-                    self.log(f"User accepted suggested prefix: {suggestion}")
-                    self.write_config_value("ADDRESS_PREFIX", suggestion)
-                    prefix = suggestion
-                else:
-                    self.log("User declined suggested prefix — aborting start")
-                    return False
+                hostname = result.stdout.strip().replace(".onion", "")
+                if hostname:
+                    # Extract the prefix that was used (first 3 chars as best guess)
+                    current_prefix = hostname[:3]
+            except Exception:
+                pass
+
+            # Build button list: Use suggestion (if different), Revert, Edit Again
+            # NSAlert supports max 3 buttons well
+            buttons = []
+            if suggestion and suggestion != current_prefix:
+                buttons.append(f"Use \"{suggestion}\"")
+            buttons.append(f"Revert to \"{current_prefix}\"")
+            buttons.append("Edit Again")
+            revert_idx = len(buttons) - 2
+            edit_idx = len(buttons) - 1
+
+            button_index = self.show_native_alert(
+                "Invalid Address Prefix",
+                error_msg + (f"\n\nSuggested prefix: \"{suggestion}\"" if suggestion and suggestion != current_prefix else ""),
+                buttons=buttons,
+                default_button=0,
+                cancel_button=edit_idx,
+                style="warning"
+            )
+
+            if suggestion and suggestion != current_prefix and button_index == 0:
+                self.log(f"User accepted suggested prefix: {suggestion}")
+                self.write_config_value("ADDRESS_PREFIX", suggestion)
+                prefix = suggestion
+            elif button_index == revert_idx:
+                self.log(f"User reverted to prefix: {current_prefix}")
+                self.write_config_value("ADDRESS_PREFIX", current_prefix)
+                prefix = current_prefix
             else:
-                self.show_native_alert(
-                    "Invalid Address Prefix",
-                    error_msg + "\n\nPlease edit your prefix in Settings and try again.",
-                    buttons=["OK"],
-                    style="critical"
-                )
+                # Open config for editing
+                self.log("User chose to edit config — aborting start")
+                config_file = os.path.join(self.app_support, "config")
+                subprocess.Popen(["open", "-e", config_file])
                 return False
+
+        self.log(f"Prefix validation passed, checking current hostname (prefix={prefix})")
 
         # Try to get current hostname from tor-keys volume
         try:
