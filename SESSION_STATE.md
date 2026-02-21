@@ -108,7 +108,7 @@ Status: Clean (all changes committed)
 No pending work - all features complete and released.
 
 Possible future enhancements:
-- Additional vanity prefix options
+- Additional address prefix options
 - Multi-site support
 - Custom WordPress themes/plugins
 - Automated backups

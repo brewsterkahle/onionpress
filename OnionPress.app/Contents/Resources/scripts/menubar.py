@@ -1800,7 +1800,7 @@ Easy and free self-hosted web server for macOS
 WordPress + Tor Onion Service
 
 Features:
-• Tor Onion Service with vanity addresses (op2*)
+• Tor Onion Service with custom address prefixes (op2*)
 • Requires visitors to use Tor or Brave browsers
 • Internet Archive Wayback Machine integration
 • Bundled container runtime (no Docker needed)

@@ -1,6 +1,6 @@
 SocksPort 0.0.0.0:9050
 
-# Content service (vanity address → WordPress)
+# Content service (custom address → WordPress)
 HiddenServiceDir /var/lib/tor/hidden_service/wordpress
 HiddenServiceVersion 3
 HiddenServicePort 80 wordpress:81

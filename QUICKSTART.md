@@ -1,6 +1,6 @@
 # onionpress Quick Start Guide
 
-> **Version 2.0.2** - Now with bundled container runtime and vanity onion addresses!
+> **Version 2.0.2** - Now with bundled container runtime and custom onion address prefixes!
 
 ## Installation
 
@@ -27,7 +27,7 @@ Alternatively, use the command-line tool. Open Terminal and run:
 ```
 
 This will:
-1. Generate your vanity onion address starting with "op2" (< 1 second)
+1. Generate your custom onion address starting with "op2" (< 1 second)
 2. Initialize the bundled container runtime (Colima) - first launch only (~2-3 minutes)
 3. Download WordPress, MariaDB, and Tor containers (~1GB, one-time)
 4. Start your WordPress site with your new onion address
@@ -82,11 +82,11 @@ onionpress address
 
 Your site is also available at `http://localhost:8080` for testing (only accessible from your Mac).
 
-### Vanity Address Customization
+### Address Prefix Customization
 
 Want a different prefix? Edit `~/.onionpress/config` before first launch:
 ```bash
-VANITY_PREFIX=blog  # or any base32 string (a-z, 2-7)
+ADDRESS_PREFIX=blog  # or any base32 string (a-z, 2-7)
 ```
 Note: Longer prefixes take exponentially longer to generate (see config file for estimates).
 
@@ -166,8 +166,8 @@ rm -rf ~/.onionpress
 
 ## What's New in v2.0.2
 
-- **Vanity onion addresses**: All new installations generate addresses starting with "op2"
-- **Instant generation**: Vanity address creation takes < 1 second
+- **Custom onion address prefixes**: All new installations generate addresses starting with "op2"
+- **Instant generation**: Address prefix generation takes < 1 second
 - **Configurable prefix**: Customize your onion address prefix before first launch
 - **Bundled runtime**: No external Docker/OrbStack needed - everything is included
 

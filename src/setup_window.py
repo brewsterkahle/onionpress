@@ -477,7 +477,7 @@ class SetupProgressWindow(AppKit.NSObject):
             ("SYS_CHECK", "Checking system requirements"),
             ("RUNTIME_INIT", "Initializing container runtime"),
             ("IMG_DOWNLOAD", "Downloading container images"),
-            ("VANITY_GEN", "Generating vanity onion address"),
+            ("VANITY_GEN", "Generating custom onion address"),
             ("SVC_START", "Starting services"),
             ("FINALIZE", "Finalizing setup")
         ]
@@ -572,7 +572,7 @@ class SetupProgressWindow(AppKit.NSObject):
             ("01", "Checking system requirements"),
             ("02", "Initializing container runtime (Colima VM)"),
             ("03", "Downloading Docker images (~500MB)"),
-            ("04", "Generating vanity .onion address"),
+            ("04", "Generating custom .onion address"),
             ("05", "Starting WordPress + Tor services"),
         ]
         y_pos = 100
@@ -960,7 +960,7 @@ class SetupProgressWindow(AppKit.NSObject):
             AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_update)
 
     def set_detail(self, message):
-        """Update subtitle/detail line (e.g. vanity address step)."""
+        """Update subtitle/detail line (e.g. address generation step)."""
         self.set_status(message)
 
     def add_log(self, message, status="info"):
@@ -1174,8 +1174,8 @@ if __name__ == "__main__":
         window.complete_step(2)
         # Step 3+: Tor phase — this shows the hop animation
         window.set_step(3, "in_progress")
-        window.set_status("Generating vanity onion address")
-        window.add_log("GENERATING VANITY PREFIX...", "progress")
+        window.set_status("Generating custom onion address")
+        window.add_log("GENERATING ADDRESS PREFIX...", "progress")
         time.sleep(3)
         window.add_log("ADDRESS: op2abc...onion", "ok")
         window.complete_step(3)

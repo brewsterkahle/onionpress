@@ -19,7 +19,7 @@ onionpress is a macOS application that bundles WordPress with a Tor onion servic
 - 🔐 **End-to-End Encrypted**: Built-in encryption without needing HTTPS certificates or SSL setup
 - 🌐 **No DNS Registration Needed**: Your .onion address works immediately - no domain registration, no DNS configuration
 - 🏠 **Works Behind Firewalls**: Runs on home, school, or work networks even behind firewalls or NAT - no port forwarding required
-- ✨ **Vanity Onion Addresses**: All installations generate addresses starting with "op2" for easy identification
+- ✨ **Custom Onion Address Prefixes**: All installations generate addresses starting with "op2" for easy identification
 - 📚 **Internet Archive Integration**: Automatically submits posts to be archived and installs the [Wayback Machine Link Fixer](https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/) plugin to submit links from posts to be archived.   Registers the onionpress's .onion address so that when onionpress is offline, the URL requests are fulfilled by the Wayback Machine.
 - 🐳 **Cyber Security from hacking**: Uses Docker containers inside a VM for easy management and isolation
 - 📱 **Menu Bar App**: Simple menu bar interface to control your site
@@ -131,7 +131,7 @@ The app automatically syncs this setting with macOS login items. You can also ma
 3. Copy your onion address and paste it into Tor Browser
 4. Complete the WordPress setup wizard
 
-**Vanity Address Configuration**: You can customize the prefix in `~/.onionpress/config` before first launch. See the config file for details on generation times for different prefix lengths.
+**Address Prefix Customization**: You can customize the prefix in `~/.onionpress/config` before first launch. See the config file for details on generation times for different prefix lengths.
 
 ### Backup & Restore
 
@@ -210,7 +210,7 @@ onionpress uses:
 - **WordPress**: Latest official WordPress container
 - **MariaDB**: Latest MariaDB for the database
 - **Tor**: Onion service container that exposes WordPress as a .onion site
-- **mkp224o**: Vanity onion address generator (generates addresses with custom prefixes)
+- **mkp224o**: Onion address prefix generator (generates addresses with custom prefixes)
 - **Colima**: Bundled container runtime using Apple's virtualization framework
 - **Lima**: VM management layer (bundled)
 - **Docker CLI**: Container management tools (bundled)
@@ -279,7 +279,7 @@ Built with:
 - [Tor Project](https://www.torproject.org/) - Anonymous communication network
 - [Colima](https://github.com/abiosoft/colima) - Container runtime for macOS
 - [Lima](https://github.com/lima-vm/lima) - Linux virtual machines for macOS
-- [mkp224o](https://github.com/cathugger/mkp224o) - Vanity onion address generator
+- [mkp224o](https://github.com/cathugger/mkp224o) - Onion address prefix generator
 - [rumps](https://github.com/jaredks/rumps) - Python library for macOS menu bar apps
 
 ## Support

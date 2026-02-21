@@ -57,7 +57,7 @@ if [ ! -f "$DATA_DIR/config" ]; then
         cp "$RESOURCES_DIR/config-template.txt" "$DATA_DIR/config"
     else
         cat > "$DATA_DIR/config" <<EOF
-VANITY_PREFIX=op2
+ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
@@ -192,13 +192,13 @@ detect_container_runtime() {
     return 1
 }
 
-# Function to generate vanity onion address
+# Function to generate custom onion address with prefix
 generate_vanity_address() {
     local prefix="${1:-op2}"
     # Use shared directory so Docker/Colima can access it
     local output_dir="$DATA_DIR/shared/vanity-keys"
 
-    log "Generating vanity onion address with prefix '$prefix'..." >&2
+    log "Generating custom onion address with prefix '$prefix'..." >&2
 
     # Create output directory
     mkdir -p "$output_dir"
@@ -209,7 +209,7 @@ generate_vanity_address() {
         return 1
     fi
 
-    # Generate vanity address (single threaded for consistency)
+    # Generate address with prefix (single threaded for consistency)
     cd "$output_dir"
     "$BIN_DIR/mkp224o" -d . -n 1 -t 4 "$prefix" >> "$LOG_FILE" 2>&1
 
@@ -217,19 +217,19 @@ generate_vanity_address() {
     VANITY_DIR=$(find "$output_dir" -type d -name "${prefix}*" | head -1)
 
     if [ -z "$VANITY_DIR" ]; then
-        log "ERROR: Failed to generate vanity address" >&2
+        log "ERROR: Failed to generate custom address" >&2
         return 1
     fi
 
     VANITY_ADDRESS=$(basename "$VANITY_DIR")
-    log "Generated vanity address: $VANITY_ADDRESS" >&2
+    log "Generated custom address: $VANITY_ADDRESS" >&2
 
     # Return the directory path (only thing on stdout)
     echo "$VANITY_DIR"
     return 0
 }
 
-# Function to import a pre-generated vanity key
+# Function to import a pre-generated onion service key
 import_key() {
     local key_b32="$1"
 
@@ -238,7 +238,7 @@ import_key() {
         cat <<'HELPEOF'
 Usage: onionpress import-key <base32-secret-key>
 
-Import a pre-generated ed25519 vanity key for your onion service.
+Import a pre-generated ed25519 key for your onion service.
 
 The base32 key should encode the 64-byte expanded ed25519 secret key.
 OnionPress will derive the .onion address automatically.
@@ -412,7 +412,7 @@ sys.stdout.buffer.write(header + pubkey)
     chmod 600 "$output_dir/hs_ed25519_public_key"
     chmod 644 "$output_dir/hostname"
 
-    log "Imported vanity key for address: $address"
+    log "Imported key for address: $address"
     echo "Imported key for: $address"
     echo "Key files written to: $output_dir"
     echo ""
@@ -862,22 +862,31 @@ start_containers() {
 
     # Check if this is first run (no tor keys exist)
     if ! docker volume ls | grep -q "onionpress-tor-keys"; then
-        log "First run detected - generating vanity onion address..."
+        log "First run detected - generating custom onion address..."
 
-        # Read prefix from config, default to "op2"
-        VANITY_PREFIX="op2"
+        # Read address prefix from config, default to "op2"
+        ADDRESS_PREFIX="op2"
         if [ -f "$DATA_DIR/config" ]; then
-            CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
             if [ ! -z "$CUSTOM_PREFIX" ]; then
-                VANITY_PREFIX="$CUSTOM_PREFIX"
+                ADDRESS_PREFIX="$CUSTOM_PREFIX"
             fi
         fi
 
-        log "Using vanity prefix: '$VANITY_PREFIX'"
+        log "Using address prefix: '$ADDRESS_PREFIX'"
 
-        # Generate vanity address
-        if VANITY_DIR=$(generate_vanity_address "$VANITY_PREFIX"); then
-            log "Vanity address generated successfully"
+        # Validate prefix: base32 only (a-z, 2-7), max 5 chars
+        if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
+            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is too long (${#ADDRESS_PREFIX} chars, max 5). Using default 'op2'."
+            ADDRESS_PREFIX="op2"
+        elif ! echo "$ADDRESS_PREFIX" | grep -qE '^[a-z2-7]+$'; then
+            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' contains invalid characters. Only a-z and 2-7 allowed. Using default 'op2'."
+            ADDRESS_PREFIX="op2"
+        fi
+
+        # Generate custom onion address
+        if VANITY_DIR=$(generate_vanity_address "$ADDRESS_PREFIX"); then
+            log "Custom onion address generated successfully"
 
             # Create volume and copy keys
             if ! docker volume create onionpress-tor-keys >> "$LOG_FILE" 2>&1; then
@@ -888,11 +897,11 @@ start_containers() {
                 -v onionpress-tor-keys:/dest \
                 --mount type=bind,source="$VANITY_DIR",target=/src \
                 alpine sh -c 'mkdir -p /dest/wordpress && cp -r /src/* /dest/wordpress/ && chown -R 100:101 /dest/wordpress && chmod 700 /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to copy vanity keys to tor volume"
+                log "ERROR: Failed to copy address keys to tor volume"
                 return 1
             fi
 
-            log "Vanity keys installed to tor volume"
+            log "Address keys installed to tor volume"
         else
             log "Using random onion address"
         fi

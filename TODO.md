@@ -19,7 +19,7 @@
 
 - **Automated updates** - Check for new WordPress/container image versions and prompt user to update
 
-- **Custom vanity prefix UI** - GUI for configuring vanity address prefix instead of editing config file
+- **Custom address prefix UI** - GUI for configuring address prefix instead of editing config file
 
 ### Low Priority
 

@@ -103,8 +103,8 @@ lipo -create \
   "$TEMP_BIN_DIR/docker-compose-x86_64" \
   -output "$TEMP_BIN_DIR/docker-compose"
 
-# Build mkp224o as a universal binary for vanity onion addresses
-echo "  Building mkp224o for vanity onion addresses..."
+# Build mkp224o as a universal binary for custom onion address prefixes
+echo "  Building mkp224o for custom onion address prefixes..."
 if command -v git >/dev/null 2>&1; then
     # Clone mkp224o
     git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || true

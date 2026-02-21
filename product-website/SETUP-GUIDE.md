@@ -123,7 +123,7 @@ See `content-proposal.md` for full content. Key sections:
 - Easy Setup
 - Full WordPress
 - True Privacy
-- Optional Vanity Addresses
+- Custom Address Prefixes
 - Retro Features (Coming Soon!)
 
 ---

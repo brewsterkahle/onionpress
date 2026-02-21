@@ -178,16 +178,16 @@
         </div>
         
         <form id="settingsForm">
-            <!-- Vanity Prefix -->
+            <!-- Address Prefix -->
             <div class="setting-group">
-                <h3>🎯 Vanity Onion Address Prefix</h3>
+                <h3>🎯 Onion Address Prefix</h3>
                 <p>Customize your .onion address prefix. Only lowercase a-z and numbers 2-7 allowed (base32). Longer prefixes take exponentially longer to generate.</p>
                 <div class="input-group">
-                    <input type="text" id="vanityPrefix" name="vanityPrefix" pattern="[a-z2-7]{2,7}" maxlength="7" required>
-                    <span class="char-hint">2-7 characters</span>
+                    <input type="text" id="addressPrefix" name="addressPrefix" pattern="[a-z2-7]{2,5}" maxlength="5" required>
+                    <span class="char-hint">2-5 characters</span>
                 </div>
-                <div class="warning" id="vanityWarning" style="display:none;">
-                    <strong>⚠️ Warning:</strong> Changing the vanity prefix requires regenerating your .onion address. This will give you a completely new URL and your old address will stop working!
+                <div class="warning" id="addressWarning" style="display:none;">
+                    <strong>⚠️ Warning:</strong> Changing the address prefix requires regenerating your .onion address. This will give you a completely new URL and your old address will stop working!
                 </div>
             </div>
             
@@ -239,15 +239,15 @@
     
     <script>
         // Load current settings
-        let originalVanityPrefix = '';
-        
+        let originalAddressPrefix = '';
+
         async function loadSettings() {
             try {
                 const response = await fetch('/settings');
                 const settings = await response.json();
-                
-                document.getElementById('vanityPrefix').value = settings.VANITY_PREFIX;
-                originalVanityPrefix = settings.VANITY_PREFIX;
+
+                document.getElementById('addressPrefix').value = settings.ADDRESS_PREFIX;
+                originalAddressPrefix = settings.ADDRESS_PREFIX;
                 
                 document.getElementById('installIaPlugin').checked = settings.INSTALL_IA_PLUGIN === 'yes';
                 document.getElementById('updateOnLaunch').checked = settings.UPDATE_ON_LAUNCH === 'yes';
@@ -257,10 +257,10 @@
             }
         }
         
-        // Check if vanity prefix changed
-        document.getElementById('vanityPrefix').addEventListener('input', function(e) {
-            const warning = document.getElementById('vanityWarning');
-            if (e.target.value !== originalVanityPrefix) {
+        // Check if address prefix changed
+        document.getElementById('addressPrefix').addEventListener('input', function(e) {
+            const warning = document.getElementById('addressWarning');
+            if (e.target.value !== originalAddressPrefix) {
                 warning.style.display = 'block';
             } else {
                 warning.style.display = 'none';
@@ -272,7 +272,7 @@
             e.preventDefault();
             
             const settings = {
-                VANITY_PREFIX: document.getElementById('vanityPrefix').value,
+                ADDRESS_PREFIX: document.getElementById('addressPrefix').value,
                 INSTALL_IA_PLUGIN: document.getElementById('installIaPlugin').checked ? 'yes' : 'no',
                 UPDATE_ON_LAUNCH: document.getElementById('updateOnLaunch').checked ? 'yes' : 'no',
                 LAUNCH_ON_LOGIN: document.getElementById('launchOnLogin').checked ? 'yes' : 'no'

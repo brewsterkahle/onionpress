@@ -94,9 +94,9 @@ Border:     #000000 3px solid
 - Tor hides your location
 - Visitors stay anonymous too
 
-**Optional Vanity Addresses**
+**Custom Address Prefixes**
 - Want your .onion to start with "blog" or "news"?
-- Built-in vanity address generator
+- Built-in address prefix generator
 - Make your dark web URL memorable
 
 **Retro Features** (Coming Soon!)

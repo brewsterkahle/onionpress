@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-# The cellar's .onion address — placeholder until a real vanity address is generated
+# The cellar's .onion address — placeholder until a real address is generated
 CELLAR_ADDRESS = "ocellarg3xj7hpw25etw34glkjsels5q6knyxe6rmomsjplckwnexdqd.onion"
 
 # Wayback Machine .onion address

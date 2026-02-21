@@ -17,6 +17,7 @@ import AppKit
 import signal
 import socket
 import atexit
+import re
 
 # Add scripts directory to path for imports
 script_dir = os.path.dirname(os.path.realpath(__file__))
@@ -2455,6 +2456,192 @@ class OnionPressApp(rumps.App):
                 self.dismiss_launch_splash()
                 self.show_browser_install_dialog()
 
+    def validate_address_prefix(self, prefix):
+        """Validate a address prefix string.
+
+        Returns:
+            (valid, error_message, suggestion) tuple.
+            suggestion is a corrected prefix string (or "" if no fix is possible).
+        """
+        if not prefix:
+            return (True, "", "")
+
+        # Build a suggested fix: lowercase, strip invalid chars, truncate to 5
+        suggested = re.sub(r'[^a-z2-7]', '', prefix.lower())[:5]
+
+        if len(prefix) > 5 and re.match(r'^[a-z2-7]+$', prefix):
+            # Valid chars but too long — suggest truncated version
+            return (False,
+                    f"Address prefix \"{prefix}\" is too long ({len(prefix)} characters).\n\n"
+                    f"Maximum length is 5 characters.",
+                    suggested)
+
+        if not re.match(r'^[a-z2-7]+$', prefix):
+            # Has invalid characters — explain what's wrong and suggest a fix
+            has_upper = any(c.isupper() for c in prefix)
+            has_digits_089 = any(c in '0189' for c in prefix)
+
+            msg = f"Address prefix \"{prefix}\" contains invalid characters.\n\n"
+            msg += "Onion addresses use base32 encoding:\n"
+            msg += "  Allowed letters:  a-z\n"
+            msg += "  Allowed numbers:  2, 3, 4, 5, 6, 7\n"
+            msg += "  NOT allowed:  0, 1, 8, 9\n"
+
+            if has_upper:
+                msg += f"\nUppercase letters will be lowercased."
+            if has_digits_089:
+                bad_digits = sorted(set(c for c in prefix if c in '0189'))
+                msg += f"\nDigits {', '.join(bad_digits)} are not valid in base32 and will be removed."
+
+            return (False, msg, suggested)
+
+        return (True, "", prefix)
+
+    def check_address_prefix_change(self):
+        """Check if ADDRESS_PREFIX has changed and handle regeneration.
+
+        Called from a background thread before starting the launcher.
+        Returns True if startup should proceed, False to abort.
+        """
+        # Read configured prefix
+        prefix = self._read_config_value("ADDRESS_PREFIX", "op2").strip()
+        if not prefix:
+            prefix = "op2"
+
+        # Validate prefix
+        valid, error_msg, suggestion = self.validate_address_prefix(prefix)
+        if not valid:
+            self.log(f"Invalid ADDRESS_PREFIX: {prefix}")
+            if suggestion:
+                # Offer to auto-correct
+                button_index = self.show_native_alert(
+                    "Invalid Address Prefix",
+                    error_msg + f"\n\nSuggested prefix: \"{suggestion}\"",
+                    buttons=[f"Use \"{suggestion}\"", "Cancel"],
+                    default_button=0,
+                    cancel_button=1,
+                    style="warning"
+                )
+                if button_index == 0:
+                    self.log(f"User accepted suggested prefix: {suggestion}")
+                    self.write_config_value("ADDRESS_PREFIX", suggestion)
+                    prefix = suggestion
+                else:
+                    self.log("User declined suggested prefix — aborting start")
+                    return False
+            else:
+                self.show_native_alert(
+                    "Invalid Address Prefix",
+                    error_msg + "\n\nPlease edit your prefix in Settings and try again.",
+                    buttons=["OK"],
+                    style="critical"
+                )
+                return False
+
+        # Try to get current hostname from tor-keys volume
+        try:
+            docker_bin = os.path.join(self.bin_dir, "docker")
+            env = os.environ.copy()
+            env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+            env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+            result = subprocess.run(
+                [docker_bin, "run", "--rm", "-v", "onionpress-tor-keys:/keys",
+                 "alpine", "cat", "/keys/wordpress/hostname"],
+                capture_output=True, text=True, env=env, timeout=15
+            )
+            current_hostname = result.stdout.strip()
+        except Exception as e:
+            self.log(f"Could not read current hostname (likely first run): {e}")
+            return True  # No existing volume, proceed normally
+
+        if not current_hostname or not current_hostname.endswith(".onion"):
+            self.log("No existing onion address found, proceeding with first run")
+            return True
+
+        # Check if current hostname already matches the prefix
+        hostname_base = current_hostname.replace(".onion", "")
+        if hostname_base.startswith(prefix):
+            self.log(f"Address prefix '{prefix}' matches current address {current_hostname}")
+            return True
+
+        # Mismatch detected — determine old prefix for display
+        old_prefix = hostname_base[:len(prefix)] if len(hostname_base) >= len(prefix) else hostname_base[:3]
+        self.log(f"Address prefix changed: current address starts with '{old_prefix}', config says '{prefix}'")
+
+        # Show confirmation dialog with time estimates
+        time_estimates = (
+            "Estimated generation time:\n"
+            "  2 characters:  < 1 second\n"
+            "  3 characters:  < 1 second\n"
+            "  4 characters:  5-30 seconds\n"
+            "  5 characters:  10-30 minutes"
+        )
+
+        message = (
+            f"Your address prefix has changed from what was used to generate "
+            f"your current onion address.\n\n"
+            f"Current address:\n{current_hostname}\n\n"
+            f"New prefix: \"{prefix}\"\n\n"
+            f"Changing will generate a NEW onion address.\n"
+            f"Your current address will stop working permanently.\n\n"
+            f"{time_estimates}"
+        )
+
+        button_index = self.show_native_alert(
+            "Change Onion Address?",
+            message,
+            buttons=["Change Address", "Keep Current Address"],
+            default_button=1,
+            cancel_button=1,
+            style="warning"
+        )
+
+        if button_index == 0:
+            # User confirmed — delete old keys so launcher regenerates
+            self.log("User confirmed address prefix change — deleting old keys")
+
+            try:
+                docker_bin = os.path.join(self.bin_dir, "docker")
+                env = os.environ.copy()
+                env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
+                env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
+
+                # Delete vanity-keys directory
+                vanity_dir = os.path.join(self.app_support, "shared", "vanity-keys")
+                if os.path.exists(vanity_dir):
+                    import shutil
+                    shutil.rmtree(vanity_dir)
+                    self.log(f"Deleted vanity-keys directory: {vanity_dir}")
+
+                # Delete docker volume
+                subprocess.run(
+                    [docker_bin, "volume", "rm", "onionpress-tor-keys"],
+                    capture_output=True, text=True, env=env, timeout=15
+                )
+                self.log("Deleted onionpress-tor-keys volume")
+
+                # Clear cached onion address
+                cached_addr_file = os.path.join(self.app_support, "onion_address")
+                if os.path.exists(cached_addr_file):
+                    os.remove(cached_addr_file)
+                    self.log("Cleared cached onion address")
+
+            except Exception as e:
+                self.log(f"Error cleaning up old keys: {e}")
+                self.show_native_alert(
+                    "Error",
+                    f"Failed to remove old onion keys:\n\n{e}\n\nPlease try again or manually delete ~/.onionpress/shared/vanity-keys/ and run: docker volume rm onionpress-tor-keys",
+                    buttons=["OK"],
+                    style="critical"
+                )
+                return False
+
+            return True
+        else:
+            # User cancelled — don't start
+            self.log("User chose to keep current address — aborting start")
+            return False
+
     @rumps.clicked("Start")
     def start_service(self, _):
         """Start the WordPress + Tor service"""
@@ -2497,7 +2684,13 @@ class OnionPressApp(rumps.App):
                 setup_window.show_welcome_screen(on_continue=on_continue, on_cancel=on_cancel)
                 return
 
-            # Not first run: start the service normally
+            # Not first run: check if address prefix changed before starting
+            if not self.check_address_prefix_change():
+                self.log("Start aborted due to address prefix issue")
+                self.menu["Starting..."].title = "Status: Stopped"
+                return
+
+            # Start the service normally
             subprocess.run([self.launcher_script, "start"])
 
             # Poll until WordPress is responding (replaces fixed sleep)
@@ -2586,7 +2779,7 @@ class OnionPressApp(rumps.App):
                     )
                 self.log(f"Docker compose up completed with exit code: {result.returncode}")
                 if result.returncode == 0:
-                    progress_window.set_status("Generating vanity onion address")
+                    progress_window.set_status("Generating custom onion address")
                     progress_window.set_detail("Finding address...")
                     rumps.notification(title="OnionPress", subtitle="Containers started", message="WordPress is starting...")
 
@@ -2667,6 +2860,13 @@ class OnionPressApp(rumps.App):
             self._bootstrap_stall_count = 0
             self._yellow_since = None
             self.auto_opened_browser = False  # Re-open browser after restart
+
+            # Check if address prefix changed before restarting
+            if not self.check_address_prefix_change():
+                self.log("Restart aborted due to address prefix issue")
+                self.menu["Starting..."].title = "Status: Stopped"
+                self.icon = self.icon_stopped
+                return
 
             # Run restart command
             subprocess.run([self.launcher_script, "restart"])
@@ -3258,8 +3458,8 @@ class OnionPressApp(rumps.App):
                     progress_window.set_progress(1.0, "COMPLETE")
                     progress_window.add_log("ALL IMAGES DOWNLOADED", "ok")
                     progress_window.complete_step(2)
-                    progress_window.set_status("Generating vanity onion address")
-                    progress_window.add_log("GENERATING VANITY PREFIX...", "progress")
+                    progress_window.set_status("Generating custom onion address")
+                    progress_window.add_log("GENERATING ADDRESS PREFIX...", "progress")
                     break
                 if all(images_to_check.values()):
                     self.log("All images downloaded")
@@ -3279,7 +3479,7 @@ Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
-• Tor Onion Service with vanity addresses (op2*)
+• Tor Onion Service with custom address prefixes (op2*)
 • Requires visitors to use Tor or Brave browsers
 • Internet Archive Wayback Machine integration
 • Bundled container runtime (no Docker needed)

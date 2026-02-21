@@ -1,26 +1,21 @@
 # onionpress Configuration
 # This file is automatically copied to ~/.onionpress/config on first run
 
-# Vanity Onion Address Prefix
+# Onion Address Prefix
 # Default: "op2" (generates addresses like op2xxxxxxxxxxxxx.onion)
 #
 # You can customize this to any lowercase alphanumeric string.
 # Note: Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.
-# Longer prefixes take exponentially longer to generate:
+# Maximum 5 characters. Longer prefixes take exponentially longer to generate:
 # - 2 chars (op): < 1 second
 # - 3 chars (op2): < 1 second
 # - 4 chars (op24): 5-30 seconds
-# - 5 chars (op2024): 10-30 minutes
-# - 6+ chars: hours to days
+# - 5 chars (op2aa): 10-30 minutes
 #
-# To use a custom prefix:
-# 1. Stop onionpress
-# 2. Edit this file: ~/.onionpress/config
-# 3. Delete ~/.onionpress/vanity-keys directory
-# 4. Delete the tor-keys volume: docker volume rm onionpress-tor-keys
-# 5. Restart onionpress (will generate new vanity address)
+# To change your prefix, edit this value and restart OnionPress.
+# You will be prompted to confirm the change (your old address will stop working).
 #
-VANITY_PREFIX=op2
+ADDRESS_PREFIX=op2
 
 # Internet Archive Wayback Machine Link Fixer Plugin
 # Default: "yes" (automatically installs and activates the plugin)

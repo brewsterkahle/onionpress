@@ -2586,7 +2586,7 @@ class OnionPressApp(rumps.App):
                     )
                 self.log(f"Docker compose up completed with exit code: {result.returncode}")
                 if result.returncode == 0:
-                    progress_window.set_status("Generating vanity onion address")
+                    progress_window.set_status("Generating custom onion address")
                     progress_window.set_detail("Finding address...")
                     rumps.notification(title="OnionPress", subtitle="Containers started", message="WordPress is starting...")
 
@@ -3258,8 +3258,8 @@ class OnionPressApp(rumps.App):
                     progress_window.set_progress(1.0, "COMPLETE")
                     progress_window.add_log("ALL IMAGES DOWNLOADED", "ok")
                     progress_window.complete_step(2)
-                    progress_window.set_status("Generating vanity onion address")
-                    progress_window.add_log("GENERATING VANITY PREFIX...", "progress")
+                    progress_window.set_status("Generating custom onion address")
+                    progress_window.add_log("GENERATING ADDRESS PREFIX...", "progress")
                     break
                 if all(images_to_check.values()):
                     self.log("All images downloaded")
@@ -3279,7 +3279,7 @@ Run your own website from your Mac. Just Works. Free, forever.
 WordPress + Tor Onion Service
 
 Features:
-• Tor Onion Service with vanity addresses (op2*)
+• Tor Onion Service with custom address prefixes (op2*)
 • Requires visitors to use Tor or Brave browsers
 • Internet Archive Wayback Machine integration
 • Bundled container runtime (no Docker needed)

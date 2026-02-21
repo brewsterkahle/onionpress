@@ -1,6 +1,6 @@
 # Development Guide
 
-> **Version 2.0.2** - Now bundles Colima container runtime with vanity onion addresses!
+> **Version 2.0.2** - Now bundles Colima container runtime with custom onion address prefixes!
 
 ## Project Structure
 
@@ -17,7 +17,7 @@ onionpress/
 │           ├── share/        # Lima templates and support files
 │           ├── docker/
 │           │   └── docker-compose.yml  # Container configuration
-│           ├── config-template.txt     # Config template for vanity prefix
+│           ├── config-template.txt     # Config template for address prefix
 │           └── scripts/
 │               ├── menubar.py          # Menu bar app (Python/rumps)
 │               └── requirements.txt    # Python dependencies
@@ -158,7 +158,7 @@ docker compose exec tor cat /var/lib/tor/hidden_service/wordpress/hostname
 
 - Uses bundled Colima container runtime (in production builds)
 - Falls back to system Docker if available (useful for development)
-- Generates vanity onion addresses with mkp224o on first launch
+- Generates custom onion address prefixes with mkp224o on first launch
 - Manages Docker Compose lifecycle
 - Retrieves onion address from Tor container
 
@@ -269,7 +269,7 @@ Before releasing a new version:
 - [ ] Test on clean macOS install (remove ~/.onionpress first)
 - [ ] Test on Apple Silicon Mac (ARM64) - primary platform
 - [ ] Verify bundled Colima initializes correctly
-- [ ] Verify vanity address generation works (check for "op2" prefix)
+- [ ] Verify address prefix generation works (check for "op2" prefix)
 - [ ] Test complete WordPress setup flow
 - [ ] Test Tor Browser integration
 - [ ] Verify all bundled binaries are ARM64-only (no Rosetta emulation)
@@ -293,7 +293,7 @@ Before releasing a new version:
 - **Fully isolated**: Each app has its own container environment in `~/.onionpress/`
 - **Open source**: MIT/Apache licensed components
 
-### Why mkp224o for vanity addresses?
+### Why mkp224o for custom address prefixes?
 - **Fast generation**: Can generate 3-character prefixes in < 1 second
 - **v3 onion support**: Works with modern Tor onion services
 - **Customizable**: Users can configure their own prefix
