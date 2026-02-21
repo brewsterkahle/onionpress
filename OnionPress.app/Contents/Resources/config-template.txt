@@ -102,3 +102,12 @@ VM_MEMORY=1
 # 5. Restart OnionPress
 # Your .onion address continues to work alongside the clearnet domain.
 CLOUDFLARE_TUNNEL_TOKEN=
+
+# Register with OnionCellar
+# Default: "yes" (register this site with the OnionCellar)
+#
+# When enabled, OnionPress will register your site with the OnionCellar
+# so it can be discovered, archived, and served to your readers as a
+# fallback when your Mac is offline. Set to "no" to opt out.
+#
+REGISTER_WITH_CELLAR=yes
