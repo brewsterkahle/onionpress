@@ -244,8 +244,10 @@ class _LogViewerWindow:
             AppKit.NSMakeRect(0, 0, 720, 480))
         tv.setEditable_(False)
         tv.setSelectable_(True)
-        tv.setFont_(AppKit.NSFont.fontWithName_size_("Menlo", 12))
-        tv.setTextColor_(AppKit.NSColor.textColor())
+        self._log_font = AppKit.NSFont.fontWithName_size_("Menlo", 12)
+        self._log_text_color = AppKit.NSColor.textColor()
+        tv.setFont_(self._log_font)
+        tv.setTextColor_(self._log_text_color)
         tv.setBackgroundColor_(AppKit.NSColor.textBackgroundColor())
         tv.setAutoresizingMask_(AppKit.NSViewWidthSizable)
         # Allow horizontal scrolling for long lines
@@ -309,7 +311,7 @@ class _LogViewerWindow:
                     content = '\n'.join(lines[-(500 + 1):])
                 self._offset = file_size
             if content:
-                self._text_view.textStorage().mutableString().appendString_(content)
+                self._append_attributed(content)
                 # Scroll to bottom
                 end = self._text_view.textStorage().length()
                 self._text_view.scrollRangeToVisible_(AppKit.NSMakeRange(end, 0))
@@ -327,6 +329,15 @@ class _LogViewerWindow:
         scroll_y = clip.bounds().origin.y
         # "Near bottom" = within 50 points of the end
         return (scroll_y + clip_height) >= (doc_height - 50)
+
+    def _append_attributed(self, text):
+        """Append text with correct font and color (respects dark mode)."""
+        attrs = {
+            AppKit.NSFontAttributeName: self._log_font,
+            AppKit.NSForegroundColorAttributeName: self._log_text_color,
+        }
+        astr = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+        self._text_view.textStorage().appendAttributedString_(astr)
 
     def _poll_loop(self):
         """Background thread: poll file for new content every 1.5s."""
@@ -352,7 +363,8 @@ class _LogViewerWindow:
                     # File was truncated — reload
                     self._offset = 0
                     def reload():
-                        self._text_view.textStorage().mutableString().setString_("")
+                        storage = self._text_view.textStorage()
+                        storage.deleteCharactersInRange_(AppKit.NSMakeRange(0, storage.length()))
                         self._load_initial()
                     _main_thread(reload)
                     continue
@@ -367,7 +379,7 @@ class _LogViewerWindow:
                 if new_content:
                     def append(text=new_content):
                         was_near = self._is_near_bottom()
-                        self._text_view.textStorage().mutableString().appendString_(text)
+                        self._append_attributed(text)
                         if was_near:
                             end = self._text_view.textStorage().length()
                             self._text_view.scrollRangeToVisible_(
