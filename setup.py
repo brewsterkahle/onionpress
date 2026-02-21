@@ -41,7 +41,6 @@ OPTIONS = {
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
         'LSApplicationCategoryType': 'public.app-category.utilities',
-        'NSLocalNetworkUsageDescription': 'OnionPress runs a local web server on your Mac to connect your browser to your onion service. No other devices on your network are accessed.',
     },
     'packages': ['rumps', 'objc', 'AppKit'],
     # CRITICAL: Local modules that menubar.py imports at runtime.

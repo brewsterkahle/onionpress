@@ -38,8 +38,6 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright not specified</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>OnionPress runs a local web server on your Mac to connect your browser to your onion service. No other devices on your network are accessed.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
