@@ -526,7 +526,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.100"
+        self.version = "2.2.103"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -594,6 +594,12 @@ class OnionPressApp(rumps.App):
             except Exception as e:
                 self.log(f"Native messaging install failed: {e}")
 
+            # Check if Cloudflare Tunnel is configured
+            cf_token = self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN")
+            if cf_token:
+                self.cloudflare_tunnel_enabled = True
+                self.log("Cloudflare Tunnel configured")
+
         # Start background initialization
         threading.Thread(target=background_init, daemon=True).start()
 
@@ -638,16 +644,19 @@ class OnionPressApp(rumps.App):
         self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
         self._cellar_registration_started = False  # Whether registration thread is running
+        self.cloudflare_tunnel_enabled = False  # True when CLOUDFLARE_TUNNEL_TOKEN is set
 
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
         self.relay_alert_item = rumps.MenuItem("Relay Alerts", callback=self.view_relay_alerts)
+        self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
+            self.clearnet_status_item,
             self.browser_menu_item,
             self.relay_alert_item,
             rumps.separator,
@@ -1541,6 +1550,19 @@ class OnionPressApp(rumps.App):
             return "stuck"
         return "starting"
 
+    def _read_config_value(self, key, default=""):
+        """Read a value from ~/.onionpress/config."""
+        config_file = os.path.join(self.app_support, "config")
+        try:
+            with open(config_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{key}="):
+                        return line.split("=", 1)[1]
+        except (OSError, IOError):
+            pass
+        return default
+
     def check_status(self):
         """Check if containers are running and get onion address"""
         if self._port_conflict:
@@ -1625,6 +1647,9 @@ class OnionPressApp(rumps.App):
                         elapsed = int(time.time() - self.startup_time)
                         self.log(f"✓ System fully operational (launched in {elapsed}s)")
                         self.last_status_logged = current_status
+
+                        # Re-read Cloudflare Tunnel config (may have changed since launch)
+                        self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
 
                         # Dismiss setup dialog if it's showing
                         self.dismiss_setup_dialog()
@@ -1796,6 +1821,13 @@ class OnionPressApp(rumps.App):
                 self.title = ""
                 self.relay_alert_item.title = "Relay Alerts"
                 self.relay_alert_item.set_callback(None)
+
+            # Show/hide clearnet status based on tunnel config and state
+            show_clearnet = (state == "available" and self.cloudflare_tunnel_enabled)
+            self.clearnet_status_item.title = "Clearnet: Active (via Cloudflare)" if show_clearnet else ""
+            # Hidden by setting callback to None (greyed out) — rumps doesn't support true hide,
+            # but an empty title with no callback is effectively invisible
+            self.clearnet_status_item.set_callback(None)
 
             if state == "available":
                 self.icon = self.icon_running
@@ -2515,6 +2547,8 @@ class OnionPressApp(rumps.App):
                         if line and not line.startswith('#') and '=' in line:
                             key, val = line.split('=', 1)
                             env[key] = val.strip("'")
+            # Pass Cloudflare Tunnel token (avoids docker-compose warning about undefined var)
+            env.setdefault("CLOUDFLARE_TUNNEL_TOKEN", self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
             docker_bin = os.path.join(self.bin_dir, "docker")
             docker_log = os.path.join(self.app_support, "docker-pull.log")
 
@@ -3019,9 +3053,11 @@ class OnionPressApp(rumps.App):
         app_update_available = False
         try:
             # Fetch latest release from GitHub using curl to avoid permission prompts
+            # --cacert needed because py2app bundle can't find CA certs (curl exit 77)
             url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
             result = subprocess.run(
-                ["curl", "-s", "-H", "User-Agent: onionpress", "--max-time", "10", url],
+                ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
+                 "-H", "User-Agent: onionpress", "--max-time", "10", url],
                 capture_output=True,
                 text=True,
                 encoding='utf-8',
@@ -3407,7 +3443,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.100 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.103 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
