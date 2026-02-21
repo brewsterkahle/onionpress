@@ -639,8 +639,8 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._was_ready = False            # Were we ever ready this session?
         self.healthcheck_address = None    # Healthcheck .onion address
-        self.relay_messages = []           # Messages received from OnionRelay
-        self._relay_alert_shown = False    # Whether we've shown the relay alert icon
+        self.cellar_messages = []          # Messages received from OnionCellar
+        self._cellar_alert_shown = False   # Whether we've shown the cellar alert icon
         self.is_cellar = False             # True if this instance is the OnionCellar
         self.cellar_locked = True          # Whether the cellar is currently locked
         self._cellar_checked = False       # Whether cellar mode has been checked
@@ -650,7 +650,7 @@ class OnionPressApp(rumps.App):
         # Menu items
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
-        self.relay_alert_item = rumps.MenuItem("Relay Alerts", callback=self.view_relay_alerts)
+        self.cellar_alert_item = rumps.MenuItem("Cellar Alerts", callback=self.view_cellar_alerts)
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -1709,9 +1709,9 @@ class OnionPressApp(rumps.App):
                 if self.healthcheck_address is None and self.is_ready:
                     self.read_healthcheck_address()
 
-                # Poll for relay messages from healthcheck service
+                # Poll for cellar messages from healthcheck service
                 if self.is_ready:
-                    self.poll_relay_messages()
+                    self.poll_cellar_messages()
 
                 # OnionCellar: detect cellar mode and start registration/polling
                 if self.is_ready and not self._cellar_checked:
@@ -1785,8 +1785,8 @@ class OnionPressApp(rumps.App):
                 self._bootstrap_stall_count = 0
                 self._yellow_since = None
                 self.healthcheck_address = None
-                self.relay_messages = []
-                self._relay_alert_shown = False
+                self.cellar_messages = []
+                self._cellar_alert_shown = False
                 self._cellar_checked = False
                 self._cellar_registration_started = False
 
@@ -1813,21 +1813,20 @@ class OnionPressApp(rumps.App):
         def do_update():
             state = self.display_state
 
-            # Relay alert indicator: show "!" next to icon when messages exist
-            if self.relay_messages:
+            # Cellar alert indicator: show "!" next to icon when messages exist
+            if self.cellar_messages:
                 self.title = "!"
-                count = len(self.relay_messages)
-                self.relay_alert_item.title = f"Relay Alerts ({count})"
-                self.relay_alert_item.set_callback(self.view_relay_alerts)
-                if self.relay_alert_item.title not in self.menu:
-                    self.menu.insert_after("Copy Onion Address", self.relay_alert_item)
+                count = len(self.cellar_messages)
+                self.cellar_alert_item.title = f"Cellar Alerts ({count})"
+                self.cellar_alert_item.set_callback(self.view_cellar_alerts)
+                if self.cellar_alert_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self.cellar_alert_item)
             else:
                 self.title = ""
-                if "Relay Alerts" in self.menu:
-                    del self.menu["Relay Alerts"]
-                # Also remove if it had a count in the title
+                if "Cellar Alerts" in self.menu:
+                    del self.menu["Cellar Alerts"]
                 for key in list(self.menu.keys()):
-                    if isinstance(key, str) and key.startswith("Relay Alerts ("):
+                    if isinstance(key, str) and key.startswith("Cellar Alerts ("):
                         del self.menu[key]
 
             # Show/hide clearnet status based on tunnel config and state
@@ -1935,8 +1934,8 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Failed to read healthcheck address: {e}")
 
-    def poll_relay_messages(self):
-        """Poll for messages from the OnionRelay via the healthcheck service."""
+    def poll_cellar_messages(self):
+        """Poll for messages from the OnionCellar via the healthcheck service."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             env = os.environ.copy()
@@ -1950,18 +1949,17 @@ class OnionPressApp(rumps.App):
                 capture_output=True, text=True, timeout=10, env=env
             )
             if result.returncode != 0 or not result.stdout.strip():
-                # No messages — clear any existing alerts
-                if self.relay_messages:
-                    self.relay_messages = []
-                    self._relay_alert_shown = False
+                if self.cellar_messages:
+                    self.cellar_messages = []
+                    self._cellar_alert_shown = False
                 return
 
             files = result.stdout.strip().split('\n')
             json_files = [f for f in files if f.endswith('.json')]
             if not json_files:
-                if self.relay_messages:
-                    self.relay_messages = []
-                    self._relay_alert_shown = False
+                if self.cellar_messages:
+                    self.cellar_messages = []
+                    self._cellar_alert_shown = False
                 return
 
             # Read all message files
@@ -1979,49 +1977,44 @@ class OnionPressApp(rumps.App):
                 except Exception:
                     continue
 
-            if messages and messages != self.relay_messages:
-                self.relay_messages = messages
-                if not self._relay_alert_shown:
-                    self._relay_alert_shown = True
-                    self.log(f"Received {len(messages)} message(s) from OnionRelay")
-                    # Show notification for the latest message
+            if messages and messages != self.cellar_messages:
+                self.cellar_messages = messages
+                if not self._cellar_alert_shown:
+                    self._cellar_alert_shown = True
+                    self.log(f"Received {len(messages)} message(s) from OnionCellar")
                     latest = messages[-1]
                     msg_type = latest.get("type", "unknown")
-                    msg_text = latest.get("message", "New message from OnionRelay")
-                    rumps.notification(
-                        title="OnionPress Alert",
-                        subtitle=msg_type.replace("_", " ").title(),
-                        message=msg_text
-                    )
-        except Exception as e:
-            # Don't spam logs — relay polling failures are expected when container is starting
+                    msg_text = latest.get("message", "New message from OnionCellar")
+                    self.log(f"OnionCellar alert: {msg_type} - {msg_text}")
+        except Exception:
+            # Don't spam logs — cellar polling failures are expected when container is starting
             pass
 
-    def view_relay_alerts(self, _):
-        """Show relay alert messages and offer to dismiss them."""
-        if not self.relay_messages:
-            rumps.alert("No relay alerts.")
+    def view_cellar_alerts(self, _):
+        """Show cellar alert messages and offer to dismiss them."""
+        if not self.cellar_messages:
+            rumps.alert("No cellar alerts.")
             return
 
         # Build summary of all messages
         lines = []
-        for msg in self.relay_messages:
+        for msg in self.cellar_messages:
             msg_type = msg.get("type", "unknown").replace("_", " ").title()
             msg_text = msg.get("message", "")
             lines.append(f"[{msg_type}] {msg_text}")
         summary = "\n".join(lines)
 
         response = rumps.alert(
-            title=f"Relay Alerts ({len(self.relay_messages)})",
+            title=f"Cellar Alerts ({len(self.cellar_messages)})",
             message=summary,
             ok="Dismiss All",
             cancel="Close"
         )
 
         if response == 1:  # "Dismiss All" clicked
-            self.log("Dismissing relay alerts")
-            self.relay_messages = []
-            self._relay_alert_shown = False
+            self.log("Dismissing cellar alerts")
+            self.cellar_messages = []
+            self._cellar_alert_shown = False
             # Delete message files from container
             try:
                 docker_bin = os.path.join(self.bin_dir, "docker")
@@ -2824,7 +2817,7 @@ class OnionPressApp(rumps.App):
                 if result.returncode == 0:
                     progress_window.set_status("Generating custom onion address")
                     progress_window.set_detail("Finding address...")
-                    rumps.notification(title="OnionPress", subtitle="Containers started", message="WordPress is starting...")
+                    self.log("Containers started, WordPress is starting...")
 
             threading.Thread(target=pull_and_start, daemon=True).start()
             self.monitor_image_downloads(progress_window)

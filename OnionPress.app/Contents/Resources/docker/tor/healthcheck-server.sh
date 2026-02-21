@@ -1,7 +1,7 @@
 #!/bin/sh
 # OnionPress Healthcheck Server
 # Listens on port 8081 via socat, serves status JSON on GET,
-# stores relay messages on POST.
+# stores cellar messages on POST.
 
 HEALTHCHECK_PORT=8081
 MESSAGES_DIR="/var/lib/tor/healthcheck-messages"
@@ -140,7 +140,7 @@ handle_get() {
     printf "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" "$len" "$body"
 }
 
-# Handle POST — store relay message
+# Handle POST — store cellar message
 handle_post() {
     local content_length="$1"
     local body=""
