@@ -492,6 +492,56 @@ install_ia_plugin() {
     return 0
 }
 
+# Function to configure IA Wayback Machine Link Fixer plugin options via WP-CLI
+configure_ia_plugin() {
+    # Check if plugin installation is enabled in config
+    local install_plugin="yes"
+    if [ -f "$DATA_DIR/config" ]; then
+        local config_value=$(grep "^INSTALL_IA_PLUGIN=" "$DATA_DIR/config" | cut -d= -f2)
+        if [ ! -z "$config_value" ]; then
+            install_plugin="$config_value"
+        fi
+    fi
+
+    if [ "$install_plugin" != "yes" ]; then
+        return 0
+    fi
+
+    # Skip if WordPress is not installed yet
+    if ! wp_is_installed; then
+        return 0
+    fi
+
+    # Skip if plugin is not installed
+    if ! docker exec onionpress-wordpress test -f /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php 2>/dev/null; then
+        return 0
+    fi
+
+    # Check if already configured (idempotent — don't overwrite user customizations)
+    local wizard_done
+    wizard_done=$(docker exec onionpress-wordpress wp option get iawmlf_setup_wizard_completed --allow-root 2>/dev/null || echo "")
+    if [ "$wizard_done" = "1" ]; then
+        log "✓ Internet Archive plugin already configured"
+        return 0
+    fi
+
+    log "Configuring Internet Archive Wayback Machine Link Fixer plugin..."
+
+    # Enable link fixer (scans outbound links, replaces broken ones with archived versions)
+    docker exec onionpress-wordpress wp option update iawmlf_process_links 1 --allow-root >> "$LOG_FILE" 2>&1
+    docker exec onionpress-wordpress wp option update iawmlf_fixer_option replace_link --allow-root >> "$LOG_FILE" 2>&1
+    docker exec onionpress-wordpress wp option update iawmlf_scan_existing_posts 1 --allow-root >> "$LOG_FILE" 2>&1
+
+    # Mark setup wizard complete (prevents wizard UI from showing)
+    docker exec onionpress-wordpress wp option update iawmlf_setup_wizard_completed 1 --allow-root >> "$LOG_FILE" 2>&1
+
+    # Do NOT enable the plugin's own auto-archive — our mu-plugin handles it
+    # with proper .onion URLs and Tor routing
+
+    log "✓ Internet Archive plugin configured (link fixer enabled, wizard completed)"
+    return 0
+}
+
 # Function to fix permissions for onionpress persistent data directory
 fix_onionpress_permissions() {
     log "Fixing permissions for onionpress persistent data directory..."
@@ -725,6 +775,20 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
+    # Copy Wayback Machine archiver mu-plugin → wp-content/mu-plugins/
+    if [ -f "$plugins_dir/onionpress-wayback-archive.php" ]; then
+        docker exec onionpress-wordpress mkdir -p \
+            /var/www/html/wp-content/mu-plugins >> "$LOG_FILE" 2>&1
+        if docker cp "$plugins_dir/onionpress-wayback-archive.php" \
+            onionpress-wordpress:/var/www/html/wp-content/mu-plugins/onionpress-wayback-archive.php >> "$LOG_FILE" 2>&1; then
+            docker exec onionpress-wordpress chown www-data:www-data \
+                /var/www/html/wp-content/mu-plugins/onionpress-wayback-archive.php >> "$LOG_FILE" 2>&1
+            log "✓ onionpress-wayback-archive.php mu-plugin installed"
+        else
+            log "WARNING: Failed to copy onionpress-wayback-archive.php"
+        fi
+    fi
+
     return 0
 }
 
@@ -876,6 +940,9 @@ start_containers() {
     # Install Internet Archive Wayback Machine Link Fixer plugin
     install_ia_plugin
 
+    # Configure IA plugin options (link fixer, wizard completion)
+    configure_ia_plugin
+
     # Install multisite domain mapping PHP files (sunrise.php + mu-plugin)
     install_multisite_domain_map
 
@@ -995,6 +1062,12 @@ wait_for_services() {
             if hc_addr=$(get_healthcheck_address); then
                 log "Healthcheck address: ${hc_addr}"
             fi
+
+            # Write onion address to shared volume for WordPress plugins
+            docker exec onionpress-tor cp /var/lib/tor/hidden_service/wordpress/hostname /var/lib/onionpress/onion_address 2>>"$LOG_FILE" && \
+                log "✓ Onion address written to shared volume" || \
+                log "WARNING: Failed to write onion address to shared volume"
+
             return 0
         fi
 
