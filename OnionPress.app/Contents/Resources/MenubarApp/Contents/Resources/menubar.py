@@ -526,7 +526,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.2.105"
+        self.version = "2.2.106"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -656,9 +656,7 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("Starting...", callback=None),
             rumps.separator,
             rumps.MenuItem("Copy Onion Address", callback=self.copy_address),
-            self.clearnet_status_item,
             self.browser_menu_item,
-            self.relay_alert_item,
             rumps.separator,
             rumps.MenuItem("Start", callback=self.start_service),
             rumps.MenuItem("Stop", callback=self.stop_service),
@@ -1820,17 +1818,27 @@ class OnionPressApp(rumps.App):
                 count = len(self.relay_messages)
                 self.relay_alert_item.title = f"Relay Alerts ({count})"
                 self.relay_alert_item.set_callback(self.view_relay_alerts)
+                if self.relay_alert_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self.relay_alert_item)
             else:
                 self.title = ""
-                self.relay_alert_item.title = "Relay Alerts"
-                self.relay_alert_item.set_callback(None)
+                if "Relay Alerts" in self.menu:
+                    del self.menu["Relay Alerts"]
+                # Also remove if it had a count in the title
+                for key in list(self.menu.keys()):
+                    if isinstance(key, str) and key.startswith("Relay Alerts ("):
+                        del self.menu[key]
 
             # Show/hide clearnet status based on tunnel config and state
             show_clearnet = (state == "available" and self.cloudflare_tunnel_enabled)
-            self.clearnet_status_item.title = "Clearnet: Active (via Cloudflare)" if show_clearnet else ""
-            # Hidden by setting callback to None (greyed out) — rumps doesn't support true hide,
-            # but an empty title with no callback is effectively invisible
-            self.clearnet_status_item.set_callback(None)
+            if show_clearnet:
+                self.clearnet_status_item.title = "Clearnet: Active (via Cloudflare)"
+                self.clearnet_status_item.set_callback(None)
+                if self.clearnet_status_item.title not in self.menu:
+                    self.menu.insert_after("Copy Onion Address", self.clearnet_status_item)
+            else:
+                if "Clearnet: Active (via Cloudflare)" in self.menu:
+                    del self.menu["Clearnet: Active (via Cloudflare)"]
 
             if state == "available":
                 self.icon = self.icon_running
@@ -3457,7 +3465,7 @@ License: AGPL v3"""
     def quit_app(self, _):
         """Quit the application"""
         self.log("="*60)
-        self.log("QUIT BUTTON CLICKED - v2.2.105 RUNNING")
+        self.log("QUIT BUTTON CLICKED - v2.2.106 RUNNING")
         self.log("="*60)
 
         # Stop monitoring immediately
