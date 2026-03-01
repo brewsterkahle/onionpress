@@ -10,7 +10,7 @@
 
 onionpress is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network.
 
-⚠️ This is **not** a securely-anonymous publishing tool-- it is a fun and easy-to-use  WordPress that works on your own network
+⚠️ This is **not** a securely-anonymous publishing tool-- it is a fun and easy-to-use WordPress that works on your own network
 
 ## Features
 
@@ -271,17 +271,17 @@ Wait 30-60 seconds for Tor to generate your onion address. Check logs if it take
 1. Click Uninstall from the menu bar app
 2. Quit OnionPress
 3. Move `OnionPress.app` to Trash
-or
-4. Quit OnionPress
-5. Move `OnionPress.app` to Trash
-6. Remove data directory: `rm -rf ~/.onionpress`
-7. Remove Docker volumes:
+4. or
+5. Quit OnionPress
+6. Move `OnionPress.app` to Trash
+7. Remove data directory: `rm -rf ~/.onionpress`
+8. Remove Docker volumes:
 
 ```bash
 docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
 ```
 
-8. Reboot
+9. Reboot
 ## License
 
 AGPL 3 License - See LICENSE file for details
