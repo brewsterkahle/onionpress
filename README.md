@@ -271,17 +271,20 @@ Wait 30-60 seconds for Tor to generate your onion address. Check logs if it take
 1. Click Uninstall from the menu bar app
 2. Quit OnionPress
 3. Move `OnionPress.app` to Trash
-4. or
-5. Quit OnionPress
-6. Move `OnionPress.app` to Trash
-7. Remove data directory: `rm -rf ~/.onionpress`
-8. Remove Docker volumes:
+4. 
+
+or
+
+1. Quit OnionPress
+2. Move `OnionPress.app` to Trash
+3. Remove data directory: `rm -rf ~/.onionpress`
+4. Remove Docker volumes:
 
 ```bash
 docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
 ```
 
-9. Reboot
+5. Reboot
 ## License
 
 AGPL 3 License - See LICENSE file for details
