@@ -271,7 +271,6 @@ Wait 30-60 seconds for Tor to generate your onion address. Check logs if it take
 1. Click Uninstall from the menu bar app
 2. Quit OnionPress
 3. Move `OnionPress.app` to Trash
-4. 
 
 or
 
