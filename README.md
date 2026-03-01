@@ -8,7 +8,7 @@
 
 **Run your own website from your Mac. Just Works. Free, forever.**
 
-onionpress is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network.
+onionpress is a macOS application that bundles WordPress with a Tor onion service, giving you an easy and free self-hosted web server accessible even when you are on a private network. 
 
 ⚠️ This is **not** a securely-anonymous publishing tool-- it is a fun and easy-to-use  WordPress that works on your own network
 
@@ -46,16 +46,16 @@ Since this app is not code-signed with an Apple Developer certificate, macOS on 
 
 **Method 1 - System Settings (Recommended):**
 
-5. Open the app when in your Applications folder - you'll see a security warning.  Hit Done.
-6. Open **System Settings** → **Privacy & Security**
-7. Scroll down and click **"Open Anyway"** next to the OnionPress warning
-8. Click **"Open Anyway"** in the confirmation dialog, and enter your computer's password
+1. Open the app when in your Applications folder - you'll see a security warning.  Hit Done.
+2. Open **System Settings** → **Privacy & Security**
+3. Scroll down and click **"Open Anyway"** next to the OnionPress warning
+4. Click **"Open Anyway"** in the confirmation dialog, and enter your computer's password
 
 **Method 2 - Right-Click:**
 
-9. Right-click (or Control-click) on the OnionPress app in you Application folder
-10. Select **"Open"**
-11. Click **"Open"** in the dialog
+1. Right-click (or Control-click) on the OnionPress app in you Application folder
+2. Select **"Open"**
+3. Click **"Open"** in the dialog
 
 **Method 3 - Terminal (Advanced):**
 
@@ -97,9 +97,9 @@ Menu items:
 **Manual Updates** (Recommended):
 Click "Check for Updates..." in the menu to:
 
-12. Check for new OnionPress app versions
-13. Download updated WordPress, MariaDB, and Tor container images
-14. Apply security patches and new features
+1. Check for new OnionPress app versions
+2. Download updated WordPress, MariaDB, and Tor container images
+3. Apply security patches and new features
 
 **Automatic Updates** (Optional):
 Enable automatic Docker image updates on launch by editing `~/.onionpress/config`:
@@ -134,10 +134,10 @@ The app automatically syncs this setting with macOS login items. You can also ma
 
 ### Accessing Your Site
 
-15. Your onion address is displayed in the menu bar dropdown (starts with "op2" for easy identification)
-16. Install [Tor Browser](https://www.torproject.org/download/) to access .onion sites
-17. Copy your onion address and paste it into Tor Browser
-18. Complete the WordPress setup wizard
+1. Your onion address is displayed in the menu bar dropdown (starts with "op2" for easy identification)
+2. Install [Tor Browser](https://www.torproject.org/download/) to access .onion sites
+3. Copy your onion address and paste it into Tor Browser
+4. Complete the WordPress setup wizard
 
 **Address Prefix Customization**: You can customize the prefix in `~/.onionpress/config` before first launch. See the config file for details on generation times for different prefix lengths.
 
@@ -147,17 +147,17 @@ OnionPress can create a full backup of your site including Tor keys (your .onion
 
 **To backup:**
 
-19. Click "Backup..." in the menu bar
-20. Enter your WordPress admin credentials (the password encrypts the backup)
-21. Choose a save location
-22. A zip file is created containing everything needed to restore
+1. Click "Backup..." in the menu bar
+2. Enter your WordPress admin credentials (the password encrypts the backup)
+3. Choose a save location
+4. A zip file is created containing everything needed to restore
 
 **To restore:**
 
-23. Click "Restore..." in the menu bar
-24. Select a backup zip file
-25. Enter the password used when the backup was created
-26. Your site, onion address, and all content will be restored
+1. Click "Restore..." in the menu bar
+2. Select a backup zip file
+3. Enter the password used when the backup was created
+4. Your site, onion address, and all content will be restored
 
 ⚠️ **Security Note**: Backup files contain your Tor private key. Anyone with this file and the password can restore your exact onion address. Store backups securely.
 
@@ -268,20 +268,20 @@ Wait 30-60 seconds for Tor to generate your onion address. Check logs if it take
 - Keep WordPress and plugins updated regularly
 ## Uninstalling
 
-27. Click Uninstall from the menu bar app
-28. Quit OnionPress
-29. Move `OnionPress.app` to Trash
+1. Click Uninstall from the menu bar app
+2. Quit OnionPress
+3. Move `OnionPress.app` to Trash
 or
-30. Quit OnionPress
-31. Move `OnionPress.app` to Trash
-32. Remove data directory: `rm -rf ~/.onionpress`
-33. Remove Docker volumes:
+4. Quit OnionPress
+5. Move `OnionPress.app` to Trash
+6. Remove data directory: `rm -rf ~/.onionpress`
+7. Remove Docker volumes:
 
 ```bash
 docker volume rm onionpress-tor-keys onionpress-wordpress-data onionpress-db-data
 ```
 
-34. Reboot
+8. Reboot
 ## License
 
 AGPL 3 License - See LICENSE file for details
