@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
-      - name: Run tests
-        run: python -m unittest tests.test_onionpress_cli -v
+      - name: Run all tests
+        run: python -m unittest discover tests -p "test_*.py" -v
