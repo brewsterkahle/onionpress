@@ -162,10 +162,11 @@ class TestRotatingLogCompression(unittest.TestCase):
         )
         if rolled:
             lr.mark_shipped(self.tmpdir, "testlog", rolled[-1])
-        log.write("trigger enforcement\n")
-        # Give the trigger-write's gzip thread a moment to finish so
-        # the size sum below sees the compressed artifact.
-        time.sleep(2.0)
+        # Drive enforcement directly. The original test piggy-backed on
+        # log.write() (which only calls _enforce_total_size when a roll
+        # happens), but whether the trigger-write happens to push the
+        # active file over max_size is racy and was failing on Linux CI.
+        log._enforce_total_size()
         total = sum(
             os.path.getsize(os.path.join(self.tmpdir, f))
             for f in os.listdir(self.tmpdir)
