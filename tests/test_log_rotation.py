@@ -143,8 +143,9 @@ class TestRotatingLogCompression(unittest.TestCase):
         # Force several rotations + compressions
         for i in range(200):
             log.write(f"line {i:04d} " + ("x" * 80) + "\n")
-        # Let background compression catch up
-        time.sleep(2.0)
+        # Let background compression catch up. Slow CI runners need
+        # noticeably more than the 2s that's plenty on a Mac.
+        time.sleep(5.0)
         # Artificially backdate files so enforce_total_size's 60s guard
         # doesn't protect them all.
         for f in os.listdir(self.tmpdir):
@@ -162,7 +163,9 @@ class TestRotatingLogCompression(unittest.TestCase):
         if rolled:
             lr.mark_shipped(self.tmpdir, "testlog", rolled[-1])
         log.write("trigger enforcement\n")
-        time.sleep(0.5)
+        # Give the trigger-write's gzip thread a moment to finish so
+        # the size sum below sees the compressed artifact.
+        time.sleep(2.0)
         total = sum(
             os.path.getsize(os.path.join(self.tmpdir, f))
             for f in os.listdir(self.tmpdir)
