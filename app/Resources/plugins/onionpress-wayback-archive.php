@@ -1103,6 +1103,19 @@ function onionpress_wayback_sweep_iteration() {
 add_action( 'onionpress_wayback_sweep', 'onionpress_wayback_sweep' );
 
 // ────────────── save_post hook: invalidate home/feed + retry post ───
+// Imported social posts (Twitter/Mastodon/Bluesky — anything with a
+// `_source_id` meta) are captured exactly once and never re-archived
+// on subsequent save_post events. Their content is frozen historical
+// data, but the importers themselves call wp_update_post repeatedly
+// (media-attach, thread fix-ups, etc.); treating those as "edit →
+// re-capture" produced rounds of duplicate Wayback submissions for
+// posts whose original content never changed.
+//
+// Original posts (no `_source_id`) keep the "edit → re-capture"
+// behaviour — for hand-written blog content that's the right thing.
+//
+// Home page + feed always re-archive when content changes, regardless
+// of source — they're a moving window that legitimately changes.
 
 add_action( 'save_post', function ( $post_id, $post, $update ) {
     if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
@@ -1114,8 +1127,10 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     delete_option( OP_WB_OPT_HOME );
     delete_option( OP_WB_OPT_FEED );
 
-    // If the post was previously archived, re-archive its current content.
-    if ( $update && get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ) ) {
+    // Re-archive on edit, but only for original posts. Imported social
+    // posts (anything with _source_id) stay archived once.
+    $is_imported = (string) get_post_meta( $post_id, '_source_id', true ) !== '';
+    if ( $update && ! $is_imported && get_post_meta( $post_id, OP_WB_META_ARCHIVED_AT, true ) ) {
         onionpress_wayback_post_write( $post_id, array(
             'archived_at'     => '',
             'snapshot_ts'     => '',
@@ -1135,7 +1150,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
 
     wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
     onionpress_wayback_log( 'save_post ' . $post_id . ': cleared home/feed'
-        . ( $update ? ' + post meta' : '' ) . ', scheduled immediate sweep' );
+        . ( $update && ! $is_imported ? ' + post meta' : '' ) . ', scheduled immediate sweep' );
 }, 10, 3 );
 
 // ────────────────────────────── cron ────────────────────────────────
