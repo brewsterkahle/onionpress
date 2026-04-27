@@ -93,3 +93,22 @@ add_filter( 'wp_redirect', 'onionpress_rewrite_url' );
 
 // Admin ajax URL.
 add_filter( 'admin_url', 'onionpress_rewrite_url' );
+
+// Responsive image srcset URLs. Without this, hand-authored posts with
+// uploaded images render `srcset="http://localhost/..."` (no port,
+// from the unfiltered raw siteurl), which doesn't resolve from any
+// browser — neither Tor nor on the local machine via the actual port.
+// Imported social-archive posts already have relative URLs baked into
+// post_content so srcset stays relative there; this filter only kicks
+// in for posts whose original `src` was absolute.
+add_filter( 'wp_calculate_image_srcset', function ( $sources ) {
+    if ( ! is_array( $sources ) ) {
+        return $sources;
+    }
+    foreach ( $sources as $key => $source ) {
+        if ( isset( $source['url'] ) ) {
+            $sources[ $key ]['url'] = onionpress_rewrite_url( $source['url'] );
+        }
+    }
+    return $sources;
+}, 10, 1 );

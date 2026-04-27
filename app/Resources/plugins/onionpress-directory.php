@@ -91,7 +91,7 @@ function onionpress_directory_lookup( $name ) {
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 30,
             CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_PROXY          => 'socks5h://onionpress-tor:9050',
+            CURLOPT_PROXY          => 'socks5h://onionheaven:9050',
         );
     }
     $ch = curl_init( $url );
