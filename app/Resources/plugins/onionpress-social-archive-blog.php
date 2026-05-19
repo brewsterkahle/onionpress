@@ -267,7 +267,7 @@ function onionpress_blog_import_page() {
             </div>
         <?php endif; ?>
 
-        <h2>Step 1 &mdash; Source blog URL</h2>
+        <h2>Source blog URL</h2>
         <p>Enter the URL of the WordPress blog to import. The blog must have a
            publicly-readable REST API (most WordPress sites do by default).</p>
         <form method="post" style="margin-bottom:1.25em;">
@@ -290,7 +290,7 @@ function onionpress_blog_import_page() {
         </form>
 
         <?php if ( $host ) : ?>
-            <h2>Step 2 &mdash; Sync</h2>
+            <h2>Sync</h2>
             <table class="wp-list-table widefat" style="max-width:620px;">
                 <tbody>
                     <tr><th style="width:200px;">Source</th>
