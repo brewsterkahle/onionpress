@@ -199,6 +199,46 @@ function onionpress_blog_rest_url( $path, $params = array() ) {
     return $url;
 }
 
+/**
+ * Count posts whose _source_id starts with "blog:<host>:". Used by the
+ * admin progress meter so a host switch doesn't show "172 of 50" by
+ * counting prior-host imports against the new host's reported total.
+ */
+function onionpress_blog_imported_count_for_host( $host ) {
+    if ( $host === '' ) return 0;
+    global $wpdb;
+    $prefix = 'blog:' . $host . ':';
+    $like   = $wpdb->esc_like( $prefix ) . '%';
+    return (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COUNT(DISTINCT p.ID)
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_source_id'
+         WHERE p.post_status = 'publish'
+           AND m.meta_value LIKE %s",
+        $like
+    ) );
+}
+
+/**
+ * Count blog-imported posts that are NOT from the current host —
+ * surfaces a notice on the admin page so the user knows the
+ * /category/blog/ index is multi-source.
+ */
+function onionpress_blog_imported_count_other_hosts( $current_host ) {
+    global $wpdb;
+    $not_prefix = 'blog:' . $current_host . ':';
+    $not_like   = $wpdb->esc_like( $not_prefix ) . '%';
+    return (int) $wpdb->get_var( $wpdb->prepare(
+        "SELECT COUNT(DISTINCT p.ID)
+         FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_source_id'
+         WHERE p.post_status = 'publish'
+           AND m.meta_value LIKE 'blog:%'
+           AND m.meta_value NOT LIKE %s",
+        $not_like
+    ) );
+}
+
 // --- Admin page render --------------------------------------------------
 
 function onionpress_blog_import_page() {
@@ -233,8 +273,11 @@ function onionpress_blog_import_page() {
 
     $url           = (string) get_option( ONIONPRESS_BLOG_URL_OPT, '' );
     $host          = (string) get_option( ONIONPRESS_BLOG_HOST_OPT, '' );
-    $imported_now  = function_exists( 'onionpress_social_count_for_source' )
-                     ? (int) onionpress_social_count_for_source( 'blog' ) : 0;
+    // Count posts imported from the CURRENT host only, not the whole
+    // /category/blog/. Old hosts' posts stay in place after a URL
+    // switch but don't count toward the new host's X-of-Y total.
+    $imported_now  = $host !== '' ? onionpress_blog_imported_count_for_host( $host ) : 0;
+    $total_other   = $host !== '' ? onionpress_blog_imported_count_other_hosts( $host ) : 0;
     $last_sync     = (int) get_option( ONIONPRESS_BLOG_LAST_SYNC, 0 );
     $last_note     = (string) get_option( ONIONPRESS_BLOG_LAST_NOTE, '' );
     $backfill_page = onionpress_blog_get_backfill_page_for( $host );
@@ -270,7 +313,31 @@ function onionpress_blog_import_page() {
         <h2>Source blog URL</h2>
         <p>Enter the URL of the WordPress blog to import. The blog must have a
            publicly-readable REST API (most WordPress sites do by default).</p>
-        <form method="post" style="margin-bottom:1.25em;">
+        <script>
+        function op_blog_confirm_switch( form ) {
+            var raw    = ( form.blog_url.value || '' ).trim();
+            var curHost   = form.dataset.curHost   || '';
+            var curCount  = parseInt( form.dataset.curCount, 10 ) || 0;
+            if ( ! curHost || curCount <= 0 ) return true;
+            var newHost = '';
+            try {
+                var u = /^https?:\/\//i.test( raw ) ? raw : 'https://' + raw;
+                newHost = new URL( u ).hostname.toLowerCase();
+            } catch ( e ) { return true; }
+            if ( newHost === '' || newHost === curHost ) return true;
+            return confirm(
+                'Switch source from ' + curHost + ' to ' + newHost + '?\n\n' +
+                'The ' + curCount + ' post' + ( curCount === 1 ? '' : 's' ) +
+                ' already imported from ' + curHost + ' will stay in /category/blog/ ' +
+                '(they aren\'t deleted) and will mingle chronologically with new posts from ' +
+                newHost + '. Backfill cursors reset; the new blog walks from scratch.'
+            );
+        }
+        </script>
+        <form method="post" style="margin-bottom:1.25em;"
+              data-cur-host="<?php echo esc_attr( $host ); ?>"
+              data-cur-count="<?php echo esc_attr( (string) $imported_now ); ?>"
+              onsubmit="return op_blog_confirm_switch( this );">
             <?php wp_nonce_field( 'onionpress_blog_save_url', 'onionpress_blog_url_nonce' ); ?>
             <input type="hidden" name="onionpress_blog_save_url" value="1">
             <table class="form-table" role="presentation">
@@ -283,11 +350,21 @@ function onionpress_blog_import_page() {
                                class="regular-text" style="max-width:480px;">
                         <p class="description">Examples: <code>https://brewster.kahle.org/</code>, <code>https://blog.example.com/</code>.
                            Changing the URL to a different host resets the backfill cursors.</p>
-                        <?php submit_button( $host ? 'Update' : 'Save & verify', 'primary', 'submit', false ); ?>
+                        <?php submit_button( $host ? 'Save changes' : 'Start archiving', 'primary', 'submit', false ); ?>
                     </td>
                 </tr>
             </table>
         </form>
+
+        <?php if ( $host && $total_other > 0 ) : ?>
+            <div class="notice notice-info inline">
+                <p><strong>Heads up:</strong>
+                    <?php echo number_format_i18n( $total_other ); ?> post<?php echo $total_other === 1 ? '' : 's'; ?>
+                    from <em>other</em> blog source<?php echo $total_other === 1 ? '' : 's'; ?> remain in
+                    <code>/category/blog/</code>. They stay where they are — switching the source URL doesn't delete prior imports.
+                    Progress below counts only the current host's posts.</p>
+            </div>
+        <?php endif; ?>
 
         <?php if ( $host ) : ?>
             <h2>Sync</h2>
@@ -427,9 +504,19 @@ function onionpress_blog_handle_save_url_post() {
         wp_schedule_event( time() + 30, ONIONPRESS_BLOG_CRON_SCHEDULE, ONIONPRESS_BLOG_CRON_HOOK );
     }
 
+    // Kick the daemon right now so "Start archiving" actually starts —
+    // not wait for the 30-min cron fire. Same trick as Sync now: clear
+    // the lock, schedule an immediate single event, fire off a non-
+    // blocking loopback POST to wp-cron.php to make WP actually run it.
+    delete_option( ONIONPRESS_BLOG_DAEMON_LOCK );
+    delete_transient( 'doing_cron' );
+    wp_schedule_single_event( time(), ONIONPRESS_BLOG_CRON_HOOK );
+    $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
+    wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
+
     return array(
         'level'   => 'success',
-        'message' => 'Saved <code>' . esc_html( $base_url ) . '</code>. Click <strong>Sync now</strong> to start importing.',
+        'message' => 'Saved <code>' . esc_html( $base_url ) . '</code>. Backfill started — progress shown below, this page auto-refreshes while syncing.',
     );
 }
 
