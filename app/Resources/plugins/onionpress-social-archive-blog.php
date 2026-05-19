@@ -34,6 +34,8 @@ const ONIONPRESS_BLOG_BACKFILL_PAGE_OPT = 'onionpress_social_blog_backfill_page'
 const ONIONPRESS_BLOG_NEWEST_OWNER_OPT   = 'onionpress_social_blog_newest_owner';
 const ONIONPRESS_BLOG_BACKFILL_OWNER_OPT = 'onionpress_social_blog_backfill_owner';
 const ONIONPRESS_BLOG_LAST_EDITS_PASS_OPT = 'onionpress_social_blog_last_edits_pass'; // unix ts of last edits-pass
+const ONIONPRESS_BLOG_TOTAL_POSTS_OPT    = 'onionpress_social_blog_total_posts';    // X-WP-Total reported by source
+const ONIONPRESS_BLOG_TOTAL_PAGES_OPT    = 'onionpress_social_blog_total_pages';    // X-WP-TotalPages reported by source
 const ONIONPRESS_BLOG_LAST_SYNC          = 'onionpress_social_blog_last_sync';
 const ONIONPRESS_BLOG_LAST_NOTE          = 'onionpress_social_blog_last_note';
 const ONIONPRESS_BLOG_TICK_LOCK          = 'onionpress_social_blog_tick_lock';      // transient
@@ -156,6 +158,8 @@ function onionpress_blog_clear_cursors() {
     delete_option( ONIONPRESS_BLOG_NEWEST_OWNER_OPT );
     delete_option( ONIONPRESS_BLOG_BACKFILL_PAGE_OPT );
     delete_option( ONIONPRESS_BLOG_BACKFILL_OWNER_OPT );
+    delete_option( ONIONPRESS_BLOG_TOTAL_POSTS_OPT );
+    delete_option( ONIONPRESS_BLOG_TOTAL_PAGES_OPT );
 }
 
 // --- URL helpers --------------------------------------------------------
@@ -235,6 +239,8 @@ function onionpress_blog_import_page() {
     $last_note     = (string) get_option( ONIONPRESS_BLOG_LAST_NOTE, '' );
     $backfill_page = onionpress_blog_get_backfill_page_for( $host );
     $backfill_done = ( $host !== '' && $backfill_page === 'done' );
+    $total_posts   = (int) get_option( ONIONPRESS_BLOG_TOTAL_POSTS_OPT, 0 );
+    $total_pages   = (int) get_option( ONIONPRESS_BLOG_TOTAL_PAGES_OPT, 0 );
 
     $dlock_raw  = (string) get_option( ONIONPRESS_BLOG_DAEMON_LOCK, '' );
     $dlock_ts   = 0;
@@ -289,8 +295,21 @@ function onionpress_blog_import_page() {
                 <tbody>
                     <tr><th style="width:200px;">Source</th>
                         <td><code><?php echo esc_html( $url ); ?></code></td></tr>
-                    <tr><th>Imported here</th>
-                        <td><?php echo number_format_i18n( $imported_now ); ?> posts</td></tr>
+                    <tr><th>Progress</th>
+                        <td><?php
+                            if ( $total_posts > 0 ) {
+                                $pct = min( 100, (int) round( 100 * $imported_now / max( 1, $total_posts ) ) );
+                                printf(
+                                    '<strong>%s of %s posts</strong> imported (%d%%)',
+                                    number_format_i18n( $imported_now ),
+                                    number_format_i18n( $total_posts ),
+                                    $pct
+                                );
+                                echo '<br><progress value="' . esc_attr( (string) $imported_now ) . '" max="' . esc_attr( (string) $total_posts ) . '" style="width:340px;height:14px;"></progress>';
+                            } else {
+                                printf( '<strong>%s</strong> posts imported (source total unknown until first sync)', number_format_i18n( $imported_now ) );
+                            }
+                        ?></td></tr>
                     <tr><th>Backfill</th><td><?php
                         if ( $daemon_alive ) {
                             $age = max( 0, $dlock_age );
@@ -298,7 +317,13 @@ function onionpress_blog_import_page() {
                         } elseif ( $backfill_done ) {
                             echo '<strong style="color:#2a7b2a;">✓ complete</strong> — polling every 30 min for new posts and edits.';
                         } else {
-                            echo '<em>paused at page ' . esc_html( (string) $backfill_page ) . ' — click "Sync now" to start or resume.</em>';
+                            $page_part = '';
+                            if ( $total_pages > 0 && is_numeric( $backfill_page ) ) {
+                                $page_part = sprintf( ' (page %d of %d)', (int) $backfill_page, $total_pages );
+                            } elseif ( is_numeric( $backfill_page ) ) {
+                                $page_part = sprintf( ' (at page %d)', (int) $backfill_page );
+                            }
+                            echo '<em>paused' . esc_html( $page_part ) . ' — click "Sync now" to start or resume.</em>';
                         }
                     ?></td></tr>
                     <tr><th>Last sync</th><td><?php echo $last_sync ? esc_html( human_time_diff( $last_sync ) ) . ' ago' : '&mdash;'; ?>
@@ -673,18 +698,30 @@ function onionpress_blog_fetch_posts( $page_num ) {
     if ( (int) $r['code'] !== 200 ) {
         return new WP_Error( 'blog_http', 'HTTP ' . $r['code'] . ' from ' . onionpress_blog_rest_url( '/wp/v2/posts' ) );
     }
+    // Refresh the source-reported totals from response headers. WP REST
+    // sets X-WP-Total + X-WP-TotalPages on every paginated response, so
+    // we get a free progress denominator without an extra HEAD request.
+    if ( isset( $r['headers']['x-wp-total'] ) ) {
+        update_option( ONIONPRESS_BLOG_TOTAL_POSTS_OPT, (int) $r['headers']['x-wp-total'] );
+    }
+    if ( isset( $r['headers']['x-wp-totalpages'] ) ) {
+        update_option( ONIONPRESS_BLOG_TOTAL_PAGES_OPT, (int) $r['headers']['x-wp-totalpages'] );
+    }
     return is_array( $r['json'] ) ? $r['json'] : array();
 }
 
 /**
  * Tor-over-SOCKS HTTP GET via the onionheaven daemon. Same shape as the
- * Mastodon importer's helper: ['code', 'body', 'json'] on success,
- * WP_Error on transport failure.
+ * Mastodon importer's helper: ['code', 'body', 'json', 'headers'] on
+ * success, WP_Error on transport failure. Response headers are returned
+ * as a lower-cased name => value array so callers can read
+ * X-WP-Total / X-WP-TotalPages on REST endpoints.
  */
 function onionpress_blog_api_get( $url ) {
     if ( ! function_exists( 'curl_init' ) ) {
         return new WP_Error( 'no_curl', 'curl extension required for blog import' );
     }
+    $headers = array();
     $ch = curl_init( $url );
     curl_setopt_array( $ch, array(
         CURLOPT_RETURNTRANSFER => true,
@@ -696,6 +733,14 @@ function onionpress_blog_api_get( $url ) {
         CURLOPT_CONNECTTIMEOUT => 30,
         CURLOPT_USERAGENT      => 'OnionPress/SocialArchive (+https://onionpress.org)',
         CURLOPT_HTTPHEADER     => array( 'Accept: application/json' ),
+        CURLOPT_HEADERFUNCTION => function ( $ch, $line ) use ( &$headers ) {
+            $len = strlen( $line );
+            $parts = explode( ':', $line, 2 );
+            if ( count( $parts ) === 2 ) {
+                $headers[ strtolower( trim( $parts[0] ) ) ] = trim( $parts[1] );
+            }
+            return $len;
+        },
     ) );
     $body = curl_exec( $ch );
     if ( $body === false ) {
@@ -706,7 +751,12 @@ function onionpress_blog_api_get( $url ) {
     $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
     curl_close( $ch );
     $json = json_decode( $body, true );
-    return array( 'code' => $code, 'body' => $body, 'json' => is_array( $json ) ? $json : null );
+    return array(
+        'code'    => $code,
+        'body'    => $body,
+        'json'    => is_array( $json ) ? $json : null,
+        'headers' => $headers,
+    );
 }
 
 /**
