@@ -76,6 +76,29 @@ if [ -z "$(db_q "SELECT option_value FROM wp_options WHERE option_name='siteurl'
     exit 0
 fi
 
+# --- Core auto-update policy -------------------------------------------
+# MUST stay above the "already converted" early-exit below: existing
+# installs took that exit every boot, so anything placed after it only
+# ever reaches brand-new users.
+#
+# Builds through v2.4.107 hard-disabled core auto-updates. Combined with
+# the digest-pinned image, that left users with no path to a WordPress
+# security release at all — not automatic, not manual. wp2shell
+# (CVE-2026-63030 + CVE-2026-60137, unauthenticated RCE, CISA KEV
+# 2026-07-21) landed on 7.0.0-7.0.1 while WordPress.org was force-pushing
+# 7.0.2 through the exact updater we had switched off.
+#
+# 'minor' rather than true is deliberate: it accepts security and point
+# releases like 7.0.2, but never an unattended major upgrade that could
+# break the multisite conversion or the bundled mu-plugins with nobody
+# watching.
+if ! grep -q "define( *'AUTOMATIC_UPDATER_DISABLED', *false *)" /var/www/html/wp-config.php 2>/dev/null \
+        || ! grep -q "define( *'WP_AUTO_UPDATE_CORE', *'minor' *)" /var/www/html/wp-config.php 2>/dev/null; then
+    wp config set AUTOMATIC_UPDATER_DISABLED false --raw --type=constant --allow-root
+    wp config set WP_AUTO_UPDATE_CORE "'minor'" --raw --type=constant --allow-root
+    log "auto-update policy applied: AUTOMATIC_UPDATER_DISABLED=false WP_AUTO_UPDATE_CORE='minor'"
+fi
+
 site_count=$(db_q 'SELECT COUNT(*) FROM wp_site' || echo 0)
 [ -z "$site_count" ] && site_count=0
 
@@ -143,9 +166,7 @@ for const_val in \
     "PATH_CURRENT_SITE:'/'" \
     "SITE_ID_CURRENT_SITE:1" \
     "BLOG_ID_CURRENT_SITE:1" \
-    "SUNRISE:true" \
-    "AUTOMATIC_UPDATER_DISABLED:true" \
-    "WP_AUTO_UPDATE_CORE:false"; do
+    "SUNRISE:true"; do
     name="${const_val%%:*}"
     value="${const_val#*:}"
     wp config set "$name" "$value" --raw --type=constant --allow-root
