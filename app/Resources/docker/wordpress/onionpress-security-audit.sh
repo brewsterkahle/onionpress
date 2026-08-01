@@ -65,9 +65,16 @@ log "WordPress core version: $current"
 # --minor keeps us on the current major (7.0.x -> 7.0.2) which is where the
 # security backports land. A major jump unattended could break multisite or
 # the bundled mu-plugins.
-if $WP core check-update --minor --field=version >/dev/null 2>&1 \
-        && [ -n "$($WP core check-update --minor --field=version 2>/dev/null)" ]; then
-    target=$($WP core check-update --minor --field=version 2>/dev/null | head -1)
+#
+# Test with --format=json, which yields exactly "[]" when there is nothing
+# to do. Do NOT test `--field=version` for emptiness: when the install is
+# already current, wp-cli prints "Success: WordPress is at the latest
+# version." on stdout, so a -n test reads that sentence as a version number
+# and fires a pointless update on every single boot.
+pending=$($WP core check-update --minor --format=json 2>/dev/null | tr -d '[:space:]')
+if [ -n "$pending" ] && [ "$pending" != "[]" ]; then
+    target=$(printf '%s' "$pending" | grep -o '"version":"[^"]*"' | head -1 | cut -d'"' -f4)
+    [ -z "$target" ] && target="(unknown)"
     log "security update available: $current -> $target — applying now"
     if $WP core update --minor >/dev/null 2>&1; then
         # Multisite stores schema version per-network; core update alone
