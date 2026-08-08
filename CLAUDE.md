@@ -2,6 +2,7 @@
 
 ## Meta
 - **This file (`CLAUDE.md`) is the project memory.** Store all new memories and notes here so they travel with the repo.
+- Run `/mission` at any point to evaluate a change against OnionPress's three author commitments: safety, ease of publishing, and content durability.
 
 ## Naming Rules (IMPORTANT)
 - The project is called **OnionPress** (one word, capital O and P). Never "Onion.Press", "onion.press", or "onion-press".
