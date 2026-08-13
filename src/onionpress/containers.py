@@ -13,7 +13,7 @@ from typing import Callable
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, Secrets, ensure_secrets, load_secrets, read_value,
-    PortConfig, detect_port_offset,
+    PortConfig, detect_port_offset, backend_nickname,
 )
 from .platform import OnionPressPaths
 
@@ -85,6 +85,19 @@ class ContainerManager:
         cf_token = read_value(self.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
         if cf_token:
             env["CLOUDFLARE_TUNNEL_TOKEN"] = cf_token
+
+        # SITE_TYPE plumbing. Existing installs have no SITE_TYPE key, so
+        # this resolves to "wordpress" everywhere and reproduces today's
+        # behavior byte-for-byte. COMPOSE_PROFILES selects which of the
+        # wordpress+db vs. site services docker compose starts; the backend
+        # host/nickname vars let the tor container's onion routing target
+        # the right backend without any hardcoded "wordpress" string.
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        env["ONIONPRESS_SITE_TYPE"] = site_type
+        env["COMPOSE_PROFILES"] = site_type
+        nickname = backend_nickname(site_type)
+        env["ONIONPRESS_BACKEND_HOST"] = nickname
+        env["ONIONPRESS_BACKEND_NICKNAME"] = nickname
 
         return env
 
