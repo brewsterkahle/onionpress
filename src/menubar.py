@@ -188,7 +188,9 @@ class OnionPressApp(rumps.App):
             _app_bundle = None
         self._paths = resolve_paths(data_dir=self.app_support, app_bundle=_app_bundle)
         self._docker = Docker(self._paths, log_func=self.log)
-        self._health_checker = HealthChecker(self._docker, log_func=self.log)
+        _site_type = op_config.read_value(self.config_file, "SITE_TYPE", "wordpress")
+        self._health_checker = HealthChecker(
+            self._docker, log_func=self.log, site_type=_site_type)
         # Wedge-detector state: next allowed probe + last logged episode signature,
         # so a persistent wedge writes one WARN per hour, not one per poll.
         self._wedge_probe_next = 0.0

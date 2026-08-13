@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Callable, Optional
 
 from .docker import Docker
+from .config import backend_nickname as _backend_nickname_for
 
 
 # Curl exit-code → human reason map. When an external reachability probe
@@ -116,33 +117,44 @@ class HealthChecker:
         self,
         docker: Docker,
         log_func: Callable[[str], None] | None = None,
+        site_type: str = "wordpress",
     ):
         self.docker = docker
         self.log_func = log_func
+        # "wordpress" (default) or "static". Existing callers that don't
+        # pass site_type get the exact pre-existing WordPress behavior.
+        self.site_type = site_type
+        nickname = _backend_nickname_for(site_type)
+        self._backend_host = nickname          # docker-network hostname
+        self._backend_container = f"onionpress-{nickname}"
 
     def _log(self, msg: str) -> None:
         if self.log_func:
             self.log_func(msg)
 
-    def check_wordpress_local(self, wp_port: int = 80) -> bool:
-        """Check if WordPress responds locally inside the container."""
+    def check_content_local(self, wp_port: int = 80) -> bool:
+        """Check if the content backend responds locally inside its container.
+
+        WordPress mode additionally rejects a response containing WP's own
+        DB-error string — static mode has no database, so any 200 counts.
+        """
         result = self.docker.exec(
-            "onionpress-wordpress",
+            self._backend_container,
             ["curl", "-sf", "--max-time", "3", f"http://localhost:{wp_port}/"],
             timeout=10,
         )
-        if result.ok:
-            # Check for database errors
-            if "Error establishing a database connection" in result.stdout:
-                return False
-            return True
-        return False
+        if not result.ok:
+            return False
+        if (self.site_type == "wordpress"
+                and "Error establishing a database connection" in result.stdout):
+            return False
+        return True
 
-    def check_wordpress_external(self, wp_port: int, log: bool = True) -> bool:
-        """Check WordPress responds via the host port mapping.
+    def check_content_external(self, wp_port: int, log: bool = True) -> bool:
+        """Check the content backend responds via the host port mapping.
 
-        Exercises the Mac → Colima → Docker → WordPress path; complements
-        check_wordpress_local which only tests inside the container. Uses
+        Exercises the Mac → Colima → Docker → backend path; complements
+        check_content_local which only tests inside the container. Uses
         curl instead of urllib to avoid macOS "local network" TCC prompts.
         """
         if log:
@@ -166,16 +178,25 @@ class HealthChecker:
                 self._log(f"✗ Local access: Connection failed (curl exit code {result.returncode})")
             return False
 
-        content = result.stdout
-        if ("Error establishing a database connection" in content
-                or "Database connection error" in content):
-            if log:
-                self._log("✗ Local access: Database connection error")
-            return False
+        if self.site_type == "wordpress":
+            content = result.stdout
+            if ("Error establishing a database connection" in content
+                    or "Database connection error" in content):
+                if log:
+                    self._log("✗ Local access: Database connection error")
+                return False
 
         if log:
-            self._log("✓ Local access: WordPress responding")
+            self._log("✓ Local access: content backend responding")
         return True
+
+    # Backward-compatible aliases — existing callers (menubar.py) keep
+    # working unchanged; new code should call check_content_*.
+    def check_wordpress_local(self, wp_port: int = 80) -> bool:
+        return self.check_content_local(wp_port)
+
+    def check_wordpress_external(self, wp_port: int, log: bool = True) -> bool:
+        return self.check_content_external(wp_port, log)
 
     def check_tor_bootstrap(self) -> tuple[bool, int]:
         """Check Tor bootstrap status via control port (with log fallback).
@@ -237,7 +258,7 @@ class HealthChecker:
         """
         result = self.docker.exec(
             "onionpress-tor",
-            ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+            ["cat", f"/var/lib/tor/hidden_service/{self._backend_host}/hostname"],
             timeout=10,
         )
         addr = result.output.strip() if result.ok else ""
@@ -246,12 +267,12 @@ class HealthChecker:
         return addr
 
     def check_internal_connectivity(self) -> bool:
-        """Check if WordPress is reachable from inside the Tor container."""
+        """Check if the content backend is reachable from inside the Tor container."""
         result = self.docker.exec(
             "onionpress-tor",
             ["curl", "-sf", "--max-time", "15",
              "-H", "User-Agent: OnionPress-HealthCheck",
-             "http://wordpress:80/"],
+             f"http://{self._backend_host}:80/"],
             timeout=20,
         )
         return result.ok
@@ -423,11 +444,14 @@ class HealthChecker:
             except (ValueError, IndexError):
                 pass
 
-        # WP container docker-level health via inspect (no exec).
+        # Content-backend container docker-level health via inspect (no exec).
+        # Field names stay wp_* for existing callers/analytics consumers —
+        # they mean "content backend" generically now (WordPress or the
+        # static-site nginx container).
         wp_health_status = None
         wp_failing_streak = None
         r = self.docker.run(
-            ["inspect", "--format", "{{json .State.Health}}", "onionpress-wordpress"],
+            ["inspect", "--format", "{{json .State.Health}}", self._backend_container],
             timeout=5,
             quiet=True,
         )
@@ -537,7 +561,7 @@ class HealthChecker:
         if wordpress_confirmed:
             hr.wp_healthy = True
         else:
-            hr.wp_healthy = self.check_wordpress_local()
+            hr.wp_healthy = self.check_content_local()
 
         # Check 2: Tor bootstrap
         hr.tor_bootstrapped, hr.bootstrap_pct = self.check_tor_bootstrap()
