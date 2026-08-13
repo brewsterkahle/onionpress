@@ -23,6 +23,12 @@ services:
       - tor-state:/var/lib/tor/
       - onionpress-data:/var/lib/onionpress
       - ${ONIONPRESS_SHARED_DIR:-/tmp/onionpress-no-shared}/analytics:/var/lib/onionhome/analytics
+      # Writable Site/ mount, used only by follow-fetch.py (static installs)
+      # to write the generated follows/index.html page. The `site` service
+      # mounts the same host directory read-only for serving; this is a
+      # separate, narrower write path for one generated file. Unused (and
+      # harmless) for WordPress installs, where ~/OnionPress/Site/ doesn't exist.
+      - ${ONIONPRESS_DOCUMENTS_DIR:-/tmp/onionpress-no-docs}/Site:/var/lib/onionpress-site:rw
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     restart: unless-stopped
     networks:

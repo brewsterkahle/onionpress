@@ -96,6 +96,37 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_publish.assert_called_once_with("/tmp/mysite")
 
     @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_follow_add_command(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_follow_add.return_value = 0
+        result = main(["follow", "add", "http://abc.onion/feed/", "--name", "ABC"])
+        self.assertEqual(result, 0)
+        instance.cmd_follow_add.assert_called_once_with("http://abc.onion/feed/", "ABC")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_follow_add_command_no_name(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_follow_add.return_value = 0
+        main(["follow", "add", "http://abc.onion/feed/"])
+        instance.cmd_follow_add.assert_called_once_with("http://abc.onion/feed/", None)
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_follow_remove_command(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_follow_remove.return_value = 0
+        result = main(["follow", "remove", "abc"])
+        self.assertEqual(result, 0)
+        instance.cmd_follow_remove.assert_called_once_with("abc")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_follow_list_command(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_follow_list.return_value = 0
+        result = main(["follow", "list"])
+        self.assertEqual(result, 0)
+        instance.cmd_follow_list.assert_called_once()
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
     def test_reset_with_yes(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_reset.return_value = 0

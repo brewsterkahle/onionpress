@@ -540,6 +540,36 @@ class OnionPressCLI:
         self.log(f"Published static site from {source_dir}")
         return 0
 
+    def cmd_follow_add(self, feed_url: str, name: str = None) -> int:
+        """Add a feed to the follow list (static-site mode only)."""
+        from .follow import add_follow
+        ok, result = add_follow(feed_url, display_name=name)
+        if not ok:
+            print(f"ERROR: {result}", file=sys.stderr)
+            return 1
+        print(f"Following {feed_url} as {result!r}")
+        return 0
+
+    def cmd_follow_remove(self, key: str) -> int:
+        """Remove a feed from the follow list."""
+        from .follow import remove_follow
+        ok, message = remove_follow(key)
+        print(message, file=sys.stderr if not ok else sys.stdout)
+        return 0 if ok else 1
+
+    def cmd_follow_list(self) -> int:
+        """List followed feeds."""
+        from .follow import list_follows
+        follows = list_follows()
+        if not follows:
+            print("Not following anyone yet.")
+            return 0
+        for f in follows:
+            status = "ok" if f.get("last_fetch_ok") else (
+                "never fetched" if f.get("last_fetch_at") is None else "error")
+            print(f"{f['key']}\t{f['display_name']}\t{f['feed_url']}\t[{status}]")
+        return 0
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -719,6 +749,18 @@ def main(argv: list[str] = None) -> int:
     )
     p_publish.add_argument("directory", help="Directory of static files to publish")
 
+    p_follow = sub.add_parser(
+        "follow",
+        help="Manage followed feeds (static-site mode)",
+    )
+    follow_sub = p_follow.add_subparsers(dest="follow_command")
+    p_follow_add = follow_sub.add_parser("add", help="Follow a feed")
+    p_follow_add.add_argument("feed_url", help="RSS/Atom feed URL")
+    p_follow_add.add_argument("--name", help="Display name (default: feed's hostname)")
+    p_follow_remove = follow_sub.add_parser("remove", help="Unfollow a feed")
+    p_follow_remove.add_argument("key", help="Follow key (see `onionpress follow list`)")
+    follow_sub.add_parser("list", help="List followed feeds")
+
     p_iba = sub.add_parser(
         "import-backup-artifacts",
         help="Import a backup's container-side artifacts into the running "
@@ -765,6 +807,16 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_provision_static(args.onionname)
     elif args.command == "publish":
         return cli.cmd_publish(args.directory)
+    elif args.command == "follow":
+        if args.follow_command == "add":
+            return cli.cmd_follow_add(args.feed_url, args.name)
+        elif args.follow_command == "remove":
+            return cli.cmd_follow_remove(args.key)
+        elif args.follow_command == "list":
+            return cli.cmd_follow_list()
+        else:
+            parser.parse_args(["follow", "--help"])
+            return 1
     elif args.command == "provision-post-install":
         from . import multisite
         return multisite.provision_post_install(

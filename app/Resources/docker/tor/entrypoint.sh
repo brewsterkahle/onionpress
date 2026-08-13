@@ -299,6 +299,17 @@ if [ "${ONIONPRESS_SITE_TYPE:-wordpress}" = "static" ]; then
     if ! kill -0 $WAYBACK_PID 2>/dev/null; then
         echo "ERROR: wayback-static.py failed to start"
     fi
+
+    # Separate process from wayback-static.py on purpose — a stuck/slow
+    # remote feed fetch must not starve Wayback submissions. No equivalent
+    # needed for WordPress installs (the "follow" feature is a WP plugin
+    # there, driven by wp-cron).
+    python3 /follow-fetch.py &
+    FOLLOW_PID=$!
+    sleep 1
+    if ! kill -0 $FOLLOW_PID 2>/dev/null; then
+        echo "ERROR: follow-fetch.py failed to start"
+    fi
 fi
 
 if [ "$TOR_IMPL" = "tor" ]; then
