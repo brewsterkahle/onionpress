@@ -165,12 +165,19 @@ class OnionPressCLI:
     def cmd_backup(self, password: str, output_path: str = None, username: str = None) -> int:
         """Create a backup."""
         from .backup import create_backup, backup_filename, verify_wp_admin, get_admin_username
-        if not username:
-            username = get_admin_username(data_dir=self.paths.data_dir)
-        ok, err = verify_wp_admin(username, password)
-        if not ok:
-            print(f"ERROR: {err}", file=sys.stderr)
-            return 1
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        if site_type == "static":
+            # No WP admin account to verify against — backup/restore are
+            # only ever invoked locally, and the encryption password is
+            # itself the security boundary (see backup.py's design notes).
+            username = "site"
+        else:
+            if not username:
+                username = get_admin_username(data_dir=self.paths.data_dir)
+            ok, err = verify_wp_admin(username, password)
+            if not ok:
+                print(f"ERROR: {err}", file=sys.stderr)
+                return 1
         addr = self.containers.get_onion_address()
         if not output_path:
             backups_dir = os.path.expanduser("~/OnionPress/backups")
@@ -185,6 +192,8 @@ class OnionPressCLI:
                 output_path=output_path,
                 version=__version__,
                 log_func=self.log,
+                site_type=site_type,
+                documents_dir=self.paths.documents_dir,
             )
             print(f"Backup saved to: {output_path}")
             return 0
@@ -206,6 +215,8 @@ class OnionPressCLI:
         except Exception as e:
             self.log(f"Restore failed during extract/seed: {e}")
             return 1
+        is_static = bool(meta.get("is_static"))
+        nickname = "site" if is_static else "wordpress"
         try:
             # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
             # the seeded key and imported backup cleanly (no stale keystore
@@ -231,13 +242,13 @@ class OnionPressCLI:
                 "-v", "onionpress-arti-state:/dest",
                 "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
                 "alpine", "sh", "-c",
-                "mkdir -p /dest/state/keystore/hss/wordpress && "
+                f"mkdir -p /dest/state/keystore/hss/{nickname} && "
                 "cp /src/ks_hs_id.ed25519_expanded_private "
-                "/dest/state/keystore/hss/wordpress/ && "
+                f"/dest/state/keystore/hss/{nickname}/ && "
                 "chown -R 100:100 /dest/state && "
-                "chmod 700 /dest/state /dest/state/keystore "
-                "/dest/state/keystore/hss /dest/state/keystore/hss/wordpress && "
-                "chmod 600 /dest/state/keystore/hss/wordpress/*",
+                f"chmod 700 /dest/state /dest/state/keystore "
+                f"/dest/state/keystore/hss /dest/state/keystore/hss/{nickname} && "
+                f"chmod 600 /dest/state/keystore/hss/{nickname}/*",
             ], timeout=30)
             if not seed.ok:
                 self.log("Restore: WARNING — arti-state key seed reported a "
@@ -246,7 +257,10 @@ class OnionPressCLI:
             # Rebuild: fresh containers adopt the seeded key; import the backup
             # artifacts into them; then bring up Tor with the restored identity.
             self.containers.start_core()
-            self.containers.wait_for_wordpress()
+            if is_static:
+                self.containers.wait_for_site_ready()
+            else:
+                self.containers.wait_for_wordpress()
             if self.cmd_import_backup_artifacts(staging) != 0:
                 self.log("Restore: artifact import failed — staging kept for retry")
                 return 1
@@ -281,16 +295,21 @@ class OnionPressCLI:
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
                     metadata = json.load(f)
-            restore_container_artifacts(staging, metadata, self.log)
-            # Migrate DB schema for cross-version backups (non-fatal).
-            res = self.docker.run(
-                ["exec", "onionpress-wordpress",
-                 "wp", "core", "update-db", "--allow-root"],
-                timeout=120,
+            restore_container_artifacts(
+                staging, metadata, self.log,
+                documents_dir=self.paths.documents_dir,
             )
-            if not res.ok:
-                self.log("Install-from-backup: wp core update-db reported a "
-                         "problem (continuing)")
+            if not metadata.get("is_static"):
+                # Migrate DB schema for cross-version backups (non-fatal).
+                # No equivalent for static installs — no database.
+                res = self.docker.run(
+                    ["exec", "onionpress-wordpress",
+                     "wp", "core", "update-db", "--allow-root"],
+                    timeout=120,
+                )
+                if not res.ok:
+                    self.log("Install-from-backup: wp core update-db reported a "
+                             "problem (continuing)")
             self.log("Install-from-backup: artifacts imported")
             return 0
         except Exception as e:

@@ -391,6 +391,141 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.assertEqual(len(new_dirs), 0, "Staging directory was not cleaned up")
 
 
+class TestCreateBackupStaticSite(unittest.TestCase):
+    """create_backup(site_type="static"): skips DB/wp-content entirely,
+    tars ~/OnionPress/Site/ instead, no docker calls beyond the Tor-key
+    extraction (which is content-agnostic and shared with WordPress mode).
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.output_zip = os.path.join(self.tmpdir, "backup.zip")
+        self.logs = []
+
+        self.pem_path = os.path.join(self.tmpdir, "arti.pem")
+        with open(self.pem_path, "wb") as f:
+            f.write(_fake_arti_pem())
+
+        # Fake docker only needs to answer the Tor-key extraction exec —
+        # a static backup makes no other docker calls at all. Anything
+        # else hitting this script is a bug (would indicate a WP-only
+        # code path firing for a static backup).
+        self.fake_bin = os.path.join(self.tmpdir, "bin")
+        os.makedirs(self.fake_bin)
+        fake_docker = os.path.join(self.fake_bin, "docker")
+        with open(fake_docker, "w") as f:
+            f.write('#!/bin/bash\n')
+            f.write(f'if [[ "$1" == "exec" && "$*" == *"ks_hs_id.ed25519_expanded_private"* ]]; then\n')
+            f.write(f'    cat "{self.pem_path}"; exit 0\n')
+            f.write('fi\n')
+            f.write('echo "unexpected docker call: $*" >&2\n')
+            f.write('exit 1\n')
+        os.chmod(fake_docker, 0o755)
+
+        self.orig_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = self.fake_bin + ":" + self.orig_path
+
+        self.data_dir = os.path.join(self.tmpdir, "onionpress-data")
+        os.makedirs(self.data_dir)
+        self.documents_dir = os.path.join(self.tmpdir, "OnionPress")
+        self.site_dir = os.path.join(self.documents_dir, "Site")
+        os.makedirs(self.site_dir)
+        with open(os.path.join(self.site_dir, "index.html"), "w") as f:
+            f.write("<h1>hello</h1>")
+
+    def tearDown(self):
+        os.environ["PATH"] = self.orig_path
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _create(self, **kwargs):
+        defaults = dict(
+            onion_address=_FAKE_DERIVED_ADDR,
+            username="site",
+            password="testpass",
+            output_path=self.output_zip,
+            version="2.2.84",
+            log_func=self.logs.append,
+            data_dir=self.data_dir,
+            site_type="static",
+            documents_dir=self.documents_dir,
+        )
+        defaults.update(kwargs)
+        backup_manager.create_backup(**defaults)
+
+    def test_zip_contains_site_not_wp_content(self):
+        self._create()
+        with zipfile.ZipFile(self.output_zip, "r") as zf:
+            names = [n.lstrip("./") for n in zf.namelist() if n.lstrip("./")]
+        self.assertTrue(any("site/index.html" in n for n in names))
+        self.assertTrue(any("tor-keys/ks_hs_id.ed25519_expanded_private" in n for n in names))
+        self.assertFalse(any("wp-content" in n for n in names))
+        self.assertFalse(any("database" in n for n in names))
+
+    def test_metadata_marks_is_static(self):
+        self._create()
+        with zipfile.ZipFile(self.output_zip, "r") as zf:
+            for name in zf.namelist():
+                if name.endswith("metadata.json"):
+                    data = json.loads(zf.read(name, pwd=b"testpass"))
+                    break
+        self.assertTrue(data["is_static"])
+        self.assertFalse(data["is_onionheaven"])
+        self.assertFalse(data["is_onionhome"])
+        self.assertFalse(data["excludes_creations"])
+
+    def test_missing_site_dir_produces_empty_but_valid_backup(self):
+        shutil.rmtree(self.site_dir)
+        self._create()
+        self.assertTrue(os.path.exists(self.output_zip))
+        with zipfile.ZipFile(self.output_zip, "r") as zf:
+            names = [n.lstrip("./") for n in zf.namelist() if n.lstrip("./")]
+        self.assertTrue(any("tor-keys/ks_hs_id.ed25519_expanded_private" in n for n in names))
+
+
+class TestRestoreContainerArtifactsStaticSite(unittest.TestCase):
+    """restore_container_artifacts branches on metadata['is_static'] — pure
+    host filesystem copy, no docker calls, no WP-only steps."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.staging = os.path.join(self.tmpdir, "staging")
+        os.makedirs(os.path.join(self.staging, "site"))
+        with open(os.path.join(self.staging, "site", "index.html"), "w") as f:
+            f.write("restored content")
+        self.documents_dir = os.path.join(self.tmpdir, "OnionPress")
+        self.logs = []
+
+    def test_restores_site_dir(self):
+        backup_manager.restore_container_artifacts(
+            self.staging, {"is_static": True}, self.logs.append,
+            documents_dir=self.documents_dir,
+        )
+        restored = os.path.join(self.documents_dir, "Site", "index.html")
+        with open(restored) as f:
+            self.assertEqual(f.read(), "restored content")
+
+    def test_replaces_existing_site_dir(self):
+        site_dir = os.path.join(self.documents_dir, "Site")
+        os.makedirs(site_dir)
+        with open(os.path.join(site_dir, "stale.html"), "w") as f:
+            f.write("old")
+        backup_manager.restore_container_artifacts(
+            self.staging, {"is_static": True}, self.logs.append,
+            documents_dir=self.documents_dir,
+        )
+        self.assertFalse(os.path.exists(os.path.join(site_dir, "stale.html")))
+        self.assertTrue(os.path.exists(os.path.join(site_dir, "index.html")))
+
+    def test_warns_when_backup_has_no_site_dir(self):
+        shutil.rmtree(os.path.join(self.staging, "site"))
+        backup_manager.restore_container_artifacts(
+            self.staging, {"is_static": True}, self.logs.append,
+            documents_dir=self.documents_dir,
+        )
+        self.assertTrue(any("no site/ directory" in m for m in self.logs))
+
+
 class TestRestoreRoundTrip(unittest.TestCase):
     """Test that a backup zip can be read back by restore_from_backup.
 

@@ -191,6 +191,53 @@ class TestPIDLock(unittest.TestCase):
         self.assertFalse(os.path.exists(pid_file))
 
 
+class TestCmdBackupStaticSite(unittest.TestCase):
+    """cmd_backup(): static installs skip verify_wp_admin entirely (no WP
+    admin account to check) and back up under username="site"."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    @mock.patch("onionpress.cli.detect_port_offset")
+    @mock.patch("onionpress.cli.ensure_secrets")
+    @mock.patch("onionpress.cli.Docker")
+    def _make_cli(self, MockDocker, mock_secrets, mock_ports, site_type):
+        from onionpress.config import PortConfig, Secrets, write_value
+        mock_ports.return_value = PortConfig(0, 8080, 9050, 9077)
+        mock_secrets.return_value = Secrets("p1", "p2", "p3")
+        MockDocker.return_value = mock.Mock()
+        cli = OnionPressCLI(data_dir=self.tmpdir)
+        write_value(cli.paths.config_file, "SITE_TYPE", site_type)
+        cli.containers = mock.Mock()
+        cli.containers.get_onion_address.return_value = "abc.onion"
+        return cli
+
+    def test_static_skips_admin_verification(self):
+        cli = self._make_cli(site_type="static")
+        output = os.path.join(self.tmpdir, "out.zip")
+        with mock.patch("onionpress.backup.verify_wp_admin") as m_verify, \
+             mock.patch("onionpress.backup.create_backup") as m_create:
+            result = cli.cmd_backup("mypassword", output)
+        m_verify.assert_not_called()
+        self.assertEqual(result, 0)
+        self.assertEqual(m_create.call_args.kwargs["username"], "site")
+        self.assertEqual(m_create.call_args.kwargs["site_type"], "static")
+
+    def test_wordpress_still_requires_admin_verification(self):
+        cli = self._make_cli(site_type="wordpress")
+        output = os.path.join(self.tmpdir, "out.zip")
+        with mock.patch("onionpress.backup.verify_wp_admin",
+                         return_value=(False, "nope")) as m_verify, \
+             mock.patch("onionpress.backup.get_admin_username",
+                         return_value="alice"), \
+             mock.patch("onionpress.backup.create_backup") as m_create:
+            result = cli.cmd_backup("mypassword", output)
+        m_verify.assert_called_once_with("alice", "mypassword")
+        self.assertEqual(result, 1)
+        m_create.assert_not_called()
+
+
 class TestCmdPublish(unittest.TestCase):
     """cmd_publish: static-only, atomic rsync+swap into ~/OnionPress/Site/."""
 
