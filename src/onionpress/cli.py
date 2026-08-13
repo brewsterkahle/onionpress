@@ -8,6 +8,8 @@ Commands: start, stop, restart, status, address, logs, setup, backup, restore, r
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from typing import Callable
@@ -453,6 +455,72 @@ class OnionPressCLI:
         )
         return 0 if ok else 1
 
+    def cmd_publish(self, source_dir: str) -> int:
+        """Publish a static site: sync `source_dir` into ~/OnionPress/Site/.
+
+        Static-mode only. Syncs into a staging directory first and swaps it
+        in atomically so the nginx backend (which bind-mounts Site/
+        read-only) never serves a half-written tree. Refuses to publish an
+        empty directory — that would silently take the site offline.
+        """
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        if site_type != "static":
+            print("ERROR: 'publish' is only available in static-site mode "
+                  "(this install is running WordPress).", file=sys.stderr)
+            return 1
+        if not os.path.isdir(source_dir):
+            print(f"ERROR: {source_dir!r} is not a directory", file=sys.stderr)
+            return 1
+
+        os.makedirs(self.paths.documents_dir, exist_ok=True)
+        site_dir = os.path.join(self.paths.documents_dir, "Site")
+        staging_dir = os.path.join(self.paths.documents_dir, ".Site.staging")
+        previous_dir = os.path.join(self.paths.documents_dir, ".Site.previous")
+
+        if os.path.exists(staging_dir):
+            shutil.rmtree(staging_dir)
+        try:
+            result = subprocess.run(
+                ["rsync", "-a", "--delete", "--exclude", "follows/",
+                 source_dir.rstrip("/") + "/", staging_dir + "/"],
+                capture_output=True, text=True, timeout=300,
+            )
+        except FileNotFoundError:
+            print("ERROR: rsync is required for 'onionpress publish' "
+                  "but was not found on PATH.", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            print(f"ERROR: rsync failed: {result.stderr.strip()}", file=sys.stderr)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            return 1
+
+        if not os.path.isdir(staging_dir) or not os.listdir(staging_dir):
+            print("ERROR: source directory is empty — refusing to publish "
+                  "an empty site (this would take your site offline).",
+                  file=sys.stderr)
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            return 1
+
+        # The follow-fetch sidecar generates Site/follows/ independently of
+        # publish (see follow.py) — carry it forward so a publish doesn't
+        # make it disappear until the next fetch cycle regenerates it.
+        old_follows = os.path.join(site_dir, "follows")
+        if os.path.isdir(old_follows):
+            shutil.copytree(old_follows, os.path.join(staging_dir, "follows"))
+
+        # Atomic swap: move the live dir out of the way, move staging in.
+        if os.path.exists(previous_dir):
+            shutil.rmtree(previous_dir)
+        if os.path.exists(site_dir):
+            os.rename(site_dir, previous_dir)
+        os.rename(staging_dir, site_dir)
+        if os.path.exists(previous_dir):
+            shutil.rmtree(previous_dir, ignore_errors=True)
+
+        print(f"Published {source_dir} -> {site_dir}")
+        self.log(f"Published static site from {source_dir}")
+        return 0
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -626,6 +694,12 @@ def main(argv: list[str] = None) -> int:
     )
     p_prov_static.add_argument("--onionname", required=True, help="Chosen onionname")
 
+    p_publish = sub.add_parser(
+        "publish",
+        help="Publish a static site: sync a directory into ~/OnionPress/Site/",
+    )
+    p_publish.add_argument("directory", help="Directory of static files to publish")
+
     p_iba = sub.add_parser(
         "import-backup-artifacts",
         help="Import a backup's container-side artifacts into the running "
@@ -670,6 +744,8 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_admin_password()
     elif args.command == "provision-static":
         return cli.cmd_provision_static(args.onionname)
+    elif args.command == "publish":
+        return cli.cmd_publish(args.directory)
     elif args.command == "provision-post-install":
         from . import multisite
         return multisite.provision_post_install(
