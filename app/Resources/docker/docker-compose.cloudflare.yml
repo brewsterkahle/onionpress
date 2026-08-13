@@ -7,8 +7,6 @@ services:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     networks:
       - onionpress-network
-    depends_on:
-      - wordpress
     restart: unless-stopped
 
 networks:

@@ -84,7 +84,13 @@ fi
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
 mkdir -p "$DOCUMENTS_DIR/Social Archives"
+mkdir -p "$DOCUMENTS_DIR/Site"
 touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
+
+# Docker-compose's Creations and Site bind-mounts key off this var (see
+# ONIONPRESS_DOCUMENTS_DIR in docker-compose.yml) — without it they fall
+# back to a throwaway /tmp path. Matches app/MacOS/onionpress's launcher.
+export ONIONPRESS_DOCUMENTS_DIR="$DOCUMENTS_DIR"
 
 # Log file with rotation (keep 3 x 5MB files)
 LOG_FILE="$DATA_DIR/onionpress.log"
@@ -246,6 +252,25 @@ export ONIONPRESS_BIND_HOST
 # Tor implementation (C Tor is the default, matching Mac)
 export TOR_IMPL="${TOR_IMPL:-tor}"
 
+# "wordpress" (default) or "static" — see src/onionpress/config.py's
+# SITE_TYPE. COMPOSE_PROFILES gates which of wordpress+db vs. site docker
+# compose starts (docker-compose.yml's `profiles:` tags); ONIONPRESS_BACKEND_*
+# is what the tor container's onion routing targets. Existing installs have
+# no SITE_TYPE key in their config, so all four default to "wordpress" and
+# every `docker compose` call below behaves exactly as it did before —
+# including `pull`/`up` with no explicit service names, which are
+# profile-filtered by Compose and would otherwise silently stop
+# pulling/starting wordpress+db.
+export ONIONPRESS_SITE_TYPE="${ONIONPRESS_SITE_TYPE:-wordpress}"
+export COMPOSE_PROFILES="$ONIONPRESS_SITE_TYPE"
+if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+    export ONIONPRESS_BACKEND_HOST="site"
+    export ONIONPRESS_BACKEND_NICKNAME="site"
+else
+    export ONIONPRESS_BACKEND_HOST="wordpress"
+    export ONIONPRESS_BACKEND_NICKNAME="wordpress"
+fi
+
 # OnionHome analytics directory (bind-mounted into tor container)
 export ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
 mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
@@ -277,6 +302,13 @@ fi
 if [ -f "$DATA_DIR/config" ]; then
     _val=$(grep "^TOR_IMPL=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export TOR_IMPL="$_val"
+    _val=$(grep "^SITE_TYPE=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    if [ "$_val" = "static" ]; then
+        export ONIONPRESS_SITE_TYPE="static"
+        export COMPOSE_PROFILES="static"
+        export ONIONPRESS_BACKEND_HOST="site"
+        export ONIONPRESS_BACKEND_NICKNAME="site"
+    fi
     _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_MAX_SERVICES="$_val"
     _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
@@ -1183,13 +1215,18 @@ start_containers() {
         log "WARNING: Failed to pull images (will use cached)"
     fi
 
-    # Start WordPress, DB, and OnionHeaven first
+    # Start the content backend (WordPress+DB, or the static-site server)
+    # plus OnionHeaven first.
+    local core_services="wordpress db onionheaven"
+    if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+        core_services="site onionheaven"
+    fi
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         # tee for the same reason as docker compose pull above — keeps the
         # journal tail visible while compose creates networks/volumes/containers.
-        docker compose up -d wordpress db onionheaven 2>&1 | tee -a "$LOG_FILE"
+        docker compose up -d $core_services 2>&1 | tee -a "$LOG_FILE"
         if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             break
         fi
