@@ -2350,8 +2350,45 @@ main() {
         setup)
             # Usage: onionpress setup [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE]
             #        onionpress setup --from-backup <password> <backup.zip>
-            setup_db_passwords
+            #        onionpress setup --static [--user ONIONNAME]
             cd "$DOCKER_DIR"
+
+            # Static-site installs have no wp-cli/database — skip straight
+            # to provisioning the content dir + onionname, no WP readiness
+            # gate needed (there's no WordPress to wait for).
+            if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+                if ! curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
+                    echo "Site container is not running. Start OnionPress first: sudo systemctl start onionpress"
+                    exit 1
+                fi
+                shift  # remove "setup" from args
+                local static_user=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --user) static_user="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -z "$static_user" ]; then
+                    printf "  Onionname: "
+                    read static_user
+                fi
+                if [ -z "$static_user" ]; then
+                    echo "ERROR: onionname cannot be empty" >&2
+                    exit 1
+                fi
+                op_py provision-static --onionname "$static_user"
+                if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
+                    echo "  Starting Tor..."
+                    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1
+                fi
+                echo ""
+                echo "  Setup complete! Publish your site with:"
+                echo "    onionpress publish <directory>"
+                exit 0
+            fi
+
+            setup_db_passwords
             if wp_is_installed; then
                 echo "WordPress is already installed."
                 exit 0

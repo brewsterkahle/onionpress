@@ -142,8 +142,10 @@ class TestProvisionInteractiveRouting(unittest.TestCase):
     def setUp(self):
         # Stub input/getpass to feed deterministic values into the
         # interactive prompts so we can run the function headless.
+        # First input is the WordPress-vs-static chooser ("" -> wordpress,
+        # the default), then the existing site title / username prompts.
         patches = [
-            mock.patch("builtins.input", side_effect=["My Blog", "alice"]),
+            mock.patch("builtins.input", side_effect=["", "My Blog", "alice"]),
             mock.patch("getpass.getpass", side_effect=["hunter22", "hunter22"]),
         ]
         for p in patches:
@@ -185,6 +187,80 @@ class TestProvisionInteractiveRouting(unittest.TestCase):
         self.assertTrue(ok)
         m_existing.assert_called_once()
         m_fresh.assert_not_called()
+
+
+class TestProvisionStaticSite(unittest.TestCase):
+    """provision_static_site: content dir + placeholder + persisted config,
+    no wp-cli involved anywhere."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(self._rmtree)
+
+    def _rmtree(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_creates_site_dir_with_placeholder(self):
+        docs_dir = os.path.join(self.tmpdir, "OnionPress")
+        ok = setup_logic.provision_static_site(
+            onionname="alice", documents_dir=docs_dir, data_dir=self.tmpdir,
+        )
+        self.assertTrue(ok)
+        site_dir = os.path.join(docs_dir, "Site")
+        self.assertTrue(os.path.isdir(site_dir))
+        self.assertTrue(os.path.isfile(os.path.join(site_dir, "index.html")))
+
+    def test_does_not_overwrite_existing_content(self):
+        docs_dir = os.path.join(self.tmpdir, "OnionPress")
+        site_dir = os.path.join(docs_dir, "Site")
+        os.makedirs(site_dir)
+        with open(os.path.join(site_dir, "index.html"), "w") as f:
+            f.write("already published")
+
+        setup_logic.provision_static_site(
+            onionname="alice", documents_dir=docs_dir, data_dir=self.tmpdir,
+        )
+        with open(os.path.join(site_dir, "index.html")) as f:
+            self.assertEqual(f.read(), "already published")
+
+    def test_persists_site_type_and_onionname(self):
+        setup_logic.provision_static_site(
+            onionname="alice",
+            documents_dir=os.path.join(self.tmpdir, "OnionPress"),
+            data_dir=self.tmpdir,
+        )
+        with open(os.path.join(self.tmpdir, "config")) as f:
+            contents = f.read()
+        self.assertIn("SITE_TYPE=static", contents)
+        self.assertIn("ONIONNAME=alice", contents)
+
+
+class TestProvisionInteractiveStaticRouting(unittest.TestCase):
+    """Choosing "static" at the first prompt must route to
+    provision_static_site() and skip every WordPress-specific step
+    entirely (no wp_is_installed probe, no onion-address read)."""
+
+    def test_routes_to_static_site_and_skips_wordpress(self):
+        with mock.patch(
+            "builtins.input", side_effect=["static", "alice"],
+        ), mock.patch(
+            "onionpress.setup_logic._wp_is_installed",
+        ) as m_wp_installed, mock.patch(
+            "onionpress.setup_logic.install_fresh_wordpress",
+        ) as m_fresh, mock.patch(
+            "onionpress.setup_logic.provision_existing_wordpress",
+        ) as m_existing, mock.patch(
+            "onionpress.setup_logic.provision_static_site",
+            return_value=True,
+        ) as m_static:
+            ok = setup_logic.provision_interactive()
+        self.assertTrue(ok)
+        m_static.assert_called_once()
+        self.assertEqual(m_static.call_args.kwargs["onionname"], "alice")
+        m_wp_installed.assert_not_called()
+        m_fresh.assert_not_called()
+        m_existing.assert_not_called()
 
 
 class TestProvisionPostInstallSubcommandPresent(unittest.TestCase):

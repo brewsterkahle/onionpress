@@ -439,6 +439,20 @@ class OnionPressCLI:
         print(pw)
         return 0
 
+    # ─── Static-site mode ────────────────────────────────────────────────
+
+    def cmd_provision_static(self, onionname: str) -> int:
+        """Provision a fresh static-site install: content dir + persisted
+        onionname. Static-mode counterpart to install_fresh_wordpress()."""
+        from .setup_logic import provision_static_site
+        ok = provision_static_site(
+            onionname=onionname,
+            documents_dir=self.paths.documents_dir,
+            data_dir=self.paths.data_dir,
+            log_func=self.log,
+        )
+        return 0 if ok else 1
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -606,6 +620,12 @@ def main(argv: list[str] = None) -> int:
         "--clean", action="store_true",
         help="Delete the backup zip after a successful scrub")
 
+    p_prov_static = sub.add_parser(
+        "provision-static",
+        help="Provision a fresh static-site install (content dir + onionname)",
+    )
+    p_prov_static.add_argument("--onionname", required=True, help="Chosen onionname")
+
     p_iba = sub.add_parser(
         "import-backup-artifacts",
         help="Import a backup's container-side artifacts into the running "
@@ -648,6 +668,8 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_generate_vanity()
     elif args.command == "admin-password":
         return cli.cmd_admin_password()
+    elif args.command == "provision-static":
+        return cli.cmd_provision_static(args.onionname)
     elif args.command == "provision-post-install":
         from . import multisite
         return multisite.provision_post_install(

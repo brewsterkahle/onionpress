@@ -3099,6 +3099,9 @@ class OnionPressApp(rumps.App):
             return
 
         # New-site path
+        if sw and getattr(sw, 'site_type', 'wordpress') == 'static':
+            self.write_config_value("SITE_TYPE", "static")
+            self.log("Site type set to 'static' from welcome screen")
         if sw and getattr(sw, 'address_prefix', None):
             # Vanity prefix chosen on the welcome screen — generated once at
             # first-run start (no on-the-fly change needed later).
@@ -3121,12 +3124,14 @@ class OnionPressApp(rumps.App):
     # subsequent launch (see _retry_pending_onionname).
 
     def _read_onion_address(self):
-        """Return the local wordpress .onion address, or None if not yet written."""
+        """Return the local content-backend .onion address, or None if not yet written."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
+            site_type = self.read_config_value("SITE_TYPE", "wordpress")
+            nickname = op_config.backend_nickname(site_type)
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "cat",
-                 "/var/lib/tor/hidden_service/wordpress/hostname"],
+                 f"/var/lib/tor/hidden_service/{nickname}/hostname"],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=10,
             )
@@ -3428,6 +3433,34 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"wp core install error: {e}")
 
+    def _provision_static_site(self, sw):
+        """Delegate to setup_logic.provision_static_site() (shared with Linux).
+
+        Static-mode counterpart to _wp_core_install() — no wp-cli, no
+        credentials to apply. Just makes sure ~/OnionPress/Site/ exists
+        (with a placeholder) and persists the chosen onionname.
+        """
+        try:
+            from onionpress.setup_logic import provision_static_site
+
+            def _log(msg):
+                self.log(msg)
+                if sw:
+                    sw.add_log(msg)
+
+            if sw:
+                sw.set_status("Preparing your static site...")
+            provision_static_site(
+                onionname=sw.admin_user,
+                documents_dir=self._paths.documents_dir,
+                log_func=_log,
+            )
+            if sw:
+                sw.add_log("Static site ready — publish with "
+                           "'onionpress publish <directory>'")
+        except Exception as e:
+            self.log(f"static site provisioning error: {e}")
+
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.
 
@@ -3608,6 +3641,8 @@ class OnionPressApp(rumps.App):
                         # content come from the backup), so DON'T fresh-install
                         # WordPress or register a new onionname over it.
                         self.log("Restore from backup: skipping fresh WordPress install")
+                    elif sw and getattr(sw, 'site_type', 'wordpress') == 'static':
+                        self._provision_static_site(sw)
                     elif sw and sw.admin_pass:
                         try:
                             self._register_onionname_during_setup(sw)

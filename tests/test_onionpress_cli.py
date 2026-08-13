@@ -183,5 +183,33 @@ class TestPIDLock(unittest.TestCase):
         self.assertFalse(os.path.exists(pid_file))
 
 
+class TestCmdProvisionStatic(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.docs_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.docs_dir, ignore_errors=True)
+
+    @mock.patch("onionpress.cli.detect_port_offset")
+    @mock.patch("onionpress.cli.ensure_secrets")
+    @mock.patch("onionpress.cli.Docker")
+    def test_creates_site_dir_and_persists_onionname(self, MockDocker, mock_secrets, mock_ports):
+        from onionpress.config import PortConfig, Secrets
+        import dataclasses
+        mock_ports.return_value = PortConfig(0, 8080, 9050, 9077)
+        mock_secrets.return_value = Secrets("p1", "p2", "p3")
+        MockDocker.return_value = mock.Mock()
+        cli = OnionPressCLI(data_dir=self.tmpdir)
+        cli.paths = dataclasses.replace(cli.paths, documents_dir=self.docs_dir)
+
+        self.assertEqual(cli.cmd_provision_static("alice"), 0)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.docs_dir, "Site", "index.html")))
+        with open(os.path.join(self.tmpdir, "config")) as f:
+            contents = f.read()
+        self.assertIn("SITE_TYPE=static", contents)
+        self.assertIn("ONIONNAME=alice", contents)
+
+
 if __name__ == "__main__":
     unittest.main()
