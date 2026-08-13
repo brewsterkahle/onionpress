@@ -289,6 +289,18 @@ if ! kill -0 $HC_PID 2>/dev/null; then
     echo "ERROR: healthcheck-server.sh failed to start"
 fi
 
+# Static-site installs have no wp-cron to drive Wayback archiving — this
+# process's own loop is the scheduler. No equivalent needed for WordPress
+# installs (their archiving runs as a WP plugin via wp-cron).
+if [ "${ONIONPRESS_SITE_TYPE:-wordpress}" = "static" ]; then
+    python3 /wayback-static.py &
+    WAYBACK_PID=$!
+    sleep 1
+    if ! kill -0 $WAYBACK_PID 2>/dev/null; then
+        echo "ERROR: wayback-static.py failed to start"
+    fi
+fi
+
 if [ "$TOR_IMPL" = "tor" ]; then
     # ==================== C Tor mode ====================
     echo "Starting C Tor (TOR_IMPL=tor)..."

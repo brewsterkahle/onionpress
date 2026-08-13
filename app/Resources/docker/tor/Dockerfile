@@ -62,6 +62,7 @@ COPY key-convert.py /key-convert.py
 COPY torrc.template /etc/tor/torrc.template
 COPY tor-watchdog.py /tor-watchdog.py
 COPY onionnames.py /onionnames.py
+COPY wayback-static.py /wayback-static.py
 COPY wordlists /wordlists
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /wayback-static.py
 ENTRYPOINT ["/entrypoint.sh"]
