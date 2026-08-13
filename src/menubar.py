@@ -3644,6 +3644,14 @@ class OnionPressApp(rumps.App):
                         # WordPress or register a new onionname over it.
                         self.log("Restore from backup: skipping fresh WordPress install")
                     elif sw and getattr(sw, 'site_type', 'wordpress') == 'static':
+                        # Register the onionname first, same as the WordPress
+                        # path — the registrar may rename sw.admin_user on a
+                        # collision, and provision_static_site should persist
+                        # whatever name actually won.
+                        try:
+                            self._register_onionname_during_setup(sw)
+                        except Exception as e:
+                            self.log(f"onionname: register path errored: {e}")
                         self._provision_static_site(sw)
                     elif sw and sw.admin_pass:
                         try:
