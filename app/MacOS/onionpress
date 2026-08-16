@@ -2319,10 +2319,14 @@ main() {
             # etc.) still exist below and are still called by start_
             # containers — only this subcommand entry point goes through
             # Python for now.
+            # "$@" forwards caller flags (e.g. --managed, which a managing app passes
+            # so the end-user onboarding wizard is skipped); shift drops the
+            # subcommand name itself.
+            shift
             bundled_python -m onionpress.cli provision-post-install \
                 --themes-dir "$RESOURCES_DIR/themes" \
                 --plugins-dir "$RESOURCES_DIR/plugins" \
-                --apache-conf-dir "$DOCKER_DIR/wordpress"
+                --apache-conf-dir "$DOCKER_DIR/wordpress" "$@"
             ;;
 
         setup)

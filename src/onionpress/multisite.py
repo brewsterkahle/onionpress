@@ -985,11 +985,52 @@ def ensure_archive_s3_keys(
     return True
 
 
+def apply_managed_defaults(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Settings that only make sense when an external managing app owns setup.
+
+    Opt-in, so a standalone OnionPress install keeps its current behaviour.
+
+    1. Close the onboarding gate. onionpress-onboarding redirects EVERY admin
+       page to its wizard until `onionpress_onboarded` is set. When the
+       managing app has
+       already installed and configured WordPress, that wizard is a dead end
+       the user never asked for — and it blocks the settings page outright,
+       so they cannot even reach the Archive.org fields.
+
+    2. Stop WordPress phoning home. wp-admin calls api.wordpress.org for core,
+       plugin and theme update checks on page load. Measured from inside the
+       container on a censored network, one such call took 11.5s to connect,
+       making the admin close to unusable — on exactly the networks this
+       product exists to serve. Blocking WP_Http does NOT affect archiving or
+       takeover: the Wayback plugin and OnionHeaven use raw curl.
+    """
+    log = log_func or _noop_log
+
+    res = _wp("eval", "update_site_option('onionpress_onboarded', time());",
+              docker_bin=docker_bin)
+    if res.returncode == 0:
+        log("Managed install: onboarding wizard marked complete")
+    else:
+        log("WARNING: could not mark onboarding complete")
+
+    res = _wp("config", "set", "WP_HTTP_BLOCK_EXTERNAL", "true", "--raw",
+              docker_bin=docker_bin)
+    if res.returncode == 0:
+        log("Managed install: WordPress external HTTP blocked (no update-check stalls)")
+    else:
+        log("WARNING: could not set WP_HTTP_BLOCK_EXTERNAL")
+
+
 def provision_post_install(
     *,
     themes_dir: str,
     plugins_dir: str,
     conf_dir: Optional[str] = None,
+    managed: bool = False,
     docker_bin: str = "docker",
     log_func: Optional[Callable[[str], None]] = None,
 ) -> int:
@@ -1008,6 +1049,8 @@ def provision_post_install(
     without aborting the run.
     """
     log = log_func or _noop_log
+    if managed:
+        apply_managed_defaults(docker_bin=docker_bin, log_func=log)
     ensure_multisite(docker_bin=docker_bin, log_func=log)
     install_multisite_domain_map(
         plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)

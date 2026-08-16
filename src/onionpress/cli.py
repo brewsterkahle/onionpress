@@ -728,6 +728,12 @@ def main(argv: list[str] = None) -> int:
         "--plugins-dir", required=True,
         help="Source directory containing mu-plugins, sunrise.php, icons")
     p_ppi.add_argument(
+        "--managed", action="store_true",
+        help="Unattended install driven by an external app, not by a "
+             "person at the OnionPress UI: skip the end-user onboarding "
+             "wizard and stop WordPress phoning home. Off by default, so a "
+             "standalone install is unaffected.")
+    p_ppi.add_argument(
         "--apache-conf-dir",
         help="Source directory containing onionpress-static-site.conf, "
              "injected at runtime for static-first serving "
@@ -835,6 +841,7 @@ def main(argv: list[str] = None) -> int:
             themes_dir=args.themes_dir,
             plugins_dir=args.plugins_dir,
             conf_dir=args.apache_conf_dir,
+            managed=args.managed,
             log_func=print,
         )
     elif args.command == "ensure-static-site-conf":
