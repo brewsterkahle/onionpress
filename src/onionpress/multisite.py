@@ -51,6 +51,12 @@ MU_PLUGIN_ASSETS = (
     "onionpress-avatar-default.png",
 )
 
+# Where install_uploads_ini drops the PHP limits overlay. The `zz-` prefix
+# is load-bearing: PHP reads conf.d in alphabetical order and the last value
+# wins, so this sorts after the image's own onionpress-uploads.ini and
+# overrides it without overwriting it.
+UPLOADS_INI_PATH = "/usr/local/etc/php/conf.d/zz-onionpress-uploads.ini"
+
 # Multisite constants written to wp-config.php in ensure_multisite. The
 # values are wp-cli `--raw` literals (already-quoted strings stay quoted).
 MULTISITE_CONSTANTS = (
@@ -297,6 +303,291 @@ def install_multisite_domain_map(
             log(f"WARNING: Failed to copy {asset}")
 
     return True
+
+
+def install_static_site_conf(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Inject the Apache static-first conf into the running WordPress
+    container at provision time (the runtime equivalent of the Dockerfile
+    COPY + a2enconf we removed).
+
+    Why runtime, not baked-in: docker-compose.yml pulls the published
+    WordPress image by digest — it is never built locally. Baking
+    onionpress-static-site.conf into that image would force us to rebuild
+    + host a fork image. Copying it in the same way the mu-plugins are
+    (docker cp into the live container) reuses the published image
+    unchanged. Mind the
+    asymmetry with the mu-plugins, though: those land in /var/www/html,
+    which is a Docker volume and so persists, whereas /etc/apache2 is
+    container rootfs. This conf survives a restart but NOT a container
+    recreate, and the provisioning path that calls this does not run when
+    the launcher's `start` short-circuits on an already-running stack.
+    `ensure_static_site_conf` closes that gap — see its docstring.
+
+    `conf_dir` is the on-disk directory holding onionpress-static-site.conf
+    (Mac: `$RESOURCES_DIR/docker/wordpress`; Linux: `$INSTALL_DIR/docker/
+    wordpress`). Best-effort: a missing file or a not-yet-running container
+    logs a warning and returns False without aborting the provision run.
+    """
+    log = log_func or _noop_log
+    src = os.path.join(conf_dir, "onionpress-static-site.conf")
+    if not os.path.isfile(src):
+        log(f"WARNING: static-site Apache conf not found at {src} — "
+            "static-site serving not enabled")
+        return False
+
+    cp = _docker_cp(
+        src,
+        "onionpress-wordpress:/etc/apache2/conf-available/"
+        "onionpress-static-site.conf",
+        docker_bin=docker_bin,
+    )
+    if cp.returncode != 0:
+        log(f"WARNING: Failed to copy static-site Apache conf: "
+            f"{cp.stderr.strip()[:200]}")
+        return False
+
+    # Enable mod_rewrite (the conf's InheritDownBefore rules need it),
+    # enable the conf, then gracefully reload Apache so it takes effect
+    # without dropping in-flight requests. a2enmod/a2enconf are idempotent
+    # (no-op + exit 0 when already enabled), so this is safe every start.
+    r = _exec_sh(
+        "a2enmod rewrite && a2enconf onionpress-static-site && "
+        "apache2ctl graceful",
+        docker_bin=docker_bin,
+    )
+    if r.returncode != 0:
+        log(f"WARNING: Failed to enable static-site Apache conf: "
+            f"{r.stderr.strip()[:200]}")
+        # The chain is not atomic: a2enconf can succeed and then
+        # `apache2ctl graceful` fail, leaving the conf-enabled symlink in
+        # place while Apache still serves the old config. That is exactly
+        # the state ensure_static_site_conf's presence probe reads as
+        # "healthy" — so it would short-circuit forever on a conf that
+        # never took effect, recreating the silent-forever failure this
+        # pair exists to end. Back the symlink out so the probe stays
+        # honest and the next start retries.
+        try:
+            _exec_sh("a2disconf onionpress-static-site", docker_bin=docker_bin)
+        except Exception:
+            pass  # best-effort cleanup; the warning above is the signal
+        return False
+
+    log("Static-first Apache conf installed "
+        "(static generations served ahead of WordPress)")
+    return True
+
+
+def install_uploads_ini(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Inject the PHP limits ini into the running WordPress container at
+    provision time, as an overlay that leaves the image's own copy alone.
+
+    Same reasoning as install_static_site_conf: docker-compose.yml pulls the
+    WordPress image by digest from a registry the fork does not own, so a
+    `COPY` in our Dockerfile only reaches a container someone else built.
+    Runtime injection reuses the published image unchanged.
+
+    Why an overlay under a different name rather than overwriting: unlike
+    onionpress-static-site.conf, the image ALREADY ships
+    /usr/local/etc/php/conf.d/onionpress-uploads.ini — present, but frozen
+    at whatever limits the image was built with. PHP reads conf.d in
+    alphabetical order, last value wins, so copying our version to
+    zz-onionpress-uploads.ini overrides the image's without touching it. The
+    image's file stays pristine (an upstream revision of it is not silently
+    clobbered), and backing the injection out is a plain `rm` of a file we
+    alone own.
+
+    The reload is not optional. mod_php reads conf.d when an Apache worker
+    initialises, so `docker cp` alone leaves every live worker on the old
+    limits — verified against a real container: the copy lands, the served
+    values stay at the image's, and only `apache2ctl graceful` moves them.
+
+    `conf_dir` is the on-disk directory holding onionpress-uploads.ini — the
+    same directory install_static_site_conf reads its conf from.
+    Best-effort: a missing file or a not-yet-running container logs a
+    warning and returns False without aborting the provision run.
+    """
+    log = log_func or _noop_log
+    src = os.path.join(conf_dir, "onionpress-uploads.ini")
+    if not os.path.isfile(src):
+        log(f"WARNING: PHP limits ini not found at {src} — "
+            "large static-site uploads may exceed PHP's default limits")
+        return False
+
+    cp = _docker_cp(
+        src,
+        f"onionpress-wordpress:{UPLOADS_INI_PATH}",
+        docker_bin=docker_bin,
+    )
+    if cp.returncode != 0:
+        log(f"WARNING: Failed to copy PHP limits ini: "
+            f"{cp.stderr.strip()[:200]}")
+        return False
+
+    r = _exec_sh("apache2ctl graceful", docker_bin=docker_bin)
+    if r.returncode != 0:
+        log(f"WARNING: Failed to reload Apache for PHP limits ini: "
+            f"{r.stderr.strip()[:200]}")
+        # Copy-then-reload is not atomic, and the overlay file existing is
+        # exactly what ensure_uploads_ini's probe reads as "healthy" — so a
+        # failed reload would short-circuit every later start on limits
+        # Apache never actually loaded. Remove it so the probe stays honest
+        # and the next start retries.
+        try:
+            _exec_sh(f"rm -f {UPLOADS_INI_PATH}", docker_bin=docker_bin)
+        except Exception:
+            pass  # best-effort cleanup; the warning above is the signal
+        return False
+
+    log("PHP limits ini installed "
+        "(large static generations can be uploaded)")
+    return True
+
+
+def ensure_uploads_ini(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Guarantee the PHP limits overlay is present, cheaply.
+
+    The container-rootfs/volume asymmetry ensure_static_site_conf exists for
+    applies here too: /usr/local/etc/php/conf.d is rootfs, so a container
+    RECREATE drops the overlay and restores the image's lower limits, while
+    a plain restart keeps it. provision_post_install re-injects on the next
+    full start, but a launcher `start` that short-circuits on an
+    already-running stack never reaches provisioning.
+
+    The failure that leaves behind is not silent, unlike the static-site
+    one — the next large upload fails outright at the image's stale
+    limits. It is, though, indefinite: nothing else on the start path
+    would ever put the overlay back.
+
+    Cheap by design — one `test -e` on the happy path, no docker cp and no
+    Apache reload, so it is safe on every start including the fast
+    already-running path. Same deliberate tradeoff as
+    ensure_static_site_conf: it tests presence, not content, so an app
+    update shipping revised limits will NOT refresh an overlay already in
+    the container. An app update recreates the container anyway, which
+    drops the overlay entirely and lets provision_post_install install the
+    new version on the very next start.
+
+    Returns True if the overlay is present or was successfully restored.
+    Best-effort like install_uploads_ini: never raises, so it can never turn
+    a healthy start into a failed one.
+    """
+    log = log_func or _noop_log
+    try:
+        present = _exec_sh(
+            f"test -e {UPLOADS_INI_PATH}", docker_bin=docker_bin)
+        if present.returncode == 0:
+            return True
+
+        # Same rc=1 ambiguity ensure_static_site_conf splits on: `test -e`
+        # reports absence with an EMPTY stderr, while the docker CLI reports
+        # a dead daemon or a stopped container with a message ON stderr.
+        # Without the split, a stopped container claims a recreate happened
+        # and runs a copy that cannot land.
+        if present.stderr.strip():
+            log("WARNING: could not check PHP limits ini: "
+                f"{present.stderr.strip()[:200]}")
+            return False
+
+        log("PHP limits ini missing (container recreated?) — reinstalling "
+            "so large static generations can still be uploaded")
+        return install_uploads_ini(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
+        )
+    except Exception as e:  # docker missing, daemon hang, timeout
+        # Spans the reinstall as well as the probe: _docker_cp and _exec_sh
+        # raise TimeoutExpired/OSError rather than returning a non-zero rc,
+        # and this function promises callers it never raises.
+        log(f"WARNING: could not ensure PHP limits ini: {e}")
+        return False
+
+
+def ensure_static_site_conf(
+    *,
+    conf_dir: str,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Guarantee the static-first Apache conf is present, cheaply.
+
+    Why this is separate from install_static_site_conf: /etc/apache2 is
+    container rootfs, not a Docker volume, so the conf is destroyed by any
+    container RECREATE (compose recreate, image change, stack update); a
+    plain restart keeps it. provision_post_install normally re-injects it
+    on the next start, but a launcher `start` that short-circuits on an
+    already-running stack ("nothing to do") never reaches that
+    provisioning.
+
+    A recreate done behind the launcher's back therefore leaves the conf
+    missing indefinitely, and the failure is silent in the worst way:
+    publishes keep succeeding, and the onion just serves the WordPress
+    theme instead of the published site.
+
+    Cheap by design — one `test -e` in the container on the happy path,
+    with no docker cp and no Apache reload, so it is safe to call on every
+    start including the fast already-running path. The tradeoff is that it
+    tests presence, not content: an app update shipping a revised
+    onionpress-static-site.conf will NOT refresh a stale one already in the
+    container. That is deliberate — comparing content on every start costs
+    a docker cp plus an Apache reload, and an app update recreates the
+    container anyway (dropping the conf entirely), so provision_post_install
+    installs the new version on the very next start.
+
+    Only a launcher whose `start` can short-circuit on an already-running
+    stack needs this. The Linux launcher's `start` has no such
+    short-circuit — it always runs start_containers, which already calls
+    provision-post-install with --apache-conf-dir.
+
+    Returns True if the conf is present or was successfully restored.
+    Best-effort like install_static_site_conf: never raises, so it can
+    never turn a healthy start into a failed one.
+    """
+    log = log_func or _noop_log
+    try:
+        present = _exec_sh(
+            "test -e /etc/apache2/conf-enabled/onionpress-static-site.conf",
+            docker_bin=docker_bin,
+        )
+        if present.returncode == 0:
+            return True
+
+        # Tell "the conf is absent" apart from "I couldn't ask". `test -e`
+        # reports absence with rc=1 and an EMPTY stderr; the docker CLI
+        # reports a dead daemon or a stopped/absent container with rc=1 and
+        # a message ON stderr. Without this split, a stopped container logs
+        # the recreate-detected line below and runs a pointless copy —
+        # inverting the diagnostic value of the one line this whole
+        # function exists to emit.
+        if present.stderr.strip():
+            log("WARNING: could not check static-site Apache conf: "
+                f"{present.stderr.strip()[:200]}")
+            return False
+
+        log("Static-first Apache conf missing (container recreated?) — "
+            "reinstalling so static generations are served ahead of WordPress")
+        return install_static_site_conf(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log,
+        )
+    except Exception as e:  # docker missing, daemon hang, timeout
+        # Deliberately spans the reinstall as well as the probe: _docker_cp
+        # and _exec_sh raise TimeoutExpired/OSError rather than returning a
+        # non-zero rc, and this function promises callers it never raises.
+        log(f"WARNING: could not ensure static-site Apache conf: {e}")
+        return False
 
 
 def install_onionpress_theme(
@@ -616,6 +907,7 @@ def provision_post_install(
     *,
     themes_dir: str,
     plugins_dir: str,
+    conf_dir: Optional[str] = None,
     docker_bin: str = "docker",
     log_func: Optional[Callable[[str], None]] = None,
 ) -> int:
@@ -637,6 +929,16 @@ def provision_post_install(
     ensure_multisite(docker_bin=docker_bin, log_func=log)
     install_multisite_domain_map(
         plugins_dir=plugins_dir, docker_bin=docker_bin, log_func=log)
+    # Runtime-inject the Apache static-first conf so static generations
+    # shadow WordPress, and the PHP limits overlay so uploading one doesn't
+    # exceed the image's PHP limits. Only when a conf dir is supplied —
+    # callers that predate static-first serving (and don't pass one) keep
+    # the earlier behavior. Both files live in that same directory.
+    if conf_dir:
+        install_static_site_conf(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)
+        install_uploads_ini(
+            conf_dir=conf_dir, docker_bin=docker_bin, log_func=log)
     install_onionpress_theme(
         themes_dir=themes_dir, plugins_dir=plugins_dir,
         docker_bin=docker_bin, log_func=log)
