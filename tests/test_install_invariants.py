@@ -1231,34 +1231,48 @@ class TestScrubVerifyChecks(unittest.TestCase):
         )
 
 
-class TestUploadsIniShipsBoundedStreamingLimits(unittest.TestCase):
-    """onionpress-uploads.ini is runtime-injected into the WordPress
-    container (multisite.install_uploads_ini) so a large static-site
-    upload can land. It must bound the upload without raising
-    memory_limit: uploads arrive as multipart, which PHP streams to
-    upload_tmp_dir at constant memory, so upload_max_filesize and
-    post_max_size are the bounds that matter and a memory raise would
-    only paper over a buffering path that should not exist.
+class TestGenerationUploadCarrier(unittest.TestCase):
+    """POST /wp-json/onionpress/v1/generation is multipart-only as of
+    receiver_version 2.0. The removed raw-body carrier forced WordPress's
+    REST server to buffer the whole tar into a PHP string before the route
+    callback ever ran — a ~65MB site needed a 512M memory_limit raise just
+    to reach the plugin's own code. Multipart streams to upload_tmp_dir at
+    constant memory, so that raise was deleted with the carrier. These
+    invariants keep both halves from silently regressing.
     """
 
-    def test_uploads_ini_does_not_set_memory_limit(self):
+    def test_uploads_ini_does_not_resurrect_memory_limit(self):
         ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
         self.assertIsNone(
             re.search(r"^memory_limit\s*=", ini, re.MULTILINE),
-            "onionpress-uploads.ini sets memory_limit — uploads stream as "
-            "multipart at constant memory, so a raise here means some new "
-            "path buffers the body into PHP memory and needs its own "
-            "justification.",
+            "onionpress-uploads.ini sets memory_limit again — that raise "
+            "existed solely for the raw-body upload carrier removed at "
+            "receiver_version 2.0. If it is back, either the raw carrier "
+            "crept back into onionpress-static-receiver.php (fix that "
+            "instead) or a new buffering path needs its own justification "
+            "here.",
         )
 
-    def test_uploads_ini_bounds_the_multipart_part(self):
+    def test_uploads_ini_still_bounds_multipart(self):
+        # Multipart still needs the size ceilings even with no memory raise:
+        # upload_max_filesize/post_max_size are what bound the streamed part.
         ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
         for key in ("upload_max_filesize", "post_max_size"):
             self.assertRegex(
                 ini, r"(?m)^%s\s*=\s*\d+[GM]$" % key,
-                "onionpress-uploads.ini must keep %s — it is the size "
-                "ceiling on the streamed multipart part." % key,
+                "onionpress-uploads.ini must keep %s — it is the bound on "
+                "the multipart part that replaced the raw body." % key,
             )
+
+    def test_receiver_has_no_raw_body_branch(self):
+        php = _read("app/Resources/plugins/onionpress-static-receiver.php")
+        self.assertNotIn(
+            "get_body()", php,
+            "onionpress-static-receiver.php reads get_body() again — the "
+            "raw-body carrier was removed at receiver_version 2.0 because "
+            "WP buffers it into PHP memory before the route can reject it. "
+            "Uploads must stay multipart-only (get_file_params).",
+        )
 
 
 if __name__ == "__main__":

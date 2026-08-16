@@ -42,6 +42,7 @@ MU_PLUGINS = (
     "onionpress-social-archive-twitter.php",
     "onionpress-social-archive-mastodon.php",
     "onionpress-social-archive-bluesky.php",
+    "onionpress-static-receiver.php",
 )
 
 # Icon assets co-located with the mu-plugins.
