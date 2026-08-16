@@ -1,5 +1,7 @@
 """Tests for src/onionpress/cli.py."""
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -11,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.cli import main, OnionPressCLI, _make_log_func
+from onionpress.onionnames_registrar import RegistrarResult
 
 
 class TestMakeLogFunc(unittest.TestCase):
@@ -125,6 +128,178 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_status.return_value = 0
         main(["--data-dir", "/tmp/test", "status"])
         MockCLI.assert_called_once_with(data_dir="/tmp/test")
+
+
+class TestOnionnameArgParsing(unittest.TestCase):
+    """main() routes `onionname <sub>` to the right cmd_onionname_* method."""
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_suggest(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_onionname_suggest.return_value = 0
+        self.assertEqual(main(["onionname", "suggest"]), 0)
+        instance.cmd_onionname_suggest.assert_called_once_with()
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_check(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_onionname_check.return_value = 0
+        self.assertEqual(main(["onionname", "check", "brewsterkahle"]), 0)
+        instance.cmd_onionname_check.assert_called_once_with("brewsterkahle")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_register(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_onionname_register.return_value = 0
+        self.assertEqual(main(["onionname", "register", "brewsterkahle"]), 0)
+        instance.cmd_onionname_register.assert_called_once_with("brewsterkahle")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_bare_onionname_is_error(self, MockCLI):
+        # No subcommand → help + non-zero (a driving app always passes one).
+        self.assertEqual(main(["onionname"]), 1)
+
+
+class TestOnionnameCommands(unittest.TestCase):
+    """The JSON shapes an external app parses from stdout, with the
+    Registrar mocked."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self._patches = [
+            mock.patch("onionpress.cli.detect_port_offset"),
+            mock.patch("onionpress.cli.ensure_secrets"),
+            mock.patch("onionpress.cli.Docker"),
+        ]
+        mock_ports, mock_secrets, MockDocker = (p.start() for p in self._patches)
+        from onionpress.config import PortConfig, Secrets
+        mock_ports.return_value = PortConfig(0, 8080, 9050, 9077)
+        mock_secrets.return_value = Secrets("p1", "p2", "p3")
+        MockDocker.return_value = mock.Mock()
+        self.cli = OnionPressCLI(data_dir=self.tmpdir)
+        # Silence stderr logging noise during the tests.
+        self.cli.log = lambda *a, **k: None
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _run(fn, *args):
+        """Call a cmd_* fn, capturing the single JSON line it prints."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = fn(*args)
+        out = buf.getvalue().strip()
+        # Exactly one JSON line on stdout — the contract callers rely on.
+        assert "\n" not in out, f"expected one line, got: {out!r}"
+        return rc, json.loads(out)
+
+    def _stub_registrar(self, **methods):
+        stub = mock.Mock()
+        for name, result in methods.items():
+            getattr(stub, name).return_value = result
+        return mock.patch.object(self.cli, "_registrar", return_value=stub), stub
+
+    # ── suggest ──────────────────────────────────────────────────────────
+    def test_suggest_from_registry(self):
+        patch, _ = self._stub_registrar(
+            suggest=RegistrarResult(status="ok", body={"onionname": "happy-otter"}))
+        with patch:
+            rc, out = self._run(self.cli.cmd_onionname_suggest)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, {"name": "happy-otter"})
+
+    def test_suggest_falls_back_to_local_when_unreachable(self):
+        patch, _ = self._stub_registrar(
+            suggest=RegistrarResult(status="unreachable", reason="timeout"))
+        with patch, mock.patch(
+                "onionpress.onionnames_client.suggest_name_local",
+                return_value="local-fallback"):
+            rc, out = self._run(self.cli.cmd_onionname_suggest)
+        self.assertEqual(out, {"name": "local-fallback"})
+
+    # ── check ────────────────────────────────────────────────────────────
+    def test_check_rejects_invalid_locally_without_registry(self):
+        patch, stub = self._stub_registrar()
+        with patch:
+            rc, out = self._run(self.cli.cmd_onionname_check, "abc")  # too short
+        self.assertEqual(out,
+                         {"available": False, "reason": "too_short",
+                          "suggestions": []})
+        stub.check.assert_not_called()
+
+    def test_check_available(self):
+        patch, _ = self._stub_registrar(
+            check=RegistrarResult(status="ok",
+                                  body={"available": True, "reason": None}))
+        with patch:
+            rc, out = self._run(self.cli.cmd_onionname_check, "happy-otter")
+        self.assertEqual(out,
+                         {"available": True, "reason": "", "suggestions": []})
+
+    def test_check_taken_with_suggestions(self):
+        patch, _ = self._stub_registrar(
+            check=RegistrarResult(
+                status="ok",
+                body={"available": False, "reason": "taken",
+                      "suggestions": ["happy-otter2", "happy-otter3"]}))
+        with patch:
+            rc, out = self._run(self.cli.cmd_onionname_check, "happy-otter")
+        self.assertEqual(out, {
+            "available": False, "reason": "taken",
+            "suggestions": ["happy-otter2", "happy-otter3"]})
+
+    def test_check_registry_unreachable(self):
+        patch, _ = self._stub_registrar(
+            check=RegistrarResult(status="unreachable", reason="exec_failed"))
+        with patch:
+            rc, out = self._run(self.cli.cmd_onionname_check, "happy-otter")
+        self.assertEqual(out, {
+            "available": False, "reason": "exec_failed", "suggestions": []})
+
+    # ── register ─────────────────────────────────────────────────────────
+    def test_register_rejects_invalid_locally(self):
+        patch, stub = self._stub_registrar()
+        with patch:
+            rc, out = self._run(self.cli.cmd_onionname_register, "12345")
+        self.assertEqual(out,
+                         {"ok": False, "error": "all_numeric",
+                          "suggestions": []})
+        stub.register.assert_not_called()
+
+    def test_register_no_onion_address(self):
+        patch, _ = self._stub_registrar(register=RegistrarResult(status="ok"))
+        with patch, mock.patch.object(
+                self.cli.containers, "get_onion_address", return_value=""):
+            rc, out = self._run(self.cli.cmd_onionname_register, "happy-otter")
+        self.assertEqual(out,
+                         {"ok": False, "error": "no_onion_address",
+                          "suggestions": []})
+
+    def test_register_success_resolves_root_url(self):
+        patch, _ = self._stub_registrar(register=RegistrarResult(status="ok"))
+        with patch, mock.patch.object(
+                self.cli.containers, "get_onion_address",
+                return_value="op2abcdef.onion"):
+            rc, out = self._run(self.cli.cmd_onionname_register, "happy-otter")
+        self.assertEqual(out, {
+            "ok": True, "name": "happy-otter",
+            "address": "op2abcdef.onion",
+            "url": "http://op2abcdef.onion/",
+        })
+
+    def test_register_collision_returns_suggestions(self):
+        patch, _ = self._stub_registrar(
+            register=RegistrarResult(status="collision", reason="taken",
+                                     suggestions=["happy-otter2"]))
+        with patch, mock.patch.object(
+                self.cli.containers, "get_onion_address",
+                return_value="op2abcdef.onion"):
+            rc, out = self._run(self.cli.cmd_onionname_register, "happy-otter")
+        self.assertEqual(out, {
+            "ok": False, "error": "taken", "suggestions": ["happy-otter2"]})
 
 
 class TestPIDLock(unittest.TestCase):

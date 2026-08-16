@@ -2246,6 +2246,25 @@ main() {
             get_onion_address
             ;;
 
+        onionname)
+            # Headless onionname registry, for driving by an external app.
+            # Delegates to the Python CLI, which wraps the already-built
+            # Registrar client and prints exactly ONE JSON line to stdout
+            # (the caller parses it). All launcher/CLI diagnostics go to the log
+            # file / stderr, so stdout stays clean for the JSON.
+            #   onionname suggest            -> {"name":"…"}
+            #   onionname check   <name>     -> {"available",…}
+            #   onionname register <name>    -> {"ok",…}
+            shift  # drop "onionname"; pass suggest/check/register (+name) through
+            # Point the local-suggestion fallback at the bundled wordlists.
+            # onionnames_client's auto-discovery doesn't know the bundle's
+            # docker/tor/wordlists layout, so `suggest` would return an empty
+            # name when the registry is unreachable. Only the fallback path
+            # uses this; the primary path is the server suggestion.
+            ONIONNAME_WORDLISTS_DIR="$DOCKER_DIR/tor/wordlists" \
+                bundled_python -m onionpress.cli onionname "$@"
+            ;;
+
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
@@ -2691,6 +2710,9 @@ User commands:
 Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address,
   reset, scrub
+  onionname {suggest|check <name>|register <name>}
+                (onionname registry ops; one JSON line on stdout, for
+                driving by an external app)
 
 Examples:
   $0 status
