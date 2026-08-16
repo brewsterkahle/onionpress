@@ -1231,6 +1231,84 @@ class TestScrubVerifyChecks(unittest.TestCase):
         )
 
 
+class TestLauncherStartIsIdempotent(unittest.TestCase):
+    """`start` must no-op when the stack is already up, and that check must
+    come BEFORE the PID lock.
+
+    Incident: the menu-bar app re-enters `start` on every launch
+    (menubar.auto_start -> start_service), so merely launching it next to a
+    running stack re-ran the up-to-120s wait_for_services and popped a
+    blocking osascript dialog over a perfectly healthy site — `start`
+    conflating "already fine" with "this failed".
+
+    Ordering is the load-bearing half and is invisible to a behavioural test
+    that only checks the exit code: an early `exit 0` placed BELOW
+    `echo $$ > $PIDFILE` + `trap 'rm -f $PIDFILE' EXIT` would strip the lock
+    belonging to the *other*, still-running invocation on its way out.
+    (tests/test_launcher_start_idempotent.py covers the behaviour itself, but
+    only on macOS.)
+    """
+
+    # assertIn/assertRegex would dump the whole 2700-line launcher into the
+    # failure message; these check a boolean so a failure reads as one line.
+    def _assert_has(self, pattern, message):
+        self.assertTrue(re.search(pattern, self.script), message)
+
+    def setUp(self):
+        self.script = _read("app/MacOS/onionpress")
+
+    def test_probe_uses_the_shared_receiver_discovery_idiom(self):
+        self._assert_has(
+            r'receiver_answering_port',
+            "start must probe whether a receiver is already answering.",
+        )
+        self._assert_has(
+            r'for\s+port\s+in\s+8080\s+18080\s+28080\s+38080\s+48080',
+            "Probe must walk the same port ladder as the publisher's "
+            "RECEIVER_PORTS and test-receiver.sh (docs/static-publish-protocol.md).",
+        )
+        self._assert_has(
+            r'/wp-json/onionpress/v1/status',
+            "Probe must hit the receiver's /status route.",
+        )
+        self._assert_has(
+            r'curl[^\n]*--max-time\s+[12]\b',
+            "Probe must be bounded — `start` must not gain a slow path just "
+            "to discover it has nothing to do.",
+        )
+        self._assert_has(
+            r"grep -q 'receiver_version'",
+            "Readiness is judged by the receiver ANSWERING (a body carrying "
+            "receiver_version), never by an exit code.",
+        )
+
+    def test_probe_runs_before_the_pid_lock_is_taken(self):
+        probe_call = "if _receiver_port=$(receiver_answering_port); then"
+        self._assert_has(
+            re.escape(probe_call),
+            "start must call the receiver probe before anything else.",
+        )
+        probe = self.script.index(probe_call)
+        pid_write = self.script.index('echo $$ > "$PIDFILE"')
+        trap_install = self.script.index("trap 'rm -f \"$PIDFILE\"")
+
+        self.assertLess(
+            probe, pid_write,
+            "The already-running probe must run before $PIDFILE is written.",
+        )
+        self.assertLess(
+            probe, trap_install,
+            "The already-running probe must run before the EXIT trap is "
+            "installed, or a no-op `start` deletes another invocation's "
+            "PID file on the way out.",
+        )
+        self.assertIn(
+            "exit 0", self.script[probe:pid_write],
+            "An already-running stack must exit 0 — it is a no-op, not a "
+            "conflict.",
+        )
+
+
 class TestGenerationUploadCarrier(unittest.TestCase):
     """POST /wp-json/onionpress/v1/generation is multipart-only as of
     receiver_version 2.0. The removed raw-body carrier forced WordPress's

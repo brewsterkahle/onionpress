@@ -2027,9 +2027,99 @@ restore_backup() {
     echo "Restore complete: $onion_address"
 }
 
+# Is a publish receiver already answering on the loopback port ladder?
+# Echoes the port and returns 0 on the first hit, returns 1 when nothing
+# answers.
+#
+# Discovery mirrors publisher clients and ./test-receiver.sh (docs/static-publish-protocol.md):
+# probe GET /wp-json/onionpress/v1/status on 8080 and the multi-user +10000
+# offsets; the first port whose body carries `receiver_version` wins. Readiness
+# is judged by the receiver ANSWERING, never by an exit code — that is this
+# integration's established rule.
+#
+# Bounded on purpose: a closed port is refused instantly, so the common
+# "nothing is running" answer costs milliseconds and `start` gains no slow
+# path just to discover it has work to do. `|| true` keeps curl's non-zero
+# exit (refused/timeout) from tripping `set -e`.
+#
+# The ladder is deliberately the shared discovery idiom, which means it
+# inherits the ambiguity publisher clients and test-receiver.sh already have: on a
+# multi-user Mac, another user's receiver answering on a lower port reads as
+# "a stack is up". Distinguishing owners needs an identity the /status body
+# does not yet carry; if that is ever added, this is the place to use it.
+receiver_answering_port() {
+    local port body
+    for port in 8080 18080 28080 38080 48080; do
+        body=$(curl -s --connect-timeout 1 --max-time 2 \
+            "http://127.0.0.1:${port}/wp-json/onionpress/v1/status" 2>/dev/null || true)
+        if printf '%s' "$body" | grep -q 'receiver_version'; then
+            echo "$port"
+            return 0
+        fi
+    done
+    return 1
+}
+
 main() {
     case "${1:-start}" in
         start)
+            # Starting an already-running stack is a no-op, not a conflict.
+            #
+            # Two callers drive this stack: a managing app owns its lifecycle
+            # (install and start), while the menu-bar app is the power-user surface —
+            # and the menu bar re-enters `start` on every launch (auto_start
+            # -> start_service -> `onionpress start`). Without this check,
+            # merely LAUNCHING the menu bar next to a healthy stack re-ran the
+            # up-to-120s wait_for_services and could report failure over a
+            # site that was serving fine, and a second `start` from either
+            # side got a blocking GUI dialog nobody asked for.
+            #
+            # Same bug class as the EXIT-trap guard below: `start` conflating
+            # "already fine" / "not everything ready yet" with "this failed". The cure belongs here, in the one
+            # place that knows the stack's state, rather than in each
+            # caller's integration layer.
+            #
+            # TRAP SAFETY: this runs BEFORE the PID file is written and BEFORE
+            # the EXIT trap is installed, so this exit can never remove a PID
+            # file belonging to a different, still-running invocation. Any
+            # future work added to `start` must stay below this block for the
+            # same reason.
+            if _receiver_port=$(receiver_answering_port); then
+                # A container recreate behind the launcher's back (compose
+                # recreate, image change, stack update) wipes the static-first
+                # Apache conf, because /etc/apache2 is container rootfs and not
+                # a volume. This early exit is precisely the path such a stack
+                # takes on every later `start`, so without a check here the
+                # onion serves the WordPress theme instead of the published
+                # static site indefinitely — and silently, since publishes and
+                # the receiver both go on reporting success. Cheap: a single
+                # `test -e` in the container unless the conf is really gone.
+                #
+                # TRAP SAFETY (see above): this writes no PID file and installs
+                # no trap, and `|| true` stops it changing this branch's exit
+                # status under `set -e`.
+                #
+                # Output goes to the log, not the terminal: a silent repair is
+                # a repair nobody can confirm happened, and this is the only
+                # record that the conf had gone missing at all. The user-facing
+                # message for this branch is the "already running" line below.
+                bundled_python -m onionpress.cli ensure-static-site-conf \
+                    --apache-conf-dir "$DOCKER_DIR/wordpress" \
+                    >> "$LOG_FILE" 2>&1 || true
+                # The same recreate drops the PHP limits overlay from
+                # /usr/local/etc/php/conf.d, restoring the image's lower
+                # memory_limit. That failure is loud rather than silent —
+                # the next publish dies on a PHP fatal-error page —
+                # but nothing else on this path would ever put it back.
+                # Same cost and same trap safety as the check above.
+                bundled_python -m onionpress.cli ensure-uploads-ini \
+                    --conf-dir "$DOCKER_DIR/wordpress" \
+                    >> "$LOG_FILE" 2>&1 || true
+                log "start: receiver already answering on port $_receiver_port — stack is already running, nothing to do"
+                echo "OnionPress is already running (http://localhost:${_receiver_port})."
+                exit 0
+            fi
+
             # PID lock — prevent double-starting
             if [ -f "$PIDFILE" ]; then
                 # If PID file is older than system boot, it's from a previous
@@ -2042,8 +2132,18 @@ main() {
                 else
                     old_pid=$(cat "$PIDFILE" 2>/dev/null)
                     if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-                        echo "OnionPress is already running (PID $old_pid)." >&2
-                        osascript -e 'display dialog "OnionPress is already running." buttons {"OK"} default button "OK" with icon caution with title "OnionPress"' 2>/dev/null || true
+                        # Narrower than it used to be: the receiver did not
+                        # answer above, so this is a genuine collision with a
+                        # `start` that is still booting, not a double-start
+                        # over a healthy stack.
+                        echo "OnionPress is already starting up (PID $old_pid)." >&2
+                        # The dialog survives because the usual way to reach
+                        # this is double-clicking the app, where stderr is
+                        # invisible. It is now bounded, though: `start` also
+                        # runs unattended (a managing app's stack installer runs it
+                        # headless), and an un-dismissed modal would hang that
+                        # caller forever instead of failing.
+                        osascript -e 'display dialog "OnionPress is already starting up." buttons {"OK"} default button "OK" with icon caution with title "OnionPress" giving up after 10' 2>/dev/null || true
                         exit 1
                     fi
                     # Stale pid file — process no longer running
@@ -2051,8 +2151,15 @@ main() {
                 fi
             fi
             echo $$ > "$PIDFILE"
-            # On exit: clean PID file and kill our background children
-            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null' EXIT INT TERM HUP
+            # On exit: clean PID file and kill our background children.
+            # The `|| true` is load-bearing: under `set -e`, a failing command
+            # inside the EXIT trap becomes the SCRIPT's exit status. `kill`
+            # fails when the jobs table is empty or only holds already-finished
+            # jobs — so a fully successful `start` exited 1 whenever its
+            # background children happened to finish first (race), which any
+            # caller that checks the exit code (a managing app's stack installer) read
+            # as a start failure.
+            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null || true' EXIT INT TERM HUP
 
             # Note: orphaned background processes from previous launches may exist
             # but are harmless (sleeping poll loops). The exit trap kills our own
