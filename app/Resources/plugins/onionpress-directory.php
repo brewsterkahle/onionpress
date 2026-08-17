@@ -43,6 +43,36 @@ function onionpress_directory_is_onionhome_host( $host ) {
 }
 
 /**
+ * The host this request arrived on: lower-cased, port stripped.
+ *
+ * Extracted because the same three lines were hand-rolled in two places and
+ * only one of them kept the variable it assigned. The other read an
+ * undefined $own, so its clearnet check was constantly false and every
+ * clearnet visitor fell through to a redirect at a raw .onion URL their
+ * browser cannot open. One definition means the two callers cannot drift
+ * apart again.
+ */
+function onionpress_directory_request_host() {
+    $host = strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) );
+    if ( strpos( $host, ':' ) !== false ) {
+        $host = substr( $host, 0, strpos( $host, ':' ) );
+    }
+    return $host;
+}
+
+/**
+ * True when this request came in over the clearnet bridge (onionpress.org
+ * via the Cloudflare tunnel) rather than over Tor.
+ */
+function onionpress_directory_request_is_clearnet() {
+    $host = onionpress_directory_request_host();
+    return (
+        $host === ONIONPRESS_CLEARNET_HOST
+        || $host === 'www.' . ONIONPRESS_CLEARNET_HOST
+    );
+}
+
+/**
  * Read this instance's own .onion address from the shared volume the
  * launcher populates. Returns lower-case .onion or null.
  */
@@ -136,12 +166,7 @@ function onionpress_directory_handle_follow_by_name( $name ) {
         exit;
     }
 
-    $own = strtolower( (string) ( $_SERVER['HTTP_HOST'] ?? '' ) );
-    if ( strpos( $own, ':' ) !== false ) {
-        $own = substr( $own, 0, strpos( $own, ':' ) );
-    }
-    $is_clearnet = ( $own === ONIONPRESS_CLEARNET_HOST
-                     || $own === 'www.' . ONIONPRESS_CLEARNET_HOST );
+    $is_clearnet = onionpress_directory_request_is_clearnet();
 
     status_header( 200 );
     header( 'Content-Type: text/html; charset=utf-8' );
@@ -206,7 +231,7 @@ function onionpress_directory_handle_name_lookup( $name ) {
     // onionpress.org we don't ship them to a raw .onion URL in their
     // clearnet browser (which would just error). Surface a simple page
     // pointing at Tor Browser instead. Indexers explicitly blocked.
-    if ( $own === ONIONPRESS_CLEARNET_HOST || $own === 'www.' . ONIONPRESS_CLEARNET_HOST ) {
+    if ( onionpress_directory_request_is_clearnet() ) {
         status_header( 200 );
         header( 'X-Robots-Tag: noindex, nofollow' );
         header( 'Content-Type: text/html; charset=utf-8' );
