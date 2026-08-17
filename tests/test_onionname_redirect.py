@@ -102,6 +102,110 @@ class TestClearnetHostDetection(unittest.TestCase):
         self.assertFalse(self._is_clearnet("")["clearnet"])
 
 
+@unittest.skipUnless(PHP, "php not installed")
+class TestNameResolvesToTheOnionRoot(unittest.TestCase):
+    """Where the redirect points.
+
+    The target was built as <onion>/<name>/ on the theory that
+    onionpress-user-path.php would rewrite that into an author archive. That
+    rewriter only runs on a network-root multisite install, so on a
+    self-hosted node serving one site at the onion root every claimed name
+    404'd. A name is registry state, not site state: it resolves to the
+    site's root, and any path after it belongs to the target.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="onionpress-target-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addr = (
+            "op2ykvbdwzg75f3pifywmwdjue5utsg4yi4j72wadpk32varfcdk6uad.onion"
+        )
+
+    def _target(self, suffix="", query=""):
+        harness = textwrap.dedent(f"""\
+            <?php
+            define('ABSPATH', __DIR__);
+            function add_action(...$args) {{}}
+            $_SERVER['HTTP_HOST'] = 'onionpress.org';
+            $_SERVER['QUERY_STRING'] = {json.dumps(query)};
+            require {json.dumps(PLUGIN)};
+            echo onionpress_directory_target_url(
+                {json.dumps(self.addr)}, {json.dumps(suffix)}
+            );
+        """)
+        path = os.path.join(self.tmp, "target.php")
+        with open(path, "w") as f:
+            f.write(harness)
+        proc = subprocess.run(
+            [PHP, "-d", "error_reporting=E_ALL", "-d", "display_errors=stderr",
+             path],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("Warning", proc.stderr, proc.stderr)
+        return proc.stdout
+
+    def test_a_bare_name_resolves_to_the_site_root(self):
+        self.assertEqual(self._target(), f"http://{self.addr}/")
+
+    def test_the_name_is_not_appended_as_a_path(self):
+        """The bug itself, stated as an assertion."""
+        self.assertNotIn("william-blake", self._target())
+
+    def test_a_deep_path_is_carried_through(self):
+        """A name is only worth having if you can link to a page."""
+        self.assertEqual(
+            self._target("posts/hello"),
+            f"http://{self.addr}/posts/hello",
+        )
+
+    def test_a_query_string_survives(self):
+        self.assertEqual(
+            self._target("posts/hello", "utm_source=x"),
+            f"http://{self.addr}/posts/hello?utm_source=x",
+        )
+
+    def test_a_leading_slash_on_the_suffix_does_not_double_up(self):
+        self.assertEqual(
+            self._target("/posts/hello"), f"http://{self.addr}/posts/hello"
+        )
+
+
+class TestReservedSegmentsAreNotNames(unittest.TestCase):
+    """Treating the first segment as a candidate name means WordPress's own
+    paths would otherwise be looked up in the registry."""
+
+    def setUp(self):
+        self.src = _read("app/Resources/plugins/onionpress-directory.php")
+
+    def test_wordpress_paths_are_excluded(self):
+        for segment in ("wp-admin", "wp-json", "wp-login", "feed"):
+            self.assertIn(
+                f"'{segment}'", self.src,
+                f"{segment} must be reserved, not treated as an onionname.",
+            )
+
+    def test_the_dispatcher_consults_the_reserved_list(self):
+        dispatch = self.src.index("add_action( 'parse_request'")
+        self.assertIn(
+            "onionpress_directory_is_reserved_segment", self.src[dispatch:],
+            "The dispatcher must skip reserved segments before looking a "
+            "name up.",
+        )
+
+    def test_deep_paths_reach_the_name_handler(self):
+        """The old dispatcher skipped anything containing a slash, so deep
+        paths got no redirect at all."""
+        dispatch = self.src.index("add_action( 'parse_request'")
+        body = self.src[dispatch:]
+        self.assertNotIn(
+            "strpos( $path, '/' ) === false", body,
+            "The single-segment restriction is what stopped deep paths from "
+            "resolving; it must not come back.",
+        )
+        self.assertIn("explode( '/', $path, 2 )", body)
+
+
 class TestClearnetGuardIsWiredUp(unittest.TestCase):
     """The call sites. The helper being right is worth nothing if the
     name-lookup path does not consult it before redirecting."""

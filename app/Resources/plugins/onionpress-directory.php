@@ -73,6 +73,41 @@ function onionpress_directory_request_is_clearnet() {
 }
 
 /**
+ * Path segments that are WordPress's, never an onionname.
+ *
+ * The first segment of any URL is now treated as a candidate name (deep
+ * paths are carried through to the target), so the handful of segments
+ * that unambiguously belong to this site are excluded before we ask the
+ * registry about them.
+ */
+function onionpress_directory_is_reserved_segment( $segment ) {
+    $reserved = array(
+        'wp-admin', 'wp-json', 'wp-content', 'wp-includes', 'wp-login',
+        'feed', 'follow', 'xmlrpc.php',
+    );
+    return in_array( strtolower( (string) $segment ), $reserved, true );
+}
+
+/**
+ * The URL a claimed name resolves to: the target's onion ROOT, plus
+ * whatever path followed the name, plus the original query string.
+ *
+ * A name is registry state, not site state. The site is served at the onion
+ * root and has no /<name>/ path of its own, so appending the name — which
+ * this did until 2026-08-17 — 404s every claimed name. Carrying the
+ * remainder through is the other half: a name is only worth having if you
+ * can hand someone a link to a page, not just to a homepage.
+ */
+function onionpress_directory_target_url( $addr, $suffix = '' ) {
+    $url = 'http://' . $addr . '/' . ltrim( (string) $suffix, '/' );
+    $query = (string) ( $_SERVER['QUERY_STRING'] ?? '' );
+    if ( $query !== '' ) {
+        $url .= '?' . $query;
+    }
+    return $url;
+}
+
+/**
  * Read this instance's own .onion address from the shared volume the
  * launcher populates. Returns lower-case .onion or null.
  */
@@ -200,7 +235,7 @@ function onionpress_directory_handle_follow_by_name( $name ) {
  * OTHER .onion, 302 to that site. If the target is this instance, fall
  * through so WP multisite serves the local blog.
  */
-function onionpress_directory_handle_name_lookup( $name ) {
+function onionpress_directory_handle_name_lookup( $name, $suffix = '' ) {
     // Cheap client-side filter — avoids a curl hop for obviously-invalid
     // segments. Mirrors the server's validate_name rules.
     if (
@@ -239,7 +274,7 @@ function onionpress_directory_handle_name_lookup( $name ) {
         $addr_h  = esc_html( $info['onionaddress'] );
         $addr_a  = esc_attr( $info['onionaddress'] );
         $onion_h = esc_html(
-            'http://' . $info['onionaddress'] . '/' . $info['onionname'] . '/'
+            onionpress_directory_target_url( $info['onionaddress'], $suffix )
         );
         echo '<!doctype html><meta charset="utf-8"><title>@' . $name_h . ' — OnionPress</title>';
         echo '<meta name="robots" content="noindex, nofollow">';
@@ -253,13 +288,14 @@ function onionpress_directory_handle_name_lookup( $name ) {
         exit;
     }
 
-    // Bare-NAME redirect on the onion side: point at the target's
-    // /<name>/ path, which onionpress-user-path.php rewrites to the
-    // user's author archive on the target's WordPress. That gives us a
-    // stable, share-worthy URL (op2abc.onion/brewsterkahle) even when the
-    // target has just one blog.
+    // Onion-side redirect: point at the target's ROOT, carrying any path
+    // that followed the name. This used to append /<name>/ on the theory
+    // that onionpress-user-path.php would rewrite it to an author archive,
+    // but that rewriter only runs on a network-root multisite install
+    // (onionpress-user-path.php gates on blog_id 1), so on a self-hosted
+    // node serving one site at the root every claimed name 404'd.
     wp_redirect(
-        'http://' . $info['onionaddress'] . '/' . $info['onionname'] . '/',
+        onionpress_directory_target_url( $info['onionaddress'], $suffix ),
         302
     );
     exit;
@@ -295,9 +331,23 @@ add_action( 'parse_request', function ( $wp ) {
         return;
     }
 
-    // /NAME — single path segment. Skip if the URL has more than one segment
-    // (posts, categories, etc.) or looks like a reserved path.
-    if ( $path !== '' && strpos( $path, '/' ) === false ) {
-        onionpress_directory_handle_name_lookup( $path );
+    // /NAME[/REST] — the first segment is the candidate onionname and
+    // everything after it is carried through to the target unchanged, so
+    // /alice/posts/hello lands on /posts/hello rather than 404ing. Deep
+    // paths used to be skipped entirely, which meant a name could only ever
+    // link to a homepage.
+    //
+    // An unregistered first segment (every ordinary WordPress URL) falls
+    // through untouched: lookup returns null. The pre-filter in
+    // handle_name_lookup keeps that from costing a registry hop for most of
+    // them, and this dispatcher only runs on the OnionHome hosts, where the
+    // registry is a local container call rather than a trip over Tor.
+    if ( $path !== '' ) {
+        $parts  = explode( '/', $path, 2 );
+        $segment = $parts[0];
+        $suffix  = isset( $parts[1] ) ? $parts[1] : '';
+        if ( ! onionpress_directory_is_reserved_segment( $segment ) ) {
+            onionpress_directory_handle_name_lookup( $segment, $suffix );
+        }
     }
 } );
