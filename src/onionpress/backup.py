@@ -754,6 +754,24 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
     except OSError:
         pass
     _, metadata = extract_backup(zip_path, password, log_func, staging=staging)
+
+    # Persist the backup's site type BEFORE anything reads config again.
+    # Everything downstream — containers.py's _build_env/start_core (which
+    # picks COMPOSE_PROFILES and the wordpress+db vs. site service set),
+    # the launchers' env exports, and the tor container's onion-service
+    # nickname — keys off SITE_TYPE in config, while cmd_restore derives
+    # the keystore nickname from this metadata. Without this write, a
+    # static backup restored onto a fresh (default-wordpress) install
+    # seeds the key into hss/site but then boots the WordPress topology
+    # with nickname "wordpress" — a brand-new onion address instead of
+    # the restored identity. Restore is a full teardown/rebuild, so
+    # adopting the backup's type is the correct semantic in both
+    # directions; old backups without is_static restore as wordpress.
+    restored_site_type = 'static' if metadata.get('is_static') else 'wordpress'
+    config_path = os.path.join(_data_dir, 'config')
+    write_value(config_path, 'SITE_TYPE', restored_site_type)
+    log_func(f"Restore: SITE_TYPE set to {restored_site_type} (from backup metadata)")
+
     seed_onion_key_for_install(staging, metadata, log_func, data_dir=_data_dir)
     apply_config_overrides(staging, log_func, data_dir=_data_dir)
     marker = os.path.join(_data_dir, INSTALL_FROM_BACKUP_MARKER)

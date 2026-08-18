@@ -562,7 +562,8 @@ class TestRestoreRoundTrip(unittest.TestCase):
         os.environ["PATH"] = self.orig_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _make_backup_zip(self, password="testpw", metadata_address=None):
+    def _make_backup_zip(self, password="testpw", metadata_address=None,
+                          is_static=False):
         """Create a realistic backup zip manually.
 
         metadata_address overrides the address recorded in metadata.json
@@ -582,6 +583,8 @@ class TestRestoreRoundTrip(unittest.TestCase):
             "onionpress_version": "2.2.84",
             "username": "admin",
         }
+        if is_static:
+            metadata["is_static"] = True
         with open(os.path.join(staging, "metadata.json"), "w") as f:
             json.dump(metadata, f)
 
@@ -746,6 +749,32 @@ class TestRestoreRoundTrip(unittest.TestCase):
         self.assertTrue(os.path.isfile(marker))
         with open(marker) as f:
             self.assertEqual(f.read().strip(), staging)
+
+    def test_prepare_install_from_backup_persists_static_site_type(self):
+        # start_core()/_build_env() read SITE_TYPE from config while the
+        # keystore nickname comes from the backup's metadata — without this
+        # write, a static backup restored onto a fresh install boots the
+        # WordPress topology and generates a NEW onion address instead of
+        # adopting the restored identity.
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write("ADDRESS_PREFIX=zzz\n")
+        zip_path = self._make_backup_zip(is_static=True)
+        backup_manager.prepare_install_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+        with open(os.path.join(self.data_dir, "config")) as f:
+            self.assertIn("SITE_TYPE=static", f.read())
+
+    def test_prepare_install_from_backup_persists_wordpress_site_type(self):
+        # The inverse direction: a WordPress backup restored onto a static
+        # install must flip config back, or start_core() would boot the
+        # site container while the artifacts import expects wordpress+db.
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write("SITE_TYPE=static\n")
+        zip_path = self._make_backup_zip()
+        backup_manager.prepare_install_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+        with open(os.path.join(self.data_dir, "config")) as f:
+            self.assertIn("SITE_TYPE=wordpress", f.read())
 
     def test_peek_backup_metadata_validates_and_returns(self):
         zip_path = self._make_backup_zip()
