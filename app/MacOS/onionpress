@@ -102,6 +102,10 @@ ensure_documents_dir() {
     # compose's /tmp fallback.
     mkdir -p "$DOCUMENTS_DIR/Social Archives"
     touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
+    # Published static-site content (bind-mounted into the `site` and tor
+    # containers). Created unconditionally so the compose mounts always
+    # have a real source dir; unused on WordPress installs.
+    mkdir -p "$DOCUMENTS_DIR/Site"
 }
 ensure_documents_dir
 
@@ -245,6 +249,31 @@ if [ -f "$DATA_DIR/config" ]; then
     fi
 fi
 export TOR_IMPL
+
+# "wordpress" (default) or "static" — see src/onionpress/config.py's
+# SITE_TYPE. COMPOSE_PROFILES gates which of wordpress+db vs. site docker
+# compose starts/pulls/stops (docker-compose.yml's `profiles:` tags — a
+# bare `docker compose pull`/`down` with no active profile silently skips
+# profiled services, so this export must cover every compose call below);
+# ONIONPRESS_BACKEND_* is what the tor container's onion routing targets.
+# Existing installs have no SITE_TYPE key, so everything defaults to
+# "wordpress" and behaves exactly as before. Matches linux/onionpress.
+ONIONPRESS_SITE_TYPE="wordpress"
+if [ -f "$DATA_DIR/config" ]; then
+    _site_type=$(grep "^SITE_TYPE=" "$DATA_DIR/config" | cut -d= -f2)
+    if [ "$_site_type" = "static" ]; then
+        ONIONPRESS_SITE_TYPE="static"
+    fi
+fi
+export ONIONPRESS_SITE_TYPE
+export COMPOSE_PROFILES="$ONIONPRESS_SITE_TYPE"
+if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+    export ONIONPRESS_BACKEND_HOST="site"
+    export ONIONPRESS_BACKEND_NICKNAME="site"
+else
+    export ONIONPRESS_BACKEND_HOST="wordpress"
+    export ONIONPRESS_BACKEND_NICKNAME="wordpress"
+fi
 
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
@@ -1280,24 +1309,30 @@ start_containers() {
     log "Pulling pre-built images..."
     docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
 
-    # Always start WordPress and DB first
+    # Start the content backend (WordPress+DB, or the static-site server)
+    # plus OnionHeaven first.
+    local core_services="wordpress db onionheaven autoheal"
+    if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+        core_services="site onionheaven autoheal"
+    fi
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
-        if docker compose up -d wordpress db onionheaven autoheal >> "$LOG_FILE" 2>&1; then
+        if docker compose up -d $core_services >> "$LOG_FILE" 2>&1; then
             break
         fi
-        log "WARNING: 'docker compose up -d wordpress db onionheaven autoheal' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
+        log "WARNING: 'docker compose up -d $core_services' failed (attempt $attempt/$max_attempts). Check $LOG_FILE for details."
         if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: 'docker compose up -d wordpress db onionheaven autoheal' failed after $max_attempts attempts."
+            log "ERROR: 'docker compose up -d $core_services' failed after $max_attempts attempts."
             return 1
         fi
         attempt=$((attempt + 1))
         sleep 5
     done
-    log "WordPress, DB, and Tor client containers starting"
+    log "Content and Tor client containers starting ($core_services)"
 
-    # Wait for WordPress container to be ready before checking install status
+    # Wait for the content backend to answer HTTP before continuing
+    # (WordPress or the static-site nginx — same host port either way).
     local wp_wait=0
     while [ $wp_wait -lt 60 ]; do
         if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT:-8080}" >/dev/null 2>&1; then
@@ -1309,17 +1344,21 @@ start_containers() {
 
     # Check if WordPress is already set up (admin account created)
     # Retry a few times — the DB may still be warming up even though
-    # WordPress HTTP is responding (wp core is-installed needs a live DB)
+    # WordPress HTTP is responding (wp core is-installed needs a live DB).
+    # Static installs have no WordPress: skip the probe entirely so we
+    # don't burn 10s exec'ing into a container that doesn't exist.
     local wp_installed=false
-    local wp_check=0
-    while [ $wp_check -lt 5 ]; do
-        if wp_is_installed; then
-            wp_installed=true
-            break
-        fi
-        sleep 2
-        wp_check=$((wp_check + 1))
-    done
+    if [ "$ONIONPRESS_SITE_TYPE" != "static" ]; then
+        local wp_check=0
+        while [ $wp_check -lt 5 ]; do
+            if wp_is_installed; then
+                wp_installed=true
+                break
+            fi
+            sleep 2
+            wp_check=$((wp_check + 1))
+        done
+    fi
 
     # Ensure .htaccess exists — WordPress REST API (block editor publishing)
     # requires rewrite rules. These can be lost if WordPress auto-updates or
@@ -1355,6 +1394,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
                 log "✓ .htaccess restored" || \
                 log "WARNING: Failed to restore .htaccess"
         fi
+    elif [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+        log "Static-site install — no WordPress provisioning needed"
     else
         log "WordPress not yet installed — will be configured by setup window"
     fi
@@ -1364,15 +1405,17 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     log "Starting Tor containers..."
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
 
-    # Install Internet Archive Wayback Machine Link Fixer plugin —
-    # stays bash for now (uses install_plugin.sh + activate_plugin.sh
-    # helpers; bigger lift to port).
-    install_ia_plugin
+    if [ "$ONIONPRESS_SITE_TYPE" != "static" ]; then
+        # Install Internet Archive Wayback Machine Link Fixer plugin —
+        # stays bash for now (uses install_plugin.sh + activate_plugin.sh
+        # helpers; bigger lift to port).
+        install_ia_plugin
 
-    # Install and configure Cache Enabler page-caching plugin
-    # (Mac-only — no Linux equivalent at present)
-    install_cache_enabler
-    configure_cache_enabler
+        # Install and configure Cache Enabler page-caching plugin
+        # (Mac-only — no Linux equivalent at present)
+        install_cache_enabler
+        configure_cache_enabler
+    fi
 
     # The WP-side post-start provisioning is shared with Linux now:
     # configure-ia-plugin, deactivate-wp-statistics, then
@@ -1401,11 +1444,13 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
-    bundled_python -m onionpress.cli configure-ia-plugin
-    bundled_python -m onionpress.cli deactivate-wp-statistics
-    bundled_python -m onionpress.cli provision-post-install \
-        --themes-dir "$RESOURCES_DIR/themes" \
-        --plugins-dir "$RESOURCES_DIR/plugins"
+    if [ "$ONIONPRESS_SITE_TYPE" != "static" ]; then
+        bundled_python -m onionpress.cli configure-ia-plugin
+        bundled_python -m onionpress.cli deactivate-wp-statistics
+        bundled_python -m onionpress.cli provision-post-install \
+            --themes-dir "$RESOURCES_DIR/themes" \
+            --plugins-dir "$RESOURCES_DIR/plugins"
+    fi
 
     # install-from-backup: clean up staging + marker only after a successful
     # import + provisioning, so an interrupted run re-imports on the next start.
@@ -1415,13 +1460,17 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         log "Install-from-backup: complete (staging cleaned up)"
     fi
 
-    # Tor-routed archive.org login can take 30s — background it so the
-    # rest of start_containers returns promptly. No-op if keys are set.
-    bundled_python -m onionpress.cli ensure-archive-s3-keys &
+    if [ "$ONIONPRESS_SITE_TYPE" != "static" ]; then
+        # Tor-routed archive.org login can take 30s — background it so the
+        # rest of start_containers returns promptly. No-op if keys are set.
+        # (Static installs fetch their own keys inside wayback-static.py —
+        # this path stores them in WP options, which don't exist there.)
+        bundled_python -m onionpress.cli ensure-archive-s3-keys &
 
-    # Configure site timezones to match the host machine so imported
-    # social-media timestamps display in local time. Idempotent.
-    configure_site_timezones
+        # Configure site timezones to match the host machine so imported
+        # social-media timestamps display in local time. Idempotent.
+        configure_site_timezones
+    fi
 
     # Install iptables rules to log clearnet access from non-Tor containers
     install_clearnet_logging
@@ -1521,7 +1570,7 @@ get_status() {
 # Function to get onion address (non-blocking, single attempt)
 get_onion_address() {
     cd "$DOCKER_DIR"
-    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/${ONIONPRESS_BACKEND_NICKNAME:-wordpress}/hostname 2>/dev/null || echo "")
     if [ ! -z "$ONION_ADDR" ]; then
         echo "$ONION_ADDR"
         return 0
@@ -1558,7 +1607,7 @@ wait_for_services() {
     while [ $waited -lt $max_wait ]; do
         # Step 1: Get onion address if we don't have it yet
         if [ -z "$onion_addr" ] || [ "$onion_addr" = "Generating..." ]; then
-            onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+            onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/${ONIONPRESS_BACKEND_NICKNAME:-wordpress}/hostname 2>/dev/null || echo "")
         fi
 
         # Step 2: Check if WordPress is responding locally
@@ -1583,7 +1632,7 @@ wait_for_services() {
             # Check Tor is bootstrapped
             if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
                 # Check WordPress is reachable from Tor container
-                if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
+                if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://${ONIONPRESS_BACKEND_HOST:-wordpress}:80/ 2>/dev/null; then
                     log "✓ Onion service ready: ${onion_addr}"
                     onion_ready=true
                 fi
@@ -1600,7 +1649,7 @@ wait_for_services() {
             fi
 
             # Write onion address to shared volume for WordPress plugins
-            docker exec onionpress-tor cp /var/lib/tor/hidden_service/wordpress/hostname /var/lib/onionpress/onion_address 2>>"$LOG_FILE" && \
+            docker exec onionpress-tor cp /var/lib/tor/hidden_service/${ONIONPRESS_BACKEND_NICKNAME:-wordpress}/hostname /var/lib/onionpress/onion_address 2>>"$LOG_FILE" && \
                 log "✓ Onion address written to shared volume" || \
                 log "WARNING: Failed to write onion address to shared volume"
 
@@ -1640,7 +1689,7 @@ _validate_oh_address() {
         our_address=$(basename "$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)" 2>/dev/null)
     fi
     if [ -z "$our_address" ] || [ "$our_address" = "." ]; then
-        our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+        our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/${ONIONPRESS_BACKEND_NICKNAME:-wordpress}/hostname 2>/dev/null | tr -d '\n\r ')
     fi
     if [ -n "$our_address" ] && [ "$addr" = "$our_address" ]; then
         echo '{"valid":false,"status":"self","message":"You cannot use your own onion address as the OnionHeaven hub."}'
@@ -2400,7 +2449,7 @@ main() {
             # prove install-from-backup preserved the address and did not
             # regenerate a vanity key during the restore.
             local scrub_addr_before scrub_log_mark
-            scrub_addr_before=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+            scrub_addr_before=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/${ONIONPRESS_BACKEND_NICKNAME:-wordpress}/hostname 2>/dev/null || echo "")
             scrub_log_mark=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
             echo "  Pre-scrub address: ${scrub_addr_before:-<none>}"
 
@@ -2451,7 +2500,7 @@ main() {
 
             # Check onion address is present
             local scrub_addr
-            scrub_addr=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
+            scrub_addr=$(docker compose -f "$DOCKER_DIR/docker-compose.yml" exec -T tor cat /var/lib/tor/hidden_service/${ONIONPRESS_BACKEND_NICKNAME:-wordpress}/hostname 2>/dev/null || echo "")
             if [ -n "$scrub_addr" ]; then
                 echo "  ✓ Onion address: $scrub_addr"
             else
