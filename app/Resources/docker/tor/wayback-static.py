@@ -525,7 +525,13 @@ def sweep_iteration(conn):
         for jid, url in defer.items():
             mark_error(conn, url, cdx_ext[jid], now)
         if do_now:
-            cdx = cdx_lookup_parallel({jid: url for jid, url in do_now.items()})
+            # The pages DB stores bare paths ("/about/") — CDX needs the
+            # full URL of the capture ("http://<onion>/about/"), same as
+            # the submit path below builds. Passing the raw path would
+            # query CDX for url=%2Fabout%2F, which matches nothing, and
+            # the rescue would silently never fire.
+            cdx = cdx_lookup_parallel(
+                {jid: f"http://{onion}{path}" for jid, path in do_now.items()})
             for jid, url in do_now.items():
                 ts = cdx.get(jid, "")
                 if ts:

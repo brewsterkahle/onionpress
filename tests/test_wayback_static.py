@@ -235,6 +235,10 @@ class TestSweepIteration(_StateStoreTestCase):
             did_work = wb.sweep_iteration(self.conn)
         self.assertTrue(did_work)
         m_cdx.assert_called_once()
+        # CDX must be queried with the FULL capture URL, not the stored
+        # bare path — url=%2Fa matches no snapshot and the rescue would
+        # silently never fire.
+        self.assertEqual(m_cdx.call_args[0][0], {"job-a": "http://abc.onion/a"})
         row = self.conn.execute(
             "SELECT archived_at, snapshot_ts FROM pages WHERE url = '/a'").fetchone()
         self.assertEqual(row[1], "20260102000000")
