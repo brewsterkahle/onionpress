@@ -477,10 +477,23 @@ class OnionPressCLI:
     def cmd_publish(self, source_dir: str) -> int:
         """Publish a static site: sync `source_dir` into ~/OnionPress/Site/.
 
-        Static-mode only. Syncs into a staging directory first and swaps it
-        in atomically so the nginx backend (which bind-mounts Site/
-        read-only) never serves a half-written tree. Refuses to publish an
-        empty directory — that would silently take the site offline.
+        Static-mode only. Syncs IN PLACE with `rsync --delete` — never by
+        replacing the Site/ directory itself. The running containers
+        bind-mount Site/ (nginx serves it read-only; the tor container's
+        follow-fetch sidecar writes into it), and a bind mount pins the
+        directory inode: a rename-and-recreate "atomic swap" would leave
+        nginx serving the orphaned old inode (emptied by cleanup — every
+        request 404s) until the containers are recreated. In-place rsync
+        keeps the mounted inode; visitors may briefly see a mixed tree
+        mid-sync, which is the acceptable trade-off.
+
+        `--exclude follows/` both skips a follows/ dir in the source and
+        (because --delete-excluded is NOT passed) protects the generated
+        Site/follows/ page from deletion, so a publish doesn't wipe it
+        until the next fetch cycle regenerates it.
+
+        Refuses to publish an empty directory — that would silently take
+        the site offline.
         """
         site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
         if site_type != "static":
@@ -490,18 +503,19 @@ class OnionPressCLI:
         if not os.path.isdir(source_dir):
             print(f"ERROR: {source_dir!r} is not a directory", file=sys.stderr)
             return 1
+        if not os.listdir(source_dir):
+            print("ERROR: source directory is empty — refusing to publish "
+                  "an empty site (this would take your site offline).",
+                  file=sys.stderr)
+            return 1
 
-        os.makedirs(self.paths.documents_dir, exist_ok=True)
         site_dir = os.path.join(self.paths.documents_dir, "Site")
-        staging_dir = os.path.join(self.paths.documents_dir, ".Site.staging")
-        previous_dir = os.path.join(self.paths.documents_dir, ".Site.previous")
+        os.makedirs(site_dir, exist_ok=True)
 
-        if os.path.exists(staging_dir):
-            shutil.rmtree(staging_dir)
         try:
             result = subprocess.run(
                 ["rsync", "-a", "--delete", "--exclude", "follows/",
-                 source_dir.rstrip("/") + "/", staging_dir + "/"],
+                 source_dir.rstrip("/") + "/", site_dir + "/"],
                 capture_output=True, text=True, timeout=300,
             )
         except FileNotFoundError:
@@ -510,31 +524,7 @@ class OnionPressCLI:
             return 1
         if result.returncode != 0:
             print(f"ERROR: rsync failed: {result.stderr.strip()}", file=sys.stderr)
-            shutil.rmtree(staging_dir, ignore_errors=True)
             return 1
-
-        if not os.path.isdir(staging_dir) or not os.listdir(staging_dir):
-            print("ERROR: source directory is empty — refusing to publish "
-                  "an empty site (this would take your site offline).",
-                  file=sys.stderr)
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            return 1
-
-        # The follow-fetch sidecar generates Site/follows/ independently of
-        # publish (see follow.py) — carry it forward so a publish doesn't
-        # make it disappear until the next fetch cycle regenerates it.
-        old_follows = os.path.join(site_dir, "follows")
-        if os.path.isdir(old_follows):
-            shutil.copytree(old_follows, os.path.join(staging_dir, "follows"))
-
-        # Atomic swap: move the live dir out of the way, move staging in.
-        if os.path.exists(previous_dir):
-            shutil.rmtree(previous_dir)
-        if os.path.exists(site_dir):
-            os.rename(site_dir, previous_dir)
-        os.rename(staging_dir, site_dir)
-        if os.path.exists(previous_dir):
-            shutil.rmtree(previous_dir, ignore_errors=True)
 
         print(f"Published {source_dir} -> {site_dir}")
         self.log(f"Published static site from {source_dir}")

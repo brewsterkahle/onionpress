@@ -332,6 +332,23 @@ class TestCmdPublish(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.docs_dir, ".Site.staging")))
         self.assertFalse(os.path.exists(os.path.join(self.docs_dir, ".Site.previous")))
 
+    def test_publish_preserves_site_dir_inode(self):
+        # The running containers bind-mount Site/, which pins its inode —
+        # a rename-and-recreate swap would leave nginx serving the orphaned
+        # old directory (guaranteed 404s until container recreation). The
+        # sync must happen IN PLACE.
+        cli = self._make_cli()
+        src1 = self._source_dir({"index.html": "v1"})
+        self.assertEqual(cli.cmd_publish(src1), 0)
+        site_dir = os.path.join(self.docs_dir, "Site")
+        inode_before = os.stat(site_dir).st_ino
+
+        src2 = self._source_dir({"index.html": "v2"})
+        self.assertEqual(cli.cmd_publish(src2), 0)
+        self.assertEqual(os.stat(site_dir).st_ino, inode_before,
+                         "Site/ was replaced instead of synced in place — "
+                         "this detaches the containers' bind mounts")
+
     def test_republish_removes_stale_files(self):
         cli = self._make_cli()
         src1 = self._source_dir({"old.html": "old"})
