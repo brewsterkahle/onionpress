@@ -76,6 +76,45 @@ class TestMacOSBuildBundlesKeyManager(unittest.TestCase):
         )
 
 
+class TestSetupPyIncludesFollow(unittest.TestCase):
+    """setup.py's py2app `includes` list must name onionpress.follow.
+
+    py2app runs menubar.py via exec(), not import, so it can't
+    auto-detect local `onionpress.X` submodules menubar.py imports at
+    runtime — each one needs its own line in `includes` (see setup.py's
+    own comment: "adding a new submodule means one new line here"). This
+    shipped once already: onionpress.follow was added for static-site
+    installs' `onionpress follow add/remove/list` but the includes line
+    was missed, which would raise ModuleNotFoundError on any Mac build
+    that doesn't happen to bundle the whole package by other means.
+    """
+
+    def test_includes_onionpress_follow(self):
+        src = _read("setup.py")
+        tree = ast.parse(src)
+        includes = None
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Dict)
+                    and any(isinstance(k, ast.Constant) and k.value == "includes"
+                            for k in node.keys)):
+                for key, value in zip(node.keys, node.values):
+                    if isinstance(key, ast.Constant) and key.value == "includes":
+                        includes = [
+                            elt.value for elt in value.elts
+                            if isinstance(elt, ast.Constant)
+                        ]
+        self.assertIsNotNone(
+            includes, "Could not find the `includes` list in setup.py's "
+            "py2app OPTIONS dict — has it been restructured? Update this test.",
+        )
+        self.assertIn(
+            "onionpress.follow", includes,
+            "setup.py's py2app `includes` list is missing "
+            "'onionpress.follow' — cli.py's follow subcommands would raise "
+            "ModuleNotFoundError in a built Mac app.",
+        )
+
+
 class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
     """mkp224o must be bundled at Contents/Resources/bin/mkp224o. On first run
     the macOS shell launcher's generate_vanity_address() (app/MacOS/onionpress)
