@@ -293,6 +293,55 @@ class TestProvisionPostInstallSubcommandPresent(unittest.TestCase):
         )
 
 
+class TestLinuxSetupStaticFlagParsed(unittest.TestCase):
+    """Invariant: `onionpress setup --static` must actually be parsed.
+
+    The usage comment has always documented `onionpress setup --static
+    [--user ONIONNAME]`, but on a FRESH install ONIONPRESS_SITE_TYPE (read
+    from config at script startup) can't see a flag on the very invocation
+    that's supposed to set SITE_TYPE=static — a bug that shipped once
+    already (the static branch was gated purely on that env var, so
+    --static silently fell through to the WordPress path with the flag
+    left as an unrecognized argument). Assert the setup) case actually
+    scans its own "$@" for --static, and that the scan happens BEFORE the
+    branch it's meant to unlock.
+    """
+
+    def test_setup_case_scans_args_for_static_before_branching(self):
+        import re
+
+        full = os.path.join(os.path.dirname(__file__), "..", "linux", "onionpress")
+        with open(full) as f:
+            lines = f.readlines()
+
+        # Top-level case arms in this script are consistently `        name)`
+        # on their own line (8-space indent, nothing else) — distinct from
+        # the nested `--user)`/`*)` arms inside setup)'s own arg-parsing
+        # loop, which are indented further and never match this alone.
+        arm_re = re.compile(r"^        [a-zA-Z_-]+\)\s*$")
+        setup_idx = next(
+            (i for i, l in enumerate(lines) if l.rstrip() == "        setup)"), None)
+        self.assertIsNotNone(setup_idx, "linux/onionpress is missing the "
+                              "`setup)` case entirely")
+
+        next_arm_idx = next(
+            (i for i in range(setup_idx + 1, len(lines)) if arm_re.match(lines[i])),
+            len(lines))
+        block_text = "".join(lines[setup_idx + 1:next_arm_idx])
+
+        scan_idx = block_text.find('"$_setup_arg" = "--static"')
+        gate_idx = block_text.find('"$ONIONPRESS_SITE_TYPE" = "static"')
+        self.assertNotEqual(scan_idx, -1,
+            "linux/onionpress's `setup)` case doesn't scan its own "
+            "arguments for --static — a fresh `onionpress setup --static` "
+            "would silently run the WordPress path instead")
+        self.assertNotEqual(gate_idx, -1,
+            "linux/onionpress's `setup)` case lost its static-mode branch")
+        self.assertLess(scan_idx, gate_idx,
+            "the --static arg scan must run BEFORE the branch that checks "
+            "ONIONPRESS_SITE_TYPE, or the flag arrives too late to matter")
+
+
 class TestDebPrermKillsTray(unittest.TestCase):
     """Invariant: the .deb's prerm script must kill the running tray.
 

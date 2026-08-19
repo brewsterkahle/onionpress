@@ -2353,6 +2353,20 @@ main() {
             #        onionpress setup --static [--user ONIONNAME]
             cd "$DOCKER_DIR"
 
+            # --static can arrive as a flag on THIS invocation, on a fresh
+            # install where SITE_TYPE=static doesn't exist in config yet —
+            # ONIONPRESS_SITE_TYPE (read from config at script startup,
+            # above) can't see a flag that hasn't been persisted anywhere.
+            # Without this scan, `onionpress setup --static` on a fresh
+            # install silently fell through to the WordPress branch with
+            # --static left as an unrecognized wp-cli argument.
+            for _setup_arg in "$@"; do
+                if [ "$_setup_arg" = "--static" ]; then
+                    ONIONPRESS_SITE_TYPE="static"
+                    break
+                fi
+            done
+
             # Static-site installs have no wp-cli/database — skip straight
             # to provisioning the content dir + onionname, no WP readiness
             # gate needed (there's no WordPress to wait for).
