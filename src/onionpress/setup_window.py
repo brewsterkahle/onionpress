@@ -159,6 +159,11 @@ class SetupProgressWindow(AppKit.NSObject):
         self._user_hint = None           # inline validation label
         self._pass_field = None
         self.language = "en_US"
+        # "wordpress" (default) or "static" — chosen once, at setup, via the
+        # segmented control at the top of the welcome view. Immutable after
+        # setup; see src/onionpress/config.py's SITE_TYPE.
+        self.site_type = "wordpress"
+        self._wp_only_views = []  # hidden when site_type == "static"
         self._on_setup_callback = None  # Called when user clicks "Set Up"
         self._showing_welcome = True
         return self
@@ -166,7 +171,7 @@ class SetupProgressWindow(AppKit.NSObject):
     # -- window creation ----------------------------------------------------
 
     def create_window(self):
-        width, height = 480, 640
+        width, height = 480, 690
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, width, height),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
@@ -238,19 +243,52 @@ class SetupProgressWindow(AppKit.NSObject):
         field_x = 180
         field_w = width - field_x - 40
 
+        # -- Site type: WordPress, or bring your own static site --
+        seg_w = field_w
+        self._site_type_seg = AppKit.NSSegmentedControl.alloc().initWithFrame_(
+            NSMakeRect(field_x, y - 2, seg_w, 24)
+        )
+        self._site_type_seg.setSegmentCount_(2)
+        self._site_type_seg.setLabel_forSegment_("WordPress", 0)
+        self._site_type_seg.setLabel_forSegment_("Bring your own static site", 1)
+        self._site_type_seg.setSelectedSegment_(0)
+        try:
+            self._site_type_seg.setSegmentStyle_(AppKit.NSSegmentStyleRounded)
+        except Exception:
+            pass
+        self._site_type_seg.setTarget_(self)
+        self._site_type_seg.setAction_(
+            objc.selector(self.siteTypeChanged_, signature=b'v@:@'))
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(label_x, y, 130, 20),
+            "Publish with",
+            font=_bold(13), color=NSColor.labelColor(),
+        ))
+        self.welcome_view.addSubview_(self._site_type_seg)
+        y -= 18
+        self.welcome_view.addSubview_(_label(
+            NSMakeRect(field_x, y, field_w, 14),
+            "Static: publish files you built yourself (Hugo, Jekyll, plain HTML, ...).",
+            font=_sys(10), color=_TEXT_SECONDARY,
+        ))
+
+        y -= 30  # spacing
+
         # Site Title
         y -= 24
-        self.welcome_view.addSubview_(_label(
+        title_label = _label(
             NSMakeRect(label_x, y, 130, 20),
             "Site Title",
             font=_bold(13), color=NSColor.labelColor(),
-        ))
+        )
+        self.welcome_view.addSubview_(title_label)
         self._title_field = _input_field(
             NSMakeRect(field_x, y - 2, field_w, 24),
             placeholder=_default_site_title(),
         )
         self._title_field.setStringValue_(_default_site_title())
         self.welcome_view.addSubview_(self._title_field)
+        self._wp_only_views += [title_label, self._title_field]
 
         # Onionname — the human-readable handle that OnionHome maps back to
         # this site's .onion address. Doubles as the WordPress admin username.
@@ -293,11 +331,13 @@ class SetupProgressWindow(AppKit.NSObject):
 
         # Password
         y -= 22
-        self.welcome_view.addSubview_(_label(
+        password_label = _label(
             NSMakeRect(label_x, y, 130, 20),
             "Password",
             font=_bold(13), color=NSColor.labelColor(),
-        ))
+        )
+        self.welcome_view.addSubview_(password_label)
+        self._wp_only_views.append(password_label)
         eye_w = 36
         pass_frame = NSMakeRect(field_x, y - 2, field_w - eye_w - 6, 24)
         # Visible field (hidden by default; shown when user clicks eye)
@@ -319,14 +359,17 @@ class SetupProgressWindow(AppKit.NSObject):
         eye_btn.setTarget_(self)
         eye_btn.setAction_(objc.selector(self.togglePasswordVisibility_, signature=b'v@:@'))
         self.welcome_view.addSubview_(eye_btn)
+        self._wp_only_views += [self._pass_field, self._pass_field_secure, eye_btn]
 
         # Password hint
         y -= 20
-        self.welcome_view.addSubview_(_label(
+        password_hint = _label(
             NSMakeRect(field_x, y, field_w, 16),
             "Save this password somewhere safe.",
             font=_sys(10), color=_TEXT_SECONDARY,
-        ))
+        )
+        self.welcome_view.addSubview_(password_hint)
+        self._wp_only_views.append(password_hint)
 
         y -= 30
 
@@ -350,11 +393,13 @@ class SetupProgressWindow(AppKit.NSObject):
         y -= 30
 
         # -- Language selector --
-        self.welcome_view.addSubview_(_label(
+        language_label = _label(
             NSMakeRect(label_x, y, 130, 20),
             "Language",
             font=_bold(13), color=NSColor.labelColor(),
-        ))
+        )
+        self.welcome_view.addSubview_(language_label)
+        self._wp_only_views.append(language_label)
         self._language_popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
             NSMakeRect(field_x, y - 2, field_w, 24), False
         )
@@ -374,6 +419,7 @@ class SetupProgressWindow(AppKit.NSObject):
         for name, _ in _languages:
             self._language_popup.addItemWithTitle_(name)
         self.welcome_view.addSubview_(self._language_popup)
+        self._wp_only_views.append(self._language_popup)
 
         y -= 30
         # -- Address prefix (advanced): choose the .onion vanity prefix now so
@@ -612,6 +658,18 @@ class SetupProgressWindow(AppKit.NSObject):
             self._pass_field.becomeFirstResponder()
             self._pass_visible = True
 
+    def siteTypeChanged_(self, sender):
+        """Toggle between WordPress and static-site mode.
+
+        Static mode has no site title/admin-password/language concept
+        (no wp-cli, no database) — hide those fields rather than validate
+        and then ignore them.
+        """
+        is_static = self._site_type_seg.selectedSegment() == 1
+        self.site_type = "static" if is_static else "wordpress"
+        for view in self._wp_only_views:
+            view.setHidden_(is_static)
+
     def regenerateOnionname_(self, sender):
         """Pick a fresh local adjective-noun suggestion in the current language."""
         if _setup_logic is None:
@@ -678,7 +736,9 @@ class SetupProgressWindow(AppKit.NSObject):
             else:
                 self._show_user_hint("")  # clear any prior error
                 self._user_hint.setHidden_(True)
-        if not self.admin_pass:
+        # Static-site installs have no admin password (no wp-cli, no
+        # database) — only require one for WordPress installs.
+        if self.site_type != "static" and not self.admin_pass:
             red_placeholder = AppKit.NSAttributedString.alloc().initWithString_attributes_(
                 "Choose a password", {
                     AppKit.NSForegroundColorAttributeName: NSColor.systemRedColor(),

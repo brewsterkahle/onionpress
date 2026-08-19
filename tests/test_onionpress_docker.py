@@ -186,6 +186,39 @@ class TestDockerCompose(FakeDockerTestCase):
         self.assertTrue(result.ok)
         self.assertIn("-f /path/to/docker-compose.yml", result.output)
 
+    def test_compose_injects_default_profile(self):
+        # wordpress/db carry `profiles:` tags — a compose call with no
+        # active profile silently skips them on pull/down. The wrapper
+        # must guarantee COMPOSE_PROFILES on every compose invocation.
+        self._write_fake_docker('#!/bin/bash\necho "COMPOSE_PROFILES=$COMPOSE_PROFILES"\n')
+        d = Docker(self.paths)
+        result = d.compose(["pull"])
+        self.assertIn("COMPOSE_PROFILES=wordpress", result.output)
+
+    def test_compose_profile_follows_config_site_type(self):
+        self._write_fake_docker('#!/bin/bash\necho "COMPOSE_PROFILES=$COMPOSE_PROFILES"\n')
+        with open(self.paths.config_file, "w") as f:
+            f.write("SITE_TYPE=static\n")
+        d = Docker(self.paths)
+        result = d.compose(["down"])
+        self.assertIn("COMPOSE_PROFILES=static", result.output)
+
+    def test_compose_profile_resolved_per_call_not_cached(self):
+        # SITE_TYPE is written mid-session by first-run setup — the
+        # profile must track the config file, not construction time.
+        self._write_fake_docker('#!/bin/bash\necho "COMPOSE_PROFILES=$COMPOSE_PROFILES"\n')
+        d = Docker(self.paths)
+        self.assertIn("COMPOSE_PROFILES=wordpress", d.compose(["ps"]).output)
+        with open(self.paths.config_file, "w") as f:
+            f.write("SITE_TYPE=static\n")
+        self.assertIn("COMPOSE_PROFILES=static", d.compose(["ps"]).output)
+
+    def test_compose_caller_profile_wins(self):
+        self._write_fake_docker('#!/bin/bash\necho "COMPOSE_PROFILES=$COMPOSE_PROFILES"\n')
+        d = Docker(self.paths)
+        result = d.compose(["up"], extra_env={"COMPOSE_PROFILES": "static"})
+        self.assertIn("COMPOSE_PROFILES=static", result.output)
+
 
 class TestContainerRunning(FakeDockerTestCase):
     def setUp(self):

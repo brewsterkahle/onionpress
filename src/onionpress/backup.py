@@ -28,6 +28,13 @@ def _default_data_dir() -> str:
     return os.path.expanduser("~/.onionpress")
 
 
+def _default_documents_dir() -> str:
+    """Resolve the default ~/OnionPress/ directory at call time (see
+    _default_data_dir — same not-cached rationale)."""
+    from onionpress.platform import default_documents_dir
+    return default_documents_dir()
+
+
 # ─── Instrumentation helpers (issue #214) ───────────────────────────────
 # Phase 1: log workload inputs and per-phase wall times so we can later
 # fit an ETA formula and surface estimates in the dialogs. Lines use a
@@ -283,162 +290,196 @@ def get_admin_username(data_dir=None):
     return "admin"
 
 
-def create_backup(onion_address, username, password, output_path, version, log_func, *, data_dir=None):
+def _extract_tor_keys_to_staging(staging, onion_address, log_func):
+    """Extract Tor keys into staging/tor-keys/; return the key-derived address.
+
+    Shared by both WordPress and static backups — Tor identity is
+    content-agnostic. See create_backup's docstring for why the derived
+    address (not the caller-supplied one) is authoritative.
+    """
+    log_func("Backup: extracting Tor keys...")
+    tor_dir = os.path.join(staging, 'tor-keys')
+    os.makedirs(tor_dir)
+
+    priv = key_manager.extract_private_key()
+    pub = key_manager.extract_public_key()
+    pem_data = key_manager.build_openssh_key(priv, pub)
+    with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
+        f.write(pem_data)
+
+    # Override caller-supplied onion_address with the address derived
+    # from the actual key being zipped. The caller passes
+    # self.onion_address from the menubar, which is a cached value
+    # updated only on the ~30s update_status poll. If a backup runs
+    # in the window after a vanity rotation / restore / key import
+    # but before that poll, the caller's value is stale and the
+    # backup is born with metadata.onion_address pointing at the
+    # PRIOR address while tor-keys/ holds the NEW key — exactly the
+    # corrupted-backup shape that propagates the mismatch into
+    # KEYS_DIR on the hub when this backup is later restored and
+    # heartbeated. Derive from the key and the backup is internally
+    # consistent regardless of the caller's view.
+    derived_address = key_manager.derive_onion_address(pub)
+    if onion_address and onion_address != derived_address:
+        log_func(f"Backup: KEY-MISMATCH — caller-supplied "
+                 f"onion_address={onion_address} does not match "
+                 f"key_derives_to={derived_address}. Recording "
+                 f"DERIVED in metadata (key is authoritative). The "
+                 f"caller's cached onion_address was stale — likely "
+                 f"a backup taken in the window after a vanity "
+                 f"rotation / restore / key import but before "
+                 f"update_status repolled the container.")
+    return derived_address
+
+
+def create_backup(onion_address, username, password, output_path, version, log_func, *,
+                   data_dir=None, site_type="wordpress", documents_dir=None):
     """Create a full OnionPress backup zip.
 
     Args:
         onion_address: Current .onion address
-        username: WP admin username (stored in metadata)
+        username: WP admin username (stored in metadata). Ignored for
+            static-site installs.
         password: Zip encryption password
         data_dir: OnionPress data directory (defaults to ~/.onionpress). Tests pass a sandbox path.
         output_path: Where to write the .zip file
         version: OnionPress version string
         log_func: Callable for progress logging
+        site_type: "wordpress" (default) or "static". Static installs skip
+            the DB dump/wp-content tar entirely and instead tar
+            ~/OnionPress/Site/ directly off the host filesystem.
+        documents_dir: ~/OnionPress/ directory (static mode only). Tests
+            pass a sandbox path.
     """
     backup_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-backup-')
     try:
-        # 0. Workload stats — log once up front (issue #214). Read DB
-        #    creds here so we can reuse them for the dump phase below
-        #    without paying for two round trips through wp-cli.
-        db_creds = _get_db_credentials()
-        _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
-
-        # 1. Extract Tor keys (Arti OpenSSH keystore format)
+        # 1. Extract Tor keys (Arti OpenSSH keystore format) — shared by
+        # both site types, content-agnostic.
         with _phase_timer(log_func, 'BACKUP', 'tor_keys'):
-            log_func("Backup: extracting Tor keys...")
-            tor_dir = os.path.join(staging, 'tor-keys')
-            os.makedirs(tor_dir)
+            onion_address = _extract_tor_keys_to_staging(staging, onion_address, log_func)
 
-            priv = key_manager.extract_private_key()
-            pub = key_manager.extract_public_key()
-            pem_data = key_manager.build_openssh_key(priv, pub)
-            with open(os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private'), 'wb') as f:
-                f.write(pem_data)
+        if site_type == "static":
+            is_onionheaven = False
+            is_onionhome = False
+            with _phase_timer(log_func, 'BACKUP', 'site_copy'):
+                log_func("Backup: copying static site content...")
+                _docs_dir = documents_dir if documents_dir is not None else _default_documents_dir()
+                site_src = os.path.join(_docs_dir, 'Site')
+                site_dst = os.path.join(staging, 'site')
+                if os.path.isdir(site_src):
+                    shutil.copytree(site_src, site_dst)
+                    site_bytes = _dir_size_bytes(site_dst)
+                else:
+                    os.makedirs(site_dst, exist_ok=True)
+                    site_bytes = 0
+                log_func(f"BACKUP_STATS: site_bytes={site_bytes}")
+        else:
+            # 0. Workload stats — log once up front (issue #214). Read DB
+            #    creds here so we can reuse them for the dump phase below
+            #    without paying for two round trips through wp-cli.
+            db_creds = _get_db_credentials()
+            _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
 
-            # Override caller-supplied onion_address with the address derived
-            # from the actual key being zipped. The caller passes
-            # self.onion_address from the menubar, which is a cached value
-            # updated only on the ~30s update_status poll. If a backup runs
-            # in the window after a vanity rotation / restore / key import
-            # but before that poll, the caller's value is stale and the
-            # backup is born with metadata.onion_address pointing at the
-            # PRIOR address while tor-keys/ holds the NEW key — exactly the
-            # corrupted-backup shape that propagates the mismatch into
-            # KEYS_DIR on the hub when this backup is later restored and
-            # heartbeated. Derive from the key and the backup is internally
-            # consistent regardless of the caller's view.
-            derived_address = key_manager.derive_onion_address(pub)
-            if onion_address and onion_address != derived_address:
-                log_func(f"Backup: KEY-MISMATCH — caller-supplied "
-                         f"onion_address={onion_address} does not match "
-                         f"key_derives_to={derived_address}. Recording "
-                         f"DERIVED in metadata (key is authoritative). The "
-                         f"caller's cached onion_address was stale — likely "
-                         f"a backup taken in the window after a vanity "
-                         f"rotation / restore / key import but before "
-                         f"update_status repolled the container.")
-            onion_address = derived_address
+            # 2. Dump WordPress database via mariadb-dump in the db container
+            # (wp db export uses mysqldump which isn't in the WordPress container)
+            with _phase_timer(log_func, 'BACKUP', 'db_dump'):
+                log_func("Backup: exporting database...")
+                db_dir = os.path.join(staging, 'database')
+                os.makedirs(db_dir)
 
-        # 2. Dump WordPress database via mariadb-dump in the db container
-        # (wp db export uses mysqldump which isn't in the WordPress container)
-        with _phase_timer(log_func, 'BACKUP', 'db_dump'):
-            log_func("Backup: exporting database...")
-            db_dir = os.path.join(staging, 'database')
-            os.makedirs(db_dir)
+                result = subprocess.run(
+                    ['docker', 'exec', 'onionpress-db',
+                     'mariadb-dump',
+                     '-u', db_creds['user'],
+                     '-p' + db_creds['password'],
+                     db_creds['name']],
+                    capture_output=True, timeout=120
+                )
+                if result.returncode != 0:
+                    raise Exception(f"Database export failed: {result.stderr.decode(errors='replace')}")
+                with open(os.path.join(db_dir, 'wordpress.sql'), 'wb') as f:
+                    f.write(result.stdout)
 
-            result = subprocess.run(
-                ['docker', 'exec', 'onionpress-db',
-                 'mariadb-dump',
-                 '-u', db_creds['user'],
-                 '-p' + db_creds['password'],
-                 db_creds['name']],
-                capture_output=True, timeout=120
-            )
-            if result.returncode != 0:
-                raise Exception(f"Database export failed: {result.stderr.decode(errors='replace')}")
-            with open(os.path.join(db_dir, 'wordpress.sql'), 'wb') as f:
-                f.write(result.stdout)
+            # 3. Copy wp-content from container, excluding:
+            #    - creations/: bind-mounted from ~/OnionPress/Creations,
+            #      often multi-GB of media. Lives on the host filesystem already,
+            #      so docker-cp'ing it through the VM and then re-encrypting it
+            #      into the zip is redundant work for a local backup.
+            #    - .thumbs/: auto-generated macOS qlmanage thumbnails; regenerate
+            #      on demand.
+            #    - .DS_Store: Finder cruft.
+            #
+            #    Stream via `docker exec tar -cf - | tar -xf -` instead of
+            #    docker cp so the excludes apply at read time (no wasted IO
+            #    pulling Creations across the VM boundary).
+            with _phase_timer(log_func, 'BACKUP', 'wpcontent_tar'):
+                log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
+                wpcontent_dir = os.path.join(staging, 'wp-content')
+                os.makedirs(wpcontent_dir, exist_ok=True)
+                docker_tar = subprocess.Popen(
+                    ['docker', 'exec', 'onionpress-wordpress',
+                     'tar', '-cf', '-',
+                     '--exclude=./creations',
+                     '--exclude=.thumbs',
+                     '--exclude=.DS_Store',
+                     '-C', '/var/www/html/wp-content', '.'],
+                    stdout=subprocess.PIPE
+                )
+                host_tar = subprocess.run(
+                    ['tar', '-xf', '-', '-C', wpcontent_dir],
+                    stdin=docker_tar.stdout, timeout=300
+                )
+                docker_tar.stdout.close()
+                docker_rc = docker_tar.wait(timeout=10)
+                if docker_rc != 0 or host_tar.returncode != 0:
+                    raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
 
-        # 3. Copy wp-content from container, excluding:
-        #    - creations/: bind-mounted from ~/OnionPress/Creations,
-        #      often multi-GB of media. Lives on the host filesystem already,
-        #      so docker-cp'ing it through the VM and then re-encrypting it
-        #      into the zip is redundant work for a local backup.
-        #    - .thumbs/: auto-generated macOS qlmanage thumbnails; regenerate
-        #      on demand.
-        #    - .DS_Store: Finder cruft.
-        #
-        #    Stream via `docker exec tar -cf - | tar -xf -` instead of
-        #    docker cp so the excludes apply at read time (no wasted IO
-        #    pulling Creations across the VM boundary).
-        with _phase_timer(log_func, 'BACKUP', 'wpcontent_tar'):
-            log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
-            wpcontent_dir = os.path.join(staging, 'wp-content')
-            os.makedirs(wpcontent_dir, exist_ok=True)
-            docker_tar = subprocess.Popen(
+            # 4. Backup OnionHeaven data if this is OnionHeaven instance
+            #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
+            is_onionheaven = False
+            onionheaven_check = subprocess.run(
                 ['docker', 'exec', 'onionpress-wordpress',
-                 'tar', '-cf', '-',
-                 '--exclude=./creations',
-                 '--exclude=.thumbs',
-                 '--exclude=.DS_Store',
-                 '-C', '/var/www/html/wp-content', '.'],
-                stdout=subprocess.PIPE
+                 'test', '-f', '/var/lib/onionpress/onionheaven/master-key.json'],
+                capture_output=True, timeout=10
             )
-            host_tar = subprocess.run(
-                ['tar', '-xf', '-', '-C', wpcontent_dir],
-                stdin=docker_tar.stdout, timeout=300
+            if onionheaven_check.returncode == 0:
+                with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
+                    log_func("Backup: copying OnionHeaven data (encrypted keys, registry)...")
+                    is_onionheaven = True
+                    onionheaven_dir = os.path.join(staging, 'onionheaven')
+                    subprocess.run(
+                        ['docker', 'cp',
+                         'onionpress-wordpress:/var/lib/onionpress/onionheaven/.',
+                         onionheaven_dir],
+                        capture_output=True, timeout=60, check=True
+                    )
+                    # Remove the ephemeral unlock file if it was copied
+                    unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
+                    if os.path.exists(unlocked_file):
+                        os.unlink(unlocked_file)
+
+            # 4b. Backup OnionHome name registry if this is an OnionHome instance.
+            #     The DB is tiny (KB) but losing it strands every inbound
+            #     /api/name/lookup/NAME that ever pointed here — it's the
+            #     canonical record of who's who in the onion directory.
+            is_onionhome = False
+            onionhome_check = subprocess.run(
+                ['docker', 'exec', 'onionpress-wordpress',
+                 'test', '-f', '/var/lib/onionpress/onionhome/onionnames.db'],
+                capture_output=True, timeout=10
             )
-            docker_tar.stdout.close()
-            docker_rc = docker_tar.wait(timeout=10)
-            if docker_rc != 0 or host_tar.returncode != 0:
-                raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
-
-        # 4. Backup OnionHeaven data if this is OnionHeaven instance
-        #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
-        is_onionheaven = False
-        onionheaven_check = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'test', '-f', '/var/lib/onionpress/onionheaven/master-key.json'],
-            capture_output=True, timeout=10
-        )
-        if onionheaven_check.returncode == 0:
-            with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
-                log_func("Backup: copying OnionHeaven data (encrypted keys, registry)...")
-                is_onionheaven = True
-                onionheaven_dir = os.path.join(staging, 'onionheaven')
-                subprocess.run(
-                    ['docker', 'cp',
-                     'onionpress-wordpress:/var/lib/onionpress/onionheaven/.',
-                     onionheaven_dir],
-                    capture_output=True, timeout=60, check=True
-                )
-                # Remove the ephemeral unlock file if it was copied
-                unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
-                if os.path.exists(unlocked_file):
-                    os.unlink(unlocked_file)
-
-        # 4b. Backup OnionHome name registry if this is an OnionHome instance.
-        #     The DB is tiny (KB) but losing it strands every inbound
-        #     /api/name/lookup/NAME that ever pointed here — it's the
-        #     canonical record of who's who in the onion directory.
-        is_onionhome = False
-        onionhome_check = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'test', '-f', '/var/lib/onionpress/onionhome/onionnames.db'],
-            capture_output=True, timeout=10
-        )
-        if onionhome_check.returncode == 0:
-            with _phase_timer(log_func, 'BACKUP', 'onionhome_copy'):
-                log_func("Backup: copying OnionHome name registry...")
-                is_onionhome = True
-                onionhome_dir = os.path.join(staging, 'onionhome')
-                subprocess.run(
-                    ['docker', 'cp',
-                     'onionpress-wordpress:/var/lib/onionpress/onionhome/.',
-                     onionhome_dir],
-                    capture_output=True, timeout=60, check=True
-                )
+            if onionhome_check.returncode == 0:
+                with _phase_timer(log_func, 'BACKUP', 'onionhome_copy'):
+                    log_func("Backup: copying OnionHome name registry...")
+                    is_onionhome = True
+                    onionhome_dir = os.path.join(staging, 'onionhome')
+                    subprocess.run(
+                        ['docker', 'cp',
+                         'onionpress-wordpress:/var/lib/onionpress/onionhome/.',
+                         onionhome_dir],
+                        capture_output=True, timeout=60, check=True
+                    )
 
         # 5. Save non-default config values
         _data_dir = data_dir if data_dir is not None else _default_data_dir()
@@ -458,13 +499,15 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             'backup_date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'onionpress_version': version,
             'username': username,
+            'is_static': site_type == "static",
             'is_onionheaven': is_onionheaven,
             'is_onionhome': is_onionhome,
             # Creations aren't inside wp-content anymore; they're in the
             # user's ~/OnionPress/Creations directory. Flag this
             # so restore can surface a useful "also copy your Documents"
             # reminder instead of silently producing an empty Creations page.
-            'excludes_creations': True,
+            # Not applicable to static installs (no wp-content at all).
+            'excludes_creations': site_type != "static",
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -711,6 +754,24 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
     except OSError:
         pass
     _, metadata = extract_backup(zip_path, password, log_func, staging=staging)
+
+    # Persist the backup's site type BEFORE anything reads config again.
+    # Everything downstream — containers.py's _build_env/start_core (which
+    # picks COMPOSE_PROFILES and the wordpress+db vs. site service set),
+    # the launchers' env exports, and the tor container's onion-service
+    # nickname — keys off SITE_TYPE in config, while cmd_restore derives
+    # the keystore nickname from this metadata. Without this write, a
+    # static backup restored onto a fresh (default-wordpress) install
+    # seeds the key into hss/site but then boots the WordPress topology
+    # with nickname "wordpress" — a brand-new onion address instead of
+    # the restored identity. Restore is a full teardown/rebuild, so
+    # adopting the backup's type is the correct semantic in both
+    # directions; old backups without is_static restore as wordpress.
+    restored_site_type = 'static' if metadata.get('is_static') else 'wordpress'
+    config_path = os.path.join(_data_dir, 'config')
+    write_value(config_path, 'SITE_TYPE', restored_site_type)
+    log_func(f"Restore: SITE_TYPE set to {restored_site_type} (from backup metadata)")
+
     seed_onion_key_for_install(staging, metadata, log_func, data_dir=_data_dir)
     apply_config_overrides(staging, log_func, data_dir=_data_dir)
     marker = os.path.join(_data_dir, INSTALL_FROM_BACKUP_MARKER)
@@ -892,12 +953,30 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def restore_container_artifacts(staging, metadata, log_func):
-    """Import a backup's container-side state into the RUNNING db + wordpress
-    containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
-    and multisite constants. Shared by restore_from_backup (in-place) and the
-    install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
+def restore_container_artifacts(staging, metadata, log_func, *, documents_dir=None):
+    """Import a backup's artifacts into the current install: WordPress DB,
+    wp-content, OnionHeaven data, OnionHome registry, and multisite
+    constants — or, for a static-site backup (metadata['is_static']),
+    the published site content. Shared by restore_from_backup (in-place)
+    and the install-from-backup path. WordPress mode requires
+    onionpress-db + onionpress-wordpress up; static mode is a pure host
+    filesystem operation (no containers needed).
     """
+    if metadata.get('is_static'):
+        with _phase_timer(log_func, 'RESTORE', 'site_copy'):
+            log_func("Restore: restoring static site content...")
+            site_src = _find_dir(staging, 'site')
+            _docs_dir = documents_dir if documents_dir is not None else _default_documents_dir()
+            site_dst = os.path.join(_docs_dir, 'Site')
+            if os.path.isdir(site_src):
+                if os.path.isdir(site_dst):
+                    shutil.rmtree(site_dst)
+                shutil.copytree(site_src, site_dst)
+                log_func(f"Restore: site content restored to {site_dst}")
+            else:
+                log_func("Restore: WARNING — backup has no site/ directory")
+        return
+
     db_dir = _find_dir(staging, 'database')
     wpcontent_dir = _find_dir(staging, 'wp-content')
 

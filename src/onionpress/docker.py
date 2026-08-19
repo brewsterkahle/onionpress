@@ -140,6 +140,30 @@ class Docker:
             args = ["exec", container] + list(command)
         return self.run(args, timeout=timeout, check=check, quiet=quiet)
 
+    def _compose_profiles_env(self) -> str:
+        """Resolve COMPOSE_PROFILES from the install's SITE_TYPE, per call.
+
+        The wordpress/db and site services carry `profiles:` tags in
+        docker-compose.yml, and Compose silently *excludes* profiled
+        services from bare `pull`/`down`/`ps` invocations when no profile
+        is active — so a compose call without this env var would skip
+        pulling the WordPress image and leave wordpress/db running on
+        `down`. Resolved lazily (not cached at construction) so a
+        SITE_TYPE written mid-session by first-run setup takes effect
+        without an app restart.
+        """
+        site_type = "wordpress"
+        try:
+            with open(self.paths.config_file, "r", encoding="utf-8",
+                      errors="replace") as f:
+                for line in f:
+                    if line.strip().startswith("SITE_TYPE="):
+                        site_type = line.strip().split("=", 1)[1]
+                        break
+        except OSError:
+            pass
+        return site_type if site_type in ("wordpress", "static") else "wordpress"
+
     def compose(
         self,
         args: list,
@@ -162,6 +186,11 @@ class Docker:
             for f in compose_files:
                 cmd_args.extend(["-f", f])
         cmd_args.extend(str(a) for a in args)
+        # Guarantee an active profile on every compose call — callers that
+        # pass their own COMPOSE_PROFILES (containers.py's _build_env) win.
+        if not extra_env or "COMPOSE_PROFILES" not in extra_env:
+            extra_env = dict(extra_env or {})
+            extra_env["COMPOSE_PROFILES"] = self._compose_profiles_env()
         return self.run(cmd_args, timeout=timeout, check=check, extra_env=extra_env)
 
     def container_running(self, name: str) -> bool:

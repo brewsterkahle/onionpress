@@ -56,11 +56,19 @@ LEGACY_DB_PATH = "/var/lib/onionhome/onionnames.db"
 MIN_NAME_LEN = 5
 MAX_NAME_LEN = 40
 
-# WordPress container hostname on the Docker network — used to refresh the
+# Content-backend hostname on the Docker network — used to refresh the
 # dynamic reservations table from /wp-json. Short timeout: if WP is not up
-# we skip this refresh and try again on the next tick.
-WP_API_URL = "http://wordpress:80/wp-json/wp/v2/pages"
+# we skip this refresh and try again on the next tick. No equivalent exists
+# for static-site installs (no page/slug concept), see SITE_TYPE below.
+WP_API_URL = "http://{}:80/wp-json/wp/v2/pages".format(
+    os.environ.get("ONIONPRESS_BACKEND_HOST", "wordpress")
+)
 WP_API_TIMEOUT = 5
+
+# "wordpress" (default) or "static" — dynamic reservations refresh only
+# applies to WordPress installs (WP page slugs); static installs have no
+# equivalent and skip the refresh entirely.
+SITE_TYPE = os.environ.get("ONIONPRESS_SITE_TYPE", "wordpress")
 
 # How often to refresh dynamic reservations (seconds).
 DYNAMIC_REFRESH_INTERVAL = 3600
@@ -507,6 +515,8 @@ def refresh_dynamic_reservations(conn, slugs=None):
     fetch failed (no changes made).
     """
     if slugs is None:
+        if SITE_TYPE != "wordpress":
+            return None
         slugs = fetch_wp_slugs()
         if not slugs:
             return None
@@ -574,8 +584,9 @@ def start_refresh_thread(db_path=DB_PATH, interval=DYNAMIC_REFRESH_INTERVAL):
 # OnionHome via Tor SOCKS. Both paths go through helpers here so the logic
 # is testable without touching HTTPServer.
 
-CTOR_SECRET_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"
-CTOR_PUBLIC_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
+_BACKEND_NICKNAME = os.environ.get("ONIONPRESS_BACKEND_NICKNAME", "wordpress")
+CTOR_SECRET_PATH = f"/var/lib/tor/hidden_service/{_BACKEND_NICKNAME}/hs_ed25519_secret_key"
+CTOR_PUBLIC_PATH = f"/var/lib/tor/hidden_service/{_BACKEND_NICKNAME}/hs_ed25519_public_key"
 
 # 32-byte fixed prefixes used by C Tor's key files. See key-convert.py for
 # the reference implementation.
@@ -606,8 +617,8 @@ def read_local_hs_key(secret_path=CTOR_SECRET_PATH,
 
 
 def read_local_onion_address(
-        hostname_path="/var/lib/tor/hidden_service/wordpress/hostname"):
-    """Return this instance's wordpress onion address, or None if not written."""
+        hostname_path=f"/var/lib/tor/hidden_service/{_BACKEND_NICKNAME}/hostname"):
+    """Return this instance's content-backend onion address, or None if not written."""
     try:
         with open(hostname_path) as f:
             addr = f.read().strip()

@@ -44,15 +44,37 @@ def send_message(msg):
     sys.stdout.buffer.flush()
 
 
+def _backend_nickname():
+    """Docker-network hostname / onion-service nickname for this install.
+
+    Self-contained (no relative import) — this file runs standalone as a
+    subprocess invoked directly by the browser, not as part of the
+    onionpress package. Mirrors key_manager.py's _backend_nickname().
+    """
+    config_path = os.path.join(os.path.expanduser("~"), ".onionpress", "config")
+    site_type = "wordpress"
+    try:
+        with open(config_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SITE_TYPE="):
+                    site_type = line.split("=", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    return "site" if site_type == "static" else "wordpress"
+
+
 def get_onion_address():
     """Read the user's .onion address from the Tor container."""
     try:
         # Try reading from the hostname file via docker
         docker_bin = _find_docker()
         env = _docker_env()
+        nickname = _backend_nickname()
         result = subprocess.run(
             [docker_bin, "exec", "onionpress-tor",
-             "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+             "cat", f"/var/lib/tor/hidden_service/{nickname}/hostname"],
             capture_output=True, text=True, timeout=5, env=env
         )
         if result.returncode == 0:

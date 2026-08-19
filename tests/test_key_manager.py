@@ -12,8 +12,10 @@ failure reporting so a regression would fail loudly.
 import base64
 import hashlib
 import os
+import shutil
 import struct
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -139,6 +141,70 @@ class TestExtractKeysCTor(unittest.TestCase):
         with mock.patch.object(key_manager.subprocess, "run",
                                side_effect=_mock_run_factory(files)):
             _, pub = key_manager.extract_keys()
+        self.assertEqual(pub, public)
+
+
+class TestRefreshPaths(unittest.TestCase):
+    """extract_keys()/write_private_key() must re-read SITE_TYPE on every
+    call, not just at module import — the menubar is a long-lived process
+    and SITE_TYPE is written mid-session by first-run setup, after
+    key_manager was already imported. A module-load-time-only nickname
+    would leave the whole first session reading hss/wordpress paths on a
+    freshly-chosen static install."""
+
+    def setUp(self):
+        self.tmp_home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_home, ignore_errors=True)
+        self.data_dir = os.path.join(self.tmp_home, ".onionpress")
+        os.makedirs(self.data_dir)
+        # os.path.expanduser("~") reads $HOME on POSIX — scope it to a
+        # throwaway dir instead of monkeypatching the shared os.path module.
+        self._patch = mock.patch.dict(os.environ, {"HOME": self.tmp_home})
+        self._patch.start()
+        # addCleanup runs LIFO: register _refresh_paths first so it's the
+        # SECOND (later) callback to run, after the HOME patch is already
+        # stopped — otherwise it would re-read the tmp_home config (which
+        # may say static) instead of the real environment, leaving
+        # BACKEND_NICKNAME pointing at "site" for every later test in
+        # this file that reads key_manager.CTOR_SECRET_PATH etc. at call time.
+        self.addCleanup(key_manager._refresh_paths)
+        self.addCleanup(self._patch.stop)
+
+    def _write_site_type(self, value):
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write(f"SITE_TYPE={value}\n")
+
+    def test_defaults_to_wordpress_with_no_config(self):
+        key_manager._refresh_paths()
+        self.assertEqual(key_manager.BACKEND_NICKNAME, "wordpress")
+
+    def test_picks_up_static_written_after_import(self):
+        # Simulates: module already imported (constants frozen at
+        # "wordpress"), then the welcome screen writes SITE_TYPE=static
+        # mid-session, then a key operation runs.
+        self.assertEqual(key_manager.BACKEND_NICKNAME, "wordpress")
+        self._write_site_type("static")
+        key_manager._refresh_paths()
+        self.assertEqual(key_manager.BACKEND_NICKNAME, "site")
+        self.assertIn("/hidden_service/site/", key_manager.CTOR_SECRET_PATH)
+        self.assertIn("/hidden_service/site/", key_manager.CTOR_HOSTNAME_PATH)
+        self.assertIn("/keystore/hss/site/", key_manager.ARTI_KEYSTORE_PATH)
+
+    def test_extract_keys_uses_refreshed_nickname(self):
+        self._write_site_type("static")
+        expanded, public, _ = _fresh_keypair()
+        pem = key_manager.build_openssh_key(expanded, public)
+
+        # Keyed by the path AFTER refresh (i.e. the "site" nickname) —
+        # extract_keys() must call _refresh_paths() before looking this up.
+        key_manager._refresh_paths()
+        files = {key_manager.ARTI_KEYSTORE_PATH: (0, pem)}
+        self.assertIn("hss/site/", key_manager.ARTI_KEYSTORE_PATH)
+
+        with mock.patch.object(key_manager.subprocess, "run",
+                               side_effect=_mock_run_factory(files)):
+            priv, pub = key_manager.extract_keys()
+        self.assertEqual(priv, expanded)
         self.assertEqual(pub, public)
 
 
