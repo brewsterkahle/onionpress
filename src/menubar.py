@@ -3880,73 +3880,113 @@ class OnionPressApp(rumps.App):
         (once the user dismisses the "Done" alert) or False on any cancel /
         failure. The uninstall "backup first" flow uses it to proceed only
         after a successful backup; the menu item passes none (unchanged)."""
-        # Show credentials dialog using AppKit accessory view
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("Backup OnionPress")
-        alert.setInformativeText_(
-            "Enter your WordPress administrator credentials.\n"
-            "The password will be used to encrypt the backup.")
+        site_type = self.read_config_value("SITE_TYPE", "wordpress")
 
-        icon_path = os.path.join(self.resources_dir, "app-icon.png")
-        if os.path.exists(icon_path):
-            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-            if icon:
-                alert.setIcon_(icon)
+        if site_type == "static":
+            # No WP admin account to verify — the zip's own encryption
+            # password is the security boundary (matches cli.py's
+            # cmd_backup). Just ask for that password.
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Backup OnionPress")
+            alert.setInformativeText_(
+                "Choose a password to encrypt the backup.")
 
-        # Build accessory view with username and password fields
-        container = AppKit.NSView.alloc().initWithFrame_(
-            AppKit.NSMakeRect(0, 0, 300, 70))
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
 
-        user_label = AppKit.NSTextField.labelWithString_("Username:")
-        user_label.setFrame_(AppKit.NSMakeRect(0, 48, 80, 18))
-        container.addSubview_(user_label)
+            pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 300, 24))
+            alert.setAccessoryView_(pass_field)
+            alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+            alert.window().setInitialFirstResponder_(pass_field)
 
-        user_field = AppKit.NSTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(85, 44, 210, 24))
-        user_field.setStringValue_(self._get_admin_username())
-        container.addSubview_(user_field)
+            response = alert.runModal()
+            if response != 1000:  # Not "Backup"
+                if on_complete:
+                    on_complete(False)
+                return
 
-        pass_label = AppKit.NSTextField.labelWithString_("Password:")
-        pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
-        container.addSubview_(pass_label)
+            username = "site"
+            password = pass_field.stringValue()
 
-        pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(85, 14, 210, 24))
-        container.addSubview_(pass_field)
+            if not password:
+                rumps.alert(title="Missing Password",
+                            message="A password is required.")
+                if on_complete:
+                    on_complete(False)
+                return
+        else:
+            # Show credentials dialog using AppKit accessory view
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Backup OnionPress")
+            alert.setInformativeText_(
+                "Enter your WordPress administrator credentials.\n"
+                "The password will be used to encrypt the backup.")
 
-        alert.setAccessoryView_(container)
-        alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
-        alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
 
-        # Make username field first responder
-        alert.window().setInitialFirstResponder_(user_field)
-        user_field.setNextKeyView_(pass_field)
+            # Build accessory view with username and password fields
+            container = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 300, 70))
 
-        response = alert.runModal()
-        if response != 1000:  # Not "Backup"
-            if on_complete:
-                on_complete(False)
-            return
+            user_label = AppKit.NSTextField.labelWithString_("Username:")
+            user_label.setFrame_(AppKit.NSMakeRect(0, 48, 80, 18))
+            container.addSubview_(user_label)
 
-        username = user_field.stringValue().strip()
-        password = pass_field.stringValue()
+            user_field = AppKit.NSTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(85, 44, 210, 24))
+            user_field.setStringValue_(self._get_admin_username())
+            container.addSubview_(user_field)
 
-        if not username or not password:
-            rumps.alert(title="Missing Credentials",
-                        message="Both username and password are required.")
-            if on_complete:
-                on_complete(False)
-            return
+            pass_label = AppKit.NSTextField.labelWithString_("Password:")
+            pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
+            container.addSubview_(pass_label)
 
-        # Verify credentials
-        self.log("Backup: verifying credentials...")
-        ok, err = backup_manager.verify_wp_admin(username, password)
-        if not ok:
-            self.log(f"Backup: credential verification failed: {err}")
-            rumps.alert(title="Verification Failed", message=err)
-            if on_complete:
-                on_complete(False)
-            return
+            pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(85, 14, 210, 24))
+            container.addSubview_(pass_field)
+
+            alert.setAccessoryView_(container)
+            alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+
+            # Make username field first responder
+            alert.window().setInitialFirstResponder_(user_field)
+            user_field.setNextKeyView_(pass_field)
+
+            response = alert.runModal()
+            if response != 1000:  # Not "Backup"
+                if on_complete:
+                    on_complete(False)
+                return
+
+            username = user_field.stringValue().strip()
+            password = pass_field.stringValue()
+
+            if not username or not password:
+                rumps.alert(title="Missing Credentials",
+                            message="Both username and password are required.")
+                if on_complete:
+                    on_complete(False)
+                return
+
+            # Verify credentials
+            self.log("Backup: verifying credentials...")
+            ok, err = backup_manager.verify_wp_admin(username, password)
+            if not ok:
+                self.log(f"Backup: credential verification failed: {err}")
+                rumps.alert(title="Verification Failed", message=err)
+                if on_complete:
+                    on_complete(False)
+                return
 
         # Show NSSavePanel for output location
         panel = AppKit.NSSavePanel.savePanel()
@@ -3997,7 +4037,8 @@ class OnionPressApp(rumps.App):
 
                 backup_manager.create_backup(
                     self.onion_address, username, password,
-                    output_path, self.version, log_and_update)
+                    output_path, self.version, log_and_update,
+                    site_type=site_type, documents_dir=self._paths.documents_dir)
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
