@@ -137,6 +137,102 @@ class TestFetchCycle(unittest.TestCase):
         reloaded = ff.read_follows()
         self.assertEqual(len(reloaded["follows"]), 2)
 
+    def test_concurrent_add_during_fetch_is_not_reverted(self):
+        # Simulates `onionpress follow add` landing (via docker exec from
+        # the host) while fetch_cycle()'s per-feed fetches are still
+        # in-flight — the eventual write must not blindly clobber it with
+        # the stale in-memory snapshot fetch_cycle() started from.
+        ff.write_follows({"schema": 1, "follows": [
+            {"key": "a", "feed_url": "http://a.onion/feed/", "display_name": "A"},
+        ]})
+
+        real_fetch_one = ff.fetch_one
+
+        def fetch_one_and_concurrently_add(entry):
+            # A host-side `follow add` writes mid-cycle, after fetch_cycle()
+            # took its initial read but before it writes back.
+            data = ff.read_follows()
+            data["follows"].append({
+                "key": "b", "feed_url": "http://b.onion/feed/",
+                "display_name": "B", "last_fetch_at": None,
+                "last_fetch_ok": None, "last_error": None, "items": [],
+            })
+            ff.write_follows(data)
+            return real_fetch_one(entry)
+
+        with mock.patch.object(ff, "fetch_one", side_effect=fetch_one_and_concurrently_add), \
+             mock.patch.object(ff, "_fetch_via_tor", return_value=(_RSS_FEED, None)):
+            result = ff.fetch_cycle()
+
+        keys = {e["key"] for e in result["follows"]}
+        self.assertEqual(keys, {"a", "b"},
+            "concurrent follow-add during the fetch cycle was reverted")
+        reloaded = ff.read_follows()
+        self.assertEqual({e["key"] for e in reloaded["follows"]}, {"a", "b"})
+
+    def test_concurrent_remove_during_fetch_stays_removed(self):
+        ff.write_follows({"schema": 1, "follows": [
+            {"key": "a", "feed_url": "http://a.onion/feed/", "display_name": "A"},
+            {"key": "b", "feed_url": "http://b.onion/feed/", "display_name": "B"},
+        ]})
+
+        real_fetch_one = ff.fetch_one
+
+        def fetch_one_and_concurrently_remove(entry):
+            if entry["key"] == "a":
+                # `onionpress follow remove b` lands mid-cycle.
+                data = ff.read_follows()
+                data["follows"] = [e for e in data["follows"] if e["key"] != "b"]
+                ff.write_follows(data)
+            return real_fetch_one(entry)
+
+        with mock.patch.object(ff, "fetch_one", side_effect=fetch_one_and_concurrently_remove), \
+             mock.patch.object(ff, "_fetch_via_tor", return_value=(_RSS_FEED, None)):
+            result = ff.fetch_cycle()
+
+        keys = {e["key"] for e in result["follows"]}
+        self.assertEqual(keys, {"a"},
+            "concurrent follow-remove during the fetch cycle was undone "
+            "(removed follow was resurrected by the cycle's own write)")
+
+    def test_merge_applies_fetch_fields_without_touching_others(self):
+        current = [{"key": "a", "feed_url": "http://a.onion/feed/",
+                    "display_name": "A", "added_at": "2026-01-01T00:00:00Z",
+                    "last_fetch_at": None, "last_fetch_ok": None,
+                    "last_error": None, "items": []}]
+        fetched = {"a": {"key": "a", "feed_url": "http://a.onion/feed/",
+                          "display_name": "A", "added_at": "2026-01-01T00:00:00Z",
+                          "last_fetch_at": "2026-01-02T00:00:00Z",
+                          "last_fetch_ok": True, "last_error": None,
+                          "items": [{"title": "Hi"}]}}
+        merged = ff.merge_fetch_results(current, fetched)
+        self.assertEqual(merged[0]["last_fetch_ok"], True)
+        self.assertEqual(merged[0]["items"], [{"title": "Hi"}])
+        # Fields the fetch doesn't own are preserved from `current`.
+        self.assertEqual(merged[0]["added_at"], "2026-01-01T00:00:00Z")
+
+    def test_merge_ignores_fetch_results_for_removed_keys(self):
+        # "current" no longer has "b" (removed concurrently) — a fetch
+        # result for "b" must not resurrect it.
+        current = [{"key": "a", "last_fetch_at": None, "last_fetch_ok": None,
+                    "last_error": None, "items": []}]
+        fetched = {"a": {"last_fetch_at": "t", "last_fetch_ok": True,
+                          "last_error": None, "items": []},
+                   "b": {"last_fetch_at": "t", "last_fetch_ok": True,
+                         "last_error": None, "items": []}}
+        merged = ff.merge_fetch_results(current, fetched)
+        self.assertEqual([e["key"] for e in merged], ["a"])
+
+    def test_merge_keeps_entries_with_no_fetch_result(self):
+        # "b" was added concurrently — it has no fetch result yet, but
+        # must survive the merge (it'll be fetched next cycle).
+        current = [{"key": "a", "last_fetch_at": None, "last_fetch_ok": None,
+                    "last_error": None, "items": []},
+                   {"key": "b", "last_fetch_at": None, "last_fetch_ok": None,
+                    "last_error": None, "items": []}]
+        merged = ff.merge_fetch_results(current, {"a": current[0]})
+        self.assertEqual([e["key"] for e in merged], ["a", "b"])
+
 
 class TestGenerateFollowsPage(unittest.TestCase):
     def setUp(self):

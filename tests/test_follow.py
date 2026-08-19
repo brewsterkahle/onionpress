@@ -45,9 +45,27 @@ class TestReadWriteFollows(unittest.TestCase):
         with mock.patch("onionpress.follow.subprocess.run", return_value=_ok()) as m_run:
             ok = follow._write_follows({"schema": 1, "follows": []})
         self.assertTrue(ok)
-        # Second call is the `sh -c "cat > ..."` write; check the piped input.
+        # Second call is the `sh -c "cat > tmp && mv tmp target"` write;
+        # check the piped input.
         write_call = m_run.call_args_list[-1]
         self.assertEqual(write_call.kwargs["input"], json.dumps({"schema": 1, "follows": []}, indent=2))
+
+    def test_write_is_atomic_via_tmp_file_and_rename(self):
+        # A plain `cat > follows.json` leaves a window where follow-fetch.py
+        # (reading concurrently inside the same container, mid-fetch-cycle)
+        # could see a truncated file. Must write to a tmp path and rename
+        # over the target instead.
+        with mock.patch("onionpress.follow.subprocess.run", return_value=_ok()) as m_run:
+            follow._write_follows({"schema": 1, "follows": []})
+        write_call = m_run.call_args_list[-1]
+        shell_cmd = write_call.args[0][-1]
+        self.assertIn(" > ", shell_cmd)
+        self.assertIn("&& mv ", shell_cmd)
+        tmp_target = shell_cmd.split(" > ", 1)[1].split(" &&", 1)[0].strip()
+        self.assertNotEqual(tmp_target, follow.FOLLOWS_JSON,
+            "write must go to a tmp path, not directly to follows.json")
+        self.assertTrue(shell_cmd.rstrip().endswith(follow.FOLLOWS_JSON),
+            "the final `mv` destination must be the real follows.json path")
 
     def test_write_failure_returns_false(self):
         with mock.patch("onionpress.follow.subprocess.run", return_value=_fail()):

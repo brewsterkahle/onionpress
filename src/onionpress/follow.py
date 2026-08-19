@@ -39,13 +39,23 @@ def _read_follows(docker_bin="docker"):
 
 
 def _write_follows(data, docker_bin="docker"):
+    """Write follows.json atomically: a plain `cat > follows.json` leaves a
+    window where follow-fetch.py's own read (running concurrently inside
+    the same container, mid-fetch-cycle) could see a truncated/partial
+    file. Write to a tmp file in the same directory and rename over the
+    target — `mv` within one filesystem is atomic, so any concurrent
+    reader always sees either the old or the new complete content, never
+    a partial write.
+    """
     subprocess.run(
         [docker_bin, "exec", CONTAINER, "mkdir", "-p", FOLLOW_DIR],
         capture_output=True, timeout=10,
     )
     payload = json.dumps(data, indent=2)
+    tmp_path = f"{FOLLOWS_JSON}.tmp"
     result = subprocess.run(
-        [docker_bin, "exec", "-i", CONTAINER, "sh", "-c", f"cat > {FOLLOWS_JSON}"],
+        [docker_bin, "exec", "-i", CONTAINER, "sh", "-c",
+         f"cat > {tmp_path} && mv {tmp_path} {FOLLOWS_JSON}"],
         input=payload, capture_output=True, text=True, timeout=10,
     )
     return result.returncode == 0

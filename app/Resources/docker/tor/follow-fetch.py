@@ -144,13 +144,50 @@ def fetch_one(entry):
     return updated
 
 
+def merge_fetch_results(current_follows, fetched_by_key):
+    """Apply freshly-fetched results onto the CURRENT follow list, not the
+    stale snapshot fetch_cycle() started from.
+
+    A fetch cycle can span minutes (one feed at a time, up to
+    FETCH_TIMEOUT_SEC each) while `onionpress follow add/remove` can write
+    the same file at any point via `docker exec` from the host. Without
+    this re-read-and-merge step, the cycle's eventual write would blindly
+    overwrite the whole list with its now-stale in-memory copy — silently
+    reverting any add/remove that happened during the fetch.
+
+    `current_follows` is authoritative for WHICH entries exist (so a
+    concurrent remove stays removed, and a concurrent add survives even
+    though it has no fetch result yet); `fetched_by_key` supplies the
+    fetch-related fields (last_fetch_at/last_fetch_ok/last_error/items)
+    for whichever entries we actually just fetched.
+    """
+    merged = []
+    for entry in current_follows:
+        fetched = fetched_by_key.get(entry["key"])
+        if fetched is None:
+            merged.append(entry)
+            continue
+        updated = dict(entry)
+        for field in ("last_fetch_at", "last_fetch_ok", "last_error", "items"):
+            updated[field] = fetched[field]
+        merged.append(updated)
+    return merged
+
+
 def fetch_cycle():
     data = read_follows()
     if not data["follows"]:
         return data
-    data["follows"] = [fetch_one(entry) for entry in data["follows"]]
-    write_follows(data)
-    return data
+
+    fetched_by_key = {entry["key"]: fetch_one(entry) for entry in data["follows"]}
+
+    # Re-read rather than reuse `data` — followers may have been added or
+    # removed via `onionpress follow add/remove` while the fetches above
+    # (which can take minutes) were running.
+    current = read_follows()
+    current["follows"] = merge_fetch_results(current["follows"], fetched_by_key)
+    write_follows(current)
+    return current
 
 
 # ─────────────────────────── generated follows page ────────────────────────
