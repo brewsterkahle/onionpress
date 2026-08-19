@@ -36,6 +36,27 @@ def _backend_nickname():
     return "site" if site_type == "static" else "wordpress"
 
 
+def _refresh_paths():
+    """Recompute the nickname-derived path constants from current config.
+
+    The menubar is a long-lived process and SITE_TYPE is written mid-
+    session by first-run setup (menubar._first_run_after_welcome), AFTER
+    this module was imported — module-load-time constants would leave the
+    whole first session reading hss/wordpress paths on a static install.
+    Called at the top of every entry point that touches key paths, so the
+    constants always reflect the config as of the operation, not as of
+    import. Module-level constants are kept (refreshed in place) because
+    tests and external callers reference them by name.
+    """
+    global BACKEND_NICKNAME, ARTI_KEYSTORE_PATH
+    global CTOR_SECRET_PATH, CTOR_PUBLIC_PATH, CTOR_HOSTNAME_PATH
+    BACKEND_NICKNAME = _backend_nickname()
+    ARTI_KEYSTORE_PATH = f"/var/lib/arti/state/keystore/hss/{BACKEND_NICKNAME}/ks_hs_id.ed25519_expanded_private"
+    CTOR_SECRET_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hs_ed25519_secret_key"
+    CTOR_PUBLIC_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hs_ed25519_public_key"
+    CTOR_HOSTNAME_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hostname"
+
+
 BACKEND_NICKNAME = _backend_nickname()
 
 ARTI_KEYSTORE_PATH = f"/var/lib/arti/state/keystore/hss/{BACKEND_NICKNAME}/ks_hs_id.ed25519_expanded_private"
@@ -271,6 +292,7 @@ def extract_keys():
     at a time — if both are missing we surface the Arti error, which is
     the more informative of the two on a broken install.
     """
+    _refresh_paths()
     arti_ok, arti_data = _docker_cat(ARTI_KEYSTORE_PATH)
     if arti_ok:
         try:
@@ -338,6 +360,7 @@ def write_private_key(private_key, public_key):
     import tempfile
     import os
 
+    _refresh_paths()
     try:
         pem_data = build_openssh_key(private_key, public_key)
 
