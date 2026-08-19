@@ -3104,6 +3104,12 @@ class OnionPressApp(rumps.App):
         if sw and getattr(sw, 'site_type', 'wordpress') == 'static':
             self.write_config_value("SITE_TYPE", "static")
             self.log("Site type set to 'static' from welcome screen")
+            # self._health_checker was built once in __init__, before this
+            # config value existed — rebuild it now so the rest of this
+            # (long-lived) session probes onionpress-site instead of a
+            # nonexistent onionpress-wordpress for every health check.
+            self._health_checker = HealthChecker(
+                self._docker, log_func=self.log, site_type="static")
         if sw and getattr(sw, 'address_prefix', None):
             # Vanity prefix chosen on the welcome screen — generated once at
             # first-run start (no on-the-fly change needed later).
@@ -3472,6 +3478,13 @@ class OnionPressApp(rumps.App):
         setup window shows real-time progress instead of a single long wait.
         """
         sw = setup_window.get_setup_window() if setup_window else None
+        # SITE_TYPE is already written to config by the time this runs
+        # (_first_run_after_welcome writes it, then calls start_service(),
+        # which spawns this thread) — read it once so the milestone-polling
+        # steps below (image tracking, onion-address wait) target the right
+        # backend instead of hardcoding "wordpress"/mariadb.
+        _site_type = self.read_config_value("SITE_TYPE", "wordpress")
+        _backend_nickname = "site" if _site_type == "static" else "wordpress"
 
         # Step 0: System check — verify bundled binaries exist
         if sw:
@@ -3529,7 +3542,13 @@ class OnionPressApp(rumps.App):
         step2_done = False   # Images downloaded
         step3_done = False   # .onion address generated
         step4_done = False   # WordPress responding
-        images_found = {'wordpress': False, 'mariadb': False, 'tor': False}
+        if _site_type == "static":
+            # No mariadb/wordpress image for a static install — track the
+            # site image instead, or "all images found" would never fire
+            # and setup would hang at step 2 forever.
+            images_found = {'site': False, 'tor': False}
+        else:
+            images_found = {'wordpress': False, 'mariadb': False, 'tor': False}
         total_images = len(images_found)
         setup_start = time.time()
         setup_timeout = 600  # 10 minute max
@@ -3610,7 +3629,7 @@ class OnionPressApp(rumps.App):
                 try:
                     result = subprocess.run(
                         [docker_bin, "exec", "onionpress-tor", "cat",
-                         "/var/lib/tor/hidden_service/wordpress/hostname"],
+                         f"/var/lib/tor/hidden_service/{_backend_nickname}/hostname"],
                         capture_output=True, text=True, encoding='utf-8',
                         errors='replace', timeout=10
                     )
