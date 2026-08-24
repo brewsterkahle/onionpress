@@ -828,12 +828,18 @@ class TestWaybackStaticGeneration(unittest.TestCase):
         self.assertEqual({"/alpha/": {"job_id": "jid-new"}}, after.get("urls"),
             f"adopting a generation must drop the previous one's rows; got {after}")
 
-    def test_the_progress_counters_include_the_static_pages(self):
+    def test_the_progress_counters_follow_the_static_pages(self):
         """The visible half of the bug. The admin page counts posts, and on a
         static site the posts are leftover WordPress defaults — archiving those
         six read as "100% archived" while 32 real pages had never been
         submitted. A number that says done when nothing is done is worse than
         no number.
+
+        The exclusion cuts both ways: once a generation serves the site, its
+        WP posts are OUT of the totals, not merely outnumbered. They are also
+        skipped by the submit path, so counting them would pin a fixed
+        "remaining" the sweep can never clear — a number that says "not done"
+        forever is the same lie in the other direction.
         """
         pages = ["/", "/alpha/", "/beta/"]
         self._commit("gen-counters", pages)
@@ -849,15 +855,52 @@ class TestWaybackStaticGeneration(unittest.TestCase):
                    function() { return '/nonexistent/op-wb-no-generation'; });
         echo json_encode(onionpress_wayback_queue_totals());
         """, self.url))
+        # Only the MAIN site's posts leave the totals — the generation serves
+        # the root, and a subsite's posts remain that subsite's real content.
+        main_posts = int(_eval("""
+        echo count(get_posts(array('post_status' => 'publish',
+            'post_type' => array('post', 'page'), 'numberposts' => -1,
+            'fields' => 'ids', 'suppress_filters' => false)));
+        """, self.url))
         # The root is the home record's, so 3 sitemap entries are 2 pages here.
         self.assertEqual(2, out["static"]["total"],
             f"the generation's pages must be counted; got {out['static']}")
         self.assertEqual(0, out["static"]["archived"],
             "none of them has been archived, and the counter must say so")
-        self.assertEqual(base["total"] + 2, out["queue"]["total"],
-            f"queue totals must carry the static pages; {base} vs {out['queue']}")
+        self.assertGreater(main_posts, 0,
+            "this test needs the main site to have boilerplate posts to exclude")
+        self.assertEqual(base["total"] - main_posts + 2, out["queue"]["total"],
+            "with a generation serving, the main site's posts leave the queue "
+            "and its static pages join it; subsite posts stay; "
+            f"base={base} main_posts={main_posts} got {out['queue']}")
         self.assertGreaterEqual(out["queue"]["remaining"], 2,
             f"two unarchived pages cannot leave the queue looking drained; got {out['queue']}")
+
+    def test_boilerplate_posts_leave_the_submit_queue_with_a_generation(self):
+        """posts_needing_submit()/posts_with_in_flight() return nothing while
+        a generation serves the site: the sample-page/hello-world leftovers
+        are not the site, and submitting them spends real SPN slots. Without
+        a generation both paths must work again — a plain WP site's posts ARE
+        its content."""
+        self._commit("gen-boiler", ["/alpha/"])
+        with_gen = json.loads(_eval(self._mock() + """
+        echo json_encode(array(
+            'submit'    => count(onionpress_wayback_posts_needing_submit(10)),
+            'in_flight' => count(onionpress_wayback_posts_with_in_flight()),
+        ));
+        """, self.url))
+        self.assertEqual({"submit": 0, "in_flight": 0}, with_gen,
+            f"WP posts must be excluded while a generation serves; got {with_gen}")
+        without_gen = json.loads(_eval("""
+        add_filter('onionpress_wayback_static_current_path_mock',
+                   function() { return '/nonexistent/op-wb-no-generation'; });
+        echo json_encode(array(
+            'submit' => count(onionpress_wayback_posts_needing_submit(10)),
+        ));
+        """, self.url))
+        self.assertGreater(without_gen["submit"], 0,
+            "with no generation the WP posts are the site again and must "
+            f"re-enter the queue; got {without_gen}")
 
     def test_the_feed_record_follows_the_generation(self):
         """`/feed/` is a WordPress route. A generation serving the whole root

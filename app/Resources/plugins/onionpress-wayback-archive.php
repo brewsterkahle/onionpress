@@ -3,6 +3,10 @@
  * Plugin Name: OnionPress Wayback Archive
  * Description: Archives the site's posts, home page, and RSS feed to the
  *              Internet Archive's Wayback Machine via Save Page Now (SPN2).
+ *              When a moss-generated static site is serving, its own pages
+ *              (which are files, not WordPress posts) and its own feed join
+ *              the same queue in place of the WP boilerplate posts — see
+ *              "the static site's own pages" below.
  *              Fire-and-forget pipeline: a 60s cron tick polls outstanding
  *              job_ids in batch, then submits fresh work up to the account's
  *              current available-slots count. No per-URL retry counter,
@@ -1308,6 +1312,13 @@ function onionpress_wayback_static_totals() {
  * home/feed go through the same code path.
  */
 function onionpress_wayback_posts_needing_submit( $limit ) {
+    // When a static generation is serving this site, its posts are the
+    // leftover WordPress defaults (sample-page, hello-world, ...) — not
+    // the site. Submitting them alongside the real pages would spend SPN
+    // slots on boilerplate nobody asked to archive.
+    if ( onionpress_wayback_static_serves_this_site() ) {
+        return array();
+    }
     $posts = get_posts( array(
         'post_status'      => 'publish',
         'post_type'        => array( 'post', 'page' ),
@@ -1341,6 +1352,12 @@ function onionpress_wayback_posts_needing_submit( $limit ) {
 }
 
 function onionpress_wayback_posts_with_in_flight() {
+    // Same exclusion as onionpress_wayback_posts_needing_submit(): a
+    // static generation's boilerplate WP posts were never submitted, so
+    // none can be legitimately in flight either.
+    if ( onionpress_wayback_static_serves_this_site() ) {
+        return array();
+    }
     $posts = get_posts( array(
         'post_status'      => 'publish',
         'post_type'        => array( 'post', 'page' ),
@@ -1528,6 +1545,12 @@ function onionpress_wayback_sweep() {
  * real content is a static generation, the posts this loop counts are the
  * leftover WordPress defaults, and archiving all six of them reported 100%
  * while 32 actual pages had never been submitted.
+ *
+ * Conversely, once a static generation IS serving a given site, its WP posts
+ * are excluded here entirely rather than added on top — they are the same
+ * leftover defaults, permanently unsubmitted (onionpress_wayback_posts_
+ * needing_submit() skips them too), and counting them would report a fixed
+ * number of pages as "remaining" forever with no sweep able to clear it.
  */
 function onionpress_wayback_queue_totals() {
     $out = array( 'archived' => 0, 'in_flight' => 0, 'remaining' => 0, 'total' => 0 );
@@ -1539,6 +1562,9 @@ function onionpress_wayback_queue_totals() {
         $bid = (int) $site->blog_id;
         if ( function_exists( 'switch_to_blog' ) ) switch_to_blog( $bid );
         try {
+            if ( onionpress_wayback_static_serves_this_site() ) {
+                continue;
+            }
             global $wpdb;
             $prefix = $wpdb->get_blog_prefix( $bid );
             $posts_table = $prefix . 'posts';
