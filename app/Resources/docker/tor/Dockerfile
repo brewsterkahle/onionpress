@@ -35,7 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        | gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg \
     && echo 'deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org trixie main' \
        > /etc/apt/sources.list.d/tor.list \
-    && apt-get update && apt-get install -y --no-install-recommends tor \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       tor obfs4proxy snowflake-client \
     && rm -rf /var/lib/apt/lists/*
 # Docker CLI for heartbeat to manage takeover containers via docker exec/run
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
