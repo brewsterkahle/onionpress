@@ -1288,9 +1288,18 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
             re.escape(probe_call),
             "start must call the receiver probe before anything else.",
         )
-        probe = self.script.index(probe_call)
-        pid_write = self.script.index('echo $$ > "$PIDFILE"')
-        trap_install = self.script.index("trap 'rm -f \"$PIDFILE\"")
+        # Offsets are taken against the script with comment lines removed.
+        # This is an ordering invariant about code, and the launcher's
+        # comments quote the trap verbatim where they explain why a launch
+        # has to be disowned — a plain search finds the quotation first and
+        # the test then compares a comment against a code line.
+        code = "\n".join(
+            line for line in self.script.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        probe = code.index(probe_call)
+        pid_write = code.index('echo $$ > "$PIDFILE"')
+        trap_install = code.index("trap 'rm -f \"$PIDFILE\"")
 
         self.assertLess(
             probe, pid_write,
@@ -1303,9 +1312,136 @@ class TestLauncherStartIsIdempotent(unittest.TestCase):
             "PID file on the way out.",
         )
         self.assertIn(
-            "exit 0", self.script[probe:pid_write],
+            "exit 0", code[probe:pid_write],
             "An already-running stack must exit 0 — it is a no-op, not a "
             "conflict.",
+        )
+
+
+class TestStartRevivesTheMenubarApp(unittest.TestCase):
+    """`start` must bring the MenubarApp back, and must do it above the
+    already-running probe.
+
+    Incident (2026-08-16): moss's Restart recovery runs `quit` then `start`.
+    `quit` SIGTERMs the MenubarApp; `start` only ever restored containers, so
+    the app stayed dead through every later Start/Restart. Because the
+    MenubarApp is the sole writer of status.json and the sole sender of
+    OnionHeaven's /online heartbeat, the site's reachability verdict froze at
+    a 19-hour-old snapshot and an OnionHeaven takeover was never released —
+    moss then "recovered" containers in a loop against a problem that was
+    never in the containers.
+
+    Ordering is the load-bearing half and is invisible to an exit-code test:
+    the stranded state is containers-up + MenubarApp-dead, which takes the
+    already-running early exit, so a revival placed below that probe would
+    never run in the one case it exists for.
+    (tests/test_launcher_start_idempotent.py covers the behaviour itself,
+    but only on macOS.)
+    """
+
+    def setUp(self):
+        self.script = _read("app/MacOS/onionpress")
+
+    def _assert_has(self, pattern, message):
+        self.assertTrue(re.search(pattern, self.script), message)
+
+    def test_start_calls_the_revival_helper(self):
+        self._assert_has(
+            r"\nensure_menubar_running\(\)\s*\{",
+            "The launcher must define ensure_menubar_running.",
+        )
+        start_arm = self.script.index("        start)")
+        stop_arm = self.script.index("        stop)")
+        self.assertIn(
+            "ensure_menubar_running", self.script[start_arm:stop_arm],
+            "`start` must call ensure_menubar_running, or a scripted "
+            "quit+start (moss's Restart) leaves the MenubarApp off for good.",
+        )
+
+    def test_revival_runs_before_the_already_running_early_exit(self):
+        start_arm = self.script.index("        start)")
+        call = self.script.index("ensure_menubar_running", start_arm)
+        probe = self.script.index(
+            "if _receiver_port=$(receiver_answering_port); then", start_arm
+        )
+        self.assertLess(
+            call, probe,
+            "ensure_menubar_running must run BEFORE the already-running "
+            "probe. Containers-up + MenubarApp-dead takes that probe's early "
+            "exit, so a revival below it never fires in the stranded case.",
+        )
+
+    def test_revival_is_a_noop_when_the_app_is_already_running(self):
+        """The MenubarApp re-enters `onionpress start` on every launch
+        (auto_start -> start_service), so an unguarded spawn here would have
+        the app start a second copy of itself."""
+        helper = self.script.index("ensure_menubar_running() {")
+        body = self.script[helper:self.script.index("\nmain() {", helper)]
+        self.assertIn(
+            "menubar_alive && return 0", body,
+            "Revival must be guarded by the shared liveness check.",
+        )
+        self.assertIn(
+            '[ -x "$menubar_bin" ] || return 0', body,
+            "A source checkout or CI has no built bundle — revival must be a "
+            "no-op there rather than an error.",
+        )
+
+    def test_liveness_is_never_decided_by_pgrep(self):
+        """Whether a MenubarApp is running is decided by `ps`, never pgrep.
+
+        On macOS 26.5 pgrep can fail to see a live MenubarApp that
+        `ps -x -o args=` prints in full, at the same instant and as the same
+        uid — and it fails precisely when the launcher runs as a child of
+        that app, which is when the answer matters. On 2026-08-18 that put
+        four MenubarApps on the machine in fifteen seconds, three of which
+        lost the onion proxy port to `[Errno 48]`, and the stack tore itself
+        down 78 seconds later.
+
+        Three places ask the question — revival, the quit arm, and
+        launcher.sh's already-running exit — and every one of them does
+        damage when told "no" about a running app: two launch a duplicate,
+        the third leaves an app that was asked to quit still running.
+        """
+        for name in ("app/MacOS/onionpress", "app/MacOS/launcher.sh"):
+            text = _read(name)
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue  # the comments explain why pgrep is out
+                if "pgrep" in stripped and "MenubarApp" in stripped:
+                    self.fail(
+                        f"{name} decides MenubarApp liveness with pgrep:\n"
+                        f"    {stripped}\n"
+                        "Use a `ps -x -o args=` scan instead — see "
+                        "menubar_alive() in app/MacOS/onionpress."
+                    )
+
+    def test_revival_does_not_hold_the_callers_pipe_open(self):
+        """moss runs the launcher as a subprocess and reads its output. A
+        backgrounded child inheriting that pipe keeps it open, so the caller
+        would block until the MenubarApp itself exits."""
+        helper = self.script.index("ensure_menubar_running() {")
+        body = self.script[helper:self.script.index("\nmain() {", helper)]
+        self._assert_has(
+            re.escape('nohup "$menubar_bin" >> "$LOG_FILE" 2>&1 </dev/null &'),
+            "The spawned MenubarApp must redirect stdout/stderr to the log "
+            "and stdin from /dev/null, under nohup — not inherit the "
+            "caller's pipe.",
+        )
+        self.assertIn("rm -f \"$DATA_DIR/menubar.pid\"", body,
+                      "A dead app's menubar.pid must be dropped before "
+                      "spawning; upload-analytics reads it as liveness.")
+
+    def test_quit_clears_the_menubar_pid_file(self):
+        """`quit` escalates to SIGKILL, which bypasses the app's own
+        _remove_pid_file, leaving menubar.pid pointing at a dead PID that
+        `upload-analytics` reports as running."""
+        quit_arm = self.script.index("        quit)")
+        body = self.script[quit_arm:]
+        self.assertIn(
+            'MENUBAR_PIDFILE="$DATA_DIR/menubar.pid"', body,
+            "quit must clean up menubar.pid, not only onionpress.pid.",
         )
 
 
