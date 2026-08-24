@@ -1231,5 +1231,35 @@ class TestScrubVerifyChecks(unittest.TestCase):
         )
 
 
+class TestUploadsIniShipsBoundedStreamingLimits(unittest.TestCase):
+    """onionpress-uploads.ini is runtime-injected into the WordPress
+    container (multisite.install_uploads_ini) so a large static-site
+    upload can land. It must bound the upload without raising
+    memory_limit: uploads arrive as multipart, which PHP streams to
+    upload_tmp_dir at constant memory, so upload_max_filesize and
+    post_max_size are the bounds that matter and a memory raise would
+    only paper over a buffering path that should not exist.
+    """
+
+    def test_uploads_ini_does_not_set_memory_limit(self):
+        ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
+        self.assertIsNone(
+            re.search(r"^memory_limit\s*=", ini, re.MULTILINE),
+            "onionpress-uploads.ini sets memory_limit — uploads stream as "
+            "multipart at constant memory, so a raise here means some new "
+            "path buffers the body into PHP memory and needs its own "
+            "justification.",
+        )
+
+    def test_uploads_ini_bounds_the_multipart_part(self):
+        ini = _read("app/Resources/docker/wordpress/onionpress-uploads.ini")
+        for key in ("upload_max_filesize", "post_max_size"):
+            self.assertRegex(
+                ini, r"(?m)^%s\s*=\s*\d+[GM]$" % key,
+                "onionpress-uploads.ini must keep %s — it is the size "
+                "ceiling on the streamed multipart part." % key,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

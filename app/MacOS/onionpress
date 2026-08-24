@@ -1405,7 +1405,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     bundled_python -m onionpress.cli deactivate-wp-statistics
     bundled_python -m onionpress.cli provision-post-install \
         --themes-dir "$RESOURCES_DIR/themes" \
-        --plugins-dir "$RESOURCES_DIR/plugins"
+        --plugins-dir "$RESOURCES_DIR/plugins" \
+        --apache-conf-dir "$DOCKER_DIR/wordpress"
 
     # install-from-backup: clean up staging + marker only after a successful
     # import + provisioning, so an interrupted run re-imports on the next start.
@@ -2230,7 +2231,8 @@ main() {
             # Python for now.
             bundled_python -m onionpress.cli provision-post-install \
                 --themes-dir "$RESOURCES_DIR/themes" \
-                --plugins-dir "$RESOURCES_DIR/plugins"
+                --plugins-dir "$RESOURCES_DIR/plugins" \
+                --apache-conf-dir "$DOCKER_DIR/wordpress"
             ;;
 
         setup)

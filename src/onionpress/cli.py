@@ -580,6 +580,11 @@ def main(argv: list[str] = None) -> int:
     p_ppi.add_argument(
         "--plugins-dir", required=True,
         help="Source directory containing mu-plugins, sunrise.php, icons")
+    p_ppi.add_argument(
+        "--apache-conf-dir",
+        help="Source directory containing onionpress-static-site.conf, "
+             "injected at runtime for static-first serving "
+             "(optional; skipped when omitted)")
 
     # Individual post-start provisioning steps. These are the helpers
     # start_containers used to inline as bash function calls; the bash
@@ -594,6 +599,24 @@ def main(argv: list[str] = None) -> int:
                    help="Remove WP-Statistics if present (clearnet leak)")
     sub.add_parser("ensure-archive-s3-keys",
                    help="Fetch shared archive.org S3 keys for Wayback archiving")
+
+    p_essc = sub.add_parser(
+        "ensure-static-site-conf",
+        help="Restore the static-first Apache conf if a container recreate "
+             "dropped it (cheap no-op when already present)",
+    )
+    p_essc.add_argument(
+        "--apache-conf-dir", required=True,
+        help="Source directory containing onionpress-static-site.conf")
+
+    p_eui = sub.add_parser(
+        "ensure-uploads-ini",
+        help="Restore the PHP limits overlay if a container recreate "
+             "dropped it (cheap no-op when already present)",
+    )
+    p_eui.add_argument(
+        "--conf-dir", required=True,
+        help="Source directory containing onionpress-uploads.ini")
 
     p_scrub = sub.add_parser(
         "scrub",
@@ -653,8 +676,29 @@ def main(argv: list[str] = None) -> int:
         return multisite.provision_post_install(
             themes_dir=args.themes_dir,
             plugins_dir=args.plugins_dir,
+            conf_dir=args.apache_conf_dir,
             log_func=print,
         )
+    elif args.command == "ensure-static-site-conf":
+        from . import multisite
+        # Deliberately always 0: this runs on the launcher's fast
+        # already-running path, where a missing container or a docker
+        # hiccup must not turn a healthy `start` into a reported failure.
+        multisite.ensure_static_site_conf(
+            conf_dir=args.apache_conf_dir,
+            log_func=print,
+        )
+        return 0
+    elif args.command == "ensure-uploads-ini":
+        from . import multisite
+        # Deliberately always 0, for the same reason as
+        # ensure-static-site-conf above: this runs on the launcher's fast
+        # already-running path.
+        multisite.ensure_uploads_ini(
+            conf_dir=args.conf_dir,
+            log_func=print,
+        )
+        return 0
     elif args.command == "configure-ia-plugin":
         from . import multisite
         return 0 if multisite.configure_ia_plugin(log_func=print) else 1
