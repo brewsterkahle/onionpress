@@ -439,6 +439,134 @@ class OnionPressCLI:
         print(pw)
         return 0
 
+    # ─── Headless onionname registry (for driving by an external app) ────
+    #
+    # An external app drives these programmatically and parses a single
+    # JSON line from stdout. All diagnostics go through self.log
+    # (stderr), so stdout carries exactly one JSON object per command.
+
+    def _registrar(self):
+        """Build a Registrar whose curl runs through the CLI's docker env.
+
+        We inject a runner backed by self.docker.exec so the OnionHome
+        request uses the same DOCKER_HOST / Colima socket the rest of the
+        CLI does — working whether the CLI was invoked via the launcher
+        (docker env exported) or directly. SOCKS over Colima port-forwarding
+        is broken, so docker exec into the tor container is the only
+        reliable path.
+        """
+        from .onionnames_registrar import Registrar, DEFAULT_CONTAINER
+
+        def runner(curl_args, timeout):
+            result = self.docker.exec(
+                DEFAULT_CONTAINER, ["curl", *curl_args],
+                timeout=timeout, quiet=True,
+            )
+            return result.returncode, result.stdout or ""
+
+        return Registrar(log=self.log, runner=runner)
+
+    def cmd_onionname_suggest(self) -> int:
+        """Print one onionname suggestion as a single JSON line: {"name": …}.
+
+        Asks the registry (authority on availability); falls back to a local
+        wordlist suggestion if the registry is unreachable, so the caller
+        always gets a plausible, validation-passing default.
+        """
+        from .onionnames_client import suggest_name_local
+
+        name = ""
+        try:
+            result = self._registrar().suggest()
+            if result.ok and isinstance(result.body, dict):
+                name = (result.body.get("onionname") or "").strip()
+        except Exception as e:
+            self.log(f"onionname suggest: registry error: {e}")
+        if not name:
+            name = suggest_name_local() or ""
+        print(json.dumps({"name": name}))
+        return 0
+
+    def cmd_onionname_check(self, name: str) -> int:
+        """Print onionname availability as a single JSON line:
+        {"available": bool, "reason": str, "suggestions": [...]}.
+
+        Rejects locally-invalid names before hitting the registry (5–40
+        chars, the shared charset, not all-numeric — mirrors OnionHome).
+        """
+        from .onionnames_client import validate_name
+
+        ok, reason = validate_name(name)
+        if not ok:
+            print(json.dumps(
+                {"available": False, "reason": reason, "suggestions": []}))
+            return 0
+
+        result = self._registrar().check(name)
+        if result.ok and isinstance(result.body, dict):
+            available = bool(result.body.get("available"))
+            body_reason = result.body.get("reason")
+            reason_str = body_reason or ("" if available else "taken")
+            suggestions = result.body.get("suggestions") or []
+            print(json.dumps({
+                "available": available,
+                "reason": reason_str,
+                "suggestions": suggestions,
+            }))
+            return 0
+
+        # Unreachable / server error: report not-available with the
+        # diagnostic so the picker can surface "registry unreachable".
+        print(json.dumps({
+            "available": False,
+            "reason": result.reason or result.status,
+            "suggestions": result.suggestions or [],
+        }))
+        return 0
+
+    def cmd_onionname_register(self, name: str) -> int:
+        """Register `name` for this site's onion address and print a single
+        JSON line: {"ok": true, "name", "address", "url"} on success, or
+        {"ok": false, "error", "suggestions": [...]} on failure.
+
+        Policy: the registered name maps to the onion address ROOT
+        (http://<addr>.onion/). OnionPress's WP-admin/subsite-path coupling
+        is intentionally not applied here — a headless registration
+        addresses the whole service, not a WP subsite; the onionname is a
+        memorable handle that maps to the address.
+        """
+        from .onionnames_client import validate_name
+
+        ok, reason = validate_name(name)
+        if not ok:
+            print(json.dumps(
+                {"ok": False, "error": reason, "suggestions": []}))
+            return 0
+
+        # Resolve the onion address the same way `address` does.
+        onionaddress = self.containers.get_onion_address()
+        if not onionaddress:
+            print(json.dumps(
+                {"ok": False, "error": "no_onion_address", "suggestions": []}))
+            return 0
+
+        result = self._registrar().register(name, onionaddress)
+        if result.ok:
+            print(json.dumps({
+                "ok": True,
+                "name": name,
+                "address": onionaddress,
+                "url": f"http://{onionaddress}/",
+            }))
+            return 0
+
+        print(json.dumps({
+            "ok": False,
+            "error": result.reason or result.status,
+            "suggestions": result.suggestions or [],
+        }))
+        return 0
+
     def cmd_reset(self, yes: bool = False) -> int:
         """Reset OnionPress — wipe all data and start fresh."""
         if not yes:
@@ -570,6 +698,25 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("admin-password",
                    help="Print the recovery admin password (if any)")
 
+    # Headless onionname registry — an external app drives these and
+    # parses one JSON line from stdout. See OnionPressCLI.cmd_onionname_*.
+    p_name = sub.add_parser(
+        "onionname",
+        help="Onionname registry ops for driving by an external app "
+             "(one JSON line on stdout)",
+    )
+    name_sub = p_name.add_subparsers(dest="name_command")
+    name_sub.add_parser(
+        "suggest", help='Print an available onionname: {"name": "…"}')
+    p_name_check = name_sub.add_parser(
+        "check",
+        help='Check availability: {"available", "reason", "suggestions"}')
+    p_name_check.add_argument("name", help="Onionname to check")
+    p_name_register = name_sub.add_parser(
+        "register",
+        help='Register for this site: {"ok", "name", "address", "url"}')
+    p_name_register.add_argument("name", help="Onionname to register")
+
     p_ppi = sub.add_parser(
         "provision-post-install",
         help="Run the WordPress post-install steps (multisite + theme + mu-plugins)",
@@ -580,6 +727,17 @@ def main(argv: list[str] = None) -> int:
     p_ppi.add_argument(
         "--plugins-dir", required=True,
         help="Source directory containing mu-plugins, sunrise.php, icons")
+    p_ppi.add_argument(
+        "--managed", action="store_true",
+        help="Unattended install driven by an external app, not by a "
+             "person at the OnionPress UI: skip the end-user onboarding "
+             "wizard and stop WordPress phoning home. Off by default, so a "
+             "standalone install is unaffected.")
+    p_ppi.add_argument(
+        "--apache-conf-dir",
+        help="Source directory containing onionpress-static-site.conf, "
+             "injected at runtime for static-first serving "
+             "(optional; skipped when omitted)")
 
     # Individual post-start provisioning steps. These are the helpers
     # start_containers used to inline as bash function calls; the bash
@@ -594,6 +752,24 @@ def main(argv: list[str] = None) -> int:
                    help="Remove WP-Statistics if present (clearnet leak)")
     sub.add_parser("ensure-archive-s3-keys",
                    help="Fetch shared archive.org S3 keys for Wayback archiving")
+
+    p_essc = sub.add_parser(
+        "ensure-static-site-conf",
+        help="Restore the static-first Apache conf if a container recreate "
+             "dropped it (cheap no-op when already present)",
+    )
+    p_essc.add_argument(
+        "--apache-conf-dir", required=True,
+        help="Source directory containing onionpress-static-site.conf")
+
+    p_eui = sub.add_parser(
+        "ensure-uploads-ini",
+        help="Restore the PHP limits overlay if a container recreate "
+             "dropped it (cheap no-op when already present)",
+    )
+    p_eui.add_argument(
+        "--conf-dir", required=True,
+        help="Source directory containing onionpress-uploads.ini")
 
     p_scrub = sub.add_parser(
         "scrub",
@@ -648,13 +824,46 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_generate_vanity()
     elif args.command == "admin-password":
         return cli.cmd_admin_password()
+    elif args.command == "onionname":
+        nc = getattr(args, "name_command", None)
+        if nc == "suggest":
+            return cli.cmd_onionname_suggest()
+        elif nc == "check":
+            return cli.cmd_onionname_check(args.name)
+        elif nc == "register":
+            return cli.cmd_onionname_register(args.name)
+        else:
+            p_name.print_help()
+            return 1
     elif args.command == "provision-post-install":
         from . import multisite
         return multisite.provision_post_install(
             themes_dir=args.themes_dir,
             plugins_dir=args.plugins_dir,
+            conf_dir=args.apache_conf_dir,
+            managed=args.managed,
             log_func=print,
         )
+    elif args.command == "ensure-static-site-conf":
+        from . import multisite
+        # Deliberately always 0: this runs on the launcher's fast
+        # already-running path, where a missing container or a docker
+        # hiccup must not turn a healthy `start` into a reported failure.
+        multisite.ensure_static_site_conf(
+            conf_dir=args.apache_conf_dir,
+            log_func=print,
+        )
+        return 0
+    elif args.command == "ensure-uploads-ini":
+        from . import multisite
+        # Deliberately always 0, for the same reason as
+        # ensure-static-site-conf above: this runs on the launcher's fast
+        # already-running path.
+        multisite.ensure_uploads_ini(
+            conf_dir=args.conf_dir,
+            log_func=print,
+        )
+        return 0
     elif args.command == "configure-ia-plugin":
         from . import multisite
         return 0 if multisite.configure_ia_plugin(log_func=print) else 1

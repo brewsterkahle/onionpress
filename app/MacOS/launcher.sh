@@ -281,8 +281,20 @@ initialize_colima() {
     fi
 }
 
-# Check if menubar app is already running
-if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
+# Check if menubar app is already running.
+#
+# `ps`, not `pgrep`, for the reason spelled out above menubar_alive() in
+# `onionpress`: on macOS pgrep can fail to see a live MenubarApp, and getting
+# this wrong here is expensive — the else branch below launches a second copy.
+# Captured into a variable rather than piped into grep so the scan cannot
+# match the grep process's own argv. `ps -x` is this user's processes only,
+# which is what the multi-user pgrep rule in CLAUDE.md was asking for.
+_running_procs="$(ps -x -o args= 2>/dev/null || true)"
+case "$_running_procs" in
+    *MenubarApp/Contents/MacOS/OnionPress*) _menubar_up=1 ;;
+    *) _menubar_up=0 ;;
+esac
+if [ "$_menubar_up" = 1 ]; then
     echo "" >> "$LOG_FILE"
     echo "============================================================" >> "$LOG_FILE"
     log "=== Launcher restarted (app already running) ==="

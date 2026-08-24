@@ -45,6 +45,53 @@ CONNECT_RETRY_DELAY = 5
 # Hidden service key paths
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
 
+# ---------------------------------------------------------------------------
+# The escalation ladder
+# ---------------------------------------------------------------------------
+# Everything above recovers Tor *within* its current process. That is not
+# enough: a host sleep can leave the pluggable transport wedged — snowflake
+# stops answering entirely, no reconnect attempts, no errors — and Tor has no
+# way to notice or fix that from the inside. Measured 2026-08-08: after a Mac
+# idle+clamshell sleep the onion went dark and stayed dark until someone ran
+# `docker restart` by hand, ~20 minutes later.
+#
+# The old ladder could never reach past DROPGUARDS in that state, because every
+# rung above it was gated on `not state.bootstrapped` — and after a sleep Tor
+# keeps reporting bootstrapped=100% (stale) while circuit-established=0. So the
+# ladder now hangs off SERVING, not off bootstrapped: circuits up, descriptor
+# published, service attached. That is the thing the reader actually needs.
+#
+# Timings come from what the code already waits for. The wake path gives
+# circuits 120s, and a descriptor gets HS_DESC_UPLOAD_TIMEOUT (60s) to land, so
+# 180s is the earliest moment at which "OnionPress tried and failed" is an
+# honest statement rather than an impatient one.
+PT_RESTART_AFTER = 180        # 120s circuit wait + 60s descriptor window
+PT_RESTART_COOLDOWN = 300
+# 4 more minutes: a fresh snowflake rendezvous plus a bootstrap through it ran
+# 1-3 min in the captured logs, so anything tighter restarts a transport that
+# was about to work.
+TOR_RESTART_AFTER = 420
+TOR_RESTART_COOLDOWN = 900    # at most 4 process restarts an hour
+# Fighting a genuinely offline network is worse than sitting still: it burns
+# battery, and it guarantees we are mid-bootstrap rather than connected at the
+# moment the network returns. After this many restarts that changed nothing, we
+# stop climbing and just say so.
+DEGRADED_AFTER_RESTARTS = 3
+DEGRADED_WINDOW = 3600
+
+# Where the ladder publishes what it knows, for the launcher and any external
+# status consumer to read (the shared volume the content address already lives
+# on). Never sit silent: if we have stopped trying, the file says so.
+STATE_FILE = "/var/lib/onionpress/watchdog-state.json"
+
+# Managed pluggable transports we know how to restart. Tor launches these as
+# child processes and does NOT relaunch one that dies or wedges.
+PT_BINARIES = ("snowflake-client", "obfs4proxy")
+
+# A wake that arrives while we are still handling the previous one is the same
+# wake. The host sends several (observed: 3 for one lid-open).
+WAKE_DEBOUNCE = 60
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -206,13 +253,34 @@ def discover_services():
         key_b64 = None
         try:
             key_b64 = _read_ed25519_key(secret_key_file)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            if service_id:
+                # This service HAS an address, and it is one the user has
+                # published — printed on a card, sent to readers, registered in
+                # the name directory. Minting a fresh one because a key read
+                # failed for a moment would be worse than not serving at all:
+                # the old address is what people type, and it would be gone.
+                # A transient unreadable key is a bad disk or a mount that
+                # isn't up yet, not permission to become a different site.
+                log(f"REFUSING to mint a new address for {name}: it already "
+                    f"publishes {service_id[:16]}... but its key is unreadable "
+                    f"({e}). Fix the key; NEW:BEST would change the address.")
+                services.append({
+                    "service_id": service_id,
+                    "service_name": name,
+                    "key_b64": None,
+                    "key_unreadable": True,
+                    "ports": ports,
+                    "service_dir": service_dir,
+                })
+                continue
             log(f"No key for {name} — will generate with NEW:BEST")
 
         services.append({
             "service_id": service_id if key_b64 else None,
             "service_name": name,
             "key_b64": key_b64,
+            "key_unreadable": False,
             "ports": ports,
             "service_dir": service_dir,
         })
@@ -253,6 +321,13 @@ def add_all_services(cmd_sock, services):
     collisions = 0
     for svc in services:
         port_args = " ".join(f"Port={p}" for p in svc["ports"])
+        # An address we already publish, whose key we could not read. Skipping
+        # is the only safe move: NEW:BEST here would silently replace the
+        # user's published address. See `discover_services`.
+        if svc.get("key_unreadable"):
+            log(f"ADD_ONION {svc['service_name']} — SKIPPED: key unreadable, "
+                f"refusing to mint a replacement address")
+            continue
         if svc.get("key_b64"):
             cmd = f"ADD_ONION ED25519-V3:{svc['key_b64']} Flags=Detach {port_args}"
         else:
@@ -338,6 +413,14 @@ class WatchdogState:
         self.services = []  # discovered onion services
         self.services_active = False  # True when ADD_ONION has been done
         self.sleeping = False  # True between USR1 (sleep) and USR2 (wake)
+        # --- escalation ladder ---
+        self.not_serving_since = 0   # 0 = serving (or not yet judged)
+        self.last_pt_restart = 0
+        self.tor_restarts = []       # timestamps, for the degraded window
+        self.degraded = False
+        self.degraded_reason = ""
+        self.last_wake_started = 0   # wake debounce
+        self.last_state_write = 0
 
 
 # ---------------------------------------------------------------------------
@@ -443,8 +526,158 @@ def do_dormant_cycle(cmd_sock, state, reason):
     state.bootstrapped = False
 
 
+# ---------------------------------------------------------------------------
+# Escalation ladder
+# ---------------------------------------------------------------------------
+def is_serving(state, circuit_established):
+    """Is the site actually reachable-in-principle right now?
+
+    Not "is Tor alive" — a Tor that is bootstrapped, has no circuits and has
+    published no descriptor is alive and useless. This is the only health
+    question with a reader on the other end of it.
+    """
+    if not state.bootstrapped or not circuit_established:
+        return False
+    if not state.services:
+        return True  # SOCKS-only container: circuits ARE the service
+    if not state.services_active:
+        return False
+    # A publication window is armed and hasn't landed → the descriptor is not
+    # out there, so nobody can reach us regardless of how healthy Tor looks.
+    if state.last_recovery_time > 0 and not state.hs_desc_uploaded_since_recovery:
+        return False
+    return True
+
+
+def next_escalation(state, now, has_transport):
+    """Which rung is due, or None. Pure — the whole ladder in one place.
+
+    Returns one of: None, "restart-pt", "restart-tor", "degraded".
+    DROPGUARDS is not here: it is event-driven (see `process_event`) and fires
+    long before this does.
+    """
+    if state.not_serving_since <= 0:
+        return None
+    down_for = now - state.not_serving_since
+
+    if state.degraded:
+        return None  # stopped climbing on purpose; the state file says so
+
+    # Enough restarts that changed nothing → stop.
+    recent = [t for t in state.tor_restarts if now - t < DEGRADED_WINDOW]
+    if len(recent) >= DEGRADED_AFTER_RESTARTS:
+        return "degraded"
+
+    if (down_for >= TOR_RESTART_AFTER
+            and now - _last_or_zero(state.tor_restarts) >= TOR_RESTART_COOLDOWN):
+        return "restart-tor"
+
+    # Never climb back DOWN. Restarting Tor already re-execs the transport, so
+    # once this outage has had a process restart, a transport restart is
+    # strictly less than what we just did — and offering it again is how a
+    # cooling-off period turns into a busier loop than the rung it replaced.
+    if any(t >= state.not_serving_since for t in state.tor_restarts):
+        return None
+
+    if (has_transport
+            and down_for >= PT_RESTART_AFTER
+            and now - state.last_pt_restart >= PT_RESTART_COOLDOWN):
+        return "restart-pt"
+
+    return None
+
+
+def _last_or_zero(stamps):
+    return stamps[-1] if stamps else 0
+
+
+def configured_transports(torrc_path="/etc/tor/torrc"):
+    """Managed transports this Tor was told to launch, from its own torrc."""
+    found = []
+    try:
+        with open(torrc_path) as f:
+            for line in f:
+                if line.startswith("ClientTransportPlugin "):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        found.append(parts[1])
+    except OSError:
+        pass
+    return found
+
+
+def _pt_pids(proc_root="/proc"):
+    """PIDs of managed-transport child processes, by scanning /proc.
+
+    Deliberately not `pkill`: procps is not guaranteed in the image, and a
+    dependency the recovery path needs is a dependency that can fail exactly
+    when recovery matters.
+    """
+    pids = []
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as f:
+                cmdline = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(binary in cmdline for binary in PT_BINARIES):
+            pids.append(int(entry))
+    return pids
+
+
+def do_restart_pt(cmd_sock, state, reason, kill=None, pids=None):
+    """Rung 2: kill the wedged transport and make Tor launch a fresh one.
+
+    This is the rung that was missing, and it is the one that matters: a
+    snowflake-client that has stopped answering is invisible to Tor. Tor does
+    not supervise a managed proxy back to life — it only launches proxies it is
+    missing, at config-load time. So: kill it, then RELOAD so Tor notices the
+    gap and re-execs it.
+
+    Nothing here touches keys. The onion address is whatever ADD_ONION is given
+    from disk, and this rung sends no ADD_ONION at all.
+    """
+    now = time.time()
+    kill = kill or os.kill
+    found = _pt_pids() if pids is None else pids
+    if not found:
+        log(f"Escalating: {reason} — no transport process found to restart")
+        state.last_pt_restart = now
+        return False
+
+    for pid in found:
+        try:
+            kill(pid, signal.SIGTERM)
+            log(f"Escalating: {reason} — killed transport pid {pid}")
+        except (OSError, ProcessLookupError) as e:
+            log(f"Could not kill transport pid {pid}: {e}")
+
+    resp = send_cmd(cmd_sock, "SIGNAL RELOAD")
+    if "250" in resp:
+        log("Sent SIGNAL RELOAD — Tor relaunching the pluggable transport")
+    else:
+        log(f"SIGNAL RELOAD failed: {resp.strip()[:100]}")
+    state.last_pt_restart = now
+    return True
+
+
 def do_halt(cmd_sock, state, reason):
-    """Last resort: tell Tor to shut down. Docker restart policy brings it back."""
+    """Rung 3: tell Tor to shut down. Docker's restart policy brings it back.
+
+    Heavier than rung 2 and strictly more thorough: the restart re-execs the
+    transport from scratch along with Tor, which is what a hand-run
+    `docker restart onionpress-tor` did for the user.
+
+    The address survives this the same way it survives a normal container
+    restart — the keys are on the mounted volume, and the entrypoint hands them
+    back to `discover_services` on the way up. Nothing here writes a key.
+    """
     now = time.time()
     if now - state.last_halt < HALT_COOLDOWN:
         return
@@ -452,6 +685,81 @@ def do_halt(cmd_sock, state, reason):
     log(f"LAST RESORT: {reason} — sending SIGNAL HALT")
     send_cmd(cmd_sock, "SIGNAL HALT")
     state.last_halt = now
+    state.tor_restarts.append(now)
+
+
+def do_degrade(state, reason):
+    """Rung 4: stop climbing, and say so where external consumers can read it.
+
+    Restarting into a network that is simply gone is worse than waiting: it
+    burns the user's battery and guarantees we are mid-bootstrap, rather than
+    connected, at the moment the network comes back. But going quiet is not an
+    option either — the launcher has to be able to answer "is my site live",
+    so the honest answer gets written down.
+    """
+    if state.degraded:
+        return
+    state.degraded = True
+    state.degraded_reason = reason
+    log(f"DEGRADED: {reason} — no longer escalating; will recover if the network returns")
+
+
+def write_state_file(state, circuit_established, path=STATE_FILE, now=None):
+    """Publish what the ladder knows. Atomic; failure here is never fatal."""
+    now = now or time.time()
+    payload = {
+        "serving": is_serving(state, circuit_established),
+        "bootstrapped": state.bootstrapped,
+        "bootstrap_pct": state.last_bootstrap_pct,
+        "circuit_established": bool(circuit_established),
+        "services_active": state.services_active,
+        "descriptor_published": (
+            state.last_recovery_time == 0 or state.hs_desc_uploaded_since_recovery
+        ),
+        "not_serving_since": state.not_serving_since or None,
+        "degraded": state.degraded,
+        "degraded_reason": state.degraded_reason,
+        "tor_restarts_recent": len([t for t in state.tor_restarts if now - t < DEGRADED_WINDOW]),
+        "updated_at": int(now),
+    }
+    payload["tor_restart_stamps"] = [
+        int(t) for t in state.tor_restarts if now - t < DEGRADED_WINDOW
+    ]
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        log(f"Could not write state file: {e}")
+
+
+def load_restart_history(state, path=STATE_FILE, now=None):
+    """Recover the restart count from the last run.
+
+    Rung 3 is `SIGNAL HALT`, which ends the container — and takes this process
+    with it. So a counter that lives only in memory resets on exactly the event
+    it is counting, and rung 4 could never be reached: the ladder would restart
+    Tor forever, every 15 minutes, against a network that is simply gone.
+    The state file is on the shared volume, so it outlives the restart.
+
+    The `degraded` FLAG is deliberately not restored — only the stamps. Coming
+    back up is a fresh chance to serve; if the situation is still hopeless the
+    count says so again within one pass, and if it isn't, we are already
+    working.
+    """
+    now = now or time.time()
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except (OSError, ValueError):
+        return
+    stamps = payload.get("tor_restart_stamps") or []
+    state.tor_restarts = [t for t in stamps if now - t < DEGRADED_WINDOW]
+    if state.tor_restarts:
+        log(f"Resuming with {len(state.tor_restarts)} Tor restart(s) "
+            f"in the last {DEGRADED_WINDOW // 60}min")
 
 
 # ---------------------------------------------------------------------------
@@ -563,21 +871,36 @@ def check_stalls(cmd_sock, state):
     """Periodic check for stalls that events alone can't catch."""
     now = time.time()
 
+    # Circuit health, and the serving verdict the ladder hangs off. Read once
+    # per pass and reused by everything below, heartbeat included.
+    resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
+    circuits_up = "circuit-established=1" in resp
+    if state.bootstrapped and "circuit-established=0" in resp:
+        do_dropguards(cmd_sock, state, "circuit-established=0 (circuits lost)")
+
     # Periodic heartbeat log (every 5 minutes)
     if now - state.last_heartbeat_log > 300:
-        ce = "?"
-        resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
-        if "circuit-established=" in resp:
-            ce = resp.split("circuit-established=")[1].split()[0].strip()
         log(f"alive — bootstrapped={state.bootstrapped}, "
-            f"circuit-established={ce}, services_active={state.services_active}")
+            f"circuit-established={'1' if circuits_up else '0'}, "
+            f"services_active={state.services_active}, "
+            f"serving={is_serving(state, circuits_up)}")
         state.last_heartbeat_log = now
 
-    # Active circuit health check — if Tor reports no circuits, recover
-    if state.bootstrapped:
-        resp = send_cmd(cmd_sock, "GETINFO status/circuit-established")
-        if "circuit-established=0" in resp:
-            do_dropguards(cmd_sock, state, "circuit-established=0 (circuits lost)")
+    serving = is_serving(state, circuits_up)
+    if serving:
+        if state.not_serving_since:
+            down_for = int(now - state.not_serving_since)
+            log(f"Serving again after {down_for}s")
+        state.not_serving_since = 0
+        # A recovered stack is not a degraded one. Clearing here (rather than
+        # never) is what lets the ladder work again after the network returns —
+        # the reason we stop climbing is that climbing is useless, not that the
+        # stack is written off.
+        state.degraded = False
+        state.degraded_reason = ""
+        state.tor_restarts = []
+    elif not state.not_serving_since:
+        state.not_serving_since = now
 
     # Bootstrap stall
     if (not state.bootstrapped
@@ -594,6 +917,7 @@ def check_stalls(cmd_sock, state):
             and not state.hs_desc_uploaded_since_recovery
             and now - state.last_recovery_time > HS_DESC_UPLOAD_TIMEOUT
             and state.bootstrapped):
+        rearmed = False
         elapsed = int(now - state.last_recovery_time)
         started = state.hs_desc_upload_started_since_recovery
         failed = state.hs_desc_upload_failed_since_recovery
@@ -615,6 +939,17 @@ def check_stalls(cmd_sock, state):
             added, _ = add_all_services(cmd_sock, state.services)
             if added > 0:
                 state.services_active = True
+                # Re-arm rather than disarm. Disarming is how the old code went
+                # quiet: it did exactly one DEL+ADD per recovery and then
+                # stopped watching, so a descriptor that never landed looked
+                # identical to one that did. Staying armed is also what keeps
+                # `is_serving` false, which is what lets the ladder climb.
+                state.last_recovery_time = now
+                state.last_recovery_trigger = "hs-desc-stall"
+                state.hs_desc_upload_started_since_recovery = False
+                state.hs_desc_upload_failed_since_recovery = False
+                state.hs_desc_last_failed_reason = ""
+                rearmed = True
         else:
             # SOCKS-only container (no services). Fall back to HSFETCH to
             # refresh the client-side descriptor cache for known addresses.
@@ -629,7 +964,8 @@ def check_stalls(cmd_sock, state):
                         log(f"HSFETCH {addr[:16]}... — refreshing descriptor")
             else:
                 log(f"HS_DESC stall after recovery ({fields}) — no services or addresses known; no action")
-        state.last_recovery_time = 0
+        if not rearmed:
+            state.last_recovery_time = 0
 
     # Escalation: DORMANT/ACTIVE if DROPGUARDS didn't work after 2 minutes.
     # Only safe for SOCKS-only containers — DORMANT kills onion services permanently.
@@ -641,13 +977,40 @@ def check_stalls(cmd_sock, state):
         do_dormant_cycle(cmd_sock, state,
                          f"DROPGUARDS didn't recover after {DORMANT_COOLDOWN}s — trying DORMANT/ACTIVE")
 
-    # Last resort: HALT
+    # Last resort for the bootstrap-stuck case (Tor never came up at all).
+    # The not-serving ladder below covers the harder case: Tor that looks
+    # perfectly healthy and reaches nobody.
     if (state.last_dropguards > 0
             and not state.bootstrapped
             and now - state.last_dropguards > HALT_COOLDOWN
             and now - state.last_halt > HALT_COOLDOWN):
         do_halt(cmd_sock, state,
                 f"still not bootstrapped {HALT_COOLDOWN}s after recovery attempts")
+
+    # ── The escalation ladder ────────────────────────────────────────────────
+    transports = configured_transports()
+    rung = next_escalation(state, now, has_transport=bool(transports))
+    if rung:
+        down_for = int(now - state.not_serving_since)
+        if rung == "restart-pt":
+            do_restart_pt(cmd_sock, state,
+                          f"not serving for {down_for}s — restarting "
+                          f"{'/'.join(transports)}")
+        elif rung == "restart-tor":
+            do_halt(cmd_sock, state,
+                    f"not serving for {down_for}s and a transport restart "
+                    f"did not help")
+        elif rung == "degraded":
+            do_degrade(state,
+                       f"not serving for {down_for}s after "
+                       f"{DEGRADED_AFTER_RESTARTS} Tor restarts — the network "
+                       f"itself looks unreachable")
+
+    # Publish what we know, whether or not we acted. The launcher has to be
+    # able to answer "is my site live" at any moment, not only after a failure.
+    if now - state.last_state_write > 15:
+        write_state_file(state, circuits_up, now=now)
+        state.last_state_write = now
 
 
 # ---------------------------------------------------------------------------
@@ -658,6 +1021,8 @@ def run():
 
     log("Starting tor-watchdog")
     state = WatchdogState()
+    # We may BE the restart the ladder just performed — see load_restart_history.
+    load_restart_history(state)
 
     # Discover onion services from disk (keys + torrc port mappings)
     state.services = discover_services()
@@ -739,6 +1104,16 @@ def run():
             # Check for USR2 (wake) signal
             if _signal_wake:
                 _signal_wake = False
+                # One lid-open produces several USR2s (observed: 3), and the
+                # handler below blocks for up to 120s waiting for circuits — so
+                # the extras used to land mid-recovery and restart the wait from
+                # the top, which is why the log showed "waiting for circuits"
+                # twice for one wake and the ladder never made progress.
+                if time.time() - state.last_wake_started < WAKE_DEBOUNCE:
+                    log("Duplicate wake within "
+                        f"{WAKE_DEBOUNCE}s — already recovering, ignoring")
+                    continue
+                state.last_wake_started = time.time()
                 state.sleeping = False
                 state.last_recovery_time = time.time()
                 state.last_recovery_trigger = "wake"

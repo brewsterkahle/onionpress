@@ -1263,7 +1263,8 @@ start_containers() {
     # /var/lib/onionpress and wp-content/uploads.
     op_py provision-post-install \
         --themes-dir "$THEMES_DIR" \
-        --plugins-dir "$PLUGINS_DIR"
+        --plugins-dir "$PLUGINS_DIR" \
+        --apache-conf-dir "$DOCKER_DIR/wordpress"
 
 }
 
@@ -2352,7 +2353,8 @@ main() {
                 # installed, run it again to complete those steps.
                 op_py provision-post-install \
                     --themes-dir "$THEMES_DIR" \
-                    --plugins-dir "$PLUGINS_DIR" >> "$LOG_FILE" 2>&1 || true
+                    --plugins-dir "$PLUGINS_DIR" \
+                    --apache-conf-dir "$DOCKER_DIR/wordpress" >> "$LOG_FILE" 2>&1 || true
                 # Fetch archive.org S3 keys now that Tor is up and WP is
                 # installed — same timing as the Mac setup flow.
                 op_py ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 &
@@ -2398,7 +2400,8 @@ sys.exit(0 if provision_interactive() else 1)
             # enforced inside the module — see its docstring for why.
             op_py provision-post-install \
                 --themes-dir "$THEMES_DIR" \
-                --plugins-dir "$PLUGINS_DIR"
+                --plugins-dir "$PLUGINS_DIR" \
+                --apache-conf-dir "$DOCKER_DIR/wordpress"
             ;;
 
         import-key)

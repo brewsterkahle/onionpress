@@ -163,6 +163,46 @@ UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
+elif [ -f "$RESOURCES_DIR/config-template.txt" ]; then
+    # An existing config is never regenerated, so a key added to the template
+    # after a user first installed reached nobody who upgraded — the setting
+    # was documented, shipped, and invisible. A Mac upgraded from 2026-07-30
+    # held a 28-byte config, and the snowflake bridge settings the template
+    # describes simply were not in it.
+    #
+    # So append keys the template has and this config lacks, commented out,
+    # with the template's own explanatory comment block above them. Appending
+    # COMMENTED is what makes this safe to run on every launch: it can only add
+    # documentation, never change behaviour, and never touches a value the
+    # user set. Matching is on `^KEY=` against both live and commented forms,
+    # so a key the user already commented out stays as they left it.
+    # The comment block immediately above a key is carried with it — that block
+    # is where the template explains the setting and, for the bridge keys, holds
+    # the ready-to-uncomment snowflake lines. Appending a bare `#TOR_BRIDGE_LINES=`
+    # without it would be documentation that documents nothing.
+    _tpl_comments=""
+    while IFS= read -r _tpl_line; do
+        case "$_tpl_line" in
+            "")
+                _tpl_comments=""
+                ;;
+            \#*)
+                _tpl_comments="${_tpl_comments}${_tpl_line}
+"
+                ;;
+            *=*)
+                _tpl_key="${_tpl_line%%=*}"
+                if ! grep -qE "^#? *${_tpl_key}=" "$DATA_DIR/config" 2>/dev/null; then
+                    {
+                        printf '\n'
+                        [ -n "$_tpl_comments" ] && printf '%s' "$_tpl_comments"
+                        printf '#%s\n' "$_tpl_line"
+                    } >> "$DATA_DIR/config"
+                fi
+                _tpl_comments=""
+                ;;
+        esac
+    done < "$RESOURCES_DIR/config-template.txt"
 fi
 
 # Prefer bundled binaries
@@ -246,6 +286,23 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_IMPL
 
+# Bridge / pluggable-transport config for censored networks — compose
+# interpolates these into the tor containers' environment, and entrypoint.sh
+# turns them into torrc directives. The Python path (containers.py
+# _build_env) already passes them; without this mirror, a launcher-driven
+# `compose up` interpolates them empty and RECREATES a bridge-configured tor
+# container without its bridges. cut -f2- because bridge lines carry '='
+# inside cert=/url=/ice= values — -f2 would truncate at the first one.
+TOR_BRIDGE_LINES=""
+TOR_CLIENT_TRANSPORT_PLUGIN=""
+TOR_UPSTREAM_PROXY=""
+if [ -f "$DATA_DIR/config" ]; then
+    TOR_BRIDGE_LINES=$(grep "^TOR_BRIDGE_LINES=" "$DATA_DIR/config" | cut -d= -f2-)
+    TOR_CLIENT_TRANSPORT_PLUGIN=$(grep "^TOR_CLIENT_TRANSPORT_PLUGIN=" "$DATA_DIR/config" | cut -d= -f2-)
+    TOR_UPSTREAM_PROXY=$(grep "^TOR_UPSTREAM_PROXY=" "$DATA_DIR/config" | cut -d= -f2-)
+fi
+export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN TOR_UPSTREAM_PROXY
+
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
@@ -291,6 +348,9 @@ _start_takeover_worker() {
         --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
         -e TOR_IMPL="${TOR_IMPL:-tor}" \
+        -e TOR_BRIDGE_LINES="${TOR_BRIDGE_LINES:-}" \
+        -e TOR_CLIENT_TRANSPORT_PLUGIN="${TOR_CLIENT_TRANSPORT_PLUGIN:-}" \
+        -e TOR_UPSTREAM_PROXY="${TOR_UPSTREAM_PROXY:-}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \
@@ -1405,7 +1465,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     bundled_python -m onionpress.cli deactivate-wp-statistics
     bundled_python -m onionpress.cli provision-post-install \
         --themes-dir "$RESOURCES_DIR/themes" \
-        --plugins-dir "$RESOURCES_DIR/plugins"
+        --plugins-dir "$RESOURCES_DIR/plugins" \
+        --apache-conf-dir "$DOCKER_DIR/wordpress"
 
     # install-from-backup: clean up staging + marker only after a successful
     # import + provisioning, so an interrupted run re-imports on the next start.
@@ -1547,7 +1608,18 @@ get_healthcheck_address() {
 # Function to wait for services to be ready using active probing
 wait_for_services() {
     cd "$DOCKER_DIR"
+    # A direct bootstrap takes 30-90s. Over a pluggable transport it takes
+    # several minutes — measured 5m26s on a censored network, where
+    # snowflake-client cycled through three proxies ("timeout waiting for
+    # DataChannel.OnOpen") before one held. At a flat 120s this reported
+    # failure on a bootstrap that was succeeding, and everything downstream —
+    # including a publisher's publish flow — inherited that false negative. The wait
+    # is therefore keyed to whether a bridge is configured, not to a single
+    # guess about how fast the network is.
     local max_wait=120
+    if [ -n "$TOR_BRIDGE_LINES" ]; then
+        max_wait=600
+    fi
     local waited=0
     local wp_ready=false
     local onion_ready=false
@@ -1955,9 +2027,224 @@ restore_backup() {
     echo "Restore complete: $onion_address"
 }
 
+# Is a publish receiver already answering on the loopback port ladder?
+# Echoes the port and returns 0 on the first hit, returns 1 when nothing
+# answers.
+#
+# Discovery mirrors publisher clients and ./test-receiver.sh (docs/static-publish-protocol.md):
+# probe GET /wp-json/onionpress/v1/status on 8080 and the multi-user +10000
+# offsets; the first port whose body carries `receiver_version` wins. Readiness
+# is judged by the receiver ANSWERING, never by an exit code — that is this
+# integration's established rule.
+#
+# Bounded on purpose: a closed port is refused instantly, so the common
+# "nothing is running" answer costs milliseconds and `start` gains no slow
+# path just to discover it has work to do. `|| true` keeps curl's non-zero
+# exit (refused/timeout) from tripping `set -e`.
+#
+# The ladder is deliberately the shared discovery idiom, which means it
+# inherits the ambiguity publisher clients and test-receiver.sh already have: on a
+# multi-user Mac, another user's receiver answering on a lower port reads as
+# "a stack is up". Distinguishing owners needs an identity the /status body
+# does not yet carry; if that is ever added, this is the place to use it.
+receiver_answering_port() {
+    local port body
+    for port in 8080 18080 28080 38080 48080; do
+        body=$(curl -s --connect-timeout 1 --max-time 2 \
+            "http://127.0.0.1:${port}/wp-json/onionpress/v1/status" 2>/dev/null || true)
+        if printf '%s' "$body" | grep -q 'receiver_version'; then
+            echo "$port"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Bring the menu-bar app back if it is gone, so that `start` restores the
+# whole stack rather than only its containers.
+#
+# `quit` takes the MenubarApp down (SIGTERM, in the quit arm below) but
+# `start` never brought it back, so any caller that scripts quit+start left
+# it off permanently. moss's Restart recovery is exactly that pair, which
+# meant moss's own recovery stranded the site it was recovering.
+#
+# The MenubarApp is not cosmetic on macOS. It is the only writer of
+# /var/lib/onionpress/status.json (menubar.py:write_status_to_volume) and the
+# only sender of OnionHeaven's /online heartbeat (onionheaven.py), so while it
+# is dead the published reachability verdict is frozen at whatever it last
+# said and an OnionHeaven takeover can never be released.
+#
+# Idempotent by design: the menu bar itself re-enters `onionpress start` on
+# every launch (auto_start -> start_service), so this has to be a no-op when
+# called from the very app it would otherwise spawn a second copy of.
+# Is a MenubarApp alive for this user?
+#
+# Deliberately NOT pgrep. On macOS 26.5, with the app running, `ps -x -o args=`
+# prints its full path while `pgrep -f MenubarApp/Contents/MacOS/OnionPress` —
+# run at the same instant, same uid — returns nothing. It misses the app
+# precisely when this launcher runs as a child of that app, which is the one
+# context the guard below has to be right in, because the MenubarApp re-enters
+# `onionpress start` on every launch (auto_start -> start_service).
+#
+# On 2026-08-18 one moss recovery Start produced four MenubarApps in fifteen
+# seconds that way; three lost the race for the onion proxy port with
+# `[Errno 48] Address already in use` and the stack tore itself down 78
+# seconds later. tests/test_menubar_revival.py pins the guarantee with a
+# pgrep that is blind on every platform, so the fix cannot quietly revert to
+# relying on it.
+#
+# The PID file goes first because it is also what the app's own
+# single-instance check reads (menubar.py __init__), and the two must agree.
+# `ps -x` is this user's processes only, which is what the multi-user pgrep
+# rule in CLAUDE.md was asking for.
+menubar_alive() {
+    local stored procs
+
+    stored="$(tr -d '[:space:]' < "$DATA_DIR/menubar.pid" 2>/dev/null || true)"
+    if [ -n "$stored" ] && kill -0 "$stored" 2>/dev/null; then
+        # Liveness is not identity — PIDs are recycled, and a pid file left
+        # by a SIGKILLed app can name something else entirely by now.
+        case "$(ps -p "$stored" -o args= 2>/dev/null || true)" in
+            *MenubarApp/Contents/MacOS/OnionPress*) return 0 ;;
+        esac
+    fi
+
+    # Captured into a variable rather than piped into grep: in a
+    # `ps … | grep PAT` pipeline, ps can list the grep process itself, whose
+    # own argv contains PAT, and the scan then always says yes.
+    procs="$(ps -x -o args= 2>/dev/null || true)"
+    case "$procs" in
+        *MenubarApp/Contents/MacOS/OnionPress*) return 0 ;;
+    esac
+    return 1
+}
+
+ensure_menubar_running() {
+    local menubar_bin="$RESOURCES_DIR/MenubarApp/Contents/MacOS/OnionPress"
+
+    # A source checkout or CI has no built bundle — nothing to revive.
+    [ -x "$menubar_bin" ] || return 0
+
+    menubar_alive && return 0
+
+    # Only now is the PID file known stale. Removing it is safe *because* of
+    # that, and unsafe without it: menubar.py reads this file to decide it is
+    # a duplicate and exit, so deleting a live incumbent's file is what let
+    # the second copy through, and the third, and the fourth.
+    #
+    # It still has to go when genuinely stale — a MenubarApp that died without
+    # running its cleanup (SIGKILL, crash) leaves a dead PID here that
+    # `upload-analytics` reads as "OnionPress is running".
+    rm -f "$DATA_DIR/menubar.pid"
+
+    log "start: MenubarApp is not running — launching it"
+    # stdout/stderr go to the log, never to the caller's pipe: a backgrounded
+    # child holding an inherited pipe open would hang any caller that reads
+    # our output to EOF (moss runs this launcher exactly that way). nohup and
+    # </dev/null keep it alive and non-blocking once this script exits.
+    # Architecture needs no `arch -` prefix here — the re-exec at the top of
+    # this script already dropped us out of Rosetta and the child inherits it.
+    PYTHONDONTWRITEBYTECODE=1 nohup "$menubar_bin" >> "$LOG_FILE" 2>&1 </dev/null &
+    log "start: MenubarApp launched (PID: $!)"
+    # `nohup` only makes the child ignore SIGHUP. It does NOT take the job out
+    # of this shell's job table — and `start` installs
+    #
+    #     trap 'rm -f "$PIDFILE"; kill $(jobs -p) …' EXIT INT TERM HUP
+    #
+    # further down, so without this line the very `start` that revives the
+    # MenubarApp SIGTERMs it again the moment it finishes. That is the
+    # 2026-08-18 report: the app came up, the install completed, and ~35s
+    # later OnionPress tore the whole stack down with nothing in any log to
+    # say why — the trap does not log, and moss (long suspected) never
+    # touched it.
+    #
+    # It looked intermittent for two reasons, and neither is randomness. A
+    # `start` that finds the app already alive returns above and backgrounds
+    # nothing. And a `start` that finds the receiver already answering exits
+    # at the early-exit branch, which is *before* the trap is installed. So
+    # only a cold start — the install — both revives the app and installs the
+    # trap that kills it.
+    #
+    # `disown` and not a narrower trap: the trap's job — reaping this script's
+    # sleeping poll loops — is right, and this launch is the one child that
+    # was always meant to outlive us. The comment above already claimed it
+    # did; this makes the claim true.
+    disown
+}
+
 main() {
     case "${1:-start}" in
         start)
+            # Revive the menu-bar app first of all. This has to run BEFORE the
+            # already-running probe below, not after it: the stranded state
+            # this fixes is "containers up, MenubarApp dead", which takes that
+            # probe's early exit — so a revival placed below it would never
+            # fire in precisely the case that needs it.
+            #
+            # TRAP SAFETY (see the probe's note below): this writes no PID
+            # file and installs no trap, so it cannot strip a lock belonging
+            # to another, still-running invocation.
+            ensure_menubar_running
+
+            # Starting an already-running stack is a no-op, not a conflict.
+            #
+            # Two callers drive this stack: a managing app owns its lifecycle
+            # (install and start), while the menu-bar app is the power-user surface —
+            # and the menu bar re-enters `start` on every launch (auto_start
+            # -> start_service -> `onionpress start`). Without this check,
+            # merely LAUNCHING the menu bar next to a healthy stack re-ran the
+            # up-to-120s wait_for_services and could report failure over a
+            # site that was serving fine, and a second `start` from either
+            # side got a blocking GUI dialog nobody asked for.
+            #
+            # Same bug class as the EXIT-trap guard below: `start` conflating
+            # "already fine" / "not everything ready yet" with "this failed". The cure belongs here, in the one
+            # place that knows the stack's state, rather than in each
+            # caller's integration layer.
+            #
+            # TRAP SAFETY: this runs BEFORE the PID file is written and BEFORE
+            # the EXIT trap is installed, so this exit can never remove a PID
+            # file belonging to a different, still-running invocation. Any
+            # future work added to `start` that writes the PID file or takes
+            # the lock must stay below this block for the same reason; work
+            # that does neither (ensure_menubar_running, above) may precede
+            # it, and must when the early exit would otherwise skip it.
+            if _receiver_port=$(receiver_answering_port); then
+                # A container recreate behind the launcher's back (compose
+                # recreate, image change, stack update) wipes the static-first
+                # Apache conf, because /etc/apache2 is container rootfs and not
+                # a volume. This early exit is precisely the path such a stack
+                # takes on every later `start`, so without a check here the
+                # onion serves the WordPress theme instead of the published
+                # static site indefinitely — and silently, since publishes and
+                # the receiver both go on reporting success. Cheap: a single
+                # `test -e` in the container unless the conf is really gone.
+                #
+                # TRAP SAFETY (see above): this writes no PID file and installs
+                # no trap, and `|| true` stops it changing this branch's exit
+                # status under `set -e`.
+                #
+                # Output goes to the log, not the terminal: a silent repair is
+                # a repair nobody can confirm happened, and this is the only
+                # record that the conf had gone missing at all. The user-facing
+                # message for this branch is the "already running" line below.
+                bundled_python -m onionpress.cli ensure-static-site-conf \
+                    --apache-conf-dir "$DOCKER_DIR/wordpress" \
+                    >> "$LOG_FILE" 2>&1 || true
+                # The same recreate drops the PHP limits overlay from
+                # /usr/local/etc/php/conf.d, restoring the image's lower
+                # memory_limit. That failure is loud rather than silent —
+                # the next publish dies on a PHP fatal-error page —
+                # but nothing else on this path would ever put it back.
+                # Same cost and same trap safety as the check above.
+                bundled_python -m onionpress.cli ensure-uploads-ini \
+                    --conf-dir "$DOCKER_DIR/wordpress" \
+                    >> "$LOG_FILE" 2>&1 || true
+                log "start: receiver already answering on port $_receiver_port — stack is already running, nothing to do"
+                echo "OnionPress is already running (http://localhost:${_receiver_port})."
+                exit 0
+            fi
+
             # PID lock — prevent double-starting
             if [ -f "$PIDFILE" ]; then
                 # If PID file is older than system boot, it's from a previous
@@ -1970,8 +2257,18 @@ main() {
                 else
                     old_pid=$(cat "$PIDFILE" 2>/dev/null)
                     if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-                        echo "OnionPress is already running (PID $old_pid)." >&2
-                        osascript -e 'display dialog "OnionPress is already running." buttons {"OK"} default button "OK" with icon caution with title "OnionPress"' 2>/dev/null || true
+                        # Narrower than it used to be: the receiver did not
+                        # answer above, so this is a genuine collision with a
+                        # `start` that is still booting, not a double-start
+                        # over a healthy stack.
+                        echo "OnionPress is already starting up (PID $old_pid)." >&2
+                        # The dialog survives because the usual way to reach
+                        # this is double-clicking the app, where stderr is
+                        # invisible. It is now bounded, though: `start` also
+                        # runs unattended (a managing app's stack installer runs it
+                        # headless), and an un-dismissed modal would hang that
+                        # caller forever instead of failing.
+                        osascript -e 'display dialog "OnionPress is already starting up." buttons {"OK"} default button "OK" with icon caution with title "OnionPress" giving up after 10' 2>/dev/null || true
                         exit 1
                     fi
                     # Stale pid file — process no longer running
@@ -1979,8 +2276,15 @@ main() {
                 fi
             fi
             echo $$ > "$PIDFILE"
-            # On exit: clean PID file and kill our background children
-            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null' EXIT INT TERM HUP
+            # On exit: clean PID file and kill our background children.
+            # The `|| true` is load-bearing: under `set -e`, a failing command
+            # inside the EXIT trap becomes the SCRIPT's exit status. `kill`
+            # fails when the jobs table is empty or only holds already-finished
+            # jobs — so a fully successful `start` exited 1 whenever its
+            # background children happened to finish first (race), which any
+            # caller that checks the exit code (a managing app's stack installer) read
+            # as a start failure.
+            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null || true' EXIT INT TERM HUP
 
             # Note: orphaned background processes from previous launches may exist
             # but are harmless (sleeping poll loops). The exit trap kills our own
@@ -2046,12 +2350,14 @@ main() {
             FAILED_STEPS=""
 
             # Capture MenubarApp PID. Prefer the PID file
-            # (authoritative), but fall back to pgrep — the PID file
-            # can be missing after a prior unclean shutdown, manual rm,
-            # or a MenubarApp code path that never wrote it, and we
+            # (authoritative), but fall back to a process scan — the PID
+            # file can be missing after a prior unclean shutdown, manual
+            # rm, or a MenubarApp code path that never wrote it, and we
             # still need to find and stop the running MenubarApp in
-            # that case. `-u $(whoami)` restricts to this user's
-            # processes per the multi-user rule in CLAUDE.md.
+            # that case.
+            #
+            # `ps`, not pgrep, per menubar_alive() above: a fallback that
+            # cannot see the app leaves it running, and this is `quit`.
             MENUBAR_PID=""
             if [ -f "$PIDFILE" ]; then
                 MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
@@ -2059,8 +2365,15 @@ main() {
             if [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; then
                 # Match the py2app-frozen MenubarApp binary path — narrow
                 # enough that we don't collide with other OnionPress
-                # processes (launcher, shell scripts).
-                MENUBAR_PID=$(pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" 2>/dev/null | head -1)
+                # processes (launcher, shell scripts). `ps -x` is this
+                # user's processes only, per the multi-user rule in
+                # CLAUDE.md.
+                # ps is run to completion first: in a live `ps | awk`
+                # pipeline, ps can list the awk process, whose own argv
+                # carries the pattern, and quit would SIGTERM the awk.
+                MENUBAR_PS_SNAPSHOT="$(ps -x -o pid=,args= 2>/dev/null || true)"
+                MENUBAR_PID=$(printf '%s\n' "$MENUBAR_PS_SNAPSHOT" \
+                    | awk '/MenubarApp\/Contents\/MacOS\/OnionPress/ {print $1; exit}')
             fi
 
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
@@ -2123,6 +2436,20 @@ main() {
                 fi
             fi
 
+            # Same for the MenubarApp's own PID file. The app normally
+            # removes this itself (menubar.py:_remove_pid_file), but the
+            # SIGKILL escalation above bypasses that cleanup — and a stale
+            # menubar.pid is not inert: `upload-analytics` reads it and
+            # reports "OnionPress is running" over a dead app. Guarded the
+            # same way, so a MenubarApp that raced in behind us keeps its.
+            MENUBAR_PIDFILE="$DATA_DIR/menubar.pid"
+            if [ -f "$MENUBAR_PIDFILE" ]; then
+                STORED_PID=$(cat "$MENUBAR_PIDFILE" 2>/dev/null | tr -d '[:space:]')
+                if [ -z "$MENUBAR_PID" ] || [ "$STORED_PID" = "$MENUBAR_PID" ]; then
+                    rm -f "$MENUBAR_PIDFILE"
+                fi
+            fi
+
             if [ -n "$FAILED_STEPS" ]; then
                 log "quit: completed with issues in:$FAILED_STEPS"
                 echo "onionpress quit: some steps failed:$FAILED_STEPS" >&2
@@ -2172,6 +2499,25 @@ main() {
 
         address)
             get_onion_address
+            ;;
+
+        onionname)
+            # Headless onionname registry, for driving by an external app.
+            # Delegates to the Python CLI, which wraps the already-built
+            # Registrar client and prints exactly ONE JSON line to stdout
+            # (the caller parses it). All launcher/CLI diagnostics go to the log
+            # file / stderr, so stdout stays clean for the JSON.
+            #   onionname suggest            -> {"name":"…"}
+            #   onionname check   <name>     -> {"available",…}
+            #   onionname register <name>    -> {"ok",…}
+            shift  # drop "onionname"; pass suggest/check/register (+name) through
+            # Point the local-suggestion fallback at the bundled wordlists.
+            # onionnames_client's auto-discovery doesn't know the bundle's
+            # docker/tor/wordlists layout, so `suggest` would return an empty
+            # name when the registry is unreachable. Only the fallback path
+            # uses this; the primary path is the server suggestion.
+            ONIONNAME_WORDLISTS_DIR="$DOCKER_DIR/tor/wordlists" \
+                bundled_python -m onionpress.cli onionname "$@"
             ;;
 
         start-tor)
@@ -2228,9 +2574,14 @@ main() {
             # etc.) still exist below and are still called by start_
             # containers — only this subcommand entry point goes through
             # Python for now.
+            # "$@" forwards caller flags (e.g. --managed, which a managing app passes
+            # so the end-user onboarding wizard is skipped); shift drops the
+            # subcommand name itself.
+            shift
             bundled_python -m onionpress.cli provision-post-install \
                 --themes-dir "$RESOURCES_DIR/themes" \
-                --plugins-dir "$RESOURCES_DIR/plugins"
+                --plugins-dir "$RESOURCES_DIR/plugins" \
+                --apache-conf-dir "$DOCKER_DIR/wordpress" "$@"
             ;;
 
         setup)
@@ -2618,6 +2969,9 @@ User commands:
 Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address,
   reset, scrub
+  onionname {suggest|check <name>|register <name>}
+                (onionname registry ops; one JSON line on stdout, for
+                driving by an external app)
 
 Examples:
   $0 status
