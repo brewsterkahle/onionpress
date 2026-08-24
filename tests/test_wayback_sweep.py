@@ -51,10 +51,16 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 
 _WP = os.environ.get("ONIONPRESS_WP_CONTAINER", "onionpress-wordpress")
+
+_PLUGIN = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "app", "Resources", "plugins", "onionpress-wayback-archive.php",
+)
 
 
 def _docker_exec(args, **kwargs):
@@ -113,6 +119,152 @@ def _eval(php, url):
     """Run PHP inside WP, return stdout (stripped)."""
     r = _wp(["eval", php], url=url, timeout=90)
     return r.stdout.strip()
+
+
+def _php_available():
+    return shutil.which("php") is not None and os.path.exists(_PLUGIN)
+
+
+def _eval_plugin(php):
+    """Run PHP against the plugin source in THIS checkout, no container.
+
+    The container serves the plugin from a Docker volume, not a bind
+    mount of this repo, so `wp eval` tests whatever copy was last
+    deployed — fine for the sweep engine, useless for verifying a change
+    that has not shipped yet. Everything below the sweep is pure PHP:
+    the file's only load-time dependencies are the ABSPATH guard and
+    add_action/add_filter, so three stubs make it loadable directly and
+    the helpers under test can be called for real.
+    """
+    boot = (
+        "<?php\n"
+        "define('ABSPATH', sys_get_temp_dir() . '/');\n"
+        "function add_action() {}\n"
+        "function add_filter() {}\n"
+        "function apply_filters($tag, $value) { return $value; }\n"
+        "require %s;\n" % json.dumps(_PLUGIN)
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".php", delete=False) as fh:
+        fh.write(boot + php)
+        path = fh.name
+    try:
+        # -n skips php.ini: with xdebug loaded, var_dump output grows a
+        # file:line prefix and every exact-match assertion below breaks on
+        # any runner that ships xdebug (GitHub CI does).
+        r = subprocess.run(["php", "-n", path], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            raise AssertionError("php failed: %s%s" % (r.stdout, r.stderr))
+        return r.stdout.strip()
+    finally:
+        os.unlink(path)
+
+
+@unittest.skipUnless(_php_available(), "requires a local php CLI and the plugin source")
+class TestWaybackResourcesState(unittest.TestCase):
+    """`resources_state` is what turns a bare-HTML capture from a silent
+    "success" into something the sweep actually reports. Runs against the
+    plugin source directly (see `_eval_plugin`) rather than through
+    Docker: no SPN response needs mocking, because these functions only
+    ever look at the `resources` array already handed to them — the
+    fields SPN's /save/status returns, not a live capture.
+
+    Investigated 2026-08-24: SPN cannot capture .onion embeds at all right
+    now (confirmed live: a directly-submitted asset URL over Tor fails
+    with error:no-captures, on both our onion and a fast, well-provisioned
+    control onion — see the long comment above onionpress_wayback_same_url
+    in the plugin source). So `resources_state` is not a stopgap for a
+    remedy that's still coming; it is the whole remedy. These tests pin
+    the one thing OnionPress can actually do about onion embeds: notice
+    and report when a capture doesn't have any, rather than calling it a
+    plain success."""
+
+    def test_same_url_ignores_scheme_and_trailing_slash(self):
+        out = _eval_plugin(
+            "var_dump(onionpress_wayback_same_url("
+            "'http://x.onion/a.css', 'https://x.onion/a.css/'));"
+        )
+        self.assertEqual(out, "bool(true)")
+
+    def test_same_url_rejects_a_genuine_mismatch(self):
+        out = _eval_plugin(
+            "var_dump(onionpress_wayback_same_url("
+            "'http://x.onion/a.css', 'http://x.onion/b.css'));"
+        )
+        self.assertEqual(out, "bool(false)")
+
+    def test_embed_count_excludes_the_page_itself(self):
+        # SPN's resources list always leads with the URL that was
+        # captured — a list of length 1 (just the page) is zero embeds,
+        # not one.
+        out = _eval_plugin(
+            "echo onionpress_wayback_embed_count("
+            "array('http://x.onion/'), 'http://x.onion/');"
+        )
+        self.assertEqual(out, "0")
+
+    def test_embed_count_counts_real_embeds(self):
+        out = _eval_plugin(
+            "echo onionpress_wayback_embed_count("
+            "array('http://x.onion/', 'http://x.onion/style.css', "
+            "'http://x.onion/logo.png'), 'http://x.onion/');"
+        )
+        self.assertEqual(out, "2")
+
+    def test_embed_count_skips_empty_and_non_string_entries(self):
+        # SPN's JSON can hand back null/empty slots; they are not embeds.
+        out = _eval_plugin(
+            "echo onionpress_wayback_embed_count("
+            "array('http://x.onion/', '', null, 'http://x.onion/a.js'), "
+            "'http://x.onion/');"
+        )
+        self.assertEqual(out, "1")
+
+    def test_resources_state_unverified_when_spn_omitted_the_field(self):
+        out = _eval_plugin(
+            "echo onionpress_wayback_resources_state(array(), 'http://x.onion/');"
+        )
+        self.assertEqual(out, "unverified")
+
+    def test_resources_state_bare_when_only_the_page_came_back(self):
+        out = _eval_plugin(
+            "echo onionpress_wayback_resources_state("
+            "array('resources' => array('http://x.onion/')), "
+            "'http://x.onion/');"
+        )
+        self.assertEqual(out, "bare")
+
+    def test_resources_state_complete_when_embeds_came_back(self):
+        out = _eval_plugin(
+            "echo onionpress_wayback_resources_state("
+            "array('resources' => array('http://x.onion/', "
+            "'http://x.onion/style.css')), 'http://x.onion/');"
+        )
+        self.assertEqual(out, "complete")
+
+    def test_finalize_success_records_resources_state(self):
+        """The state onionpress_wayback_resources_state() computes must
+        actually reach storage — this is the wiring test, not just the
+        pure-function test above."""
+        out = _eval_plugin(
+            "$captured = null;\n"
+            "$write = function ($kv) use (&$captured) { $captured = $kv; };\n"
+            "onionpress_wayback_finalize_success($write, 'http://x.onion/', "
+            "array('timestamp' => '20260824000000', "
+            "'resources' => array('http://x.onion/')));\n"
+            "echo $captured['resources_state'];"
+        )
+        self.assertEqual(out, "bare", "a page-only capture must be recorded as bare")
+
+    def test_finalize_success_complete_when_embeds_present(self):
+        out = _eval_plugin(
+            "$captured = null;\n"
+            "$write = function ($kv) use (&$captured) { $captured = $kv; };\n"
+            "onionpress_wayback_finalize_success($write, 'http://x.onion/', "
+            "array('timestamp' => '20260824000000', "
+            "'resources' => array('http://x.onion/', 'http://x.onion/a.css')));\n"
+            "echo $captured['resources_state'];"
+        )
+        self.assertEqual(out, "complete")
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")

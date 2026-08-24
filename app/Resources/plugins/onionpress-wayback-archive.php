@@ -123,6 +123,14 @@ define( 'OP_WB_META_ORIGINAL_URL',    '_op_wayback_original_url' );
 define( 'OP_WB_META_DURATION_SEC',    '_op_wayback_duration_sec' );
 define( 'OP_WB_META_RESOURCES_COUNT', '_op_wayback_resources_count' );
 define( 'OP_WB_META_OUTLINKS_COUNT',  '_op_wayback_outlinks_count' );
+// How much of the page actually landed in the archive — see
+// onionpress_wayback_resources_state(). A capture can succeed and still
+// replay as a bare page, so "archived" alone is not a claim we can make.
+define( 'OP_WB_META_RESOURCES_STATE', '_op_wayback_resources_state' );
+// Values for the above.
+define( 'OP_WB_RES_COMPLETE',   'complete' );   // SPN captured embeds too
+define( 'OP_WB_RES_BARE',       'bare' );       // page only; will replay unstyled
+define( 'OP_WB_RES_UNVERIFIED', 'unverified' ); // we never saw a resource list
 define( 'OP_WB_META_LAST_ERROR_EXT',  '_op_wayback_last_error_ext' );
 define( 'OP_WB_META_LAST_ERROR_AT',   '_op_wayback_last_error_at' );
 // Set when the post has been re-archived once due to a comment being
@@ -457,6 +465,36 @@ function onionpress_wayback_submit_parallel( array $urls ) {
     // Speed-tuning params per SPN docs (Tips for faster captures):
     //   skip_first_archive=1      don't compute "is this a first?"
     //   js_behavior_timeout=0     skip JS behaviors (WP content is server-rendered)
+    //
+    // There is deliberately NO parameter here asking SPN to capture the
+    // page's images, CSS and favicons, because no such parameter exists.
+    // The SPN2 API doc defines embeds as "Components of a web page, e.g.
+    // images, CSS, JS, etc. When we capture a web page, we also try to
+    // capture its embeds" — it is unconditional and always on. The two
+    // options that look like they might govern it do not:
+    //   capture_all=1       "Archive page even when the server returns an
+    //                        HTTP error status (4xx or 5xx)" — about
+    //                        status codes, not resources.
+    //   capture_outlinks=1  archives LINKS found on the page (a[href]),
+    //                        not embeds, capped at 100 and billed against
+    //                        our capture budget. Doc: "Avoid ... unless
+    //                        you need to archive all discovered outlinks."
+    // Nor does js_behavior_timeout=0 switch the browser off: it bounds JS
+    // run "after page load", and force_get=1 is the separate option that
+    // would bypass the headless browser. We must NOT set force_get here —
+    // that one really would reduce every capture to a bare HTML GET.
+    //
+    // So when a capture of ours replays without its images, the cause is
+    // not on this line. Our onion answers in 3-20s when it answers at
+    // all, against SPN's documented "Network connection timeout = 10s"
+    // per resource and "Max web page capture time = 50s ... Partial
+    // success may still be recorded if sufficient content has been
+    // captured". A slow onion spends that budget on the HTML and the
+    // embeds are what falls off. Raising js_behavior_timeout does not buy
+    // those back — it spends the same scarce 50s on scroll/hover events
+    // we have no use for, and a trial with behaviors enabled returned 504.
+    // What we do instead is refuse to call such a capture complete: see
+    // onionpress_wayback_resources_state() and the bare-captures counter.
     // Dropped `if_not_archived_within=1h` — on retries after a failed
     // onion crawl, SPN was returning the cached error instead of re-
     // trying with a fresh circuit. Relying on SPN's built-in default
@@ -671,6 +709,96 @@ function onionpress_wayback_poll_parallel( array $job_ids, &$covered = null ) {
 
 // ───────────────── finalize: write outcomes into storage ────────────
 
+// Investigated 2026-08-24: submitting each image/CSS/JS URL to SPN as
+// its own job did not work that day, so no per-asset submission path
+// ships here — but read the whole note before treating that as settled.
+//
+// The controlled experiment (same window, minutes apart, our Tor client
+// verified healthy by a third-party onion fetch first):
+//   - our onion's HOME PAGE as an SPN job  -> status:success in 10.3s,
+//     http_status:200, and counters.embeds=0 / resources=[]. SPN's
+//     crawler reaches this onion and captures HTML; it fetched no
+//     embedded resources even from a successful page capture.
+//   - our onion's CSS FILE as its own job, submitted in BOTH the
+//     http:// and https:// URL forms -> error:no-captures for each,
+//     "...unreachable" — which the successful page capture in the same
+//     minutes proves is factually wrong as a reachability claim.
+//   - earlier the same day: a favicon and a PNG on DuckDuckGo's onion
+//     (fast, well-provisioned, unrelated to us), with force_get=1 and
+//     without -> error:no-captures as well.
+// So on 2026-08-24, SPN captured onion HTML pages while failing every
+// standalone non-HTML onion URL, across two sites and both URL schemes.
+//
+// What this does NOT establish — and this file previously overclaimed
+// it, in exactly the way that was already made and retracted on
+// 2026-08-13 ("archive.org's onion is unreachable" -> our own Tor was
+// degraded; "no onion captures since June, SPN regressed" -> nobody had
+// submitted any; one live submission then succeeded in 6.6s):
+//   - "cannot, for anyone, permanently". SPN's /save/status flips
+//     success -> error:no-captures for a job whose capture actually
+//     landed (that is why the CDX-rescue path in this file exists), IA
+//     serves "Temporarily Offline" pages mid-outage, and CDX absence
+//     only ever proves absence of submissions. A failure report from
+//     any of these channels is weather until CDX, checked later, says
+//     otherwise.
+// Before acting on this note in either direction, re-run the experiment
+// above — page control first, then assets, then CDX a while later. Do
+// not write "SPN cannot" anywhere (comments, commits, issues) from
+// error responses alone.
+//
+// Until a re-run shows asset jobs landing: resources_state below is the
+// remedy we can ship — stop calling embed-less captures successful.
+
+/**
+ * Compare two URLs the way SPN's resource list needs them compared:
+ * ignoring scheme and a trailing slash, which SPN varies freely between
+ * what we submitted and what it echoes back.
+ */
+function onionpress_wayback_same_url( $a, $b ) {
+    $norm = function ( $u ) {
+        $u = preg_replace( '#^https?://#i', '', trim( (string) $u ) );
+        return rtrim( $u, '/' );
+    };
+    return strcasecmp( $norm( $a ), $norm( $b ) ) === 0;
+}
+
+/**
+ * How many EMBEDS a capture actually got — the images, CSS, JS and
+ * favicons, not counting the page itself. SPN's `resources` list always
+ * leads with the captured URL, so a list of length 1 means "the HTML
+ * and nothing else".
+ */
+function onionpress_wayback_embed_count( array $resources, $url ) {
+    $n = 0;
+    foreach ( $resources as $r ) {
+        if ( ! is_string( $r ) || $r === '' ) continue;
+        if ( onionpress_wayback_same_url( $r, $url ) ) continue;
+        $n++;
+    }
+    return $n;
+}
+
+/**
+ * Decide how much of a capture landed, from SPN's own answer.
+ *
+ * Why this exists: a Wayback capture can report "success", be findable
+ * in CDX, and still replay as a bare wall of text. The Wayback Machine
+ * rewrites every `src`/`href` in the stored HTML into a `…im_/…` replay
+ * URL whether or not those bytes were ever fetched, so a page whose
+ * links all look correctly rewritten tells you nothing about whether
+ * its images and stylesheet exist. The only evidence on hand is the
+ * `resources` list SPN returns with the status — so that is what we
+ * read, and when we have not seen one we say so instead of assuming.
+ */
+function onionpress_wayback_resources_state( array $data, $url ) {
+    if ( ! is_array( $data['resources'] ?? null ) ) {
+        return OP_WB_RES_UNVERIFIED;
+    }
+    return onionpress_wayback_embed_count( $data['resources'], $url ) > 0
+        ? OP_WB_RES_COMPLETE
+        : OP_WB_RES_BARE;
+}
+
 /**
  * Record a successful capture. $data is one element from the
  * /save/status batch response. Generic over storage: the caller
@@ -685,6 +813,7 @@ function onionpress_wayback_finalize_success( callable $write, $url, array $data
         'duration_sec'    => (float) ( $data['duration_sec'] ?? 0 ),
         'resources_count' => is_array( $data['resources'] ?? null ) ? count( $data['resources'] ) : 0,
         'outlinks_count'  => is_array( $data['outlinks']  ?? null ) ? count( $data['outlinks']  ) : 0,
+        'resources_state' => onionpress_wayback_resources_state( $data, $url ),
     );
     // Only store original_url if it actually differs from what we submitted,
     // to avoid 4kB of duplicated URLs in postmeta.
@@ -725,6 +854,7 @@ function onionpress_wayback_post_write( $post_id, array $patch ) {
         'duration_sec'    => OP_WB_META_DURATION_SEC,
         'resources_count' => OP_WB_META_RESOURCES_COUNT,
         'outlinks_count'  => OP_WB_META_OUTLINKS_COUNT,
+        'resources_state' => OP_WB_META_RESOURCES_STATE,
         'last_error_ext'  => OP_WB_META_LAST_ERROR_EXT,
         'last_error_at'   => OP_WB_META_LAST_ERROR_AT,
     );
@@ -1766,6 +1896,12 @@ function onionpress_wayback_sweep_iteration() {
     $polled_cdx_hit = 0;
     $polled_unknown = 0;
     $polled_lost    = 0;
+    // Successes that came back with the HTML and none of its embeds.
+    // Counted apart from $polled_success because they are not the same
+    // outcome: the page is in the archive, but it will replay unstyled
+    // and imageless. Folding them into "success" is what let a sweep
+    // report a healthy run while producing bare pages.
+    $polled_bare    = 0;
     $poll_covered   = array();
     $results        = onionpress_wayback_poll_parallel( $ripe_job_ids, $poll_covered );
 
@@ -1789,8 +1925,13 @@ function onionpress_wayback_sweep_iteration() {
             onionpress_wayback_finalize_success( $rec['write'], $rec['url'], $res );
             $rec['write']( array( 'job_id' => '', 'submitted_at' => '', 'last_error_ext' => '', 'last_error_at' => '' ) );
             $polled_success++;
+            $res_state = onionpress_wayback_resources_state( $res, $rec['url'] );
+            if ( $res_state !== OP_WB_RES_COMPLETE ) $polled_bare++;
             onionpress_wayback_log( 'Archived ' . $rec['key'] . ' ts=' . (string) ( $res['timestamp'] ?? '' )
-                . ' dur=' . (string) ( $res['duration_sec'] ?? '' ) );
+                . ' dur=' . (string) ( $res['duration_sec'] ?? '' )
+                . ' embeds=' . ( is_array( $res['resources'] ?? null )
+                    ? onionpress_wayback_embed_count( $res['resources'], $rec['url'] ) : '?' )
+                . ( $res_state === OP_WB_RES_COMPLETE ? '' : ' [' . $res_state . ': replays without images/CSS]' ) );
         } elseif ( $status === 'error' ) {
             $ext = (string) ( $res['status_ext'] ?? 'error' );
             // Queue for CDX verification before deciding this is a real loss.
@@ -1885,13 +2026,19 @@ function onionpress_wayback_sweep_iteration() {
             $rec = $cdx_check_recs[ $jid ];
             $ts  = (string) ( $cdx[ $jid ] ?? '' );
             if ( $ts !== '' ) {
+                // CDX proves the PAGE exists at $ts. It says nothing about
+                // whether the images and stylesheet came with it, and we
+                // never saw a `resources` list for this job — SPN called it
+                // an error. Record that gap rather than leaving the field
+                // blank, which reads downstream as a clean capture.
                 $rec['write']( array(
-                    'archived_at'    => time(),
-                    'snapshot_ts'    => $ts,
-                    'job_id'         => '',
-                    'submitted_at'   => '',
-                    'last_error_ext' => '',
-                    'last_error_at'  => '',
+                    'archived_at'     => time(),
+                    'snapshot_ts'     => $ts,
+                    'resources_state' => OP_WB_RES_UNVERIFIED,
+                    'job_id'          => '',
+                    'submitted_at'    => '',
+                    'last_error_ext'  => '',
+                    'last_error_at'   => '',
                 ) );
                 $polled_cdx_hit++;
                 onionpress_wayback_log( 'CDX rescued ' . $rec['key'] . ' ts=' . $ts
@@ -2027,6 +2174,10 @@ function onionpress_wayback_sweep_iteration() {
     // this one deliberately leaves them for the next sweep. Borrowing the
     // other path's name would tell a reader the opposite of what happened.
     if ( $cdx_skipped > 0 )     $notes[] = 'cdx-skipped=' . $cdx_skipped;
+    // Surfaced as a note, not a silent postmeta field: a run where every
+    // capture came back bare looks identical to a healthy one in the
+    // counters above, and that is the failure this note exists to name.
+    if ( $polled_bare > 0 )     $notes[] = 'bare-captures=' . $polled_bare;
     if ( $discarded > 0 )       $notes[] = 'job-id-discarded=' . $discarded;
     if ( $submit_skip !== '' )  $notes[] = 'submit-skipped=' . str_replace( ' ', '-', $submit_skip );
     onionpress_wayback_log( sprintf(
@@ -2042,6 +2193,7 @@ function onionpress_wayback_sweep_iteration() {
     return array(
         'submitted' => $submitted,
         'success'   => $polled_success,
+        'bare'      => $polled_bare,
         'cdx'       => $polled_cdx_hit,
         'error'     => $polled_error,
         'forgotten' => $polled_unknown,
@@ -2144,6 +2296,7 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
             'duration_sec'    => '',
             'resources_count' => '',
             'outlinks_count'  => '',
+            'resources_state' => '',
             'last_error_ext'  => '',
             'last_error_at'   => '',
         ) );
@@ -2192,6 +2345,7 @@ add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
         'duration_sec'    => '',
         'resources_count' => '',
         'outlinks_count'  => '',
+        'resources_state' => '',
         'last_error_ext'  => '',
         'last_error_at'   => '',
     ) );
