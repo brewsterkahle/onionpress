@@ -72,16 +72,20 @@ LAUNCH_ON_LOGIN=yes
 PREVENT_SLEEP=normal
 
 # Virtual Machine Memory (GB)
-# Default: 1 (1 GB RAM for the container VM)
+# Default: 2 (2 GB RAM for the container VM)
 #
 # The Linux VM that runs WordPress, Tor, and MariaDB containers.
-# 1 GB is sufficient for normal use. OnionHeaven instances auto-increase
-# to 5 GB on first detection. Increase manually if you run many plugins
-# or experience out-of-memory issues.
+# The stack idles at ~840 MB (tor 250, onionheaven 286, wordpress 154,
+# mariadb 141, autoheal 8), so the old 1 GB default left ~115 MB free
+# before anything was published — and a large static-site upload then got
+# the kernel OOM-killer instead of an error. 2 GB leaves ~1.1 GB, headroom
+# for large uploads and for WordPress itself.
+# OnionHeaven instances auto-increase to 5 GB on first detection.
+# Increase manually if you run many plugins or publish very large sites.
 #
 # Requires restart to take effect.
 #
-VM_MEMORY=1
+VM_MEMORY=2
 
 # Cloudflare Tunnel (Clearnet Access)
 # Expose your WordPress site on the regular internet with HTTPS via Cloudflare Tunnel.

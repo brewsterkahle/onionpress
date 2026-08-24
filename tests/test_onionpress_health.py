@@ -46,6 +46,20 @@ class TestHealthResult(unittest.TestCase):
         self.assertFalse(hr.ready)
         self.assertEqual(hr.errors, [])
 
+    def test_unknown_reachability_defaults_to_none_not_false(self):
+        # Reachability is tri-state: a HealthResult that never ran Check 5
+        # must be distinguishable from one that ran it and got a negative
+        # answer — status.json (and any consumer of onion_reachable) treats
+        # None as "unknown", never as "confirmed unreachable".
+        hr = HealthResult()
+        self.assertIsNone(hr.tor_externally_reachable)
+        self.assertIsNone(hr.external_http_code)
+        self.assertFalse(hr.ready)  # None must not satisfy `ready`
+
+    def test_not_ready_when_reachability_unknown(self):
+        hr = HealthResult(wp_healthy=True, tor_externally_reachable=None)
+        self.assertFalse(hr.ready)
+
 
 class TestCheckWordpressLocal(unittest.TestCase):
     def test_healthy(self):
@@ -383,6 +397,33 @@ class TestFullCheck(unittest.TestCase):
         hr = hc.full_check()
         self.assertFalse(hr.ready)
         self.assertFalse(hr.tor_internally_ready)
+        # Check 5 never ran (gated on tor_internally_ready) — the
+        # regression this guards is write_status() reading this as a
+        # confirmed-unreachable `false` instead of "never asked".
+        self.assertIsNone(hr.tor_externally_reachable)
+        self.assertIsNone(hr.external_http_code)
+
+    def test_missing_onion_address_skips_check_5_leaves_reachability_unknown(self):
+        # Checks 1-4 can all pass with no onion_address yet (e.g. hostname
+        # file present but check_tor_hostname returned "" for some other
+        # reason) — full_check's Check 5 gate requires BOTH
+        # tor_internally_ready and onion_address, so this exercises the
+        # other half of that gate.
+        docker = mock.Mock()
+        docker.exec.side_effect = [
+            _ok("<html>"),   # check_wordpress_local
+            _fail(),         # check_tor_bootstrap control-port probe
+            _ok(""),         # check_tor_hostname → empty address
+            _ok(),           # check_internal_connectivity
+        ]
+        docker.run.return_value = _ok("Bootstrapped 100% (done)")
+        hc = HealthChecker(docker)
+        hr = hc.full_check()
+        self.assertTrue(hr.tor_internally_ready)
+        self.assertEqual(hr.onion_address, "")
+        self.assertIsNone(hr.tor_externally_reachable)
+        self.assertIsNone(hr.external_http_code)
+        self.assertFalse(hr.ready)
 
 
 class TestHealthMonitorEvaluate(unittest.TestCase):

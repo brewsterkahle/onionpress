@@ -1,11 +1,13 @@
 """Tests for src/onionpress/config.py."""
 
 import os
+import socket
 import stat
 import sys
 import tempfile
 import shutil
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -14,7 +16,7 @@ from onionpress.config import (
     read_config, read_value, write_value, write_config,
     validate_address_prefix,
     Secrets, load_secrets, ensure_secrets,
-    PortConfig, detect_port_offset,
+    PortConfig, detect_port_offset, resolve_port_offset,
     ensure_config,
     SAFE_CONFIG_KEYS, redact_config,
 )
@@ -304,6 +306,59 @@ class TestPortDetection(unittest.TestCase):
         pc = PortConfig(offset=10000, wp_port=18080, socks_port=19050, proxy_port=19077)
         self.assertEqual(pc.offset, 10000)
         self.assertEqual(pc.wp_port, 18080)
+
+    def test_foreign_holder_still_bumps_offset(self):
+        """detect_port_offset() is a bind-based allocator: it can't tell
+        "someone else holds this port" from "we do" — it only knows
+        "taken". That's correct for the multi-user path (another macOS
+        account legitimately holds 8080) and must keep bumping to +10000
+        in that case; resolve_port_offset() (tested below) is what adds
+        the "is it actually us" distinction on top."""
+        real_socket_cls = socket.socket
+
+        class FakeSocket(real_socket_cls):
+            def bind(self, addr):
+                if addr[1] == 8080:
+                    raise OSError("address in use (simulated foreign holder)")
+                return super().bind(addr)
+
+        with mock.patch("onionpress.config.socket.socket", FakeSocket):
+            pc = detect_port_offset()
+        self.assertEqual(pc.offset, 10000)
+        self.assertEqual(pc.wp_port, 18080)
+
+
+class TestResolvePortOffset(unittest.TestCase):
+    """resolve_port_offset() is the runtime lookup detect_port_offset()
+    can't be: it reads our own running container's published port first
+    (authoritative) and only falls back to bind-probe allocation when
+    nothing of ours is up yet.
+    """
+
+    def test_reads_running_stack_port_without_bumping(self):
+        with mock.patch("onionpress.config.launcher_ops.get_running_wp_port",
+                         return_value=8080):
+            pc = resolve_port_offset()
+        self.assertEqual(pc, PortConfig(offset=0, wp_port=8080, socks_port=9050, proxy_port=9077))
+
+    def test_reads_running_stack_on_nonzero_offset(self):
+        # A stack that came up on a non-default offset (multi-user, or a
+        # prior restart that landed elsewhere) must be followed, not
+        # silently mis-addressed for the rest of the session.
+        with mock.patch("onionpress.config.launcher_ops.get_running_wp_port",
+                         return_value=18080):
+            pc = resolve_port_offset()
+        self.assertEqual(pc, PortConfig(offset=10000, wp_port=18080, socks_port=19050, proxy_port=19077))
+
+    def test_falls_back_to_detect_when_nothing_running(self):
+        sentinel = PortConfig(offset=20000, wp_port=28080, socks_port=29050, proxy_port=29077)
+        with mock.patch("onionpress.config.launcher_ops.get_running_wp_port",
+                         return_value=None), \
+             mock.patch("onionpress.config.detect_port_offset",
+                         return_value=sentinel) as m:
+            pc = resolve_port_offset()
+        m.assert_called_once()
+        self.assertEqual(pc, sentinel)
 
 
 class TestDefaults(unittest.TestCase):

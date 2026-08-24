@@ -487,7 +487,7 @@ detect_container_runtime() {
         if [ -f "$COLIMA_HOME/.initialized" ]; then
             if "$BIN_DIR/colima" status >/dev/null 2>&1; then
                 # Check if configured VM memory differs from running VM
-                _cfg_mem=1
+                _cfg_mem=2
                 if [ -f "$DATA_DIR/config" ]; then
                     _tmp_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
                     [ -n "$_tmp_mem" ] && _cfg_mem="$_tmp_mem"
@@ -539,7 +539,7 @@ detect_container_runtime() {
                 log "Starting bundled Colima..."
 
                 # Read VM memory/CPU from config so restarts honour changes
-                _restart_mem=1
+                _restart_mem=2
                 _restart_cpu=2
                 if [ -f "$DATA_DIR/config" ]; then
                     _cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
@@ -998,8 +998,8 @@ configure_cache_enabler() {
 install_docker() {
     log "Container runtime initialization required"
 
-    # Read VM memory from config (default: 1 GB)
-    VM_MEMORY=1
+    # Read VM memory from config (default: 2 GB — the stack idles at ~840 MB)
+    VM_MEMORY=2
     VM_CPU=2
     if [ -f "$DATA_DIR/config" ]; then
         config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
@@ -1979,8 +1979,15 @@ main() {
                 fi
             fi
             echo $$ > "$PIDFILE"
-            # On exit: clean PID file and kill our background children
-            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null' EXIT INT TERM HUP
+            # On exit: clean PID file and kill our background children.
+            # The `|| true` is load-bearing: under `set -e`, a failing command
+            # inside the EXIT trap becomes the SCRIPT's exit status. `kill`
+            # fails when the jobs table is empty or only holds already-finished
+            # jobs — so a fully successful `start` exited 1 whenever its
+            # background children happened to finish first (race), which any
+            # caller that checks the exit code (a managing app's stack installer) read
+            # as a start failure.
+            trap 'rm -f "$PIDFILE"; kill $(jobs -p) 2>/dev/null || true' EXIT INT TERM HUP
 
             # Note: orphaned background processes from previous launches may exist
             # but are harmless (sleeping poll loops). The exit trap kills our own
