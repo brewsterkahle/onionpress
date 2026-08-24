@@ -139,6 +139,35 @@ define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
 define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
 define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
 
+// Every page of the live static generation keeps its capture state in this ONE
+// option, shaped { generation: '<id>', urls: { '<path>': {job_id, archived_at,
+// …} } }. One row rather than one option per page: the set is bounded (see
+// OP_WB_STATIC_MAX_PAGES), the whole thing is read and written together, and
+// the sweep holds a single-process lock so there is no concurrent writer to
+// lose an update to.
+//
+// The generation id rides along because it is what makes a publish re-archive.
+// A row only answers for the generation it was written under, so a new id
+// silently retires every row at once — no reset call has to fire, and nothing
+// depends on the receiver's commit route remembering to clear anything. The
+// same comparison is what makes a re-commit of the SAME generation harmless:
+// the ids match, so rows survive and a capture still in flight is not thrown
+// away. See onionpress_wayback_static_write().
+define( 'OP_WB_OPT_STATIC',        'op_wayback_static_state' );
+
+// Ceiling on how many static pages are tracked. This is a storage bound, not a
+// throughput one — the sweep already drains whatever it enumerates across
+// iterations at OP_WB_SUBMIT_BATCH_MAX a time. At roughly 150 serialized bytes
+// per archived page, 1000 pages is ~150 kB in one non-autoloaded option, which
+// is unremarkable; a hundred thousand would not be. Pages past the cap are not
+// archived, and the enumeration logs that rather than dropping them silently.
+define( 'OP_WB_STATIC_MAX_PAGES', 1000 );
+
+// How many files the fallback directory walk may look at before giving up on
+// the pages it has found so far. Only reached when a generation ships no
+// sitemap.xml AND carries a very large tree.
+define( 'OP_WB_STATIC_SCAN_MAX', 20000 );
+
 // ─────────────────────────── logging + helpers ──────────────────────
 
 function onionpress_wayback_log( $msg ) {
@@ -189,10 +218,41 @@ function onionpress_wayback_home_url_full() {
     return 'http://' . $onion . $path;
 }
 
+/**
+ * The feed URL to archive.
+ *
+ * `/feed/` is a WordPress route. When a static generation is serving, it has
+ * replaced the whole site at the onion root and publishes its feed under its
+ * own name — moss writes `/rss.xml` — and emits nothing at `/feed/` at all.
+ * WordPress still answers `/feed/` with a boilerplate feed, 200 and all, so the
+ * record looked healthy while archiving a feed no reader subscribes to.
+ *
+ * Decided by the file being on disk, not by "is a generation live": a generator
+ * may legitimately ship no feed (moss gates rss.xml on its site_url being
+ * deployed, so a site published before its onion name was registered has none),
+ * and then WordPress's route really is the only feed that exists.
+ *
+ * Main site only, for the same reason the pages are: the generation sits at the
+ * onion ROOT, so its feed is the main site's. A subsite's readers subscribe to
+ * `http://<onion>/<subsite>/feed/`, which the generation neither publishes nor
+ * replaces.
+ */
 function onionpress_wayback_feed_url_full() {
     $onion = onionpress_wayback_onion_addr();
     if ( empty( $onion ) ) {
         return '';
+    }
+    if ( onionpress_wayback_static_serves_this_site() ) {
+        $gen = onionpress_wayback_static_generation();
+        // Ordered by how likely a generator is to emit it. The first one
+        // present wins; a generation shipping two feeds is not a case worth
+        // guessing between, and picking deterministically at least keeps the
+        // record's url stable across sweeps.
+        foreach ( array( '/rss.xml', '/feed.xml', '/atom.xml' ) as $candidate ) {
+            if ( $gen !== null && is_file( $gen['dir'] . $candidate ) ) {
+                return 'http://' . $onion . $candidate;
+            }
+        }
     }
     $path = wp_parse_url( home_url( '/' ), PHP_URL_PATH ) ?: '/';
     return 'http://' . $onion . rtrim( $path, '/' ) . '/feed/';
@@ -695,6 +755,420 @@ function onionpress_wayback_opt_write( $option_key, array $patch ) {
     update_option( $option_key, $raw, false /* no autoload */ );
 }
 
+// ──────────────────── the static site's own pages ───────────────────
+//
+// A static publish replaces the whole site at the onion root in one atomic
+// symlink flip. Its pages are FILES, served straight off disk by the
+// static-first Apache config before WordPress's rewrite rules ever run — so
+// get_posts() cannot see them, by construction, and until this section existed
+// the archiver's entire view of such a site was home + feed. A site whose real
+// content was 32 pages reported "archived 6/6, 100%" while archiving six
+// leftover WordPress defaults and none of its actual content.
+//
+// These pages join the queue as ordinary records, in the same key/url/read/
+// write shape posts and home/feed already use, so poll, CDX rescue, stale-
+// pending, back-off, budget and logging all apply to them unchanged. There is
+// no second submission path.
+
+/**
+ * Where the live generation is symlinked. The static receiver owns this path,
+ * so read its constant rather than keeping a second copy of the same string in
+ * two mu-plugins that would then have to agree.
+ */
+function onionpress_wayback_static_current_path() {
+    $path = defined( 'ONIONPRESS_STATIC_CURRENT' )
+        ? ONIONPRESS_STATIC_CURRENT
+        : '/var/www/html/site/current';
+    // Test hook: point the enumeration at a throwaway generation. The suite
+    // runs against a live site, and repointing the real `current` symlink to
+    // test this would swap out the site somebody is actually serving.
+    return (string) apply_filters( 'onionpress_wayback_static_current_path_mock', $path );
+}
+
+/**
+ * The live generation as array( 'id' => …, 'dir' => … ), or null when nothing
+ * is serving statically (a plain WordPress site, or a first run before the
+ * receiver has ever committed).
+ *
+ * realpath() is load-bearing, and not for the reason it looks like. The walk
+ * below is indifferent to it — PHP descends a symlinked start path perfectly
+ * well, unlike find(1), which needs -L. What resolving buys is the ID:
+ * `site/current` is a symlink whose own basename is the constant "current".
+ * Read the id off the unresolved path and it never changes, so every publish
+ * matches the generation already recorded, no row is ever retired, and new
+ * content is silently never submitted. The generation id is the entire
+ * mechanism by which a publish re-archives.
+ *
+ * Agrees with the receiver's own onionpress_static_current_generation(), which
+ * takes the basename of the readlink target; that function returns only the id,
+ * and the enumeration needs the directory too.
+ */
+function onionpress_wayback_static_generation() {
+    $real = realpath( onionpress_wayback_static_current_path() );
+    if ( $real === false || ! is_dir( $real ) ) {
+        return null;
+    }
+    return array( 'id' => basename( $real ), 'dir' => $real );
+}
+
+/**
+ * Does the live generation publish THIS subsite's URLs?
+ *
+ * Everything static-shaped here is container-global — one `site/current`
+ * symlink, one /var/lib/onionpress/onion_address — but the sweep visits every
+ * subsite in the network in turn. Without this gate a four-subsite network
+ * enumerated the same generation four times and submitted all 32 URLs four
+ * times over, against an SPN account whose concurrent slots are counted in
+ * single digits.
+ *
+ * The generation serves at the onion ROOT, so its pages are the main site's
+ * URLs; a subsite lives under a path prefix and owns none of them.
+ * function_exists() because is_main_site() ships with multisite only, and this
+ * plugin also runs on single-site installs — where the one site is the main one
+ * by definition.
+ */
+function onionpress_wayback_static_serves_this_site() {
+    if ( function_exists( 'is_main_site' ) && ! is_main_site() ) {
+        return false;
+    }
+    return onionpress_wayback_static_generation() !== null;
+}
+
+/**
+ * Read the static capture map. Pinned to blog 1 — there is ONE static site per
+ * network, at the root, so its capture state is one thing and not one per
+ * subsite. Without the pin, a four-subsite network keeps four copies of the
+ * same map and each submits the same pages under its own job_ids.
+ *
+ * Blog 1 by literal, matching onionpress_wayback_auth_header(), which pins the
+ * SPN credentials the same way: on OnionPress the network's main site is
+ * always blog 1, and having two functions disagree about where "the network's
+ * own state" lives would be worse than the assumption.
+ */
+function onionpress_wayback_static_state_read() {
+    $raw = function_exists( 'get_blog_option' )
+        ? get_blog_option( 1, OP_WB_OPT_STATIC, array() )
+        : get_option( OP_WB_OPT_STATIC, array() );
+    return is_array( $raw ) ? $raw : array();
+}
+
+/**
+ * Write the static capture map back to blog 1.
+ *
+ * Switches by hand rather than calling update_blog_option(), which has no
+ * autoload parameter: this row reaches ~150 kB at OP_WB_STATIC_MAX_PAGES, and
+ * autoloading it would put that on every request the container serves. The
+ * $autoload=false here is the same choice onionpress_wayback_opt_write() makes.
+ */
+function onionpress_wayback_static_state_write( array $state ) {
+    $switched = false;
+    if ( function_exists( 'switch_to_blog' ) && get_current_blog_id() !== 1 ) {
+        switch_to_blog( 1 );
+        $switched = true;
+    }
+    try {
+        update_option( OP_WB_OPT_STATIC, $state, false /* no autoload */ );
+    } finally {
+        if ( $switched && function_exists( 'restore_current_blog' ) ) {
+            restore_current_blog();
+        }
+    }
+}
+
+/**
+ * Every page path the live generation serves, as absolute site paths ('/',
+ * '/about/', …), sorted and capped at OP_WB_STATIC_MAX_PAGES.
+ *
+ * sitemap.xml first, because it is the publisher's own statement of what the
+ * site is — written from its build manifest, so it is authoritative in a way a
+ * directory listing never is. Only the PATH of each <loc> is used: the host in
+ * there comes from whatever site_url was configured at build time and can be
+ * stale or even http://localhost, and archiving that submits URLs nobody can
+ * fetch.
+ *
+ * The walk is the fallback because a generator may ship no sitemap at all —
+ * moss gates sitemap.xml (and rss.xml) on its site_url being deployed, so a
+ * site built before its onion name was registered ships neither. Without the
+ * fallback those sites would archive nothing and the reason would be invisible.
+ *
+ * Memoized per REQUEST, keyed on the generation, because one sweep iteration
+ * asks several times over (the has-work probe, the poll's record list, the
+ * submit's) and on the fallback path each ask is a full directory walk. Keying
+ * on the generation is what keeps a publish visible: a new generation is a new
+ * key, so the memo cannot serve the previous publish's page list. Within one
+ * generation the tree is immutable — each publish is built into its own
+ * directory and the symlink moved — so nothing here can go stale.
+ */
+function onionpress_wayback_static_paths( array $gen ) {
+    static $memo = array();
+    $memo_key = (string) $gen['id'] . "\0" . (string) $gen['dir'];
+    if ( isset( $memo[ $memo_key ] ) ) {
+        return $memo[ $memo_key ];
+    }
+
+    $paths   = array();
+    $sitemap = $gen['dir'] . '/sitemap.xml';
+
+    if ( is_readable( $sitemap ) && function_exists( 'simplexml_load_file' ) ) {
+        $prev = libxml_use_internal_errors( true );
+        $xml  = simplexml_load_file( $sitemap );
+        libxml_clear_errors();
+        libxml_use_internal_errors( $prev );
+        if ( $xml !== false && isset( $xml->url ) ) {
+            foreach ( $xml->url as $u ) {
+                $path = wp_parse_url( (string) $u->loc, PHP_URL_PATH );
+                if ( is_string( $path ) && $path !== '' ) {
+                    $paths[ $path ] = true;
+                }
+            }
+        } elseif ( $xml !== false && $xml->getName() === 'sitemapindex' ) {
+            // Past 50k URLs the convention is an INDEX of sitemaps, whose
+            // children are <sitemap> not <url>. Deliberately not followed: a
+            // site that large is two orders of magnitude past
+            // OP_WB_STATIC_MAX_PAGES, so the pages the index would name are
+            // ones this plugin refuses to track anyway. Say so rather than
+            // letting an unrecognised sitemap look like an absent one — the
+            // fallback below is much more expensive, and an operator seeing a
+            // walk on a site that plainly ships a sitemap would have no way to
+            // know why.
+            onionpress_wayback_log(
+                'static: sitemap.xml is a <sitemapindex> (a site past ~50k URLs); '
+                . 'not followed — falling back to the directory walk, and only the '
+                . 'first ' . OP_WB_STATIC_MAX_PAGES . ' pages are tracked' );
+        }
+    }
+
+    // Fallback, only when the sitemap named nothing. A generation that ships a
+    // usable one is authoritative, and the walk is the expensive path.
+    //
+    // A page is a directory carrying index.html. `_moss` is the generator's own
+    // internal directory (hashed css/js, generated OG images); it outnumbers
+    // the pages and can never contain one.
+    //
+    // Every part of this can throw. RecursiveDirectoryIterator reports an
+    // unreadable directory as an UnexpectedValueException — from its own
+    // constructor for the root, and from getChildren() for a subdirectory. One
+    // directory the web user could not open would otherwise propagate out of
+    // the sweep as a PHP fatal on every invocation, with no log line saying
+    // what happened. CATCH_GET_CHILD skips the unreadable subtree; the
+    // try/catch covers the root and anything else the iterator raises. Both
+    // keep whatever was enumerated before the failure, because a partial page
+    // list is worth far more than a dead sweep.
+    if ( ! $paths ) {
+        $scanned    = 0;
+        $unreadable = array();
+        try {
+            $dir    = new RecursiveDirectoryIterator( $gen['dir'], FilesystemIterator::SKIP_DOTS );
+            $filter = new RecursiveCallbackFilterIterator( $dir, function ( $file ) use ( &$unreadable ) {
+                if ( $file->getFilename() === '_moss' ) {
+                    return false;
+                }
+                // CATCH_GET_CHILD turns an unreadable subdirectory from a fatal
+                // into a SILENT skip, and silent is its own failure: every page
+                // under it stops being archived and nothing says why. One
+                // is_readable() per directory — not per file — buys the log
+                // line below. CATCH_GET_CHILD stays as the backstop for the gap
+                // between this check and the descent.
+                if ( $file->isDir() && ! $file->isReadable() ) {
+                    $unreadable[] = $file->getPathname();
+                    return false;
+                }
+                return true;
+            } );
+            $walk = new RecursiveIteratorIterator(
+                $filter,
+                RecursiveIteratorIterator::LEAVES_ONLY,
+                RecursiveIteratorIterator::CATCH_GET_CHILD
+            );
+            foreach ( $walk as $file ) {
+                if ( ++$scanned > OP_WB_STATIC_SCAN_MAX ) {
+                    onionpress_wayback_log( sprintf(
+                        'static: directory walk hit its %d-file ceiling; enumerated %d page(s) before stopping',
+                        OP_WB_STATIC_SCAN_MAX, count( $paths )
+                    ) );
+                    break;
+                }
+                if ( $file->getFilename() !== 'index.html' ) {
+                    continue;
+                }
+                $rel = substr( $file->getPath(), strlen( $gen['dir'] ) );
+                $rel = str_replace( '\\', '/', $rel );
+                $paths[ $rel === '' ? '/' : rtrim( $rel, '/' ) . '/' ] = true;
+            }
+        } catch ( Exception $e ) {
+            onionpress_wayback_log( sprintf(
+                'static: directory walk of %s failed after %d file(s) (%s); '
+                . 'archiving the %d page(s) enumerated so far',
+                $gen['dir'], $scanned, $e->getMessage(), count( $paths )
+            ) );
+        }
+        if ( $unreadable ) {
+            onionpress_wayback_log( sprintf(
+                'static: %d director(y/ies) could not be opened and were skipped, '
+                . 'so any page under them is NOT archived: %s',
+                count( $unreadable ), implode( ', ', array_slice( $unreadable, 0, 5 ) )
+                    . ( count( $unreadable ) > 5 ? ', …' : '' )
+            ) );
+        }
+    }
+
+    $out = array_keys( $paths );
+    sort( $out );
+    // Storage bound, not a throughput one — see OP_WB_STATIC_MAX_PAGES. Applied
+    // inside the memo so the log line fires once per request, not once per ask.
+    $total = count( $out );
+    if ( $total > OP_WB_STATIC_MAX_PAGES ) {
+        $out = array_slice( $out, 0, OP_WB_STATIC_MAX_PAGES );
+        onionpress_wayback_log( sprintf(
+            'static: %d page(s) found, tracking the first %d (OP_WB_STATIC_MAX_PAGES); %d NOT archived',
+            $total, OP_WB_STATIC_MAX_PAGES, $total - OP_WB_STATIC_MAX_PAGES
+        ) );
+    }
+    $memo[ $memo_key ] = $out;
+    return $out;
+}
+
+/**
+ * Patch one static page's state inside the single OP_WB_OPT_STATIC row.
+ * Returns false when the write was REFUSED, so a caller counting successful
+ * submissions can tell that apart from a write that did nothing.
+ *
+ * Refuses to write into a generation that is no longer the live one. A job
+ * submitted against the previous generation can land here after a publish, and
+ * finalize_success writes archived_at and clears job_id in two separate calls —
+ * without this guard a late write resurrects a row for a page the new
+ * generation may not even serve, and nothing would ever retire it.
+ *
+ * Adopting a new generation is the other half of the same comparison, and it
+ * lives here because this is the WRITE path. Doing it while building records
+ * would mean merely ASKING what work exists rewrote the option and logged a
+ * publish, several times per subsite per iteration. Doing it on the first real
+ * write instead keeps every read path pure and loses nothing: a record's read
+ * already reports a page as unarchived whenever the stored map describes a
+ * different generation, so a publish puts every page back in the queue whether
+ * or not anything has been written yet.
+ */
+function onionpress_wayback_static_write( $gen_id, $path, array $patch ) {
+    $state = onionpress_wayback_static_state_read();
+    if ( (string) ( $state['generation'] ?? '' ) !== (string) $gen_id ) {
+        // The map describes some other generation. Two cases, opposite
+        // answers, and only the live generation id separates them.
+        $live = onionpress_wayback_static_generation();
+        if ( $live === null || (string) $live['id'] !== (string) $gen_id ) {
+            return false; // a late write from a generation that has been retired
+        }
+        // A publish has landed and this is the first write against it: adopt
+        // it, retiring every row of the old generation in one write. That
+        // replacement is the entire mechanism by which a publish re-archives.
+        onionpress_wayback_log( sprintf(
+            'static: generation %s is live (was %s) — re-archiving its pages',
+            $gen_id, ( $state['generation'] ?? '(none)' )
+        ) );
+        $state = array( 'generation' => (string) $gen_id, 'urls' => array() );
+    }
+    $urls = isset( $state['urls'] ) && is_array( $state['urls'] ) ? $state['urls'] : array();
+    $row  = isset( $urls[ $path ] ) && is_array( $urls[ $path ] ) ? $urls[ $path ] : array();
+    // Same convention as onionpress_wayback_opt_write(): '' / 0 deletes a key.
+    foreach ( $patch as $k => $v ) {
+        if ( $v === '' || $v === 0 || $v === 0.0 ) {
+            unset( $row[ $k ] );
+        } else {
+            $row[ $k ] = $v;
+        }
+    }
+    if ( $row ) {
+        $urls[ $path ] = $row;
+    } else {
+        unset( $urls[ $path ] );
+    }
+    $state['urls'] = $urls;
+    onionpress_wayback_static_state_write( $state );
+    return true;
+}
+
+/**
+ * The live generation's pages as work records, in the same shape posts and
+ * home/feed already use.
+ *
+ * $covered is the set of URLs home/feed already claim. The sitemap lists the
+ * root too, so without it '/' would be submitted twice every sweep.
+ *
+ * Reads nothing it does not need and writes nothing at all: building the work
+ * list is a question, and the answer to a question should not depend on having
+ * been asked. The generation adoption lives in static_write() — see there.
+ */
+function onionpress_wayback_static_records( array $covered = array() ) {
+    $onion = onionpress_wayback_onion_addr();
+    if ( $onion === '' ) {
+        return array();
+    }
+    $gen = onionpress_wayback_static_generation();
+    if ( $gen === null ) {
+        return array();
+    }
+
+    $gen_id  = $gen['id'];
+    $records = array();
+    foreach ( onionpress_wayback_static_paths( $gen ) as $path ) {
+        $url = 'http://' . $onion . $path;
+        if ( isset( $covered[ $url ] ) ) {
+            continue;
+        }
+        $records[] = array(
+            'key'   => 'static:' . $path,
+            'url'   => $url,
+            // A row belongs to the generation the map was written for. When a
+            // publish has replaced it, every page of the NEW generation is
+            // unarchived by definition — including one whose path the old
+            // generation happened to serve too — so a stale row must not be
+            // reported as this page's state. That is what puts every page back
+            // in the queue on a publish, and why nothing has to reset the
+            // option eagerly for a publish to be noticed.
+            'read'  => function () use ( $gen_id, $path ) {
+                $s = onionpress_wayback_static_state_read();
+                if ( (string) ( $s['generation'] ?? '' ) !== (string) $gen_id ) {
+                    return array();
+                }
+                return isset( $s['urls'][ $path ] ) && is_array( $s['urls'][ $path ] )
+                    ? $s['urls'][ $path ]
+                    : array();
+            },
+            'write' => function ( $patch ) use ( $gen_id, $path ) {
+                return onionpress_wayback_static_write( $gen_id, $path, $patch );
+            },
+        );
+    }
+    return $records;
+}
+
+/**
+ * archived / in_flight / total for the live generation's pages, for the
+ * progress counters. Derived from the same records the sweep works on, so the
+ * admin page cannot report a state the queue disagrees with.
+ *
+ * Gated exactly like the submission, and deliberately by the same call: a
+ * subsite neither owns these pages nor submits them, and counting them there
+ * would show a root page permanently unarchived — the root is excluded from the
+ * records because the MAIN site's home record covers it, which is not true of a
+ * subsite's home url.
+ */
+function onionpress_wayback_static_totals() {
+    $out = array( 'total' => 0, 'archived' => 0, 'in_flight' => 0 );
+    if ( ! onionpress_wayback_static_serves_this_site() ) {
+        return $out;
+    }
+    foreach ( onionpress_wayback_static_records( onionpress_wayback_sitewide_covered_urls() ) as $rec ) {
+        $state = call_user_func( $rec['read'] );
+        $out['total']++;
+        if ( ! empty( $state['archived_at'] ) ) {
+            $out['archived']++;
+        } elseif ( ! empty( $state['job_id'] ) ) {
+            $out['in_flight']++;
+        }
+    }
+    return $out;
+}
+
 // ───────────────────── work queue (posts + home/feed) ───────────────
 
 /**
@@ -765,7 +1239,24 @@ function onionpress_wayback_posts_with_in_flight() {
 }
 
 /**
- * Home + feed as work records, matching the shape used for posts.
+ * The URLs home + feed already claim, as a set. The static enumeration
+ * subtracts these so the root — which every sitemap lists — is not queued a
+ * second time under its own record.
+ */
+function onionpress_wayback_sitewide_covered_urls() {
+    $covered = array();
+    foreach ( array( onionpress_wayback_home_url_full(), onionpress_wayback_feed_url_full() ) as $url ) {
+        if ( $url ) {
+            $covered[ $url ] = true;
+        }
+    }
+    return $covered;
+}
+
+/**
+ * Home + feed as work records, matching the shape used for posts, plus every
+ * page of the live static generation.
+ *
  * Returns a mixed list: some awaiting submission, some in-flight. The
  * sweep checks each record's state to decide what to do.
  */
@@ -780,15 +1271,67 @@ function onionpress_wayback_sitewide_records() {
         $records[] = array(
             'key'   => 'opt:' . $opt_key,
             'url'   => $url,
-            'read'  => function() use ( $opt_key ) {
-                return onionpress_wayback_opt_read( $opt_key );
+            // A state naming a DIFFERENT url describes a different page and
+            // cannot answer for this one — report unarchived and let it be
+            // submitted. The feed url moves: it switches from WordPress's
+            // /feed/ route to the generation's own feed the moment a publish
+            // ships one. Without this the record only ever recorded THAT it
+            // archived, never WHAT, so the first /feed/ capture pinned it as
+            // done forever and the real feed was never once submitted.
+            //
+            // An absent stored url is a row written before this field existed.
+            // Treating those as a mismatch would re-submit every site's home
+            // page once on upgrade for no gain — a url is only known to be
+            // stale when it is present and differs.
+            'read'  => function() use ( $opt_key, $url ) {
+                $state  = onionpress_wayback_opt_read( $opt_key );
+                $stored = (string) ( $state['url'] ?? '' );
+                if ( $stored !== '' && $stored !== $url ) {
+                    return array();
+                }
+                return $state;
             },
-            'write' => function( $patch ) use ( $opt_key ) {
+            // Stamped on every write, so a row becomes self-describing at the
+            // first thing that happens to it — submission included, which is
+            // what keeps an in-flight job from being credited to a url that
+            // changed while it was out.
+            'write' => function( $patch ) use ( $opt_key, $url ) {
+                $patch['url'] = $url;
                 onionpress_wayback_opt_write( $opt_key, $patch );
             },
         );
     }
-    return $records;
+    // Home and feed are the only two URLs WordPress can name generically. When
+    // a static generation is serving they are 2 of N, and every other page it
+    // publishes sat outside the queue entirely — which is how a site could
+    // report 100% archived while none of its actual pages had been submitted.
+    if ( ! onionpress_wayback_static_serves_this_site() ) {
+        return $records;
+    }
+    return array_merge(
+        $records,
+        onionpress_wayback_static_records( onionpress_wayback_sitewide_covered_urls() )
+    );
+}
+
+/**
+ * Does any sitewide URL still need attention? A record needs work unless it has
+ * an archived_at and no job_id in flight.
+ *
+ * Derived from the records rather than from named options so it cannot drift
+ * from what the sweep would actually try to do. The multisite loop uses this to
+ * decide it may skip a subsite entirely, and reading only home + feed there was
+ * the same bug one layer up: a subsite whose posts and home/feed were all
+ * archived got skipped, so its static pages sat unarchived forever.
+ */
+function onionpress_wayback_sitewide_has_work() {
+    foreach ( onionpress_wayback_sitewide_records() as $rec ) {
+        $state = call_user_func( $rec['read'] );
+        if ( empty( $state['archived_at'] ) || ! empty( $state['job_id'] ) ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ──────────────────────────── sweep ─────────────────────────────────
@@ -847,9 +1390,14 @@ function onionpress_wayback_sweep() {
 }
 
 /**
- * Sum queue totals across every subsite in the network. Returns an
- * array with 'archived', 'in_flight', 'remaining', and 'total' post
- * counts (counting publish posts + pages only).
+ * Sum queue totals across every subsite in the network, plus the pages of the
+ * live static generation. Returns an array with 'archived', 'in_flight',
+ * 'remaining' and 'total'.
+ *
+ * The static pages have to be in here or the number is a lie: on a site whose
+ * real content is a static generation, the posts this loop counts are the
+ * leftover WordPress defaults, and archiving all six of them reported 100%
+ * while 32 actual pages had never been submitted.
  */
 function onionpress_wayback_queue_totals() {
     $out = array( 'archived' => 0, 'in_flight' => 0, 'remaining' => 0, 'total' => 0 );
@@ -883,6 +1431,13 @@ function onionpress_wayback_queue_totals() {
             if ( function_exists( 'restore_current_blog' ) ) restore_current_blog();
         }
     }
+    // Once, outside the loop: there is one static site per network, at the
+    // root, and its state is pinned to blog 1. Adding it per subsite would
+    // multiply the same 32 pages by the number of subsites.
+    $static = onionpress_wayback_static_totals();
+    $out['total']     += $static['total'];
+    $out['archived']  += $static['archived'];
+    $out['in_flight'] += $static['in_flight'];
     $out['remaining'] = max( 0, $out['total'] - $out['archived'] - $out['in_flight'] );
     return $out;
 }
@@ -1018,15 +1573,15 @@ function onionpress_wayback_sweep_loop( $token ) {
                     ),
                     'fields' => 'ids',
                 ) );
-                // Home + feed are tracked in wp_options, not post meta, so the
-                // post probes above miss them. A subsite with every post archived
-                // can still need work if save_post invalidated its home/feed
-                // capture (state cleared) or a home/feed job is in flight. Treat
-                // a state as "needs work" unless archived_at is set AND no job_id.
-                $home_state    = onionpress_wayback_opt_read( OP_WB_OPT_HOME );
-                $feed_state    = onionpress_wayback_opt_read( OP_WB_OPT_FEED );
-                $sitewide_work = empty( $home_state['archived_at'] ) || ! empty( $home_state['job_id'] )
-                              || empty( $feed_state['archived_at'] ) || ! empty( $feed_state['job_id'] );
+                // Home, feed and the static pages are tracked in wp_options,
+                // not post meta, so the post probes above miss all of them. A
+                // subsite with every post archived can still need work if
+                // save_post invalidated its home/feed capture, if a job is in
+                // flight, or if a static publish put N pages back in the queue.
+                // Ask the records rather than named options, so this cannot
+                // decide there is nothing to do while the sweep would have
+                // found something.
+                $sitewide_work = onionpress_wayback_sitewide_has_work();
                 if ( empty( $remaining ) && empty( $in_flight ) && ! $sitewide_work ) {
                     // No work on this subsite — skip.
                     continue;
@@ -1393,6 +1948,7 @@ function onionpress_wayback_sweep_iteration() {
     }
 
     $submitted   = 0;
+    $discarded   = 0;
     $hit_429     = false;
     $submit_skip = '';
     if ( ! empty( $to_submit ) && microtime( true ) >= $deadline ) {
@@ -1431,7 +1987,22 @@ function onionpress_wayback_sweep_iteration() {
                 continue;
             }
             if ( $result !== '' ) {
-                $rec['write']( array( 'job_id' => $result, 'submitted_at' => time() ) );
+                // A write can be REFUSED, and then this is not a submission we
+                // may count. A static record's write goes into the generation
+                // it was built against (see static_write), so a publish landing
+                // between building the batch and writing its results back makes
+                // the write a no-op: the job_id is dropped, SPN still runs the
+                // capture and still holds the slot, nothing ever polls it, and
+                // the sweep would log submitted=N as if all was well. Count
+                // what landed, and say out loud what did not.
+                if ( $rec['write']( array( 'job_id' => $result, 'submitted_at' => time() ) ) === false ) {
+                    $discarded++;
+                    onionpress_wayback_log( 'Submitted ' . $rec['key'] . ' but could not record its '
+                        . 'job_id (the generation it belongs to is no longer live); the capture '
+                        . 'completes at SPN unpolled and the page is resubmitted under the new '
+                        . 'generation' );
+                    continue;
+                }
                 $submitted++;
             }
         }
@@ -1456,6 +2027,7 @@ function onionpress_wayback_sweep_iteration() {
     // this one deliberately leaves them for the next sweep. Borrowing the
     // other path's name would tell a reader the opposite of what happened.
     if ( $cdx_skipped > 0 )     $notes[] = 'cdx-skipped=' . $cdx_skipped;
+    if ( $discarded > 0 )       $notes[] = 'job-id-discarded=' . $discarded;
     if ( $submit_skip !== '' )  $notes[] = 'submit-skipped=' . str_replace( ' ', '-', $submit_skip );
     onionpress_wayback_log( sprintf(
         'Sweep: avail=%d%s in-flight=%d polled(success=%d cdx-hit=%d err=%d pending=%d '
@@ -1776,6 +2348,7 @@ add_action( 'admin_post_onionpress_wayback_action', function () {
 
 function onionpress_wayback_admin_page() {
     $totals        = onionpress_wayback_queue_totals();
+    $static_totals = onionpress_wayback_static_totals();
     $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
     $backoff_secs  = max( 0, $backoff_until - time() );
     $lock_raw      = (string) get_option( 'op_wayback_sweep_lock', '' );
@@ -1823,9 +2396,23 @@ function onionpress_wayback_admin_page() {
         <table class="wp-list-table widefat striped" style="max-width:720px;">
             <tbody>
                 <tr>
-                    <th style="width:220px;">Total posts</th>
+                    <th style="width:220px;">Total pages</th>
                     <td><?php echo number_format_i18n( $totals['total'] ); ?></td>
                 </tr>
+                <?php if ( $static_totals['total'] > 0 ) : ?>
+                <tr>
+                    <th>&nbsp;&nbsp;&nbsp;of which static-site pages</th>
+                    <td><?php echo number_format_i18n( $static_totals['archived'] ); ?>
+                        of <?php echo number_format_i18n( $static_totals['total'] ); ?> archived
+                        <?php if ( $static_totals['in_flight'] > 0 ) : ?>
+                            &middot; <?php echo number_format_i18n( $static_totals['in_flight'] ); ?> in flight
+                        <?php endif; ?>
+                        <br><span class="description">Pages of the published static site, which are
+                        files rather than WordPress posts. They re-enter the queue on every
+                        publish.</span>
+                    </td>
+                </tr>
+                <?php endif; ?>
                 <tr>
                     <th>Archived in Wayback</th>
                     <td><strong><?php echo number_format_i18n( $totals['archived'] ); ?></strong>

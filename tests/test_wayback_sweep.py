@@ -30,21 +30,31 @@ archiving nothing:
   9. The daemon must recycle on a timer and hand its lock back. It ran
      70 hours in one PHP request, serving option reads from a cache
      that predated the fix being applied to the database.
+ 10. The published static site's own pages are in the queue. They are
+     files, not posts, so get_posts() cannot see them — a site whose
+     real content was 32 static pages reported "6/6 archived, 100%"
+     while archiving six leftover WordPress defaults.
 
 Prerequisites (skips the suite if any fails):
   - Docker running
   - `onionpress-wordpress` container up with the wayback plugin
     present in mu-plugins/
   - At least one subsite to target
+
+Set ONIONPRESS_WP_CONTAINER to run against a scratch WordPress instead of
+the developer's live one. These tests write real options and post meta, and
+the mocks only stop the *network* calls — pointing them at a throwaway
+container is the way to run them without touching a site somebody is serving.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import time
 import unittest
 
-_WP = "onionpress-wordpress"
+_WP = os.environ.get("ONIONPRESS_WP_CONTAINER", "onionpress-wordpress")
 
 
 def _docker_exec(args, **kwargs):
@@ -72,14 +82,31 @@ def _docker_available():
     return r.returncode == 0 and "true" in r.stdout
 
 
-def _pick_site():
+def _sites():
     r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
             timeout=15)
     if r.returncode != 0 or not r.stdout.strip():
-        return None
-    sites = json.loads(r.stdout)
+        return []
+    return json.loads(r.stdout)
+
+
+def _pick_site():
+    sites = _sites()
     sub = [s for s in sites if s.get("path") != "/"]
     return sub[0] if sub else (sites[0] if sites else None)
+
+
+def _pick_main_site():
+    """The main site, where _pick_site() deliberately prefers a subsite.
+
+    The static generation serves at the onion ROOT, so its pages are the main
+    site's URLs and the enumeration is gated on is_main_site() — without that
+    gate a four-subsite network submits the same 32 URLs four times. Tests for
+    it therefore have to run where it is switched on.
+    """
+    sites = _sites()
+    main = [s for s in sites if s.get("path") == "/"]
+    return main[0] if main else (sites[0] if sites else None)
 
 
 def _eval(php, url):
@@ -195,12 +222,22 @@ class TestWaybackSweepIteration(unittest.TestCase):
 
     def _common_mocks(self, available=40):
         """Short-circuit reachability + user_status so the iteration
-        reaches the poll/submit phases."""
+        reaches the poll/submit phases, and hide the live static generation.
+
+        The generation is real content on the machine running the suite, and
+        every one of its pages is now a work record. Left visible it would put
+        an unbounded, site-dependent number of URLs into each iteration's
+        submit batch ahead of the post these tests create, and would write the
+        real site's capture map. Tests that are ABOUT the generation point this
+        filter at a fixture of their own instead.
+        """
         return f"""
         add_filter('onionpress_wayback_self_reachable_mock',
                    function() {{ return true; }});
         add_filter('onionpress_wayback_user_status_mock',
                    function() {{ return array('available' => {available}, 'processing' => 0); }});
+        add_filter('onionpress_wayback_static_current_path_mock',
+                   function() {{ return '/nonexistent/op-wb-no-generation'; }});
         """
 
     def test_young_job_is_not_polled(self):
@@ -333,34 +370,47 @@ class TestWaybackSweepIteration(unittest.TestCase):
         self.assertEqual("", stats["home_job"],
             f"the unanswered job should have been cleared; got: {stats}")
 
-    def test_job_whose_batch_never_answered_is_not_cleared(self):
-        """poll_parallel chunks job_ids 20 at a time and silently drops any
-        batch that fails — a non-200 or unparseable body contributes nothing
-        to the return value and leaves no trace. Age alone cannot tell that
-        apart from amnesia, so one 40s Tor timeout would reclassify a whole
-        batch of old jobs as forgotten and resubmit all of them.
+    def test_both_guards_against_over_clearing_hold_in_one_iteration(self):
+        """poll_parallel returns [] both when SPN forgot the jobs and when the
+        request itself failed, and clearing a job_id wrongly resubmits a URL
+        that is already being captured. Two independent guards stop that, and
+        this drives both in a single iteration so neither can be standing in
+        for the other:
 
-        Coverage tracking is the fix: only jobs whose batch actually came
-        back count as answered-about. Here the job is old enough to clear
-        but its batch never returned, so it must be left alone.
+          - COVERAGE. A batch that never came back contributes nothing to the
+            return value and leaves no trace, so age alone cannot tell a
+            timeout from amnesia — one 40s Tor timeout would reclassify a whole
+            batch of old jobs as forgotten. The post's job is old enough to
+            clear, but its batch is uncovered, so it must survive.
+          - AGE. The home record's batch DID come back and said nothing about
+            it, but it is younger than the threshold at which even a job SPN
+            answered 'pending' for would be given up on, so it must survive too.
         """
         self._set_meta("_op_wayback_job_id", "jid-lost-batch-test")
         self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 4000))
 
         php = self._common_mocks() + """
+        update_option('op_wayback_home_state',
+                      array('job_id' => 'jid-young-covered',
+                            'submitted_at' => time() - 30), false);
         add_filter('onionpress_wayback_poll_parallel_mock',
                    function($_, $job_ids) { return array(); }, 10, 2);
-        // No batch came back, so nothing is covered.
+        // Only the young job's batch came back. The old one's did not, which
+        // is the case coverage tracking exists to separate from amnesia.
         add_filter('onionpress_wayback_poll_covered_mock',
-                   function($_, $job_ids) { return array(); }, 10, 2);
+                   function($_, $job_ids) { return array('jid-young-covered'); }, 10, 2);
         add_filter('onionpress_wayback_submit_parallel_mock',
                    function($_, $urls) {
             return array_fill_keys(array_keys($urls), '');
         }, 10, 2);
-        onionpress_wayback_sweep_iteration();
-        echo 'ok';
+        $stats = onionpress_wayback_sweep_iteration();
+        $home = get_option('op_wayback_home_state', array());
+        echo json_encode(array(
+            'forgotten' => $stats['forgotten'],
+            'home_job'  => $home['job_id'] ?? '',
+        ));
         """
-        _eval(php, self.url)
+        out = json.loads(_eval(php, self.url))
         self.assertEqual("jid-lost-batch-test", self._get_meta("_op_wayback_job_id"),
             "a job whose status batch never came back must keep its job_id — "
             "we did not learn that SPN forgot it, only that we failed to ask")
@@ -368,34 +418,11 @@ class TestWaybackSweepIteration(unittest.TestCase):
             "submitted_at must survive alongside the job_id — clearing it "
             "alone would make the record read as a zombie on the next sweep "
             "and get it cleared there instead")
-
-    def test_recently_submitted_job_survives_an_empty_poll(self):
-        """A guard against over-clearing, not a regression test — it passes
-        against the pre-fix plugin too, which cleared nothing at all.
-
-        poll_parallel returns [] both when SPN forgot the jobs and when the
-        request itself failed. Coverage tracking now separates those, but
-        the age gate is the second line of defence: a job younger than the
-        threshold at which a *pending* job would be resubmitted must
-        survive a blank response, or one Tor blip resubmits everything.
-        """
-        self._set_meta("_op_wayback_job_id", "jid-fresh-test")
-        self._set_meta("_op_wayback_submitted_at", str(int(time.time()) - 30))
-
-        php = self._common_mocks() + """
-        add_filter('onionpress_wayback_poll_parallel_mock',
-                   function($_, $job_ids) { return array(); }, 10, 2);
-        add_filter('onionpress_wayback_submit_parallel_mock',
-                   function($_, $urls) {
-            return array_fill_keys(array_keys($urls), '');
-        }, 10, 2);
-        onionpress_wayback_sweep_iteration();
-        echo 'ok';
-        """
-        _eval(php, self.url)
-        self.assertEqual("jid-fresh-test", self._get_meta("_op_wayback_job_id"),
+        self.assertEqual("jid-young-covered", out["home_job"],
             "a young job must survive an empty poll — it is far more likely "
             "the poll failed than that SPN forgot a job submitted seconds ago")
+        self.assertEqual(0, out["forgotten"],
+            f"neither job may be counted as forgotten; got {out}")
 
     def test_submit_assigns_job_id(self):
         """A fresh post (no job_id) gets one on a successful submit."""
@@ -421,6 +448,286 @@ class TestWaybackSweepIteration(unittest.TestCase):
         submitted_at = self._get_meta("_op_wayback_submitted_at")
         self.assertNotEqual("", submitted_at, "submitted_at should be set")
         self.assertGreater(int(submitted_at), int(time.time()) - 60)
+
+
+@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
+class TestWaybackStaticGeneration(unittest.TestCase):
+    """The published static site's own pages are in the queue.
+
+    A publish replaces the whole site at the onion root with a directory of
+    files, served ahead of WordPress by the static-first Apache config. Those
+    pages are not posts, so get_posts() cannot see them and the archiver's
+    entire view of such a site was home + feed: 32 real pages, 1 submitted,
+    admin reporting 100%.
+
+    Every test here points the plugin at a throwaway generation via
+    `onionpress_wayback_static_current_path_mock` rather than repointing the
+    real `site/current` symlink, which would swap out the site the machine is
+    serving.
+    """
+
+    ROOT = "/tmp/op-wb-static-test"
+
+    @classmethod
+    def setUpClass(cls):
+        s = _pick_main_site()
+        if s is None:
+            raise unittest.SkipTest("no site available")
+        cls.url = s["url"].rstrip("/") + "/"
+        cls.onion = _eval("echo onionpress_wayback_onion_addr();", cls.url)
+        if not cls.onion:
+            raise unittest.SkipTest("no onion address on this instance")
+
+    def setUp(self):
+        _wp(["option", "delete", "op_wayback_backoff_until"], url=self.url, timeout=15)
+        self._save_static_state()
+        self.addCleanup(self._rm_fixture_root)
+
+    def _save_static_state(self):
+        """Sibling of TestWaybackSweepIteration._save_sitewide_state.
+
+        The static capture map is a real archive record for the site's real
+        pages, kept in one wp_option. A test that seeds or sweeps it would
+        otherwise leave the live site's pages marked unarchived — or worse,
+        marked archived under a generation id belonging to a fixture — and the
+        next real sweep would act on that.
+        """
+        saved = _eval(
+            "echo base64_encode(json_encode("
+            "get_option('op_wayback_static_state', null)));", self.url)
+        self.addCleanup(self._restore_static_state, saved)
+
+    def _restore_static_state(self, saved):
+        _eval("""
+        $v = json_decode(base64_decode('%s'), true);
+        if ($v === null) { delete_option('op_wayback_static_state'); }
+        else { update_option('op_wayback_static_state', $v, false); }
+        echo 'restored';
+        """ % saved, self.url)
+
+    def _rm_fixture_root(self):
+        _docker_exec(["rm", "-rf", self.ROOT], timeout=15)
+
+    def _mock(self):
+        """Point the plugin at the fixture generation, not the real one."""
+        return ("add_filter('onionpress_wayback_static_current_path_mock', "
+                "function() { return '%s/current'; });" % self.ROOT)
+
+    def _commit(self, gen_id, pages, sitemap=True, feeds=()):
+        """Build a generation and flip `current` at it, exactly as the static
+        receiver does: build into its own directory, symlink, atomic rename.
+
+        `pages` are absolute site paths. Each becomes a directory carrying
+        index.html, so the fallback walk can find them when `sitemap` is False.
+        """
+        locs = "".join(
+            "<url><loc>http://%s%s</loc></url>" % (self.onion, p) for p in pages)
+        php = """
+        $root = '%(root)s';
+        $gen  = $root . '/%(gen)s';
+        foreach (%(pages)s as $p) {
+            $dir = rtrim($gen . $p, '/');
+            if ($dir === '') { $dir = $gen; }
+            @mkdir($dir, 0755, true);
+            file_put_contents($dir . '/index.html', '<html>page</html>');
+        }
+        if (%(sitemap)s) {
+            file_put_contents($gen . '/sitemap.xml',
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                . '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                . '%(locs)s</urlset>');
+        }
+        foreach (%(feeds)s as $f) { file_put_contents($gen . $f, '<rss/>'); }
+        $tmp = $root . '/current.tmp';
+        @unlink($tmp);
+        symlink($gen, $tmp);
+        rename($tmp, $root . '/current');
+        echo readlink($root . '/current');
+        """ % {
+            "root": self.ROOT,
+            "gen": gen_id,
+            "pages": "array(" + ",".join("'%s'" % p for p in pages) + ")",
+            "sitemap": "true" if sitemap else "false",
+            "locs": locs,
+            "feeds": "array(" + ",".join("'%s'" % f for f in feeds) + ")",
+        }
+        out = _eval(php, self.url)
+        self.assertTrue(out.endswith("/" + gen_id),
+                        f"fixture generation not committed: {out}")
+
+    def _sweep_submit_set(self):
+        """One sweep iteration; returns the URLs it tried to submit."""
+        php = self._mock() + """
+        add_filter('onionpress_wayback_self_reachable_mock', function() { return true; });
+        add_filter('onionpress_wayback_user_status_mock',
+                   function() { return array('available' => 40, 'processing' => 0); });
+        add_filter('onionpress_wayback_poll_parallel_mock',
+                   function($_, $job_ids) { return array(); }, 10, 2);
+        delete_option('op_test_wb_submit_set');
+        add_filter('onionpress_wayback_submit_parallel_mock', function($_, $urls) {
+            update_option('op_test_wb_submit_set', array_values($urls), false);
+            // Empty job_ids: nothing is recorded, so the fixture leaves no
+            // in-flight state behind for the next test to trip over.
+            return array_fill_keys(array_keys($urls), '');
+        }, 10, 2);
+        onionpress_wayback_sweep_iteration();
+        echo json_encode(get_option('op_test_wb_submit_set', array()));
+        """
+        self.addCleanup(lambda: _wp(["option", "delete", "op_test_wb_submit_set"],
+                                    url=self.url, timeout=15))
+        return json.loads(_eval(php, self.url))
+
+    def test_every_page_the_generation_lists_reaches_the_submit_set(self):
+        """The whole point: a publish's pages are work, not invisible.
+
+        Run twice — once against a generation that ships a sitemap.xml, once
+        against one that does not. The sitemap is the publisher's own statement
+        of what the site is and is preferred; the directory walk is the
+        fallback for generators that ship none (moss withholds sitemap.xml
+        until its site_url is deployed, so a site published before its onion
+        name was registered has no sitemap at all, and without the fallback
+        those sites archive nothing for a reason nobody can see).
+        """
+        pages = ["/alpha/", "/beta/", "/gamma/delta/"]
+        for source, sitemap in (("sitemap.xml", True), ("directory walk", False)):
+            with self.subTest(source=source):
+                self._commit("gen-%s" % source.split(".")[0].replace(" ", "-"),
+                             pages, sitemap=sitemap)
+                submitted = self._sweep_submit_set()
+                for p in pages:
+                    self.assertIn("http://%s%s" % (self.onion, p), submitted,
+                        f"{p} is a page of the published site and must be "
+                        f"submitted; the sweep asked for: {submitted}")
+
+    def test_the_root_is_not_queued_twice(self):
+        """Every sitemap lists the root, and the home record already covers it.
+
+        Submitting it under both records spends two of an SPN account's
+        single-digit concurrent slots on one URL, every sweep, forever.
+        """
+        self._commit("gen-root", ["/", "/alpha/"])
+        php = self._mock() + """
+        $out = array();
+        foreach (onionpress_wayback_sitewide_records() as $rec) {
+            $out[] = array('key' => $rec['key'], 'url' => $rec['url']);
+        }
+        echo json_encode($out);
+        """
+        records = json.loads(_eval(php, self.url))
+        home = "http://%s/" % self.onion
+        urls = [r["url"] for r in records]
+        self.assertEqual(1, urls.count(home),
+            f"the site root must appear exactly once across all records; got {records}")
+        self.assertIn("opt:op_wayback_home_state", [r["key"] for r in records],
+            "the one record covering the root should be the home record")
+        self.assertIn("http://%s/alpha/" % self.onion, urls,
+            "de-duplicating the root must not drop the other pages")
+
+    def test_a_publish_resets_capture_state_but_a_re_commit_does_not(self):
+        """State is keyed by generation id, and that key does two jobs.
+
+        A NEW id retires every row at once, so a publish puts its pages back in
+        the queue without anything having to remember to clear an option — the
+        receiver's commit route is not on the hook for it. The SAME id must
+        leave the map alone, because re-committing a generation (a repeated
+        publish of unchanged content, a receiver retry) is not new content and
+        must not throw away a capture still in flight at SPN.
+        """
+        self._commit("gen-first", ["/alpha/", "/beta/"])
+        _eval("""
+        update_option('op_wayback_static_state', array(
+            'generation' => 'gen-first',
+            'urls' => array('/alpha/' => array(
+                'job_id' => 'jid-inflight', 'submitted_at' => time())),
+        ), false);
+        echo 'seeded';
+        """, self.url)
+
+        read_alpha = self._mock() + """
+        foreach (onionpress_wayback_static_records() as $rec) {
+            if ($rec['key'] === 'static:/alpha/') { echo json_encode($rec['read']()); return; }
+        }
+        echo '"no-record"';
+        """
+
+        # Re-commit the SAME generation: the symlink is rewritten, the id is not.
+        self._commit("gen-first", ["/alpha/", "/beta/"])
+        state = json.loads(_eval(read_alpha, self.url))
+        self.assertEqual("jid-inflight", state.get("job_id"),
+            "re-committing the same generation must preserve an in-flight "
+            f"job_id — SPN is still capturing that URL; got {state}")
+
+        # A genuinely new generation retires it.
+        self._commit("gen-second", ["/alpha/", "/beta/"])
+        # PHP's empty array encodes as [], not {} — assert emptiness, not shape.
+        state = json.loads(_eval(read_alpha, self.url))
+        self.assertFalse(state,
+            "a new generation makes every page unarchived by definition, "
+            f"including one whose path the old generation also served; got {state}")
+
+        # ...and the reset lands on the first real write, not on the read.
+        after = json.loads(_eval(self._mock() + """
+        foreach (onionpress_wayback_static_records() as $rec) {
+            if ($rec['key'] === 'static:/alpha/') { $rec['write'](array('job_id' => 'jid-new')); }
+        }
+        echo json_encode(get_option('op_wayback_static_state', array()));
+        """, self.url))
+        self.assertEqual("gen-second", after.get("generation"))
+        self.assertEqual({"/alpha/": {"job_id": "jid-new"}}, after.get("urls"),
+            f"adopting a generation must drop the previous one's rows; got {after}")
+
+    def test_the_progress_counters_include_the_static_pages(self):
+        """The visible half of the bug. The admin page counts posts, and on a
+        static site the posts are leftover WordPress defaults — archiving those
+        six read as "100% archived" while 32 real pages had never been
+        submitted. A number that says done when nothing is done is worse than
+        no number.
+        """
+        pages = ["/", "/alpha/", "/beta/"]
+        self._commit("gen-counters", pages)
+        php = self._mock() + """
+        echo json_encode(array(
+            'static' => onionpress_wayback_static_totals(),
+            'queue'  => onionpress_wayback_queue_totals(),
+        ));
+        """
+        out = json.loads(_eval(php, self.url))
+        base = json.loads(_eval("""
+        add_filter('onionpress_wayback_static_current_path_mock',
+                   function() { return '/nonexistent/op-wb-no-generation'; });
+        echo json_encode(onionpress_wayback_queue_totals());
+        """, self.url))
+        # The root is the home record's, so 3 sitemap entries are 2 pages here.
+        self.assertEqual(2, out["static"]["total"],
+            f"the generation's pages must be counted; got {out['static']}")
+        self.assertEqual(0, out["static"]["archived"],
+            "none of them has been archived, and the counter must say so")
+        self.assertEqual(base["total"] + 2, out["queue"]["total"],
+            f"queue totals must carry the static pages; {base} vs {out['queue']}")
+        self.assertGreaterEqual(out["queue"]["remaining"], 2,
+            f"two unarchived pages cannot leave the queue looking drained; got {out['queue']}")
+
+    def test_the_feed_record_follows_the_generation(self):
+        """`/feed/` is a WordPress route. A generation serving the whole root
+        publishes its feed under its own name and emits nothing at `/feed/` —
+        but WordPress still answers there, 200, with a boilerplate feed titled
+        "OnionPress". So the record looked permanently healthy while archiving
+        a feed the published site does not have.
+
+        Decided by the file being on disk, not by "is a generation live": a
+        generator that ships no feed leaves WordPress's route as the only one
+        that exists.
+        """
+        self._commit("gen-with-feed", ["/alpha/"], feeds=("/rss.xml",))
+        feed = _eval(self._mock() + "echo onionpress_wayback_feed_url_full();", self.url)
+        self.assertEqual("http://%s/rss.xml" % self.onion, feed,
+            "the feed record must follow the generation's own feed")
+
+        self._commit("gen-no-feed", ["/alpha/"])
+        feed = _eval(self._mock() + "echo onionpress_wayback_feed_url_full();", self.url)
+        self.assertTrue(feed.endswith("/feed/"),
+            f"with no feed in the generation, WordPress's route is the only "
+            f"feed there is; got {feed}")
 
 
 @unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")

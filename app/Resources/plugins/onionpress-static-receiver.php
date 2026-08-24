@@ -667,10 +667,17 @@ function onionpress_static_route_commit( $request ) {
     // A commit is the publisher's whole publish — it replaces the entire static
     // site in one atomic flip rather than creating/updating individual
     // WordPress posts, so the wayback archiver's post-level save_post
-    // hook never fires for it. Re-archive home + feed the same way
-    // save_post does for a WordPress-side publish, following the
-    // archiver's own invalidate-then-kick mechanism instead of adding a
-    // second submission path.
+    // hook never fires for it. Re-archive the same way save_post does for a
+    // WordPress-side publish, following the archiver's own
+    // invalidate-then-kick mechanism instead of adding a second submission
+    // path.
+    //
+    // Only home + feed are invalidated here, and deliberately so: the
+    // archiver keys the static pages' capture state by GENERATION ID, so the
+    // symlink flip above has already retired every row of the old generation
+    // by itself. Nothing on this route has to remember to clear them — which
+    // is what makes a re-commit of the SAME generation safe, since wiping the
+    // map there would throw away captures still in flight at SPN.
     if ( function_exists( 'onionpress_wayback_invalidate_sitewide' )
         && function_exists( 'onionpress_wayback_kick_now' ) ) {
         onionpress_wayback_invalidate_sitewide();
