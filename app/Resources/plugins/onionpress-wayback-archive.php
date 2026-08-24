@@ -489,20 +489,91 @@ function onionpress_wayback_submit_parallel( array $urls ) {
     // that one really would reduce every capture to a bare HTML GET.
     //
     // So when a capture of ours replays without its images, the cause is
-    // not on this line. Our onion answers in 3-20s when it answers at
-    // all, against SPN's documented "Network connection timeout = 10s"
-    // per resource and "Max web page capture time = 50s ... Partial
-    // success may still be recorded if sufficient content has been
-    // captured". A slow onion spends that budget on the HTML and the
-    // embeds are what falls off. Raising js_behavior_timeout does not buy
-    // those back — it spends the same scarce 50s on scroll/hover events
-    // we have no use for, and a trial with behaviors enabled returned 504.
+    // not on this line — and it is not our origin being slow either. That
+    // "a slow onion spends SPN's 50s budget on the HTML and the embeds
+    // fall off" account stood in this comment for a while and it is
+    // WRONG. Measured 2026-08-24 with four submissions:
+    //
+    //     ddg onion,  plain (no params)      success  9.3s   resources=0
+    //     clearnet,   WITH these speed params success 10.7s  resources=24
+    //     clearnet,   plain (control)         success 15.7s  resources=24
+    //     our onion,  plain (no params)       success  7.4s  resources=0
+    //
+    // Read the middle two rows first: they are the control on this very
+    // line. skip_first_archive/js_behavior_timeout do NOT suppress embed
+    // capture — clearnet pulls 24 subresources with them set, the same 24
+    // it pulls without. The paragraph above about force_get is correct.
+    //
+    // Then read the outer two: over .onion SPN reports **zero** resources,
+    // for DuckDuckGo exactly as for us, at a duration that shows it did
+    // not run out of anything. Budget is not the mechanism. SPN's Tor path
+    // simply fetches the HTML and stops; its clearnet path runs the
+    // headless browser and follows embeds. Nothing we send, and nothing
+    // about our server, moves that.
+    //
+    // (Our origin is also not slow: 2.4-7.5s TTFB over Tor against DDG's
+    // 2.3-4.1s, serving 43KB against their 172KB. The intermittent
+    // error:gateway-timeout on our submissions is transient circuit luck,
+    // not a property of this site — the same URL succeeded in 7.4s.)
+    //
     // What we do instead is refuse to call such a capture complete: see
     // onionpress_wayback_resources_state() and the bare-captures counter.
+    //
+    // Do NOT "fix" this by submitting the assets as their own URLs, and do
+    // NOT reach for force_get=1 to do it. Both were measured 2026-08-24 and
+    // both fail. SPN gates non-document URLs over .onion on the URL's
+    // EXTENSION, before it opens a connection: .html/.xhtml/.rss/.atom and
+    // extensionless paths capture, while .css/.xml/.png/.js/.json/.txt come
+    // back error:no-captures ("unreachable") having never touched us — 27
+    // submissions produced exactly 8 requests in our access log, matching
+    // the 8 successes 1:1. It is the extension and not the Content-Type: a
+    // .html URL served as text/css captured, and .css/.png URLs served as
+    // text/html were refused. force_get=1, the documented flag for non-HTML
+    // targets, does not bypass it (CSS and JPEG both still no-captures,
+    // no-flag control identical).
+    //
+    // This is also why /feed/ has 17 stored records and /rss.xml has none:
+    // same RSS bytes, but one is an extensionless directory URL and the
+    // other ends in .xml and is refused unread.
+    //
+    // Two earlier versions of this comment were wrong here and are worth
+    // naming so the mistakes are not reinstated. They said the onion
+    // CSS/JS already in Wayback "did not come through Save Page Now" and
+    // that provenance "can't be read off the index". Provenance CAN be
+    // read: the x-archive-src header on the id_ replay endpoint carries
+    // the WARC name even though CDX redacts `filename` — ours reads
+    // spn2-20260824074929-wwwb-spn22.us.archive.org-8002.warc.gz. Those
+    // other captures were SPN2's own. And embed capture over .onion is a
+    // dated REGRESSION, not a standing limitation: it worked to ~2026-06-24,
+    // vanished for all of July, and came back HTML-only in August. Full
+    // month-by-month evidence in CLAUDE.md — read it before theorising here.
+    //
+    // Net effect while both defects stand: over .onion the Wayback Machine
+    // holds our HTML and nothing else. Pages replay whole (see the no-gzip
+    // work in multisite.py) but unstyled, because the stylesheet they
+    // reference was never captured. No parameter, retry, or resubmission
+    // strategy on our side changes that — the paired test settled it with
+    // the same moss build on both transports and a byte-identical
+    // stylesheet at an identical path: clearnet 22 and 15 resources on two
+    // pages against onion 0 and 0, leaf assets clearnet 3/3 vs onion 0/5.
+    // Belongs in the report to IA — and OnionPress is IA's own project, so
+    // that report has somewhere to go.
+    //
+    // One thing here IS ours, though: the sweep's own submit list contains
+    // zero non-document-extension URLs, so "our assets never captured" is
+    // partly "we almost never asked". That does not change the outcome
+    // while Defect B stands, but do not cite the empty index as proof of
+    // refusal without checking what was actually submitted.
+    //
     // Dropped `if_not_archived_within=1h` — on retries after a failed
     // onion crawl, SPN was returning the cached error instead of re-
     // trying with a fresh circuit. Relying on SPN's built-in default
-    // (45 min) lets genuinely failed URLs retry sooner on new circuits.
+    // lets genuinely failed URLs retry sooner on new circuits.
+    //
+    // That default is NOT the 45 minutes this comment used to assert. A
+    // resubmission 75 minutes later came back with the *identical* job
+    // id, so the real dedup window is >=75 min. Anything that reasons
+    // about "it will retry in 45 minutes" is wrong.
     //
     // Chunk the URL list so we never fire more than OP_WB_CONCURRENT_MAX
     // handles at once — Tor SOCKS saturates above that point and every
