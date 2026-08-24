@@ -9,6 +9,7 @@ orchestration glue: right wp-cli calls in the right order, right
 docker cp invocations, right error handling.
 """
 
+import re
 import subprocess
 import unittest
 from unittest import mock
@@ -794,6 +795,70 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
             result = multisite.ensure_archive_s3_keys(log_func=logs.append)
         self.assertFalse(result)
         self.assertTrue(any("Could not reach archive.org" in s for s in logs))
+
+
+class TestPagesGoOutUncompressed(unittest.TestCase):
+    """Wayback stores our pages truncated to their gzipped length, so
+    anything the sweep submits by name must be served uncompressed while
+    the assets beside it keep their gzip. Both halves matter: drop the
+    first and captures stay cut off mid-tag, drop the second and every
+    reader pays for CSS and JS that compress 5x.
+
+    The regex is read out of HTACCESS_BODY rather than retyped, so the
+    test cannot agree with a copy of the rule the server never sees.
+    """
+
+    def _no_gzip_pattern(self):
+        m = re.search(r'SetEnvIf Request_URI "([^"]+)" no-gzip=1',
+                      multisite.HTACCESS_BODY)
+        self.assertIsNotNone(m, "HTACCESS_BODY must carry the no-gzip rule")
+        pattern = m.group(1)
+        # SetEnvIf cannot negate a pattern -- a leading "!" would be matched
+        # as a literal character and the rule would never fire. Catching it
+        # here is the difference between a red test and a silently inert
+        # server config.
+        self.assertFalse(
+            pattern.startswith("!"),
+            "SetEnvIf has no regex negation; list the documents positively",
+        )
+        return re.compile(pattern)
+
+    def _uncompressed(self, pattern, url):
+        """no-gzip is set on the URLs the pattern matches."""
+        return pattern.search(url) is not None
+
+    def test_documents_the_sweep_submits_are_uncompressed(self):
+        pattern = self._no_gzip_pattern()
+        for url in (
+            "/",
+            "/illuminated-books/",
+            "/illuminated-books/songs-of-experience/the-tyger/",
+            "/index.html",
+            "/rss.xml",          # the sweep submits the feed by name
+            "/sitemap.xml",      # and reads it to find the pages
+            "/index.php",
+        ):
+            with self.subTest(url=url):
+                self.assertTrue(
+                    self._uncompressed(pattern, url),
+                    f"{url} is archived by name and must go out uncompressed",
+                )
+
+    def test_assets_keep_their_gzip(self):
+        pattern = self._no_gzip_pattern()
+        for url in (
+            "/_moss/style.c3fa146a646b7866.css",
+            "/_moss/js/theme.e39f3b537f972275.js",
+            "/assets/songs-of-experience/the-tyger.jpg",
+            "/assets/songs-of-experience/the-tyger.w800.webp",
+            "/assets/favicon.svg",
+            "/assets/favicon-32.png",
+        ):
+            with self.subTest(url=url):
+                self.assertFalse(
+                    self._uncompressed(pattern, url),
+                    f"{url} compresses well and is not submitted by name",
+                )
 
 
 if __name__ == "__main__":
