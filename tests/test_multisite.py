@@ -9,11 +9,15 @@ orchestration glue: right wp-cli calls in the right order, right
 docker cp invocations, right error handling.
 """
 
+import ast
+import pathlib
+import re
 import subprocess
 import unittest
 from unittest import mock
 
 from onionpress import multisite
+from onionpress.onionnames_client import _NAME_ALLOWED_RE
 
 
 def _ok():
@@ -330,6 +334,88 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
             result = multisite.ensure_archive_s3_keys(log_func=logs.append)
         self.assertFalse(result)
         self.assertTrue(any("Could not reach archive.org" in s for s in logs))
+
+
+def _wp_content_strip_rule():
+    """Extract the .htaccess RewriteRule that strips the leading
+    /<onionname>/ segment before shared wp-content/wp-admin/wp-includes
+    requests reach WordPress, as a compiled regex for testing.
+    """
+    m = re.search(
+        r"RewriteRule \^\((\[[^\]]+\]\+)/\)\?\(wp-\(content\|admin\|includes\)",
+        multisite.HTACCESS_BODY,
+    )
+    assert m, "could not find the wp-content strip rule in HTACCESS_BODY"
+    return re.compile("^" + m.group(1) + "/")
+
+
+def _extract_onion_proxy_htaccess():
+    """Pull the hand-duplicated .htaccess string out of onion_proxy.py's
+    setup-wizard flow, so it can be compared against multisite.HTACCESS_BODY.
+    """
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "src" / "onionpress" / "onion_proxy.py")
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "htaccess_content" for t in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError("could not find htaccess_content assignment in onion_proxy.py")
+
+
+class TestHtaccessMatchesOnionnameCharset(unittest.TestCase):
+    """Regression test: the .htaccess strip rule's character class must
+    cover every character onionnames_client._NAME_ALLOWED_RE allows.
+    A onionname with a character the strip rule doesn't recognize falls
+    through to WordPress's PHP front controller for every static asset
+    request, instead of being served directly by Apache — broken CSS/JS/
+    images with no error anywhere.
+    """
+
+    SAMPLE_ONIONNAMES = [
+        "myname",
+        "my-name",
+        "my_name",
+        "my.name",
+        "abc123",
+        "a.b-c_d9",
+    ]
+
+    def test_validator_and_htaccess_charset_examples_agree(self):
+        prefix_re = _wp_content_strip_rule()
+        for name in self.SAMPLE_ONIONNAMES:
+            self.assertTrue(_NAME_ALLOWED_RE.match(name),
+                             f"{name!r} should be a valid onionname")
+            self.assertTrue(
+                prefix_re.match(name + "/"),
+                f"htaccess strip rule does not match onionname {name!r} - "
+                "static assets would silently fall through to PHP for this user"
+            )
+
+    def test_dotted_onionname_regression(self):
+        # The original bug: '.' was missing from the strip rule's
+        # character class even though it's a valid onionname character.
+        prefix_re = _wp_content_strip_rule()
+        self.assertTrue(prefix_re.match("my.name/"))
+
+
+class TestHtaccessDuplicatesStayInSync(unittest.TestCase):
+    """The .htaccess rewrite rules are hand-duplicated in multisite.py
+    (Linux / generic-static path) and onion_proxy.py (Mac setup-wizard
+    path). Nothing else enforces the two copies match, so a fix applied
+    to one and not the other silently reintroduces the bug on the other
+    platform.
+    """
+
+    def test_onion_proxy_htaccess_matches_multisite(self):
+        onion_proxy_content = _extract_onion_proxy_htaccess()
+        self.assertEqual(
+            multisite.HTACCESS_BODY.strip(),
+            onion_proxy_content.strip(),
+            "onion_proxy.py's htaccess_content has drifted from "
+            "multisite.HTACCESS_BODY - keep the two in sync"
+        )
 
 
 if __name__ == "__main__":
