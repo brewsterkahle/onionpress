@@ -2760,7 +2760,7 @@ class OnionPressApp(rumps.App):
             return None
         name = self.read_config_value("ONIONNAME", "")
         if name:
-            return f"http://{self.onion_address}/{name}"
+            return f"http://{self.onion_address}/{name}/"
         return f"http://{self.onion_address}/"
 
     @rumps.clicked("Copy Onion Address")
@@ -2809,7 +2809,7 @@ class OnionPressApp(rumps.App):
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
         name = self.read_config_value("ONIONNAME", "")
-        local_base = f"{self.local_url}/{name}" if name else self.local_url
+        local_base = f"{self.local_url}/{name}/" if name else self.local_url
         url = self._generate_login_url(local_base)
         subprocess.run(["open", url])
         self.log(f"Opened local site: {url}")
