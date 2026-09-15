@@ -197,6 +197,46 @@ class TestMakefilePrecheckUsesCorrectPath(unittest.TestCase):
         )
 
 
+class TestPluginDownloadAbortsOnAStalledCircuit(unittest.TestCase):
+    """install_plugin.sh tries onionheaven first and onionpress-tor second.
+    That fallback only helps if the first attempt gives up promptly.
+
+    On 2026-08-22 it did not. A Tor circuit went silent without closing —
+    the SOCKS handshake is local and instant, so curl sat on a live
+    connection receiving nothing. `--max-time 300` was the only bound, and
+    a silent circuit is indistinguishable from a slow download until that
+    deadline expires, so a first-run install showed five minutes of
+    "Starting OnionPress" before onionpress-tor fetched the same file in
+    two seconds.
+
+    The guard is a low-speed abort, not a shorter deadline: cutting
+    --max-time would also kill a slow download that is making progress.
+    """
+
+    def test_download_has_a_low_speed_abort_on_every_proxy_attempt(self):
+        sh = _read("app/Resources/scripts/install_plugin.sh")
+        self.assertRegex(
+            sh,
+            r'--speed-limit\s+\d+',
+            "The plugin download must abort a stalled transfer via "
+            "--speed-limit; --max-time alone cannot detect a silent circuit.",
+        )
+        self.assertRegex(
+            sh,
+            r'--speed-time\s+\d+',
+            "--speed-limit does nothing without --speed-time.",
+        )
+
+    def test_the_outer_deadline_survives(self):
+        sh = _read("app/Resources/scripts/install_plugin.sh")
+        self.assertRegex(
+            sh,
+            r'--max-time\s+\d+',
+            "--max-time is the outer bound for a download that crawls the "
+            "whole way and stays just above the low-speed floor.",
+        )
+
+
 class TestSubsiteGetsOnionPressTheme(unittest.TestCase):
     """RECURRING regression: after `wp site create` creates the primary
     subsite at /<onionname>/, the new subsite gets WordPress's default

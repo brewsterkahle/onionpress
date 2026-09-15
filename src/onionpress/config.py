@@ -15,6 +15,7 @@ import socket
 import subprocess
 from dataclasses import dataclass
 
+from . import launcher_ops
 from .platform import OnionPressPaths
 
 # Default config values matching config-template.txt
@@ -369,3 +370,32 @@ def detect_port_offset() -> PortConfig:
         socks_port=9050 + offset,
         proxy_port=9077 + offset,
     )
+
+
+def resolve_port_offset() -> PortConfig:
+    """Return the port offset our own stack is actually using.
+
+    detect_port_offset() allocates: it binds candidate ports and returns
+    the first free one, which is correct before anything is running. Once
+    our WordPress container is up, its ports are bound (by the container
+    itself), so a fresh bind test just reports "in use" without saying
+    which port that is — including the mundane case where the caller is
+    asking about the very stack it's part of.
+
+    Read the running container's published port first (authoritative —
+    Docker already made this mapping) and only fall back to allocation
+    when nothing is running yet. Callers that need the multi-user
+    allocation behavior with no risk of misreading a foreign container
+    (e.g. a first-launch check before anything of ours exists) should call
+    detect_port_offset() directly instead.
+    """
+    running_port = launcher_ops.get_running_wp_port()
+    if running_port is not None and running_port >= 8080:
+        offset = running_port - 8080
+        return PortConfig(
+            offset=offset,
+            wp_port=running_port,
+            socks_port=9050 + offset,
+            proxy_port=9077 + offset,
+        )
+    return detect_port_offset()
