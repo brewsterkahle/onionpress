@@ -53,6 +53,7 @@ from onionpress.ui_helpers import (
     BackupProgressWindow as _BackupProgressWindow,
     LogViewerActions as _LogViewerActions,
     LogViewerWindow as _LogViewerWindow,
+    ensure_edit_menu as _ensure_edit_menu,
 )
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
@@ -196,6 +197,11 @@ class OnionPressApp(rumps.App):
 
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
+
+        # LSUIElement apps have no visible menu bar, but ⌘-key equivalents
+        # (⌘V paste, ⌘C copy, …) are still dispatched through the main menu —
+        # without this, pasting a password into the setup window just beeps.
+        _ensure_edit_menu()
 
         # Detect first-run early so we can show the right window.
         # Use .setup_complete marker (written by Python after setup finishes)

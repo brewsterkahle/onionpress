@@ -474,9 +474,18 @@ class LogViewerWindow:
 
         actions = LogViewerActions.shared()
 
-        # Edit menu
+        # Edit menu — must include the full standard set: this app is
+        # LSUIElement (no visible menu bar), but macOS still routes ⌘-key
+        # equivalents through the main menu, so a missing Paste item means
+        # ⌘V beeps in every text field (e.g. pasting a password from a
+        # password manager into the setup window).
         edit_menu = AppKit.NSMenu.alloc().initWithTitle_("Edit")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Undo", "undo:", "z")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Redo", "redo:", "Z")
+        edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Cut", "cut:", "x")
         edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "c")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Paste", "paste:", "v")
         edit_menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "a")
         edit_menu.addItem_(AppKit.NSMenuItem.separatorItem())
         find_item = edit_menu.addItemWithTitle_action_keyEquivalent_("Find\u2026", "performFindPanelAction:", "f")
@@ -523,3 +532,14 @@ class LogViewerWindow:
                 self._window.orderOut_(None)
             except Exception:
                 pass
+
+
+def ensure_edit_menu():
+    """Install the Edit/View main menu so ⌘C/⌘V/⌘X/⌘Z/⌘A work in all windows.
+
+    Call once on the main thread at app startup. Safe to call repeatedly.
+    """
+    try:
+        LogViewerWindow._ensure_edit_menu()
+    except Exception:
+        pass
