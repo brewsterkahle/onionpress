@@ -1291,6 +1291,33 @@ add_action( 'init', function () {
  * menu. Uses late priority (20) so the Social Archive plugin has
  * registered the parent menu first.
  */
+/**
+ * Dashboard warning when SPN credentials are missing. Without them the
+ * sweep silently skips every submission (submit_parallel returns empty
+ * on blank auth), which looks identical to "working, just slow" —
+ * surface it where the admin will actually see it. Only shown once the
+ * site has published posts, so a fresh install whose background key
+ * fetch is still in flight doesn't flash a false alarm.
+ */
+add_action( 'admin_notices', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return;
+    }
+    $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+    if ( ! $screen || $screen->id !== 'dashboard' ) {
+        return;
+    }
+    if ( onionpress_wayback_auth_header() !== '' ) {
+        return;
+    }
+    if ( (int) wp_count_posts( 'post' )->publish === 0 ) {
+        return;
+    }
+    echo '<div class="notice notice-warning"><p><strong>Wayback archiving is not running.</strong> '
+        . 'This site has no archive.org credentials, so posts are not being saved to the Wayback Machine. '
+        . 'See <a href="' . esc_url( admin_url( 'admin.php?page=onionpress-wayback' ) ) . '">Wayback Archive</a> for details.</p></div>';
+} );
+
 add_action( 'admin_menu', function () {
     if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
         // Social Archive plugin not loaded — fall back to a top-level menu.
@@ -1394,6 +1421,17 @@ function onionpress_wayback_admin_page() {
 
         <?php if ( $msg ) : ?>
             <div class="notice notice-success is-dismissible"><p><?php echo esc_html( $msg ); ?></p></div>
+        <?php endif; ?>
+
+        <?php if ( onionpress_wayback_auth_header() === '' ) : ?>
+            <div class="notice notice-error">
+                <p><strong>Not connected to archive.org — posts are not being archived.</strong>
+                    Save Page Now needs archive.org credentials, and none are configured, so
+                    every submission is skipped. OnionPress normally sets this up automatically
+                    during setup and retries on each launch; if this message persists, connect
+                    an archive.org account under
+                    <a href="<?php echo esc_url( admin_url( 'admin.php?page=onionpress-settings' ) ); ?>">OnionPress Settings</a>.</p>
+            </div>
         <?php endif; ?>
 
         <?php

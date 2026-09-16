@@ -583,7 +583,8 @@ def ensure_archive_s3_keys(
          "--max-time", "60", "-X", "POST",
          "-d", f"email={_ARCHIVE_LOGIN_EMAIL}&password={_ARCHIVE_LOGIN_PASS}",
          "https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login"],
-        capture_output=True, text=True, timeout=75,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=75,
     )
     if login.returncode != 0 or not login.stdout:
         log("WARNING: Could not reach archive.org onion to fetch S3 keys — "

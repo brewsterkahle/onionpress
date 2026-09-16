@@ -463,6 +463,7 @@ class OnionPressApp(rumps.App):
         self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
         self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
         self._onionheaven_alert_in_menu = False
+        self._s3_keys_reconcile_started = False
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -2119,6 +2120,15 @@ class OnionPressApp(rumps.App):
                 return  # Don't update icon/menu during shutdown
 
             if state == "available":
+                # Reconcile archive.org S3 keys once per launch. Setup
+                # fetches them in a one-shot Tor call that can fail on a
+                # freshly bootstrapped Tor, and without keys the Wayback
+                # sweep silently skips every submission.
+                if not self._s3_keys_reconcile_started:
+                    self._s3_keys_reconcile_started = True
+                    threading.Thread(
+                        target=self._reconcile_archive_s3_keys,
+                        daemon=True).start()
                 self.icon = self.icon_running
                 onionname = self.read_config_value("ONIONNAME", "").strip()
                 short = self._short_onion(self.onion_address)
@@ -4109,6 +4119,28 @@ class OnionPressApp(rumps.App):
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
 
         threading.Thread(target=do_restore, daemon=True).start()
+
+    def _reconcile_archive_s3_keys(self):
+        """Ensure the Wayback sweep's archive.org S3 keys exist, retrying
+        a few times — first-boot Tor circuits are the flaky window that
+        loses the setup-time fetch. Idempotent: when keys are already
+        set the first attempt is a single `wp option get` and returns.
+        """
+        from onionpress import multisite
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        for attempt in range(3):
+            if attempt:
+                time.sleep(120)
+            try:
+                if multisite.ensure_archive_s3_keys(
+                        docker_bin=docker_bin, log_func=self.log):
+                    return
+            except Exception as e:
+                self.log(f"archive.org S3 key reconcile attempt "
+                         f"{attempt + 1} failed: {e}")
+        self.log("WARNING: archive.org S3 keys still missing after "
+                 "retries — Wayback archiving is idle until they are set "
+                 "(Settings, or next launch retries)")
 
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
