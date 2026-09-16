@@ -6,10 +6,60 @@ Keys are stored in OpenSSH format at the Arti keystore path.
 """
 
 import base64
+import os
 import struct
 import subprocess
 
-ARTI_KEYSTORE_PATH = "/var/lib/arti/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private"
+
+def _backend_nickname():
+    """Docker-network hostname / onion-service nickname for this install.
+
+    Self-contained (no import from config.py) because this file is shipped
+    as a flat script outside the onionpress package — app/MacOS/onionpress
+    and linux/install.sh invoke it directly from Contents/Resources/scripts/
+    or scripts/, without the rest of the package alongside it. Reads
+    SITE_TYPE directly from ~/.onionpress/config; a missing file/key or any
+    value other than "static" resolves to "wordpress" — today's only
+    nickname, and the safe default for every existing install.
+    """
+    config_path = os.path.join(os.path.expanduser("~"), ".onionpress", "config")
+    site_type = "wordpress"
+    try:
+        with open(config_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SITE_TYPE="):
+                    site_type = line.split("=", 1)[1].strip()
+                    break
+    except OSError:
+        pass
+    return "site" if site_type == "static" else "wordpress"
+
+
+def _refresh_paths():
+    """Recompute the nickname-derived path constants from current config.
+
+    The menubar is a long-lived process and SITE_TYPE is written mid-
+    session by first-run setup (menubar._first_run_after_welcome), AFTER
+    this module was imported — module-load-time constants would leave the
+    whole first session reading hss/wordpress paths on a static install.
+    Called at the top of every entry point that touches key paths, so the
+    constants always reflect the config as of the operation, not as of
+    import. Module-level constants are kept (refreshed in place) because
+    tests and external callers reference them by name.
+    """
+    global BACKEND_NICKNAME, ARTI_KEYSTORE_PATH
+    global CTOR_SECRET_PATH, CTOR_PUBLIC_PATH, CTOR_HOSTNAME_PATH
+    BACKEND_NICKNAME = _backend_nickname()
+    ARTI_KEYSTORE_PATH = f"/var/lib/arti/state/keystore/hss/{BACKEND_NICKNAME}/ks_hs_id.ed25519_expanded_private"
+    CTOR_SECRET_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hs_ed25519_secret_key"
+    CTOR_PUBLIC_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hs_ed25519_public_key"
+    CTOR_HOSTNAME_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hostname"
+
+
+BACKEND_NICKNAME = _backend_nickname()
+
+ARTI_KEYSTORE_PATH = f"/var/lib/arti/state/keystore/hss/{BACKEND_NICKNAME}/ks_hs_id.ed25519_expanded_private"
 ARTI_KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
 CONTAINER = "onionpress-tor"
 
@@ -17,9 +67,9 @@ CONTAINER = "onionpress-tor"
 # the default since 2026-03-16, commit 5d91cb3e) the Arti keystore doesn't
 # exist at all — identity lives at these paths instead. Format: 32-byte
 # ASCII header + raw ed25519 material.
-CTOR_SECRET_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_secret_key"
-CTOR_PUBLIC_PATH = "/var/lib/tor/hidden_service/wordpress/hs_ed25519_public_key"
-CTOR_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+CTOR_SECRET_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hs_ed25519_secret_key"
+CTOR_PUBLIC_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hs_ed25519_public_key"
+CTOR_HOSTNAME_PATH = f"/var/lib/tor/hidden_service/{BACKEND_NICKNAME}/hostname"
 CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
 CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
 
@@ -242,6 +292,7 @@ def extract_keys():
     at a time — if both are missing we surface the Arti error, which is
     the more informative of the two on a broken install.
     """
+    _refresh_paths()
     arti_ok, arti_data = _docker_cat(ARTI_KEYSTORE_PATH)
     if arti_ok:
         try:
@@ -309,6 +360,7 @@ def write_private_key(private_key, public_key):
     import tempfile
     import os
 
+    _refresh_paths()
     try:
         pem_data = build_openssh_key(private_key, public_key)
 
@@ -322,7 +374,7 @@ def write_private_key(private_key, public_key):
             # Ensure keystore directory exists
             result = subprocess.run(
                 ["docker", "exec", CONTAINER, "mkdir", "-p",
-                 "/var/lib/arti/state/keystore/hss/wordpress"],
+                 f"/var/lib/arti/state/keystore/hss/{BACKEND_NICKNAME}"],
                 capture_output=True,
                 timeout=10
             )
@@ -347,7 +399,7 @@ def write_private_key(private_key, public_key):
                 raise Exception(f"Failed to set key permissions: {result.stderr.decode()}")
 
             # Delete derived keys so Arti regenerates them for the new identity
-            keystore_dir = "/var/lib/arti/state/keystore/hss/wordpress"
+            keystore_dir = f"/var/lib/arti/state/keystore/hss/{BACKEND_NICKNAME}"
             for derived in ["ks_hss_blind_id", "ks_hss_desc_sign", "ks_hss_ipts"]:
                 subprocess.run(
                     ["docker", "exec", CONTAINER, "sh", "-c",

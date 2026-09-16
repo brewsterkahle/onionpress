@@ -188,7 +188,9 @@ class OnionPressApp(rumps.App):
             _app_bundle = None
         self._paths = resolve_paths(data_dir=self.app_support, app_bundle=_app_bundle)
         self._docker = Docker(self._paths, log_func=self.log)
-        self._health_checker = HealthChecker(self._docker, log_func=self.log)
+        _site_type = op_config.read_value(self.config_file, "SITE_TYPE", "wordpress")
+        self._health_checker = HealthChecker(
+            self._docker, log_func=self.log, site_type=_site_type)
         # Wedge-detector state: next allowed probe + last logged episode signature,
         # so a persistent wedge writes one WARN per hour, not one per poll.
         self._wedge_probe_next = 0.0
@@ -3099,6 +3101,15 @@ class OnionPressApp(rumps.App):
             return
 
         # New-site path
+        if sw and getattr(sw, 'site_type', 'wordpress') == 'static':
+            self.write_config_value("SITE_TYPE", "static")
+            self.log("Site type set to 'static' from welcome screen")
+            # self._health_checker was built once in __init__, before this
+            # config value existed — rebuild it now so the rest of this
+            # (long-lived) session probes onionpress-site instead of a
+            # nonexistent onionpress-wordpress for every health check.
+            self._health_checker = HealthChecker(
+                self._docker, log_func=self.log, site_type="static")
         if sw and getattr(sw, 'address_prefix', None):
             # Vanity prefix chosen on the welcome screen — generated once at
             # first-run start (no on-the-fly change needed later).
@@ -3121,12 +3132,14 @@ class OnionPressApp(rumps.App):
     # subsequent launch (see _retry_pending_onionname).
 
     def _read_onion_address(self):
-        """Return the local wordpress .onion address, or None if not yet written."""
+        """Return the local content-backend .onion address, or None if not yet written."""
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
+            site_type = self.read_config_value("SITE_TYPE", "wordpress")
+            nickname = op_config.backend_nickname(site_type)
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-tor", "cat",
-                 "/var/lib/tor/hidden_service/wordpress/hostname"],
+                 f"/var/lib/tor/hidden_service/{nickname}/hostname"],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=10,
             )
@@ -3428,6 +3441,34 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"wp core install error: {e}")
 
+    def _provision_static_site(self, sw):
+        """Delegate to setup_logic.provision_static_site() (shared with Linux).
+
+        Static-mode counterpart to _wp_core_install() — no wp-cli, no
+        credentials to apply. Just makes sure ~/OnionPress/Site/ exists
+        (with a placeholder) and persists the chosen onionname.
+        """
+        try:
+            from onionpress.setup_logic import provision_static_site
+
+            def _log(msg):
+                self.log(msg)
+                if sw:
+                    sw.add_log(msg)
+
+            if sw:
+                sw.set_status("Preparing your static site...")
+            provision_static_site(
+                onionname=sw.admin_user,
+                documents_dir=self._paths.documents_dir,
+                log_func=_log,
+            )
+            if sw:
+                sw.add_log("Static site ready — publish with "
+                           "'onionpress publish <directory>'")
+        except Exception as e:
+            self.log(f"static site provisioning error: {e}")
+
     def _run_first_time_setup(self):
         """Run first-time setup: launcher start with concurrent progress monitoring.
 
@@ -3437,6 +3478,13 @@ class OnionPressApp(rumps.App):
         setup window shows real-time progress instead of a single long wait.
         """
         sw = setup_window.get_setup_window() if setup_window else None
+        # SITE_TYPE is already written to config by the time this runs
+        # (_first_run_after_welcome writes it, then calls start_service(),
+        # which spawns this thread) — read it once so the milestone-polling
+        # steps below (image tracking, onion-address wait) target the right
+        # backend instead of hardcoding "wordpress"/mariadb.
+        _site_type = self.read_config_value("SITE_TYPE", "wordpress")
+        _backend_nickname = "site" if _site_type == "static" else "wordpress"
 
         # Step 0: System check — verify bundled binaries exist
         if sw:
@@ -3494,7 +3542,13 @@ class OnionPressApp(rumps.App):
         step2_done = False   # Images downloaded
         step3_done = False   # .onion address generated
         step4_done = False   # WordPress responding
-        images_found = {'wordpress': False, 'mariadb': False, 'tor': False}
+        if _site_type == "static":
+            # No mariadb/wordpress image for a static install — track the
+            # site image instead, or "all images found" would never fire
+            # and setup would hang at step 2 forever.
+            images_found = {'site': False, 'tor': False}
+        else:
+            images_found = {'wordpress': False, 'mariadb': False, 'tor': False}
         total_images = len(images_found)
         setup_start = time.time()
         setup_timeout = 600  # 10 minute max
@@ -3575,7 +3629,7 @@ class OnionPressApp(rumps.App):
                 try:
                     result = subprocess.run(
                         [docker_bin, "exec", "onionpress-tor", "cat",
-                         "/var/lib/tor/hidden_service/wordpress/hostname"],
+                         f"/var/lib/tor/hidden_service/{_backend_nickname}/hostname"],
                         capture_output=True, text=True, encoding='utf-8',
                         errors='replace', timeout=10
                     )
@@ -3608,6 +3662,16 @@ class OnionPressApp(rumps.App):
                         # content come from the backup), so DON'T fresh-install
                         # WordPress or register a new onionname over it.
                         self.log("Restore from backup: skipping fresh WordPress install")
+                    elif sw and getattr(sw, 'site_type', 'wordpress') == 'static':
+                        # Register the onionname first, same as the WordPress
+                        # path — the registrar may rename sw.admin_user on a
+                        # collision, and provision_static_site should persist
+                        # whatever name actually won.
+                        try:
+                            self._register_onionname_during_setup(sw)
+                        except Exception as e:
+                            self.log(f"onionname: register path errored: {e}")
+                        self._provision_static_site(sw)
                     elif sw and sw.admin_pass:
                         try:
                             self._register_onionname_during_setup(sw)
@@ -3816,73 +3880,113 @@ class OnionPressApp(rumps.App):
         (once the user dismisses the "Done" alert) or False on any cancel /
         failure. The uninstall "backup first" flow uses it to proceed only
         after a successful backup; the menu item passes none (unchanged)."""
-        # Show credentials dialog using AppKit accessory view
-        alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("Backup OnionPress")
-        alert.setInformativeText_(
-            "Enter your WordPress administrator credentials.\n"
-            "The password will be used to encrypt the backup.")
+        site_type = self.read_config_value("SITE_TYPE", "wordpress")
 
-        icon_path = os.path.join(self.resources_dir, "app-icon.png")
-        if os.path.exists(icon_path):
-            icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
-            if icon:
-                alert.setIcon_(icon)
+        if site_type == "static":
+            # No WP admin account to verify — the zip's own encryption
+            # password is the security boundary (matches cli.py's
+            # cmd_backup). Just ask for that password.
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Backup OnionPress")
+            alert.setInformativeText_(
+                "Choose a password to encrypt the backup.")
 
-        # Build accessory view with username and password fields
-        container = AppKit.NSView.alloc().initWithFrame_(
-            AppKit.NSMakeRect(0, 0, 300, 70))
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
 
-        user_label = AppKit.NSTextField.labelWithString_("Username:")
-        user_label.setFrame_(AppKit.NSMakeRect(0, 48, 80, 18))
-        container.addSubview_(user_label)
+            pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 300, 24))
+            alert.setAccessoryView_(pass_field)
+            alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+            alert.window().setInitialFirstResponder_(pass_field)
 
-        user_field = AppKit.NSTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(85, 44, 210, 24))
-        user_field.setStringValue_(self._get_admin_username())
-        container.addSubview_(user_field)
+            response = alert.runModal()
+            if response != 1000:  # Not "Backup"
+                if on_complete:
+                    on_complete(False)
+                return
 
-        pass_label = AppKit.NSTextField.labelWithString_("Password:")
-        pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
-        container.addSubview_(pass_label)
+            username = "site"
+            password = pass_field.stringValue()
 
-        pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
-            AppKit.NSMakeRect(85, 14, 210, 24))
-        container.addSubview_(pass_field)
+            if not password:
+                rumps.alert(title="Missing Password",
+                            message="A password is required.")
+                if on_complete:
+                    on_complete(False)
+                return
+        else:
+            # Show credentials dialog using AppKit accessory view
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Backup OnionPress")
+            alert.setInformativeText_(
+                "Enter your WordPress administrator credentials.\n"
+                "The password will be used to encrypt the backup.")
 
-        alert.setAccessoryView_(container)
-        alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
-        alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+            icon_path = os.path.join(self.resources_dir, "app-icon.png")
+            if os.path.exists(icon_path):
+                icon = AppKit.NSImage.alloc().initWithContentsOfFile_(icon_path)
+                if icon:
+                    alert.setIcon_(icon)
 
-        # Make username field first responder
-        alert.window().setInitialFirstResponder_(user_field)
-        user_field.setNextKeyView_(pass_field)
+            # Build accessory view with username and password fields
+            container = AppKit.NSView.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 300, 70))
 
-        response = alert.runModal()
-        if response != 1000:  # Not "Backup"
-            if on_complete:
-                on_complete(False)
-            return
+            user_label = AppKit.NSTextField.labelWithString_("Username:")
+            user_label.setFrame_(AppKit.NSMakeRect(0, 48, 80, 18))
+            container.addSubview_(user_label)
 
-        username = user_field.stringValue().strip()
-        password = pass_field.stringValue()
+            user_field = AppKit.NSTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(85, 44, 210, 24))
+            user_field.setStringValue_(self._get_admin_username())
+            container.addSubview_(user_field)
 
-        if not username or not password:
-            rumps.alert(title="Missing Credentials",
-                        message="Both username and password are required.")
-            if on_complete:
-                on_complete(False)
-            return
+            pass_label = AppKit.NSTextField.labelWithString_("Password:")
+            pass_label.setFrame_(AppKit.NSMakeRect(0, 18, 80, 18))
+            container.addSubview_(pass_label)
 
-        # Verify credentials
-        self.log("Backup: verifying credentials...")
-        ok, err = backup_manager.verify_wp_admin(username, password)
-        if not ok:
-            self.log(f"Backup: credential verification failed: {err}")
-            rumps.alert(title="Verification Failed", message=err)
-            if on_complete:
-                on_complete(False)
-            return
+            pass_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(85, 14, 210, 24))
+            container.addSubview_(pass_field)
+
+            alert.setAccessoryView_(container)
+            alert.addButtonWithTitle_("Backup").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+
+            # Make username field first responder
+            alert.window().setInitialFirstResponder_(user_field)
+            user_field.setNextKeyView_(pass_field)
+
+            response = alert.runModal()
+            if response != 1000:  # Not "Backup"
+                if on_complete:
+                    on_complete(False)
+                return
+
+            username = user_field.stringValue().strip()
+            password = pass_field.stringValue()
+
+            if not username or not password:
+                rumps.alert(title="Missing Credentials",
+                            message="Both username and password are required.")
+                if on_complete:
+                    on_complete(False)
+                return
+
+            # Verify credentials
+            self.log("Backup: verifying credentials...")
+            ok, err = backup_manager.verify_wp_admin(username, password)
+            if not ok:
+                self.log(f"Backup: credential verification failed: {err}")
+                rumps.alert(title="Verification Failed", message=err)
+                if on_complete:
+                    on_complete(False)
+                return
 
         # Show NSSavePanel for output location
         panel = AppKit.NSSavePanel.savePanel()
@@ -3933,7 +4037,8 @@ class OnionPressApp(rumps.App):
 
                 backup_manager.create_backup(
                     self.onion_address, username, password,
-                    output_path, self.version, log_and_update)
+                    output_path, self.version, log_and_update,
+                    site_type=site_type, documents_dir=self._paths.documents_dir)
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"

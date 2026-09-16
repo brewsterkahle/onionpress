@@ -114,7 +114,7 @@ class TestCheckWordpressExternal(unittest.TestCase):
                         return_value=self._result(0, "<html>")):
             hc.check_wordpress_external(8080, log=True)
         self.assertTrue(any("Checking local access" in l for l in logs))
-        self.assertTrue(any("WordPress responding" in l for l in logs))
+        self.assertTrue(any("content backend responding" in l for l in logs))
 
     def test_silent_when_log_false(self):
         logs = []
@@ -206,6 +206,72 @@ class TestCheckInternalConnectivity(unittest.TestCase):
         docker.exec.return_value = _fail()
         hc = HealthChecker(docker)
         self.assertFalse(hc.check_internal_connectivity())
+
+
+class TestStaticSiteType(unittest.TestCase):
+    """HealthChecker(site_type="static"): targets onionpress-site/"site"
+    instead of onionpress-wordpress/"wordpress", and skips the WP-only
+    DB-error-string sniff (nginx never emits it, but the point is it
+    shouldn't need to)."""
+
+    def test_defaults_to_wordpress_backend(self):
+        hc = HealthChecker(mock.Mock())
+        self.assertEqual(hc.site_type, "wordpress")
+        self.assertEqual(hc._backend_host, "wordpress")
+        self.assertEqual(hc._backend_container, "onionpress-wordpress")
+
+    def test_static_resolves_site_backend(self):
+        hc = HealthChecker(mock.Mock(), site_type="static")
+        self.assertEqual(hc._backend_host, "site")
+        self.assertEqual(hc._backend_container, "onionpress-site")
+
+    def test_content_local_targets_site_container(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("<html>ok</html>")
+        hc = HealthChecker(docker, site_type="static")
+        self.assertTrue(hc.check_content_local())
+        container = docker.exec.call_args[0][0]
+        self.assertEqual(container, "onionpress-site")
+
+    def test_content_local_static_ignores_db_error_string(self):
+        # Static installs have no database — a page that happens to contain
+        # this substring (e.g. a blog post about the incident) must not be
+        # treated as unhealthy the way it would be for WordPress.
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("Error establishing a database connection")
+        hc = HealthChecker(docker, site_type="static")
+        self.assertTrue(hc.check_content_local())
+
+    def test_content_external_static_ignores_db_error_string(self):
+        hc = HealthChecker(mock.Mock(), site_type="static")
+        result = mock.Mock(returncode=0, stdout="Error establishing a database connection")
+        with mock.patch("onionpress.health.subprocess.run", return_value=result):
+            self.assertTrue(hc.check_content_external(8080, log=False))
+
+    def test_tor_hostname_uses_site_nickname(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("abc.onion\n")
+        hc = HealthChecker(docker, site_type="static")
+        hc.check_tor_hostname()
+        path = docker.exec.call_args[0][1][-1]
+        self.assertIn("hidden_service/site/hostname", path)
+
+    def test_internal_connectivity_targets_site_host(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok()
+        hc = HealthChecker(docker, site_type="static")
+        hc.check_internal_connectivity()
+        url = docker.exec.call_args[0][1][-1]
+        self.assertIn("http://site:80/", url)
+
+    def test_vm_wedge_inspects_site_container(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _fail()  # loadavg probe, not under test
+        docker.run.return_value = _fail()   # inspect probe, not under test
+        hc = HealthChecker(docker, site_type="static")
+        hc.check_vm_wedge()
+        inspect_args = docker.run.call_args[0][0]
+        self.assertIn("onionpress-site", inspect_args)
 
 
 class TestCheckInternetConnectivity(unittest.TestCase):

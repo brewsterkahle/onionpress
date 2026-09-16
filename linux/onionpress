@@ -84,7 +84,13 @@ fi
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
 mkdir -p "$DOCUMENTS_DIR/Social Archives"
+mkdir -p "$DOCUMENTS_DIR/Site"
 touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
+
+# Docker-compose's Creations and Site bind-mounts key off this var (see
+# ONIONPRESS_DOCUMENTS_DIR in docker-compose.yml) — without it they fall
+# back to a throwaway /tmp path. Matches app/MacOS/onionpress's launcher.
+export ONIONPRESS_DOCUMENTS_DIR="$DOCUMENTS_DIR"
 
 # Log file with rotation (keep 3 x 5MB files)
 LOG_FILE="$DATA_DIR/onionpress.log"
@@ -246,6 +252,25 @@ export ONIONPRESS_BIND_HOST
 # Tor implementation (C Tor is the default, matching Mac)
 export TOR_IMPL="${TOR_IMPL:-tor}"
 
+# "wordpress" (default) or "static" — see src/onionpress/config.py's
+# SITE_TYPE. COMPOSE_PROFILES gates which of wordpress+db vs. site docker
+# compose starts (docker-compose.yml's `profiles:` tags); ONIONPRESS_BACKEND_*
+# is what the tor container's onion routing targets. Existing installs have
+# no SITE_TYPE key in their config, so all four default to "wordpress" and
+# every `docker compose` call below behaves exactly as it did before —
+# including `pull`/`up` with no explicit service names, which are
+# profile-filtered by Compose and would otherwise silently stop
+# pulling/starting wordpress+db.
+export ONIONPRESS_SITE_TYPE="${ONIONPRESS_SITE_TYPE:-wordpress}"
+export COMPOSE_PROFILES="$ONIONPRESS_SITE_TYPE"
+if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+    export ONIONPRESS_BACKEND_HOST="site"
+    export ONIONPRESS_BACKEND_NICKNAME="site"
+else
+    export ONIONPRESS_BACKEND_HOST="wordpress"
+    export ONIONPRESS_BACKEND_NICKNAME="wordpress"
+fi
+
 # OnionHome analytics directory (bind-mounted into tor container)
 export ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
 mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
@@ -277,6 +302,13 @@ fi
 if [ -f "$DATA_DIR/config" ]; then
     _val=$(grep "^TOR_IMPL=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export TOR_IMPL="$_val"
+    _val=$(grep "^SITE_TYPE=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    if [ "$_val" = "static" ]; then
+        export ONIONPRESS_SITE_TYPE="static"
+        export COMPOSE_PROFILES="static"
+        export ONIONPRESS_BACKEND_HOST="site"
+        export ONIONPRESS_BACKEND_NICKNAME="site"
+    fi
     _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_MAX_SERVICES="$_val"
     _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
@@ -1183,13 +1215,18 @@ start_containers() {
         log "WARNING: Failed to pull images (will use cached)"
     fi
 
-    # Start WordPress, DB, and OnionHeaven first
+    # Start the content backend (WordPress+DB, or the static-site server)
+    # plus OnionHeaven first.
+    local core_services="wordpress db onionheaven"
+    if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+        core_services="site onionheaven"
+    fi
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         # tee for the same reason as docker compose pull above — keeps the
         # journal tail visible while compose creates networks/volumes/containers.
-        docker compose up -d wordpress db onionheaven 2>&1 | tee -a "$LOG_FILE"
+        docker compose up -d $core_services 2>&1 | tee -a "$LOG_FILE"
         if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             break
         fi
@@ -2313,8 +2350,59 @@ main() {
         setup)
             # Usage: onionpress setup [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE]
             #        onionpress setup --from-backup <password> <backup.zip>
-            setup_db_passwords
+            #        onionpress setup --static [--user ONIONNAME]
             cd "$DOCKER_DIR"
+
+            # --static can arrive as a flag on THIS invocation, on a fresh
+            # install where SITE_TYPE=static doesn't exist in config yet —
+            # ONIONPRESS_SITE_TYPE (read from config at script startup,
+            # above) can't see a flag that hasn't been persisted anywhere.
+            # Without this scan, `onionpress setup --static` on a fresh
+            # install silently fell through to the WordPress branch with
+            # --static left as an unrecognized wp-cli argument.
+            for _setup_arg in "$@"; do
+                if [ "$_setup_arg" = "--static" ]; then
+                    ONIONPRESS_SITE_TYPE="static"
+                    break
+                fi
+            done
+
+            # Static-site installs have no wp-cli/database — skip straight
+            # to provisioning the content dir + onionname, no WP readiness
+            # gate needed (there's no WordPress to wait for).
+            if [ "$ONIONPRESS_SITE_TYPE" = "static" ]; then
+                if ! curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
+                    echo "Site container is not running. Start OnionPress first: sudo systemctl start onionpress"
+                    exit 1
+                fi
+                shift  # remove "setup" from args
+                local static_user=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --user) static_user="$2"; shift 2 ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -z "$static_user" ]; then
+                    printf "  Onionname: "
+                    read static_user
+                fi
+                if [ -z "$static_user" ]; then
+                    echo "ERROR: onionname cannot be empty" >&2
+                    exit 1
+                fi
+                op_py provision-static --onionname "$static_user"
+                if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
+                    echo "  Starting Tor..."
+                    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1
+                fi
+                echo ""
+                echo "  Setup complete! Publish your site with:"
+                echo "    onionpress publish <directory>"
+                exit 0
+            fi
+
+            setup_db_passwords
             if wp_is_installed; then
                 echo "WordPress is already installed."
                 exit 0

@@ -8,6 +8,8 @@ Commands: start, stop, restart, status, address, logs, setup, backup, restore, r
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from typing import Callable
@@ -163,12 +165,19 @@ class OnionPressCLI:
     def cmd_backup(self, password: str, output_path: str = None, username: str = None) -> int:
         """Create a backup."""
         from .backup import create_backup, backup_filename, verify_wp_admin, get_admin_username
-        if not username:
-            username = get_admin_username(data_dir=self.paths.data_dir)
-        ok, err = verify_wp_admin(username, password)
-        if not ok:
-            print(f"ERROR: {err}", file=sys.stderr)
-            return 1
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        if site_type == "static":
+            # No WP admin account to verify against — backup/restore are
+            # only ever invoked locally, and the encryption password is
+            # itself the security boundary (see backup.py's design notes).
+            username = "site"
+        else:
+            if not username:
+                username = get_admin_username(data_dir=self.paths.data_dir)
+            ok, err = verify_wp_admin(username, password)
+            if not ok:
+                print(f"ERROR: {err}", file=sys.stderr)
+                return 1
         addr = self.containers.get_onion_address()
         if not output_path:
             backups_dir = os.path.expanduser("~/OnionPress/backups")
@@ -183,6 +192,8 @@ class OnionPressCLI:
                 output_path=output_path,
                 version=__version__,
                 log_func=self.log,
+                site_type=site_type,
+                documents_dir=self.paths.documents_dir,
             )
             print(f"Backup saved to: {output_path}")
             return 0
@@ -204,6 +215,8 @@ class OnionPressCLI:
         except Exception as e:
             self.log(f"Restore failed during extract/seed: {e}")
             return 1
+        is_static = bool(meta.get("is_static"))
+        nickname = "site" if is_static else "wordpress"
         try:
             # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
             # the seeded key and imported backup cleanly (no stale keystore
@@ -229,13 +242,13 @@ class OnionPressCLI:
                 "-v", "onionpress-arti-state:/dest",
                 "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
                 "alpine", "sh", "-c",
-                "mkdir -p /dest/state/keystore/hss/wordpress && "
+                f"mkdir -p /dest/state/keystore/hss/{nickname} && "
                 "cp /src/ks_hs_id.ed25519_expanded_private "
-                "/dest/state/keystore/hss/wordpress/ && "
+                f"/dest/state/keystore/hss/{nickname}/ && "
                 "chown -R 100:100 /dest/state && "
-                "chmod 700 /dest/state /dest/state/keystore "
-                "/dest/state/keystore/hss /dest/state/keystore/hss/wordpress && "
-                "chmod 600 /dest/state/keystore/hss/wordpress/*",
+                f"chmod 700 /dest/state /dest/state/keystore "
+                f"/dest/state/keystore/hss /dest/state/keystore/hss/{nickname} && "
+                f"chmod 600 /dest/state/keystore/hss/{nickname}/*",
             ], timeout=30)
             if not seed.ok:
                 self.log("Restore: WARNING — arti-state key seed reported a "
@@ -244,7 +257,10 @@ class OnionPressCLI:
             # Rebuild: fresh containers adopt the seeded key; import the backup
             # artifacts into them; then bring up Tor with the restored identity.
             self.containers.start_core()
-            self.containers.wait_for_wordpress()
+            if is_static:
+                self.containers.wait_for_site_ready()
+            else:
+                self.containers.wait_for_wordpress()
             if self.cmd_import_backup_artifacts(staging) != 0:
                 self.log("Restore: artifact import failed — staging kept for retry")
                 return 1
@@ -279,16 +295,21 @@ class OnionPressCLI:
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
                     metadata = json.load(f)
-            restore_container_artifacts(staging, metadata, self.log)
-            # Migrate DB schema for cross-version backups (non-fatal).
-            res = self.docker.run(
-                ["exec", "onionpress-wordpress",
-                 "wp", "core", "update-db", "--allow-root"],
-                timeout=120,
+            restore_container_artifacts(
+                staging, metadata, self.log,
+                documents_dir=self.paths.documents_dir,
             )
-            if not res.ok:
-                self.log("Install-from-backup: wp core update-db reported a "
-                         "problem (continuing)")
+            if not metadata.get("is_static"):
+                # Migrate DB schema for cross-version backups (non-fatal).
+                # No equivalent for static installs — no database.
+                res = self.docker.run(
+                    ["exec", "onionpress-wordpress",
+                     "wp", "core", "update-db", "--allow-root"],
+                    timeout=120,
+                )
+                if not res.ok:
+                    self.log("Install-from-backup: wp core update-db reported a "
+                             "problem (continuing)")
             self.log("Install-from-backup: artifacts imported")
             return 0
         except Exception as e:
@@ -437,6 +458,106 @@ class OnionPressCLI:
             print("No admin password file found", file=sys.stderr)
             return 1
         print(pw)
+        return 0
+
+    # ─── Static-site mode ────────────────────────────────────────────────
+
+    def cmd_provision_static(self, onionname: str) -> int:
+        """Provision a fresh static-site install: content dir + persisted
+        onionname. Static-mode counterpart to install_fresh_wordpress()."""
+        from .setup_logic import provision_static_site
+        ok = provision_static_site(
+            onionname=onionname,
+            documents_dir=self.paths.documents_dir,
+            data_dir=self.paths.data_dir,
+            log_func=self.log,
+        )
+        return 0 if ok else 1
+
+    def cmd_publish(self, source_dir: str) -> int:
+        """Publish a static site: sync `source_dir` into ~/OnionPress/Site/.
+
+        Static-mode only. Syncs IN PLACE with `rsync --delete` — never by
+        replacing the Site/ directory itself. The running containers
+        bind-mount Site/ (nginx serves it read-only; the tor container's
+        follow-fetch sidecar writes into it), and a bind mount pins the
+        directory inode: a rename-and-recreate "atomic swap" would leave
+        nginx serving the orphaned old inode (emptied by cleanup — every
+        request 404s) until the containers are recreated. In-place rsync
+        keeps the mounted inode; visitors may briefly see a mixed tree
+        mid-sync, which is the acceptable trade-off.
+
+        `--exclude follows/` both skips a follows/ dir in the source and
+        (because --delete-excluded is NOT passed) protects the generated
+        Site/follows/ page from deletion, so a publish doesn't wipe it
+        until the next fetch cycle regenerates it.
+
+        Refuses to publish an empty directory — that would silently take
+        the site offline.
+        """
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        if site_type != "static":
+            print("ERROR: 'publish' is only available in static-site mode "
+                  "(this install is running WordPress).", file=sys.stderr)
+            return 1
+        if not os.path.isdir(source_dir):
+            print(f"ERROR: {source_dir!r} is not a directory", file=sys.stderr)
+            return 1
+        if not os.listdir(source_dir):
+            print("ERROR: source directory is empty — refusing to publish "
+                  "an empty site (this would take your site offline).",
+                  file=sys.stderr)
+            return 1
+
+        site_dir = os.path.join(self.paths.documents_dir, "Site")
+        os.makedirs(site_dir, exist_ok=True)
+
+        try:
+            result = subprocess.run(
+                ["rsync", "-a", "--delete", "--exclude", "follows/",
+                 source_dir.rstrip("/") + "/", site_dir + "/"],
+                capture_output=True, text=True, timeout=300,
+            )
+        except FileNotFoundError:
+            print("ERROR: rsync is required for 'onionpress publish' "
+                  "but was not found on PATH.", file=sys.stderr)
+            return 1
+        if result.returncode != 0:
+            print(f"ERROR: rsync failed: {result.stderr.strip()}", file=sys.stderr)
+            return 1
+
+        print(f"Published {source_dir} -> {site_dir}")
+        self.log(f"Published static site from {source_dir}")
+        return 0
+
+    def cmd_follow_add(self, feed_url: str, name: str = None) -> int:
+        """Add a feed to the follow list (static-site mode only)."""
+        from .follow import add_follow
+        ok, result = add_follow(feed_url, display_name=name)
+        if not ok:
+            print(f"ERROR: {result}", file=sys.stderr)
+            return 1
+        print(f"Following {feed_url} as {result!r}")
+        return 0
+
+    def cmd_follow_remove(self, key: str) -> int:
+        """Remove a feed from the follow list."""
+        from .follow import remove_follow
+        ok, message = remove_follow(key)
+        print(message, file=sys.stderr if not ok else sys.stdout)
+        return 0 if ok else 1
+
+    def cmd_follow_list(self) -> int:
+        """List followed feeds."""
+        from .follow import list_follows
+        follows = list_follows()
+        if not follows:
+            print("Not following anyone yet.")
+            return 0
+        for f in follows:
+            status = "ok" if f.get("last_fetch_ok") else (
+                "never fetched" if f.get("last_fetch_at") is None else "error")
+            print(f"{f['key']}\t{f['display_name']}\t{f['feed_url']}\t[{status}]")
         return 0
 
     def cmd_reset(self, yes: bool = False) -> int:
@@ -606,6 +727,30 @@ def main(argv: list[str] = None) -> int:
         "--clean", action="store_true",
         help="Delete the backup zip after a successful scrub")
 
+    p_prov_static = sub.add_parser(
+        "provision-static",
+        help="Provision a fresh static-site install (content dir + onionname)",
+    )
+    p_prov_static.add_argument("--onionname", required=True, help="Chosen onionname")
+
+    p_publish = sub.add_parser(
+        "publish",
+        help="Publish a static site: sync a directory into ~/OnionPress/Site/",
+    )
+    p_publish.add_argument("directory", help="Directory of static files to publish")
+
+    p_follow = sub.add_parser(
+        "follow",
+        help="Manage followed feeds (static-site mode)",
+    )
+    follow_sub = p_follow.add_subparsers(dest="follow_command")
+    p_follow_add = follow_sub.add_parser("add", help="Follow a feed")
+    p_follow_add.add_argument("feed_url", help="RSS/Atom feed URL")
+    p_follow_add.add_argument("--name", help="Display name (default: feed's hostname)")
+    p_follow_remove = follow_sub.add_parser("remove", help="Unfollow a feed")
+    p_follow_remove.add_argument("key", help="Follow key (see `onionpress follow list`)")
+    follow_sub.add_parser("list", help="List followed feeds")
+
     p_iba = sub.add_parser(
         "import-backup-artifacts",
         help="Import a backup's container-side artifacts into the running "
@@ -648,6 +793,20 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_generate_vanity()
     elif args.command == "admin-password":
         return cli.cmd_admin_password()
+    elif args.command == "provision-static":
+        return cli.cmd_provision_static(args.onionname)
+    elif args.command == "publish":
+        return cli.cmd_publish(args.directory)
+    elif args.command == "follow":
+        if args.follow_command == "add":
+            return cli.cmd_follow_add(args.feed_url, args.name)
+        elif args.follow_command == "remove":
+            return cli.cmd_follow_remove(args.key)
+        elif args.follow_command == "list":
+            return cli.cmd_follow_list()
+        else:
+            parser.parse_args(["follow", "--help"])
+            return 1
     elif args.command == "provision-post-install":
         from . import multisite
         return multisite.provision_post_install(

@@ -127,7 +127,9 @@ ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 
 # Read our own onion address so we can reject self-registration
 OWN_ONION_ADDRESS = None
-_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+_HOSTNAME_PATH = "/var/lib/tor/hidden_service/{}/hostname".format(
+    os.environ.get("ONIONPRESS_BACKEND_NICKNAME", "wordpress")
+)
 
 
 def _get_own_address():

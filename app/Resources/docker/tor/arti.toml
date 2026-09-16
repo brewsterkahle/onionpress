@@ -22,7 +22,9 @@ enabled = true
 [onion_services."wordpress"]
 enabled = true
 # Arti requires IP addresses (no hostnames). socat on 127.0.0.1:8080
-# forwards to wordpress:80 — started by entrypoint.sh.
+# forwards to the content backend (wordpress:80, or site:80 for static-site
+# installs) — started by entrypoint.sh. This section's name is renamed
+# in-place by entrypoint.sh via sed when ONIONPRESS_BACKEND_NICKNAME != wordpress.
 proxy_ports = [["80", "127.0.0.1:8080"]]
 num_intro_points = 3
 

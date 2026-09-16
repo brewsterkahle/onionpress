@@ -7,6 +7,13 @@
 # Which Tor implementation to use: "tor" (C Tor, default) or "arti"
 TOR_IMPL="${TOR_IMPL:-tor}"
 
+# Docker-network hostname / onion-service nickname of the content backend.
+# Defaults reproduce the original hardcoded "wordpress" behavior exactly for
+# existing installs; static-site installs set both to "site" (see
+# src/onionpress/config.py's backend_nickname()).
+BACKEND_HOST="${ONIONPRESS_BACKEND_HOST:-wordpress}"
+BACKEND_NICKNAME="${ONIONPRESS_BACKEND_NICKNAME:-wordpress}"
+
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 
@@ -249,14 +256,14 @@ TORRC_EOF
 fi
 
 # Create compat directories for hostname files
-mkdir -p /var/lib/tor/hidden_service/wordpress
+mkdir -p "/var/lib/tor/hidden_service/${BACKEND_NICKNAME}"
 mkdir -p /var/lib/tor/hidden_service/healthcheck
 
 # Write version for healthcheck server
 echo "${ONIONPRESS_VERSION:-unknown}" > /var/lib/tor/healthcheck-version
 
-# Forward 127.0.0.1:8080 → wordpress:80 (both Arti and C Tor need IP targets)
-socat TCP-LISTEN:8080,reuseaddr,fork TCP:wordpress:80 &
+# Forward 127.0.0.1:8080 → backend:80 (both Arti and C Tor need IP targets)
+socat TCP-LISTEN:8080,reuseaddr,fork TCP:${BACKEND_HOST}:80 &
 SOCAT_PID=$!
 sleep 1
 if ! kill -0 $SOCAT_PID 2>/dev/null; then
@@ -282,6 +289,29 @@ if ! kill -0 $HC_PID 2>/dev/null; then
     echo "ERROR: healthcheck-server.sh failed to start"
 fi
 
+# Static-site installs have no wp-cron to drive Wayback archiving — this
+# process's own loop is the scheduler. No equivalent needed for WordPress
+# installs (their archiving runs as a WP plugin via wp-cron).
+if [ "${ONIONPRESS_SITE_TYPE:-wordpress}" = "static" ]; then
+    python3 /wayback-static.py &
+    WAYBACK_PID=$!
+    sleep 1
+    if ! kill -0 $WAYBACK_PID 2>/dev/null; then
+        echo "ERROR: wayback-static.py failed to start"
+    fi
+
+    # Separate process from wayback-static.py on purpose — a stuck/slow
+    # remote feed fetch must not starve Wayback submissions. No equivalent
+    # needed for WordPress installs (the "follow" feature is a WP plugin
+    # there, driven by wp-cron).
+    python3 /follow-fetch.py &
+    FOLLOW_PID=$!
+    sleep 1
+    if ! kill -0 $FOLLOW_PID 2>/dev/null; then
+        echo "ERROR: follow-fetch.py failed to start"
+    fi
+fi
+
 if [ "$TOR_IMPL" = "tor" ]; then
     # ==================== C Tor mode ====================
     echo "Starting C Tor (TOR_IMPL=tor)..."
@@ -292,7 +322,7 @@ if [ "$TOR_IMPL" = "tor" ]; then
     chmod 700 /var/lib/tor
 
     # Convert Arti keys to C Tor format if Arti keystore exists but C Tor keys don't
-    for nickname in wordpress healthcheck; do
+    for nickname in "$BACKEND_NICKNAME" healthcheck; do
         ARTI_KEY="/var/lib/arti/state/keystore/hss/${nickname}/ks_hs_id.ed25519_expanded_private"
         CTOR_DIR="/var/lib/tor/hidden_service/${nickname}"
         CTOR_SECRET="${CTOR_DIR}/hs_ed25519_secret_key"
@@ -303,7 +333,7 @@ if [ "$TOR_IMPL" = "tor" ]; then
     done
 
     # Set ownership on hidden service dirs (C Tor is strict about this)
-    for dir in /var/lib/tor/hidden_service/wordpress /var/lib/tor/hidden_service/healthcheck; do
+    for dir in "/var/lib/tor/hidden_service/${BACKEND_NICKNAME}" /var/lib/tor/hidden_service/healthcheck; do
         chown -R debian-tor:debian-tor "$dir" 2>/dev/null || chown -R tor:tor "$dir" 2>/dev/null || true
         chmod 700 "$dir"
     done
@@ -314,10 +344,11 @@ if [ "$TOR_IMPL" = "tor" ]; then
     sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
     # Write onion service definitions for the watchdog to ADD_ONION.
-    # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
-    cat > /etc/tor/onion-services.json << 'SERVICES_EOF'
+    # Keys live on disk at /var/lib/tor/hidden_service/<name>/. Heredoc is
+    # intentionally unquoted so $BACKEND_NICKNAME interpolates.
+    cat > /etc/tor/onion-services.json << SERVICES_EOF
 [
-  {"name": "wordpress", "ports": ["80,127.0.0.1:8080", "8083,127.0.0.1:8083"]},
+  {"name": "${BACKEND_NICKNAME}", "ports": ["80,127.0.0.1:8080", "8083,127.0.0.1:8083"]},
   {"name": "healthcheck", "ports": ["80,127.0.0.1:8081"]}
 ]
 SERVICES_EOF
@@ -340,7 +371,7 @@ SERVICES_EOF
 
     # Wait for hostname files (first run: Tor creates them; subsequent: watchdog ADD_ONION)
     write_ctor_hostnames() {
-        for nickname in wordpress healthcheck; do
+        for nickname in "$BACKEND_NICKNAME" healthcheck; do
             local hfile="/var/lib/tor/hidden_service/${nickname}/hostname"
             while [ ! -f "$hfile" ] || [ ! -s "$hfile" ]; do
                 sleep 2
@@ -355,6 +386,12 @@ SERVICES_EOF
 else
     # ==================== Arti mode ====================
 
+    # Rename the backend's onion-service section if not using the default
+    # "wordpress" nickname (static-site installs use "site").
+    if [ "$BACKEND_NICKNAME" != "wordpress" ]; then
+        sed -i 's/onion_services\."wordpress"/onion_services."'"${BACKEND_NICKNAME}"'"/' /etc/arti/arti.toml
+    fi
+
     # Expose port 8083 through the onion service so other nodes can reach the API
     sed -i 's/proxy_ports = \[\["80", "127.0.0.1:8080"\]\]/proxy_ports = [["80", "127.0.0.1:8080"], ["8083", "127.0.0.1:8083"]]/' /etc/arti/arti.toml
 
@@ -362,7 +399,7 @@ else
     sed -i 's/num_intro_points = 3/num_intro_points = 10/' /etc/arti/arti.toml
 
     # Convert C Tor keys to Arti format if switching back from C Tor
-    for nickname in wordpress healthcheck; do
+    for nickname in "$BACKEND_NICKNAME" healthcheck; do
         CTOR_SECRET="/var/lib/tor/hidden_service/${nickname}/hs_ed25519_secret_key"
         ARTI_KEY="/var/lib/arti/state/keystore/hss/${nickname}/ks_hs_id.ed25519_expanded_private"
         if [ -f "$CTOR_SECRET" ] && [ ! -f "$ARTI_KEY" ]; then
@@ -387,7 +424,7 @@ else
     # so existing scripts (healthcheck-server.sh, launcher, menubar.py)
     # can read onion addresses from the same paths as before.
     write_compat_hostnames() {
-        for nickname in wordpress healthcheck; do
+        for nickname in "$BACKEND_NICKNAME" healthcheck; do
             while true; do
                 # --nickname must come before the subcommand; run as arti user (not root)
                 addr=$(su -s /bin/sh arti -c "arti hss --nickname $nickname onion-address -c /etc/arti/arti.toml" 2>/dev/null)
