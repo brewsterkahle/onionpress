@@ -41,8 +41,12 @@ collect_files() {
     cp "$PROJECT_DIR/linux/onionpress" "$dest/onionpress"
     chmod +x "$dest/onionpress"
 
-    # Docker Compose files
+    # Docker Compose files. Strip __pycache__ the same way the lib/ copy
+    # below does: the tor container's scripts are importable and the test
+    # suite imports them, so this tree accumulates .pyc — 18 of which were
+    # shipping in the .deb, two for modules whose .py no longer exists.
     cp -r "$PROJECT_DIR/app/Resources/docker" "$dest/docker"
+    find "$dest/docker" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
     # Plugins
     if [ -d "$PROJECT_DIR/app/Resources/plugins" ]; then

@@ -20,9 +20,10 @@ Those are called out per component.
 
 - [Container image pins](#container-image-pins)
 - [Running a locally built stack](#running-a-locally-built-stack)
+- [Building the container images](#building-the-container-images)
 
-<!-- Sections for the image builds, input pinning, generated assets and the
-     unified entry points are added by the later phases of this work. -->
+<!-- Sections for input pinning, generated assets and the unified entry
+     points are added by the later phases of this work. -->
 
 ---
 
@@ -130,3 +131,94 @@ Verify interpolation without a daemon:
 ```bash
 cd app/Resources/docker && docker compose config | grep image:
 ```
+
+---
+
+## Building the container images
+
+```bash
+build/build-images.sh              # tor + wordpress, native arch
+build/build-images.sh tor          # just one
+build/build-images.sh all          # adds the stress-test worker
+build/build-images.sh --help       # every flag
+```
+
+| Image | Context | Cold build time |
+|---|---|---|
+| `onionpress-tor:dev` | `app/Resources/docker/tor` | **tens of minutes** — compiles arti from source |
+| `onionpress-wordpress:dev` | `app/Resources/docker/wordpress` | seconds |
+| `onionpress-stress-worker:dev` | `tests/stress` | seconds, chains off your local tor image |
+
+Needs `docker` with `buildx`, and nothing else. These are Linux images, so
+unlike the `.dmg` there is no host-OS requirement.
+
+### Shadow tags, and why a local build also tags the GHCR name
+
+Both launchers decide whether vanity-address generation is available with a
+deliberately tag-only check:
+
+```bash
+docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest
+```
+
+A local build tagged only `onionpress-tor:dev` fails that check, and the
+install silently falls back to a random `.onion` instead of an `op2…` vanity
+address — the v2.4.101 regression. So a local build **also** tags the GHCR
+name, pointing at your local image ID. It shadows the published image on your
+machine until you `docker pull` again. `--no-shadow-tag` opts out.
+
+### Architectures
+
+By default you build for your host's native platform. Multi-arch needs
+`--push`, because Docker cannot load a multi-platform result into the local
+image store — a tag there resolves to exactly one manifest. The script refuses
+that combination up front rather than failing at the end of a long build.
+
+Cross-building the **tor** image is a QEMU-emulated Rust compile and takes
+hours. CI avoids it entirely: `docker-publish.yml` builds amd64 on a
+GitHub-hosted runner and arm64 on a self-hosted Apple Silicon Mac, then merges
+the two with `docker buildx imagetools create`. For local work, build natively
+for whatever you are on — that is what you run anyway.
+
+A consequence worth knowing: because the two halves are built at different
+times from unpinned upstreams, the amd64 and arm64 sides of a published
+manifest can legitimately contain different Debian, Tor and arti versions.
+Pinning the inputs is what makes them agree — see the next section.
+
+### Build contexts are now filtered
+
+Docker does not read `.gitignore`, so `__pycache__/` was invisible in
+`git status` yet fully present in the build context — 544K of the tor
+context's 964K. `COPY wordlists /wordlists` baked those `.pyc` files into the
+published image, making that layer's cache key depend on whether the developer
+had run the test suite. Two of them (`follow-fetch`, `wayback-static`) had no
+`.py` source left in the repo at all.
+
+Each context now has a `.dockerignore`. The same leak went into the Linux
+`.deb` — 18 stale `.pyc` files — and `build/build-linux.sh` now strips them
+too.
+
+These directories come back after every test run, because
+`tests/test_onionnames.py` and `tests/test_onionheaven_integration.py` put
+`app/Resources/docker/tor` on `sys.path` and import from it. An exclude is the
+fix; deleting them is not.
+
+### CI coverage
+
+`.github/workflows/build-images.yml` runs `build/build-images.sh` on any PR
+touching a build context, so the local path cannot rot between releases. It is
+amd64-only, never pushes, never touches the self-hosted Mac (it runs fork PRs),
+and writes to a PR-scoped build cache so it cannot evict the release cache.
+
+**`docker-publish.yml` was deliberately not rewired to call this script.** The
+two CI paths differ in ways a shared script would have to absorb carefully —
+the `type=gha` cache backend needs Actions runtime env vars that
+`build-push-action` injects and a plain `run:` step does not; the self-hosted
+runner reuses a long-lived builder while the hosted one gets a fresh empty one
+each run; and the two paths have different default provenance behaviour, a
+mismatch that already forced commit `419b53ec`. `build-images.sh` exposes every
+flag that migration needs (`--platform`, `--push`, `--registry`, `--cache-from`,
+`--cache-to`, `--provenance`, `--pull`) and the validation workflow exercises
+them, but changing the release publisher is a supply-chain change that
+[CONTRIBUTING.md](../CONTRIBUTING.md) reserves for the maintainer and that
+cannot be tested without cutting a release.
