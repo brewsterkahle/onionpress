@@ -205,6 +205,34 @@ class Colima:
         self.start()
 
 
+def repair_foreign_socket_link(paths: OnionPressPaths, log_func=None) -> bool:
+    """Remove a docker.sock symlink that escapes our own Colima home.
+
+    Launchers up to v2.4.110 symlinked ~/.colima/default/docker.sock into
+    COLIMA_HOME whenever our own Lima forward was missing. That pointed
+    DOCKER_HOST at whatever *other* Colima VM the user happened to be
+    running, so OnionPress would deploy wordpress/db/tor into it. The link
+    can still be on disk from an earlier launch, so drop it rather than
+    talk to a VM that isn't ours.
+
+    Returns True if a link was removed.
+    """
+    sock = paths.docker_socket
+    if not os.path.islink(sock):
+        return False
+    target = os.path.realpath(sock)
+    home = os.path.realpath(paths.colima_home)
+    if target == home or target.startswith(home + os.sep):
+        return False  # points inside our own VM state
+    if log_func:
+        log_func(f"WARNING: removing foreign Docker socket link ({sock} -> {target})")
+    try:
+        os.unlink(sock)
+    except OSError:
+        return False
+    return True
+
+
 def detect_container_runtime(paths: OnionPressPaths, log_func=None) -> str:
     """Detect the available container runtime.
 
@@ -218,6 +246,7 @@ def detect_container_runtime(paths: OnionPressPaths, log_func=None) -> str:
     current_os = detect_os()
 
     if current_os == OS.MACOS:
+        repair_foreign_socket_link(paths, log_func=log_func)
         colima = Colima(paths, log_func=log_func)
         colima_bin = colima._colima_bin
         if os.path.isfile(colima_bin) and os.access(colima_bin, os.X_OK):
