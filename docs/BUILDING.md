@@ -173,8 +173,30 @@ build/build-images.sh --help       # every flag
 | `onionpress-wordpress:dev` | `app/Resources/docker/wordpress` | seconds |
 | `onionpress-stress-worker:dev` | `tests/stress` | seconds, chains off your local tor image |
 
-Needs `docker` with `buildx`, and nothing else. These are Linux images, so
-unlike the `.dmg` there is no host-OS requirement.
+Needs `docker`, and nothing else. These are Linux images, so unlike the
+`.dmg` there is no host-OS requirement.
+
+`buildx` is optional for a plain local build — the script falls back to the
+classic builder without it. That matters on macOS: OnionPress bundles its own
+docker CLI at `Contents/Resources/bin/docker` with **no buildx plugin** (the
+launcher links only `docker-compose` into `cli-plugins`), so requiring buildx
+would lock you out of the toolchain the app itself ships. `--platform`,
+`--push` and `--cache-*` are buildx-only and the script says so if you ask for
+them without it.
+
+To build against the app's own Colima VM:
+
+```bash
+export PATH="/Applications/OnionPress.app/Contents/Resources/bin:$PATH"
+export COLIMA_HOME="$HOME/.onionpress/colima"
+export LIMA_HOME="$COLIMA_HOME/_lima"
+export DOCKER_CONFIG="$HOME/.onionpress/docker-config"
+export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+colima start
+```
+
+That VM is sized for *running* the stack (1 GB RAM by default), which is fine
+for the wordpress image and slow for arti.
 
 ### Shadow tags, and why a local build also tags the GHCR name
 

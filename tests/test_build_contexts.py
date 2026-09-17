@@ -207,6 +207,35 @@ class TestBuildImagesScript(unittest.TestCase):
             "pushed, before starting the build.",
         )
 
+    def test_falls_back_to_the_classic_builder(self):
+        """OnionPress bundles its own docker CLI at
+        Contents/Resources/bin/docker with NO buildx plugin, and the launcher
+        only links docker-compose into cli-plugins. Requiring buildx
+        unconditionally locked developers out of the toolchain this app ships
+        — verified on a machine with the app installed: `docker buildx
+        version` fails, so build-images.sh refused to run at all.
+
+        A single-platform local build does not need buildx, so it now falls
+        back. --platform/--push/--cache-* still require it and say so.
+        """
+        script = _code("build/build-images.sh")
+        self.assertIn(
+            'BUILDER="classic"', script,
+            "build-images.sh must fall back to the classic builder when "
+            "buildx is absent.",
+        )
+        self.assertIn(
+            "needs_buildx", script,
+            "...but must still refuse the options that only buildx has.",
+        )
+        # The buildx-only flags must not be passed to the classic builder.
+        classic = script.split('else', 1)
+        self.assertIn(
+            "docker \"$@\"", script,
+            "The classic path must invoke `docker build`, not `docker buildx`.",
+        )
+        _ = classic
+
     def test_sets_provenance_explicitly(self):
         """docker/build-push-action attaches provenance attestations by
         default and raw `docker buildx build` does not. Commit 419b53ec had to

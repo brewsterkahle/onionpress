@@ -145,19 +145,49 @@ ERROR: docker not found on PATH.
   Colima, Podman with a docker shim, or a remote DOCKER_HOST.
 
   OnionPress bundles its own docker CLI + Colima VM for running the app, at
-  /Applications/OnionPress.app/Contents/Resources/bin/. You can build with
-  those, but the VM is sized for running the stack, not for compiling arti:
+  /Applications/OnionPress.app/Contents/Resources/bin/. Those work for a
+  single-platform build (the bundle ships no buildx plugin, so this script
+  falls back to the classic builder), but the VM is sized for running the
+  stack, not for compiling arti:
       export PATH="/Applications/OnionPress.app/Contents/Resources/bin:$PATH"
+      export COLIMA_HOME="$HOME/.onionpress/colima"
+      export LIMA_HOME="$COLIMA_HOME/_lima"
       export DOCKER_CONFIG="$HOME/.onionpress/docker-config"
+      export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
       colima start
 EOF
     exit 1
 fi
 
+# buildx is only REQUIRED for the features that only it has. A plain
+# single-platform build works fine with the classic builder, and that matters
+# here: OnionPress bundles its own docker CLI at
+# Contents/Resources/bin/docker with no buildx plugin, so demanding buildx
+# unconditionally locked developers out of the very toolchain this app ships.
+BUILDER="buildx"
 if ! docker buildx version >/dev/null 2>&1; then
-    echo "ERROR: 'docker buildx' is unavailable. It ships with Docker 19.03+;" >&2
-    echo "  on a bare docker-ce install: apt-get install docker-buildx-plugin" >&2
-    exit 1
+    BUILDER="classic"
+    needs_buildx=""
+    [ -n "$PLATFORM" ]   && needs_buildx="$needs_buildx --platform"
+    [ "$PUSH" = "1" ]    && needs_buildx="$needs_buildx --push"
+    [ -n "$CACHE_FROM" ] && needs_buildx="$needs_buildx --cache-from"
+    [ -n "$CACHE_TO" ]   && needs_buildx="$needs_buildx --cache-to"
+    if [ -n "$needs_buildx" ]; then
+        cat >&2 <<EOF
+ERROR: 'docker buildx' is unavailable, but you asked for:$needs_buildx
+
+  Those options exist only in buildx. Drop them to build for this host with
+  the classic builder, or install buildx:
+    macOS       brew install docker-buildx
+    docker-ce   apt-get install docker-buildx-plugin
+  then link it where your docker CLI looks for plugins, e.g.
+    mkdir -p ~/.docker/cli-plugins
+    ln -sfn "\$(brew --prefix)/bin/docker-buildx" ~/.docker/cli-plugins/docker-buildx
+EOF
+        exit 1
+    fi
+    echo "NOTE: docker buildx not found — using the classic builder."
+    echo "      Fine for a single-platform local build; --platform/--push need buildx."
 fi
 
 if ! docker version >/dev/null 2>&1; then
@@ -241,6 +271,7 @@ build_one() {
     [ -n "$PLATFORM" ] && set -- "$@" --platform "$PLATFORM"
     set -- "$@" -t "$ref"
 
+
     # Shadow tag, so the launchers' tag-only presence check keeps passing.
     if [ "$SHADOW_TAG" = "1" ] && [ "$PUSH" = "0" ]; then
         set -- "$@" -t "$(ghcr_name "$target"):latest"
@@ -261,14 +292,22 @@ build_one() {
 
     [ "$NO_CACHE" = "1" ] && set -- "$@" --no-cache
     [ "$PULL" = "1" ] && set -- "$@" --pull
-    [ -n "$CACHE_FROM" ] && set -- "$@" --cache-from "$CACHE_FROM"
-    [ -n "$CACHE_TO" ] && set -- "$@" --cache-to "$CACHE_TO"
-    set -- "$@" --provenance "$PROVENANCE"
-    [ "$PUSH" = "1" ] && set -- "$@" --push
-    [ "$LOAD" = "1" ] && set -- "$@" --load
-    set -- "$@" "$context"
 
-    docker buildx "$@"
+    if [ "$BUILDER" = "buildx" ]; then
+        [ -n "$CACHE_FROM" ] && set -- "$@" --cache-from "$CACHE_FROM"
+        [ -n "$CACHE_TO" ] && set -- "$@" --cache-to "$CACHE_TO"
+        set -- "$@" --provenance "$PROVENANCE"
+        [ "$PUSH" = "1" ] && set -- "$@" --push
+        [ "$LOAD" = "1" ] && set -- "$@" --load
+        set -- "$@" "$context"
+        docker buildx "$@"
+    else
+        # Classic builder: no --provenance/--load/--push/--cache-* to pass.
+        # The image lands in the local store directly, which is what --load
+        # accomplishes on the buildx path.
+        set -- "$@" "$context"
+        docker "$@"
+    fi
 
     if [ "$LOAD" = "1" ]; then
         local id
