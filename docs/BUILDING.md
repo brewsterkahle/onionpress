@@ -21,9 +21,10 @@ Those are called out per component.
 - [Container image pins](#container-image-pins)
 - [Running a locally built stack](#running-a-locally-built-stack)
 - [Building the container images](#building-the-container-images)
+- [Pinned inputs](#pinned-inputs)
 
-<!-- Sections for input pinning, generated assets and the unified entry
-     points are added by the later phases of this work. -->
+<!-- Sections for generated assets and the unified entry points are added by
+     the later phases of this work. -->
 
 ---
 
@@ -222,3 +223,102 @@ flag that migration needs (`--platform`, `--push`, `--registry`, `--cache-from`,
 them, but changing the release publisher is a supply-chain change that
 [CONTRIBUTING.md](../CONTRIBUTING.md) reserves for the maintainer and that
 cannot be tested without cutting a release.
+
+---
+
+## Pinned inputs
+
+Every external input to the images is pinned to an immutable identifier. The
+pins live as `ARG` defaults in the Dockerfiles themselves, next to what they
+control — deliberately not in a separate manifest, because the repo already
+has two pin surfaces (`build/bump-version.sh` for the app version,
+`build/refresh-image-digests.sh` for the published image digests) and a third
+would be one more thing to forget.
+
+| Input | Where | Pinned as |
+|---|---|---|
+| Rust toolchain (arti builder) | tor | `ARG RUST_IMAGE` — tag + index digest |
+| Debian (mkp224o builder + runtime) | tor | `ARG DEBIAN_IMAGE` — tag + index digest |
+| Docker CLI | tor | `ARG DOCKER_CLI_IMAGE` — named stage, tag + digest |
+| arti crate | tor | `ARG ARTI_VERSION` + `cargo install --version` |
+| mkp224o | tor | `ARG MKP224O_VERSION` + `ARG MKP224O_COMMIT`, asserted after clone |
+| Tor apt signing key | tor | `ENV TOR_APT_KEY_FPR`, fingerprint asserted |
+| WordPress base | wordpress | `ARG WORDPRESS_IMAGE` — tag + index digest |
+| wp-cli | wordpress | `ARG WP_CLI_VERSION` + `ARG WP_CLI_SHA256`, verified |
+| tor image (stress worker) | tests/stress | `ARG TOR_IMAGE`, supplied by the builder |
+
+`tests/test_dockerfile_pins.py` fails if any base image loses its digest, if
+`cargo install arti` loses `--version`, if `MKP224O_COMMIT` stops being a full
+SHA, if either supply-chain assertion is removed, or if a `curl` loses `-f`.
+
+### The two supply-chain fixes
+
+**wp-cli was an unverified download from a moving branch.** The old line
+fetched `wp-cli.phar` from the `gh-pages` branch of `wp-cli/builds` with no
+checksum and no `curl -f` — so an HTTP error page was written to
+`/usr/local/bin/wp` and `chmod +x`'d. The failure then surfaced far away,
+inside `onionpress-multisite-init.sh` or `onionpress-security-audit.sh`,
+rather than at build time. It is now a tagged release asset whose published
+sha256 is verified *before* the file is made executable.
+
+**The Tor apt signing key was fetched but never checked.** The URL is *named*
+after a fingerprint, which is not verification: nothing compared the fetched
+key's actual fingerprint to that name, so a substituted key at that URL would
+have been installed and trusted. `gpg --show-keys` now re-derives the
+fingerprint from the fetched bytes and the build fails on mismatch.
+
+`TOR_APT_KEY_FPR` is an `ENV`, not an `ARG`, and that distinction is
+load-bearing: an `ARG` can be overridden with `--build-arg`, which would let a
+builder point *both* the fetch and the assertion at the same substituted key —
+a self-certifying check that proves nothing.
+
+### What is deliberately not pinned
+
+**The `tor` apt package.** `deb.torproject.org` removes superseded versions
+from its mirror and publishes no snapshot service, so an apt version pin
+becomes `E: Version '…' was not found` within weeks. The base-image digest is
+the right granularity for the Debian package set, and the identifier users
+actually consume is the published image digest in `build/image-pins.env`. The
+signing-key assertion is what makes this safe.
+
+**WordPress core, in practice.** The base image is pinned, but that does not
+freeze WordPress for users: `onionpress-security-audit.sh` runs on every
+container start and applies pending core security releases over Tor. The pin
+fixes what this image is *built* on; the running site patches itself.
+
+### Bumping a pinned input
+
+Resolve the new **multi-arch index digest** — not a per-platform manifest
+digest, which resolves on amd64 and 404s on the arm64 builder:
+
+```bash
+docker buildx imagetools inspect rust:1.99-trixie
+```
+
+Without a daemon, the registry API works too:
+
+```bash
+TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/rust:pull" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+curl -sI -H "Authorization: Bearer $TOKEN" \
+     -H "Accept: application/vnd.oci.image.index.v1+json" \
+     https://registry-1.docker.io/v2/library/rust/manifests/1.99-trixie \
+  | grep -i docker-content-digest
+```
+
+Then edit the `ARG` default and rebuild. Two coupling rules:
+
+- **`ARTI_VERSION` and `RUST_IMAGE` move together.** arti requires a minimum
+  Rust version; bumping one alone fails about twenty minutes into a
+  release-mode compile.
+- **`MKP224O_VERSION` must match `build/build-dmg-simple.sh`.** That script
+  cross-compiles the same mkp224o release as a universal macOS binary. Two
+  different versions minting vanity addresses for the same project is a
+  difference nobody notices until the outputs differ. A test enforces this.
+
+Do **not** switch the Rust builder to a `-slim` variant. arti's default
+features resolve `default` → `default-runtime` → `native-tls` → `openssl-sys`,
+which needs `pkg-config` and `libssl-dev`; `rust:slim-trixie` ships only
+`ca-certificates`, `gcc` and `libc6-dev`. The full variant is
+`FROM buildpack-deps:trixie` and has them. The size difference is irrelevant —
+it is a builder stage, discarded once the arti binary is copied out.
