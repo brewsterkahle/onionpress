@@ -22,6 +22,7 @@ Those are called out per component.
 - [Running a locally built stack](#running-a-locally-built-stack)
 - [Building the container images](#building-the-container-images)
 - [Pinned inputs](#pinned-inputs)
+- [Running the stack you just built](#running-the-stack-you-just-built)
 
 <!-- Sections for generated assets and the unified entry points are added by
      the later phases of this work. -->
@@ -322,3 +323,65 @@ which needs `pkg-config` and `libssl-dev`; `rust:slim-trixie` ships only
 `ca-certificates`, `gcc` and `libc6-dev`. The full variant is
 `FROM buildpack-deps:trixie` and has them. The size difference is irrelevant —
 it is a builder stage, discarded once the arti binary is copied out.
+
+---
+
+## Running the stack you just built
+
+```bash
+build/build-images.sh     # produce onionpress-{tor,wordpress}:dev
+build/dev-up.sh           # start the stack on them
+build/dev-up.sh --logs
+build/dev-up.sh --down
+```
+
+### Why building was only half the job
+
+The running app used to pull over whatever you built. Three separate paths did
+it, and the important one was not the opt-in one:
+
+| Path | Gated by `UPDATE_ON_LAUNCH`? |
+|---|---|
+| `update_images()` in both launchers | yes |
+| `docker compose pull` on every start | **no** — ran unconditionally |
+| `docker compose up --pull always tor` (`start-tor`) | **no** — force-pulls |
+| `docker compose pull` in `onionpress update` (Linux) | **no** |
+| `update_docker_images()` in `src/menubar.py` | separate path again |
+
+So you could build an image, launch the app, and silently test someone else's
+build. Nothing failed; the stack just was not running your code.
+
+All of them now check `using_local_images()` — true when
+`ONIONPRESS_TOR_IMAGE` or `ONIONPRESS_WORDPRESS_IMAGE` points at a reference
+that is *not* on `ghcr.io`. A `ghcr.io` reference is a deliberate pin, not a
+local build, so pulls keep working normally for everyone else.
+
+The predicate exists in three places — `app/MacOS/onionpress`,
+`linux/onionpress` and `onionpress.containers.using_local_images()` — because
+the bash CLI, the Linux launcher and the macOS menubar are parallel
+implementations. `tests/test_local_image_mode.py` checks all three agree and
+that no pull escapes the guard.
+
+### Pointing an installed app at local images
+
+Add to `~/.onionpress/config` (the keys are in the shipped config template,
+commented out):
+
+```
+ONIONPRESS_TOR_IMAGE=onionpress-tor:dev
+ONIONPRESS_WORDPRESS_IMAGE=onionpress-wordpress:dev
+```
+
+Both launchers read these at startup and export them, so compose, the pull
+gating and vanity-key generation all follow.
+
+### One stack per machine
+
+`docker-compose.yml` hardcodes `container_name:` and `volumes: name:`, so a
+"dev" stack is not isolated from an installed OnionPress — it takes the same
+containers and volumes over. `build/dev-up.sh` refuses to start when an
+OnionPress stack is already running rather than fighting it; `--force`
+overrides.
+
+For the same reason `--down` never passes `-v`. Those volumes hold the
+database, the WordPress content and the onion service keys.

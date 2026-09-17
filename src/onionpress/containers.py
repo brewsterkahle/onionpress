@@ -35,6 +35,26 @@ ONIONHEAVEN_IMAGE = (
 )
 
 
+def using_local_images() -> bool:
+    """True when the stack points at images built on this machine.
+
+    build/build-images.sh prints ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE
+    for a locally built stack. Every image pull is gated on this: without the
+    gate a pull overwrites the local tag with the registry's copy, so a
+    developer builds an image, starts the app, and silently tests someone
+    else's build.
+
+    A reference that still points at ghcr.io is a deliberate pin, not a local
+    build, so it does not count. Mirrors using_local_images() in both bash
+    launchers — change all three together.
+    """
+    for ref in (os.environ.get("ONIONPRESS_TOR_IMAGE"),
+                os.environ.get("ONIONPRESS_WORDPRESS_IMAGE")):
+        if ref and not ref.startswith("ghcr.io/"):
+            return True
+    return False
+
+
 @dataclass
 class ContainerStatus:
     """Status of the OnionPress container stack."""

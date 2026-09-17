@@ -135,6 +135,19 @@ SHARE_ANALYTICS_WITH_ONIONHOME=no
 #
 # ONIONHOME_ADDRESS=op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion
 
+# Locally Built Container Images (advanced, developer-only)
+#
+# Point OnionPress at container images you built yourself with
+# build/build-images.sh instead of the published ones. When either is set to a
+# non-ghcr.io reference, OnionPress stops pulling images on launch — otherwise
+# the pull would overwrite your local build before it ever started.
+#
+# Unset them (or delete these lines) to go back to published images.
+# See docs/BUILDING.md in the OnionPress repository.
+#
+# ONIONPRESS_TOR_IMAGE=onionpress-tor:dev
+# ONIONPRESS_WORDPRESS_IMAGE=onionpress-wordpress:dev
+
 # Tor Implementation
 # Default: "tor" (Classic C Tor)
 #

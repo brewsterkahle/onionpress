@@ -230,12 +230,23 @@ class TestDeliberatelyUnpinned(unittest.TestCase):
         tags `:latest` precisely so this keeps working.
         """
         text = _read("linux/onionpress")
-        self.assertRegex(
-            text,
-            r"docker image inspect " + re.escape(TOR_REPO) + r"\s",
-            "linux/onionpress's mkp224o presence check must stay a bare tag "
-            "reference. If it has moved or been renamed, update this test.",
+        match = re.search(r"docker image inspect \"?([^\"\n]+)\"?", text)
+        self.assertIsNotNone(
+            match,
+            "Could not find the mkp224o presence check in linux/onionpress — "
+            "has it moved or been renamed? Update this test.",
         )
+        expr = match.group(1)
+        self.assertNotIn(
+            "@sha256:", expr,
+            "The presence check must not be digest-pinned: a locally built "
+            f"image would fail it. Got {expr!r}.",
+        )
+        # It follows ONIONPRESS_TOR_IMAGE so a local build is recognised, and
+        # falls back to the bare tag — which build/build-images.sh also
+        # shadow-tags, so the default keeps working either way.
+        self.assertIn("${ONIONPRESS_TOR_IMAGE:-", expr)
+        self.assertIn(TOR_REPO, expr)
 
     def test_in_container_takeover_default_stays_tag_only(self):
         """onionheaven_common.py runs INSIDE the tor container, where the

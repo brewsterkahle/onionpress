@@ -43,6 +43,7 @@ from onionpress.health import (
     decode_curl_reason,
 )
 from onionpress import config as op_config
+from onionpress import containers
 from onionpress.reachability_stats import ReachabilityStats
 from onionpress.system_metrics import host_metrics, container_metrics
 from onionpress.ui_helpers import (
@@ -4107,6 +4108,20 @@ class OnionPressApp(rumps.App):
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
         try:
+            # A pull would overwrite a locally built tag with the registry's
+            # copy — see containers.using_local_images(). The bash launchers
+            # gate their pulls the same way.
+            if containers.using_local_images():
+                self.log("Skipping image update: running locally built images")
+                if show_notifications:
+                    self.show_native_alert(
+                        "Running Locally Built Images",
+                        "Image updates are skipped because ONIONPRESS_TOR_IMAGE "
+                        "or ONIONPRESS_WORDPRESS_IMAGE points at a locally built "
+                        "image.\nUnset it to resume updates from the registry.",
+                    )
+                return False
+
             self.log("Checking for Docker image updates...")
             docker_compose_file = os.path.join(self.parent_resources_dir, "docker", "docker-compose.yml")
 
@@ -4376,8 +4391,11 @@ class OnionPressApp(rumps.App):
         """Check for Docker updates in background thread"""
         images_updated = self.update_docker_images(show_notifications=True)
 
-        # Show final summary if no app update was available.
-        if not app_update_available and not images_updated:
+        # Show final summary if no app update was available. Not when running
+        # locally built images — update_docker_images() has already said so,
+        # and "all container images are up to date" would be a lie.
+        if (not app_update_available and not images_updated
+                and not containers.using_local_images()):
             version = self.version
             self.show_native_alert(
                 "No Updates Available",
