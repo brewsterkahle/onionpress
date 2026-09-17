@@ -10,7 +10,12 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.platform import OnionPressPaths
-from onionpress.colima import Colima, ColimaError, detect_container_runtime
+from onionpress.colima import (
+    Colima,
+    ColimaError,
+    detect_container_runtime,
+    repair_foreign_socket_link,
+)
 
 
 def _make_paths(tmpdir):
@@ -256,6 +261,67 @@ class TestDetectContainerRuntime(unittest.TestCase):
                 detect_container_runtime(paths)
         finally:
             shutil.rmtree(os.path.dirname(paths.data_dir), ignore_errors=True)
+
+
+class TestRepairForeignSocketLink(unittest.TestCase):
+    """A docker.sock link must never point outside our own Colima home.
+
+    Launchers up to v2.4.110 bridged ~/.colima/default/docker.sock into
+    COLIMA_HOME when our own Lima forward was missing, which silently
+    handed OnionPress the user's personal Colima VM.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.paths = _make_paths(self.tmpdir)
+        os.makedirs(os.path.dirname(self.paths.docker_socket), exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _link_to(self, target):
+        open(target, "w").close()
+        os.symlink(target, self.paths.docker_socket)
+
+    def test_removes_link_to_another_colima(self):
+        foreign = os.path.join(self.tmpdir, "dot-colima-docker.sock")
+        self._link_to(foreign)
+
+        self.assertTrue(repair_foreign_socket_link(self.paths))
+        self.assertFalse(os.path.lexists(self.paths.docker_socket))
+        self.assertTrue(os.path.exists(foreign))  # not ours to delete
+
+    def test_removes_dangling_foreign_link(self):
+        os.symlink(os.path.join(self.tmpdir, "gone.sock"), self.paths.docker_socket)
+
+        self.assertTrue(repair_foreign_socket_link(self.paths))
+        self.assertFalse(os.path.lexists(self.paths.docker_socket))
+
+    def test_keeps_link_inside_colima_home(self):
+        inner = os.path.join(self.paths.colima_home, "_lima", "docker.sock")
+        os.makedirs(os.path.dirname(inner), exist_ok=True)
+        self._link_to(inner)
+
+        self.assertFalse(repair_foreign_socket_link(self.paths))
+        self.assertTrue(os.path.lexists(self.paths.docker_socket))
+
+    def test_keeps_real_socket(self):
+        open(self.paths.docker_socket, "w").close()
+
+        self.assertFalse(repair_foreign_socket_link(self.paths))
+        self.assertTrue(os.path.exists(self.paths.docker_socket))
+
+    def test_absent_socket_is_not_an_error(self):
+        self.assertFalse(repair_foreign_socket_link(self.paths))
+
+    def test_logs_what_it_removed(self):
+        self._link_to(os.path.join(self.tmpdir, "foreign.sock"))
+        lines = []
+
+        repair_foreign_socket_link(self.paths, log_func=lines.append)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("foreign.sock", lines[0])
 
 
 if __name__ == "__main__":
