@@ -149,6 +149,11 @@ with the maintainer.
   must use the bundled binary at
   `OnionPress.app/Contents/Resources/MenubarApp/Contents/MacOS/python`,
   never the system `python3`.
+- **Image pins live in one file.** `build/image-pins.env` is the source of
+  truth for the `ghcr.io/brewsterkahle/onionpress-*` digests; five files
+  embed those literals and `build/refresh-image-digests.sh` is the only
+  thing that writes them. `tests/test_image_pins.py` fails on drift.
+  Never hand-edit a digest — run the script. See [docs/BUILDING.md](docs/BUILDING.md).
 - **Two `Info.plist` files.** `OnionPress.app/Contents/Info.plist`
   (the parent) and `OnionPress.app/Contents/Resources/MenubarApp/Contents/Info.plist`
   (py2app's) must agree. `build/rebuild-menubar.sh` syncs them; if you

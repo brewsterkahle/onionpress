@@ -663,12 +663,16 @@ update_images() {
 
     cd "$DOCKER_DIR"
 
-    # GHCR images pinned to digest — must match docker-compose.yml. Refresh
-    # with build/refresh-image-digests.sh at each release. mariadb stays
-    # on :latest to receive upstream security patches automatically.
+    # GHCR images pinned to digest. The pins come from build/image-pins.env,
+    # which build/refresh-image-digests.sh regenerates at each release and
+    # propagates here; tests/test_image_pins.py fails the build if they drift.
+    # Exporting ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE overrides
+    # them, which is how a locally built stack is pulled into this loop
+    # (build/build-images.sh prints the exports). mariadb stays on :latest to
+    # receive upstream security patches automatically.
     local images=(
-        "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
-        "ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:5056497e355667c6f440baf75721e189c7845921218468f566d34e20c39bc776"
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:6c25a33819e66d6af735c886fbbacf714e887f838c4604433626229448cf011f}"
         "mariadb:latest"
     )
     local pulled=0

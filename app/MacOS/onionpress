@@ -297,7 +297,7 @@ _start_takeover_worker() {
         -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \
-        "${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >> "$LOG_FILE" 2>&1; then
+        "${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c}}" >> "$LOG_FILE" 2>&1; then
         log "OnionHeaven farm: started takeover worker $name"
     else
         log "WARNING: Failed to start takeover worker $name"
@@ -1070,8 +1070,19 @@ update_images() {
 
     cd "$DOCKER_DIR"
 
-    # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
+    # Pull the images the stack actually runs. These were bare `:latest` tags
+    # while docker-compose.yml pinned by digest, so this loop warmed a layer
+    # the stack never started and then logged it as "up to date" — the Linux
+    # launcher has pinned here since v2.4.99. The pins come from
+    # build/image-pins.env via build/refresh-image-digests.sh, and
+    # tests/test_image_pins.py fails if they drift. Exporting
+    # ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE points this at a
+    # locally built stack. mariadb stays on :latest by design.
+    local images=(
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:6c25a33819e66d6af735c886fbbacf714e887f838c4604433626229448cf011f}"
+        "mariadb:latest"
+    )
     local updated=false
 
     for image in "${images[@]}"; do

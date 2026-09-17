@@ -20,9 +20,19 @@ from .platform import OnionPressPaths
 
 CORE_SERVICES = ["wordpress", "db", "onionheaven", "autoheal"]
 ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
-# Pinned to digest — must match docker-compose.yml and linux/onionpress.
-# Refresh all three together via build/refresh-image-digests.sh.
-ONIONHEAVEN_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
+# Pinned to digest. The literal below is propagated from build/image-pins.env
+# by build/refresh-image-digests.sh, which writes every consumer at once;
+# tests/test_image_pins.py fails if any of them drift apart.
+#
+# Resolution order matches docker-compose.yml's `onionheaven` service, so the
+# menubar path and the compose path always agree: the service-specific
+# ONIONHEAVEN_IMAGE wins, then the stack-wide ONIONPRESS_TOR_IMAGE (what
+# build/build-images.sh exports for a locally built stack), then the pin.
+ONIONHEAVEN_IMAGE = (
+    os.environ.get("ONIONHEAVEN_IMAGE")
+    or os.environ.get("ONIONPRESS_TOR_IMAGE")
+    or "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c"
+)
 
 
 @dataclass

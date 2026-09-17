@@ -22,9 +22,16 @@ import sys
 from typing import Optional
 
 
-# Pinned to digest — must match docker-compose.yml and linux/onionpress.
-# Refresh all three together via build/refresh-image-digests.sh.
-DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
+# Pinned to digest. The literal below is propagated from build/image-pins.env
+# by build/refresh-image-digests.sh, which writes every consumer at once;
+# tests/test_image_pins.py fails if any of them drift apart.
+#
+# ONIONPRESS_TOR_IMAGE overrides it, so vanity-key generation runs against the
+# same image the rest of a locally built stack uses.
+DEFAULT_TOR_IMAGE = os.environ.get(
+    "ONIONPRESS_TOR_IMAGE",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c",
+)
 
 
 def _tor_browser_lock_paths() -> list:
