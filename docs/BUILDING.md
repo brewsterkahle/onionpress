@@ -23,9 +23,9 @@ Those are called out per component.
 - [Building the container images](#building-the-container-images)
 - [Pinned inputs](#pinned-inputs)
 - [Running the stack you just built](#running-the-stack-you-just-built)
+- [Generated assets](#generated-assets)
 
-<!-- Sections for generated assets and the unified entry points are added by
-     the later phases of this work. -->
+<!-- The unified entry points section is added by the last phase of this work. -->
 
 ---
 
@@ -385,3 +385,104 @@ overrides.
 
 For the same reason `--down` never passes `-v`. Those volumes hold the
 database, the WordPress content and the onion service keys.
+
+---
+
+## Generated assets
+
+Four families of binary were committed with nothing in the repo that could
+produce them. Each now has a recipe, and the recipes differ in how much they
+guarantee — that difference is the point of this section.
+
+| Artifact | Command | Guarantee |
+|---|---|---|
+| `app/Resources/app-icon.png` | `build/make-icons.sh` | **byte-identical** |
+| `app/Resources/AppIcon.icns` | `build/make-icons.sh` | **byte-identical** |
+| `app/Resources/menubar-icon-*.png` | `build/make-icons.sh` (needs ImageMagick) | equivalent, reconstructed |
+| `build/dist/onionpress-firefox.xpi` | `build/build-extension.sh` | reproducible across machines |
+| `build/dist/onionpress-chrome.zip` | `build/build-extension.sh` | reproducible across machines |
+| `build/dmg-assets/dmg-background.png` | `build/create-dmg-background.py` | equivalent, not identical |
+| `build/dmg-assets/DS_Store` | — | a capture, not a build |
+
+```bash
+build/make-icons.sh --verify    # rebuild to a temp dir and diff; writes nothing
+```
+
+### App icons
+
+macOS only (`sips`, `iconutil`). Two sharp edges, both guarded by tests:
+
+- **`sips -z`, not `sips -Z`.** The master is 992x1072 and is deliberately
+  squashed to a square 1024x1024. "Fixing" that to `-Z 1024` yields 948x1024
+  and silently changes every icon layer and the `.icns`.
+- **Never build the iconset by exporting the existing `.icns`.**
+  `iconutil --convert iconset` and back is lossy: the `ic04`/`ic05` layers are
+  raw ARGB and get re-encoded, producing a file of identical length that
+  differs in two bytes. Build from the PNG master.
+
+The three menubar PNGs are the exception. They were made with **ImageMagick**,
+not `sips` — their embedded `tEXt` chunks say so, and
+`exif:PixelXDimension 761` pins the source to
+`assets/branding/icon-menubar.png`. The recipe is reconstructed from that
+metadata and from the pixel relationships between the files; it produces
+equivalent icons, not identical bytes, and it has not been run against the
+committed files. Use `-grayscale Rec709Luma`, not `-colorspace Gray`:
+ImageMagick 7's `-colorspace Gray` is gamma-aware and does not match.
+
+### Browser extensions
+
+```bash
+build/build-extension.sh          # both
+build/build-extension.sh firefox  # one
+```
+
+There are **two Firefox manifests in the tree and they are not equivalent**:
+
+| | `extension/manifest.firefox.json` | `extension-firefox/manifest.json` |
+|---|---|---|
+| Version | 1.0.0, min Firefox 109 | 1.1.0, min Firefox 142 |
+| Permissions | + `webRequest`, `webRequestBlocking`, `webNavigation`, `<all_urls>` | narrow |
+| Content script | yes | no |
+| `data_collection_permissions` | **absent** | present |
+
+The build uses `extension-firefox/`. Building from `manifest.firefox.json`
+would re-request four permissions the extension no longer needs and produce a
+package addons.mozilla.org rejects — AMO requires
+`data_collection_permissions` from Firefox 142.
+
+`extension-firefox/` holds only the files that differ (`manifest.json`,
+`offline.html`, `offline.js`); icons, popup and background come from
+`extension/`. `offline.html` is deliberately different: `extension/`'s uses an
+inline `<script>`, which violates the extension CSP, and `extension-firefox/`
+externalises it to `offline.js`. The build fails if the manifest references a
+file that is not in the package.
+
+`.gitignore` used to list `extension-firefox/` while four of its files were
+tracked. Ignore rules do not apply to already-tracked files, so the entry was
+inert for those four — but any *new* file added there would have been silently
+untracked, in the directory holding the current manifest. That entry is gone.
+
+**The committed `build/onionpress-firefox.xpi` is not what this script
+produces, and cannot be.** Its inputs no longer exist: its `background.js`
+matches neither current source (it is an older revision), and its
+`manifest.json` appears in **no commit in this repository**. It is v1.0.0
+where the sources are v1.1.0. Nothing in the repo references it. It is left in
+place rather than deleted, because whether to replace a distributable that may
+already be published is the maintainer's call — but it should not be treated
+as the output of any build.
+
+### DMG window assets
+
+See [`build/dmg-assets/README.md`](../build/dmg-assets/README.md).
+`dmg-background.png` is regenerable from branding sources (needs Pillow) but
+only equivalently — it depends on the installed Pillow's resampling and on
+system font rasterisation.
+
+`DS_Store` cannot be regenerated by a script at all. It is a Finder capture
+encoding volume creation dates, file IDs and an Alias blob, and the committed
+one embeds a build machine's home directory path
+(`/Users/brewster/tmp/onionpress/…`), which therefore ships inside every
+published DMG. Recapturing on another machine substitutes that machine's path
+rather than removing it. Its filename has **no leading dot** on purpose: the
+repo ignores `.DS_Store`, so renaming it makes git drop it silently and the
+next DMG loses all window styling with no error.
