@@ -24,8 +24,30 @@ Those are called out per component.
 - [Pinned inputs](#pinned-inputs)
 - [Running the stack you just built](#running-the-stack-you-just-built)
 - [Generated assets](#generated-assets)
+- [Quick reference](#quick-reference)
 
-<!-- The unified entry points section is added by the last phase of this work. -->
+
+## Quick reference
+
+```bash
+make doctor        # which build tools you have, and what each missing one costs
+```
+
+| You want | Command | Host OS | Reaches out to |
+|---|---|---|---|
+| tor + wordpress images | `make images` | any | Docker Hub, crates.io, Debian, deb.torproject.org, GitHub |
+| run the stack on them | `make dev-up` | any | — |
+| macOS installer (`.dmg`) | `make dmg` | **macOS** | GitHub releases, Docker, python.org/PyPI, libsodium |
+| Linux package (`.deb`) | `make deb` | any | — |
+| browser extensions | `make extension` | any | — |
+| app icons | `make icons` | **macOS** | — |
+| unit tests | `make test-unit` | any | — |
+| source layout + pin check | `make test` | any | — |
+
+`make deb` and `make extension` need no network at all. The `.dmg` is
+macOS-only because it uses `swiftc`, `lipo`, `codesign`, `hdiutil` and
+`PlistBuddy`; note that `.deb` is *not* Linux-only — `build/build-linux.sh`
+hand-assembles the `ar` archive in Python when `dpkg-deb` is absent.
 
 ---
 

@@ -140,6 +140,12 @@ with the maintainer.
 
 ## Build pipeline gotchas
 
+Start with **[docs/BUILDING.md](docs/BUILDING.md)** — it covers every
+component, what rebuilds it and on which host OS. `make doctor` reports what
+your machine is missing. The notes below are the traps that are not obvious
+from the scripts themselves.
+
+
 - **`py2app` vs `setuptools` 81+** — setuptools 81 (released 2026-02-06)
   removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still
   uses. `build/build-dmg-simple.sh` handles this with a fallback to

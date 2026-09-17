@@ -135,13 +135,23 @@ quirk, not actual disk consumption.
 
 ## Building from Source
 
-```bash
-# Mac DMG
-bash build/build-dmg-simple.sh
+Everything OnionPress ships — including the container images — can be rebuilt
+on your own machine. Nothing requires access to the project's CI, its registry
+credentials, or its self-hosted build runner.
 
-# Linux .deb
-bash build/build-linux.sh
+```bash
+make doctor        # which build tools you have, and what each missing one costs
+
+make images        # the tor + wordpress container images   (any OS)
+make dev-up        # run the stack on the images you just built
+make dmg           # the macOS installer                    (macOS only)
+make deb           # the Linux package                      (any OS)
+make extension     # the Chrome + Firefox extensions        (any OS)
 ```
+
+See **[docs/BUILDING.md](docs/BUILDING.md)** for what each component needs,
+which inputs are pinned and how to bump them, and how to point an installed
+OnionPress at images you built yourself.
 
 ## Uninstalling
 

@@ -32,6 +32,7 @@ ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-…}}, so a pattern anchored to
 
 import os
 import re
+import subprocess
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -203,6 +204,44 @@ class TestRefreshScriptOwnsEveryConsumer(unittest.TestCase):
             "build/refresh-image-digests.sh and tests/test_image_pins.py "
             "disagree about which files embed image pins. A file in only one "
             "list is a file that drifts without anything noticing.",
+        )
+
+    def test_check_mode_passes_on_the_working_tree(self):
+        """End-to-end: run the real script. --check fails if --propagate
+        would change any consumer, so this covers the whole rewrite path
+        rather than the literals alone.
+
+        This exists because a purely textual assertion missed a real bug.
+        Giving linux/onionpress's `docker image inspect` an
+        ONIONPRESS_TOR_IMAGE override changed it from
+            docker image inspect ghcr.io/…:latest >/dev/null
+        to
+            docker image inspect "${ONIONPRESS_TOR_IMAGE:-ghcr.io/…:latest}"
+        which moved it INTO the rewriter's pin context. The text still looked
+        right, and a test that only read the text still passed, but the next
+        --propagate would have digest-pinned the presence check and silently
+        disabled vanity-address generation for locally built images.
+        """
+        result = subprocess.run(
+            ["bash", os.path.join(PROJECT_ROOT, "build/refresh-image-digests.sh"),
+             "--check"],
+            capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=60,
+        )
+        self.assertEqual(
+            0, result.returncode,
+            "build/refresh-image-digests.sh --check failed:\n"
+            f"{result.stdout}\n{result.stderr}",
+        )
+
+    def test_rewriter_never_touches_presence_checks(self):
+        """`docker image inspect` lines must be excluded by what they do, not
+        by how they happen to be punctuated.
+        """
+        script = _read("build/refresh-image-digests.sh")
+        self.assertIn(
+            'if "image inspect" in line:', script,
+            "The rewriter must explicitly skip `docker image inspect` lines — "
+            "relying on the pin-context lookahead alone already failed once.",
         )
 
     def test_refresh_script_offers_check_mode(self):

@@ -150,11 +150,17 @@ fi
 # (Linux/CI) rejects it, and we already require python3 for the build.
 #
 # The lookahead `(?=["}\n])` restricts rewrites to a *pin context* — a quoted
-# string, a `${VAR:-…}` default, or end of line. It deliberately skips bare
-# shell occurrences such as
-#     if docker image inspect ghcr.io/…onionpress-tor:latest >/dev/null
-# (linux/onionpress), which is a presence check that must stay tag-only: a
-# local build tags `:latest` precisely so that check keeps passing.
+# string, a `${VAR:-…}` default, or end of line.
+#
+# That is not sufficient on its own. `docker image inspect` lines are presence
+# checks that MUST stay tag-only — digest-pinning one makes a locally built
+# image fail it and the install silently falls back to a random .onion (the
+# v2.4.101 regression). They used to be skipped incidentally, because the
+# reference was bare and followed by a space. Once linux/onionpress grew an
+# override, `"${ONIONPRESS_TOR_IMAGE:-ghcr.io/…:latest}"` put the very same
+# check *into* pin context and this script would have pinned it. So they are
+# now excluded explicitly, by what the line does rather than by how it is
+# punctuated.
 #
 # Not in this list, on purpose:
 #   app/Resources/docker/tor/onionheaven_common.py — runs INSIDE the tor
@@ -189,7 +195,14 @@ for path in CONSUMERS:
               file=sys.stderr)
         sys.exit(1)
     s = p.read_text()
-    n = wp_re.sub(wp_pin, tor_re.sub(tor_pin, s))
+    # Rewrite line by line so presence checks can be held back.
+    out = []
+    for line in s.splitlines(keepends=True):
+        if "image inspect" in line:
+            out.append(line)
+            continue
+        out.append(wp_re.sub(wp_pin, tor_re.sub(tor_pin, line)))
+    n = "".join(out)
     if n == s:
         continue
     if mode == "check":

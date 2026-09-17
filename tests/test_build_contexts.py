@@ -25,6 +25,19 @@ def _read(rel_path):
         return f.read()
 
 
+def _code(rel_path):
+    """File contents with `#` comment lines removed.
+
+    These scripts and Makefile targets document the traps they avoid, so the
+    prose contains the exact strings some checks scan for. Scanning the raw
+    text matches the explanation instead of the instruction.
+    """
+    return "\n".join(
+        line for line in _read(rel_path).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 class TestDockerIgnore(unittest.TestCase):
     """Docker does not read .gitignore. __pycache__/ is gitignored, so it is
     invisible in `git status` yet fully present in the build context — 544K of
@@ -283,3 +296,78 @@ class TestValidationWorkflow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildEntryPoints(unittest.TestCase):
+    """Every build script should be reachable from `make`, and `make help`
+    should list it — the help block is a hardcoded echo, so it drifts silently.
+    """
+
+    TARGETS = {
+        "images": "build/build-images.sh",
+        "dev-up": "build/dev-up.sh",
+        "dmg": "build/build-dmg-simple.sh",
+        "deb": "build/build-linux.sh",
+        "extension": "build/build-extension.sh",
+        "icons": "build/make-icons.sh",
+        "doctor": "build/doctor.sh",
+    }
+
+    def test_every_script_has_a_make_target(self):
+        makefile = _read("Makefile")
+        for target, script in self.TARGETS.items():
+            with self.subTest(target=target):
+                self.assertTrue(
+                    os.path.exists(os.path.join(PROJECT_ROOT, script)),
+                    f"{script} is missing.",
+                )
+                self.assertRegex(
+                    makefile, rf"(?m)^{re.escape(target)}:",
+                    f"Makefile must define a `{target}` target for {script}.",
+                )
+
+    def test_help_lists_every_target(self):
+        makefile = _read("Makefile")
+        help_block = makefile.split("help:", 1)[1].split("\n\n# ", 1)[0]
+        for target in self.TARGETS:
+            with self.subTest(target=target):
+                self.assertIn(
+                    f"make {target}", help_block,
+                    f"`make help` must mention `make {target}` — the help "
+                    "block is a hardcoded echo and drifts silently.",
+                )
+
+    def test_phony_covers_every_target(self):
+        makefile = _read("Makefile")
+        phony = re.search(r"\.PHONY:(.*?)(?=\n[a-z])", makefile, re.S)
+        self.assertIsNotNone(phony, "Could not find .PHONY — update this test.")
+        declared = set(phony.group(1).replace("\\", " ").split())
+        for target in self.TARGETS:
+            with self.subTest(target=target):
+                self.assertIn(target, declared)
+
+    def test_dead_dmg_script_is_gone(self):
+        """build/build-dmg.sh was reachable as the default-looking `make build`
+        and was actively damaging: it packaged a bundle at the never-produced
+        lowercase path onionpress.app — which resolves to the real
+        OnionPress.app on case-insensitive APFS — ran `lipo -thin arm64` over
+        its binaries, destroying the universal-binary invariant that
+        validate-bundle.sh and test-bundle.sh enforce, and then failed under
+        `set -e` on a background image that does not exist, leaving the damaged
+        bundle behind.
+        """
+        self.assertFalse(
+            os.path.exists(os.path.join(PROJECT_ROOT, "build/build-dmg.sh")),
+            "build/build-dmg.sh thins universal binaries to arm64-only and "
+            "should not exist.",
+        )
+        self.assertNotIn(
+            "build-dmg.sh", _code("Makefile").replace("build-dmg-simple.sh", ""),
+            "No make target may invoke build/build-dmg.sh.",
+        )
+
+    def test_make_test_checks_pin_consistency(self):
+        self.assertIn(
+            "refresh-image-digests.sh --check", _read("Makefile"),
+            "`make test` should catch image-pin drift before a build.",
+        )
