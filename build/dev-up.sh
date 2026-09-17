@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
         --logs)  ACTION="logs" ;;
         -t|--tag) TAG="${2:?--tag needs a value}"; shift ;;
         --force) FORCE=1 ;;
-        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift

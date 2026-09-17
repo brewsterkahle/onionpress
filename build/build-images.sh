@@ -67,7 +67,7 @@ GHCR_WP="ghcr.io/brewsterkahle/onionpress-wordpress"
 GHCR_STRESS="ghcr.io/brewsterkahle/onionpress-stress-worker"
 
 usage() {
-    sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 
 OPTIONS
@@ -96,7 +96,7 @@ TARGETS
   image and chains off the tor image you just built.
 
 SHADOW TAGS
-  Both launchers gate vanity-address generation on
+  The LINUX launcher gates vanity-address generation on
       docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest
   a deliberately tag-only presence check. If a local build is only tagged
   onionpress-tor:dev that check fails, and the install silently falls back to
@@ -104,6 +104,10 @@ SHADOW TAGS
   So a local tor build also tags the GHCR name by default. The tag points at
   your local image ID; it shadows the published image on this machine until
   you `docker pull` again. Use --no-shadow-tag to opt out.
+
+  macOS does not consult Docker for this at all: it runs the bundled native
+  $BIN_DIR/mkp224o from inside the .app, so the shadow tag is irrelevant
+  there.
 EOF
 }
 

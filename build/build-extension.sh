@@ -52,7 +52,7 @@ TARGETS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         chrome|firefox|all) TARGETS="$TARGETS $1" ;;
-        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift

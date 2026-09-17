@@ -55,7 +55,22 @@ def _from_refs(text):
     """
     args = _arg_defaults(text)
     out = []
-    for match in re.finditer(r"^FROM\s+(\S+)(?:\s+AS\s+(\S+))?\s*$", text, re.M | re.I):
+    # Tolerates flags (`FROM --platform=$BUILDPLATFORM ...`) and trailing
+    # comments. The previous pattern anchored at `\s*$` right after the
+    # optional `AS`, so ANY such line failed to match and was silently never
+    # checked — an unpinned `FROM --platform=... rust:latest` passed every
+    # base-image test.
+    for line in text.splitlines():
+        match = re.match(
+            r"^FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?\s*(?:#.*)?$",
+            line, re.I,
+        )
+        if not match:
+            if re.match(r"^FROM\s", line, re.I):
+                raise AssertionError(
+                    f"Could not parse FROM line, so it would be silently "
+                    f"skipped: {line!r}. Fix _from_refs in this test.")
+            continue
         ref, alias = match.group(1), match.group(2)
         resolved = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
                           lambda m: args.get(m.group(1), m.group(0)), ref)
@@ -233,14 +248,25 @@ class TestTorAptKeyIsVerified(unittest.TestCase):
     """
 
     def test_fingerprint_is_asserted(self):
-        text = _read(TOR_DOCKERFILE)
+        # Comment-stripped: the Dockerfile explains this check in prose that
+        # contains the very strings scanned for, so an unstripped scan would
+        # pass even if the check itself were replaced by `echo $EXPECTED`.
+        text = _strip_comments(_read(TOR_DOCKERFILE))
         self.assertIn(
             "gpg --show-keys", text,
             "The Tor apt key's fingerprint must be re-derived from the "
             "fetched bytes with `gpg --show-keys` and compared.",
         )
         self.assertIn(
-            "Tor apt signing key fingerprint mismatch", text,
+            '$1=="pub"', text,
+            "The check must compare EVERY primary key in the file, not just "
+            "the first fpr record. `gpg --dearmor` decodes the whole file into "
+            "the keyring and apt's signed-by= trusts any key in it, so "
+            "checking only the first fingerprint lets an attacker APPEND a "
+            "second key and have it trusted while the assertion still passes.",
+        )
+        self.assertIn(
+            "Tor apt signing key does not match expectations", text,
             "A fingerprint mismatch must fail the build with a clear message.",
         )
 
@@ -284,15 +310,34 @@ class TestNoSilentlyFailingDownloads(unittest.TestCase):
 
     def test_all_curl_downloads_use_fail_flag(self):
         for dockerfile in (TOR_DOCKERFILE, WP_DOCKERFILE):
-            body = _strip_comments(_read(dockerfile))
-            for match in re.finditer(r"curl\s+(-[A-Za-z]+)", body):
-                flags = match.group(1)
-                with self.subTest(dockerfile=dockerfile, flags=flags):
-                    self.assertIn(
-                        "f", flags,
-                        f"{dockerfile}: `curl {flags}` lacks -f, so an HTTP "
-                        "error page is written to the output file and the "
-                        "build continues.",
+            # Join line continuations first, then scan the WHOLE invocation.
+            # Looking only at the first short-flag cluster missed
+            # `curl --silent -o ...` entirely (no cluster to match, so the
+            # loop body never ran and the test passed vacuously) and falsely
+            # failed the correct `curl -sSL --fail ...`.
+            body = _strip_comments(_read(dockerfile)).replace("\\\n", " ")
+            # Anchored to a command position (start of line, after RUN, or
+            # after &&/||/;/|). Without that, the bare word `curl` inside the
+            # apt-get package list matched and the rest of the package names
+            # were scanned as if they were curl flags.
+            invocations = re.findall(
+                r"(?:^|RUN\s+|&&\s*|\|\|\s*|;\s*|\|\s*)curl\s+(.*?)(?=\s+&&|\s*$)",
+                body, re.M,
+            )
+            self.assertTrue(
+                invocations,
+                f"No curl invocation found in {dockerfile} — renamed or "
+                "removed? Update this test rather than passing vacuously.",
+            )
+            for args in invocations:
+                with self.subTest(dockerfile=dockerfile, args=args[:60]):
+                    short = re.findall(r"(?:^|\s)-([A-Za-z]+)", args)
+                    has_fail = "--fail" in args or any("f" in c for c in short)
+                    self.assertTrue(
+                        has_fail,
+                        f"{dockerfile}: `curl {args[:70]}` lacks -f/--fail, so "
+                        "an HTTP error page is written to the output file and "
+                        "the build continues.",
                     )
 
 

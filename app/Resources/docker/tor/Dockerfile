@@ -102,21 +102,32 @@ ENV TOR_APT_KEY_FPR=A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89
 # The key URL being *named* after a fingerprint is not verification either.
 # gpg --show-keys re-derives the fingerprint from the fetched bytes and we
 # compare it, so a substituted key at that URL fails the build.
+#
+# It compares EVERY primary key in the file, not just the first. `--dearmor`
+# decodes the whole file into the keyring, and apt's `signed-by=` trusts any
+# key in there — so checking only the first fingerprint would let an attacker
+# APPEND a second key after the genuine one and have it trusted while the
+# assertion still passed. The awk prints the fpr record that follows each
+# `pub` (primary keys only, skipping subkey fprs), and the comparison demands
+# that list be exactly the one expected fingerprint.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     socat openssl ca-certificates sqlite3 python3 curl wget procps netcat-openbsd xxd gpg \
     libsodium23 \
     && curl -fsSL "https://deb.torproject.org/torproject.org/${TOR_APT_KEY_FPR}.asc" \
        -o /tmp/tor-archive-keyring.asc \
-    && gpg --show-keys --with-colons --fingerprint /tmp/tor-archive-keyring.asc \
-       | awk -F: '/^fpr:/ {print $10; exit}' > /tmp/tor-key-fpr \
-    && if [ "$(cat /tmp/tor-key-fpr)" != "${TOR_APT_KEY_FPR}" ]; then \
-         echo "ERROR: Tor apt signing key fingerprint mismatch." >&2; \
-         echo "       got      $(cat /tmp/tor-key-fpr)" >&2; \
-         echo "       expected ${TOR_APT_KEY_FPR}" >&2; \
+    && gpg --show-keys --with-colons /tmp/tor-archive-keyring.asc \
+       | awk -F: '$1=="pub"{p=1;next} $1=="fpr" && p {print $10; p=0}' \
+       > /tmp/tor-key-fprs \
+    && if [ "$(cat /tmp/tor-key-fprs)" != "${TOR_APT_KEY_FPR}" ]; then \
+         echo "ERROR: Tor apt signing key does not match expectations." >&2; \
+         echo "       expected exactly one primary key:" >&2; \
+         echo "         ${TOR_APT_KEY_FPR}" >&2; \
+         echo "       got:" >&2; \
+         sed 's/^/         /' /tmp/tor-key-fprs >&2; \
          exit 1; \
        fi \
     && gpg --dearmor -o /usr/share/keyrings/tor-archive-keyring.gpg /tmp/tor-archive-keyring.asc \
-    && rm -f /tmp/tor-archive-keyring.asc /tmp/tor-key-fpr \
+    && rm -f /tmp/tor-archive-keyring.asc /tmp/tor-key-fprs \
     && echo 'deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org trixie main' \
        > /etc/apt/sources.list.d/tor.list \
     && apt-get update && apt-get install -y --no-install-recommends tor \

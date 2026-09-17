@@ -63,7 +63,7 @@ while [ $# -gt 0 ]; do
         --check)     MODE="check" ;;
         --tor)       TOR_DIGEST_ARG="${2:-}"; shift ;;
         --wordpress) WP_DIGEST_ARG="${2:-}";  shift ;;
-        -h|--help)   sed -n '2,45p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,46p' "$0"; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -94,10 +94,16 @@ digest_of() {
 }
 
 read_pin() {
-    # Read one KEY= line out of build/image-pins.env. Piped through cut so a
-    # missing key yields an empty string rather than tripping `set -e` on
-    # grep's exit status.
-    grep "^$1=" "$PINS_FILE" 2>/dev/null | head -1 | cut -d= -f2-
+    # Read one KEY= line out of build/image-pins.env.
+    #
+    # The trailing `|| :` is required. The launchers use this same
+    # grep|head|cut idiom under plain `set -e`, where the pipeline's status is
+    # cut's and a missing key harmlessly yields "". This script also sets
+    # `pipefail`, which propagates grep's exit 1 through the pipe — so without
+    # `|| :` a missing key killed the script at the assignment below, before
+    # the explanatory guard could print, leaving the operator with exit 1 and
+    # zero output while doctor.sh told them the pins had "DRIFTED".
+    grep "^$1=" "$PINS_FILE" 2>/dev/null | head -1 | cut -d= -f2- || :
 }
 
 if [ "$MODE" = "refresh" ]; then

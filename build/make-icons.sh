@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
         --verify)  VERIFY=1 ;;
         --icns)    DO_MENUBAR=0 ;;
         --menubar) DO_ICNS=0 ;;
-        -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift

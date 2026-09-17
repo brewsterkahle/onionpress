@@ -178,8 +178,8 @@ unlike the `.dmg` there is no host-OS requirement.
 
 ### Shadow tags, and why a local build also tags the GHCR name
 
-Both launchers decide whether vanity-address generation is available with a
-deliberately tag-only check:
+The **Linux** launcher decides whether vanity-address generation is available
+with a deliberately tag-only check:
 
 ```bash
 docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest
@@ -190,6 +190,12 @@ install silently falls back to a random `.onion` instead of an `op2…` vanity
 address — the v2.4.101 regression. So a local build **also** tags the GHCR
 name, pointing at your local image ID. It shadows the published image on your
 machine until you `docker pull` again. `--no-shadow-tag` opts out.
+
+macOS never consults Docker for this. It runs the bundled native
+`$BIN_DIR/mkp224o` from inside the `.app`, and falls back to a random address
+only if that binary is missing — which is why `build-dmg-simple.sh` aborts the
+DMG rather than warning when the mkp224o cross-compile fails. The shadow tag
+is a Linux concern.
 
 ### Architectures
 
@@ -397,6 +403,13 @@ ONIONPRESS_WORDPRESS_IMAGE=onionpress-wordpress:dev
 Both launchers read these at startup and export them, so compose, the pull
 gating and vanity-key generation all follow.
 
+The macOS menubar app reads the same file directly, via
+`onionpress.containers.image_override()`. That is necessary rather than
+redundant: the MenubarApp *spawns* the launcher, so the launcher's exports can
+never reach it, and it has its own `docker compose pull` on the
+"Check for Updates" path. Without reading the config itself it would pull over
+your local image on every launch and then report the images as up to date.
+
 ### One stack per machine
 
 `docker-compose.yml` hardcodes `container_name:` and `volumes: name:`, so a
@@ -472,10 +485,15 @@ would re-request four permissions the extension no longer needs and produce a
 package addons.mozilla.org rejects — AMO requires
 `data_collection_permissions` from Firefox 142.
 
-`extension-firefox/` holds only the files that differ (`manifest.json`,
-`offline.html`, `offline.js`); icons, popup and background come from
-`extension/`. `offline.html` is deliberately different: `extension/`'s uses an
-inline `<script>`, which violates the extension CSP, and `extension-firefox/`
+`extension-firefox/` is overlaid on top of `extension/`, so **every file it
+contains wins** — `manifest.json`, `offline.html`, `offline.js` *and*
+`background.js`. Only the icons and the popup come from `extension/`. The two
+`background.js` files happen to be byte-identical today, which is exactly what
+would make a future divergence silent: fix a bug in `extension/background.js`
+alone and the Firefox package will not contain it.
+
+`offline.html` is deliberately different: `extension/`'s uses an inline
+`<script>`, which violates the extension CSP, and `extension-firefox/`
 externalises it to `offline.js`. The build fails if the manifest references a
 file that is not in the package.
 

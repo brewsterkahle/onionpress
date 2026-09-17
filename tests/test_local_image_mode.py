@@ -214,7 +214,13 @@ class TestMenubarGatesItsPull(unittest.TestCase):
             "Could not find update_docker_images in src/menubar.py — renamed? "
             "Update this test.",
         )
-        body = match.group(1)
+        # Comment-stripped: the guard carries a three-line comment naming
+        # containers.using_local_images(), so an unstripped scan passed even
+        # with the guard itself deleted.
+        body = "\n".join(
+            line for line in match.group(1).splitlines()
+            if not line.lstrip().startswith("#")
+        )
         self.assertIn(
             "using_local_images()", body,
             "menubar.update_docker_images() must skip the pull when running "
@@ -237,7 +243,11 @@ class TestMenubarGatesItsPull(unittest.TestCase):
             "Could not find _check_docker_updates_async — renamed? Update "
             "this test.",
         )
-        self.assertIn("using_local_images()", match.group(1))
+        self.assertIn(
+            "using_local_images()",
+            "\n".join(line for line in match.group(1).splitlines()
+                      if not line.lstrip().startswith("#")),
+        )
 
 
 class TestDevUpScript(unittest.TestCase):

@@ -18,6 +18,35 @@ from .config import (
 from .platform import OnionPressPaths
 
 
+def image_override(name: str) -> str | None:
+    """An image override from the environment, or failing that from the config.
+
+    Reading the config file matters on macOS, and is not merely a
+    convenience. The bash launcher exports these after reading
+    ~/.onionpress/config, but the MenubarApp is that launcher's PARENT — it
+    spawns the launcher, never the reverse — so a child's exports can never
+    reach it. Without this, a developer who followed the documented route of
+    putting ONIONPRESS_TOR_IMAGE in ~/.onionpress/config still had the
+    menubar's own `docker compose pull` overwrite their local image on every
+    launch, and be told the images were up to date.
+
+    The config is parsed the same way the launchers parse it: first matching
+    `KEY=` line, everything after the first `=`.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        with open(os.path.expanduser("~/.onionpress/config"),
+                  "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith(name + "="):
+                    return line.split("=", 1)[1].strip() or None
+    except OSError:
+        pass
+    return None
+
+
 CORE_SERVICES = ["wordpress", "db", "onionheaven", "autoheal"]
 ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 # Pinned to digest. The literal below is propagated from build/image-pins.env
@@ -28,11 +57,21 @@ ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 # menubar path and the compose path always agree: the service-specific
 # ONIONHEAVEN_IMAGE wins, then the stack-wide ONIONPRESS_TOR_IMAGE (what
 # build/build-images.sh exports for a locally built stack), then the pin.
-ONIONHEAVEN_IMAGE = (
-    os.environ.get("ONIONHEAVEN_IMAGE")
-    or os.environ.get("ONIONPRESS_TOR_IMAGE")
-    or "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c"
-)
+ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c"
+
+
+def onionheaven_image() -> str:
+    """The image to run OnionHeaven takeover workers from.
+
+    Resolved on each call rather than at import, so it picks up an override
+    written to ~/.onionpress/config without a restart — and so it sees the
+    same config the launchers do (see image_override).
+    """
+    return (image_override("ONIONHEAVEN_IMAGE")
+            or image_override("ONIONPRESS_TOR_IMAGE")
+            or ONIONHEAVEN_IMAGE_PIN)
+
+
 
 
 def using_local_images() -> bool:
@@ -48,8 +87,8 @@ def using_local_images() -> bool:
     build, so it does not count. Mirrors using_local_images() in both bash
     launchers — change all three together.
     """
-    for ref in (os.environ.get("ONIONPRESS_TOR_IMAGE"),
-                os.environ.get("ONIONPRESS_WORDPRESS_IMAGE")):
+    for name in ("ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE"):
+        ref = image_override(name)
         if ref and not ref.startswith("ghcr.io/"):
             return True
     return False
@@ -301,15 +340,20 @@ class ContainerManager:
 
     # -- OnionHeaven farm --
 
-    def start_farm_worker(self, idx: int, image: str = ONIONHEAVEN_IMAGE) -> bool:
+    def start_farm_worker(self, idx: int, image: str | None = None) -> bool:
         """Start a single OnionHeaven takeover worker container.
 
         Args:
             idx: Worker index (0, 1, 2, ...).
-            image: Docker image to use.
+            image: Docker image to use. Resolved per call when omitted, so a
+                locally built image set in the environment or in
+                ~/.onionpress/config is honoured — a module-level default
+                would have frozen the value at import time.
 
         Returns True on success.
         """
+        if image is None:
+            image = onionheaven_image()
         name = f"onionheaven-takeover-{idx}"
         self._log(f"Starting farm worker {name}...")
 

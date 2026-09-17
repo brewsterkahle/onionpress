@@ -70,6 +70,30 @@ class TestDockerIgnore(unittest.TestCase):
                 self.assertIn("__pycache__/", text)
                 self.assertIn("*.py[cod]", text)
 
+    def test_patterns_match_at_any_depth(self):
+        """.dockerignore patterns are matched against the whole
+        context-relative path and `*` never crosses `/`, so a bare
+        `__pycache__/` excludes only the one at the context root. The tor
+        context has a second one under wordlists/, and
+        `COPY wordlists /wordlists` copies that directory wholesale — which
+        was the exact path by which .pyc files kept reaching the published
+        image even after the first .dockerignore landed.
+        """
+        for context in CONTEXTS:
+            lines = [
+                line.strip()
+                for line in _read(os.path.join(context, ".dockerignore")).splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            with self.subTest(context=context):
+                for pattern in lines:
+                    self.assertTrue(
+                        pattern.startswith("**/"),
+                        f"{context}/.dockerignore pattern {pattern!r} is "
+                        "anchored to the context root and will miss nested "
+                        "matches. Prefix it with `**/`.",
+                    )
+
     def test_dockerignore_is_not_an_allowlist(self):
         """The tor Dockerfile COPYs 18 individually named files. An
         exclude-everything-then-allowlist .dockerignore that misses one fails
@@ -154,10 +178,13 @@ class TestBuildImagesScript(unittest.TestCase):
                 )
 
     def test_shadow_tags_the_ghcr_name_by_default(self):
-        """Both launchers gate vanity-address generation on a tag-only
+        """The LINUX launcher gates vanity-address generation on a tag-only
         `docker image inspect ghcr.io/...onionpress-tor:latest`. A local build
         tagged only onionpress-tor:dev fails that check and the install
         silently falls back to a random .onion — the v2.4.101 regression.
+
+        macOS does not consult Docker for this; it runs the bundled native
+        $BIN_DIR/mkp224o. The shadow tag is a Linux concern.
         """
         script = _read("build/build-images.sh")
         self.assertIn(
@@ -294,9 +321,6 @@ class TestValidationWorkflow(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestBuildEntryPoints(unittest.TestCase):
     """Every build script should be reachable from `make`, and `make help`
@@ -371,3 +395,5 @@ class TestBuildEntryPoints(unittest.TestCase):
             "refresh-image-digests.sh --check", _read("Makefile"),
             "`make test` should catch image-pin drift before a build.",
         )
+if __name__ == "__main__":
+    unittest.main()

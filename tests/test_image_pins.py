@@ -353,15 +353,23 @@ class TestLocalImageOverride(unittest.TestCase):
         containers = _read("src/onionpress/containers.py")
         self.assertRegex(
             containers,
-            r'os\.environ\.get\("ONIONHEAVEN_IMAGE"\)',
-            "containers.ONIONHEAVEN_IMAGE must prefer the ONIONHEAVEN_IMAGE "
-            "env var, matching docker-compose.yml's resolution order.",
+            r'image_override\("ONIONHEAVEN_IMAGE"\)',
+            "onionheaven_image() must prefer the ONIONHEAVEN_IMAGE override, "
+            "matching docker-compose.yml's resolution order.",
         )
         self.assertRegex(
             containers,
-            r'os\.environ\.get\("ONIONPRESS_TOR_IMAGE"\)',
-            "containers.ONIONHEAVEN_IMAGE must fall back to "
-            "ONIONPRESS_TOR_IMAGE before the pin.",
+            r'image_override\("ONIONPRESS_TOR_IMAGE"\)',
+            "onionheaven_image() must fall back to ONIONPRESS_TOR_IMAGE "
+            "before the pin.",
+        )
+        self.assertIn(
+            '~/.onionpress/config', containers,
+            "image_override must also read ~/.onionpress/config. The bash "
+            "launcher exports these after reading that file, but the "
+            "MenubarApp is the launcher's PARENT — it spawns the launcher, "
+            "never the reverse — so a child's exports can never reach it, and "
+            "the documented config route would not gate the menubar's pull.",
         )
 
         launcher_ops = _read("src/onionpress/launcher_ops.py")

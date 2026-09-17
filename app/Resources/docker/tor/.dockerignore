@@ -14,6 +14,12 @@
 # Deliberately a targeted exclude list rather than an exclude-all/allowlist:
 # the tor Dockerfile COPYs 18 individually named files, and an allowlist that
 # misses one fails late with a confusing "file not found" at COPY time.
-__pycache__/
-*.py[cod]
-.DS_Store
+# The `**/` prefixes are required, not decorative. .dockerignore patterns are
+# matched against the whole context-relative path and `*` never crosses `/`,
+# so a bare `__pycache__/` excludes only the one at the context root. The tor
+# context has a second one under wordlists/, and `COPY wordlists /wordlists`
+# copies that directory wholesale — which is the exact path by which .pyc was
+# reaching the published image.
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
