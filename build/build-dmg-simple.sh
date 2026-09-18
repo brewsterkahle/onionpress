@@ -17,6 +17,19 @@ DMG_PATH="$BUILD_DIR/$DMG_NAME"
 echo "Project directory: $PROJECT_DIR"
 echo "App path: $APP_PATH"
 
+# strip_pycache <dir> — remove __pycache__/ trees and stray *.pyc files from a
+# tree copied out of the source checkout. `make test-unit` leaves __pycache__
+# under src/onionpress/ and app/Resources/docker/tor/ (tests/test_onionnames.py
+# and tests/test_onionheaven_integration.py import from there), and `cp -R`
+# ships them: a DMG built right after the tests carried 31 .pyc files that a
+# clean-tree build did not. Same fix as build/build-linux.sh's collect_files.
+# Only point this at our own copies — never at the py2app output, which ships
+# a byte-compiled site.pyc next to __boot__.py on purpose.
+strip_pycache() {
+    find "$1" -type d -name __pycache__ -prune -exec rm -rf {} +
+    find "$1" -type f -name '*.pyc' -delete
+}
+
 # Assemble OnionPress.app from app/ source directory
 echo "Assembling OnionPress.app from app/ source..."
 rm -rf "$APP_PATH"
@@ -51,6 +64,7 @@ cp -R "$PROJECT_DIR/app/Resources/docker" "$APP_PATH/Contents/Resources/docker"
 cp -R "$PROJECT_DIR/app/Resources/plugins" "$APP_PATH/Contents/Resources/plugins"
 cp -R "$PROJECT_DIR/app/Resources/themes" "$APP_PATH/Contents/Resources/themes"
 cp -R "$PROJECT_DIR/app/Resources/scripts" "$APP_PATH/Contents/Resources/scripts"
+strip_pycache "$APP_PATH/Contents/Resources"
 cp "$PROJECT_DIR/app/Resources/"*.png "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_DIR/app/Resources/AppIcon.icns" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_DIR/app/Resources/config-template.txt" "$APP_PATH/Contents/Resources/"
@@ -446,6 +460,8 @@ fi
 # All shared code lives inside the package now — no flat-module cp dance.
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
 cp -r "$SCRIPTS_DIR/onionpress" "$SITE_PACKAGES/"
+# py2app copies this tree into the bundle verbatim, __pycache__ included.
+strip_pycache "$SITE_PACKAGES/onionpress"
 
 # Run py2app build using the root setup.py
 cd "$PROJECT_DIR"
@@ -481,6 +497,13 @@ fi
 # Remove broken .pyo symlinks — py2app creates these but .pyo files
 # haven't existed since Python 3.5. They break xattr/gatekeeper stripping.
 find "$MENUBAR_APP_DIR" -name '*.pyo' -type l ! -exec test -e {} \; -delete
+
+# No __pycache__/ anywhere in the bundle, whatever copied it in. A bytecode
+# cache is only ever read next to its .py source, so dropping one cannot break
+# an import — Python just recompiles on first use. Runs before signing so the
+# seal covers the swept tree. Stray *.pyc are deliberately NOT swept here: the
+# py2app output legitimately contains site.pyc (see strip_pycache above).
+find "$APP_PATH" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # Universal binaries in MenubarApp are fine — macOS runs the arm64 slice
 # natively on Apple Silicon without triggering a Rosetta prompt.

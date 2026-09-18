@@ -67,7 +67,7 @@ about. So you know what you are trusting:
 | Artifact | Proven |
 |---|---|
 | `.deb` | builds on macOS via the pure-Python `ar` fallback; ships 0 stale `.pyc` (was 18) |
-| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `diskutil image` (and the `hdiutil` fallback, forced with `DMG_TOOL=hdiutil`). 161 MB, version verified. **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
+| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `diskutil image` (and the `hdiutil` fallback, forced with `DMG_TOOL=hdiutil`). 161 MB, version verified; ships 0 stale `.pyc` (was 31 when built right after `make test-unit`). **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
 | `onionpress-wordpress` image | builds with the classic builder; wp-cli 2.12.0 with the pinned sha256 in the image; a wrong `WP_CLI_SHA256` fails at `sha256sum -c` **before** `chmod +x`; a wrong base digest fails at `FROM` |
 | `onionpress-tor` image | builds on the Tor Project's Onimages `tor:trixie` image in under a minute once it is pulled (isolated Colima VM, classic builder — nothing but mkp224o is compiled); baked in: Tor 0.4.9.13, Docker 29.8.1, mkp224o v1.7.0 against the base's libsodium; image user root, `CMD []`; the entrypoint bootstraps Tor in onion-service, SOCKS-only and takeover-worker modes and converts a delivered PEM key to C Tor's files; the stress worker chains off it; 0 `.pyc` under `/wordlists`; a wrong `MKP224O_COMMIT` fails at the post-clone assert |
 | `AppIcon.icns`, `app-icon.png` | byte-identical to the committed files |
@@ -337,7 +337,15 @@ had run the test suite. Two of them (`follow-fetch`, `wayback-static`) had no
 
 Each context now has a `.dockerignore`. The same leak went into the Linux
 `.deb` — 18 stale `.pyc` files — and `build/build-linux.sh` now strips them
-too.
+too. It also went into the `.dmg`: `build/build-dmg-simple.sh` copies
+`app/Resources/` and `src/onionpress/` with `cp -R`, so a DMG built right
+after `make test-unit` carried 31 `.pyc` files a clean-tree build did not (24
+under the py2app bundle's `onionpress/__pycache__/`, 7 under `docker/tor/`).
+The script now strips `__pycache__/` and stray `*.pyc` from every tree it
+copies out of the checkout, and sweeps `__pycache__/` from the assembled bundle
+once more before signing. It deliberately does *not* sweep `*.pyc` bundle-wide:
+py2app byte-compiles `site.py` into the MenubarApp's `Contents/Resources/` on
+purpose. `tests/test_dmg_pycache.py` guards all of it.
 
 These directories come back after every test run, because
 `tests/test_onionnames.py` and `tests/test_onionheaven_integration.py` put
