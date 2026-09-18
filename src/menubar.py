@@ -2991,14 +2991,6 @@ class OnionPressApp(rumps.App):
                     self.dismiss_launch_splash()
                     self.show_browser_install_dialog()
 
-    def validate_address_prefix(self, prefix):
-        """Validate an address prefix string.
-
-        Returns:
-            (valid, error_message, suggestion) tuple.
-        """
-        return op_config.validate_address_prefix(prefix)
-
     def check_address_prefix_change(self):
         """No-op: the vanity prefix is chosen once at install (welcome
         screen) and never changed on the fly. The old behaviour — detect a

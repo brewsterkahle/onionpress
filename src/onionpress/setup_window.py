@@ -30,6 +30,11 @@ try:
 except ImportError:
     _setup_logic = None
 
+try:
+    from onionpress import config as _op_config
+except ImportError:
+    _op_config = None
+
 
 # ---------------------------------------------------------------------------
 # Standard macOS colors
@@ -157,6 +162,7 @@ class SetupProgressWindow(AppKit.NSObject):
         self._title_field = None
         self._user_field = None
         self._user_hint = None           # inline validation label
+        self._prefix_hint = None         # inline validation label
         self._pass_field = None
         self.language = "en_US"
         self._on_setup_callback = None  # Called when user clicks "Set Up"
@@ -390,11 +396,21 @@ class SetupProgressWindow(AppKit.NSObject):
         self._prefix_field.setStringValue_("op2")
         self.welcome_view.addSubview_(self._prefix_field)
         y -= 18
-        self.welcome_view.addSubview_(_label(
+        self._prefix_help = _label(
             NSMakeRect(field_x, y, field_w, 14),
             "Your .onion starts with this. Longer prefixes take much longer to make.",
             font=_sys(10), color=_TEXT_SECONDARY,
-        ))
+        )
+        self.welcome_view.addSubview_(self._prefix_help)
+        # Inline validation hint, shown in place of the help text on error.
+        # Same pattern as the onionname field's _user_hint above.
+        self._prefix_hint = _label(
+            NSMakeRect(field_x, y, field_w, 14),
+            "",
+            font=_sys(10), color=NSColor.systemRedColor(),
+        )
+        self._prefix_hint.setHidden_(True)
+        self.welcome_view.addSubview_(self._prefix_hint)
 
         y -= 40  # spacing
 
@@ -633,6 +649,25 @@ class SetupProgressWindow(AppKit.NSObject):
             self._user_hint.setStringValue_(message)
             self._user_hint.setHidden_(False)
 
+    def _show_prefix_hint(self, message):
+        """Show or clear the address-prefix validation hint.
+
+        The hint occupies the same line as the help text, so they are
+        swapped rather than stacked — otherwise the Set Up button would move
+        whenever an error appeared.
+        """
+        if not self._prefix_hint:
+            return
+        if message:
+            self._prefix_hint.setStringValue_(message)
+            self._prefix_hint.setHidden_(False)
+            if getattr(self, "_prefix_help", None):
+                self._prefix_help.setHidden_(True)
+        else:
+            self._prefix_hint.setHidden_(True)
+            if getattr(self, "_prefix_help", None):
+                self._prefix_help.setHidden_(False)
+
     def setupClicked_(self, sender):
         """User clicked Set Up — save credentials and switch to progress view."""
         # Read field values
@@ -646,16 +681,38 @@ class SetupProgressWindow(AppKit.NSObject):
         else:
             self.admin_pass = self._pass_field_secure.stringValue() or ""
 
-        # Address prefix (advanced) — default op2. The launcher validates it
-        # (base32, <=5 chars) and falls back to op2 if it's invalid.
+        # Address prefix (advanced) — default op2.
+        #
+        # This used to accept anything and rely on the launcher to validate.
+        # The launcher does validate, but it can only fall back to op2 and log
+        # it — so a prefix like "elphin" was accepted here, silently discarded
+        # at first launch, and the user got an op2… address they never chose,
+        # with the only evidence in ~/.onionpress/launcher.log. Validate at the
+        # point of entry instead, where the value can still be corrected.
+        prefix_invalid = False
         if getattr(self, "_prefix_field", None):
             p = (self._prefix_field.stringValue() or "").strip().lower()
+            if p and _op_config is not None:
+                ok, message, suggestion = _op_config.validate_address_prefix(p)
+                if not ok:
+                    # First line of the validator's message is the headline;
+                    # the rest explains base32 and is too long for an inline
+                    # label. Offer the suggestion in the field so the user can
+                    # accept it with one more click.
+                    headline = message.strip().splitlines()[0]
+                    if suggestion:
+                        self._prefix_field.setStringValue_(suggestion)
+                        headline += f'  Try "{suggestion}".'
+                    self._show_prefix_hint(headline)
+                    prefix_invalid = True
+                else:
+                    self._show_prefix_hint("")
             self.address_prefix = p or "op2"
         else:
             self.address_prefix = "op2"
 
         # Validate required fields
-        missing = False
+        missing = prefix_invalid
         if not self.admin_user:
             red_placeholder = AppKit.NSAttributedString.alloc().initWithString_attributes_(
                 "Choose an onionname", {

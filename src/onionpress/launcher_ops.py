@@ -21,6 +21,8 @@ import subprocess
 import sys
 from typing import Optional
 
+from .config import validate_address_prefix
+
 
 # Pinned to digest. The literal below is propagated from build/image-pins.env
 # by build/refresh-image-digests.sh, which writes every consumer at once;
@@ -204,8 +206,14 @@ def generate_vanity_in_container(
     failure. Caller is responsible for ensuring the dir is empty first if
     a fresh key is required.
     """
-    if not (2 <= len(prefix) <= 6):
-        raise ValueError(f"prefix must be 2-6 chars (got {prefix!r})")
+    # Single source of truth — see config.validate_address_prefix(). This
+    # used to be a bare `2 <= len(prefix) <= 6`, which allowed a 6-character
+    # prefix the macOS launcher rejects and let a non-base32 prefix (0/1/8/9)
+    # through to mkp224o, where no address can ever match and the search never
+    # terminates.
+    prefix_ok, prefix_error, _ = validate_address_prefix(prefix)
+    if not prefix_ok:
+        raise ValueError(prefix_error.splitlines()[0])
 
     os.makedirs(vanity_dir, exist_ok=True)
     if jobs is None:

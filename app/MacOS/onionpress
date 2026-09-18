@@ -1249,16 +1249,47 @@ start_containers() {
             fi
         fi
 
-        log "Using address prefix: '$ADDRESS_PREFIX'"
-
-        # Validate prefix: base32 only (a-z, 2-7), max 5 chars
+        # Validate before announcing it — the old order logged
+        # "Using address prefix: 'elphin'" and only then the rejection, so the
+        # log's first statement about the prefix was the one that did not
+        # happen.
+        #
+        # These rules mirror config.validate_address_prefix(): base32 (a-z,
+        # 2-7), 2 to 5 characters. Keep them in step; the Python side is the
+        # source of truth and tests/test_address_prefix.py checks they agree.
+        #
+        # The fallback is deliberately silent-but-logged rather than fatal: a
+        # bad prefix must not stop the app starting. The real guard is
+        # validation at the point of entry (setup_window.py), because nobody
+        # reads this log — a user who typed "elphin" got an op2… address and
+        # the only evidence was here.
+        _prefix_problem=""
         if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is too long (${#ADDRESS_PREFIX} chars, max 5). Using default 'op2'."
-            ADDRESS_PREFIX="op2"
+            _prefix_problem="too long (${#ADDRESS_PREFIX} chars, max 5)"
+        elif [ ${#ADDRESS_PREFIX} -lt 2 ]; then
+            _prefix_problem="too short (${#ADDRESS_PREFIX} chars, min 2)"
         elif ! echo "$ADDRESS_PREFIX" | grep -qE '^[a-z2-7]+$'; then
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' contains invalid characters. Only a-z and 2-7 allowed. Using default 'op2'."
-            ADDRESS_PREFIX="op2"
+            _prefix_problem="contains characters that are not base32 (only a-z and 2-7; 0, 1, 8 and 9 are not valid)"
         fi
+
+        if [ -n "$_prefix_problem" ]; then
+            # Closest valid prefix, by the same rule the Python validator uses:
+            # lowercase, drop non-base32, truncate to 5.
+            _prefix_suggestion=$(echo "$ADDRESS_PREFIX" | tr '[:upper:]' '[:lower:]' \
+                | tr -cd 'a-z2-7' | cut -c1-5)
+            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is $_prefix_problem."
+            if [ ${#_prefix_suggestion} -ge 2 ]; then
+                log "       Falling back to 'op2'. To use the closest valid prefix, set"
+                log "       ADDRESS_PREFIX=$_prefix_suggestion in $DATA_DIR/config before first launch."
+            else
+                log "       Falling back to 'op2'. Edit ADDRESS_PREFIX in $DATA_DIR/config."
+            fi
+            ADDRESS_PREFIX="op2"
+            unset _prefix_suggestion
+        fi
+        unset _prefix_problem
+
+        log "Using address prefix: '$ADDRESS_PREFIX'"
 
         # Check for pre-existing imported key before generating a new one
         VANITY_DIR=""

@@ -6,7 +6,10 @@
 #
 # You can customize this to any lowercase alphanumeric string.
 # Note: Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.
-# Maximum 5 characters. Longer prefixes take exponentially longer to generate:
+# Length must be 2 to 5 characters. An invalid prefix is rejected at setup; if
+# you hand-edit this file with a bad one, OnionPress falls back to 'op2' and
+# records why in ~/.onionpress/launcher.log.
+# Longer prefixes take exponentially longer to generate:
 # - 2 chars (op): < 1 second
 # - 3 chars (op2): < 1 second
 # - 4 chars (op24): 5-30 seconds
