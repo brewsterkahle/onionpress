@@ -432,6 +432,29 @@ class TestBuildEntryPoints(unittest.TestCase):
             "No make target may invoke build/build-dmg.sh.",
         )
 
+    def test_how_to_build_covers_every_make_target(self):
+        """docs/HOW-TO-BUILD.md is the entry point for anyone building the
+        project. Like the Makefile's hand-maintained help block, it drifts
+        silently when a target is added, so pin them together.
+        """
+        path = os.path.join(PROJECT_ROOT, "docs/HOW-TO-BUILD.md")
+        self.assertTrue(os.path.exists(path), "docs/HOW-TO-BUILD.md is missing.")
+        howto = _read("docs/HOW-TO-BUILD.md")
+        for target in list(self.TARGETS) + ["test-unit", "test", "dev-down", "install"]:
+            with self.subTest(target=target):
+                self.assertIn(
+                    f"make {target}", howto,
+                    f"docs/HOW-TO-BUILD.md does not mention `make {target}`.",
+                )
+        self.assertIn(
+            "docs/HOW-TO-BUILD.md", _read("README.md"),
+            "README.md must link to docs/HOW-TO-BUILD.md.",
+        )
+        self.assertIn(
+            "HOW-TO-BUILD.md", _read("docs/BUILDING.md"),
+            "docs/BUILDING.md must point readers at the how-to.",
+        )
+
     def test_make_test_checks_pin_consistency(self):
         self.assertIn(
             "refresh-image-digests.sh --check", _read("Makefile"),

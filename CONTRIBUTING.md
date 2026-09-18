@@ -140,10 +140,11 @@ with the maintainer.
 
 ## Build pipeline gotchas
 
-Start with **[docs/BUILDING.md](docs/BUILDING.md)** — it covers every
-component, what rebuilds it and on which host OS. `make doctor` reports what
-your machine is missing. The notes below are the traps that are not obvious
-from the scripts themselves.
+Start with **[docs/HOW-TO-BUILD.md](docs/HOW-TO-BUILD.md)** — requirements,
+install commands and the steps for every artifact; `make doctor` reports what
+your machine is missing. **[docs/BUILDING.md](docs/BUILDING.md)** is the
+reference behind it. The notes below are the traps that are not obvious from
+the scripts themselves.
 
 
 - **`py2app` vs `setuptools` 81+** — setuptools 81 (released 2026-02-06)

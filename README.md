@@ -149,9 +149,11 @@ make deb           # the Linux package                      (any OS)
 make extension     # the Chrome + Firefox extensions        (any OS)
 ```
 
-See **[docs/BUILDING.md](docs/BUILDING.md)** for what each component needs,
-which inputs are pinned and how to bump them, and how to point an installed
-OnionPress at images you built yourself.
+**[docs/HOW-TO-BUILD.md](docs/HOW-TO-BUILD.md)** has the system and software
+requirements, install commands and step-by-step instructions for every
+artifact. **[docs/BUILDING.md](docs/BUILDING.md)** is the reference behind it:
+which inputs are pinned and how to bump them, why some images stay floating,
+and how to point an installed OnionPress at images you built yourself.
 
 ## Uninstalling
 

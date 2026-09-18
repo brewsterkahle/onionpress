@@ -1,8 +1,13 @@
 # Building OnionPress locally
 
 Every artifact OnionPress ships can be rebuilt on a developer's own machine.
-This document is the map: what each component is, which command rebuilds it,
-which host OS that command needs, and what it reaches out to the network for.
+This document is the map and the reasoning: what each component is, which
+command rebuilds it, which host OS that command needs, what it reaches out to
+the network for — and why each of those is the way it is.
+
+**If you just want to build something, start with
+[HOW-TO-BUILD.md](HOW-TO-BUILD.md)** — requirements, install commands and
+steps, without the history.
 
 **"Local" here means buildable on your machine, not hermetic.** The builds
 still fetch from upstream package sources — Debian, crates.io, Docker Hub,
