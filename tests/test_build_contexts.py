@@ -236,6 +236,19 @@ class TestBuildImagesScript(unittest.TestCase):
         )
         _ = classic
 
+    def test_stress_worker_requires_a_local_base(self):
+        """With the shadow tag as its base and no local tor image, docker
+        would pull the PUBLISHED tor image and extend that — the exact
+        "silently tests someone else's build" failure the chaining claims to
+        prevent. The script must check the base exists locally first.
+        """
+        script = _code("build/build-images.sh")
+        self.assertIn(
+            'docker image inspect "$base"', script,
+            "build-images.sh must verify the stress-worker base image exists "
+            "locally before building, or docker pulls the published one.",
+        )
+
     def test_sets_provenance_explicitly(self):
         """docker/build-push-action attaches provenance attestations by
         default and raw `docker buildx build` does not. Commit 419b53ec had to

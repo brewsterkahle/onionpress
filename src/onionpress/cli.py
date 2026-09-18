@@ -16,7 +16,7 @@ from . import __version__
 from .platform import OS, detect_os, resolve_paths, detect_timezone
 from .config import (
     ensure_config, ensure_secrets, read_value, detect_port_offset,
-    validate_address_prefix,
+    validate_address_prefix, DEFAULTS,
 )
 from .docker import Docker
 from .containers import ContainerManager
@@ -397,7 +397,15 @@ class OnionPressCLI:
         # character set at all — a prefix containing 0, 1, 8 or 9 is not
         # base32, can never match any address, and sent mkp224o searching
         # forever.
-        prefix = read_value(self.paths.config_file, "ADDRESS_PREFIX", "op2")
+        # read_value() returns its default only when the key is ABSENT; a line
+        # `ADDRESS_PREFIX=` with nothing after it yields "". The validator
+        # accepts "" (to UI callers it means "use the default"), so without
+        # this substitution the empty string went to mkp224o as an empty
+        # filter. Before this branch a bare length check happened to reject
+        # it; keep rejecting it, by giving it the default it stands for.
+        prefix = (read_value(self.paths.config_file, "ADDRESS_PREFIX",
+                             DEFAULTS["ADDRESS_PREFIX"])
+                  or DEFAULTS["ADDRESS_PREFIX"])
         prefix_ok, prefix_error, prefix_suggestion = validate_address_prefix(prefix)
         if not prefix_ok:
             self.log(f"ADDRESS_PREFIX is invalid, skipping vanity generation: "

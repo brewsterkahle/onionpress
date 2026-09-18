@@ -211,6 +211,14 @@ def generate_vanity_in_container(
     # prefix the macOS launcher rejects and let a non-base32 prefix (0/1/8/9)
     # through to mkp224o, where no address can ever match and the search never
     # terminates.
+    # Empty means "use the default" to UI callers, and validate_address_prefix()
+    # accepts it for that reason. A library function about to invoke mkp224o
+    # has no default to fall back on. With an empty filter mkp224o reports
+    # "0 filters" and exits 0 having generated nothing — and the
+    # `startswith(prefix)` scan below then matches EVERY existing key directory,
+    # returning an old address as if freshly minted.
+    if not prefix:
+        raise ValueError("prefix must not be empty")
     prefix_ok, prefix_error, _ = validate_address_prefix(prefix)
     if not prefix_ok:
         raise ValueError(prefix_error.splitlines()[0])

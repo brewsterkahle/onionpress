@@ -287,6 +287,24 @@ build_one() {
             base="$(image_ref tor)"
         fi
         echo "   base:    $base"
+        # Without this check a missing local base is not an error: docker
+        # would pull the PUBLISHED tor image from the registry and extend
+        # that — precisely the "silently tests someone else's build" failure
+        # this chaining exists to prevent.
+        if [ "$PUSH" = "0" ] && ! docker image inspect "$base" >/dev/null 2>&1; then
+            cat >&2 <<EOF
+ERROR: stress-worker extends $base, which is not present locally.
+
+  Build the tor image first so the worker tests YOUR tor changes:
+      build/build-images.sh tor
+  or build everything in one go:
+      build/build-images.sh all
+
+  Refusing to continue: with no local base, docker would pull the published
+  tor image and extend that instead.
+EOF
+            exit 1
+        fi
         set -- "$@" --build-arg "TOR_IMAGE=$base"
     fi
 

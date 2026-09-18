@@ -695,14 +695,26 @@ class SetupProgressWindow(AppKit.NSObject):
             if p and _op_config is not None:
                 ok, message, suggestion = _op_config.validate_address_prefix(p)
                 if not ok:
-                    # First line of the validator's message is the headline;
-                    # the rest explains base32 and is too long for an inline
-                    # label. Offer the suggestion in the field so the user can
-                    # accept it with one more click.
-                    headline = message.strip().splitlines()[0]
+                    # The validator's message is written for a dialog and its
+                    # first line alone runs to ~90 characters. This hint is a
+                    # single 14pt line about 260px wide — roughly 45
+                    # characters — so that text was clipped mid-sentence, and
+                    # the part cut off was the suggestion. Map to a compact
+                    # headline instead, the way the onionname field does with
+                    # its reason codes above.
+                    if "too long" in message:
+                        headline = (f"Too long ({len(p)} chars, max "
+                                    f"{_op_config.ADDRESS_PREFIX_MAX}).")
+                    elif "too short" in message:
+                        headline = (f"Too short (min "
+                                    f"{_op_config.ADDRESS_PREFIX_MIN} chars).")
+                    else:
+                        headline = "Use only a-z and 2-7."
+                    # Offer the suggestion in the field so the user can accept
+                    # it with one more click.
                     if suggestion:
                         self._prefix_field.setStringValue_(suggestion)
-                        headline += f'  Try "{suggestion}".'
+                        headline += f' Try "{suggestion}".'
                     self._show_prefix_hint(headline)
                     prefix_invalid = True
                 else:

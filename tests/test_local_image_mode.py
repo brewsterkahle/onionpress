@@ -15,6 +15,8 @@ checks cover all three.
 
 import os
 import re
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 import sys
@@ -47,11 +49,17 @@ class TestPredicate(unittest.TestCase):
     modules read image env vars at import time, and tests/test_onionheaven_*.py
     import them at module scope, so an unscoped mutation would leak across
     discovery order.
+
+    config_file=os.devnull everywhere, also deliberately: when the env is
+    cleared the predicate falls through to the config FILE, and its default is
+    the real ~/.onionpress/config on whatever machine runs the suite. These
+    tests passed on the author's machine only because that file happened not
+    to set an override.
     """
 
     def test_unset_means_published_images(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(using_local_images())
+            self.assertFalse(using_local_images(config_file=os.devnull))
 
     def test_ghcr_reference_is_not_a_local_build(self):
         """Pointing at a published image by digest is a deliberate pin, not a
@@ -63,11 +71,11 @@ class TestPredicate(unittest.TestCase):
         ):
             with self.subTest(ref=ref):
                 with mock.patch.dict(os.environ, {"ONIONPRESS_TOR_IMAGE": ref}, clear=True):
-                    self.assertFalse(using_local_images())
+                    self.assertFalse(using_local_images(config_file=os.devnull))
 
     def test_local_tag_is_a_local_build(self):
         with mock.patch.dict(os.environ, {"ONIONPRESS_TOR_IMAGE": "onionpress-tor:dev"}, clear=True):
-            self.assertTrue(using_local_images())
+            self.assertTrue(using_local_images(config_file=os.devnull))
 
     def test_either_variable_is_enough(self):
         """A developer iterating on only the WordPress image still must not
@@ -78,7 +86,105 @@ class TestPredicate(unittest.TestCase):
             {"ONIONPRESS_WORDPRESS_IMAGE": "onionpress-wordpress:dev"},
             clear=True,
         ):
-            self.assertTrue(using_local_images())
+            self.assertTrue(using_local_images(config_file=os.devnull))
+
+
+class TestImageOverrideReadsTheConfigFile(unittest.TestCase):
+    """The macOS MenubarApp spawns the launcher, so the launcher's exports can
+    never reach it. It has to read ~/.onionpress/config itself, or the
+    documented config route leaves its own pull ungated.
+    """
+
+    def _write(self, text):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".config", delete=False)
+        handle.write(text)
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_reads_the_value_from_the_given_file(self):
+        from onionpress.containers import image_override
+        cfg = self._write("ADDRESS_PREFIX=op2\nONIONPRESS_TOR_IMAGE=onionpress-tor:dev\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual("onionpress-tor:dev",
+                             image_override("ONIONPRESS_TOR_IMAGE", cfg))
+            self.assertTrue(using_local_images(config_file=cfg))
+
+    def test_environment_wins_over_the_file(self):
+        from onionpress.containers import image_override
+        cfg = self._write("ONIONPRESS_TOR_IMAGE=onionpress-tor:from-file\n")
+        with mock.patch.dict(os.environ, {"ONIONPRESS_TOR_IMAGE": "onionpress-tor:from-env"}, clear=True):
+            self.assertEqual("onionpress-tor:from-env",
+                             image_override("ONIONPRESS_TOR_IMAGE", cfg))
+
+    def test_empty_value_and_missing_file_mean_no_override(self):
+        from onionpress.containers import image_override
+        cfg = self._write("ONIONPRESS_TOR_IMAGE=\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(image_override("ONIONPRESS_TOR_IMAGE", cfg))
+            self.assertIsNone(image_override("ONIONPRESS_TOR_IMAGE",
+                                             "/nonexistent/onionpress/config"))
+            self.assertFalse(using_local_images(config_file="/nonexistent/onionpress/config"))
+
+    def test_callers_with_paths_pass_their_config_file(self):
+        """resolve_paths() supports a data_dir override; a hardcoded home path
+        would silently read the wrong file under one. Callers that already
+        hold an OnionPressPaths must pass it through.
+        """
+        containers = _read("src/onionpress/containers.py")
+        self.assertIn("onionheaven_image(self.paths.config_file)", containers)
+        menubar = _read("src/menubar.py")
+        self.assertEqual(
+            2, menubar.count("containers.using_local_images(self._paths.config_file)"),
+            "Both menubar call sites must pass the resolved config path.",
+        )
+
+
+class TestConfigOverrideLoopIsInjectionSafe(unittest.TestCase):
+    """Both launchers read the override with `eval`. ~/.onionpress/config is
+    user-writable, and on macOS the config is also hand-edited per the docs,
+    so a value must never be executed. This runs the launchers' ACTUAL loop
+    text — extracted, not re-typed — against a hostile config.
+    """
+
+    LOOP = re.compile(
+        r"for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do.*?"
+        r"unset _img_var _img_val",
+        re.S,
+    )
+
+    def test_hostile_values_stay_literal(self):
+        for launcher in LAUNCHERS:
+            match = self.LOOP.search(_read(launcher))
+            self.assertIsNotNone(
+                match, f"Could not find the override loop in {launcher} — "
+                       "restructured? Update this test.")
+            with tempfile.TemporaryDirectory() as data_dir:
+                marker = os.path.join(data_dir, "PWNED")
+                with open(os.path.join(data_dir, "config"), "w") as f:
+                    f.write(f"ONIONPRESS_TOR_IMAGE=$(touch {marker}-subst)\n")
+                    f.write(f"ONIONPRESS_WORDPRESS_IMAGE=`touch {marker}-tick`;touch {marker}-semi\n")
+                script = (
+                    "set -e\n"
+                    f"DATA_DIR={data_dir!r}\n"
+                    + match.group(0)
+                    + '\nprintf "%s|%s" "$ONIONPRESS_TOR_IMAGE" "$ONIONPRESS_WORDPRESS_IMAGE"\n'
+                )
+                result = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True,
+                    env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                    timeout=30,
+                )
+                with self.subTest(launcher=launcher):
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    tor, wp = result.stdout.split("|", 1)
+                    self.assertTrue(tor.startswith("$(touch "),
+                                    f"value was interpreted, not stored: {tor!r}")
+                    self.assertTrue(wp.startswith("`touch "),
+                                    f"value was interpreted, not stored: {wp!r}")
+                    created = [n for n in os.listdir(data_dir) if n.startswith("PWNED")]
+                    self.assertEqual([], created,
+                                     f"config value executed commands: {created}")
 
 
 class TestLaunchersDefineThePredicate(unittest.TestCase):
@@ -221,13 +327,15 @@ class TestMenubarGatesItsPull(unittest.TestCase):
             line for line in match.group(1).splitlines()
             if not line.lstrip().startswith("#")
         )
+        # `using_local_images(` — the call now passes the resolved config path,
+        # so do not pin the exact argument list here.
         self.assertIn(
-            "using_local_images()", body,
+            "using_local_images(", body,
             "menubar.update_docker_images() must skip the pull when running "
             "locally built images, like both bash launchers do.",
         )
         self.assertLess(
-            body.index("using_local_images()"), body.index('["pull"]'),
+            body.index("using_local_images("), body.index('["pull"]'),
             "The guard must come before the pull, not after it.",
         )
 
@@ -244,7 +352,7 @@ class TestMenubarGatesItsPull(unittest.TestCase):
             "this test.",
         )
         self.assertIn(
-            "using_local_images()",
+            "using_local_images(",
             "\n".join(line for line in match.group(1).splitlines()
                       if not line.lstrip().startswith("#")),
         )

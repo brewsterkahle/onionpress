@@ -28,7 +28,9 @@ correction — was called by nothing but its own tests.
 import os
 import re
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -115,6 +117,74 @@ class TestCanonicalRules(unittest.TestCase):
         """So the shell launchers have something to be checked against."""
         self.assertEqual(2, ADDRESS_PREFIX_MIN)
         self.assertEqual(5, ADDRESS_PREFIX_MAX)
+
+
+class TestEmptyPrefix(unittest.TestCase):
+    """An empty prefix is valid to the validator, because to UI callers it
+    means "use the default". The two library-side callers must not take that
+    literally — and before this branch they did not, by accident: a bare
+    `2 <= len(prefix) <= 6` happened to reject "". Switching them to the
+    validator dropped that guard, so `ADDRESS_PREFIX=` (present but empty)
+    reached mkp224o as an empty filter. mkp224o then reports "0 filters",
+    exits 0 having generated nothing, and the `startswith(prefix)` scan of the
+    output directory matches every pre-existing key — an OLD address returned
+    as if freshly minted.
+    """
+
+    def test_library_boundary_rejects_empty(self):
+        from onionpress.launcher_ops import generate_vanity_in_container
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError) as ctx:
+                generate_vanity_in_container("", tmp)
+        self.assertIn("empty", str(ctx.exception))
+
+    def test_cli_substitutes_the_default_for_a_present_but_empty_key(self):
+        """read_value() returns its default only when the key is ABSENT; a
+        bare `ADDRESS_PREFIX=` yields "". The CLI must give that the default
+        it stands for rather than pass it on.
+        """
+        from onionpress.cli import OnionPressCLI
+        seen = {}
+
+        def fake_generate(prefix, vanity_dir, **kwargs):
+            seen["prefix"] = prefix
+            return None  # "nothing generated" — keeps the test off the key path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = OnionPressCLI(data_dir=tmp)
+            with open(cli.paths.config_file, "w") as f:
+                f.write("ADDRESS_PREFIX=\n")
+            with mock.patch("onionpress.launcher_ops.tor_image_has_mkp224o", return_value=True), \
+                 mock.patch("onionpress.launcher_ops.generate_vanity_in_container", fake_generate):
+                rc = cli.cmd_generate_vanity()
+        self.assertEqual(1, rc)  # generation reported nothing, as the fake said
+        self.assertEqual("op2", seen.get("prefix"),
+                         "an empty ADDRESS_PREFIX must become the default, "
+                         f"not reach mkp224o as {seen.get('prefix')!r}")
+
+
+class TestSetupWindowHintFits(unittest.TestCase):
+    """The inline hint is one 14pt line ~260px wide (~45 characters). The
+    validator's first line alone is ~90, so appending the suggestion to it
+    put the suggestion exactly where the clipping happened.
+    """
+
+    def test_uses_compact_headlines_not_the_dialog_message(self):
+        body = _read("src/onionpress/setup_window.py")
+        self.assertNotIn(
+            "message.strip().splitlines()[0]", body,
+            "setup_window must not show the validator's dialog-length first "
+            "line in the inline hint — it is clipped.",
+        )
+        for fragment in ("Too long (", "Too short (min", "Use only a-z and 2-7."):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, body)
+
+    def test_worst_case_headline_fits(self):
+        # Longest realistic headline: a too-long prefix with a full-length
+        # suggestion appended.
+        headline = f'Too long ({len("abcdefghij")} chars, max 5). Try "abcde".'
+        self.assertLessEqual(len(headline), 48, headline)
 
 
 class TestEveryEntryPointUsesTheValidator(unittest.TestCase):

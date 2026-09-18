@@ -4103,7 +4103,7 @@ class OnionPressApp(rumps.App):
             # A pull would overwrite a locally built tag with the registry's
             # copy — see containers.using_local_images(). The bash launchers
             # gate their pulls the same way.
-            if containers.using_local_images():
+            if containers.using_local_images(self._paths.config_file):
                 self.log("Skipping image update: running locally built images")
                 if show_notifications:
                     self.show_native_alert(
@@ -4387,7 +4387,7 @@ class OnionPressApp(rumps.App):
         # locally built images — update_docker_images() has already said so,
         # and "all container images are up to date" would be a lie.
         if (not app_update_available and not images_updated
-                and not containers.using_local_images()):
+                and not containers.using_local_images(self._paths.config_file)):
             version = self.version
             self.show_native_alert(
                 "No Updates Available",

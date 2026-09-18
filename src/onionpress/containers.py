@@ -18,8 +18,20 @@ from .config import (
 from .platform import OnionPressPaths
 
 
-def image_override(name: str) -> str | None:
+def _default_config_file() -> str:
+    # Same path resolve_paths() uses when no data_dir override is given. Kept
+    # as a plain join rather than a resolve_paths() call so importing this
+    # module has no side effects and no dependency on the app bundle.
+    return os.path.join(os.path.expanduser("~"), ".onionpress", "config")
+
+
+def image_override(name: str, config_file: str | None = None) -> str | None:
     """An image override from the environment, or failing that from the config.
+
+    `config_file` defaults to ~/.onionpress/config. Callers that already hold
+    an OnionPressPaths should pass `paths.config_file` — resolve_paths()
+    supports a data_dir override, and a hardcoded home path would silently
+    read the wrong file under one.
 
     Reading the config file matters on macOS, and is not merely a
     convenience. The bash launcher exports these after reading
@@ -37,7 +49,7 @@ def image_override(name: str) -> str | None:
     if value:
         return value
     try:
-        with open(os.path.expanduser("~/.onionpress/config"),
+        with open(config_file or _default_config_file(),
                   "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 if line.startswith(name + "="):
@@ -60,21 +72,21 @@ ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c"
 
 
-def onionheaven_image() -> str:
+def onionheaven_image(config_file: str | None = None) -> str:
     """The image to run OnionHeaven takeover workers from.
 
     Resolved on each call rather than at import, so it picks up an override
     written to ~/.onionpress/config without a restart — and so it sees the
     same config the launchers do (see image_override).
     """
-    return (image_override("ONIONHEAVEN_IMAGE")
-            or image_override("ONIONPRESS_TOR_IMAGE")
+    return (image_override("ONIONHEAVEN_IMAGE", config_file)
+            or image_override("ONIONPRESS_TOR_IMAGE", config_file)
             or ONIONHEAVEN_IMAGE_PIN)
 
 
 
 
-def using_local_images() -> bool:
+def using_local_images(config_file: str | None = None) -> bool:
     """True when the stack points at images built on this machine.
 
     build/build-images.sh prints ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE
@@ -88,7 +100,7 @@ def using_local_images() -> bool:
     launchers — change all three together.
     """
     for name in ("ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE"):
-        ref = image_override(name)
+        ref = image_override(name, config_file)
         if ref and not ref.startswith("ghcr.io/"):
             return True
     return False
@@ -353,7 +365,7 @@ class ContainerManager:
         Returns True on success.
         """
         if image is None:
-            image = onionheaven_image()
+            image = onionheaven_image(self.paths.config_file)
         name = f"onionheaven-takeover-{idx}"
         self._log(f"Starting farm worker {name}...")
 

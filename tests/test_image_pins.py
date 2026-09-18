@@ -353,13 +353,13 @@ class TestLocalImageOverride(unittest.TestCase):
         containers = _read("src/onionpress/containers.py")
         self.assertRegex(
             containers,
-            r'image_override\("ONIONHEAVEN_IMAGE"\)',
+            r'image_override\("ONIONHEAVEN_IMAGE"[,)]',  # with or without config_file
             "onionheaven_image() must prefer the ONIONHEAVEN_IMAGE override, "
             "matching docker-compose.yml's resolution order.",
         )
         self.assertRegex(
             containers,
-            r'image_override\("ONIONPRESS_TOR_IMAGE"\)',
+            r'image_override\("ONIONPRESS_TOR_IMAGE"[,)]',
             "onionheaven_image() must fall back to ONIONPRESS_TOR_IMAGE "
             "before the pin.",
         )
