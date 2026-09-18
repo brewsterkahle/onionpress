@@ -49,6 +49,43 @@ macOS-only because it uses `swiftc`, `lipo`, `codesign`, `hdiutil` and
 `PlistBuddy`; note that `.deb` is *not* Linux-only — `build/build-linux.sh`
 hand-assembles the `ar` archive in Python when `dpkg-deb` is absent.
 
+### What has been proven by actually running it
+
+Every row above has been executed on a developer machine, not just reasoned
+about. So you know what you are trusting:
+
+| Artifact | Proven |
+|---|---|
+| `.deb` | builds on macOS via the pure-Python `ar` fallback; ships 0 stale `.pyc` (was 18) |
+| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `hdiutil`. 160 MB, version verified. **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
+| `onionpress-wordpress` image | builds with the classic builder; wp-cli 2.12.0 with the pinned sha256 in the image; a wrong `WP_CLI_SHA256` fails at `sha256sum -c` **before** `chmod +x`; a wrong base digest fails at `FROM` |
+| `onionpress-tor` image | builds (isolated 6-CPU/8 GB Colima VM); baked in: Tor 0.4.9.12, Arti 2.6.0, Docker 29.8.1, mkp224o v1.7.0; **exactly one** key in the apt keyring, fingerprint `A3C4…DD89`; 0 `.pyc` under `/wordlists`; a wrong `MKP224O_COMMIT` fails at the post-clone assert |
+| `AppIcon.icns`, `app-icon.png` | byte-identical to the committed files |
+| menubar PNGs | `running`, `starting` pixel-identical; `stopped` within 2/255 (see [Generated assets](#generated-assets)) |
+| extensions | byte-reproducible across runs |
+
+One forward-looking note from the DMG log: on macOS 27 `hdiutil create`,
+`hdiutil attach` and `hdiutil convert` each print a deprecation warning
+pointing at `diskutil image …`. They still work today; a future macOS may
+remove them, and `build/build-dmg-simple.sh` uses all three.
+
+**Building the tor image without disturbing a running OnionPress.** Its VM
+is 1 GB by default — not enough to compile arti — and it is your live site.
+Rather than resizing it, run a second, isolated Colima instance under its own
+home; nothing under `~/.onionpress` is touched, and deleting the directory
+reclaims everything:
+
+```bash
+export PATH="/Applications/OnionPress.app/Contents/Resources/bin:$PATH"
+export COLIMA_HOME="$HOME/.colima-build"
+export LIMA_HOME="$COLIMA_HOME/_lima"
+export DOCKER_CONFIG="$COLIMA_HOME/docker-config"
+export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+colima start --cpu 6 --memory 8 --disk 20      # first time: downloads a ~200 MB VM image
+build/build-images.sh tor                      # 20-40 min natively
+colima stop                                    # frees the RAM; the layer cache stays
+```
+
 ---
 
 ## Container image pins
@@ -455,7 +492,7 @@ guarantee — that difference is the point of this section.
 |---|---|---|
 | `app/Resources/app-icon.png` | `build/make-icons.sh` | **byte-identical** |
 | `app/Resources/AppIcon.icns` | `build/make-icons.sh` | **byte-identical** |
-| `app/Resources/menubar-icon-*.png` | `build/make-icons.sh` (needs ImageMagick) | equivalent, reconstructed |
+| `app/Resources/menubar-icon-*.png` | `build/make-icons.sh` (needs ImageMagick) | **pixel-identical** (`running`, `starting`); `stopped` within 2/255 |
 | `build/dist/onionpress-firefox.xpi` | `build/build-extension.sh` | reproducible across machines |
 | `build/dist/onionpress-chrome.zip` | `build/build-extension.sh` | reproducible across machines |
 | `build/dmg-assets/dmg-background.png` | `build/create-dmg-background.py` | equivalent, not identical |
@@ -477,14 +514,28 @@ macOS only (`sips`, `iconutil`). Two sharp edges, both guarded by tests:
   raw ARGB and get re-encoded, producing a file of identical length that
   differs in two bytes. Build from the PNG master.
 
-The three menubar PNGs are the exception. They were made with **ImageMagick**,
-not `sips` — their embedded `tEXt` chunks say so, and
-`exif:PixelXDimension 761` pins the source to
-`assets/branding/icon-menubar.png`. The recipe is reconstructed from that
-metadata and from the pixel relationships between the files; it produces
-equivalent icons, not identical bytes, and it has not been run against the
-committed files. Use `-grayscale Rec709Luma`, not `-colorspace Gray`:
-ImageMagick 7's `-colorspace Gray` is gamma-aware and does not match.
+The three menubar PNGs were made with **ImageMagick**, not `sips` — their
+embedded `tEXt` chunks say so, and `exif:PixelXDimension 761` pins the source
+to `assets/branding/icon-menubar.png`. ImageMagick stamps the save time into
+every PNG it writes, so a fresh render can never be byte-identical to a
+committed file even when every pixel matches; `--verify` compares **pixels**
+for these three and bytes for the `.icns` chain.
+
+Measured, with ImageMagick installed:
+
+| Icon | Recipe | `--verify` |
+|---|---|---|
+| `running` | `-resize 75x88` | pixel-identical |
+| `stopped` | `-grayscale Rec709Luma` | ~2 pixels differ by 2/255 — version rounding. `-colorspace Gray` is linear-light and far off. |
+| `starting` | flood fill from the four corners, 15% fuzz | pixel-identical |
+
+The `starting` recipe was first written as `-transparent gray` and that was
+**wrong**: the backdrop is `#E0E0E0`, not `#808080`, so it removed nothing.
+Even `-transparent '#E0E0E0'` with fuzz reaches only 610 of the committed 617
+transparent pixels, because the backdrop has ±1 noise per channel — the
+original was a *connectivity*-based fill from the edges, which a corner flood
+fill reproduces exactly. Outputs are `-strip`'d so two runs agree byte for
+byte; regenerating drops the timestamps the committed files carry.
 
 ### Browser extensions
 

@@ -96,16 +96,56 @@ class TestIconRecipe(unittest.TestCase):
                     f"{result.stdout}",
                 )
 
-    def test_is_honest_about_the_menubar_icons(self):
-        """They were made with ImageMagick and the recipe is reconstructed
-        from the committed files' embedded metadata, not verified. The script
-        must say so rather than implying the same guarantee as the .icns.
+    def test_menubar_recipe_is_the_measured_one(self):
+        """The menubar recipe was first written as a reconstruction and, once
+        ImageMagick was available, measured: `-transparent gray` removed no
+        pixels at all (the backdrop is #E0E0E0, not #808080), while a corner
+        flood fill at 15% fuzz reproduces the committed alpha exactly.
         """
-        script = _read(self.SCRIPT)
+        script = _code(self.SCRIPT)
         self.assertIn("Rec709Luma", script,
-                      "ImageMagick 7's -colorspace Gray is linear and does "
-                      "not match the committed file; Rec709Luma does.")
-        self.assertIn("ImageMagick", script)
+                      "ImageMagick 7's -colorspace Gray is linear-light and "
+                      "does not match the committed file; Rec709Luma does.")
+        self.assertIn("floodfill", script,
+                      "starting must be produced by a corner flood fill.")
+        self.assertNotIn("-transparent gray", script,
+                         "`-transparent gray` knocks out nothing: the backdrop "
+                         "is #E0E0E0.")
+        self.assertIn("-strip", script,
+                      "outputs must be -strip'd so runs are byte-reproducible.")
+
+    def test_verify_compares_pixels_for_imagemagick_outputs(self):
+        """ImageMagick stamps the save time into every PNG, so a fresh render
+        is never byte-identical to a committed file. A byte comparison would
+        report every menubar icon as different regardless of correctness.
+        """
+        script = _code(self.SCRIPT)
+        self.assertIn("-metric AE", script)
+        # compare exits 1 when images differ; under pipefail that aborted
+        # --verify after the first identical file.
+        self.assertRegex(script, r"-metric AE .*\|\| :",
+                         "the compare pipeline must tolerate compare's exit 1.")
+
+    @unittest.skipUnless(platform.system() == "Darwin", "make-icons.sh is macOS-only")
+    @unittest.skipUnless(shutil.which("magick") or shutil.which("convert"),
+                         "ImageMagick not available")
+    def test_menubar_icons_regenerate_to_the_committed_pixels(self):
+        """Runs the real recipe. running and starting must be pixel-identical;
+        stopped may differ by ImageMagick rounding but nothing more.
+        """
+        result = subprocess.run(
+            ["bash", os.path.join(PROJECT_ROOT, self.SCRIPT), "--verify", "--menubar"],
+            capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=180,
+        )
+        self.assertEqual(0, result.returncode,
+                         f"--verify --menubar failed:\n{result.stdout}\n{result.stderr}")
+        for name in ("menubar-icon-running.png", "menubar-icon-starting.png"):
+            with self.subTest(name=name):
+                self.assertRegex(result.stdout, rf"PIXEL-IDENTICAL\s+app/Resources/{name}",
+                                 result.stdout)
+        self.assertRegex(result.stdout,
+                         r"(PIXEL-IDENTICAL|EQUIVALENT)\s+app/Resources/menubar-icon-stopped\.png",
+                         result.stdout)
 
 
 class TestExtensionRecipe(unittest.TestCase):
