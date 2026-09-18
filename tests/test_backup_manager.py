@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import zlib
 from unittest import mock
 
 # Add src/ to path so we can import both onionpress.backup and key_manager
@@ -113,6 +114,66 @@ class TestReadBackupMetadata(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             backup_manager.read_backup_metadata(zip_path, "wrong")
         self.assertIn("password", str(ctx.exception).lower())
+
+    # ZipCrypto checks only one byte of the decryption header, so about 1 in
+    # 256 wrong passwords gets past it and the garbage plaintext blows up in
+    # zlib (or the CRC check) instead of raising "Bad password". That made
+    # test_wrong_password flaky, and showed users a zlib.error crash instead
+    # of the wrong-password message. The next three tests pin the fix.
+
+    def test_wrong_password_slipping_past_header_check(self):
+        """End to end: a real wrong password that passes the one-byte check."""
+        zip_path = self._make_zip({"onion_address": "test.onion"}, "correct")
+        wrong = self._wrong_password_passing_header_check(zip_path)
+        with self.assertRaises(ValueError) as ctx:
+            backup_manager.read_backup_metadata(zip_path, wrong)
+        self.assertIn("password", str(ctx.exception).lower())
+
+    def _wrong_password_passing_header_check(self, zip_path):
+        """Brute-force a wrong password that ZipCrypto's header check accepts.
+
+        Deterministic in outcome: each candidate has ~1/256 odds and an
+        attempt costs ~20us, so this finds one within a few ms. Hitting the
+        20000-try cap has probability (255/256)**20000, about 1e-34.
+        """
+        with zipfile.ZipFile(zip_path) as zf:
+            name = next(n for n in zf.namelist()
+                        if n.rstrip('/').endswith('metadata.json'))
+            for i in range(20000):
+                candidate = f"wrong{i}"
+                try:
+                    zf.read(name, pwd=candidate.encode())
+                except RuntimeError:
+                    continue  # failed the header check: the common case
+                except Exception:
+                    return candidate  # passed it, then choked on garbage
+                self.fail(f"wrong password {candidate!r} decrypted the member")
+        self.fail("no wrong password slipped past the header check")
+
+    def test_garbage_plaintext_errors_mean_wrong_password(self):
+        """Deterministic: zlib.error or a CRC mismatch from the encrypted read."""
+        zip_path = self._make_zip({"onion_address": "test.onion"}, "correct")
+        garbage_errors = [
+            zlib.error("Error -3 while decompressing data: invalid code lengths set"),
+            zipfile.BadZipFile("Bad CRC-32 for file 'metadata.json'"),
+        ]
+        for err in garbage_errors:
+            with self.subTest(error=type(err).__name__):
+                with mock.patch.object(zipfile.ZipFile, "read", side_effect=err):
+                    with self.assertRaises(ValueError) as ctx:
+                        backup_manager.read_backup_metadata(zip_path, "wrong")
+                self.assertIn("password", str(ctx.exception).lower())
+
+    def test_garbage_plaintext_on_unencrypted_zip_is_not_a_password_error(self):
+        """Only a password-protected read is reinterpreted: a corrupt
+        unencrypted zip keeps its original error."""
+        zip_path = os.path.join(self.tmpdir, "plain.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("metadata.json", json.dumps({"onion_address": "x.onion"}))
+        with mock.patch.object(zipfile.ZipFile, "read",
+                               side_effect=zlib.error("Error -3 while decompressing data")):
+            with self.assertRaises(zlib.error):
+                backup_manager.read_backup_metadata(zip_path, "irrelevant")
 
     def test_missing_metadata(self):
         """Zip without metadata.json should raise ValueError."""
@@ -538,8 +599,9 @@ class TestRestoreRoundTrip(unittest.TestCase):
 
     def test_extract_backup_wrong_password_raises(self):
         zip_path = self._make_backup_zip(password="rightpw")
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError) as ctx:
             backup_manager.extract_backup(zip_path, "wrongpw", self.logs.append)
+        self.assertIn("password", str(ctx.exception).lower())
 
     def test_extract_backup_password_metachars_no_shell_injection(self):
         # A password full of shell metacharacters must be treated as a literal
@@ -620,8 +682,42 @@ class TestRestoreRoundTrip(unittest.TestCase):
 
     def test_peek_backup_metadata_wrong_password_raises(self):
         zip_path = self._make_backup_zip(password="rightpw")
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValueError) as ctx:
             backup_manager.peek_backup_metadata(zip_path, "wrongpw")
+        self.assertIn("password", str(ctx.exception).lower())
+
+    def test_restore_wrong_password_raises_valueerror(self):
+        zip_path = self._make_backup_zip(password="rightpw")
+        with self.assertRaises(ValueError) as ctx:
+            backup_manager.restore_from_backup(
+                zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir)
+        self.assertIn("password", str(ctx.exception).lower())
+
+    def test_garbage_plaintext_on_wrong_password_raises_valueerror(self):
+        """A wrong password that slips past ZipCrypto's one-byte header check
+        surfaces as zlib.error (or a CRC mismatch) from the encrypted read
+        rather than "Bad password". Every restore path must still report it
+        as a wrong password instead of crashing."""
+        zip_path = self._make_backup_zip(password="rightpw")
+        staging = os.path.join(self.tmpdir, "restore-staging")
+        cases = [
+            ("extract_backup", "extractall",
+             lambda: backup_manager.extract_backup(
+                 zip_path, "wrongpw", self.logs.append, staging=staging)),
+            ("restore_from_backup", "extractall",
+             lambda: backup_manager.restore_from_backup(
+                 zip_path, "wrongpw", self.logs.append, data_dir=self.data_dir)),
+            ("peek_backup_metadata", "extract",
+             lambda: backup_manager.peek_backup_metadata(zip_path, "wrongpw")),
+        ]
+        for label, zipfile_method, call in cases:
+            with self.subTest(label):
+                with mock.patch.object(
+                        zipfile.ZipFile, zipfile_method,
+                        side_effect=zlib.error("Error -3 while decompressing data")):
+                    with self.assertRaises(ValueError) as ctx:
+                        call()
+                self.assertIn("password", str(ctx.exception).lower())
 
     def test_seed_onion_key_mismatch_guard(self):
         stale = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"

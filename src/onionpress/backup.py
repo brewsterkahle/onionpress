@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -498,11 +499,42 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         shutil.rmtree(staging, ignore_errors=True)
 
 
+_WRONG_PASSWORD_MSG = "Incorrect password for this backup."
+
+
+@contextmanager
+def _wrong_password_as_valueerror(zf):
+    """Report every way zipfile can fail on a wrong password as one ValueError.
+
+    ZipCrypto (what `zip -P` writes) verifies only ONE byte of a member's
+    decryption header, so about 1 wrong password in 256 slips past that check.
+    zipfile then hands the garbage plaintext to zlib, which raises zlib.error
+    (or, if the garbage happens to inflate, the CRC check raises BadZipFile)
+    instead of the RuntimeError("Bad password ...") seen the other 255 times.
+    Wrap reads of encrypted members — zf.read/extract/extractall with pwd= —
+    so callers and the UI see a single "incorrect password" ValueError.
+
+    Only a password-protected read is reinterpreted: if the archive has no
+    encrypted members, a zlib/CRC failure is corruption and propagates as-is.
+    """
+    try:
+        yield
+    except RuntimeError as e:
+        # "Bad password for file ..." or "... is encrypted, password required"
+        if 'password' in str(e).lower():
+            raise ValueError(_WRONG_PASSWORD_MSG) from e
+        raise
+    except (zlib.error, zipfile.BadZipFile) as e:
+        if any(zi.flag_bits & 0x1 for zi in zf.infolist()):
+            raise ValueError(_WRONG_PASSWORD_MSG) from e
+        raise
+
+
 def read_backup_metadata(zip_path, password):
     """Read metadata.json from a backup zip.
 
     Returns the metadata dict.
-    Raises on bad password, missing metadata, or invalid zip.
+    Raises ValueError on a wrong password, missing metadata, or invalid zip.
     """
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -515,12 +547,9 @@ def read_backup_metadata(zip_path, password):
             if metadata_name is None:
                 raise ValueError("Not a valid OnionPress backup (no metadata.json found)")
 
-            data = zf.read(metadata_name, pwd=password.encode())
+            with _wrong_password_as_valueerror(zf):
+                data = zf.read(metadata_name, pwd=password.encode())
             return json.loads(data)
-    except RuntimeError as e:
-        if 'password' in str(e).lower() or 'Bad password' in str(e):
-            raise ValueError("Incorrect password for this backup.")
-        raise
     except zipfile.BadZipFile:
         raise ValueError("Not a valid zip file.")
 
@@ -565,7 +594,7 @@ def extract_backup(zip_path, password, log_func, staging=None):
     Pass an explicit *staging* (e.g. a persistent ~/.onionpress/restore-staging)
     when the extracted files must survive a container restart, as in
     install-from-backup. Validates the password as a side effect — a wrong
-    password raises here (zipfile error) before any state is touched.
+    password raises ValueError here before any state is touched.
 
     Uses the system `unzip` CLI when available (much faster for password-
     protected archives), falling back to pure-Python zipfile otherwise.
@@ -578,7 +607,8 @@ def extract_backup(zip_path, password, log_func, staging=None):
             # Fallback: pure-Python zipfile — always available, but slow for
             # ZipCrypto. Also the path that surfaces a wrong-password error.
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(staging, pwd=password.encode())
+                with _wrong_password_as_valueerror(zf):
+                    zf.extractall(staging, pwd=password.encode())
     metadata_path = os.path.join(staging, 'metadata.json')
     if not os.path.exists(metadata_path):
         metadata_path = os.path.join(staging, '.', 'metadata.json')
@@ -591,7 +621,7 @@ def peek_backup_metadata(zip_path, password):
     """Validate the password and return a backup's metadata WITHOUT a full
     extract. Used by the welcome-screen restore flow to confirm the password up
     front (and show the address/username being restored) before committing.
-    Raises on a wrong password or an invalid backup.
+    Raises ValueError on a wrong password; raises on an invalid backup.
     """
     with tempfile.TemporaryDirectory(prefix='onionpress-peek-') as tmp:
         with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -599,7 +629,8 @@ def peek_backup_metadata(zip_path, password):
                      if n.rstrip('/').endswith('metadata.json')]
             if not names:
                 raise Exception("Not an OnionPress backup (no metadata.json)")
-            zf.extract(names[0], tmp, pwd=password.encode())
+            with _wrong_password_as_valueerror(zf):
+                zf.extract(names[0], tmp, pwd=password.encode())
             with open(os.path.join(tmp, names[0])) as f:
                 return json.load(f)
 
@@ -731,6 +762,9 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
 
     Returns:
         metadata dict from the backup
+
+    Raises:
+        ValueError on a wrong password.
     """
     restore_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-restore-')
@@ -739,7 +773,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
             log_func("Restore: extracting backup archive...")
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                zf.extractall(staging, pwd=password.encode())
+                with _wrong_password_as_valueerror(zf):
+                    zf.extractall(staging, pwd=password.encode())
 
         # Normalize paths -- zip may have ./ prefix
         metadata_path = os.path.join(staging, 'metadata.json')
