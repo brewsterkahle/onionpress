@@ -49,4 +49,6 @@ onionheaven-stress-results/
 tests/onionheaven-stress-results/
 
 # Per-user Claude Code config (local permissions, hooks, etc.)
-.claude/
+# Commands are shared and travel with the repo; everything else stays local.
+.claude/*
+!.claude/commands/
