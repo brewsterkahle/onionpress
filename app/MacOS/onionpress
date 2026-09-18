@@ -163,6 +163,46 @@ UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
+elif [ -f "$RESOURCES_DIR/config-template.txt" ]; then
+    # An existing config is never regenerated, so a key added to the template
+    # after a user first installed reached nobody who upgraded — the setting
+    # was documented, shipped, and invisible. A Mac upgraded from 2026-07-30
+    # held a 28-byte config, and the snowflake bridge settings the template
+    # describes simply were not in it.
+    #
+    # So append keys the template has and this config lacks, commented out,
+    # with the template's own explanatory comment block above them. Appending
+    # COMMENTED is what makes this safe to run on every launch: it can only add
+    # documentation, never change behaviour, and never touches a value the
+    # user set. Matching is on `^KEY=` against both live and commented forms,
+    # so a key the user already commented out stays as they left it.
+    # The comment block immediately above a key is carried with it — that block
+    # is where the template explains the setting and, for the bridge keys, holds
+    # the ready-to-uncomment snowflake lines. Appending a bare `#TOR_BRIDGE_LINES=`
+    # without it would be documentation that documents nothing.
+    _tpl_comments=""
+    while IFS= read -r _tpl_line; do
+        case "$_tpl_line" in
+            "")
+                _tpl_comments=""
+                ;;
+            \#*)
+                _tpl_comments="${_tpl_comments}${_tpl_line}
+"
+                ;;
+            *=*)
+                _tpl_key="${_tpl_line%%=*}"
+                if ! grep -qE "^#? *${_tpl_key}=" "$DATA_DIR/config" 2>/dev/null; then
+                    {
+                        printf '\n'
+                        [ -n "$_tpl_comments" ] && printf '%s' "$_tpl_comments"
+                        printf '#%s\n' "$_tpl_line"
+                    } >> "$DATA_DIR/config"
+                fi
+                _tpl_comments=""
+                ;;
+        esac
+    done < "$RESOURCES_DIR/config-template.txt"
 fi
 
 # Prefer bundled binaries
@@ -246,6 +286,23 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_IMPL
 
+# Bridge / pluggable-transport config for censored networks — compose
+# interpolates these into the tor containers' environment, and entrypoint.sh
+# turns them into torrc directives. The Python path (containers.py
+# _build_env) already passes them; without this mirror, a launcher-driven
+# `compose up` interpolates them empty and RECREATES a bridge-configured tor
+# container without its bridges. cut -f2- because bridge lines carry '='
+# inside cert=/url=/ice= values — -f2 would truncate at the first one.
+TOR_BRIDGE_LINES=""
+TOR_CLIENT_TRANSPORT_PLUGIN=""
+TOR_UPSTREAM_PROXY=""
+if [ -f "$DATA_DIR/config" ]; then
+    TOR_BRIDGE_LINES=$(grep "^TOR_BRIDGE_LINES=" "$DATA_DIR/config" | cut -d= -f2-)
+    TOR_CLIENT_TRANSPORT_PLUGIN=$(grep "^TOR_CLIENT_TRANSPORT_PLUGIN=" "$DATA_DIR/config" | cut -d= -f2-)
+    TOR_UPSTREAM_PROXY=$(grep "^TOR_UPSTREAM_PROXY=" "$DATA_DIR/config" | cut -d= -f2-)
+fi
+export TOR_BRIDGE_LINES TOR_CLIENT_TRANSPORT_PLUGIN TOR_UPSTREAM_PROXY
+
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
@@ -291,6 +348,9 @@ _start_takeover_worker() {
         --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
         -e TOR_IMPL="${TOR_IMPL:-tor}" \
+        -e TOR_BRIDGE_LINES="${TOR_BRIDGE_LINES:-}" \
+        -e TOR_CLIENT_TRANSPORT_PLUGIN="${TOR_CLIENT_TRANSPORT_PLUGIN:-}" \
+        -e TOR_UPSTREAM_PROXY="${TOR_UPSTREAM_PROXY:-}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \
@@ -1547,7 +1607,18 @@ get_healthcheck_address() {
 # Function to wait for services to be ready using active probing
 wait_for_services() {
     cd "$DOCKER_DIR"
+    # A direct bootstrap takes 30-90s. Over a pluggable transport it takes
+    # several minutes — measured 5m26s on a censored network, where
+    # snowflake-client cycled through three proxies ("timeout waiting for
+    # DataChannel.OnOpen") before one held. At a flat 120s this reported
+    # failure on a bootstrap that was succeeding, and everything downstream —
+    # including a publisher's publish flow — inherited that false negative. The wait
+    # is therefore keyed to whether a bridge is configured, not to a single
+    # guess about how fast the network is.
     local max_wait=120
+    if [ -n "$TOR_BRIDGE_LINES" ]; then
+        max_wait=600
+    fi
     local waited=0
     local wp_ready=false
     local onion_ready=false

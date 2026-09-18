@@ -110,6 +110,54 @@ VM_MEMORY=1
 # the Docker-internal WordPress container.
 CLOUDFLARE_TUNNEL_TOKEN=
 
+# Bridge / pluggable-transport support
+# Default: empty (disabled — Tor connects directly)
+#
+# If your network blocks Tor outright, set these to bootstrap via a bridge
+# and a pluggable transport instead. Get bridge lines from
+# https://bridges.torproject.org/ or from Tor Browser's own
+# about:preferences#connection page (Tor Browser must already be able to
+# connect on this network for the lines it gives you to work here too).
+#
+# TOR_CLIENT_TRANSPORT_PLUGIN selects the pluggable transport binary: "snowflake"
+# or "obfs4" (both are bundled in the onionpress-tor image). Leave blank to use
+# a bridge with no pluggable transport.
+#
+# TOR_BRIDGE_LINES holds one or more "Bridge ..." lines (as given by Tor Browser
+# or bridges.torproject.org), joined with ';' since this file has no multi-line
+# values.
+#
+# Everything after the fingerprint is load-bearing for snowflake — `url=` is the
+# broker it registers with, `fronts=` are the domains it hides that request
+# behind, and `ice=` are the STUN servers it needs to find a proxy. A line
+# trimmed to just address + fingerprint looks reasonable and silently never
+# bootstraps. These values also rotate, so if a once-working line stops, re-copy
+# it from Tor Browser rather than assuming the network changed.
+#
+# Snowflake, using Tor Browser's own built-in bridges (current as of
+# 2026-08-08, from tor-browser-build's pt_config.json). Uncomment both lines
+# below to use them:
+#
+# TOR_CLIENT_TRANSPORT_PLUGIN=snowflake
+# TOR_BRIDGE_LINES=snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn;snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA url=https://1098762253.rsc.cdn77.org/ fronts=app.datapacket.com,www.datapacket.com ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478,stun:stun.fitauto.ru:3478,stun:stun.m-online.net:3478 utls-imitate=hellorandomizedalpn
+#
+# obfs4 instead: bridges are per-user and not publishable here. Get lines from
+# https://bridges.torproject.org/, or — if that is blocked too — by emailing
+# bridges@torproject.org from a Gmail or Riseup address with "get transport
+# obfs4" in the body.
+#
+# TOR_UPSTREAM_PROXY (host:port) routes the pluggable transport's own dial-out
+# through a local SOCKS5 proxy — for networks where even the bridge connection
+# is disrupted but a separate circumvention proxy works. Only obfs4 honors it
+# (snowflake's client rejects proxies), and it only takes effect alongside
+# TOR_BRIDGE_LINES: with a proxy but no bridge, Tor would hand the proxy
+# public relay IPs, which is exactly what such networks reset. The address
+# must be reachable from inside the container (a proxy on the host's
+# loopback is not — forward it to the docker-bridge gateway first).
+TOR_CLIENT_TRANSPORT_PLUGIN=
+TOR_BRIDGE_LINES=
+TOR_UPSTREAM_PROXY=
+
 # Register with OnionHeaven
 # Default: "yes" (register this site with the OnionHeaven)
 #
