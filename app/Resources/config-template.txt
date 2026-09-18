@@ -6,7 +6,10 @@
 #
 # You can customize this to any lowercase alphanumeric string.
 # Note: Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.
-# Maximum 5 characters. Longer prefixes take exponentially longer to generate:
+# Length must be 2 to 5 characters. An invalid prefix is rejected at setup; if
+# you hand-edit this file with a bad one, OnionPress falls back to 'op2' and
+# records why in ~/.onionpress/launcher.log.
+# Longer prefixes take exponentially longer to generate:
 # - 2 chars (op): < 1 second
 # - 3 chars (op2): < 1 second
 # - 4 chars (op24): 5-30 seconds
@@ -134,6 +137,19 @@ SHARE_ANALYTICS_WITH_ONIONHOME=no
 # You should not need to change this unless directed by an OnionPress developer.
 #
 # ONIONHOME_ADDRESS=op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion
+
+# Locally Built Container Images (advanced, developer-only)
+#
+# Point OnionPress at container images you built yourself with
+# build/build-images.sh instead of the published ones. When either is set to a
+# non-ghcr.io reference, OnionPress stops pulling images on launch — otherwise
+# the pull would overwrite your local build before it ever started.
+#
+# Unset them (or delete these lines) to go back to published images.
+# See docs/BUILDING.md in the OnionPress repository.
+#
+# ONIONPRESS_TOR_IMAGE=onionpress-tor:dev
+# ONIONPRESS_WORDPRESS_IMAGE=onionpress-wordpress:dev
 
 # Tor Implementation
 # Default: "tor" (Classic C Tor)

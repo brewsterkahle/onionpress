@@ -23,7 +23,7 @@ SETTINGS_HELP = {
         "Customise the beginning of your .onion address.\n"
         "Default: \"op2\" (generates addresses like op2xxxxxxxxxxxxx.onion)\n\n"
         "Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.\n"
-        "Maximum 5 characters. Longer prefixes take exponentially longer to generate:\n"
+        "2 to 5 characters. Longer prefixes take exponentially longer to generate:\n"
         "  2 chars: < 1 second\n"
         "  3 chars: < 1 second\n"
         "  4 chars: 5-30 seconds\n"
@@ -423,19 +423,26 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
                 new_values[key] = widget.stringValue().strip()
 
         # -- Validate prefix --
+        #
+        # Uses config.validate_address_prefix() rather than re-implementing
+        # the rules. The duplicate that used to live here drifted from it:
+        # it never explained which digits are invalid in base32 (0, 1, 8, 9),
+        # never mentioned that a too-long prefix takes hours or days rather
+        # than merely being rejected, and threw away the corrected prefix the
+        # validator offers. Keeping one implementation is also what stops the
+        # five entry points for this value disagreeing again.
         prefix = new_values["ADDRESS_PREFIX"]
-        if prefix and not re.match(r'^[a-z2-7]+$', prefix):
-            _icon_alert("Invalid Address Prefix",
-                   "Only lowercase base32 characters allowed (a-z, 2-7).\n"
-                   "Numbers 0, 1, 8, 9 are not valid.", icon_path)
+        prefix_ok, prefix_error, prefix_suggestion = \
+            op_config.validate_address_prefix(prefix)
+        if not prefix_ok:
+            if prefix_suggestion:
+                prefix_error += f'\n\nSuggested: "{prefix_suggestion}"'
+            _icon_alert("Invalid Address Prefix", prefix_error, icon_path)
             form_values = new_values
-            form_values["ADDRESS_PREFIX"] = old_values["ADDRESS_PREFIX"]
-            continue
-        if len(prefix) > 5:
-            _icon_alert("Invalid Address Prefix",
-                   "Address prefix must be at most 5 characters.", icon_path)
-            form_values = new_values
-            form_values["ADDRESS_PREFIX"] = old_values["ADDRESS_PREFIX"]
+            # Offer the correction rather than silently reverting to the old
+            # value — the user came here to change it.
+            form_values["ADDRESS_PREFIX"] = (
+                prefix_suggestion or old_values["ADDRESS_PREFIX"])
             continue
 
         # -- Validate VM memory --

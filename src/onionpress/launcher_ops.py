@@ -21,10 +21,19 @@ import subprocess
 import sys
 from typing import Optional
 
+from .config import validate_address_prefix
 
-# Pinned to digest — must match docker-compose.yml and linux/onionpress.
-# Refresh all three together via build/refresh-image-digests.sh.
-DEFAULT_TOR_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
+
+# Pinned to digest. The literal below is propagated from build/image-pins.env
+# by build/refresh-image-digests.sh, which writes every consumer at once;
+# tests/test_image_pins.py fails if any of them drift apart.
+#
+# ONIONPRESS_TOR_IMAGE overrides it, so vanity-key generation runs against the
+# same image the rest of a locally built stack uses.
+DEFAULT_TOR_IMAGE = os.environ.get(
+    "ONIONPRESS_TOR_IMAGE",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c",
+)
 
 
 def _tor_browser_lock_paths() -> list:
@@ -197,8 +206,22 @@ def generate_vanity_in_container(
     failure. Caller is responsible for ensuring the dir is empty first if
     a fresh key is required.
     """
-    if not (2 <= len(prefix) <= 6):
-        raise ValueError(f"prefix must be 2-6 chars (got {prefix!r})")
+    # Single source of truth — see config.validate_address_prefix(). This
+    # used to be a bare `2 <= len(prefix) <= 6`, which allowed a 6-character
+    # prefix the macOS launcher rejects and let a non-base32 prefix (0/1/8/9)
+    # through to mkp224o, where no address can ever match and the search never
+    # terminates.
+    # Empty means "use the default" to UI callers, and validate_address_prefix()
+    # accepts it for that reason. A library function about to invoke mkp224o
+    # has no default to fall back on. With an empty filter mkp224o reports
+    # "0 filters" and exits 0 having generated nothing — and the
+    # `startswith(prefix)` scan below then matches EVERY existing key directory,
+    # returning an old address as if freshly minted.
+    if not prefix:
+        raise ValueError("prefix must not be empty")
+    prefix_ok, prefix_error, _ = validate_address_prefix(prefix)
+    if not prefix_ok:
+        raise ValueError(prefix_error.splitlines()[0])
 
     os.makedirs(vanity_dir, exist_ok=True)
     if jobs is None:

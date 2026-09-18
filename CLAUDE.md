@@ -45,6 +45,39 @@
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
+## Local Build Path
+- **`docs/BUILDING.md` is the map** — every component, its command, its host-OS
+  requirement and its network dependencies. `make doctor` reports missing tools.
+- `build/build-images.sh` builds the tor/wordpress images locally (`make images`).
+  `build/dev-up.sh` runs the stack on them (`make dev-up`).
+- **Every `docker pull` is gated on `using_local_images()`** — implemented three
+  times (app/MacOS/onionpress, linux/onionpress, onionpress.containers). Change
+  all three together; a test enforces they agree.
+- **All Dockerfile inputs are pinned** as `ARG` defaults in the Dockerfiles
+  themselves (base images by multi-arch index digest, arti by version, mkp224o
+  by commit, wp-cli by sha256). `MKP224O_VERSION` must match
+  `build/build-dmg-simple.sh`; `ARTI_VERSION` and `RUST_IMAGE` move together.
+- **`build/build-dmg.sh` was deleted** — it thinned universal binaries to
+  arm64-only and damaged real bundles via a lowercase-path match on APFS.
+  `make build` now runs `build-dmg-simple.sh`.
+- Generated assets: `build/make-icons.sh` (icns is byte-exact; menubar PNGs need
+  ImageMagick), `build/build-extension.sh` (builds Firefox from
+  `extension-firefox/`, NOT the stale `extension/manifest.firefox.json`).
+
+## Container Image Pins
+- **`build/image-pins.env` is the single source of truth** for the GHCR image
+  digests. Five files embed the literals (docker-compose.yml, app/MacOS/onionpress,
+  linux/onionpress, src/onionpress/containers.py, src/onionpress/launcher_ops.py).
+- **Never hand-edit a digest.** Run `build/refresh-image-digests.sh` (or
+  `--propagate` to re-apply the pins file without a Docker daemon).
+  `tests/test_image_pins.py` fails the build on drift — this exists because
+  v2.4.110 refreshed only docker-compose.yml and shipped two different Tor
+  builds inside one install.
+- Pins must be **multi-arch index digests** (`docker buildx imagetools inspect`),
+  never a single-platform manifest digest.
+- Exporting `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoints the
+  whole stack at locally built images. See `docs/BUILDING.md`.
+
 ## Security
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
 - Do not commit or log database passwords.

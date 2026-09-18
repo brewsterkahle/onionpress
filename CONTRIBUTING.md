@@ -140,6 +140,13 @@ with the maintainer.
 
 ## Build pipeline gotchas
 
+Start with **[docs/HOW-TO-BUILD.md](docs/HOW-TO-BUILD.md)** — requirements,
+install commands and the steps for every artifact; `make doctor` reports what
+your machine is missing. **[docs/BUILDING.md](docs/BUILDING.md)** is the
+reference behind it. The notes below are the traps that are not obvious from
+the scripts themselves.
+
+
 - **`py2app` vs `setuptools` 81+** — setuptools 81 (released 2026-02-06)
   removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still
   uses. `build/build-dmg-simple.sh` handles this with a fallback to
@@ -149,6 +156,11 @@ with the maintainer.
   must use the bundled binary at
   `OnionPress.app/Contents/Resources/MenubarApp/Contents/MacOS/python`,
   never the system `python3`.
+- **Image pins live in one file.** `build/image-pins.env` is the source of
+  truth for the `ghcr.io/brewsterkahle/onionpress-*` digests; five files
+  embed those literals and `build/refresh-image-digests.sh` is the only
+  thing that writes them. `tests/test_image_pins.py` fails on drift.
+  Never hand-edit a digest — run the script. See [docs/BUILDING.md](docs/BUILDING.md).
 - **Two `Info.plist` files.** `OnionPress.app/Contents/Info.plist`
   (the parent) and `OnionPress.app/Contents/Resources/MenubarApp/Contents/Info.plist`
   (py2app's) must agree. `build/rebuild-menubar.sh` syncs them; if you

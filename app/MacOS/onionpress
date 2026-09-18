@@ -246,6 +246,44 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export TOR_IMPL
 
+# Locally built container images (development).
+#
+# build/build-images.sh builds the tor and wordpress images from this repo and
+# prints these two exports. Setting either here, or in ~/.onionpress/config,
+# repoints the whole stack: compose's tor/wordpress/onionheaven services, the
+# image pulls below, the OnionHeaven takeover workers and vanity-key
+# generation. See docs/BUILDING.md.
+#
+# The `| cut` is not cosmetic — a bare `var=$(grep ...)` takes grep's exit
+# status, so a missing key would return 1 and kill the script under `set -e`.
+# -f2- rather than -f2 so a value containing '=' is not truncated.
+for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do
+    if [ -z "$(eval echo \"\$$_img_var\")" ] && [ -f "$DATA_DIR/config" ]; then
+        _img_val=$(grep "^${_img_var}=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+        if [ -n "$_img_val" ]; then
+            eval "export ${_img_var}=\"\$_img_val\""
+        fi
+    fi
+done
+unset _img_var _img_val
+
+# True when the stack points at images built on this machine rather than
+# published ones. Every `docker pull` / `docker compose pull` below is gated
+# on this: without the gate they overwrite a local tag with the registry's
+# copy, so a developer would build an image, start the app, and silently test
+# someone else's build.
+using_local_images() {
+    local _ref
+    for _ref in "${ONIONPRESS_TOR_IMAGE:-}" "${ONIONPRESS_WORDPRESS_IMAGE:-}"; do
+        [ -n "$_ref" ] || continue
+        case "$_ref" in
+            ghcr.io/*) ;;   # explicitly pointed at a published image
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
 # mounted into the Colima VM.
@@ -297,7 +335,7 @@ _start_takeover_worker() {
         -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \
-        "${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >> "$LOG_FILE" 2>&1; then
+        "${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c}}" >> "$LOG_FILE" 2>&1; then
         log "OnionHeaven farm: started takeover worker $name"
     else
         log "WARNING: Failed to start takeover worker $name"
@@ -1066,12 +1104,28 @@ update_images() {
         return 0
     fi
 
+    if using_local_images; then
+        log "Skipping image update: running locally built images"
+        return 0
+    fi
+
     log "Checking for Docker image updates..."
 
     cd "$DOCKER_DIR"
 
-    # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
+    # Pull the images the stack actually runs. These were bare `:latest` tags
+    # while docker-compose.yml pinned by digest, so this loop warmed a layer
+    # the stack never started and then logged it as "up to date" — the Linux
+    # launcher has pinned here since v2.4.99. The pins come from
+    # build/image-pins.env via build/refresh-image-digests.sh, and
+    # tests/test_image_pins.py fails if they drift. Exporting
+    # ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE points this at a
+    # locally built stack. mariadb stays on :latest by design.
+    local images=(
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:6c25a33819e66d6af735c886fbbacf714e887f838c4604433626229448cf011f}"
+        "mariadb:latest"
+    )
     local updated=false
 
     for image in "${images[@]}"; do
@@ -1195,16 +1249,47 @@ start_containers() {
             fi
         fi
 
-        log "Using address prefix: '$ADDRESS_PREFIX'"
-
-        # Validate prefix: base32 only (a-z, 2-7), max 5 chars
+        # Validate before announcing it — the old order logged
+        # "Using address prefix: 'elphin'" and only then the rejection, so the
+        # log's first statement about the prefix was the one that did not
+        # happen.
+        #
+        # These rules mirror config.validate_address_prefix(): base32 (a-z,
+        # 2-7), 2 to 5 characters. Keep them in step; the Python side is the
+        # source of truth and tests/test_address_prefix.py checks they agree.
+        #
+        # The fallback is deliberately silent-but-logged rather than fatal: a
+        # bad prefix must not stop the app starting. The real guard is
+        # validation at the point of entry (setup_window.py), because nobody
+        # reads this log — a user who typed "elphin" got an op2… address and
+        # the only evidence was here.
+        _prefix_problem=""
         if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is too long (${#ADDRESS_PREFIX} chars, max 5). Using default 'op2'."
-            ADDRESS_PREFIX="op2"
+            _prefix_problem="too long (${#ADDRESS_PREFIX} chars, max 5)"
+        elif [ ${#ADDRESS_PREFIX} -lt 2 ]; then
+            _prefix_problem="too short (${#ADDRESS_PREFIX} chars, min 2)"
         elif ! echo "$ADDRESS_PREFIX" | grep -qE '^[a-z2-7]+$'; then
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' contains invalid characters. Only a-z and 2-7 allowed. Using default 'op2'."
-            ADDRESS_PREFIX="op2"
+            _prefix_problem="contains characters that are not base32 (only a-z and 2-7; 0, 1, 8 and 9 are not valid)"
         fi
+
+        if [ -n "$_prefix_problem" ]; then
+            # Closest valid prefix, by the same rule the Python validator uses:
+            # lowercase, drop non-base32, truncate to 5.
+            _prefix_suggestion=$(echo "$ADDRESS_PREFIX" | tr '[:upper:]' '[:lower:]' \
+                | tr -cd 'a-z2-7' | cut -c1-5)
+            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is $_prefix_problem."
+            if [ ${#_prefix_suggestion} -ge 2 ]; then
+                log "       Falling back to 'op2'. To use the closest valid prefix, set"
+                log "       ADDRESS_PREFIX=$_prefix_suggestion in $DATA_DIR/config before first launch."
+            else
+                log "       Falling back to 'op2'. Edit ADDRESS_PREFIX in $DATA_DIR/config."
+            fi
+            ADDRESS_PREFIX="op2"
+            unset _prefix_suggestion
+        fi
+        unset _prefix_problem
+
+        log "Using address prefix: '$ADDRESS_PREFIX'"
 
         # Check for pre-existing imported key before generating a new one
         VANITY_DIR=""
@@ -1276,9 +1361,15 @@ start_containers() {
     # Update images if enabled in config
     update_images
 
-    # Pull pre-built images from GHCR (avoids local build when both image: and build: are set)
-    log "Pulling pre-built images..."
-    docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
+    # Pull the images compose is about to start. This runs on every start,
+    # regardless of UPDATE_ON_LAUNCH — update_images() above is a separate,
+    # opt-in refresh, so gating only that one changes nothing here.
+    if using_local_images; then
+        log "Skipping image pull: running locally built images"
+    else
+        log "Pulling pre-built images..."
+        docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (using cached)"
+    fi
 
     # Always start WordPress and DB first
     local max_attempts=3
@@ -2177,7 +2268,13 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            # --pull always force-pulls even when every other pull is
+            # skipped, so it has to be dropped for local images too.
+            if using_local_images; then
+                docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            else
+                docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+            fi
             log "Tor containers started"
             ;;
 

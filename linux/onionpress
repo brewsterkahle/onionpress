@@ -256,6 +256,42 @@ export ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
 export ONIONHEAVEN_PROPAGATION_DELAY="${ONIONHEAVEN_PROPAGATION_DELAY:-180}"
 export ONIONHEAVEN_HUB_THRESHOLD="${ONIONHEAVEN_HUB_THRESHOLD:-5}"
 
+# Locally built container images (development).
+#
+# build/build-images.sh builds the tor and wordpress images from this repo and
+# prints these two exports. Setting either here, or in ~/.onionpress/config,
+# repoints the whole stack: compose's tor/wordpress/onionheaven services, the
+# image pulls below, and vanity-key generation. See docs/BUILDING.md.
+#
+# The `| cut` is load-bearing, not cosmetic — a bare `var=$(grep ...)` takes
+# grep's exit status, so a missing key returns 1 and kills the script under
+# `set -e`. -f2- rather than -f2 so a value containing '=' is not truncated.
+for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do
+    if [ -z "$(eval echo \"\$$_img_var\")" ] && [ -f "$DATA_DIR/config" ]; then
+        _img_val=$(grep "^${_img_var}=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+        if [ -n "$_img_val" ]; then
+            eval "export ${_img_var}=\"\$_img_val\""
+        fi
+    fi
+done
+unset _img_var _img_val
+
+# True when the stack points at images built on this machine rather than
+# published ones. Every pull below is gated on it: without the gate they
+# overwrite a local tag with the registry's copy, so a developer would build
+# an image, start the app, and silently test someone else's build.
+using_local_images() {
+    local _ref
+    for _ref in "${ONIONPRESS_TOR_IMAGE:-}" "${ONIONPRESS_WORDPRESS_IMAGE:-}"; do
+        [ -n "$_ref" ] || continue
+        case "$_ref" in
+            ghcr.io/*) ;;   # explicitly pointed at a published image
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # Read config
 CLOUDFLARE_TUNNEL_TOKEN=""
 export CLOUDFLARE_TUNNEL_TOKEN
@@ -659,16 +695,25 @@ update_images() {
         return 0
     fi
 
+    if using_local_images; then
+        log "Skipping image update: running locally built images"
+        return 0
+    fi
+
     log "Checking for Docker image updates..."
 
     cd "$DOCKER_DIR"
 
-    # GHCR images pinned to digest — must match docker-compose.yml. Refresh
-    # with build/refresh-image-digests.sh at each release. mariadb stays
-    # on :latest to receive upstream security patches automatically.
+    # GHCR images pinned to digest. The pins come from build/image-pins.env,
+    # which build/refresh-image-digests.sh regenerates at each release and
+    # propagates here; tests/test_image_pins.py fails the build if they drift.
+    # Exporting ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE overrides
+    # them, which is how a locally built stack is pulled into this loop
+    # (build/build-images.sh prints the exports). mariadb stays on :latest to
+    # receive upstream security patches automatically.
     local images=(
-        "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
-        "ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:5056497e355667c6f440baf75721e189c7845921218468f566d34e20c39bc776"
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:6c25a33819e66d6af735c886fbbacf714e887f838c4604433626229448cf011f}"
         "mariadb:latest"
     )
     local pulled=0
@@ -1177,10 +1222,14 @@ start_containers() {
     # sees 2-3 minutes of silence on first run while a few hundred MB land.
     # `set -o pipefail` is not enabled in this script, so we rely on
     # PIPESTATUS to get the docker exit code through the pipe.
-    log "Pulling pre-built images (missing only)..."
-    docker compose pull --policy missing 2>&1 | tee -a "$LOG_FILE"
-    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-        log "WARNING: Failed to pull images (will use cached)"
+    if using_local_images; then
+        log "Skipping image pull: running locally built images"
+    else
+        log "Pulling pre-built images (missing only)..."
+        docker compose pull --policy missing 2>&1 | tee -a "$LOG_FILE"
+        if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            log "WARNING: Failed to pull images (will use cached)"
+        fi
     fi
 
     # Start WordPress, DB, and OnionHeaven first
@@ -1987,7 +2036,12 @@ except: print('false')
         fi
     fi
     local mkp224o_available="false"
-    if docker image inspect ghcr.io/brewsterkahle/onionpress-tor:latest >/dev/null 2>&1; then
+    # Tag-only by design: pinning this to a digest would make a locally built
+    # image fail the check and silently fall back to a random .onion (the
+    # v2.4.101 regression). It follows ONIONPRESS_TOR_IMAGE so a local build
+    # is recognised; build/build-images.sh also shadow-tags the GHCR name so
+    # the default below keeps working either way.
+    if docker image inspect "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >/dev/null 2>&1; then
         # Image presence is enough; we trust the build had mkp224o.
         mkp224o_available="true"
     fi
@@ -2555,12 +2609,18 @@ sys.exit(0 if provision_interactive() else 1)
                 log "Updated plugins deployed to WordPress container"
             fi
 
-            # Pull latest docker images
-            log "Pulling latest Docker images..."
-            echo "  Pulling latest Docker images..."
+            # Pull latest docker images. Unlike the start path this has no
+            # --policy guard, so it would clobber a local build outright.
             cd "$INSTALL_DIR/docker"
             setup_db_passwords
-            docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+            if using_local_images; then
+                log "Skipping image pull: running locally built images"
+                echo "  Skipping image pull (running locally built images)"
+            else
+                log "Pulling latest Docker images..."
+                echo "  Pulling latest Docker images..."
+                docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+            fi
 
             # Restart
             log "Restarting OnionPress..."
