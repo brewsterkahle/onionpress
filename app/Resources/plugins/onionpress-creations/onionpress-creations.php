@@ -145,7 +145,7 @@ class OnionPress_Creations {
             return;
         }
 
-        $requested = $_GET['onionpress_creation'];
+        $requested = sanitize_text_field(wp_unslash($_GET['onionpress_creation']));
         $creations_dir = self::CREATIONS_DIR;
 
         if (!is_dir($creations_dir)) {
@@ -164,6 +164,24 @@ class OnionPress_Creations {
 
         if (!is_file($filepath) || !is_readable($filepath)) {
             status_header(404);
+            exit;
+        }
+
+        /**
+         * Gate file downloads. Member Vault hooks here to require
+         * validated-member login when the vault is enabled.
+         *
+         * @param bool   $allowed  Whether download is permitted.
+         * @param string $filepath Absolute path inside Creations.
+         */
+        $allowed = apply_filters('onionpress_creations_allow_download', true, $filepath);
+        if (!$allowed) {
+            if (!is_user_logged_in()) {
+                auth_redirect();
+            }
+            status_header(403);
+            header('Content-Type: text/plain; charset=utf-8');
+            echo 'Access denied. Validated member credentials are required.';
             exit;
         }
 
