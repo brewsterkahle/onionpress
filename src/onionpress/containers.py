@@ -13,13 +13,28 @@ from typing import Callable
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, Secrets, ensure_secrets, load_secrets, read_value,
-    PortConfig, detect_port_offset,
+    PortConfig, detect_port_offset, backend_nickname,
 )
 from .platform import OnionPressPaths
 
 
-CORE_SERVICES = ["wordpress", "db", "onionheaven", "autoheal"]
-ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
+def core_services_for(site_type: str) -> list:
+    """Core (non-Tor) compose services to start for a given site_type."""
+    if site_type == "static":
+        return ["site", "onionheaven", "autoheal"]
+    return ["wordpress", "db", "onionheaven", "autoheal"]
+
+
+def all_services_for(site_type: str) -> list:
+    """All compose services, including Tor, for a given site_type."""
+    return core_services_for(site_type) + ["tor"]
+
+
+# WordPress-mode service lists — kept as module-level constants for any
+# existing importer that assumed the WP list. New code should call
+# core_services_for(site_type)/all_services_for(site_type) instead.
+CORE_SERVICES = core_services_for("wordpress")
+ALL_SERVICES = all_services_for("wordpress")
 # Pinned to digest — must match docker-compose.yml and linux/onionpress.
 # Refresh all three together via build/refresh-image-digests.sh.
 ONIONHEAVEN_IMAGE = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:ecab8ad6c9a196b308441f1eac787504d8c43fb6ad7638363edb14a41e784e2b"
@@ -86,6 +101,19 @@ class ContainerManager:
         if cf_token:
             env["CLOUDFLARE_TUNNEL_TOKEN"] = cf_token
 
+        # SITE_TYPE plumbing. Existing installs have no SITE_TYPE key, so
+        # this resolves to "wordpress" everywhere and reproduces today's
+        # behavior byte-for-byte. COMPOSE_PROFILES selects which of the
+        # wordpress+db vs. site services docker compose starts; the backend
+        # host/nickname vars let the tor container's onion routing target
+        # the right backend without any hardcoded "wordpress" string.
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        env["ONIONPRESS_SITE_TYPE"] = site_type
+        env["COMPOSE_PROFILES"] = site_type
+        nickname = backend_nickname(site_type)
+        env["ONIONPRESS_BACKEND_HOST"] = nickname
+        env["ONIONPRESS_BACKEND_NICKNAME"] = nickname
+
         return env
 
     # -- Core lifecycle --
@@ -112,9 +140,10 @@ class ContainerManager:
         compose_files = self._compose_files()
 
         env = self._build_env()
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
         for attempt in range(1, retries + 1):
             result = self.docker.compose(
-                ["up", "-d"] + CORE_SERVICES,
+                ["up", "-d"] + core_services_for(site_type),
                 compose_files=compose_files,
                 timeout=120,
                 extra_env=env,
@@ -198,6 +227,28 @@ class ContainerManager:
         )
         return result.ok
 
+    def wait_for_site_ready(self, timeout: int = 60, interval: int = 2) -> bool:
+        """Wait for the static-site container to respond to HTTP requests.
+
+        Static-mode equivalent of wait_for_wordpress() — there's no wp-cli
+        readiness gate for a static file server, just plain HTTP reachability.
+        """
+        self._log("Waiting for site to be ready...")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.docker.exec(
+                "onionpress-site",
+                ["curl", "-sf", "--max-time", "3", "http://localhost:80/"],
+                timeout=10,
+            )
+            if result.ok:
+                self._log("Site is ready")
+                return True
+            time.sleep(interval)
+
+        self._log("Site did not become ready in time")
+        return False
+
     def wait_for_tor(self, timeout: int = 120, interval: int = 2) -> bool:
         """Wait for Tor to bootstrap (100% or sufficiently bootstrapped).
 
@@ -224,9 +275,11 @@ class ContainerManager:
 
     def get_onion_address(self) -> str:
         """Fetch the current onion address from the Tor container."""
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        nickname = backend_nickname(site_type)
         result = self.docker.exec(
             "onionpress-tor",
-            ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+            ["cat", f"/var/lib/tor/hidden_service/{nickname}/hostname"],
             timeout=10,
         )
         if result.ok:
@@ -241,7 +294,9 @@ class ContainerManager:
             extra_env=self._build_env(),
         )
         status.onion_address = self.get_onion_address()
-        status.wp_ready = self.docker.container_running("onionpress-wordpress")
+        site_type = read_value(self.paths.config_file, "SITE_TYPE", "wordpress")
+        content_container = "onionpress-site" if site_type == "static" else "onionpress-wordpress"
+        status.wp_ready = self.docker.container_running(content_container)
         status.tor_bootstrapped = self._is_tor_bootstrapped()
         return status
 

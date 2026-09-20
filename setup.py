@@ -86,7 +86,8 @@ OPTIONS = {
                  'onionpress.multisite',
                  'onionpress.scrub',
                  'onionpress.mac_power',
-                 'onionpress.redact'],
+                 'onionpress.redact',
+                 'onionpress.follow'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

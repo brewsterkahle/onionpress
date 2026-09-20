@@ -33,6 +33,10 @@ DEFAULTS = {
     "ONIONHEAVEN_MAX_SERVICES": "10",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
     "ONIONHOME_ADDRESS": "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
+    # "wordpress" (default) or "static" — chosen once at setup, immutable
+    # afterward. Existing installs have no SITE_TYPE key and read back
+    # "wordpress" via read_value's default, so behavior is unchanged.
+    "SITE_TYPE": "wordpress",
 }
 
 # Config keys safe to share off-machine — surfaced in the local WordPress
@@ -47,7 +51,27 @@ SAFE_CONFIG_KEYS = frozenset({
     "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
     "SHARE_ANALYTICS_WITH_ONIONHOME", "ONIONHOME_ADDRESS",
     "ONIONNAME", "ONIONNAME_REGISTERED",
+    "SITE_TYPE",
 })
+
+
+# Docker-network hostname / Tor onion-service nickname for the content
+# backend, keyed by SITE_TYPE. WordPress keeps the original "wordpress"
+# nickname (zero migration risk for existing installs); static-site installs
+# get a fresh "site" nickname/hidden_service directory.
+BACKEND_NICKNAMES = {
+    "wordpress": "wordpress",
+    "static": "site",
+}
+
+
+def backend_nickname(site_type: str) -> str:
+    """Docker-network hostname / Tor onion-service nickname for site_type.
+
+    Unknown site_type values fall back to "wordpress" so a corrupted or
+    pre-SITE_TYPE config never points at a nonexistent backend.
+    """
+    return BACKEND_NICKNAMES.get(site_type, "wordpress")
 
 
 def redact_config(config: dict) -> dict:

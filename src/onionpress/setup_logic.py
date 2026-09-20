@@ -190,6 +190,68 @@ def provision_primary_subsite(
     return True
 
 
+_PLACEHOLDER_INDEX_HTML = """\
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>OnionPress</title></head>
+<body>
+<h1>Your site is live, but empty</h1>
+<p>Publish your own static site (Hugo, Jekyll, a Next.js export, or plain
+HTML — anything that produces static files) with:</p>
+<pre>onionpress publish &lt;directory&gt;</pre>
+</body>
+</html>
+"""
+
+
+def provision_static_site(
+    *,
+    onionname: str,
+    documents_dir: str | None = None,
+    log_func: Callable[[str], None] | None = None,
+    data_dir: str | None = None,
+) -> bool:
+    """Set up a fresh static-site install: content dir + persisted onionname.
+
+    The static-mode counterpart to install_fresh_wordpress() /
+    provision_existing_wordpress() — no wp-cli, no database, no site
+    title/admin-password concept. Just: make sure the published-content
+    directory exists (with a friendly placeholder so the site isn't blank
+    before the first `onionpress publish`), and persist the chosen
+    onionname the same way WordPress installs do (actual network
+    registration is a separate, later, interactive action — see
+    onionnames_registrar.Registrar — identical to how WP installs work).
+
+    Returns True on success.
+    """
+    def log(msg: str) -> None:
+        if log_func:
+            log_func(msg)
+
+    if documents_dir is None:
+        from .platform import default_documents_dir
+        documents_dir = default_documents_dir()
+
+    site_dir = os.path.join(documents_dir, "Site")
+    try:
+        os.makedirs(site_dir, exist_ok=True)
+        if not os.listdir(site_dir):
+            with open(os.path.join(site_dir, "index.html"), "w", encoding="utf-8") as f:
+                f.write(_PLACEHOLDER_INDEX_HTML)
+            log(f"Created placeholder site at {site_dir}")
+    except OSError as e:
+        log(f"ERROR: could not create {site_dir}: {e}")
+        return False
+
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    _write_config(data_dir, "SITE_TYPE", "static")
+    _write_config(data_dir, "ONIONNAME", onionname)
+    log(f"Onionname saved to config: {onionname}")
+
+    return True
+
+
 def install_fresh_wordpress(
     *,
     site_title: str,
@@ -473,6 +535,45 @@ def provision_interactive(data_dir: str | None = None) -> bool:
     print("  OnionPress First-Run Setup")
     print("  ==========================")
     print()
+
+    site_type = "wordpress"
+    raw = input("  Publish with WordPress, or bring your own static site "
+                 "(Hugo, Jekyll, plain HTML, ...)? [wordpress]: ").strip().lower()
+    if raw in ("static", "s"):
+        site_type = "static"
+
+    if site_type == "static":
+        suggestion = suggest_onionname() or ""
+        while True:
+            prompt = f"  Username [{suggestion}]: " if suggestion else "  Username: "
+            onionname = input(prompt).strip() or suggestion
+            if not onionname:
+                print("  Username cannot be empty.")
+                continue
+            ok, reason = validate_onionname(onionname)
+            if ok:
+                break
+            msgs: dict[str, str] = {
+                "too_short": "Too short (min 2 characters)",
+                "too_long": "Too long (max 63 characters)",
+                "invalid_chars": "Letters and numbers only",
+                "all_numeric": "Cannot be all numbers",
+                "empty": "Cannot be empty",
+            }
+            print(f"  Invalid username: {msgs.get(reason, reason)}")
+
+        print()
+        print("  Setting up your static site…")
+        log_fn = lambda msg: print(f"  {msg}")
+        ok = provision_static_site(
+            onionname=onionname, data_dir=data_dir, log_func=log_fn,
+        )
+        if ok:
+            print()
+            print("  Setup complete! Publish your site with:")
+            print("    onionpress publish <directory>")
+        return ok
+
     print("  WordPress is running. Choose a site title, username, and password.")
     print()
 

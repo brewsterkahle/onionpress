@@ -15,14 +15,21 @@ services:
       - TZ=${TZ:-UTC}
       - TOR_IMPL=${TOR_IMPL:-tor}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
+      - ONIONPRESS_SITE_TYPE=${ONIONPRESS_SITE_TYPE:-wordpress}
+      - ONIONPRESS_BACKEND_HOST=${ONIONPRESS_BACKEND_HOST:-wordpress}
+      - ONIONPRESS_BACKEND_NICKNAME=${ONIONPRESS_BACKEND_NICKNAME:-wordpress}
     volumes:
       - arti-state:/var/lib/arti/
       - tor-state:/var/lib/tor/
       - onionpress-data:/var/lib/onionpress
       - ${ONIONPRESS_SHARED_DIR:-/tmp/onionpress-no-shared}/analytics:/var/lib/onionhome/analytics
+      # Writable Site/ mount, used only by follow-fetch.py (static installs)
+      # to write the generated follows/index.html page. The `site` service
+      # mounts the same host directory read-only for serving; this is a
+      # separate, narrower write path for one generated file. Unused (and
+      # harmless) for WordPress installs, where ~/OnionPress/Site/ doesn't exist.
+      - ${ONIONPRESS_DOCUMENTS_DIR:-/tmp/onionpress-no-docs}/Site:/var/lib/onionpress-site:rw
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
-    depends_on:
-      - wordpress
     restart: unless-stopped
     networks:
       - onionpress-network
@@ -32,6 +39,7 @@ services:
   wordpress:
     image: ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:6c25a33819e66d6af735c886fbbacf714e887f838c4604433626229448cf011f
     container_name: onionpress-wordpress
+    profiles: ["wordpress"]
     logging:
       driver: json-file
       options:
@@ -87,6 +95,7 @@ services:
   db:
     image: mariadb:latest
     container_name: onionpress-db
+    profiles: ["wordpress"]
     logging:
       driver: json-file
       options:
@@ -104,6 +113,38 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+
+  # Static-site backend — a tool-agnostic nginx server for "bring your own
+  # static site" installs (Hugo, Jekyll, Next.js export, plain HTML, ...).
+  # Mutually exclusive with wordpress+db (see SITE_TYPE in config.py); only
+  # one of the two profiles is ever active for a given install.
+  site:
+    image: ghcr.io/brewsterkahle/onionpress-site:latest
+    container_name: onionpress-site
+    profiles: ["static"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - TZ=${TZ:-UTC}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "--max-time", "10", "http://localhost/"]
+      interval: 60s
+      timeout: 15s
+      retries: 15
+      start_period: 30s
+    labels:
+      - autoheal=true
+    volumes:
+      - onionpress-data:/var/lib/onionpress
+      - ${ONIONPRESS_DOCUMENTS_DIR:-/tmp/onionpress-no-docs}/Site:/usr/share/nginx/html:ro
+    restart: unless-stopped
+    networks:
+      - onionpress-network
+    ports:
+      - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_WP_PORT:-8080}:80"
 
   # Auto-restart any container labeled autoheal=true when its HEALTHCHECK
   # reports unhealthy. Prevents wedge-until-manual-reboot scenarios like

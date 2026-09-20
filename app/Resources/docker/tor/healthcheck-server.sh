@@ -8,7 +8,10 @@ MESSAGES_DIR="/var/lib/tor/healthcheck-messages"
 MESSAGES_MAX=100
 MESSAGES_TTL=86400  # 24 hours in seconds
 MAX_REQUEST_BODY=1048576  # 1 MB
-CONTENT_HOSTNAME_FILE="/var/lib/tor/hidden_service/wordpress/hostname"
+BACKEND_HOST="${ONIONPRESS_BACKEND_HOST:-wordpress}"
+BACKEND_NICKNAME="${ONIONPRESS_BACKEND_NICKNAME:-wordpress}"
+SITE_TYPE="${ONIONPRESS_SITE_TYPE:-wordpress}"
+CONTENT_HOSTNAME_FILE="/var/lib/tor/hidden_service/${BACKEND_NICKNAME}/hostname"
 HEALTHCHECK_HOSTNAME_FILE="/var/lib/tor/hidden_service/healthcheck/hostname"
 VERSION_FILE="/var/lib/tor/healthcheck-version"
 STARTED_FILE="/var/lib/tor/healthcheck-started"
@@ -66,31 +69,34 @@ handle_get() {
         healthcheck_address=$(cat "$HEALTHCHECK_HOSTNAME_FILE" | tr -d '\n')
     fi
 
-    # Check WordPress health
+    # Check content backend health (wordpress or, for static installs, the
+    # static-file server — this is just a reachability probe either way)
     local wordpress_ok="false"
     local wp_status="degraded"
-    if wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
+    if wget -q -O /dev/null --timeout=5 "http://${BACKEND_HOST}:80/" 2>/dev/null; then
         wordpress_ok="true"
         wp_status="ok"
     fi
 
-    # Get last_post from WordPress REST API
+    # WordPress REST API calls — no equivalent for static installs, which
+    # have no post/multisite concept, so these stay "null"/"1" there.
     local last_post="null"
-    local posts_json=""
-    posts_json=$(wget -q -O - --timeout=5 "http://wordpress:80/wp-json/wp/v2/posts?per_page=1&orderby=date&order=desc&_fields=date" 2>/dev/null)
-    if [ -n "$posts_json" ] && echo "$posts_json" | grep -q '"date"'; then
-        last_post=$(echo "$posts_json" | sed -n 's/.*"date":"\([^"]*\)".*/"\1"/p' | head -1)
-        if [ -z "$last_post" ]; then
-            last_post="null"
-        fi
-    fi
-
-    # Get sites count from multisite API
     local sites=1
-    local sites_json=""
-    sites_json=$(wget -q -O - --timeout=5 "http://wordpress:80/wp-json/wp/v2/sites" 2>/dev/null)
-    if [ -n "$sites_json" ] && echo "$sites_json" | grep -q '"id"'; then
-        sites=$(echo "$sites_json" | grep -o '"id"' | wc -l | tr -d ' ')
+    if [ "$SITE_TYPE" = "wordpress" ]; then
+        local posts_json=""
+        posts_json=$(wget -q -O - --timeout=5 "http://${BACKEND_HOST}:80/wp-json/wp/v2/posts?per_page=1&orderby=date&order=desc&_fields=date" 2>/dev/null)
+        if [ -n "$posts_json" ] && echo "$posts_json" | grep -q '"date"'; then
+            last_post=$(echo "$posts_json" | sed -n 's/.*"date":"\([^"]*\)".*/"\1"/p' | head -1)
+            if [ -z "$last_post" ]; then
+                last_post="null"
+            fi
+        fi
+
+        local sites_json=""
+        sites_json=$(wget -q -O - --timeout=5 "http://${BACKEND_HOST}:80/wp-json/wp/v2/sites" 2>/dev/null)
+        if [ -n "$sites_json" ] && echo "$sites_json" | grep -q '"id"'; then
+            sites=$(echo "$sites_json" | grep -o '"id"' | wc -l | tr -d ' ')
+        fi
     fi
 
     # Read version and start time
