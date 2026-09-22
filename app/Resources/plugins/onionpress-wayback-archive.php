@@ -181,7 +181,11 @@ function onionpress_wayback_curl_common( $ch ) {
         CURLOPT_PROXYTYPE         => CURLPROXY_SOCKS5_HOSTNAME,
         CURLOPT_SSL_VERIFYPEER    => false,
         CURLOPT_SSL_VERIFYHOST    => 0,
-        CURLOPT_CONNECTTIMEOUT    => 15,
+        // Measured circuit-build time to archive.org's onion mirror
+        // regularly runs 20-30s cold (no cached circuit) — 15s was
+        // timing out essentially every call, silently. 45s gives
+        // headroom without letting a truly dead circuit hang forever.
+        CURLOPT_CONNECTTIMEOUT    => 45,
     ) );
 }
 
@@ -207,7 +211,7 @@ function onionpress_wayback_self_reachable( $onion ) {
     curl_setopt_array( $ch, array(
         CURLOPT_NOBODY         => true,
         CURLOPT_FOLLOWLOCATION => false, // a 302 means redirector, not us
-        CURLOPT_TIMEOUT        => 20,
+        CURLOPT_TIMEOUT        => 60,
     ) );
     curl_exec( $ch );
     $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
@@ -231,16 +235,25 @@ function onionpress_wayback_user_status() {
     $ch = curl_init( 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status/user?t=' . time() );
     onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
-        CURLOPT_TIMEOUT    => 20,
+        CURLOPT_TIMEOUT    => 60,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Authorization: ' . $auth,
         ),
     ) );
-    $response = curl_exec( $ch );
-    $code     = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $response  = curl_exec( $ch );
+    $code      = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $curl_errno = curl_errno( $ch );
+    $curl_err   = curl_error( $ch );
     curl_close( $ch );
     if ( $code !== 200 || ! $response ) {
+        // Logged because callers silently fall back to an optimistic
+        // slot count on null — without this, a transport failure here
+        // is invisible and looks identical to a real "40 slots" reply.
+        onionpress_wayback_log( sprintf(
+            'user_status call failed (code=%d, curl_errno=%d, curl_err=%s) — falling back to optimistic slot count',
+            $code, $curl_errno, $curl_err
+        ) );
         return null;
     }
     $body = @json_decode( (string) $response, true );
@@ -284,9 +297,10 @@ function onionpress_wayback_curl_multi( array $setups ) {
     foreach ( $handles as $key => $ch ) {
         $body = (string) curl_multi_getcontent( $ch );
         $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+        $err  = curl_error( $ch );
         curl_multi_remove_handle( $mh, $ch );
         curl_close( $ch );
-        $results[ $key ] = array( 'code' => $code, 'body' => $body );
+        $results[ $key ] = array( 'code' => $code, 'body' => $body, 'error' => $err );
     }
     curl_multi_close( $mh );
     return $results;
@@ -342,7 +356,7 @@ function onionpress_wayback_submit_parallel( array $urls ) {
                         'skip_first_archive'  => 1,
                         'js_behavior_timeout' => 0,
                     ) ),
-                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_TIMEOUT    => 60,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -355,6 +369,13 @@ function onionpress_wayback_submit_parallel( array $urls ) {
             }
             if ( $r['code'] < 200 || $r['code'] >= 400 || empty( $r['body'] ) ) {
                 $results[ $key ] = '';
+                // Previously silent — a transport failure here (e.g. a Tor
+                // circuit that never connected) looked identical to a
+                // healthy tick that just had nothing to submit.
+                onionpress_wayback_log( sprintf(
+                    'Submit failed for %s (url=%s, code=%d, curl_err=%s)',
+                    $key, $urls[ $key ], $r['code'], $r['error']
+                ) );
                 continue;
             }
             $data = @json_decode( $r['body'], true );
@@ -420,7 +441,7 @@ function onionpress_wayback_cdx_one_pass( array $urls ) {
             $setups[ $key ] = function ( $ch ) use ( $endpoint, $headers ) {
                 curl_setopt_array( $ch, array(
                     CURLOPT_URL        => $endpoint,
-                    CURLOPT_TIMEOUT    => 25,
+                    CURLOPT_TIMEOUT    => 60,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -476,7 +497,7 @@ function onionpress_wayback_poll_parallel( array $job_ids ) {
                     CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status',
                     CURLOPT_POST       => true,
                     CURLOPT_POSTFIELDS => http_build_query( array( 'job_ids' => implode( ',', $chunk ) ) ),
-                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_TIMEOUT    => 60,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
