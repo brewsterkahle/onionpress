@@ -7,6 +7,105 @@
 # Which Tor implementation to use: "tor" (C Tor, default) or "arti"
 TOR_IMPL="${TOR_IMPL:-tor}"
 
+# Bridge / pluggable-transport support (censored networks). Config-driven via
+# TOR_BRIDGE_LINES (one "Bridge ..." line per entry, joined with ';' since
+# ~/.onionpress/config has no multi-line values) and TOR_CLIENT_TRANSPORT_PLUGIN
+# — a comma-separated list of transports ("snowflake", "obfs4", "meek_lite").
+# Listing several matters because a censored network rarely leaves every
+# transport usable in the same window: snowflake's WebRTC rendezvous, obfs4's
+# fixed bridge IPs, and meek's domain-fronting fail independently, so we hand
+# Tor bridges for all of them and let it race whichever the network allows
+# through right now. Applied to every C-Tor torrc this entrypoint generates —
+# main, onionheaven, takeover-worker, and SOCKS-only modes all run their own
+# Tor process that needs to reach the network. Must be baked in at generation
+# time: /etc/tor/torrc is rewritten from scratch on every start, so a runtime
+# edit is silently discarded on restart, and Tor can't pick up a new
+# ClientTransportPlugin via SIGHUP — only a real restart applies it.
+apply_bridge_config() {
+    [ -n "$TOR_BRIDGE_LINES" ] || return 0
+    echo "UseBridges 1" >> /etc/tor/torrc
+    # Upstream proxy for the pluggable transport's dial-out. When TOR_UPSTREAM_PROXY
+    # is set, C Tor exports it to the PT as TOR_PT_PROXY, so obfs4proxy makes the
+    # bridge connection THROUGH this proxy (e.g. a local VPN's SOCKS port) — the
+    # only thing that reliably crosses an aggressively-censored network in the
+    # windows where every direct transport is being disrupted. Emitted only
+    # alongside a bridge on purpose: with a proxy but no bridge, Tor would hand the
+    # proxy public *relay* IPs, and a VPN that blocklists Tor relays routes those
+    # direct (→ GFW reset); a bridge IP isn't relay-listed, so the proxy tunnels it.
+    [ -n "${TOR_UPSTREAM_PROXY:-}" ] && echo "Socks5Proxy $TOR_UPSTREAM_PROXY" >> /etc/tor/torrc
+    # One ClientTransportPlugin line per named transport. meek_lite/obfs2/obfs3/
+    # scramblesuit are all implemented by the same obfs4proxy binary.
+    for transport in $(echo "$TOR_CLIENT_TRANSPORT_PLUGIN" | tr ',' ' '); do
+        case "$transport" in
+            snowflake)
+                echo "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client" >> /etc/tor/torrc
+                ;;
+            obfs4|meek_lite|obfs2|obfs3|scramblesuit)
+                echo "ClientTransportPlugin $transport exec /usr/bin/obfs4proxy" >> /etc/tor/torrc
+                ;;
+        esac
+    done
+    echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
+        # Trim leading/trailing whitespace (e.g. a space after a ';'
+        # separator) before checking for a redundant "Bridge " prefix —
+        # otherwise a leading space defeats the prefix-strip below.
+        bridge_line=$(echo "$bridge_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        bridge_line="${bridge_line#Bridge }"
+        [ -n "$bridge_line" ] && echo "Bridge $bridge_line" >> /etc/tor/torrc
+    done
+    echo "Bridge/pluggable-transport support enabled (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
+}
+
+# Arti equivalent of apply_bridge_config(): TOR_IMPL=arti is this deployment's
+# actual default (~/.onionpress/config sets it explicitly), and every Arti
+# code path below launches "arti proxy -c <file>.toml" straight from the
+# image-baked config — apply_bridge_config() only ever touches /etc/tor/torrc,
+# so on TOR_IMPL=arti, TOR_BRIDGE_LINES was silently never applied to
+# anything. Arti's bridges live in a [bridges] TOML table, not a torrc line,
+# so this patches the given arti config file instead of any global filename.
+# Idempotent against `docker restart` (same container, same on-disk file)
+# re-running the entrypoint and appending the table twice, which arti's TOML
+# parser rejects as a duplicate key.
+apply_arti_bridge_config() {
+    target="$1"
+    [ -n "$TOR_BRIDGE_LINES" ] || return 0
+    grep -q '^\[bridges\]' "$target" 2>/dev/null && return 0
+    {
+        echo ""
+        echo "[bridges]"
+        echo "enabled = true"
+        echo "bridges = ["
+        echo "$TOR_BRIDGE_LINES" | tr ';' '\n' | while IFS= read -r bridge_line; do
+            # Same trim/prefix-strip as apply_bridge_config() — TOR_BRIDGE_LINES
+            # is shared between both implementations.
+            bridge_line=$(echo "$bridge_line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            bridge_line="${bridge_line#Bridge }"
+            [ -n "$bridge_line" ] && printf '  "%s",\n' "$bridge_line"
+        done
+        echo "]"
+        # One [[bridges.transports]] stanza per named transport, same
+        # comma-separated list and same race rationale as apply_bridge_config().
+        for transport in $(echo "$TOR_CLIENT_TRANSPORT_PLUGIN" | tr ',' ' '); do
+            case "$transport" in
+                snowflake)
+                    pt_path="/usr/bin/snowflake-client"
+                    ;;
+                obfs4|meek_lite|obfs2|obfs3|scramblesuit)
+                    pt_path="/usr/bin/obfs4proxy"
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+            echo ""
+            echo "[[bridges.transports]]"
+            printf 'protocols = ["%s"]\n' "$transport"
+            printf 'path = "%s"\n' "$pt_path"
+        done
+    } >> "$target"
+    echo "Bridge/pluggable-transport support enabled for $target (transport: ${TOR_CLIENT_TRANSPORT_PLUGIN:-none})"
+}
+
 # Create Arti state directories with strict permissions (Arti requires o-rx)
 mkdir -p /var/lib/arti/cache /var/lib/arti/state
 
@@ -65,6 +164,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+        apply_bridge_config
         chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
         TOR_PID=$!
@@ -76,6 +176,7 @@ TORRC_EOF
         python3 /tor-watchdog.py &
     else
         # Start Arti with OnionHeaven config (SOCKS + keystore for takeover services)
+        apply_arti_bridge_config /etc/arti/arti-onionheaven.toml
         su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
         TOR_PID=$!
         sleep 2
@@ -135,6 +236,7 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+            apply_bridge_config
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" &
             TOR_PID=$!
@@ -146,6 +248,7 @@ TORRC_EOF
             python3 /tor-watchdog.py &
         else
             # Start Arti with OnionHeaven config (SOCKS + keystore)
+            apply_arti_bridge_config /etc/arti/arti-onionheaven.toml
             su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-onionheaven.toml" &
             TOR_PID=$!
             sleep 2
@@ -237,12 +340,14 @@ CookieAuthentication 1
 DataDirectory /var/lib/tor
 Log notice stdout
 TORRC_EOF
+            apply_bridge_config
             chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
             # Start watchdog in background (will connect once control port is ready)
             python3 /tor-watchdog.py &
             su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc"
         else
             echo "SOCKS-only mode: starting Arti SOCKS proxy (no onion services)..."
+            apply_arti_bridge_config /etc/arti/arti-polling.toml
             su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti-polling.toml" 2>&1 | tee -a "$ARTI_LOG"
         fi
     fi
@@ -313,6 +418,8 @@ if [ "$TOR_IMPL" = "tor" ]; then
     cp /etc/tor/torrc.template /etc/tor/torrc
     sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
+    apply_bridge_config
+
     # Write onion service definitions for the watchdog to ADD_ONION.
     # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
     cat > /etc/tor/onion-services.json << 'SERVICES_EOF'
@@ -328,6 +435,14 @@ SERVICES_EOF
 
     # Start C Tor as debian-tor user (log to persistent file + docker logs)
     TOR_LOG="/var/lib/tor/tor.log"
+    # Pre-create the log file owned by debian-tor. Otherwise, on a fresh
+    # volume, `tee -a` below creates it as root before Tor starts, and Tor's
+    # own "Log notice file" directive (torrc.template) then fails with
+    # "Permission denied" since debian-tor can't write a root-owned file.
+    # It self-heals on the next restart (root:root vs debian-tor ownership
+    # only happens once), but costs a restart cycle and logs ERROR/[err].
+    touch "$TOR_LOG"
+    chown debian-tor:debian-tor "$TOR_LOG" 2>/dev/null || true
     su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc" 2>&1 | tee -a "$TOR_LOG" &
     TOR_PID=$!
     sleep 2
@@ -376,6 +491,7 @@ else
     done
 
     # Start Arti in background (log to persistent file + docker logs)
+    apply_arti_bridge_config /etc/arti/arti.toml
     su -s /bin/sh arti -c "arti proxy -c /etc/arti/arti.toml" 2>&1 | tee -a "$ARTI_LOG" &
     ARTI_PID=$!
     sleep 2

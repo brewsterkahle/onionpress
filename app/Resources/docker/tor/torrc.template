@@ -16,3 +16,8 @@ Log notice stdout
 # Onion services are managed by tor-watchdog.py via ADD_ONION/DEL_ONION
 # on the control port (not torrc). Service definitions are in
 # /etc/tor/onion-services.json, written by entrypoint.sh.
+#
+# Bridge / pluggable-transport lines (UseBridges, ClientTransportPlugin,
+# Bridge) are NOT set here — entrypoint.sh appends them to the generated
+# /etc/tor/torrc from TOR_BRIDGE_LINES / TOR_CLIENT_TRANSPORT_PLUGIN when
+# those env vars are set, since this template is otherwise static.

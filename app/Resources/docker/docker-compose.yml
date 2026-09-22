@@ -14,6 +14,9 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - TOR_IMPL=${TOR_IMPL:-tor}
+      - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
+      - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
+      - TOR_UPSTREAM_PROXY=${TOR_UPSTREAM_PROXY:-}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
     volumes:
       - arti-state:/var/lib/arti/
@@ -143,6 +146,9 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - TOR_IMPL=${TOR_IMPL:-tor}
+      - TOR_BRIDGE_LINES=${TOR_BRIDGE_LINES:-}
+      - TOR_CLIENT_TRANSPORT_PLUGIN=${TOR_CLIENT_TRANSPORT_PLUGIN:-}
+      - TOR_UPSTREAM_PROXY=${TOR_UPSTREAM_PROXY:-}
       - NO_ONION_SERVICE=1
       - ONIONHEAVEN=1
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
