@@ -1,0 +1,119 @@
+name: Build container images (validation)
+
+# Proves build/build-images.sh still builds the images from the Dockerfiles in
+# this repo. This is the guarantee that the LOCAL build path keeps working —
+# docker-publish.yml only runs on a release, so until now a change that broke
+# the tor Dockerfile was not discovered until release day — and, while its
+# arm64 half still ran on the maintainer's self-hosted Mac, a contributor had
+# no way to find out at all.
+#
+# Deliberately build-only:
+#   * amd64 only. Cross-building arm64 here means QEMU emulation (hours back
+#     when the tor image compiled arti; still slow). Architecture parity is
+#     docker-publish.yml's job, on two native runners.
+#   * Never pushes. This runs on pull_request, so a fork PR executes
+#     contributor code — that must stay on a disposable GitHub-hosted runner
+#     with a read-only token.
+#   * Reads the release build cache but writes to its own PR-scoped one, so a
+#     PR cannot evict the cache docker-publish.yml depends on.
+#
+# Kept in its own file rather than added to test.yml: putting a `paths:` filter
+# on test.yml's existing pull_request trigger would gate the unit tests too,
+# and PRs touching only Python would silently report no test run.
+
+on:
+  pull_request:
+    paths:
+      - 'app/Resources/docker/tor/**'
+      - 'app/Resources/docker/wordpress/**'
+      - 'tests/stress/**'
+      - 'build/build-images.sh'
+      - '.github/workflows/build-images.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Which contexts actually changed. The tor image pulls the Tor Project's
+  # base image and compiles mkp224o, so it is only rebuilt when something
+  # under its context moved — a docs-only or wordpress-only PR should not pay
+  # for it.
+  changes:
+    name: Detect changed contexts
+    runs-on: ubuntu-latest
+    outputs:
+      tor: ${{ steps.filter.outputs.tor }}
+      wordpress: ${{ steps.filter.outputs.wordpress }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tor=true" >> "$GITHUB_OUTPUT"
+            echo "wordpress=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "Changed files:"; echo "$CHANGED" | sed 's/^/  /'
+          # build-images.sh itself affects every target.
+          if echo "$CHANGED" | grep -qE '^(app/Resources/docker/tor/|build/build-images\.sh|\.github/workflows/build-images\.yml)'; then
+            echo "tor=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tor=false" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -qE '^(app/Resources/docker/wordpress/|build/build-images\.sh|\.github/workflows/build-images\.yml)'; then
+            echo "wordpress=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "wordpress=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }} (amd64)
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: tor
+            enabled: ${{ needs.changes.outputs.tor }}
+          - target: wordpress
+            enabled: ${{ needs.changes.outputs.wordpress }}
+    if: needs.changes.outputs.tor == 'true' || needs.changes.outputs.wordpress == 'true'
+    steps:
+      - uses: actions/checkout@v4
+        if: matrix.enabled == 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: matrix.enabled == 'true'
+
+      # The gha cache backend needs ACTIONS_RUNTIME_TOKEN and
+      # ACTIONS_RESULTS_URL in the environment. docker/build-push-action
+      # injects them; a plain `run:` step does not, and without them
+      # --cache-from silently no-ops and every build starts cold on every PR.
+      - uses: crazy-max/ghaction-github-runtime@v3
+        if: matrix.enabled == 'true'
+
+      - name: Build ${{ matrix.target }}
+        if: matrix.enabled == 'true'
+        # Read the release scope so a PR starts warm; write to a PR-specific
+        # scope with mode=min so it cannot evict what docker-publish.yml needs.
+        # No --pull: every base is pinned by digest, so there is nothing to
+        # re-resolve, and it would only discard the cache for reasons
+        # unrelated to the change under review.
+        run: |
+          build/build-images.sh "${{ matrix.target }}" \
+            --platform linux/amd64 \
+            --tag ci \
+            --no-shadow-tag \
+            --cache-from "type=gha,scope=${{ matrix.target }}-amd64" \
+            --cache-to "type=gha,mode=min,scope=pr-${{ matrix.target }}-amd64"
+
+      - name: Show image
+        if: matrix.enabled == 'true'
+        run: docker image inspect "onionpress-${{ matrix.target }}:ci" --format '{{.Id}} {{.Size}} bytes'

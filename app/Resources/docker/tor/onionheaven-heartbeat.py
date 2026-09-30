@@ -2,7 +2,7 @@
 """
 OnionHeaven Heartbeat Monitor — passive takeover orchestrator
 
-Runs inside the onionheaven container alongside Arti (SOCKS + keystore),
+Runs inside the onionheaven container alongside C Tor (SOCKS + control port),
 web-server.py (registration API), and onionheaven-redirect.sh (302 redirects).
 
 Unlike the old poller, this does NOT actively ping OnionPress instances.
@@ -15,7 +15,7 @@ which updates last_healthy timestamps. This monitor:
 
 All operations are local:
   - SQLite via Python sqlite3 (shared volume)
-  - Post-takeover audits via curl through local Arti SOCKS (127.0.0.1:9050)
+  - Post-takeover audits via curl through the local Tor SOCKS port (127.0.0.1:9050)
   - Takeover/release via /onionheaven-tor-manager.sh (same container)
 """
 
@@ -32,7 +32,6 @@ from onionheaven_common import (
     check_worker_bootstrap, cleanup_dead_workers,
     _init_worker_index, _ensure_capacity, _pick_worker,
     _exec_takeover, _exec_release,
-    _check_arti_key_errors,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE,
 )
 
@@ -95,8 +94,8 @@ def _get_tor_detached(container_name):
 def startup_reconciliation(conn):
     """Reconcile DB state after container restart.
 
-    Taken-over entries: re-execute takeovers (container restart wiped Arti config,
-    so the onion services need to be re-added). These stay taken-over — they were
+    Taken-over entries: re-execute takeovers (a container restart wipes the
+    ephemeral ADD_ONION services, so they need to be re-added). These stay taken-over — they were
     offline before the restart and probably still are.
 
     Online entries: reset last_healthy to now, giving OnionPress instances a full
@@ -106,7 +105,7 @@ def startup_reconciliation(conn):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Re-execute takeovers for entries that were taken-over before restart
-    # (Arti config was wiped, so we need to re-add the onion services)
+    # (ephemeral ADD_ONION services were wiped, so we need to re-add them)
     # But first: if the content_address has an online sibling, the takeover
     # is stale (instance re-registered with a new healthcheck) — unregister instead.
     taken_over = conn.execute(
@@ -241,10 +240,6 @@ def main():
     _init_worker_index(conn)
     startup_reconciliation(conn)
     conn.close()
-
-    # Scan Arti keystore for corrupted keys left over from previous runs
-    log("Scanning Arti keystore for corrupted keys...")
-    _check_arti_key_errors()
 
     log("heartbeat monitor started")
 

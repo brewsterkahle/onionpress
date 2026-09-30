@@ -8,6 +8,22 @@
 #
 # Requires: Docker (or Podman with `alias docker=podman`)
 # Image:    containers.torproject.org/tpo/onion-services/onimages/arti:alpine
+#
+# 2026-09-24, Arti 2.6.0 (arm64, isolated Colima VM): 17/20 reachable on the
+# first pass at t+2min, 20/20 within 31s of retries — with 980 failed HsDir
+# upload attempts and 19 "Too many preemptive onion service circuits failed"
+# warnings in the publisher log on the way there (upstream arti#2621).
+#
+# Three things had to change for that run to happen at all:
+#   * the publisher now runs one busybox `nc` HTTP responder per service.
+#     The probe counts an HTTP status, so without a backend every probe was
+#     "connection refused" at the service and the script could only ever
+#     report 0/N, whatever Tor did;
+#   * Arti 2.6.0 refuses a log file whose parent directory is o+rx, and the
+#     alpine image ships /home/arti as 755, so `arti proxy` exited at once
+#     and "Publisher did not bootstrap" was the only possible outcome;
+#   * `declare -A` needs bash 4; macOS ships 3.2. STATUS is indexed by the
+#     service number, so an ordinary array does.
 
 set -euo pipefail
 
@@ -84,13 +100,25 @@ start_arti() {
         chown arti:arti /home/arti/arti.toml
         mkdir -p /home/arti/.local/share/arti/cache /home/arti/.local/share/arti/state
         chown -R arti:arti /home/arti/.local
-        chmod 700 /home/arti/.local/share/arti/state /home/arti/.local/share/arti/cache
+        chmod 700 /home/arti /home/arti/.local/share/arti/state /home/arti/.local/share/arti/cache
     '
     docker exec -d "$name" arti proxy -c /home/arti/arti.toml
 }
 
+# One HTTP responder per service inside the publisher. The alpine image has
+# busybox nc and nothing else, and one `nc -l` serves exactly one connection,
+# hence the loop.
+start_backends() {
+    local i
+    for i in $(seq 0 $((NUM_SERVICES - 1))); do
+        docker exec -d --user root "$PUB" sh -c \
+            "while true; do printf 'HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok' | nc -l -p $((BASE_PORT + i)) >/dev/null 2>&1; done"
+    done
+}
+
 log "Starting publisher ($NUM_SERVICES services)..."
 start_arti "$PUB" "$WORK/pub.toml"
+start_backends
 
 log "Starting client..."
 start_arti "$CLI" "$WORK/cli.toml"
@@ -164,7 +192,7 @@ probe() {
 log "Probing ${NUM_SERVICES} addresses from client container..."
 reachable=0
 unreachable=0
-declare -A STATUS
+declare -a STATUS   # indexed by service number; bash 3.2 has no -A
 
 for i in $(seq 0 $((NUM_SERVICES - 1))); do
     [ "${ADDRS[$i]}" = "FAILED" ] && continue

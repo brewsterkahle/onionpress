@@ -29,7 +29,7 @@ KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
 TOR_MANAGER = "/onionheaven-tor-manager.sh"
 
 # How long to wait after the last successful healthcheck before considering
-# a node stale enough for Arti takeover. Override via env for testing.
+# a node stale enough for takeover. Override via env for testing.
 PROPAGATION_DELAY = int(os.environ.get("TOR_PROPAGATION_DELAY", "180"))
 
 # How many missed heartbeats before considering takeover.
@@ -40,10 +40,6 @@ CONSECUTIVE_FAILS_THRESHOLD = int(os.environ.get("ONIONHEAVEN_CONSECUTIVE_FAILS"
 # Peers run OnionHeaven themselves, so a restart is expected to take longer.
 # Default 30 minutes — a peer that's been down 30+ minutes is likely truly dead.
 ONIONHEAVEN_PEER_GRACE = int(os.environ.get("ONIONHEAVEN_PEER_GRACE", "1800"))
-
-# Minimum interval between SIGHUPs to Tor (seconds).
-# Higher values reduce circuit rebuilds at the cost of slower takeover/release.
-SIGHUP_MIN_INTERVAL = int(os.environ.get("ONIONHEAVEN_SIGHUP_INTERVAL", "60"))
 
 # Container identity — set by entrypoint for takeover workers
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "")
@@ -92,269 +88,6 @@ def get_addr_logs(address):
     """Return recent log entries for an address."""
     with _addr_logs_lock:
         return list(_addr_logs.get(address, []))
-
-
-# ---------------------------------------------------------------------------
-# Rate-limited SIGHUP
-# ---------------------------------------------------------------------------
-
-_last_sighup_time = 0.0
-_sighup_pending = False
-
-
-def _is_ctor():
-    """Check if we're running C Tor (not Arti). SIGHUP is harmful for C Tor
-    with ephemeral ADD_ONION services — it re-reads the torrc and kills them."""
-    return os.environ.get("TOR_IMPL", "tor").lower() == "tor"
-
-
-def sighup_tor():
-    """Send SIGHUP to Arti. No-op for C Tor (would kill ephemeral services)."""
-    if _is_ctor():
-        return
-    global _last_sighup_time, _sighup_pending
-    import time as _time
-    now = _time.monotonic()
-    elapsed = now - _last_sighup_time
-
-    if elapsed >= SIGHUP_MIN_INTERVAL:
-        _do_sighup()
-        _last_sighup_time = now
-        _sighup_pending = False
-    else:
-        _sighup_pending = True
-
-
-def flush_sighup_tor(force=False):
-    """Send a final SIGHUP if pending. No-op for C Tor."""
-    if _is_ctor():
-        return
-    global _sighup_pending, _last_sighup_time
-    import time as _time
-    if _sighup_pending or force:
-        _do_sighup()
-        _last_sighup_time = _time.monotonic()
-        _sighup_pending = False
-
-
-def _do_sighup():
-    """Send SIGHUP to Tor (Arti or C Tor) via tor-manager, then check for corrupted key errors.
-
-    Sanitizes the config BEFORE sending SIGHUP to prevent stale fragments
-    from blocking reload.
-    """
-    _sanitize_arti_toml()
-
-    try:
-        result = subprocess.run(
-            [TOR_MANAGER, "sighup"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            log(f"SIGHUP sent to Tor")
-        else:
-            log(f"SIGHUP failed: {result.stderr.strip()}")
-    except Exception as e:
-        log(f"SIGHUP error: {e}")
-
-    # Check for corrupted key errors after SIGHUP and auto-clean
-    _check_arti_key_errors()
-
-
-def _sanitize_arti_toml():
-    """Remove broken fragments from Arti toml before SIGHUP.
-
-    Previous cleanup bugs left orphaned lines like bare [["80", ...]] which
-    TOML parses as invalid table headers, blocking ALL config reloads.
-    """
-    if os.environ.get("NO_ONION_SERVICE") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
-        toml_path = "/etc/arti/arti-onionheaven.toml"
-    else:
-        toml_path = "/etc/arti/arti.toml"
-
-    try:
-        with open(toml_path) as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        return
-
-    cleaned = []
-    changed = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        # Remove bare proxy_ports value lines (orphaned from buggy cleanup)
-        # Matches [["80", "127.0.0.1:XXXX"]] but NOT proxy_ports = [["80"...]]
-        if stripped.startswith("[["  ) and "127.0.0.1" in stripped and stripped.endswith("]]"):
-            log(f"sanitize-toml: removing orphaned line: {stripped}")
-            changed = True
-            i += 1
-            continue
-
-        # Remove orphaned comment lines not followed by a proper section header
-        if stripped.startswith("# onionheaven:") and stripped.endswith(".onion"):
-            j = i + 1
-            while j < len(lines) and lines[j].strip() == "":
-                j += 1
-            if j < len(lines) and lines[j].strip().startswith('[onion_services."'):
-                cleaned.append(line)
-                i += 1
-                continue
-            else:
-                log(f"sanitize-toml: removing orphaned comment: {stripped}")
-                changed = True
-                i += 1
-                continue
-
-        cleaned.append(line)
-        i += 1
-
-    if changed:
-        # Collapse excessive blank lines
-        final = []
-        prev_blank = False
-        for line in cleaned:
-            if line.strip() == "":
-                if prev_blank:
-                    continue
-                prev_blank = True
-            else:
-                prev_blank = False
-            final.append(line)
-        with open(toml_path, "w") as f:
-            f.writelines(final)
-        log(f"sanitize-toml: cleaned {toml_path}")
-
-
-def _check_arti_key_errors():
-    """Scan recent Arti log output for corrupted key errors and auto-clean.
-
-    Arti logs errors like:
-      Unable to launch onion service onionheaven_XXXX: ... PEM preamble contains invalid data (NUL byte)
-      Unable to launch onion service onionheaven_XXXX: ... corrupted data in keystore
-
-    When found, remove the corrupted key from keystore and toml config so it
-    doesn't block other services on subsequent SIGHUPs.
-    """
-    import re
-    arti_keystore = "/var/lib/arti/state/keystore/hss"
-
-    # Read recent Arti stderr — check the container's process stderr via /proc
-    arti_pid = None
-    try:
-        result = subprocess.run(
-            ["pidof", "arti"], capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            arti_pid = result.stdout.strip().split()[0]
-    except Exception:
-        pass
-    if not arti_pid:
-        try:
-            result = subprocess.run(
-                ["sh", "-c", "ps aux | grep '[/]usr/local/bin/arti' | awk '{print $2}' | head -1"],
-                capture_output=True, text=True, timeout=5
-            )
-            arti_pid = result.stdout.strip()
-        except Exception:
-            pass
-
-    if not arti_pid:
-        return
-
-    # Read Arti's fd 2 (stderr) isn't possible after the fact, but we can check
-    # the keystore directly for corrupted keys
-    try:
-        if not os.path.isdir(arti_keystore):
-            return
-        for nickname in os.listdir(arti_keystore):
-            if not nickname.startswith("onionheaven_"):
-                continue
-            key_path = os.path.join(arti_keystore, nickname, "ks_hs_id.ed25519_expanded_private")
-            if not os.path.isfile(key_path):
-                continue
-            # Check for NUL bytes or other corruption
-            try:
-                with open(key_path, "rb") as f:
-                    data = f.read()
-                if b"\x00" in data:
-                    log(f"CORRUPTED KEY detected in Arti keystore: {nickname} — auto-cleaning")
-                    _clean_corrupted_service(nickname)
-                elif not data.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
-                    log(f"INVALID KEY detected in Arti keystore: {nickname} — auto-cleaning")
-                    _clean_corrupted_service(nickname)
-                elif not data.rstrip().endswith(b"-----END OPENSSH PRIVATE KEY-----"):
-                    log(f"TRUNCATED KEY detected in Arti keystore: {nickname} — auto-cleaning")
-                    _clean_corrupted_service(nickname)
-            except Exception as e:
-                log(f"Error checking key {nickname}: {e}")
-    except Exception as e:
-        log(f"Error scanning Arti keystore: {e}")
-
-
-def _clean_corrupted_service(nickname):
-    """Remove a corrupted onion service from Arti's keystore and config."""
-    import shutil
-    arti_keystore = "/var/lib/arti/state/keystore/hss"
-
-    # Detect config file
-    if os.environ.get("NO_ONION_SERVICE") == "1" or os.environ.get("TAKEOVER_WORKER") == "1":
-        arti_toml = "/etc/arti/arti-onionheaven.toml"
-    else:
-        arti_toml = "/etc/arti/arti.toml"
-
-    # Remove keystore directory
-    ks_dir = os.path.join(arti_keystore, nickname)
-    if os.path.isdir(ks_dir):
-        shutil.rmtree(ks_dir, ignore_errors=True)
-        log(f"  Removed keystore dir: {ks_dir}")
-
-    # Remove from arti.toml config
-    try:
-        with open(arti_toml, "r") as f:
-            lines = f.readlines()
-        new_lines = []
-        skip = 0
-        for line in lines:
-            if skip > 0:
-                skip -= 1
-                continue
-            if f'[onion_services."{nickname}"]' in line:
-                # Remove this line + next 2 (enabled, proxy_ports)
-                skip = 2
-                # Also remove preceding comment line if it's the marker
-                if new_lines and new_lines[-1].startswith("# onionheaven:"):
-                    new_lines.pop()
-                # Remove preceding blank line too
-                if new_lines and new_lines[-1].strip() == "":
-                    new_lines.pop()
-                continue
-            new_lines.append(line)
-        with open(arti_toml, "w") as f:
-            f.writelines(new_lines)
-        log(f"  Removed config for {nickname} from {arti_toml}")
-    except Exception as e:
-        log(f"  Warning: could not clean config for {nickname}: {e}")
-
-    # Also clean the source key in OnionHeaven keys dir
-    # Extract content_address from nickname: onionheaven_XXXX -> find matching key dir
-    addr_prefix = nickname.replace("onionheaven_", "")
-    keys_base = "/var/lib/onionpress/onionheaven/keys"
-    if os.path.isdir(keys_base):
-        for entry in os.listdir(keys_base):
-            if entry.startswith(addr_prefix):
-                src_key = os.path.join(keys_base, entry, "ks_hs_id.ed25519_expanded_private")
-                if os.path.isfile(src_key):
-                    try:
-                        with open(src_key, "rb") as f:
-                            data = f.read()
-                        if b"\x00" in data or not data.startswith(b"-----BEGIN OPENSSH PRIVATE KEY-----"):
-                            os.unlink(src_key)
-                            log(f"  Removed corrupted source key for {entry}")
-                    except Exception:
-                        pass
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +328,6 @@ def _spawn_worker(conn):
     idx = _next_worker_index
     _next_worker_index += 1
     name = f"onionheaven-takeover-{idx}"
-    vol = f"onionpress-arti-state-takeover-{idx}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Remove any existing container with this name
@@ -603,7 +335,6 @@ def _spawn_worker(conn):
                    capture_output=True, timeout=15)
 
     tz = os.environ.get("TZ", "UTC")
-    tor_impl = os.environ.get("TOR_IMPL", "tor")
 
     try:
         result = subprocess.run(
@@ -612,11 +343,9 @@ def _spawn_worker(conn):
              "--network", "onionpress-network",
              "--ulimit", "nofile=10000:10000",
              "-e", f"TZ={tz}",
-             "-e", f"TOR_IMPL={tor_impl}",
              "-e", "TAKEOVER_WORKER=1",
              "-e", f"CONTAINER_NAME={name}",
              "-e", f"MAX_TAKEOVER_SERVICES={MAX_SERVICES_PER_WORKER}",
-             "-v", f"{vol}:/var/lib/arti/",
              "-v", "onionpress-persistent-data:/var/lib/onionpress",
              "--restart", "unless-stopped",
              TAKEOVER_IMAGE],
@@ -1090,16 +819,15 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
             f"{content_address} — not farm mode and not a takeover worker.")
 
 
-def _takeover_local(content_address, no_sighup=False):
+def _takeover_local(content_address):
     """Execute takeover via local tor-manager (takeover worker containers only).
 
-    C Tor: uses ADD_ONION via control port (no SIGHUP needed).
-    Arti: modifies config; if no_sighup=True, caller must call flush_sighup_tor().
+    ADD_ONION via the control port — no config reload involved.
     """
     log(f"Taking over {content_address} via tor-manager (local)")
     try:
         result = subprocess.run(
-            [TOR_MANAGER, "takeover", "--no-sighup", content_address],
+            [TOR_MANAGER, "takeover", content_address],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
@@ -1111,9 +839,6 @@ def _takeover_local(content_address, no_sighup=False):
     except Exception as e:
         log(f"Takeover error for {content_address}: {e}")
         return False
-
-    if not no_sighup:
-        sighup_tor()
 
 
 # ---------------------------------------------------------------------------
@@ -1194,16 +919,15 @@ def release_function(conn, content_address, healthcheck_address):
             _release_local(content_address)
 
 
-def _release_local(content_address, no_sighup=False):
+def _release_local(content_address):
     """Execute release via local tor-manager (takeover worker containers only).
 
-    If no_sighup=True, skips the SIGHUP — caller is responsible for
-    calling flush_sighup_tor() after a batch of releases.
+    DEL_ONION via the control port — no config reload involved.
     """
     log(f"Releasing {content_address} via tor-manager (local)")
     try:
         result = subprocess.run(
-            [TOR_MANAGER, "release", "--no-sighup", content_address],
+            [TOR_MANAGER, "release", content_address],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
@@ -1215,9 +939,6 @@ def _release_local(content_address, no_sighup=False):
     except Exception as e:
         log(f"Release error for {content_address}: {e}")
         return False
-
-    if not no_sighup:
-        sighup_tor()
 
 
 # ---------------------------------------------------------------------------

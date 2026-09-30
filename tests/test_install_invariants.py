@@ -135,43 +135,40 @@ class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
         )
 
 
-class TestTorImplDefaultsToCTor(unittest.TestCase):
-    """C Tor (TOR_IMPL=tor) has been the default since 2026-03-16. But the
-    CLI-rewrite foundation (commit c15d8dd9, 2026-03-20) introduced
-    read_value(..., "TOR_IMPL", "arti") in containers.py and cli.py — so on
-    a fresh install with no TOR_IMPL in config (the normal case, since the
-    value only gets written when it's non-default), those paths brought the
-    stack up as Arti and the menubar settings window showed "arti". Every
-    TOR_IMPL default must be "tor" to match config.py DEFAULTS, the bash
-    launcher, settings_ui, and menubar.py.
+class TestNoTorImplementationSwitch(unittest.TestCase):
+    """TOR_IMPL chose between C Tor and Arti until 2026-09-24. Arti was then
+    removed: it hosts a site acceptably, but it has no control interface and
+    sleep/wake, the watchdog's stall recovery and the OnionHeaven takeover
+    pipeline are all built on the control port. The switch must not creep
+    back into the app, the launchers or the compose file — a value nobody
+    honours is worse than none.
     """
 
-    def test_no_tor_impl_default_is_arti_or_unknown(self):
+    FILES = [
+        "app/MacOS/onionpress", "linux/onionpress",
+        "app/Resources/docker/docker-compose.yml",
+        "app/Resources/docker/tor/entrypoint.sh",
+        "app/Resources/config-template.txt",
+    ]
+
+    def test_tor_impl_is_gone(self):
         import glob
+        paths = glob.glob(os.path.join(PROJECT_ROOT, "src", "**", "*.py"), recursive=True)
+        paths += [os.path.join(PROJECT_ROOT, f) for f in self.FILES]
         offenders = []
-        pat = re.compile(r'TOR_IMPL"\s*,\s*"(arti|unknown)"')
-        py_files = glob.glob(os.path.join(PROJECT_ROOT, "src", "**", "*.py"),
-                             recursive=True)
-        for path in py_files:
+        for path in paths:
             with open(path, "r", encoding="utf-8") as f:
                 for lineno, line in enumerate(f, 1):
-                    if pat.search(line):
-                        rel = os.path.relpath(path, PROJECT_ROOT)
-                        offenders.append(f"{rel}:{lineno}: {line.strip()}")
+                    if "TOR_IMPL" in line:
+                        offenders.append(f"{os.path.relpath(path, PROJECT_ROOT)}:{lineno}: {line.strip()}")
         self.assertEqual(
             offenders, [],
-            "TOR_IMPL must default to \"tor\" (C Tor) everywhere. Found "
-            "non-tor defaults:\n" + "\n".join(offenders),
+            "TOR_IMPL was removed with Arti on 2026-09-24. Found:\n" + "\n".join(offenders),
         )
 
-    def test_config_defaults_tor_impl_is_tor(self):
+    def test_config_defaults_have_no_tor_impl(self):
         cfg = _read("src/onionpress/config.py")
-        self.assertRegex(
-            cfg,
-            r'"TOR_IMPL":\s*"tor"',
-            "config.py DEFAULTS must keep TOR_IMPL = \"tor\".",
-        )
-
+        self.assertNotIn('"TOR_IMPL"', cfg, "config.py must not define TOR_IMPL.")
 
 class TestMakefilePrecheckUsesCorrectPath(unittest.TestCase):
     """The Makefile's `make test` target asserts required source files
@@ -1230,6 +1227,78 @@ class TestScrubVerifyChecks(unittest.TestCase):
             "silently can't submit anything for the lifetime of the install.",
         )
 
+
+
+class TestKeyVolumeMigration(unittest.TestCase):
+    """The onion service key volume was renamed on 2026-09-25 from
+    onionpress-arti-state (layout state/keystore/hss/<name>/) to
+    onionpress-onion-keys (layout <name>/). Both launchers use the volume's
+    existence as the first-run signal, so an upgraded install that skipped
+    the migration would look fresh and mint a new address. The migration
+    therefore has to exist in both launchers, be the same code, and run
+    before the first-run check.
+    """
+
+    LAUNCHERS = ["app/MacOS/onionpress", "linux/onionpress"]
+
+    @staticmethod
+    def _function_body(text, name):
+        start = text.index(f"\n{name}() {{")
+        end = text.index("\n}\n", start)
+        return text[start:end]
+
+    def test_launchers_carry_the_same_migration(self):
+        bodies = [self._function_body(_read(f), "migrate_key_volume") for f in self.LAUNCHERS]
+        self.assertEqual(
+            bodies[0], bodies[1],
+            "migrate_key_volume() must be identical in the macOS and Linux "
+            "launchers; edit both.",
+        )
+        self.assertIn("onionpress-arti-state:/old:ro", bodies[0])
+        self.assertIn("onionpress-onion-keys:/new", bodies[0])
+
+    def test_migration_runs_before_first_run_detection(self):
+        for f in self.LAUNCHERS:
+            text = _read(f)
+            with self.subTest(launcher=f):
+                # Inside start_containers: the call must come before the first
+                # look for the new volume (the function's own early-return
+                # check sits above start_containers and does not count).
+                sc = text.index("\nstart_containers() {")
+                call = text.index("if ! migrate_key_volume; then", sc)
+                check = text.index('grep -qx "onionpress-onion-keys"', sc)
+                self.assertLess(
+                    call, check,
+                    "migrate_key_volume must be called before the first-run "
+                    "check that looks for the new volume.",
+                )
+                self.assertNotIn(
+                    'grep -qx "onionpress-arti-state"', text[sc:],
+                    "First-run detection must key off the new volume name only "
+                    "(the old name may appear only in migrate_key_volume and "
+                    "the wipe lists).",
+                )
+
+    def test_wipes_remove_both_names(self):
+        """A replaced identity (key import, restore) must delete the old-name
+        volume too, or the next start would migrate it back over the new key.
+        """
+        for f in self.LAUNCHERS + ["src/onionpress/cli.py", "src/onionpress/backup.py"]:
+            text = _read(f)
+            with self.subTest(file=f):
+                self.assertIn("onionpress-onion-keys", text)
+                self.assertIn("onionpress-arti-state", text)
+
+    def test_compose_mounts_the_new_volume(self):
+        compose = "\n".join(
+            line for line in _read("app/Resources/docker/docker-compose.yml").splitlines()
+            if not line.lstrip().startswith("#"))
+        self.assertIn("onion-keys:/var/lib/onionpress-keys/", compose)
+        self.assertIn("name: onionpress-onion-keys", compose)
+        self.assertNotIn("onionpress-arti-state", compose)
+        entrypoint = _read("app/Resources/docker/tor/entrypoint.sh")
+        self.assertIn('KEYS_DIR="/var/lib/onionpress-keys"', entrypoint)
+        self.assertNotIn("/var/lib/arti", entrypoint)
 
 if __name__ == "__main__":
     unittest.main()

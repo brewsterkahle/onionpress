@@ -611,9 +611,9 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
     path), updates the cached onion_address, and points ADDRESS_PREFIX/ONIONNAME
     at the restored identity. Returns the derived .onion address.
 
-    Host-side only: does NOT touch a running container or the arti-state volume.
-    On the next launcher start the key is copied into arti-state and (for C Tor)
-    converted to the C-Tor keystore by the tor entrypoint.
+    Host-side only: does NOT touch a running container or the key volume.
+    On the next launcher start the key is copied into onionpress-onion-keys
+    and converted to C Tor's key files by the tor entrypoint.
     """
     _data_dir = data_dir if data_dir is not None else _default_data_dir()
     tor_dir = _find_dir(staging, 'tor-keys')
@@ -803,11 +803,12 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
                          f"address's stored takeover key.")
             metadata['onion_address'] = derived_address
 
-            # Remove arti-state volume so it gets recreated from vanity-keys
-            # on next launch. This avoids stale key mismatches.
-            log_func("Restore: removing arti-state volume for clean restart...")
+            # Remove the key volume so it gets recreated from vanity-keys on
+            # next launch. This avoids stale key mismatches. The pre-2026-09-25
+            # name goes too, or the launcher's migration would bring it back.
+            log_func("Restore: removing key volume for clean restart...")
             subprocess.run(
-                ['docker', 'volume', 'rm', 'onionpress-arti-state'],
+                ['docker', 'volume', 'rm', 'onionpress-onion-keys', 'onionpress-arti-state'],
                 capture_output=True, timeout=15
             )
 

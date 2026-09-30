@@ -29,13 +29,13 @@ class TestRedactConfig(unittest.TestCase):
 
     def test_secret_keys_are_withheld(self):
         cfg = {
-            "TOR_IMPL": "tor",
+            "VM_MEMORY": "4",
             "CLOUDFLARE_TUNNEL_TOKEN": "super-secret-token",
             "ADDRESS_PREFIX": "op2",
         }
         out = redact_config(cfg)
         self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", out)
-        self.assertEqual(out.get("TOR_IMPL"), "tor")
+        self.assertEqual(out.get("VM_MEMORY"), "4")
         self.assertEqual(out.get("ADDRESS_PREFIX"), "op2")
 
     def test_cloudflare_token_not_in_allowlist(self):
@@ -45,8 +45,8 @@ class TestRedactConfig(unittest.TestCase):
     def test_unknown_key_is_withheld_by_default(self):
         # Allowlist semantics: a brand-new key (which could be a future
         # credential) is dropped unless explicitly added to SAFE_CONFIG_KEYS.
-        out = redact_config({"SOME_FUTURE_TOKEN": "x", "TOR_IMPL": "tor"})
-        self.assertEqual(out, {"TOR_IMPL": "tor"})
+        out = redact_config({"SOME_FUTURE_TOKEN": "x", "ADDRESS_PREFIX": "op2"})
+        self.assertEqual(out, {"ADDRESS_PREFIX": "op2"})
 
     def test_allowlist_has_no_secret_named_keys(self):
         for key in SAFE_CONFIG_KEYS:
@@ -309,7 +309,6 @@ class TestPortDetection(unittest.TestCase):
 class TestDefaults(unittest.TestCase):
     def test_has_expected_keys(self):
         self.assertIn("ADDRESS_PREFIX", DEFAULTS)
-        self.assertIn("TOR_IMPL", DEFAULTS)
         self.assertIn("VM_MEMORY", DEFAULTS)
         self.assertEqual(DEFAULTS["ADDRESS_PREFIX"], "op2")
 

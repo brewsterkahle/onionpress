@@ -28,7 +28,6 @@ DEFAULTS = {
     "VM_CPU": "2",
     "CLOUDFLARE_TUNNEL_TOKEN": "",
     "REGISTER_WITH_ONIONHEAVEN": "yes",
-    "TOR_IMPL": "tor",
     "ONIONHEAVEN_ADDRESS": "",
     "ONIONHEAVEN_MAX_SERVICES": "10",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
@@ -41,7 +40,7 @@ DEFAULTS = {
 # future credential-bearing key can't leak by simply being added to config.
 # CLOUDFLARE_TUNNEL_TOKEN is the notable exclusion — it's a secret.
 SAFE_CONFIG_KEYS = frozenset({
-    "TOR_IMPL", "ADDRESS_PREFIX",
+    "ADDRESS_PREFIX",
     "VM_MEMORY", "VM_CPU", "VM_DISK",
     "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "PREVENT_SLEEP",
     "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
@@ -147,8 +146,25 @@ def ensure_config(paths: OnionPressPaths) -> None:
 
 # -- Address prefix validation --
 
+# THE rules for an onion address prefix. Every entry point must use
+# validate_address_prefix() rather than re-deriving these, because they did
+# not used to agree: the macOS launcher capped at 5 while the Linux path
+# (cli.py and launcher_ops.py) accepted 2-6 and checked no character set at
+# all. The same ~/.onionpress/config therefore behaved differently per
+# platform — a 6-character prefix was silently downgraded to "op2" on macOS
+# and accepted on Linux, and a prefix containing 0, 1, 8 or 9 (not base32, so
+# no address can ever match it) was handed straight to mkp224o, which would
+# search forever.
+ADDRESS_PREFIX_MIN = 2
+ADDRESS_PREFIX_MAX = 5
+ADDRESS_PREFIX_CHARS = "a-z2-7"
+
+
 def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
     """Validate an onion address prefix.
+
+    An empty prefix is valid and means "use the default" — callers substitute
+    DEFAULTS["ADDRESS_PREFIX"].
 
     Returns:
         (valid, error_message, suggestion) tuple.
@@ -157,15 +173,16 @@ def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
     if not prefix:
         return (True, "", "")
 
-    # Build suggested fix: lowercase, strip invalid chars, truncate to 5
-    suggested = re.sub(r"[^a-z2-7]", "", prefix.lower())[:5]
+    # Build suggested fix: lowercase, strip invalid chars, truncate to max
+    suggested = re.sub(
+        f"[^{ADDRESS_PREFIX_CHARS}]", "", prefix.lower())[:ADDRESS_PREFIX_MAX]
 
-    if len(prefix) > 5 and re.match(r"^[a-z2-7]+$", prefix):
+    if len(prefix) > ADDRESS_PREFIX_MAX and re.match(f"^[{ADDRESS_PREFIX_CHARS}]+$", prefix):
         return (
             False,
             f'Address prefix "{prefix}" is too long and would take '
             f"hours or days to generate ({len(prefix)} characters).\n\n"
-            f"Maximum length is 5 characters.",
+            f"Maximum length is {ADDRESS_PREFIX_MAX} characters.",
             suggested,
         )
 
@@ -189,6 +206,14 @@ def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
             )
 
         return (False, msg, suggested)
+
+    if len(prefix) < ADDRESS_PREFIX_MIN:
+        return (
+            False,
+            f'Address prefix "{prefix}" is too short.\n\n'
+            f"Minimum length is {ADDRESS_PREFIX_MIN} characters.",
+            "",
+        )
 
     return (True, "", prefix)
 

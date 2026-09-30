@@ -174,8 +174,8 @@ def migrate_legacy_db():
             return False
         os.makedirs(DATA_DIR, exist_ok=True)
         shutil.move(LEGACY_DB_PATH, DB_PATH)
-        # Best-effort move of SQLite sidecar files too (-wal, -shm) if Arti's
-        # WAL mode left them behind. Absent sidecars are fine; they'll be
+        # Best-effort move of SQLite sidecar files too (-wal, -shm) if WAL
+        # mode left them behind. Absent sidecars are fine; they'll be
         # regenerated on next open.
         for suffix in ("-wal", "-shm"):
             src = LEGACY_DB_PATH + suffix

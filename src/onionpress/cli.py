@@ -16,6 +16,7 @@ from . import __version__
 from .platform import OS, detect_os, resolve_paths, detect_timezone
 from .config import (
     ensure_config, ensure_secrets, read_value, detect_port_offset,
+    validate_address_prefix, DEFAULTS,
 )
 from .docker import Docker
 from .containers import ContainerManager
@@ -57,9 +58,6 @@ class OnionPressCLI:
         extra_env["ONIONPRESS_SOCKS_PORT"] = str(self.port_config.socks_port)
         extra_env["ONIONPRESS_PROXY_PORT"] = str(self.port_config.proxy_port)
         extra_env["ONIONPRESS_PORT_OFFSET"] = str(self.port_config.offset)
-        extra_env["TOR_IMPL"] = read_value(
-            self.paths.config_file, "TOR_IMPL", "tor"
-        )
         extra_env["TZ"] = detect_timezone()
         extra_env["ONIONPRESS_VERSION"] = __version__
 
@@ -209,15 +207,19 @@ class OnionPressCLI:
             # the seeded key and imported backup cleanly (no stale keystore
             # overriding the restored identity, no in-place overwrite).
             self.containers.stop()
-            for vol in ("onionpress-arti-state", "onionpress-tor-state",
+            # onionpress-arti-state is the key volume's pre-2026-09-25 name;
+            # wiping it too keeps the launcher's migration from bringing the
+            # replaced identity back.
+            for vol in ("onionpress-onion-keys", "onionpress-arti-state",
+                        "onionpress-tor-state",
                         "onionpress-db-data", "onionpress-wordpress-data",
                         "onionpress-persistent-data"):
                 self.docker.run(["volume", "rm", vol], timeout=20)
                 self.log(f"Removed volume: {vol}")
 
-            # Seed the fresh arti-state keystore from the backup key so Tor serves
-            # the restored identity on first start (the C-Tor entrypoint converts
-            # arti->ctor when tor-state is empty). Mirrors the launcher's
+            # Seed the fresh key volume from the backup key so Tor serves the
+            # restored identity on first start (the entrypoint converts the PEM
+            # to C Tor's key files when tor-state is empty). Mirrors the launcher's
             # first-run key install. Bind-mount the host vanity-keys dir, which
             # seed_onion_key_for_install wrote under shared/ (inside the Colima
             # mount, so the bind works on macOS as well as Linux).
@@ -226,19 +228,17 @@ class OnionPressCLI:
                 self.paths.data_dir, "shared", "vanity-keys", addr)
             seed = self.docker.run([
                 "run", "--rm",
-                "-v", "onionpress-arti-state:/dest",
+                "-v", "onionpress-onion-keys:/dest",
                 "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
                 "alpine", "sh", "-c",
-                "mkdir -p /dest/state/keystore/hss/wordpress && "
-                "cp /src/ks_hs_id.ed25519_expanded_private "
-                "/dest/state/keystore/hss/wordpress/ && "
-                "chown -R 100:100 /dest/state && "
-                "chmod 700 /dest/state /dest/state/keystore "
-                "/dest/state/keystore/hss /dest/state/keystore/hss/wordpress && "
-                "chmod 600 /dest/state/keystore/hss/wordpress/*",
+                "mkdir -p /dest/wordpress && "
+                "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
+                "chown -R 0:0 /dest && "
+                "chmod 700 /dest /dest/wordpress && "
+                "chmod 600 /dest/wordpress/*",
             ], timeout=30)
             if not seed.ok:
-                self.log("Restore: WARNING — arti-state key seed reported a "
+                self.log("Restore: WARNING — key volume seed reported a "
                          "problem; Tor may not adopt the restored identity")
 
             # Rebuild: fresh containers adopt the seeded key; import the backup
@@ -389,9 +389,29 @@ class OnionPressCLI:
             tor_image_has_mkp224o, generate_vanity_in_container,
             DEFAULT_TOR_IMAGE,
         )
-        prefix = read_value(self.paths.config_file, "ADDRESS_PREFIX", "op2")
-        if not (2 <= len(prefix) <= 6):
-            self.log(f"ADDRESS_PREFIX must be 2-6 chars (got {prefix!r}); skipping")
+        # Validated with config.validate_address_prefix(), not a local length
+        # check. The old `2 <= len(prefix) <= 6` disagreed with the macOS
+        # launcher's max of 5 (so the same config generated a 6-character
+        # address here and silently fell back to "op2" there) and checked no
+        # character set at all — a prefix containing 0, 1, 8 or 9 is not
+        # base32, can never match any address, and sent mkp224o searching
+        # forever.
+        # read_value() returns its default only when the key is ABSENT; a line
+        # `ADDRESS_PREFIX=` with nothing after it yields "". The validator
+        # accepts "" (to UI callers it means "use the default"), so without
+        # this substitution the empty string went to mkp224o as an empty
+        # filter. Before this branch a bare length check happened to reject
+        # it; keep rejecting it, by giving it the default it stands for.
+        prefix = (read_value(self.paths.config_file, "ADDRESS_PREFIX",
+                             DEFAULTS["ADDRESS_PREFIX"])
+                  or DEFAULTS["ADDRESS_PREFIX"])
+        prefix_ok, prefix_error, prefix_suggestion = validate_address_prefix(prefix)
+        if not prefix_ok:
+            self.log(f"ADDRESS_PREFIX is invalid, skipping vanity generation: "
+                     f"{prefix_error.splitlines()[0]}")
+            if prefix_suggestion:
+                self.log(f"Set ADDRESS_PREFIX={prefix_suggestion} in "
+                         f"{self.paths.config_file} to use the closest valid prefix.")
             return 2
 
         if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE):

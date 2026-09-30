@@ -41,8 +41,8 @@ py2app_dist/
 # Assembled .app bundle (built from app/ source directory)
 OnionPress.app/
 
-# Firefox extension testing copy
-extension-firefox/
+# Generated build outputs (build/build-extension.sh)
+build/dist/
 
 # Stress test results (contain secret keys)
 onionheaven-stress-results/

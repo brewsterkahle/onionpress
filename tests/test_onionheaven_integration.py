@@ -125,9 +125,6 @@ import onionheaven_common
 onionheaven_common.ONIONHEAVEN_DATA_DIR = {data_dir!r}
 onionheaven_common.DB_PATH = os.path.join({data_dir!r}, "registry.db")
 onionheaven_common.KEYS_DIR = {keys_dir!r}
-# Stub out tor-manager calls (no Arti in test)
-onionheaven_common.sighup_arti = lambda: None
-onionheaven_common.flush_sighup_arti = lambda: None
 def _stub_takeover(conn, ca, ha, force=False):
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

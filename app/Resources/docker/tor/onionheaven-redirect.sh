@@ -46,7 +46,7 @@ handle_request() {
     fi
 
     # Circuit breaker: if this address has been released (status=online),
-    # drop the connection immediately. The stale Arti descriptor may still
+    # drop the connection immediately. A stale descriptor may still
     # route traffic here after release — closing the TCP connection forces
     # the Tor client to mark the circuit as failed and rebuild, which may
     # cause it to fetch a fresh descriptor and reach the real service.

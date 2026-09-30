@@ -204,7 +204,7 @@ class HealthChecker:
                     except ValueError:
                         pass
 
-        # Fallback: parse container logs (for Arti or if control port unavailable)
+        # Fallback: parse container logs if the control port is unavailable
         result = self.docker.run(
             ["logs", "--tail", "100", "onionpress-tor"],
             timeout=15,
@@ -221,8 +221,6 @@ class HealthChecker:
             if p > pct:
                 pct = p
 
-        if "Sufficiently bootstrapped" in output:
-            pct = max(pct, 100)
         if "Bootstrapped 100%" in output:
             pct = 100
 

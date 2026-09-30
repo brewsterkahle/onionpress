@@ -149,14 +149,6 @@ class TestCheckTorBootstrap(unittest.TestCase):
         self.assertFalse(bootstrapped)
         self.assertEqual(pct, 50)
 
-    def test_arti_sufficiently_bootstrapped(self):
-        docker = mock.Mock()
-        docker.exec.return_value = _fail()
-        docker.run.return_value = _ok("Sufficiently bootstrapped to build circuits")
-        hc = HealthChecker(docker)
-        bootstrapped, pct = hc.check_tor_bootstrap()
-        self.assertTrue(bootstrapped)
-
     def test_no_logs(self):
         docker = mock.Mock()
         docker.exec.return_value = _fail()

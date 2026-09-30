@@ -343,7 +343,7 @@ def _do_upload_cycle(app, include_active=False):
         "content_address": content_addr,
         "healthcheck_address": hc_addr,
         "version": getattr(app, "version", "unknown"),
-        "tor_impl": app.read_config_value("TOR_IMPL", "tor"),
+        "tor_impl": "tor",  # the only implementation since 2026-09-24; kept for the OnionHome schema
         "os_version": platform.mac_ver()[0] or "unknown",
         "files": [{"name": f["name"], "size": f["size"]} for f in all_files],
         "timestamp": timestamp,
