@@ -1194,22 +1194,63 @@ configure_site_timezones() {
 # Function to set up OnionHeaven (onionheaven mode only)
 # Registration API now runs in the onionheaven container (web-server.py),
 # which creates its own data directories on the shared volume at startup.
+
+# Whether Docker has volume $1: 0 yes, 1 no, 2 Docker could not say (the
+# daemon is not up yet, e.g. the Colima VM is still booting). Callers must
+# treat 2 as "stop", never as "no": a missing key volume is the first-run
+# signal, so reading a Docker error as absence turns an upgrade into a first
+# run. Kept identical in the macOS and Linux launchers; a test enforces that.
+docker_volume_state() {
+    local names
+    names=$(docker volume ls --format '{{.Name}}' 2>>"$LOG_FILE") || return 2
+    printf '%s\n' "$names" | grep -qx -- "$1"
+}
+
+# Wait up to $1 seconds for the Docker daemon to answer; returns 1 if it
+# never does. Kept identical in the macOS and Linux launchers.
+wait_for_docker() {
+    local limit="$1" waited=0
+    while ! docker info >/dev/null 2>&1; do
+        if [ "$waited" -ge "$limit" ]; then
+            return 1
+        fi
+        if [ "$waited" -eq 0 ]; then
+            log "Waiting for Docker daemon to be ready..."
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    if [ "$waited" -gt 0 ]; then
+        log "Docker daemon ready after ${waited}s"
+    fi
+    return 0
+}
+
 # One-time migration of the onion service key volume from its historical
 # name. Until 2026-09-25 the delivered PEM lived in onionpress-arti-state at
 # state/keystore/hss/<name>/ (arti's keystore layout); it now lives in
 # onionpress-onion-keys at <name>/. This runs before the first-run check,
 # which keys off the NEW volume's existence — without it an upgraded install
 # would look like a fresh one and mint a new address. For the same reason it
-# refuses to let the start continue when the copy fails: the old volume is
-# left untouched and the next start retries. Kept identical in the macOS and
-# Linux launchers; a test enforces that.
+# refuses to let the start continue when the copy fails, or when Docker cannot
+# say which volumes exist: the old volume is left untouched and the next
+# start retries. Kept identical in the macOS and Linux launchers; a test
+# enforces that.
 migrate_key_volume() {
-    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "onionpress-onion-keys"; then
-        return 0
-    fi
-    if ! docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "onionpress-arti-state"; then
-        return 0   # nothing to migrate: a fresh install, or one that never had a key volume
-    fi
+    local state=0
+    docker_volume_state onionpress-onion-keys || state=$?
+    case "$state" in
+        0) return 0 ;;
+        2) log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+           return 1 ;;
+    esac
+    state=0
+    docker_volume_state onionpress-arti-state || state=$?
+    case "$state" in
+        1) return 0 ;;   # nothing to migrate: a fresh install, or one that never had a key volume
+        2) log "ERROR: Docker did not say whether onionpress-arti-state exists; not starting"
+           return 1 ;;
+    esac
     log "Migrating the onion service key volume: onionpress-arti-state -> onionpress-onion-keys"
     if ! docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
         log "ERROR: could not create onionpress-onion-keys; not starting (the old key volume is untouched)"
@@ -1249,6 +1290,17 @@ start_containers() {
 
     cd "$DOCKER_DIR"
 
+    # Docker has to answer before anything below asks whether a volume
+    # exists. Those checks used to read "Docker is not up yet" as "no such
+    # volume", and a missing key volume is the first-run signal: upgrading
+    # to 2.5.0 on 2026-09-30 while the Colima VM was still booting took the
+    # first-run path instead of migrating the key volume.
+    local vol_state key_state
+    if ! wait_for_docker 180; then
+        log "ERROR: Docker daemon not ready after 180s; not starting"
+        return 1
+    fi
+
     # Handle pending key import (volume couldn't be removed when Docker wasn't running)
     if [ -f "$DATA_DIR/.import-key-pending" ]; then
         log "Pending key import detected — removing old key and tor-state volumes..."
@@ -1260,13 +1312,19 @@ start_containers() {
         # bring the replaced identity back.
         for vol in onionpress-onion-keys onionpress-arti-state onionpress-tor-state; do
             docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
+            vol_state=0; docker_volume_state "$vol" || vol_state=$?
+            if [ "$vol_state" -eq 0 ]; then
                 log "Volume $vol still in use — force-removing containers using it..."
                 docker rm -f $(docker ps -aq --filter "volume=$vol") >> "$LOG_FILE" 2>&1 || true
                 docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-                if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
-                    log "ERROR: Could not remove old $vol volume"
-                fi
+                vol_state=0; docker_volume_state "$vol" || vol_state=$?
+            fi
+            # Only a confirmed absence counts. Dropping the marker while an
+            # old keystore survives (or could not be checked) would silently
+            # keep the replaced identity, so leave it for the next start.
+            if [ "$vol_state" -ne 1 ]; then
+                log "ERROR: could not remove the old $vol volume; keeping the pending key import and not starting"
+                return 1
             fi
         done
         # Also remove old tor-keys volume if it exists (migration leftover)
@@ -1281,9 +1339,14 @@ start_containers() {
         return 1
     fi
 
-    # Check if this is first run (no key volume exists)
-    # Use --format + exact grep to avoid matching similarly named volumes
-    if ! docker volume ls --format '{{.Name}}' | grep -qx "onionpress-onion-keys"; then
+    # Check if this is first run (no key volume exists). Only Docker's
+    # confirmed "no" counts: an unanswered question is not a fresh install.
+    key_state=0; docker_volume_state onionpress-onion-keys || key_state=$?
+    if [ "$key_state" -eq 2 ]; then
+        log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+        return 1
+    fi
+    if [ "$key_state" -eq 1 ]; then
         log "First run detected - generating custom onion address..."
 
         # Read address prefix from config, default to "op2"
@@ -1390,23 +1453,6 @@ start_containers() {
         # compose-down + delete-key-volume + regenerate flow and risked
         # clobbering the address. Nothing to do here.
         :
-    fi
-
-    # Wait for Docker daemon to be ready (on first run, Colima VM may still be booting)
-    local docker_wait=0
-    while ! docker info >/dev/null 2>&1; do
-        if [ $docker_wait -eq 0 ]; then
-            log "Waiting for Docker daemon to be ready..."
-        fi
-        docker_wait=$((docker_wait + 2))
-        if [ $docker_wait -ge 180 ]; then
-            log "ERROR: Docker daemon not ready after 180s"
-            break
-        fi
-        sleep 2
-    done
-    if [ $docker_wait -gt 0 ] && docker info >/dev/null 2>&1; then
-        log "Docker daemon ready after ${docker_wait}s"
     fi
 
     # Update images if enabled in config

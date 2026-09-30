@@ -11,6 +11,8 @@ below has a comment pointing at the incident it's guarding against.
 import ast
 import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1266,17 +1268,61 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # check sits above start_containers and does not count).
                 sc = text.index("\nstart_containers() {")
                 call = text.index("if ! migrate_key_volume; then", sc)
-                check = text.index('grep -qx "onionpress-onion-keys"', sc)
+                check = text.index("docker_volume_state onionpress-onion-keys", sc)
                 self.assertLess(
                     call, check,
                     "migrate_key_volume must be called before the first-run "
                     "check that looks for the new volume.",
                 )
+                for old_name_check in ('grep -qx "onionpress-arti-state"',
+                                       "docker_volume_state onionpress-arti-state"):
+                    self.assertNotIn(
+                        old_name_check, text[sc:],
+                        "First-run detection must key off the new volume name "
+                        "only (the old name may appear only in "
+                        "migrate_key_volume and the wipe lists).",
+                    )
+
+    def test_launchers_carry_the_same_docker_helpers(self):
+        for name in ("docker_volume_state", "wait_for_docker"):
+            bodies = [self._function_body(_read(f), name) for f in self.LAUNCHERS]
+            with self.subTest(function=name):
+                self.assertEqual(
+                    bodies[0], bodies[1],
+                    f"{name}() must be identical in the macOS and Linux "
+                    "launchers; edit both.",
+                )
+
+    def test_start_waits_for_docker_before_any_volume_check(self):
+        """Every "does this volume exist?" check used to read a Docker error
+        as "no". A missing key volume is the first-run signal, so on
+        2026-09-30 an upgrade to 2.5.0 whose Colima VM was still booting took
+        the first-run path instead of migrating the key volume. Docker has to
+        answer first, and a start that never gets an answer has to stop.
+        """
+        for f in self.LAUNCHERS:
+            body = self._function_body(_read(f), "start_containers")
+            with self.subTest(launcher=f):
+                wait = body.index("if ! wait_for_docker ")
+                for later in (".import-key-pending",
+                              "if ! migrate_key_volume; then",
+                              "docker_volume_state onionpress-onion-keys"):
+                    self.assertLess(
+                        wait, body.index(later),
+                        f"start_containers must wait for Docker before "
+                        f"{later!r}.",
+                    )
+                self.assertRegex(
+                    body[wait:wait + 200],
+                    r"if ! wait_for_docker \d+; then\n\s+log [^\n]*\n\s+return 1",
+                    "start_containers must stop when Docker never answers, "
+                    "not carry on to the volume checks.",
+                )
                 self.assertNotIn(
-                    'grep -qx "onionpress-arti-state"', text[sc:],
-                    "First-run detection must key off the new volume name only "
-                    "(the old name may appear only in migrate_key_volume and "
-                    "the wipe lists).",
+                    "docker volume ls", body,
+                    "start_containers must ask about volumes through "
+                    "docker_volume_state, which tells an absent volume from "
+                    "a Docker that did not answer.",
                 )
 
     def test_wipes_remove_both_names(self):
@@ -1302,3 +1348,122 @@ class TestKeyVolumeMigration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
+    """Runs the launchers' own functions under bash against a stub `docker`,
+    so the checks are exercised, not just read. STUB_MODE=down makes every
+    docker call fail the way an unreachable daemon does; otherwise
+    `docker volume ls` lists STUB_VOLUMES and everything else succeeds.
+    """
+
+    LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
+    FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
+                 "start_containers")
+
+    STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_CALLS"
+if [ "$STUB_MODE" = down ]; then
+    echo "Cannot connect to the Docker daemon at unix:///stub/docker.sock." >&2
+    exit 1
+fi
+if [ "$1 $2" = "volume ls" ]; then
+    for v in $STUB_VOLUMES; do echo "$v"; done
+fi
+exit 0
+"""
+
+    def _run(self, launcher, snippet, mode="up", volumes="", pending=False):
+        text = _read(launcher)
+        functions = "".join(
+            TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
+            for name in self.FUNCTIONS)
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.mkdir(bin_dir)
+            stub = os.path.join(bin_dir, "docker")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(self.STUB)
+            os.chmod(stub, 0o755)
+            if pending:
+                open(os.path.join(tmp, ".import-key-pending"), "w").close()
+            calls = os.path.join(tmp, "calls")
+            open(calls, "w").close()
+            script = (
+                "set -e\n"
+                f'LOG_FILE="{tmp}/log"; DATA_DIR="{tmp}"; DOCKER_DIR="{tmp}"\n'
+                'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
+                "sleep() { :; }\n"  # wait_for_docker's 180 s pass instantly
+                + functions + snippet + "\n")
+            env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
+                   "STUB_MODE": mode, "STUB_VOLUMES": volumes,
+                   "STUB_CALLS": calls}
+            out = subprocess.run(["bash", "-c", script], env=env,
+                                 capture_output=True, text=True, timeout=60)
+            with open(calls, encoding="utf-8") as f:
+                docker_calls = f.read().splitlines()
+            marker_left = os.path.exists(os.path.join(tmp, ".import-key-pending"))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout, docker_calls, marker_left
+
+    def _state_of(self, launcher, name, **kw):
+        out, _, _ = self._run(
+            launcher, f"s=0; docker_volume_state {name} || s=$?; echo $s", **kw)
+        return int(out.strip())
+
+    def test_volume_state_tells_absent_from_unanswered(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                up = {"volumes": "onionpress-arti-state onionpress-onion-keys-old"}
+                self.assertEqual(self._state_of(f, "onionpress-arti-state", **up), 0)
+                self.assertEqual(self._state_of(f, "onionpress-onion-keys", **up), 1,
+                                 "only an exact name may match")
+                self.assertEqual(self._state_of(f, "onionpress-onion-keys", mode="down"), 2)
+
+    def test_migration_refuses_when_docker_does_not_answer(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                out, calls, _ = self._run(
+                    f, "rc=0; migrate_key_volume || rc=$?; echo $rc", mode="down")
+                self.assertEqual(out.strip(), "1")
+                self.assertFalse([c for c in calls if not c.startswith("volume ls")],
+                                 f"nothing but the question may run: {calls}")
+
+    def test_migration_copies_only_when_just_the_old_volume_exists(self):
+        cases = {
+            "onionpress-arti-state": True,                          # upgrade
+            "onionpress-onion-keys onionpress-arti-state": False,   # already migrated
+            "": False,                                              # fresh install
+        }
+        for f in self.LAUNCHERS:
+            for volumes, copies in cases.items():
+                with self.subTest(launcher=f, volumes=volumes):
+                    out, calls, _ = self._run(
+                        f, "rc=0; migrate_key_volume || rc=$?; echo $rc",
+                        volumes=volumes)
+                    self.assertEqual(out.strip(), "0")
+                    self.assertEqual(
+                        "volume create onionpress-onion-keys" in calls, copies, calls)
+
+    def test_start_stops_before_any_volume_check_when_docker_never_answers(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                out, calls, marker_left = self._run(
+                    f, "rc=0; start_containers || rc=$?; echo $rc",
+                    mode="down", pending=True)
+                self.assertEqual(out.strip(), "1")
+                self.assertEqual(set(calls), {"info"},
+                                 f"only `docker info` may run: {sorted(set(calls))}")
+                self.assertTrue(marker_left)
+
+    def test_pending_import_is_kept_when_an_old_keystore_survives(self):
+        # tor-state stays listed however often it is removed.
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                out, calls, marker_left = self._run(
+                    f, "rc=0; start_containers || rc=$?; echo $rc",
+                    volumes="onionpress-tor-state", pending=True)
+                self.assertEqual(out.strip(), "1")
+                self.assertTrue(marker_left,
+                                "the key import must be retried on the next start")
+                self.assertNotIn("volume create onionpress-onion-keys", calls)
