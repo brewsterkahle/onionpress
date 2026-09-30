@@ -32,7 +32,7 @@ from .config import validate_address_prefix
 # same image the rest of a locally built stack uses.
 DEFAULT_TOR_IMAGE = os.environ.get(
     "ONIONPRESS_TOR_IMAGE",
-    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:1f98ac29337bf9d5da41a80d865d04e21934eb8deba2a86009b8a69c0a4f6e7c",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43",
 )
 
 
