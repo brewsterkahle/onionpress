@@ -36,6 +36,7 @@ python3 - "$REF" <<'PY'
 import json
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -67,17 +68,37 @@ if not repo:
 url = f"https://{host}/v2/{repo}/manifests/{tag}"
 
 
-def fetch(headers):
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status, resp.headers, resp.read()
-    except urllib.error.HTTPError as err:
-        return err.code, err.headers, err.read()
+# Registry token endpoints (ghcr.io/token, gitlab.torproject.org/jwt/auth)
+# intermittently answer an anonymous request with 403 or 429 and succeed
+# seconds later; seen during the v2.5.0 release on both. Retry those, and
+# 5xx and network errors, a few times before giving up.
+RETRY_STATUSES = {403, 429, 500, 502, 503, 504}
+ATTEMPTS = 4
+
+
+def get(target, headers, what):
+    for attempt in range(1, ATTEMPTS + 1):
+        req = urllib.request.Request(target, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as err:
+            status, hdrs, body = err.code, err.headers, err.read()
+            if status not in RETRY_STATUSES or attempt == ATTEMPTS:
+                return status, hdrs, body
+            reason = f"HTTP {status}"
+        except urllib.error.URLError as err:
+            if attempt == ATTEMPTS:
+                sys.exit(f"ERROR: {what} failed: {err.reason}")
+            reason = str(err.reason)
+        delay = 2 ** attempt
+        print(f"{what}: {reason}, retrying in {delay}s "
+              f"({attempt}/{ATTEMPTS - 1})", file=sys.stderr)
+        time.sleep(delay)
 
 
 headers = {"Accept": ACCEPT}
-status, hdrs, body = fetch(headers)
+status, hdrs, body = get(url, headers, "manifest request")
 if status == 401:
     challenge = hdrs.get("WWW-Authenticate", "")
     params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
@@ -86,10 +107,12 @@ if status == 401:
                  f"speak: {challenge!r}")
     query = {k: v for k, v in params.items() if k in ("service", "scope")}
     token_url = params["realm"] + "?" + urllib.parse.urlencode(query)
-    with urllib.request.urlopen(token_url, timeout=60) as resp:
-        tok = json.load(resp)
+    tstatus, _, tbody = get(token_url, {}, "token request")
+    if tstatus != 200:
+        sys.exit(f"ERROR: {token_url} returned HTTP {tstatus}: {tbody[:200]!r}")
+    tok = json.loads(tbody)
     headers["Authorization"] = "Bearer " + (tok.get("token") or tok["access_token"])
-    status, hdrs, body = fetch(headers)
+    status, hdrs, body = get(url, headers, "manifest request")
 if status != 200:
     sys.exit(f"ERROR: {url} returned HTTP {status}: {body[:200]!r}")
 
