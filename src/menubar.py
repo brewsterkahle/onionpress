@@ -237,7 +237,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.110"
+        self.version = "2.5.0"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -650,6 +650,8 @@ class OnionPressApp(rumps.App):
         """Start the local .onion proxy server in a background thread."""
         if self.proxy_server is not None:
             return  # already running
+        if self._quitting:
+            return  # quit cleanup already stopped it; don't bring it back
 
         docker_bin = os.path.join(self.bin_dir, "docker")
         docker_env = os.environ.copy()
@@ -1586,6 +1588,8 @@ class OnionPressApp(rumps.App):
         """Check if containers are running and get onion address"""
         if self._port_conflict:
             return
+        if self._quitting:
+            return  # a status tick during quit restarts what cleanup just stopped
         with self._checking_lock:
             if self.checking:
                 return

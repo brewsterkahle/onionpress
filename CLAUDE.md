@@ -87,9 +87,9 @@
   sha256). `MKP224O_VERSION` must match `build/build-dmg-simple.sh`.
   `build/base-image-digest.sh <ref>` resolves a tag to its multi-arch index
   digest on any registry, no daemon needed; it refuses single-platform
-  manifests. containers.torproject.org keeps untagged manifests (TPA's
-  Saturday cron only collects unreferenced layers), so a pinned digest stays
-  pullable after the daily rebuild moves the tag.
+  manifests. containers.torproject.org does NOT keep old digests
+  (a 2026-09-25 pin was 404 by 2026-09-30, failing the v2.5.0 publish):
+  re-pin the Onimages base right before every image publish.
 - **`build/build-dmg.sh` was deleted** — it thinned universal binaries to
   arm64-only and damaged real bundles via a lowercase-path match on APFS.
   `make build` now runs `build-dmg-simple.sh`.

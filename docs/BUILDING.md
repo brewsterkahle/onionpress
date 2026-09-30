@@ -404,11 +404,13 @@ that decision is ever revisited.
 Upstream rebuilds these **daily** and the tags move; a digest is the only
 thing that names one specific build. The Tor sysadmins' [registry
 notes](https://gitlab.torproject.org/tpo/tpa/team/-/wikis/service/gitlab)
-say untagged manifests are deliberately *not* purged (a Saturday cron only
-collects unreferenced layers), so a pinned digest stays pullable after the
-tag has moved on — with the stated caveat that purging is a policy they could
-adopt if the registry ran out of space. If a pinned digest ever 404s, the fix
-is to bump it, not to drop the pin.
+say untagged manifests are not purged, but in practice they are: the digest
+pinned on 2026-09-25 returned 404 by 2026-09-30, failing the v2.5.0 image
+publish. Expect the pin to go stale within days, so a tor image build from
+an older commit will fail until it is re-pinned. The fix is to bump the pin
+(`build/base-image-digest.sh
+containers.torproject.org/tpo/onion-services/onimages/tor:trixie`), not to
+drop it. Shipped images are unaffected: they are self-contained in GHCR.
 
 Before Onimages 0.3.0 (2026-09-24) the images were amd64-only, which on Apple
 Silicon meant QEMU emulation for the whole Tor stack; that is why this image

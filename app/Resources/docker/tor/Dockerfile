@@ -34,15 +34,15 @@
 # `docker buildx imagetools inspect <tag>` or build/base-image-digest.sh
 # reports), not a per-platform manifest digest — the latter resolves on amd64
 # and 404s on the arm64 runner. The Onimages tags themselves move every day;
-# only the digest names one specific build. containers.torproject.org keeps
-# untagged manifests (the Tor sysadmins' cron only collects unreferenced
-# layers), so a pinned digest stays pullable after the tag moves on. See
-# docs/BUILDING.md, "Bumping a pinned input".
+# only the digest names one specific build. Old digests do NOT stay
+# pullable: a digest pinned on 2026-09-25 was 404 by 2026-09-30. When the
+# build fails with "not found" on this line, re-pin with
+# build/base-image-digest.sh. See docs/BUILDING.md, "Bumping a pinned input".
 #
 # ARGs used in FROM lines must be declared before the first FROM (global
 # scope) and re-declared inside any stage that needs them.
 
-ARG TOR_IMAGE=containers.torproject.org/tpo/onion-services/onimages/tor:trixie@sha256:636dc5d7ea28675f8bd4d9a1fe561a371f94e54250dad73ecc4825194283df6a
+ARG TOR_IMAGE=containers.torproject.org/tpo/onion-services/onimages/tor:trixie@sha256:6b0c5c913c06f2f60c4a5fc9304df6a37299834788973e48e369eab20b4efaa9
 ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:9f36dfce2d1fd053d700a4eca00c358df79bf7d8cb69d4a9e8d9981af18834ea
 
 # Stage 1: Build mkp224o for vanity .onion address generation. Lives in this
