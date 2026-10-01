@@ -172,6 +172,8 @@ export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+# Also where Colima's own `docker context` create/use/rm calls land: never
+# the user's ~/.docker (see launcher.sh).
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
 export TZ="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo UTC)"
 
@@ -545,6 +547,7 @@ detect_container_runtime() {
                     docker compose down >> "$LOG_FILE" 2>&1 || true
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                     "$BIN_DIR/colima" start \
+                        --activate=false \
                         --mount "$DATA_DIR/shared:w" \
                         $(docs_mount_args) \
                         --cpu "$_cfg_cpu" \
@@ -573,6 +576,7 @@ detect_container_runtime() {
                 fi
 
                 "$BIN_DIR/colima" start \
+                    --activate=false \
                     --mount "$DATA_DIR/shared:w" \
                     $(docs_mount_args) \
                     --cpu "$_restart_cpu" \
@@ -1046,6 +1050,7 @@ install_docker() {
     if [ "$VM_ARCH" = "aarch64" ]; then
         # Apple Silicon: use VZ backend (Virtualization.framework)
         "$BIN_DIR/colima" start \
+            --activate=false \
             --vm-type vz \
             --mount-type virtiofs \
             --mount "$DATA_DIR/shared:w" \
@@ -1058,6 +1063,7 @@ install_docker() {
     else
         # Intel: use QEMU backend
         "$BIN_DIR/colima" start \
+            --activate=false \
             --vm-type qemu \
             --mount-type sshfs \
             --mount "$DATA_DIR/shared:w" \

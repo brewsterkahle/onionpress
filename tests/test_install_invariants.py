@@ -1346,6 +1346,114 @@ class TestKeyVolumeMigration(unittest.TestCase):
         self.assertIn('KEYS_DIR="/var/lib/onionpress-keys"', entrypoint)
         self.assertNotIn("/var/lib/arti", entrypoint)
 
+
+class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
+    """Colima (v0.8.1, environment/container/docker/context.go) drives the
+    host `docker` CLI: every start creates a "colima" context and, unless
+    started with --activate=false, makes it the current one; every stop or
+    delete runs `docker context rm --force colima`. All of it lands in
+    whichever DOCKER_CONFIG Colima inherits. launcher.sh never set one, so on
+    2026-09-30 ~/.docker had currentContext "colima" aimed at the live
+    OnionPress VM: the user's own `docker`, and the docker-backed tests with
+    it, ran against the live site. The same calls take over, and on stop
+    delete, a "colima" context that belongs to a Colima of the user's own.
+
+    Every Colima run therefore gets OnionPress's private DOCKER_CONFIG, and
+    every start also passes --activate=false. It has to be spelled with "=":
+    `--activate false` makes "false" the profile name, i.e. a second VM.
+    (`limactl start` in the restart path skips Colima's provisioning, so it
+    never touches a context.)
+    """
+
+    SHELL_LAUNCHERS = ["app/MacOS/launcher.sh", "app/MacOS/onionpress"]
+    PY_WRAPPER = "src/onionpress/colima.py"  # Colima._run prepends the binary
+    SHELL_START = re.compile(r'(?i)colima(_bin)?"? start\b')
+    SHELL_RUN = re.compile(
+        r'(?i)colima(_bin)?"? (start|stop|restart|delete|status|list|version)\b')
+
+    @staticmethod
+    def _shell_commands(text, pattern):
+        """(line index, command) for each non-comment line matching pattern,
+        joined with its backslash-continued lines."""
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines):
+            first, line = i, lines[i]
+            i += 1
+            if line.lstrip().startswith("#") or not pattern.search(line):
+                continue
+            cmd = [line]
+            while cmd[-1].rstrip().endswith("\\") and i < len(lines):
+                cmd.append(lines[i])
+                i += 1
+            yield first, "\n".join(cmd)
+
+    @classmethod
+    def _py_colima_starts(cls):
+        """(file, argv words) for each list literal under src/ that starts
+        Colima: [<colima binary>, "start", ...], or ["start", ...] in the
+        Colima wrapper."""
+        for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src")):
+            for name in sorted(names):
+                if not name.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), PROJECT_ROOT)
+                for node in ast.walk(ast.parse(_read(rel))):
+                    if not isinstance(node, ast.List) or not node.elts:
+                        continue
+                    words = [str(e.value) if isinstance(e, ast.Constant) else ast.unparse(e)
+                             for e in node.elts]
+                    if (rel == cls.PY_WRAPPER and words[0] == "start") or (
+                            len(words) > 1 and "colima" in words[0].lower()
+                            and words[1] == "start"):
+                        yield rel, words
+
+    def test_every_colima_start_passes_activate_false(self):
+        for f in self.SHELL_LAUNCHERS:
+            starts = [cmd for _, cmd in self._shell_commands(_read(f), self.SHELL_START)]
+            with self.subTest(launcher=f):
+                self.assertTrue(starts, f"no colima start found in {f}; update this test")
+                for cmd in starts:
+                    self.assertIn("--activate=false", cmd.split(), cmd)
+        py_starts = list(self._py_colima_starts())
+        self.assertIn(self.PY_WRAPPER, {f for f, _ in py_starts},
+                      "Colima.start's argv not found; update this test")
+        for f, words in py_starts:
+            with self.subTest(file=f, argv=words[:2]):
+                self.assertIn("--activate=false", words)
+
+    def test_every_colima_run_gets_the_private_docker_config(self):
+        for f in self.SHELL_LAUNCHERS:
+            text = _read(f)
+            with self.subTest(launcher=f):
+                export = re.search(
+                    r'^export DOCKER_CONFIG="\$DATA_DIR/docker-config"$', text, re.M)
+                self.assertIsNotNone(
+                    export, "export DOCKER_CONFIG at top level, unconditionally")
+                runs = [n for n, _ in self._shell_commands(text, self.SHELL_RUN)]
+                self.assertTrue(runs, f"no colima call found in {f}; update this test")
+                self.assertLess(
+                    text[:export.start()].count("\n"), min(runs),
+                    "DOCKER_CONFIG must be exported before Colima first runs.")
+                self.assertEqual(
+                    len(re.findall(r"(?<![\w$])DOCKER_CONFIG=", text)), 1,
+                    "Nothing else may re-point DOCKER_CONFIG.")
+                self.assertNotRegex(text, r"\bunset\b[^\n]*\bDOCKER_CONFIG\b")
+
+        wrapper = _read(self.PY_WRAPPER)
+        run = next(n for n in ast.walk(ast.parse(wrapper))
+                   if isinstance(n, ast.FunctionDef) and n.name == "_run")
+        self.assertIn('env["DOCKER_CONFIG"] = self.paths.docker_config_dir',
+                      ast.get_source_segment(wrapper, run))
+
+        # The MenubarApp builds every colima env from os.environ (its stop and
+        # delete would remove a "colima" context too), so it must set it first.
+        menubar = _read("src/menubar.py")
+        self.assertLess(
+            menubar.index('os.environ["DOCKER_CONFIG"] = docker_config_dir'),
+            min(menubar.index(s) for s in ("stop_stale_colima(", "[colima_bin,")))
+
+
 if __name__ == "__main__":
     unittest.main()
 
