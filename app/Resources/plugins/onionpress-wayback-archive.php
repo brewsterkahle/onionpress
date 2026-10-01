@@ -9,7 +9,7 @@
  *              no back-off chain — a failed submit is simply retried on a
  *              later tick. Two global gates throttle the whole sweep:
  *              (1) self-reachability of our onion, (2) SPN account slots.
- * Version:     4.0
+ * Version:     4.1
  * Network:     true
  */
 
@@ -97,6 +97,12 @@ define( 'OP_WB_META_RESNAPSHOT_DONE',  '_op_wayback_resnapshot_done' );
 define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
 define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
 define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
+// 'yes' keeps a subsite out of the Wayback Machine entirely: the sweep
+// never visits it, the queue totals leave it out, and it never schedules
+// a sweep of its own. The integration tests create their sandbox subsites
+// with it — on 2026-09-30 a live install's sweep submitted those sandboxes
+// to the public Wayback Machine.
+define( 'OP_WB_OPT_EXCLUDE',       'op_wayback_exclude' );
 
 // ─────────────────────────── logging + helpers ──────────────────────
 
@@ -123,6 +129,13 @@ function onionpress_wayback_auth_header() {
 }
 
 function onionpress_wayback_onion_addr() {
+    // Test hook: return a string to stand in for the address file. A test
+    // target must not have that file — it is what lets the live sweep
+    // build a URL at all.
+    $mock = apply_filters( 'onionpress_wayback_onion_addr_mock', null );
+    if ( $mock !== null ) {
+        return (string) $mock;
+    }
     $f = '/var/lib/onionpress/onion_address';
     if ( ! file_exists( $f ) ) {
         return '';
@@ -697,6 +710,40 @@ function onionpress_wayback_sitewide_records() {
     return $records;
 }
 
+// ──────────────────────────── sites ─────────────────────────────────
+
+/**
+ * True if this subsite is kept out of the Wayback Machine
+ * (OP_WB_OPT_EXCLUDE). The filter lets one process see an excluded
+ * sandbox as included — the queue-totals test does — without the live
+ * sweep ever seeing it that way.
+ */
+function onionpress_wayback_site_excluded( $blog_id ) {
+    $value = function_exists( 'get_blog_option' )
+        ? get_blog_option( $blog_id, OP_WB_OPT_EXCLUDE, '' )
+        : get_option( OP_WB_OPT_EXCLUDE, '' );
+    return (bool) apply_filters( 'onionpress_wayback_site_excluded', $value === 'yes', (int) $blog_id );
+}
+
+/**
+ * The subsites the sweep works on: every site in the network except the
+ * excluded ones. The queue totals count the same set.
+ */
+function onionpress_wayback_sites() {
+    $sites = function_exists( 'get_sites' ) ? get_sites() : array();
+    if ( empty( $sites ) ) {
+        // Not multisite — fall back to single-site check.
+        $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
+    }
+    $out = array();
+    foreach ( $sites as $site ) {
+        if ( ! onionpress_wayback_site_excluded( (int) $site->blog_id ) ) {
+            $out[] = $site;
+        }
+    }
+    return $out;
+}
+
 // ──────────────────────────── sweep ─────────────────────────────────
 
 /**
@@ -753,17 +800,14 @@ function onionpress_wayback_sweep() {
 }
 
 /**
- * Sum queue totals across every subsite in the network. Returns an
- * array with 'archived', 'in_flight', 'remaining', and 'total' post
- * counts (counting publish posts + pages only).
+ * Sum queue totals across every subsite the sweep works on (excluded
+ * subsites are left out). Returns an array with 'archived', 'in_flight',
+ * 'remaining', and 'total' post counts (counting publish posts + pages
+ * only).
  */
 function onionpress_wayback_queue_totals() {
     $out = array( 'archived' => 0, 'in_flight' => 0, 'remaining' => 0, 'total' => 0 );
-    $sites = function_exists( 'get_sites' ) ? get_sites() : array();
-    if ( empty( $sites ) ) {
-        $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
-    }
-    foreach ( $sites as $site ) {
+    foreach ( onionpress_wayback_sites() as $site ) {
         $bid = (int) $site->blog_id;
         if ( function_exists( 'switch_to_blog' ) ) switch_to_blog( $bid );
         try {
@@ -813,18 +857,13 @@ function onionpress_wayback_sweep_loop( $token ) {
         }
         update_option( $lock_key, $token . ':' . time(), false );
 
-        // Visit every subsite in the network. The daemon may have been
-        // invoked from any site's cron; we need to do work on whichever
-        // subsite actually has unarchived posts. Skip subsites whose
-        // queue is fully drained — they exit the iteration for free.
-        $sites = function_exists( 'get_sites' ) ? get_sites() : array();
-        if ( empty( $sites ) ) {
-            // Not multisite — fall back to single-site check.
-            $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
-        }
-
+        // Visit every subsite in the network that isn't excluded. The
+        // daemon may have been invoked from any site's cron; we need to do
+        // work on whichever subsite actually has unarchived posts. Skip
+        // subsites whose queue is fully drained — they exit the iteration
+        // for free.
         $any_work = false;
-        foreach ( $sites as $site ) {
+        foreach ( onionpress_wayback_sites() as $site ) {
             $bid = (int) $site->blog_id;
             if ( function_exists( 'switch_to_blog' ) ) {
                 switch_to_blog( $bid );
@@ -1195,6 +1234,13 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         ) );
     }
 
+    // An excluded subsite never schedules a sweep: nothing on it is ever
+    // submitted, and a daemon started from its cron would only run
+    // alongside the network's own.
+    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
+        return;
+    }
+
     // Also clear any site-wide back-off so the immediate sweep runs.
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
 
@@ -1242,6 +1288,9 @@ add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
         'last_error_ext'  => '',
         'last_error_at'   => '',
     ) );
+    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
+        return; // never schedules a sweep — see save_post above
+    }
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
     wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
     onionpress_wayback_log( 'wp_insert_comment ' . $comment_id
@@ -1259,6 +1308,15 @@ add_filter( 'cron_schedules', function ( $schedules ) {
 } );
 
 add_action( 'init', function () {
+    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
+        // An excluded subsite never drives the sweep: drop any watchdog it
+        // scheduled before it was excluded.
+        if ( wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
+            wp_clear_scheduled_hook( 'onionpress_wayback_sweep' );
+        }
+        return;
+    }
+
     // (Re)schedule the sweep on the current watchdog schedule. Unschedule
     // any prior-schedule instances so we don't end up with two cron
     // entries for the same hook under different intervals.
@@ -1278,7 +1336,9 @@ add_action( 'init', function () {
     if ( ! wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
         wp_schedule_event( time(), 'onionpress_wayback_watchdog', 'onionpress_wayback_sweep' );
     }
+} );
 
+add_action( 'init', function () {
     // One-time v3 → v4 migration: drop the retry-machine postmeta we no
     // longer use. Preserve archived_at + snapshot_ts (the only real
     // outcome record) and job_id (active in-flight work).
