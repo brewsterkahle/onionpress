@@ -4,10 +4,11 @@
 These drive the live plugin inside the onionpress-wordpress container
 via `wp eval`, using the mock filter hooks we added to short-circuit
 every network-touching function (user_status, submit, poll, cdx,
-self_reachable) — no real Tor/SPN traffic.
+self_reachable) — no real Tor/SPN traffic — and the onion address.
 
 Coverage focus: behaviors that are easy to break during refactors.
-  1. Queue totals aggregate across every subsite in the network.
+  1. Queue totals aggregate across the subsites the sweep works on,
+     leaving excluded ones out.
   2. CDX rescue: SPN flips success->error, CDX still has a capture;
      the post must end up archived via the CDX timestamp, not errored.
   3. Young-job skip: a job submitted in the last 15s must NOT be
@@ -15,82 +16,58 @@ Coverage focus: behaviors that are easy to break during refactors.
   4. Submit path: a fresh post with no job_id gets one, with a
      matching submitted_at, on a successful submit.
   5. Lock mutex: a fresh lock blocks a second sweep invocation.
+  6. Exclusion: the sweep never visits an excluded subsite, and
+     publishing on one schedules no sweep.
 
-Prerequisites (skips the suite if any fails):
-  - Docker running
-  - `onionpress-wordpress` container up with the wayback plugin
-    present in mu-plugins/
-  - At least one subsite to target
+Sandbox safety: everything runs on a dedicated subsite
+(`op-wayback-test`) that each class creates afresh, excluded from the
+sweep, and deletes when it finishes. Earlier versions took the first
+non-root subsite — on a live install, the owner's real blog — and
+published and force-deleted posts there and deleted its live sweep lock
+and back-off. The lock and back-off this suite touches are the
+sandbox's own options. The onion address comes from a mock, because the
+target must not have one: wp_integration.py refuses a container with
+/var/lib/onionpress/onion_address.
+
+Opt-in: skipped unless ONIONPRESS_INTEGRATION_TESTS=1, and refused on a
+live install — see wp_integration.py. Needs the plugin from this
+checkout in mu-plugins/; a plugin without the sweep exclusion is
+refused before the sandbox is created.
 """
 
 import json
-import shutil
-import subprocess
+import os
+import sys
 import time
 import unittest
 
-_WP = "onionpress-wordpress"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wp_integration  # noqa: E402
+
+_wp = wp_integration.wp
+_eval = wp_integration.wp_eval
+
+_TEST_SUBSITE_SLUG = "op-wayback-test"
+
+# Stands in for the onion address file the target must not have.
+_MOCK_ONION = "wayback-test-sandbox.onion"
 
 
-def _docker_exec(args, **kwargs):
-    return subprocess.run(
-        ["docker", "exec", _WP] + args,
-        capture_output=True, text=True, encoding='utf-8',
-        errors='replace', **kwargs,
-    )
+class _WaybackSandbox(wp_integration.SandboxTestCase):
+    SANDBOX_SLUG = _TEST_SUBSITE_SLUG
+    SANDBOX_TITLE = "Wayback Sweep Test Sandbox"
+    # The exclusion is what keeps the sandbox out of the live sweep.
+    REQUIRED_PHP_FUNCTIONS = ("onionpress_wayback_site_excluded",
+                              "onionpress_wayback_sites")
 
 
-def _wp(args, url=None, **kwargs):
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
-    if url:
-        cmd.append("--url=" + url)
-    return _docker_exec(cmd, **kwargs)
+class TestWaybackQueueTotals(_WaybackSandbox):
+    """Queue totals aggregate across the subsites the sweep works on."""
 
-
-def _docker_available():
-    if not shutil.which("docker"):
-        return False
-    r = subprocess.run(
-        ["docker", "inspect", _WP, "--format={{.State.Running}}"],
-        capture_output=True, text=True, timeout=10,
-    )
-    return r.returncode == 0 and "true" in r.stdout
-
-
-def _pick_site():
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    sites = json.loads(r.stdout)
-    sub = [s for s in sites if s.get("path") != "/"]
-    return sub[0] if sub else (sites[0] if sites else None)
-
-
-def _eval(php, url):
-    """Run PHP inside WP, return stdout (stripped)."""
-    r = _wp(["eval", php], url=url, timeout=90)
-    return r.stdout.strip()
-
-
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestWaybackQueueTotals(unittest.TestCase):
-    """Queue totals aggregate correctly across every subsite."""
-
-    @classmethod
-    def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
-
-    def test_totals_structure_and_aggregate(self):
+    def test_totals_structure(self):
         """Totals come back as expected, with the remaining invariant holding."""
-        php = """
-        $t = onionpress_wayback_queue_totals();
-        echo json_encode($t);
-        """
-        out = _eval(php, self.url)
+        out = _eval("echo json_encode(onionpress_wayback_queue_totals());",
+                    self.url)
         totals = json.loads(out)
         for k in ("archived", "in_flight", "remaining", "total"):
             self.assertIn(k, totals, f"missing key: {k}")
@@ -100,29 +77,81 @@ class TestWaybackQueueTotals(unittest.TestCase):
             totals["remaining"],
             max(0, totals["total"] - totals["archived"] - totals["in_flight"]),
         )
-        # Aggregated total must be >= this subsite alone.
-        php_one = """
+
+    def test_excluded_subsite_is_left_out(self):
+        """The sandbox's posts don't count while it is excluded. Seen as
+        included — through the filter, in this process only — they add
+        exactly this subsite's count to the aggregate."""
+        _wp(["post", "create", "--post_type=post", "--post_status=publish",
+             "--post_title=wayback-test-totals", "--porcelain"],
+            url=self.url, timeout=15)
+        php = """
         global $wpdb;
-        echo (int) $wpdb->get_var(
+        $mine = (int) $wpdb->get_var(
             "SELECT COUNT(*) FROM $wpdb->posts WHERE post_status='publish' "
             . "AND post_type IN ('post','page')"
         );
+        $bid = get_current_blog_id();
+        $excluded = onionpress_wayback_queue_totals();
+        add_filter('onionpress_wayback_site_excluded',
+                   function($ex, $id) use ($bid) { return $id === $bid ? false : $ex; }, 10, 2);
+        $included = onionpress_wayback_queue_totals();
+        echo json_encode(array(
+            'mine'     => $mine,
+            'excluded' => $excluded['total'],
+            'included' => $included['total'],
+        ));
         """
-        one = int(_eval(php_one, self.url))
-        self.assertGreaterEqual(totals["total"], one,
-            f"aggregated total {totals['total']} < this subsite's {one}")
+        out = json.loads(_eval(php, self.url))
+        self.assertGreater(out["mine"], 0)
+        self.assertEqual(out["included"] - out["excluded"], out["mine"],
+            f"aggregate should gain exactly this subsite's posts: {out}")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestWaybackSweepIteration(unittest.TestCase):
+class TestWaybackSandboxExclusion(_WaybackSandbox):
+    """An excluded subsite is out of the sweep's reach — never visited,
+    never scheduling a sweep of its own. This is what keeps a sandbox
+    out of the public Wayback Machine on a stack that could submit."""
+
+    def test_sweep_never_visits_it(self):
+        php = """
+        $swept = array_map(function($s) { return (int) $s->blog_id; },
+                           onionpress_wayback_sites());
+        echo json_encode(array(
+            'excluded' => onionpress_wayback_site_excluded(get_current_blog_id()),
+            'swept'    => in_array(get_current_blog_id(), $swept, true),
+            'main'     => in_array((int) get_main_site_id(), $swept, true),
+        ));
+        """
+        out = json.loads(_eval(php, self.url))
+        self.assertTrue(out["excluded"], "the sandbox was created excluded")
+        self.assertFalse(out["swept"], "the sweep must skip an excluded subsite")
+        self.assertTrue(out["main"], "exclusion must not reach the network root")
+
+    def test_publishing_schedules_no_sweep(self):
+        """save_post and wp_insert_comment leave the subsite's cron
+        without a sweep, so it never starts a daemon of its own."""
+        php = """
+        $pid = wp_insert_post(array(
+            'post_type'=>'post','post_status'=>'publish',
+            'post_title'=>'wayback-test-schedule','post_content'=>'<p>x</p>',
+            'meta_input'=>array(
+                '_source_id'=>'mastodon:wbsched-' . time(),
+                '_op_wayback_archived_at'=>'2026-04-01 12:00:00',
+            ),
+        ));
+        wp_insert_comment(array(
+            'comment_post_ID'=>$pid,
+            'comment_content'=>'<p>thread reply</p>',
+            'comment_approved'=>1,
+        ));
+        echo wp_next_scheduled('onionpress_wayback_sweep') ? 'scheduled' : 'none';
+        """
+        self.assertEqual(_eval(php, self.url), "none")
+
+
+class TestWaybackSweepIteration(_WaybackSandbox):
     """Sweep iteration behavior with mocked network functions."""
-
-    @classmethod
-    def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
         _wp(["option", "delete", "op_wayback_backoff_until"],
@@ -147,9 +176,11 @@ class TestWaybackSweepIteration(unittest.TestCase):
         return r.stdout.strip()
 
     def _common_mocks(self, available=40):
-        """Short-circuit reachability + user_status so the iteration
-        reaches the poll/submit phases."""
+        """Short-circuit the onion address, reachability + user_status so
+        the iteration reaches the poll/submit phases."""
         return f"""
+        add_filter('onionpress_wayback_onion_addr_mock',
+                   function() {{ return '{_MOCK_ONION}'; }});
         add_filter('onionpress_wayback_self_reachable_mock',
                    function() {{ return true; }});
         add_filter('onionpress_wayback_user_status_mock',
@@ -241,16 +272,8 @@ class TestWaybackSweepIteration(unittest.TestCase):
         self.assertGreater(int(submitted_at), int(time.time()) - 60)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestWaybackSweepLock(unittest.TestCase):
+class TestWaybackSweepLock(_WaybackSandbox):
     """Token-lock mutex semantics for the sweep entry point."""
-
-    @classmethod
-    def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
 
     def setUp(self):
         _wp(["option", "delete", "op_wayback_sweep_lock"],
@@ -281,19 +304,11 @@ class TestWaybackSweepLock(unittest.TestCase):
             f"lock should still belong to otherTok: {out}")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestWaybackCommentResnapshot(unittest.TestCase):
+class TestWaybackCommentResnapshot(_WaybackSandbox):
     """`wp_insert_comment` triggers exactly one re-archive of the parent
     post — and only for imported posts that already have a snapshot.
     Caps the social-importer-threading SPN cost at one extra snapshot
     per parent (instead of one per comment)."""
-
-    @classmethod
-    def setUpClass(cls):
-        s = _pick_site()
-        if s is None:
-            raise unittest.SkipTest("no site available")
-        cls.url = s["url"].rstrip("/") + "/"
 
     def _make_imported_post(self, archived=True):
         """Insert a publish-state imported post with the wayback metadata

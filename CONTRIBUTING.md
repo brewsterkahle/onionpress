@@ -87,6 +87,12 @@ pytest tests/                                        # if installed
 
 CI runs the same tests on every PR; broken tests block merge.
 
+The Bluesky, Mastodon, Twitter and Wayback integration suites are skipped
+unless `ONIONPRESS_INTEGRATION_TESTS=1` is set. They write to whatever
+`onionpress-wordpress` container `docker` reaches and refuse to run against
+a live install; see [Integration tests](docs/BUILDING.md#integration-tests)
+for what to run them against.
+
 ## Code style
 
 - **Default to no comments.** The codebase generally avoids comments that
