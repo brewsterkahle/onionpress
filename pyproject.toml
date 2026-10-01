@@ -10,3 +10,13 @@
 name = "onionpress-dev"
 version = "0"
 requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+# Put src/ on the import path so `from onionpress import ...` resolves.
+# Nothing else does: the package is never pip-installed for the tests, and
+# there is no conftest.py to fix it up. Without this, any test that imports
+# the package dies at COLLECTION with ModuleNotFoundError, which reads as a
+# broken checkout rather than a missing path — and the suites that shell out
+# to wp-cli instead of importing never notice, so the gap stays hidden until
+# someone runs the other half from a clean shell.
+pythonpath = ["src"]

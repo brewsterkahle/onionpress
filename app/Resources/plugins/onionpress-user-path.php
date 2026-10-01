@@ -20,9 +20,11 @@ if ( ! defined( 'ABSPATH' ) ) {
  * parse_request time so WP's normal template hierarchy takes over — no
  * extra redirect, no custom template.
  *
- * Priority 30 so this runs AFTER onionpress-directory (priority 10 default),
- * which on OnionHome may 302-redirect away for remote names before we even
- * get a chance to look at the path.
+ * Priority 30 on parse_request, which is also where onionpress-directory's
+ * /follow?name= handling runs. The /NAME[/REST] name dispatch now lives on
+ * template_redirect instead (after is_404() — it only ever fires once WP
+ * has failed to find anything of its own), so a local user login served
+ * from this hook always wins over a remote name with the same slug.
  */
 add_action( 'parse_request', function ( $wp ) {
     // Only run on the network-root blog (blog_id=1). On real subsites

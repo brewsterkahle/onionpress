@@ -334,6 +334,50 @@ def signal_watchdog(docker, container: str, sig: str) -> bool:
     return bool(getattr(result, "ok", False))
 
 
+def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int]:
+    """Read the host port our own WordPress container actually published.
+
+    `detect_port_offset()` binds candidate ports to find one that's free —
+    correct for allocation at first launch, wrong as a runtime lookup: once
+    a stack is up, its ports are bound (by the stack itself), so the bind
+    test always fails and reports "in use", concluding nothing about which
+    port was actually chosen. Reading `docker port` instead asks the one
+    source that's authoritative once a stack exists — the mapping Docker
+    already made — for both the "still on our own port" case and the "came
+    up on a different offset than last time" case (stop/start races where
+    the old offset's forwards are still bound when the new ones come up).
+
+    Returns None if the container isn't running or isn't ours to read
+    (multi-user machines: this only ever inspects a container name, never
+    another user's — Docker containers are per-user via the docker socket
+    each user's Colima VM exposes, so there is no cross-user leakage here).
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "port", container, "80"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # Expected output: "0.0.0.0:8080" or "127.0.0.1:8080" (one line per
+    # bound address; take the first).
+    first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    if ":" not in first_line:
+        return None
+    port_str = first_line.rsplit(":", 1)[-1]
+    if not port_str.isdigit():
+        return None
+    port = int(port_str)
+    # Offsets are 8080 + k*10000, so nothing we allocate is ever below
+    # 8080 — a lower published port belongs to something else entirely
+    # (e.g. a hand-edited port mapping).
+    if port < 8080:
+        return None
+    return port
+
+
 def get_admin_password(data_dir: str) -> Optional[str]:
     """Read the auto-generated WP admin password (`~/.onionpress/wp-admin-password`).
 

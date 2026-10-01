@@ -15,6 +15,7 @@ import socket
 import subprocess
 from dataclasses import dataclass
 
+from . import launcher_ops
 from .platform import OnionPressPaths
 
 # Default config values matching config-template.txt
@@ -300,6 +301,17 @@ class PortConfig:
     socks_port: int
     proxy_port: int
 
+    @classmethod
+    def from_offset(cls, offset: int) -> "PortConfig":
+        """Build the port triple from an offset — the one place 8080/9050/9077
+        get added to it, so the three ports can't drift apart across callers."""
+        return cls(
+            offset=offset,
+            wp_port=8080 + offset,
+            socks_port=9050 + offset,
+            proxy_port=9077 + offset,
+        )
+
 
 def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str) -> None:
     """Stop an orphaned Colima VM left over from a crash or force-quit.
@@ -360,23 +372,16 @@ def detect_port_offset() -> PortConfig:
     """
     offset = 0
     while True:
-        ports = (8080 + offset, 9050 + offset, 9077 + offset)
-        if max(ports) > 65535:
-            offset = 0  # fall back to default
-            break
+        pc = PortConfig.from_offset(offset)
+        if max(pc.wp_port, pc.socks_port, pc.proxy_port) > 65535:
+            return PortConfig.from_offset(0)  # fall back to default
         all_free = True
-        for p in ports:
+        for p in (pc.wp_port, pc.socks_port, pc.proxy_port):
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             except OSError:
                 # Can't even create a socket — give up
-                offset = 0
-                return PortConfig(
-                    offset=offset,
-                    wp_port=8080 + offset,
-                    socks_port=9050 + offset,
-                    proxy_port=9077 + offset,
-                )
+                return PortConfig.from_offset(0)
             try:
                 s.bind(("127.0.0.1", p))
             except OSError:
@@ -385,12 +390,28 @@ def detect_port_offset() -> PortConfig:
                 break
             s.close()
         if all_free:
-            break
+            return pc
         offset += 10000
 
-    return PortConfig(
-        offset=offset,
-        wp_port=8080 + offset,
-        socks_port=9050 + offset,
-        proxy_port=9077 + offset,
-    )
+
+def resolve_port_offset() -> PortConfig:
+    """Return the port offset our own stack is actually using.
+
+    detect_port_offset() allocates: it binds candidate ports and returns
+    the first free one, which is correct before anything is running. Once
+    our WordPress container is up, its ports are bound (by the container
+    itself), so a fresh bind test just reports "in use" without saying
+    which port that is — including the mundane case where the caller is
+    asking about the very stack it's part of.
+
+    Read the running container's published port first (authoritative —
+    Docker already made this mapping) and only fall back to allocation
+    when nothing is running yet. Callers that need the multi-user
+    allocation behavior with no risk of misreading a foreign container
+    (e.g. a first-launch check before anything of ours exists) should call
+    detect_port_offset() directly instead.
+    """
+    running_port = launcher_ops.get_running_wp_port()
+    if running_port is not None:
+        return PortConfig.from_offset(running_port - 8080)
+    return detect_port_offset()

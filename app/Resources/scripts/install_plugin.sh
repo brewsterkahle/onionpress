@@ -40,9 +40,22 @@ fi
 # onionheaven first: onionpress-tor is also publishing the user's onion
 # service, so bulk fetches belong on the other daemon. Never fall back to a
 # direct connection — no Tor means no download.
+#
+# --speed-limit/--speed-time is what makes the fallback worth having. A Tor
+# circuit can go silent without closing: the SOCKS handshake is local and
+# instant, so curl holds a live connection with nothing coming down it, and
+# --max-time alone cannot tell that apart from a genuinely slow download. On
+# 2026-08-22 that cost five minutes of a first-run install — onionheaven
+# accepted the Cache Enabler request, delivered 0 bytes for the full 300s, and
+# only then did onionpress-tor fetch the same file in two seconds. Aborting
+# below 1 KB/s for 30s catches the stall while leaving a slow-but-moving
+# download alone; measured first-byte through either proxy is ~3s, so 30s is
+# roughly 10x headroom. --max-time stays as the outer bound for a download
+# that crawls the whole way.
 downloaded=0
 for proxy in onionheaven onionpress-tor; do
     if docker exec "$CONTAINER" curl -sSL -f --max-time 300 \
+            --speed-limit 1024 --speed-time 30 \
             --socks5-hostname "${proxy}:9050" \
             -o "$REMOTE_ZIP" "$PLUGIN_URL" 2>&1; then
         downloaded=1
