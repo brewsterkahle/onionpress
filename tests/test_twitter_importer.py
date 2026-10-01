@@ -10,43 +10,26 @@ fold into the parent post's comment thread, and the migration
 re-threads pre-threading installs.
 
 Sandbox safety: a dedicated test subsite (`op-twitter-test`) is
-created on first use. Tests refuse to run if any other Twitter
-options on the subsite look like real config — same load-bearing
-guard as the Mastodon and Bluesky test files.
+created afresh for each class and deleted when it finishes. Tests
+refuse to run if any other Twitter options on the subsite look like
+real config — same load-bearing guard as the Mastodon and Bluesky test
+files.
+
+Opt-in: skipped unless ONIONPRESS_INTEGRATION_TESTS=1, and refused on a
+live install — see wp_integration.py.
 """
 
 import json
-import shutil
-import subprocess
+import os
+import sys
 import unittest
 import uuid
 
-_WP = "onionpress-wordpress"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wp_integration  # noqa: E402
 
-
-def _docker_exec(args, **kwargs):
-    return subprocess.run(
-        ["docker", "exec", _WP] + args,
-        capture_output=True, text=True, encoding='utf-8',
-        errors='replace', **kwargs,
-    )
-
-
-def _wp(args, url=None, **kwargs):
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
-    if url:
-        cmd.append("--url=" + url)
-    return _docker_exec(cmd, **kwargs)
-
-
-def _docker_available():
-    if not shutil.which("docker"):
-        return False
-    r = subprocess.run(
-        ["docker", "inspect", _WP, "--format={{.State.Running}}"],
-        capture_output=True, text=True, timeout=10,
-    )
-    return r.returncode == 0 and "true" in r.stdout
+_wp = wp_integration.wp
+_eval = wp_integration.wp_eval
 
 
 _SAFE_TEST_HANDLE  = "test_twitter_user"
@@ -60,37 +43,9 @@ _TOUCHED_OPTIONS = (
 )
 
 
-def _get_or_create_test_subsite():
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    sites = json.loads(r.stdout)
-    needle = "/" + _TEST_SUBSITE_SLUG + "/"
-    for s in sites:
-        if s.get("path") == needle:
-            return s["url"].rstrip("/") + "/"
-    create = _wp(
-        ["site", "create",
-         "--slug=" + _TEST_SUBSITE_SLUG,
-         "--title=Twitter Importer Test Sandbox",
-         "--porcelain"],
-        timeout=30,
-    )
-    if create.returncode != 0:
-        return None
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    sites = json.loads(r.stdout) if r.stdout.strip() else []
-    for s in sites:
-        if s.get("path") == needle:
-            return s["url"].rstrip("/") + "/"
-    return None
-
-
-def _eval(php, url):
-    r = _wp(["eval", php], url=url, timeout=90)
-    return r.stdout.strip()
+class _TwitterSandbox(wp_integration.SandboxTestCase):
+    SANDBOX_SLUG = _TEST_SUBSITE_SLUG
+    SANDBOX_TITLE = "Twitter Importer Test Sandbox"
 
 
 def _assert_test_sandbox(url):
@@ -162,16 +117,8 @@ def _tweet(id_str, created="Wed Apr 23 00:00:00 +0000 2026",
     return t
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestTwitterThreading(unittest.TestCase):
+class TestTwitterThreading(_TwitterSandbox):
     """Self-replies thread as comments on the parent post."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
