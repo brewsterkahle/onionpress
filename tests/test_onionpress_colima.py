@@ -160,6 +160,20 @@ class TestColimaStart(unittest.TestCase):
         self.assertNotIn("--vm-type", args)
         os.unlink("/tmp/colima_test_args2")
 
+    def test_start_keeps_colima_out_of_the_users_docker_config(self):
+        # Colima's `docker context` calls edit the DOCKER_CONFIG it inherits.
+        out = os.path.join(self.tmpdir, "colima_call")
+        _write_script(
+            os.path.join(self.paths.bin_dir, "colima"),
+            f'#!/bin/bash\nprintf "%s\\n%s\\n" "$DOCKER_CONFIG" "$*" > "{out}"\n',
+        )
+        with mock.patch.dict(os.environ, {"DOCKER_CONFIG": "/Users/someone/.docker"}):
+            Colima(self.paths).start(memory=1, cpu=2)
+        with open(out) as f:
+            docker_config, args = f.read().splitlines()
+        self.assertEqual(docker_config, self.paths.docker_config_dir)
+        self.assertIn("--activate=false", args.split())
+
 
 class TestColimaStop(unittest.TestCase):
     def setUp(self):

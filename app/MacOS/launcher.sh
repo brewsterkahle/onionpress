@@ -95,6 +95,12 @@ export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+# Colima drives the host `docker` CLI: every start creates a "colima" context,
+# switches to it unless --activate=false, and every stop removes it again —
+# in whichever DOCKER_CONFIG it inherits. Hand it our own so the user's
+# ~/.docker (and any "colima" context of their own) is never touched.
+USER_DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
+export DOCKER_CONFIG="$DATA_DIR/docker-config"
 
 # Log file — daily rotation matching RotatingLog format (launcher-YYYY-MM-DD-001.log)
 LOGS_DIR="$DATA_DIR/logs"
@@ -124,6 +130,13 @@ log() {
 }
 
 log "Starting onionpress launcher..."
+
+# Releases through 2.5.1 ran Colima from here without DOCKER_CONFIG, leaving a
+# context in the user's Docker config aimed at our VM, made current. That
+# config is theirs to change; only say so.
+if grep -qsF "unix://$COLIMA_HOME/default/docker.sock" "$USER_DOCKER_CONFIG"/contexts/meta/*/meta.json; then
+    log "NOTE: $USER_DOCKER_CONFIG has a Docker context pointing at OnionPress's VM, left by OnionPress <= 2.5.1 — OnionPress leaves it alone; see 'docker context ls'"
+fi
 
 # Detect architecture (use sysctl to get actual hardware, not process architecture)
 # This is important because shell scripts may run under Rosetta on Apple Silicon
@@ -221,6 +234,7 @@ initialize_colima() {
         if [ "$HOST_ARCH" = "arm64" ]; then
             # Apple Silicon: use VZ backend (Virtualization.framework)
             "$BIN_DIR/colima" start \
+                --activate=false \
                 --vm-type vz \
                 --mount-type virtiofs \
                 --mount "$DATA_DIR/shared:w" \
@@ -234,6 +248,7 @@ initialize_colima() {
         else
             # Intel: use QEMU backend
             "$BIN_DIR/colima" start \
+                --activate=false \
                 --vm-type qemu \
                 --mount-type sshfs \
                 --mount "$DATA_DIR/shared:w" \
@@ -274,6 +289,7 @@ initialize_colima() {
         fi
         log "Starting Colima VM..."
         "$BIN_DIR/colima" start \
+            --activate=false \
             --mount "$DATA_DIR/shared:w" \
             $(docs_mount_args) \
             --memory "$vm_mem" \

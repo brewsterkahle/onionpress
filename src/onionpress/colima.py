@@ -49,6 +49,9 @@ class Colima:
         env["COLIMA_HOME"] = self.paths.colima_home
         env["LIMA_HOME"] = os.path.join(self.paths.colima_home, "_lima")
         env["LIMA_INSTANCE"] = "onionpress"
+        # Colima's `docker context` create/use/rm calls edit whichever
+        # config they inherit: make it ours, never the user's ~/.docker.
+        env["DOCKER_CONFIG"] = self.paths.docker_config_dir
         if self.paths.bin_dir:
             env["PATH"] = f"{self.paths.bin_dir}:{env.get('PATH', '')}"
         return subprocess.run(
@@ -103,6 +106,7 @@ class Colima:
 
         args = [
             "start",
+            "--activate=false",
             "--mount", f"{self.paths.shared_dir}:w",
             "--cpu", str(cpu),
             "--memory", str(memory),
