@@ -31,6 +31,7 @@ Those are called out per component.
 - [Building the container images](#building-the-container-images)
 - [Pinned inputs](#pinned-inputs)
 - [Running the stack you just built](#running-the-stack-you-just-built)
+- [Integration tests](#integration-tests)
 - [Generated assets](#generated-assets)
 - [Quick reference](#quick-reference)
 
@@ -50,6 +51,7 @@ make doctor        # which build tools you have, and what each missing one costs
 | browser extensions | `make extension` | any | — |
 | app icons | `make icons` | **macOS** | — |
 | unit tests | `make test-unit` | any | — |
+| integration tests | see [Integration tests](#integration-tests) | any — **never a machine that runs OnionPress** | — |
 | source layout + pin check | `make test` | any | — |
 
 `make deb` and `make extension` need no network at all. The `.dmg` is
@@ -71,6 +73,7 @@ about. So you know what you are trusting:
 | `AppIcon.icns`, `app-icon.png` | byte-identical to the committed files |
 | menubar PNGs | `running`, `starting` pixel-identical; `stopped` within 2/255 (see [Generated assets](#generated-assets)) |
 | extensions | byte-reproducible across runs |
+| integration tests | all four suites (81 tests) pass against a disposable stack set up as in [What to run them against](#what-to-run-them-against) — image entrypoint, the minute's wait, no tor — on GitHub-hosted runners in a fork (`ivar/onionpress`, run 36817968776), in about 9 min, leaving only the root site behind; the suites as they were before the guard left three sandbox subsites (run 36817057114). With `/var/lib/onionpress/onion_address` in the container, or one extra subsite, the guard refused before creating anything |
 | `docker-publish.yml` | ran end to end in a fork (`ivar/onionpress`, run 36064530531, 2026-09-24, on the C Tor-only image) on GitHub-hosted runners only — amd64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`. All three images published under the fork's own namespace as OCI indexes carrying `linux/amd64` and `linux/arm64`; the stress worker's `FROM` resolved to the tor index the same run had merged seconds earlier. 2 min 12 s end to end; tor 58 s (amd64) / 55 s (arm64). The previous run on the arti-compiling image (35479901478, 2026-09-20) took 8 min 50 s |
 
 One forward-looking note from the DMG log: on macOS 27 `hdiutil create`,
@@ -546,6 +549,72 @@ overrides.
 
 For the same reason `--down` never passes `-v`. Those volumes hold the
 database, the WordPress content and the onion service keys.
+
+---
+
+## Integration tests
+
+```bash
+ONIONPRESS_INTEGRATION_TESTS=1 python3 -m unittest \
+    tests.test_bluesky_importer tests.test_mastodon_importer \
+    tests.test_twitter_importer tests.test_wayback_sweep
+```
+
+These four suites drive the real mu-plugins inside `onionpress-wordpress`
+through `docker exec … wp`. They create subsites, publish and delete posts,
+and rewrite options in whichever container the host `docker` CLI reaches — on
+a machine that also runs OnionPress, the live site. On 2026-09-30 a plain
+`python -m unittest discover tests` on such a Mac created three sandbox
+subsites served at the live onion address, published and force-deleted posts
+on the owner's real subsite, deleted its Wayback lock and back-off, and the
+live Wayback sweep then submitted the sandboxes to the public Wayback Machine.
+
+So `tests/wp_integration.py` now stands between them and Docker:
+
+- **Opt-in.** Without `ONIONPRESS_INTEGRATION_TESTS=1` every one of them is
+  skipped and Docker is never called. `make test-unit` and CI stay fast and
+  safe on any machine.
+- **Liveness guard.** Opted in, the target is checked once per run, and the
+  suites *error* — they do not skip — if any of these hold:
+
+  | Signal | What it means |
+  |---|---|
+  | `ONIONNAME_REGISTERED=yes` in `~/.onionpress/config` | this machine registered a public onion name |
+  | a non-empty `~/.onionpress/onion_address` | the menubar app here has published an onion service |
+  | `/var/lib/onionpress/onion_address` in the container | the launcher published this WordPress as an onion service; it is also the file the Wayback sweep needs before it can submit anything |
+  | a subsite other than the root and the test sandboxes | setup creates `/<onionname>/` for the owner of every real install |
+  | `onionpress_root_site=yes` on the root site | a branded install (onionpress.org, OnionHeaven) whose root site is public |
+
+  A probe that cannot answer — no running container, WordPress not installed
+  or not multisite — refuses too. The first two signals describe the machine,
+  not the container, so a machine that runs OnionPress is refused even when
+  `docker` points at another daemon. That is deliberate.
+- **Sandboxes.** Each test class works in its own subsite (`op-bluesky-test`,
+  `op-mastodon-test`, `op-twitter-test` or `op-wayback-test`), created
+  non-public and with `op_wayback_exclude=yes` set as part of creating it,
+  and deleted when the class finishes. The Wayback plugin never visits,
+  counts or schedules a sweep from a subsite with that option.
+
+`tests/test_wp_integration_gate.py` pins all of this without Docker.
+
+### What to run them against
+
+A Docker daemon that has never run OnionPress — a CI runner or a VM — with a
+WordPress multisite carrying the mu-plugins from this checkout, and **no tor
+container**, so nothing ever writes the onion address file. Bringing up
+`wordpress` alone from `app/Resources/docker/docker-compose.yml` starts it
+and its database. Give it a minute: the image runs a one-shot multisite
+conversion 15 s after start, and it must find WordPress not yet installed,
+or it races the conversion below. Then `wp core install
+--url=http://localhost` inside the container, and
+`onionpress.multisite.provision_post_install()` with this checkout's
+`app/Resources/themes` and `app/Resources/plugins`, turn it into an
+OnionPress network.
+
+Never run that compose file on a machine with an OnionPress install:
+`container_name:` and the volume names are hardcoded (see
+[One stack per machine](#one-stack-per-machine)), so it would take the live
+site's containers over.
 
 ---
 
