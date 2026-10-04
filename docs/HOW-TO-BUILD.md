@@ -219,11 +219,14 @@ export LIMA_HOME="$COLIMA_HOME/_lima"
 export DOCKER_CONFIG="$COLIMA_HOME/docker-config"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 
-colima start --cpu 6 --memory 8 --disk 20    # first time: downloads a ~200 MB VM image
-build/build-images.sh tor                    # under a minute once the base image is pulled
-colima stop                                  # frees the RAM; the layer cache stays
-# rm -rf ~/.colima-build                     # when you want the disk back
+colima start --cpu 6 --memory 8 --disk 20 --ssh-config=false  # first time: downloads a ~200 MB VM image
+build/build-images.sh tor                                      # under a minute once the base image is pulled
+colima stop                                                    # frees the RAM; the layer cache stays
+# rm -rf ~/.colima-build                                       # when you want the disk back
 ```
+
+`--ssh-config=false` stops Colima adding an `Include` line for this VM to your
+`~/.ssh/config`, which deleting the directory would leave behind.
 
 The bundled CLI has no buildx plugin, which is fine — the script falls back.
 

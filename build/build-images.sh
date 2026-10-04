@@ -160,7 +160,7 @@ ERROR: docker not found on PATH.
       export LIMA_HOME="$COLIMA_HOME/_lima"
       export DOCKER_CONFIG="$COLIMA_HOME/docker-config"
       export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
-      colima start --disk 20
+      colima start --disk 20 --ssh-config=false
 EOF
     exit 1
 fi
