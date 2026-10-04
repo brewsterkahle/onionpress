@@ -548,6 +548,7 @@ detect_container_runtime() {
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                     "$BIN_DIR/colima" start \
                         --activate=false \
+                        --ssh-config=false \
                         --mount "$DATA_DIR/shared:w" \
                         $(docs_mount_args) \
                         --cpu "$_cfg_cpu" \
@@ -577,6 +578,7 @@ detect_container_runtime() {
 
                 "$BIN_DIR/colima" start \
                     --activate=false \
+                    --ssh-config=false \
                     --mount "$DATA_DIR/shared:w" \
                     $(docs_mount_args) \
                     --cpu "$_restart_cpu" \
@@ -1051,6 +1053,7 @@ install_docker() {
         # Apple Silicon: use VZ backend (Virtualization.framework)
         "$BIN_DIR/colima" start \
             --activate=false \
+            --ssh-config=false \
             --vm-type vz \
             --mount-type virtiofs \
             --mount "$DATA_DIR/shared:w" \
@@ -1064,6 +1067,7 @@ install_docker() {
         # Intel: use QEMU backend
         "$BIN_DIR/colima" start \
             --activate=false \
+            --ssh-config=false \
             --vm-type qemu \
             --mount-type sshfs \
             --mount "$DATA_DIR/shared:w" \

@@ -106,7 +106,10 @@ class Colima:
 
         args = [
             "start",
+            # Leave the user's Docker context and ~/.ssh/config alone. Bool
+            # flags need "=": a separate "false" would name a second profile.
             "--activate=false",
+            "--ssh-config=false",
             "--mount", f"{self.paths.shared_dir}:w",
             "--cpu", str(cpu),
             "--memory", str(memory),

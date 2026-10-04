@@ -138,6 +138,15 @@ if grep -qsF "unix://$COLIMA_HOME/default/docker.sock" "$USER_DOCKER_CONFIG"/con
     log "NOTE: $USER_DOCKER_CONFIG has a Docker context pointing at OnionPress's VM, left by OnionPress <= 2.5.1 — OnionPress leaves it alone; see 'docker context ls'"
 fi
 
+# Colima's start also prepends "Include $COLIMA_HOME/ssh_config" to
+# ~/.ssh/config (creating it) unless passed --ssh-config=false, as every start
+# below is. Colima rewrites that file on each start and stop whatever the flag;
+# while our VM runs it holds a "Host colima" that collides with a Colima of
+# the user's own. Releases through 2.5.1 added the line; again, only say so.
+if grep -qsxF "Include $COLIMA_HOME/ssh_config" "$HOME/.ssh/config"; then
+    log "NOTE: ~/.ssh/config has 'Include $COLIMA_HOME/ssh_config' (a 'Host colima' for OnionPress's VM), left by OnionPress <= 2.5.1 — OnionPress leaves it alone; delete that line to drop it"
+fi
+
 # Detect architecture (use sysctl to get actual hardware, not process architecture)
 # This is important because shell scripts may run under Rosetta on Apple Silicon
 if sysctl hw.optional.arm64 2>/dev/null | grep -q ": 1"; then
@@ -235,6 +244,7 @@ initialize_colima() {
             # Apple Silicon: use VZ backend (Virtualization.framework)
             "$BIN_DIR/colima" start \
                 --activate=false \
+                --ssh-config=false \
                 --vm-type vz \
                 --mount-type virtiofs \
                 --mount "$DATA_DIR/shared:w" \
@@ -249,6 +259,7 @@ initialize_colima() {
             # Intel: use QEMU backend
             "$BIN_DIR/colima" start \
                 --activate=false \
+                --ssh-config=false \
                 --vm-type qemu \
                 --mount-type sshfs \
                 --mount "$DATA_DIR/shared:w" \
@@ -290,6 +301,7 @@ initialize_colima() {
         log "Starting Colima VM..."
         "$BIN_DIR/colima" start \
             --activate=false \
+            --ssh-config=false \
             --mount "$DATA_DIR/shared:w" \
             $(docs_mount_args) \
             --memory "$vm_mem" \

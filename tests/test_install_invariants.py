@@ -1454,6 +1454,90 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
             min(menubar.index(s) for s in ("stop_stale_colima(", "[colima_bin,")))
 
 
+class TestColimaStaysOutOfUserSSHConfig(unittest.TestCase):
+    """Colima (v0.8.1, app/app.go generateSSHConfig) ends every start by
+    writing $COLIMA_HOME/ssh_config, a "Host colima" for each running VM, and
+    unless started with --ssh-config=false also prepends "Include
+    $COLIMA_HOME/ssh_config" to ~/.ssh/config, creating the file if needed.
+    The flag defaults to true and is saved as sshConfig in colima.yaml. No
+    release through 2.5.1 passed it, so every install aimed "colima" in the
+    user's SSH config at the OnionPress VM, colliding with the "Host colima"
+    of any Colima of the user's own.
+
+    Every start therefore passes --ssh-config=false, spelled with "=" like
+    --activate=false. Nothing needs the entry: `limactl shell`, which the
+    launchers and the MenubarApp use, runs ssh with -F /dev/null. An Include
+    left by an older release stays the user's to remove: launcher.sh only
+    reads the file to log a note, and nothing else refers to ~/.ssh.
+    """
+
+    COLIMA = TestColimaStaysOutOfUserDockerConfig  # its launchers and helpers
+    LAUNCHER = "app/MacOS/launcher.sh"
+
+    def test_every_colima_start_passes_ssh_config_false(self):
+        c = self.COLIMA
+        starts = [(f, cmd.split()) for f in c.SHELL_LAUNCHERS
+                  for _, cmd in c._shell_commands(_read(f), c.SHELL_START)]
+        starts += c._py_colima_starts()
+        found = {f for f, _ in starts}
+        for f in (*c.SHELL_LAUNCHERS, c.PY_WRAPPER):
+            self.assertIn(f, found, f"no colima start found in {f}; update this test")
+        for f, words in starts:
+            with self.subTest(file=f):
+                # Exactly this word: `--ssh-config false` is the bare flag
+                # (true) plus a profile named "false", and a later one wins.
+                self.assertEqual([w for w in words if w.startswith("--ssh-config")],
+                                 ["--ssh-config=false"], " ".join(words))
+
+    def test_launcher_only_notes_an_include_left_behind(self):
+        note = re.search(r'^if grep [^\n]*"\$HOME/\.ssh/config"; then\n.*?^fi$',
+                         _read(self.LAUNCHER), re.M | re.S)
+        self.assertIsNotNone(note, "launcher.sh's ~/.ssh/config note not found; update this test")
+        colima_home = "/Users/someone/.onionpress/colima"
+        include = f"Include {colima_home}/ssh_config"  # as Colima writes it
+        cases = [
+            (include, True),  # Colima created the file: no trailing newline
+            (f"{include}\n\nHost example.org\n    User someone\n", True),  # prepended
+            (f"# {include}\n", False),
+            ("Include /Users/someone/.colima/ssh_config\n", False),  # their own Colima
+            (None, False),
+        ]
+        for content, noted in cases:
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as home:
+                ssh_config = os.path.join(home, ".ssh", "config")
+                if content is not None:
+                    os.mkdir(os.path.dirname(ssh_config))
+                    with open(ssh_config, "w", encoding="utf-8") as f:
+                        f.write(content)
+                out = subprocess.run(
+                    ["bash", "-c", 'set -e\nlog() { printf "%s\\n" "$1"; }\n' + note.group(0)],
+                    env={"HOME": home, "COLIMA_HOME": colima_home, "PATH": "/usr/bin:/bin"},
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                notes = out.stdout.splitlines()
+                self.assertEqual(len(notes), int(noted), notes)
+                if noted:
+                    self.assertIn(f"{colima_home}/ssh_config", notes[0])
+                if content is None:
+                    self.assertFalse(os.path.exists(os.path.dirname(ssh_config)))
+                else:
+                    with open(ssh_config, encoding="utf-8") as f:
+                        self.assertEqual(f.read(), content, "~/.ssh/config is the user's")
+
+        # ...and nothing else refers to ~/.ssh at all.
+        sources = list(self.COLIMA.SHELL_LAUNCHERS) + sorted(
+            os.path.relpath(os.path.join(dirpath, name), PROJECT_ROOT)
+            for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src"))
+            for name in names if name.endswith(".py"))
+        for f in sources:
+            for line in _read(f).splitlines():
+                line = line.strip()
+                if re.search(r"\.ssh\b", line) and not line.startswith("#"):
+                    with self.subTest(file=f, line=line):
+                        self.assertEqual(f, self.LAUNCHER)
+                        self.assertRegex(line, r'^(if grep -q\w* |log ")')
+
+
 if __name__ == "__main__":
     unittest.main()
 
