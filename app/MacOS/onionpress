@@ -1280,6 +1280,57 @@ wait_for_docker() {
     return 0
 }
 
+# Whether Lima thinks the colima instance is up. "Running" with no Docker
+# answer is the wedge recover_lima_vm exists for.
+lima_vm_running() {
+    export COLIMA_HOME LIMA_HOME
+    "$BIN_DIR/limactl" list --format '{{.Status}}' colima 2>/dev/null | grep -qx Running
+}
+
+# Force-stop and restart the Lima VM. This is the one known recovery for the
+# wedged "Running but SSH refused" state the VM lands in occasionally after
+# long uptime / sleep, and (2026-10-02) after a macOS update killed the app
+# mid-stop: lima reports the instance Running, the guest even gets a DHCP
+# lease, but sshd never comes up, so `colima start` waits ten minutes for a
+# "running" event that never arrives and Docker stays unreachable. $1 labels
+# the log lines with the caller (start / restart). Returns 1 when the VM
+# would not come back; the caller decides what that means.
+recover_lima_vm() {
+    local who="$1"
+    log "$who: Docker daemon not reachable — restarting Lima VM first"
+    export COLIMA_HOME LIMA_HOME
+    "$BIN_DIR/limactl" stop -f colima >> "$LOG_FILE" 2>&1 || true
+    # Wait briefly for hostagent processes to fully die before starting
+    # again — lima can trip over itself otherwise.
+    sleep 3
+    if ! "$BIN_DIR/limactl" start colima >> "$LOG_FILE" 2>&1; then
+        log "$who: limactl start failed — giving up, user may need to reboot"
+        return 1
+    fi
+    log "$who: Lima VM restarted"
+    return 0
+}
+
+# wait_for_docker, plus one shot at the Lima wedge: when Docker has not
+# answered within $1 seconds but Lima still reports the VM Running, recover
+# the VM once and wait again with a fresh budget. Gives up (returns 1) only
+# after that second wait, or straight away when the VM is not Running at
+# all (a stopped VM is not the wedge; restarting it here would fight the
+# launcher's own `colima start`). $2 labels the log lines with the caller.
+wait_for_docker_or_recover_vm() {
+    local limit="$1" who="$2"
+    if wait_for_docker "$limit"; then
+        return 0
+    fi
+    if ! lima_vm_running; then
+        log "$who: Docker daemon not ready after ${limit}s and Lima does not report the VM Running — not recovering"
+        return 1
+    fi
+    log "$who: Docker daemon not ready after ${limit}s while Lima reports the VM Running — recovering the wedged VM"
+    recover_lima_vm "$who" || return 1
+    wait_for_docker "$limit"
+}
+
 # One-time migration of the onion service key volume from its historical
 # name. Until 2026-09-25 the delivered PEM lived in onionpress-arti-state at
 # state/keystore/hss/<name>/ (arti's keystore layout); it now lives in
@@ -1349,9 +1400,14 @@ start_containers() {
     # volume", and a missing key volume is the first-run signal: upgrading
     # to 2.5.0 on 2026-09-30 while the Colima VM was still booting took the
     # first-run path instead of migrating the key volume.
+    #
+    # If Docker never answers but Lima still reports the VM Running, the VM
+    # is in the wedge recover_lima_vm describes; the login-time start used
+    # to give up here (2026-10-02) while the menubar Restart path already
+    # knew how to recover. Both now share that recovery, tried once.
     local vol_state key_state
-    if ! wait_for_docker 180; then
-        log "ERROR: Docker daemon not ready after 180s; not starting"
+    if ! wait_for_docker_or_recover_vm 180 start; then
+        log "ERROR: Docker daemon not ready after 180s (one Lima VM recovery attempted if it was Running); not starting"
         return 1
     fi
 
@@ -2367,19 +2423,11 @@ main() {
             # stop and restart the VM first, then proceed. This turns
             # the menubar "Restart" item into a reliable recovery for
             # the wedge we've seen 5× in 30 days on a single machine.
+            # The same recovery runs from the start path when its Docker
+            # wait times out (see wait_for_docker_or_recover_vm).
             if ! docker info >/dev/null 2>&1; then
-                log "restart: Docker daemon not reachable — restarting Lima VM first"
-                export COLIMA_HOME LIMA_HOME
-                "$BIN_DIR/limactl" stop -f colima >> "$LOG_FILE" 2>&1 || true
-                # Wait briefly for hostagent processes to fully die
-                # before starting again — lima can trip over itself
-                # otherwise.
-                sleep 3
-                if ! "$BIN_DIR/limactl" start colima >> "$LOG_FILE" 2>&1; then
-                    log "restart: limactl start failed — giving up, user may need to reboot"
-                    exit 1
-                fi
-                log "restart: Lima VM restarted, resuming normal restart"
+                recover_lima_vm restart || exit 1
+                log "restart: resuming normal restart"
             fi
             setup_db_passwords
             # Pull updated images before stop_containers: the OnionHeaven

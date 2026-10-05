@@ -1303,7 +1303,10 @@ class TestKeyVolumeMigration(unittest.TestCase):
         for f in self.LAUNCHERS:
             body = self._function_body(_read(f), "start_containers")
             with self.subTest(launcher=f):
-                wait = body.index("if ! wait_for_docker ")
+                # macOS waits through wait_for_docker_or_recover_vm (one Lima
+                # VM recovery, see TestStartRecoversWedgedLimaVM); Linux has
+                # no VM and waits directly.
+                wait = body.index("if ! wait_for_docker")
                 for later in (".import-key-pending",
                               "if ! migrate_key_volume; then",
                               "docker_volume_state onionpress-onion-keys"):
@@ -1314,7 +1317,7 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     )
                 self.assertRegex(
                     body[wait:wait + 200],
-                    r"if ! wait_for_docker \d+; then\n\s+log [^\n]*\n\s+return 1",
+                    r"if ! wait_for_docker(_or_recover_vm)? \d+( \w+)?; then\n\s+log [^\n]*\n\s+return 1",
                     "start_containers must stop when Docker never answers, "
                     "not carry on to the volume checks.",
                 )
@@ -1538,6 +1541,148 @@ class TestColimaStaysOutOfUserSSHConfig(unittest.TestCase):
                         self.assertRegex(line, r'^(if grep -q\w* |log ")')
 
 
+class TestStartRecoversWedgedLimaVM(unittest.TestCase):
+    """Runs the macOS launcher's Docker wait under bash against stub `docker`
+    and `limactl` binaries.
+
+    Incident: on 2026-10-02 a macOS update killed OnionPress mid-stop, and
+    the login-time start found the Lima VM in the known "Running but SSH
+    refused" wedge: `colima start` hung ten minutes waiting for sshd while
+    `onionpress start` gave up at "Docker daemon not ready after 180s",
+    leaving a gray menubar and an unreachable VM. The menubar Restart path
+    already recovered that wedge (limactl stop -f, then start); the start
+    path must do the same, once, with a fresh Docker wait afterwards.
+
+    The docker stub fails until $STUB_DIR/docker-up exists; the limactl stub
+    reports $STUB_LIMA_STATUS from `list`, and its `start` either heals
+    Docker (creates that file), fails, or does nothing.
+    """
+
+    LAUNCHER = "app/MacOS/onionpress"
+    FUNCTIONS = ("wait_for_docker", "lima_vm_running", "recover_lima_vm",
+                 "wait_for_docker_or_recover_vm")
+    DOCKER_STUB = """#!/bin/sh
+printf 'docker %s\\n' "$*" >> "$STUB_CALLS"
+[ -e "$STUB_DIR/docker-up" ] && exit 0
+echo "Cannot connect to the Docker daemon at unix:///stub/docker.sock." >&2
+exit 1
+"""
+    LIMACTL_STUB = """#!/bin/sh
+printf 'limactl %s\\n' "$*" >> "$STUB_CALLS"
+case "$1" in
+    list) echo "$STUB_LIMA_STATUS" ;;
+    start)
+        [ "$STUB_LIMA_START" = fail ] && exit 1
+        [ "$STUB_LIMA_START" = heals ] && touch "$STUB_DIR/docker-up"
+        ;;
+esac
+exit 0
+"""
+
+    def _run(self, snippet, *, docker="down", lima="Running", start="heals"):
+        text = _read(self.LAUNCHER)
+        functions = "".join(
+            TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
+            for name in self.FUNCTIONS)
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.mkdir(bin_dir)
+            for name, body in (("docker", self.DOCKER_STUB),
+                               ("limactl", self.LIMACTL_STUB)):
+                path = os.path.join(bin_dir, name)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(body)
+                os.chmod(path, 0o755)
+            if docker == "up":
+                open(os.path.join(tmp, "docker-up"), "w").close()
+            calls = os.path.join(tmp, "calls")
+            for name in (calls, os.path.join(tmp, "log")):
+                open(name, "w").close()
+            script = (
+                "set -e\n"
+                f'LOG_FILE="{tmp}/log"; BIN_DIR="{bin_dir}"\n'
+                f'COLIMA_HOME="{tmp}/colima"; LIMA_HOME="{tmp}/colima/_lima"\n'
+                'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
+                "sleep() { :; }\n"  # the 180 s budgets pass instantly
+                + functions + snippet + "\n")
+            env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
+                   "STUB_DIR": tmp, "STUB_CALLS": calls,
+                   "STUB_LIMA_STATUS": lima, "STUB_LIMA_START": start}
+            out = subprocess.run(["bash", "-c", script], env=env,
+                                 capture_output=True, text=True, timeout=60)
+            with open(calls, encoding="utf-8") as f:
+                made = f.read().splitlines()
+            with open(os.path.join(tmp, "log"), encoding="utf-8") as f:
+                logged = f.read()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.strip(), made, logged
+
+    WAIT = "rc=0; wait_for_docker_or_recover_vm 180 start || rc=$?; echo $rc"
+
+    @staticmethod
+    def _recoveries(calls):
+        return [c for c in calls if c in ("limactl stop -f colima",
+                                          "limactl start colima")]
+
+    def test_recovers_the_wedge_once_and_waits_again(self):
+        rc, calls, logged = self._run(self.WAIT)
+        self.assertEqual(rc, "0")
+        self.assertEqual(self._recoveries(calls),
+                         ["limactl stop -f colima", "limactl start colima"])
+        # A full first budget was spent (180 s in 2 s steps, plus the final
+        # check) before Lima was asked, and Docker was asked again after.
+        first_wait = calls.index("limactl list --format {{.Status}} colima")
+        self.assertEqual(calls[:first_wait], ["docker info"] * 91)
+        self.assertEqual(calls[-1], "docker info")
+        self.assertIn("start: Docker daemon not ready after 180s while Lima "
+                      "reports the VM Running", logged)
+        self.assertIn("start: Lima VM restarted", logged)
+
+    def test_gives_up_after_the_second_wait_without_a_second_recovery(self):
+        rc, calls, _ = self._run(self.WAIT, start="noop")
+        self.assertEqual(rc, "1")
+        self.assertEqual(self._recoveries(calls),
+                         ["limactl stop -f colima", "limactl start colima"],
+                         "exactly one recovery attempt")
+        self.assertEqual(calls.count("docker info"), 2 * 91,
+                         "two full budgets, no third")
+
+    def test_gives_up_when_the_vm_will_not_restart(self):
+        rc, calls, logged = self._run(self.WAIT, start="fail")
+        self.assertEqual(rc, "1")
+        self.assertEqual(calls.count("docker info"), 91,
+                         "no second wait when limactl start failed")
+        self.assertIn("start: limactl start failed", logged)
+
+    def test_does_not_touch_a_vm_lima_reports_stopped(self):
+        # A stopped VM is not the wedge: `colima start` (launcher.sh or
+        # detect_container_runtime) owns that case, and a stop -f here would
+        # fight it.
+        for status in ("Stopped", "Broken", ""):
+            with self.subTest(status=status):
+                rc, calls, logged = self._run(self.WAIT, lima=status)
+                self.assertEqual(rc, "1")
+                self.assertEqual(self._recoveries(calls), [])
+                self.assertIn("not recovering", logged)
+
+    def test_no_lima_calls_when_docker_answers(self):
+        rc, calls, _ = self._run(self.WAIT, docker="up")
+        self.assertEqual(rc, "0")
+        self.assertEqual(calls, ["docker info"])
+
+    def test_start_and_restart_share_the_recovery(self):
+        text = _read(self.LAUNCHER)
+        start = TestKeyVolumeMigration._function_body(text, "start_containers")
+        self.assertIn("if ! wait_for_docker_or_recover_vm 180 start; then", start)
+        main = text[text.index("\nmain() {"):]
+        restart = main[main.index("        restart)"):main.index("        status)")]
+        self.assertIn("recover_lima_vm restart || exit 1", restart)
+        # The stop -f / start pair lives in recover_lima_vm only.
+        self.assertEqual(text.count('limactl" stop -f colima'), 1)
+        self.assertEqual(text.count('limactl" start colima'), 1)
+        self.assertNotIn("limactl", restart)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1552,6 +1697,11 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
                  "start_containers")
+    # macOS only: start_containers waits through these (Linux has no VM).
+    # Without a limactl on PATH they report the VM as not Running, so the
+    # Docker-down cases below still stop without any recovery attempt.
+    OPTIONAL_FUNCTIONS = ("lima_vm_running", "recover_lima_vm",
+                          "wait_for_docker_or_recover_vm")
 
     STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_CALLS"
@@ -1567,9 +1717,11 @@ exit 0
 
     def _run(self, launcher, snippet, mode="up", volumes="", pending=False):
         text = _read(launcher)
+        names = list(self.FUNCTIONS) + [
+            n for n in self.OPTIONAL_FUNCTIONS if f"\n{n}() {{" in text]
         functions = "".join(
             TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
-            for name in self.FUNCTIONS)
+            for name in names)
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = os.path.join(tmp, "bin")
             os.mkdir(bin_dir)
