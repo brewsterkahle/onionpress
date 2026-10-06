@@ -24,7 +24,8 @@
 #
 # Every external input below is pinned to an immutable identifier: images by
 # multi-arch index digest, mkp224o by tag with its commit SHA asserted after
-# clone. Before this, `FROM rust:latest` + `cargo install arti` (no
+# clone — and, because pinning mkp224o's source does not pin its binary, by
+# an explicit ISA baseline in CFLAGS (see Stage 1). Before this, `FROM rust:latest` + `cargo install arti` (no
 # --version) + `MKP224O_COMMIT=master` meant two builds of the same commit
 # could ship different compilers, a different arti and a different mkp224o —
 # and because CI builds amd64 and arm64 on separate runners at different
@@ -60,6 +61,53 @@ ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:9f36dfce2d1fd053d700a4eca00c358df7
 # arbitrary SHA1-in-want. Clone-by-tag plus assert gives a readable reference
 # and a real pin. Keep MKP224O_COMMIT in step with build/build-dmg-simple.sh's
 # MKP224O_VERSION, which cross-compiles the same release for the macOS host.
+#
+# The source is pinned, but a bare `./configure` left the OUTPUT unpinned:
+# mkp224o's configure.ac appends `-march=native` whenever the compiler takes
+# it, so the binary encoded whichever CPU the builder happened to have. Two
+# consequences, and the second is the one that hurts users:
+#
+#   * not reproducible — the last input to this image that still varied,
+#     now that the base image and the mkp224o commit are both pinned;
+#   * a binary built on a newer CI host SIGILLs on an older user CPU. Both
+#     halves are built on GitHub-hosted runners (ubuntu-latest and
+#     ubuntu-24.04-arm), whose CPU model changes under us without notice;
+#     `native` on the amd64 one is at least Haswell, so anyone on a pre-2013
+#     x86 would get an illegal instruction. mkp224o is what mints the vanity
+#     address, and nothing treats its failure as fatal:
+#     generate_vanity_in_container in src/onionpress/launcher_ops.py logs the
+#     exit status and returns None, and the site carries on with a random
+#     address. (app/MacOS/onionpress runs the bundled binary instead of this
+#     one, and its generate_vanity_address says the same thing out loud:
+#     "Continue with a random address so the user gets a working install".)
+#     So the crash costs the user their op2… identity and nothing notices.
+#
+# So: a fixed, portable ISA baseline per TARGETARCH. x86-64-v2 is Nehalem
+# (2008) and above; armv8-a is every arm64 machine that exists. Measured cost
+# of giving up `native` (mkp224o v1.7.0, default donna backend):
+#
+#   * arm64 — none. `-march=native` and `-march=armv8-a` compile to
+#     BYTE-IDENTICAL binaries. donna's hot loop is 64x64->128 scalar
+#     multiplies, which are base-ISA `mul`/`umulh`; there is no wider
+#     instruction for it to reach for.
+#   * amd64 — real but small in context. v2 and plain x86-64 are equivalent
+#     (10727 vs 10729 instructions in worker.o), so the baseline could drop
+#     to x86-64 for free if some ancient CPU ever needs it. The step that
+#     costs something is v3: at `-march=x86-64-v3` the compiler emits 900
+#     `mulx` and uses AVX2, about 9% fewer instructions. We give that up
+#     deliberately: the longest prefix any caller accepts is 6 characters
+#     (generate_vanity_in_container; the macOS launcher caps its own at 5),
+#     so the whole search is ~1.07e9 keys at millions of keys/sec per core
+#     across every core — tens of seconds. Tens of seconds are worth less
+#     than an old machine silently never getting a vanity address at all.
+#
+# -O3 and -fomit-frame-pointer are NOT decoration here. configure.ac only
+# applies its own `-O3 -march=native -fomit-frame-pointer` when CFLAGS came
+# in unset (it compares CFLAGS before and after AC_PROG_CC); passing any
+# CFLAGS at all skips that block entirely and the build silently drops to no
+# optimisation. Measured: 5.9x slower (1.02M vs 6.01M keys/sec, Apple M1
+# Pro, one thread). The assertion after ./configure below is there because
+# that failure is invisible — the build succeeds and the binary works.
 FROM ${TOR_IMAGE} AS mkp224o-builder
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -68,6 +116,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 ARG MKP224O_VERSION=v1.7.0
 ARG MKP224O_COMMIT=3e7aaf8a3a9cbbed56872afeef88c7a9d538d51a
+# TARGETARCH is filled in by BuildKit. An unrecognised or empty value fails
+# the build rather than falling through to a default, because every silent
+# path here ends in a user losing their vanity address: guessing wrong SIGILLs
+# at run time, and omitting -march restores the `native` this exists to stop.
+ARG TARGETARCH
 RUN git clone --depth 1 --branch "${MKP224O_VERSION}" \
         https://github.com/cathugger/mkp224o.git /build/mkp224o \
     && cd /build/mkp224o \
@@ -78,8 +131,24 @@ RUN git clone --depth 1 --branch "${MKP224O_VERSION}" \
          echo "       remote is not what we think it is. Refusing to build." >&2; \
          exit 1; \
        fi \
+    && case "${TARGETARCH}" in \
+         amd64) march="x86-64-v2" ;; \
+         arm64) march="armv8-a" ;; \
+         *) echo "ERROR: no portable -march baseline defined for" >&2; \
+            echo "       TARGETARCH='${TARGETARCH}'. Add one to this case" >&2; \
+            echo "       rather than letting mkp224o pick -march=native." >&2; \
+            exit 1 ;; \
+       esac \
     && ./autogen.sh \
-    && ./configure \
+    && CFLAGS="-O3 -march=${march} -fomit-frame-pointer" ./configure \
+    && if ! grep -q -- "^CFLAGS=.*-O3 -march=${march} -fomit-frame-pointer" GNUmakefile \
+          || grep -q -- "-march=native" GNUmakefile; then \
+         echo "ERROR: configure did not take the portable CFLAGS. mkp224o" >&2; \
+         echo "       would be built unoptimised, or tied to this builder's" >&2; \
+         echo "       CPU. GNUmakefile says:" >&2; \
+         grep "^CFLAGS=" GNUmakefile >&2; \
+         exit 1; \
+       fi \
     && make \
     && strip mkp224o
 

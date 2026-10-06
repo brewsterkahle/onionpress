@@ -220,7 +220,32 @@ fi
 # Build mkp224o as a universal binary for custom onion address prefixes.
 # Skip the full source build + cross-compile (~30s + libsodium crosscomp)
 # when we already have a cached universal binary for this pinned tag.
-if cache_get "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"; then
+#
+# MKP_OPT is not optional. mkp224o's configure.ac applies its own
+# "-O3 -march=native -fomit-frame-pointer" only when CFLAGS arrived unset (it
+# compares CFLAGS across AC_PROG_CC); the moment we pass CFLAGS — and we must,
+# to drive the universal cross-compile — that block is skipped whole and the
+# binary is built with NO optimisation at all. Nothing warns: configure
+# succeeds, make succeeds, mkp224o runs and mints correct addresses, 2.3x
+# slower than it should — 1.04M vs 2.37M keys/sec for this build's
+# --enable-ref10 backend, Apple M1 Pro, one thread.
+#
+# (Separately, and left alone here: --enable-ref10 is itself the slow choice
+# on ARM. Same machine, same flags, mkp224o's default donna backend does
+# 6.00M keys/sec — 2.5x ref10. Switching backends is a bigger call than
+# restoring -O3, and it cannot be validated for the x86_64 half of the
+# universal binary on an Apple Silicon host.)
+#
+# -march is deliberately absent: the -arch flags already fix the ISA, and the
+# universal binary has to run on every supported Mac. That is the same reason
+# app/Resources/docker/tor/Dockerfile pins an explicit baseline instead of
+# taking configure's -march=native — see docs/BUILDING.md, "Pinned inputs".
+#
+# The cache key carries these flags so an existing cache entry built without
+# them is not silently reused.
+MKP_OPT="-O3 -fomit-frame-pointer"
+MKP_CACHE_KEY="mkp224o-${MKP224O_VERSION}-O3-universal"
+if cache_get "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"; then
     echo "  mkp224o ${MKP224O_VERSION}: cache hit"
 elif command -v git >/dev/null 2>&1; then
     echo "  Building mkp224o ${MKP224O_VERSION} for custom onion address prefixes..."
@@ -274,7 +299,7 @@ elif command -v git >/dev/null 2>&1; then
     mkdir -p "$MKP_ARM64_DIR"
     cp -R "$TEMP_BIN_DIR/mkp224o-src"/* "$MKP_ARM64_DIR/"
     cd "$MKP_ARM64_DIR"
-    CFLAGS="-arch arm64 -mmacosx-version-min=13.0 -I$SODIUM_PREFIX/include" \
+    CFLAGS="-arch arm64 -mmacosx-version-min=13.0 $MKP_OPT -I$SODIUM_PREFIX/include" \
         LDFLAGS="-arch arm64" \
         ./configure --host=aarch64-apple-darwin --enable-ref10 > /dev/null 2>&1
     sed -i.bak "s| -lsodium| ${SODIUM_PREFIX}/lib/libsodium.a|g" GNUmakefile
@@ -287,7 +312,7 @@ elif command -v git >/dev/null 2>&1; then
     mkdir -p "$MKP_X86_DIR"
     cp -R "$TEMP_BIN_DIR/mkp224o-src"/* "$MKP_X86_DIR/"
     cd "$MKP_X86_DIR"
-    CFLAGS="-arch x86_64 -mmacosx-version-min=13.0 -I$SODIUM_X86_DIR/include" \
+    CFLAGS="-arch x86_64 -mmacosx-version-min=13.0 $MKP_OPT -I$SODIUM_X86_DIR/include" \
         LDFLAGS="-arch x86_64" \
         CC="clang -arch x86_64" \
         ./configure --host=x86_64-apple-darwin --enable-ref10 > /dev/null 2>&1
@@ -309,7 +334,7 @@ elif command -v git >/dev/null 2>&1; then
         else
             echo "  ✓ mkp224o statically linked (no libsodium dependency)"
         fi
-        cache_put "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"
+        cache_put "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"
     elif [ -f "$MKP_ARM64_DIR/mkp224o" ]; then
         echo "  WARNING: x86_64 build failed, using arm64-only mkp224o"
         cp "$MKP_ARM64_DIR/mkp224o" "$TEMP_BIN_DIR/mkp224o"
