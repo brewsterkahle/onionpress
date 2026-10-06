@@ -16,9 +16,15 @@ what this file asserts instead is that the base is that image, pinned by
 digest. Arti was removed the same day (no control interface for onion
 services); the image must not grow it back by accident.
 
+One input is pinned by compiler flag rather than by version: mkp224o's
+configure.ac appends `-march=native`, so pinning its commit still left the
+binary varying with the builder's CPU — and a binary built on a newer CI host
+SIGILLs on an older user CPU, which nothing above it treats as fatal: the site
+just carries on with a random address.
+
 These are static checks on the Dockerfiles. They cannot prove an image builds;
 they prove the inputs are named immutably and that the build-time assertions
-(mkp224o commit, wp-cli checksum) are still wired.
+(mkp224o commit, mkp224o CFLAGS, wp-cli checksum) are still wired.
 """
 
 import os
@@ -30,6 +36,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TOR_DOCKERFILE = "app/Resources/docker/tor/Dockerfile"
 WP_DOCKERFILE = "app/Resources/docker/wordpress/Dockerfile"
 STRESS_DOCKERFILE = "tests/stress/Dockerfile"
+DMG_BUILD = "build/build-dmg-simple.sh"
 
 # The Tor Project's onion-service images (the Onimages project), the only
 # place Tor may come from.
@@ -52,6 +59,23 @@ def _strip_comments(text):
     return "\n".join(
         line for line in text.splitlines() if not line.lstrip().startswith("#")
     )
+
+
+def _expand_shell_vars(text, names):
+    """Substitute `$NAME` / `${NAME}` for the named variables' literal values.
+
+    Only the names asked for, and only one level. Checks that read a flag at
+    its use site otherwise pass on the *name* while the value is empty — which
+    is exactly how a revert would look.
+    """
+    for name in names:
+        match = re.search(r'^\s*%s="([^"]*)"\s*$' % re.escape(name), text, re.M)
+        if match is None:
+            continue
+        value = match.group(1)
+        text = re.sub(r"\$\{%s\}|\$%s\b" % (re.escape(name), re.escape(name)),
+                      value.replace("\\", "\\\\"), text)
+    return text
 
 
 def _arg_defaults(text):
@@ -244,6 +268,190 @@ class TestMkp224oIsPinned(unittest.TestCase):
             "The tor Dockerfile and build-dmg-simple.sh must build the same "
             "mkp224o release.",
         )
+
+
+class TestMkp224oBaselineIsPinned(unittest.TestCase):
+    """Pinning MKP224O_COMMIT pinned the source; the binary was still unpinned.
+
+    mkp224o's configure.ac appends `-march=native` whenever the compiler takes
+    it, so a bare `./configure` encoded the builder's exact CPU. That made this
+    the last input to the tor image that still varied after everything else was
+    pinned — and, worse, a binary built on a newer CI host dies with SIGILL on
+    an older user CPU. mkp224o mints the vanity address, and
+    generate_vanity_address in app/MacOS/onionpress treats any failure as
+    "carry on with a random address", so that crash is silent and permanent.
+
+    Every check here strips comments first: the Dockerfile explains all of this
+    in prose that contains `-march=native` verbatim, so an unstripped scan
+    would match the explanation and pass while the instruction was gone.
+    """
+
+    def _mkp224o_run(self):
+        """The mkp224o build RUN as one line: comments dropped, continuations
+        joined. Joining matters because the flags, the arch switch and the
+        post-configure assertion are on separate physical lines of one command.
+        """
+        text = _strip_comments(_read(TOR_DOCKERFILE)).replace("\\\n", " ")
+        for line in text.splitlines():
+            if "mkp224o.git" in line:
+                return line
+        self.fail("Could not find the mkp224o build RUN in " + TOR_DOCKERFILE +
+                  " — renamed? Update this test rather than passing vacuously.")
+
+    def test_configure_is_given_explicit_cflags(self):
+        run = self._mkp224o_run()
+        self.assertNotRegex(
+            run, r"&&\s*\./configure\s+&&",
+            "`./configure` must not be run bare — with CFLAGS unset it appends "
+            "-march=native and ties the binary to the build machine's CPU.",
+        )
+        self.assertRegex(
+            run, r'CFLAGS="[^"]*"\s+\./configure',
+            "The mkp224o build must pass CFLAGS to ./configure.",
+        )
+
+    def test_baseline_is_chosen_from_targetarch(self):
+        """A single hardcoded -march cannot be right for both published
+        manifests, and TARGETARCH is what BuildKit hands each build.
+        """
+        text = _strip_comments(_read(TOR_DOCKERFILE))
+        self.assertIsNotNone(
+            re.search(r"^ARG TARGETARCH\s*$", text, re.M),
+            "ARG TARGETARCH must be declared in the mkp224o stage for BuildKit "
+            "to populate it.",
+        )
+        arms = dict(re.findall(r'(amd64|arm64)\)\s*march="([^"]+)"',
+                               self._mkp224o_run()))
+        self.assertEqual(
+            set(arms), {"amd64", "arm64"},
+            "Both published architectures need a baseline. Got: " + repr(arms),
+        )
+        for arch, march in arms.items():
+            with self.subTest(arch=arch):
+                self.assertNotIn(
+                    "native", march,
+                    "The whole point is not to compile for the builder's CPU.",
+                )
+
+    def test_unknown_arch_fails_the_build(self):
+        """Both fallbacks are silent: guessing an ISA SIGILLs at run time on
+        the user's machine, and dropping -march lets configure put `native`
+        back. Refusing to build is the only loud option.
+        """
+        run = self._mkp224o_run()
+        match = re.search(r"\*\)(.*?)esac", run)
+        self.assertIsNotNone(
+            match, "Expected a `*)` default arm in the TARGETARCH case.")
+        self.assertIn(
+            "exit 1", match.group(1),
+            "An unrecognised TARGETARCH must fail the build, not fall back to "
+            "a guessed baseline or to no -march at all.",
+        )
+
+    def test_cflags_carry_the_optimisation_flags_too(self):
+        """configure.ac applies its own `-O3 -march=native -fomit-frame-pointer`
+        only when CFLAGS arrived unset — it compares CFLAGS across AC_PROG_CC.
+        Passing CFLAGS to set -march therefore ALSO drops -O3, and nothing
+        warns: configure succeeds, make succeeds, and the miner runs several
+        times slower while minting perfectly correct addresses.
+        """
+        match = re.search(r'CFLAGS="([^"]*)"\s+\./configure',
+                          self._mkp224o_run())
+        self.assertIsNotNone(match, "No CFLAGS passed to ./configure.")
+        cflags = match.group(1)
+        self.assertIn(
+            "-O3", cflags,
+            "CFLAGS must carry -O3: setting CFLAGS at all makes configure skip "
+            "the block that would otherwise supply it.",
+        )
+        self.assertIn("-fomit-frame-pointer", cflags)
+
+    def test_the_flags_are_asserted_after_configure(self):
+        """Static checks in this file cannot see what configure did with the
+        flags. The build itself has to, because both ways of losing them —
+        dropped -O3, restored -march=native — produce a working binary.
+        """
+        run = self._mkp224o_run()
+        self.assertRegex(
+            run,
+            r'grep -q -- "\^CFLAGS=[^"]*-O3 -march=\$\{march\}'
+            r'[^"]*" GNUmakefile',
+            "The build must grep the generated GNUmakefile to confirm the "
+            "flags it passed actually landed — a dropped -O3 is otherwise "
+            "invisible.",
+        )
+        self.assertRegex(
+            run, r'grep -q -- "-march=native" GNUmakefile',
+            "The check must also fail if -march=native came back — that is the "
+            "regression this pin exists to prevent.",
+        )
+        self.assertIn(
+            "exit 1", run.split("GNUmakefile")[-1],
+            "A failed flags check must fail the build.",
+        )
+
+    def test_macos_build_passes_the_optimisation_flags(self):
+        """build-dmg-simple.sh hit the same configure quirk from the other
+        side: it has always passed CFLAGS (to drive the universal
+        cross-compile), so every shipped macOS mkp224o was built unoptimised.
+        It needs no -march — `-arch arm64`/`-arch x86_64` already fix the ISA —
+        but it does need -O3.
+        """
+        # Line continuations joined so one configure invocation is one line.
+        # The `--prefix=` exclusion drops the libsodium cross-build, which the
+        # same section performs: libsodium is a dependency, not the miner.
+        # worker_batch.inc.h calls randombytes() once per thread and
+        # sodium_memzero() once at the end, so no libsodium code runs inside
+        # the per-key loop and its optimisation level does not affect mining.
+        body = _expand_shell_vars(
+            _strip_comments(_read(DMG_BUILD)).replace("\\\n", " "), ["MKP_OPT"])
+        invocations = [
+            line for line in body.splitlines()
+            if "./configure" in line and "--host=" in line
+            and "--prefix=" not in line
+        ]
+        self.assertTrue(
+            invocations,
+            "Could not find the mkp224o cross-compile configure calls in " +
+            DMG_BUILD + " — renamed? Update this test rather than passing "
+            "vacuously.",
+        )
+        for line in invocations:
+            match = re.search(r'CFLAGS="([^"]*)"', line)
+            with self.subTest(configure=line[:60]):
+                self.assertIsNotNone(
+                    match, "mkp224o configure call with no CFLAGS: " + line[:80])
+                self.assertIn(
+                    "-O3", match.group(1),
+                    "Passing CFLAGS without -O3 silently disables optimisation "
+                    "entirely; configure only supplies -O3 when CFLAGS is unset.",
+                )
+
+    def test_macos_binary_cache_key_tracks_the_flags(self):
+        """The cache is keyed by mkp224o version, and these flags do not change
+        the version. Without the key changing, a developer with a warm cache
+        keeps shipping the binary built before this fix.
+        """
+        # MKP224O_VERSION is deliberately left unexpanded: the point is that
+        # the key carries something *besides* the version, since these flags
+        # change the binary without changing the version.
+        text = _expand_shell_vars(_strip_comments(_read(DMG_BUILD)),
+                                  ["MKP_CACHE_KEY"])
+        keys = {k for k in re.findall(r'cache_(?:get|put) "([^"]+)" ', text)
+                if "mkp224o" in k}
+        self.assertTrue(keys, "No mkp224o cache key found in " + DMG_BUILD)
+        for key in keys:
+            with self.subTest(key=key):
+                self.assertNotEqual(
+                    key, "mkp224o-${MKP224O_VERSION}-universal",
+                    "The pre-fix cache key is still in use, so a warm cache "
+                    "serves the unoptimised binary built before this fix.",
+                )
+                self.assertIn(
+                    "O3", key,
+                    "The cache key must move when the optimisation flags move; "
+                    "today it says so by name.",
+                )
 
 
 class TestWpCliIsVerified(unittest.TestCase):
