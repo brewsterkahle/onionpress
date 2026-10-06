@@ -10,6 +10,7 @@ sharp edges that make each one easy to break silently.
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -284,6 +285,77 @@ class TestDmgAssets(unittest.TestCase):
         readme = _read("build/dmg-assets/README.md")
         self.assertIn("capture", readme.lower())
         self.assertIn("create-dmg-background.py", readme)
+
+
+class TestDmgImageTooling(unittest.TestCase):
+    """build/build-dmg-simple.sh makes the disk image with `diskutil image`
+    (macOS 26+) and falls back to the hdiutil verbs that macOS 27 deprecates.
+    Both paths were built and their output compared on macOS 27 — see
+    docs/BUILDING.md, "What has been proven by actually running it".
+    """
+
+    SCRIPT = "build/build-dmg-simple.sh"
+
+    def test_volume_is_named_onionpress_in_both_paths(self):
+        """The window styling hangs on the volume name. The alias inside the
+        committed DS_Store points at /Volumes/OnionPress/.background/…, and
+        Finder resolves it by volume name on the freshly mounted image (file
+        IDs and dates differ on every build). Rename the volume in either
+        tool's call and every DMG ships a plain white window, with no error.
+        """
+        script = _code(self.SCRIPT)
+        self.assertIn('--volumeName "OnionPress"', script,
+                      "diskutil image create from must name the volume OnionPress.")
+        self.assertIn('-volname "OnionPress"', script,
+                      "the hdiutil fallback must name the volume OnionPress.")
+        with open(os.path.join(PROJECT_ROOT, "build/dmg-assets/DS_Store"), "rb") as f:
+            ds_store = f.read()
+        # The alias record stores the volume name as a length-prefixed string.
+        self.assertIn(b"\x0aOnionPress", ds_store,
+                      "the DS_Store background alias no longer names the "
+                      "OnionPress volume; the script's volume name must match it.")
+
+    def test_probes_for_diskutil_image_and_uses_it_for_every_step(self):
+        """`diskutil image` does not exist before macOS 26, so the script has
+        to probe for it rather than assume it. Having it, all four steps must
+        go through it, or the deprecation warnings come back one at a time.
+        """
+        script = _code(self.SCRIPT)
+        self.assertIn("diskutil image --help >/dev/null", script,
+                      "the script must probe for `diskutil image` support.")
+        for step in ("diskutil image create from --format RAW",
+                     "diskutil image attach",
+                     "diskutil eject",
+                     "diskutil image create from --format UDZO"):
+            with self.subTest(step=step):
+                self.assertIn(step, script)
+
+    def test_hdiutil_verbs_live_only_in_the_fallback_branches(self):
+        """A host with `diskutil image` must never run a deprecated verb, so
+        every hdiutil call sits in the else-branch of a dmg_* helper. Outside
+        the helper block, nothing may call hdiutil.
+        """
+        script = _code(self.SCRIPT)
+        helpers_start = script.index("dmg_create_rw() {")
+        helpers_end = script.index('RW_DMG_PATH="$BUILD_DIR/onionpress-rw.dmg"')
+        helpers = script[helpers_start:helpers_end]
+        outside = script[:helpers_start] + script[helpers_end:]
+        verb = re.compile(r"\bhdiutil\s+(create|attach|detach|convert)\b")
+        self.assertEqual(
+            [], [line for line in outside.splitlines() if verb.search(line)],
+            "hdiutil is called outside the dmg_* helpers.",
+        )
+        self.assertEqual(
+            4, helpers.count('if [ "$DMG_TOOL" = diskutil ]'),
+            "each of the four dmg_* helpers must branch on DMG_TOOL.",
+        )
+        self.assertEqual(4, len(verb.findall(helpers)))
+
+    def test_doctor_reports_diskutil_image_not_hdiutil(self):
+        doctor = _code("build/doctor.sh")
+        self.assertNotIn("report hdiutil", doctor,
+                         "hdiutil is no longer the DMG prerequisite.")
+        self.assertIn("diskutil image --help", doctor)
 
 
 if __name__ == "__main__":

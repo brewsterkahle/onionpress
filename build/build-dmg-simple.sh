@@ -591,20 +591,90 @@ rm -rf "$MENUBAR_BUILD_DIR"
 
 echo "Creating styled DMG..."
 
-# Calculate DMG size (app size + 80MB headroom for hi-res background)
-APP_SIZE_KB=$(du -sk "$TEMP_DIR" | cut -f1)
-DMG_SIZE_KB=$((APP_SIZE_KB + 81920))
+# ─── Disk image tooling ──────────────────────────────────────────────────
+# `diskutil image` arrived with macOS 26, and on macOS 27 the hdiutil verbs
+# this script used — create -srcfolder, attach, detach, convert — each print
+# a deprecation warning naming their replacement (hdiutil(1) carries the
+# full verb-to-verb table). diskutil is used when the host has it; older
+# hosts fall back to hdiutil so the .dmg still builds on the macOS 13+ the
+# docs promise. DMG_TOOL=hdiutil forces the fallback — that is how it stays
+# testable on a current macOS, where hdiutil still works.
+#
+# Both paths were run on macOS 27 and their output compared: an APFS volume
+# named OnionPress either way (hdiutil defaults to APFS on 27 as well),
+# identical file contents and permissions, the pre-baked .DS_Store byte-for-
+# byte with its background alias resolving on the mounted volume, and a
+# CRC32-checksummed UDZO image that `hdiutil attach` (still used by the
+# in-app updater) mounts. The one difference: diskutil exposes no zlib
+# level, so its image is ~1 MB (0.8%) larger than hdiutil's zlib-level=9.
+if [ -z "${DMG_TOOL:-}" ]; then
+    if diskutil image --help >/dev/null 2>&1; then
+        DMG_TOOL=diskutil
+    else
+        DMG_TOOL=hdiutil
+    fi
+fi
+case "$DMG_TOOL" in
+    diskutil|hdiutil) echo "  Disk image tool: $DMG_TOOL" ;;
+    *) echo "ERROR: DMG_TOOL must be 'diskutil' or 'hdiutil', not '$DMG_TOOL'" >&2; exit 1 ;;
+esac
 
-# Step 1: Create read-write DMG
+# dmg_create_rw <source-folder> <image-path> — a read-write image holding
+# the folder's contents, its volume named OnionPress. The volume name is
+# load-bearing: the alias inside build/dmg-assets/DS_Store points at
+# /Volumes/OnionPress/.background/dmg-background.png. diskutil's RAW is the
+# format hdiutil calls UDRW (imageinfo reports it as such). diskutil takes
+# no size and leaves ~5% free (18 MB on a 380 MB payload) — ample for the
+# 10 KB .DS_Store written after mounting; hdiutil needs the size spelled
+# out, so that path keeps the old app-size-plus-80 MB headroom.
+dmg_create_rw() {
+    if [ "$DMG_TOOL" = diskutil ]; then
+        diskutil image create from --format RAW --volumeName "OnionPress" "$1" "$2"
+    else
+        hdiutil create -volname "OnionPress" -srcfolder "$1" -ov -format UDRW \
+            -size "$(( $(du -sk "$1" | cut -f1) + 81920 ))k" "$2"
+    fi
+}
+
+# dmg_attach <image-path> — mount read-write and print the mount point.
+# diskutil prints one tab-separated line per entity: device, content hint,
+# and — on the line for a mounted filesystem — the mount point. A RAW image
+# mounts read-write by default and has no checksum to verify, and Finder
+# only auto-opens volumes blessed for it, so hdiutil's -readwrite -noverify
+# -noautoopen need no counterpart.
+dmg_attach() {
+    local out
+    if [ "$DMG_TOOL" = diskutil ]; then
+        out=$(diskutil image attach "$1")
+        printf '%s\n' "$out" | awk -F'\t' '$NF ~ /^\/Volumes\// { print $NF; exit }'
+    else
+        out=$(hdiutil attach -readwrite -noverify -noautoopen "$1")
+        printf '%s\n' "$out" | grep '/Volumes/' | sed 's/.*\/Volumes/\/Volumes/'
+    fi
+}
+
+# dmg_eject <mount-point>
+dmg_eject() {
+    if [ "$DMG_TOOL" = diskutil ]; then
+        diskutil eject "$1" >/dev/null
+    else
+        hdiutil detach "$1" -quiet
+    fi
+}
+
+# dmg_compress <rw-image> <output> — read-only, zlib-compressed UDZO.
+dmg_compress() {
+    if [ "$DMG_TOOL" = diskutil ]; then
+        diskutil image create from --format UDZO "$1" "$2"
+    else
+        hdiutil convert "$1" -format UDZO -imagekey zlib-level=9 -o "$2"
+    fi
+}
+
+# Step 1: Create read-write DMG from the staged folder
 RW_DMG_PATH="$BUILD_DIR/onionpress-rw.dmg"
 rm -f "$RW_DMG_PATH"
-hdiutil create \
-    -volname "OnionPress" \
-    -srcfolder "$TEMP_DIR" \
-    -ov \
-    -format UDRW \
-    -size "${DMG_SIZE_KB}k" \
-    "$RW_DMG_PATH"
+dmg_create_rw "$TEMP_DIR" "$RW_DMG_PATH"
 
 # Clean up source temp dir (contents are now in the DMG)
 rm -rf "$TEMP_DIR"
@@ -612,10 +682,12 @@ rm -rf "$TEMP_DIR"
 # Step 2: Mount the read-write DMG
 # Eject any existing volume with the same name to avoid collisions
 echo "Mounting DMG for styling..."
-hdiutil detach "/Volumes/OnionPress" -quiet 2>/dev/null || true
-MOUNT_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG_PATH")
-DEVICE=$(echo "$MOUNT_OUTPUT" | grep '/dev/' | head -1 | awk '{print $1}')
-MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | sed 's/.*\/Volumes/\/Volumes/')
+dmg_eject "/Volumes/OnionPress" 2>/dev/null || true
+MOUNT_POINT=$(dmg_attach "$RW_DMG_PATH")
+if [ -z "$MOUNT_POINT" ] || [ ! -d "$MOUNT_POINT" ]; then
+    echo "ERROR: $DMG_TOOL attached $RW_DMG_PATH but reported no /Volumes mount point" >&2
+    exit 1
+fi
 # Extract just the volume name (basename of mount point)
 VOL_NAME=$(basename "$MOUNT_POINT")
 
@@ -660,15 +732,12 @@ fi
 echo "Finalizing DMG..."
 chmod -Rf go-w "$MOUNT_POINT" 2>/dev/null || true
 sync
-hdiutil detach "$MOUNT_POINT" -quiet
+dmg_eject "$MOUNT_POINT"
 
 # Step 5: Convert to compressed read-only DMG
 echo "Compressing DMG..."
 rm -f "$DMG_PATH"
-hdiutil convert "$RW_DMG_PATH" \
-    -format UDZO \
-    -imagekey zlib-level=9 \
-    -o "$DMG_PATH"
+dmg_compress "$RW_DMG_PATH" "$DMG_PATH"
 
 # Clean up read-write DMG
 rm -f "$RW_DMG_PATH"
