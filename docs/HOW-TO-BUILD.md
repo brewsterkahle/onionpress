@@ -53,7 +53,7 @@ Intel host) still multiplies every step.
 
 | You want | You need |
 |---|---|
-| `.dmg`, icons | macOS 13 or later with the Xcode Command Line Tools. The launcher is compiled with a macOS 13 deployment target and the bundle is universal (arm64 + x86_64) regardless of the host. Verified on Apple Silicon; an Intel host should work but has not been exercised. |
+| `.dmg`, icons | macOS 13 or later with the Xcode Command Line Tools. The launcher is compiled with a macOS 13 deployment target and the bundle is universal (arm64 + x86_64) regardless of the host. The disk image is made with `diskutil image` (macOS 26 or later); on older hosts the script falls back to the deprecated `hdiutil` verbs automatically. Verified on Apple Silicon; an Intel host should work but has not been exercised. |
 | Container images, dev stack | Any OS with a Docker daemon: macOS (Docker Desktop, Colima, or the Colima that OnionPress itself bundles), Linux, or WSL2 (untested). |
 | `.deb` | Any OS. `dpkg-deb` is used when present; otherwise the archive is assembled by a pure-Python fallback, which is how it builds on macOS. |
 | Extensions, tests | Any OS. |
@@ -104,7 +104,7 @@ what you fetch is what the published build fetched. Details in
 |---|---|---|
 | Container images | `docker` | `docker buildx` — only for `--platform` (multi-arch) and `--push`. A plain local build falls back to the classic builder without it. |
 | Dev stack | `docker` with Compose v2 (`docker compose`) | |
-| `.dmg` | Xcode Command Line Tools (`swiftc`, `lipo`, `codesign`, `hdiutil`, `PlistBuddy`); Homebrew; `pkg-config`; **Python 3.14** — see below | `gh` (authenticated) — raises GitHub download speed from ≈ 30 KB/s to several MB/s |
+| `.dmg` | Xcode Command Line Tools (`swiftc`, `lipo`, `codesign`); `diskutil` and `PlistBuddy` (ship with macOS); Homebrew; `pkg-config`; **Python 3.14** — see below | `gh` (authenticated) — raises GitHub download speed from ≈ 30 KB/s to several MB/s |
 | `.deb` | `python3` | `dpkg-deb` (used when present) |
 | Extensions | `zip`, `python3` | |
 | Icons | `sips`, `iconutil` (ship with macOS) | ImageMagick — needed only for the three menubar PNGs |
@@ -130,7 +130,7 @@ decides what the installer can run on:
 **macOS**
 
 ```bash
-xcode-select --install                       # swiftc, lipo, codesign, hdiutil, PlistBuddy
+xcode-select --install                       # swiftc, lipo, codesign (diskutil, PlistBuddy ship with macOS)
 brew install uv pkg-config                   # dev-grade DMG
 brew install imagemagick                     # menubar icons only (pulls ~17 formulae)
 brew install gh && gh auth login             # optional: fast downloads; required for releases
@@ -262,8 +262,11 @@ What it does: assembles the bundle from `app/`, compiles the Swift launcher
 for both architectures, downloads pinned Colima / Lima / Docker / Compose
 binaries and `lipo`s them universal (cached under `build/.cache/`), builds
 libsodium and mkp224o for both architectures, runs py2app, ad-hoc signs
-everything, and creates the DMG with the pre-baked Finder window styling from
-`build/dmg-assets/`.
+everything, and creates the DMG with `diskutil image` — a read-write image it
+mounts to drop in the pre-baked Finder window styling from
+`build/dmg-assets/`, then compresses to read-only UDZO. `DMG_TOOL=hdiutil`
+forces the pre-macOS-26 `hdiutil` path, which the script otherwise uses only
+on hosts without `diskutil image`.
 
 **Verify:**
 
@@ -408,7 +411,9 @@ the pins file everywhere; needs no Docker daemon.
 removed an API py2app 0.28.9 still uses; the script retries automatically.
 
 **`hdiutil: WARNING: ... is deprecated. Please use 'diskutil image ...'`**
-Warnings only, on macOS 27. The DMG still builds.
+You are on the `hdiutil` fallback on macOS 27 or later — `DMG_TOOL=hdiutil`
+is set. Warnings only; the DMG still builds. Unset it to use `diskutil image`,
+which the script picks by itself whenever the host has it.
 
 **`ERROR: no Python 3.14 found` while building the DMG.** Install `uv`
 (dev-grade) or the python.org universal2 installer (release-grade). The

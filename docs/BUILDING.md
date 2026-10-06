@@ -21,7 +21,7 @@ namespace of whichever repository runs it, so a fork produces the full set
 of images without editing it — see [CI coverage](#ci-coverage).
 
 Some steps genuinely require a particular host OS — the `.dmg` needs macOS
-because it uses `swiftc`, `lipo`, `codesign`, `hdiutil` and `PlistBuddy`.
+because it uses `swiftc`, `lipo`, `codesign`, `diskutil image` and `PlistBuddy`.
 Those are called out per component.
 
 ## Contents
@@ -55,7 +55,7 @@ make doctor        # which build tools you have, and what each missing one costs
 | source layout + pin check | `make test` | any | — |
 
 `make deb` and `make extension` need no network at all. The `.dmg` is
-macOS-only because it uses `swiftc`, `lipo`, `codesign`, `hdiutil` and
+macOS-only because it uses `swiftc`, `lipo`, `codesign`, `diskutil image` and
 `PlistBuddy`; note that `.deb` is *not* Linux-only — `build/build-linux.sh`
 hand-assembles the `ar` archive in Python when `dpkg-deb` is absent.
 
@@ -67,7 +67,7 @@ about. So you know what you are trusting:
 | Artifact | Proven |
 |---|---|
 | `.deb` | builds on macOS via the pure-Python `ar` fallback; ships 0 stale `.pyc` (was 18) |
-| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `hdiutil`. 160 MB, version verified. **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
+| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `diskutil image` (and the `hdiutil` fallback, forced with `DMG_TOOL=hdiutil`). 161 MB, version verified. **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
 | `onionpress-wordpress` image | builds with the classic builder; wp-cli 2.12.0 with the pinned sha256 in the image; a wrong `WP_CLI_SHA256` fails at `sha256sum -c` **before** `chmod +x`; a wrong base digest fails at `FROM` |
 | `onionpress-tor` image | builds on the Tor Project's Onimages `tor:trixie` image in under a minute once it is pulled (isolated Colima VM, classic builder — nothing but mkp224o is compiled); baked in: Tor 0.4.9.13, Docker 29.8.1, mkp224o v1.7.0 against the base's libsodium; image user root, `CMD []`; the entrypoint bootstraps Tor in onion-service, SOCKS-only and takeover-worker modes and converts a delivered PEM key to C Tor's files; the stress worker chains off it; 0 `.pyc` under `/wordlists`; a wrong `MKP224O_COMMIT` fails at the post-clone assert |
 | `AppIcon.icns`, `app-icon.png` | byte-identical to the committed files |
@@ -76,10 +76,40 @@ about. So you know what you are trusting:
 | integration tests | all four suites (81 tests) pass against a disposable stack set up as in [What to run them against](#what-to-run-them-against) — image entrypoint, the minute's wait, no tor — on GitHub-hosted runners in a fork (`ivar/onionpress`, run 36817968776), in about 9 min, leaving only the root site behind; the suites as they were before the guard left three sandbox subsites (run 36817057114). With `/var/lib/onionpress/onion_address` in the container, or one extra subsite, the guard refused before creating anything |
 | `docker-publish.yml` | ran end to end in a fork (`ivar/onionpress`, run 36064530531, 2026-09-24, on the C Tor-only image) on GitHub-hosted runners only — amd64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`. All three images published under the fork's own namespace as OCI indexes carrying `linux/amd64` and `linux/arm64`; the stress worker's `FROM` resolved to the tor index the same run had merged seconds earlier. 2 min 12 s end to end; tor 58 s (amd64) / 55 s (arm64). The previous run on the arti-compiling image (35479901478, 2026-09-20) took 8 min 50 s |
 
-One forward-looking note from the DMG log: on macOS 27 `hdiutil create`,
-`hdiutil attach` and `hdiutil convert` each print a deprecation warning
-pointing at `diskutil image …`. They still work today; a future macOS may
-remove them, and `build/build-dmg-simple.sh` uses all three.
+**The disk-image step now uses `diskutil image`.** On macOS 27 the
+`hdiutil create`, `hdiutil attach` and `hdiutil convert` calls the DMG build
+used to make each printed a deprecation warning pointing at `diskutil image`
+(and `hdiutil(1)` now tables every verb's replacement, `detach` → `diskutil
+eject` included). `build/build-dmg-simple.sh` was ported: `create from
+--format RAW --volumeName OnionPress` for the read-write image, `diskutil
+image attach`, `diskutil eject`, and `create from --format UDZO` for the
+compressed result. `diskutil image` needs macOS 26 or later; on older hosts
+the script falls back to the hdiutil verbs by itself, and `DMG_TOOL=hdiutil`
+forces that path so it stays testable on a current macOS, where hdiutil still
+works.
+
+The two paths were compared by building both ways on macOS 27 and mounting
+the results side by side:
+
+- both mount at `/Volumes/OnionPress` as APFS (hdiutil defaults to APFS on
+  macOS 27 as well) with `OnionPress.app`, the `Applications` symlink and
+  `.background/dmg-background.png`;
+- the app's file contents and permissions are identical (`diff -r`, plus a
+  digest over every entry's mode and name), and `codesign --verify --deep
+  --strict` passes on both;
+- `.DS_Store` is byte-identical to the committed capture, and its background
+  alias — resolved the way Finder resolves it, alias record → bookmark → URL —
+  lands on `/Volumes/OnionPress/.background/dmg-background.png` on both
+  volumes, so the window styling survives;
+- both are `UDZO` with a CRC32 master checksum, and `hdiutil attach` still
+  mounts the diskutil-built image — which matters because the in-app updater
+  (`src/onionpress/updater.py`) mounts downloaded DMGs with `hdiutil attach`
+  and must keep working on macOS 13–25, where `diskutil image` does not exist;
+- the one difference: `diskutil image` exposes no zlib level, so its image is
+  ~1.3 MB (0.8%) larger than hdiutil's `-imagekey zlib-level=9` output. The
+  read-write image also has no `-size`: diskutil sizes it itself and leaves
+  ~5% free (18 MB on a 380 MB payload), ample for the 10 KB `.DS_Store`
+  written after mounting.
 
 **Building the tor image without disturbing a running OnionPress.** Its VM
 is your live site, and at 1 GB it is sized for running the stack. The tor

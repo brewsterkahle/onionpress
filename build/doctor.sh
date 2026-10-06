@@ -78,7 +78,18 @@ if [ "$OS" = "Darwin" ]; then
         "Xcode Command Line Tools."
     report codesign "ad-hoc signing the bundle" \
         "Xcode Command Line Tools."
-    report hdiutil "creating the disk image"
+    if diskutil image --help >/dev/null 2>&1; then
+        printf '  \033[32m✓\033[0m %-14s %s\n' "diskutil image" "creating the disk image"
+        have=$((have + 1))
+    elif command -v hdiutil >/dev/null 2>&1; then
+        printf '  \033[33m!\033[0m %-14s %s\n' "diskutil image" "absent (needs macOS 26+) — the build falls back to hdiutil"
+        printf '      Fine for building. hdiutil is deprecated from macOS 27 on, so the\n'
+        printf '      fallback has a shelf life; DMG_TOOL=hdiutil forces it for testing.\n'
+        have=$((have + 1))
+    else
+        printf '  \033[31m✗\033[0m %-14s %s\n' "diskutil image" "creating the disk image (no diskutil image, no hdiutil)"
+        missing=$((missing + 1))
+    fi
     report git "cloning mkp224o — a missing mkp224o ABORTS the DMG build" \
         "Without it every fresh install silently gets a RANDOM .onion."
     report pkg-config "cross-compiling libsodium for mkp224o"
@@ -114,7 +125,7 @@ if [ "$OS" = "Darwin" ]; then
 else
     echo "macOS installer — build/build-dmg-simple.sh"
     printf '  \033[33m!\033[0m %-14s %s\n' "n/a" "the .dmg can only be built on macOS"
-    printf '      It needs swiftc, lipo, codesign, hdiutil and PlistBuddy.\n'
+    printf '      It needs swiftc, lipo, codesign, diskutil and PlistBuddy.\n'
     echo ""
     echo "macOS icons — build/make-icons.sh"
     printf '  \033[33m!\033[0m %-14s %s\n' "n/a" "needs macOS sips + iconutil"
