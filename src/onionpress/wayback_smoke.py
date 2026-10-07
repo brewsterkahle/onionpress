@@ -43,10 +43,9 @@ def _get_post_wayback_state(post_id: str, site_url: str) -> dict:
         "_op_wayback_archived_at",
         "_op_wayback_snapshot_ts",
         "_op_wayback_job_id",
-        "_op_wayback_retry_count",
-        "_op_wayback_retry_after",
-        "_op_wayback_failed_at",
-        "_op_wayback_failed_reason",
+        "_op_wayback_submitted_at",
+        "_op_wayback_last_error_at",
+        "_op_wayback_last_error_ext",
     ]
     state = {}
     for key in keys:
@@ -103,8 +102,8 @@ def smoke_test_wayback(log_func: Callable[[str], None]) -> int:
             summary = (f"tick={tick} "
                        f"archived_at={state['_op_wayback_archived_at'] or '-'} "
                        f"job_id={state['_op_wayback_job_id'] or '-'} "
-                       f"retry_count={state['_op_wayback_retry_count'] or '0'} "
-                       f"failed_at={state['_op_wayback_failed_at'] or '-'}")
+                       f"submitted_at={state['_op_wayback_submitted_at'] or '-'} "
+                       f"last_error={state['_op_wayback_last_error_ext'] or '-'}")
             if summary != last_summary:
                 log_func("  " + summary)
                 last_summary = summary
@@ -113,10 +112,9 @@ def smoke_test_wayback(log_func: Callable[[str], None]) -> int:
                 ts = state["_op_wayback_snapshot_ts"] or "?"
                 log_func(f"PASS: post archived (snapshot_ts={ts})")
                 return 0
-            if state["_op_wayback_failed_at"]:
-                reason = state["_op_wayback_failed_reason"] or "(no reason)"
-                log_func(f"FAIL: sweep gave up on post — {reason}")
-                return 1
+            # The v4 sweep never gives up on a post: an SPN error is recorded
+            # in _op_wayback_last_error_* and the URL is resubmitted next
+            # tick, so an error here is progress to report, not a verdict.
             time.sleep(8)  # brief pause between sweep ticks
 
         log_func(f"FAIL: timed out after {_TEST_TIMEOUT_SEC}s. Last state: {last_summary}")
