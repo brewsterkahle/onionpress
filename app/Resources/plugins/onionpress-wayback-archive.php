@@ -20,8 +20,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 // ───────────────────────────── tunables ─────────────────────────────
 
 // How often wp-cron fires the entry point. The entry point runs a
-// daemon-style inner loop for up to OP_WB_LOOP_MAX_SEC, so cron only
-// has to fire as a watchdog that restarts the loop if it died. 5 min
+// daemon-style inner loop until the queue is drained (a stale mutex lets
+// the next tick take over), so cron only has to fire as a watchdog that
+// restarts the loop if it died. 5 min
 // is plenty — if the loop is still running, cron is a no-op (mutex).
 define( 'OP_WB_CRON_INTERVAL', 300 );
 
@@ -433,11 +434,6 @@ function onionpress_wayback_cdx_lookup_parallel( array $urls ) {
     return onionpress_wayback_cdx_one_pass( $urls );
 }
 
-// Back-compat alias for the new name.
-function onionpress_wayback_availability_parallel( array $urls ) {
-    return onionpress_wayback_cdx_lookup_parallel( $urls );
-}
-
 /**
  * Single CDX query pass. $urls is keyed map key → URL. Returns a
  * same-keyed map of key → timestamp (empty string on miss).
@@ -747,8 +743,8 @@ function onionpress_wayback_sites() {
 // ──────────────────────────── sweep ─────────────────────────────────
 
 /**
- * Entry point wired to wp-cron. Runs a continuous inner loop for up
- * to OP_WB_LOOP_MAX_SEC, so one cron invocation can drive many sweep
+ * Entry point wired to wp-cron. Runs a continuous inner loop until
+ * the queue is drained, so one cron invocation can drive many sweep
  * iterations. Exits early when:
  *   - queue fully drained (no posts with job_id=null, archived_at=null)
  *   - a gate tells us to back off for longer than remaining budget
@@ -1074,8 +1070,8 @@ function onionpress_wayback_sweep_iteration() {
         }
     }
 
-    // Second pass: for each SPN-errored job, verify against Wayback's
-    // /wayback/available (with CDX fallback). If there's a capture,
+    // Second pass: for each SPN-errored job, verify against the CDX index
+    // (the /wayback/available endpoint 404s on the onion mirror). If there's a capture,
     // mark archived; otherwise resubmit next tick.
     //
     // Cap the rescue burst so Tor SOCKS stays responsive to other
@@ -1368,11 +1364,6 @@ add_action( 'init', function () {
 // ───────────────────────── admin page ───────────────────────────────
 
 /**
- * Register a Wayback admin submenu under the Social Archive top-level
- * menu. Uses late priority (20) so the Social Archive plugin has
- * registered the parent menu first.
- */
-/**
  * Dashboard warning when SPN credentials are missing. Without them the
  * sweep silently skips every submission (submit_parallel returns empty
  * on blank auth), which looks identical to "working, just slow" —
@@ -1399,6 +1390,11 @@ add_action( 'admin_notices', function () {
         . 'See <a href="' . esc_url( admin_url( 'admin.php?page=onionpress-wayback' ) ) . '">Wayback Archive</a> for details.</p></div>';
 } );
 
+/**
+ * Register a Wayback admin submenu under the Social Archive top-level
+ * menu. Uses late priority (20) so the Social Archive plugin has
+ * registered the parent menu first.
+ */
 add_action( 'admin_menu', function () {
     if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
         // Social Archive plugin not loaded — fall back to a top-level menu.
@@ -1658,7 +1654,7 @@ function onionpress_wayback_admin_page() {
             WordPress serves again.</p>
         <p>If the daemon dies (crash, reboot, Mac sleep), the mutex lock goes stale after
             5 minutes and the next WordPress page view causes wp-cron to restart the daemon
-            from the persisted cursor. No progress is lost; no duplicates are created.</p>
+            from the per-post state in postmeta. No progress is lost; no duplicates are created.</p>
     </div>
     <?php
 }
