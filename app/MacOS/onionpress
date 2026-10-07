@@ -508,6 +508,9 @@ EOF
 
 # Function to detect container runtime
 detect_container_runtime() {
+    # Called as RUNTIME=$(detect_container_runtime): stdout IS the return
+    # value, so every log line in here goes to stderr (tee still writes
+    # the file copy) or it ends up inside $RUNTIME.
     # Use bundled Colima
     if command_exists colima; then
         if [ -f "$COLIMA_HOME/.initialized" ]; then
@@ -534,15 +537,15 @@ detect_container_runtime() {
 
                 _need_restart=false
                 if [ "$_cfg_mem" -gt 0 ] 2>/dev/null && [ "$_vm_mem_gb" -gt 0 ] 2>/dev/null && [ "$_cfg_mem" -ne "$_vm_mem_gb" ]; then
-                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB"
+                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB" >&2
                     _need_restart=true
                 fi
                 if [ "$_cfg_cpu" -gt 0 ] 2>/dev/null && [ "$_vm_cpus" -gt 0 ] 2>/dev/null && [ "$_cfg_cpu" -ne "$_vm_cpus" ]; then
-                    log "VM CPU mismatch: config=${_cfg_cpu}, running=${_vm_cpus}"
+                    log "VM CPU mismatch: config=${_cfg_cpu}, running=${_vm_cpus}" >&2
                     _need_restart=true
                 fi
                 if [ "$_need_restart" = true ]; then
-                    log "Restarting VM with ${_cfg_cpu} CPUs, ${_cfg_mem}GB RAM..."
+                    log "Restarting VM with ${_cfg_cpu} CPUs, ${_cfg_mem}GB RAM..." >&2
                     cd "$DOCKER_DIR"
                     docker compose down >> "$LOG_FILE" 2>&1 || true
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
@@ -555,16 +558,16 @@ detect_container_runtime() {
                         --memory "$_cfg_mem" \
                         >> "$LOG_FILE" 2>&1
                     if [ $? -eq 0 ]; then
-                        log "VM restarted with ${_cfg_cpu} CPUs, ${_cfg_mem}GB"
+                        log "VM restarted with ${_cfg_cpu} CPUs, ${_cfg_mem}GB" >&2
                     else
-                        log "WARNING: VM restart failed"
+                        log "WARNING: VM restart failed" >&2
                     fi
                 fi
                 echo "colima-bundled"
                 return 0
             else
                 # Start Colima if stopped
-                log "Starting bundled Colima..."
+                log "Starting bundled Colima..." >&2
 
                 # Read VM memory/CPU from config so restarts honour changes
                 _restart_mem=1
