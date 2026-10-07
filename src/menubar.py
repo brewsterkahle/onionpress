@@ -1189,6 +1189,9 @@ class OnionPressApp(rumps.App):
 
         if waited >= max_wait:
             self.log("WARNING: Container runtime not ready after 3 minutes")
+            # The splash otherwise stays on "Preparing your site..." through
+            # the launcher's own 180s Docker wait that follows.
+            self.update_splash_status("Container runtime did not start in 3 minutes — see View Logs")
 
         # Check for port conflicts (another user's OnionPress or other process)
         # Only flag a conflict if ports are busy AND our own containers aren't running.
@@ -1316,7 +1319,9 @@ class OnionPressApp(rumps.App):
             )
             return result.stdout.strip()
         except Exception as e:
-            print(f"Error running command {command}: {e}")
+            # Went to stdout (launcher.log) before; a 60s timeout here is what
+            # makes a wedged Docker look like "Stopped", so it belongs in our log.
+            self.log(f"Error running command {command}: {e}")
             return None
 
     def check_tor_reachability(self, log_result=True):
@@ -1647,16 +1652,29 @@ class OnionPressApp(rumps.App):
             # Check if containers are running
             status_json = self.run_command("status")
 
+            not_running = []
             if status_json and status_json != "[]":
                 try:
                     status = json.loads(status_json)
                     self.is_running = len(status) > 0 and all(
                         s.get("State", "").lower() == "running" for s in status
                     )
+                    not_running = sorted(
+                        f"{s.get('Name') or s.get('Service') or '?'} ({s.get('State') or '?'})"
+                        for s in status if s.get("State", "").lower() != "running")
                 except Exception:
                     self.is_running = False
             else:
                 self.is_running = False
+            if self.is_running:
+                self._start_failed_rc = None
+            # Any one container not "running" turns the whole app gray, so say
+            # which one, once per change: a tor restart loop should read as
+            # "onionpress-tor (restarting)" in the log, not as a bare Stopped.
+            if not_running != getattr(self, "_last_not_running", None):
+                if not_running:
+                    self.log("Containers not running: " + ", ".join(not_running))
+                self._last_not_running = not_running
 
             if self.is_running:
                 self._probe_vm_wedge()
