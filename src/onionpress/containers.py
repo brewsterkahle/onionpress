@@ -158,6 +158,9 @@ class ContainerManager:
         env["ONIONPRESS_SOCKS_PORT"] = str(self.port_config.socks_port)
         env["ONIONPRESS_PROXY_PORT"] = str(self.port_config.proxy_port)
         env["ONIONPRESS_PORT_OFFSET"] = str(self.port_config.offset)
+        # The Creations bind mount in docker-compose.yml; unset, compose
+        # falls back to a throwaway /tmp path.
+        env["ONIONPRESS_DOCUMENTS_DIR"] = self.paths.documents_dir
 
         # Read config-driven env vars
 
