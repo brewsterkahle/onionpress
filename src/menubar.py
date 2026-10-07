@@ -2181,7 +2181,9 @@ class OnionPressApp(rumps.App):
             else:
                 # Stopped
                 self.icon = self.icon_stopped
-                if self.onion_address and self.onion_address.endswith('.onion'):
+                if getattr(self, "_start_failed_rc", None) is not None:
+                    self.menu["Starting..."].title = "Status: Start failed — see View Logs"
+                elif self.onion_address and self.onion_address.endswith('.onion'):
                     self.menu["Starting..."].title = f"Stopped — {self._short_onion(self.onion_address)}"
                 else:
                     self.menu["Starting..."].title = "Status: Stopped"
@@ -3048,7 +3050,16 @@ class OnionPressApp(rumps.App):
 
             # Start the service normally
             self.update_splash_status("Starting your site...")
-            subprocess.run([self.launcher_script, "start"])
+            self._start_failed_rc = None
+            rc = subprocess.run([self.launcher_script, "start"]).returncode
+            if rc != 0:
+                # Every hard stop in the launcher (Docker never answered, key
+                # volume missing, compose up failed three times) exits 1 with
+                # an ERROR line in ~/.onionpress/onionpress.log. Nothing read
+                # the rc before: the menu just said "Stopped" with no reason.
+                self._start_failed_rc = rc
+                self.log(f"onionpress start failed (rc={rc}) — see ~/.onionpress/onionpress.log for the ERROR line")
+                self.update_splash_status("Start failed — see View Logs")
 
             # Poll until WordPress is responding (replaces fixed sleep)
             self.update_splash_status("Starting your site...")
@@ -3489,10 +3500,23 @@ class OnionPressApp(rumps.App):
                     capture_output=True, text=True, encoding='utf-8', errors='replace'
                 )
                 if result.returncode != 0:
-                    # Don't treat as fatal — the launcher may return non-zero for
-                    # benign reasons (port offset log message hitting system `log`).
-                    # The milestone polling loop will detect real failures via timeout.
-                    self.log(f"Launcher exited with rc={result.returncode} (may be benign)")
+                    # capture_output swallowed the launcher's stderr, including
+                    # the tracebacks of its onionpress.cli steps; keep the tail.
+                    tail = (result.stderr or result.stdout or "").strip()[-4000:]
+                    self.log(f"Launcher exited with rc={result.returncode}")
+                    if tail:
+                        self.log("Launcher output (tail):\n" + tail)
+                    # Before WordPress has answered, a non-zero exit is the
+                    # launcher's own hard stop (Docker never ready, key volume,
+                    # compose up): fail now instead of sitting on "Downloading
+                    # components..." until the 10-minute timeout. After step 4
+                    # it is a late, non-fatal step, recorded by the log above.
+                    try:
+                        wordpress_up = step4_done
+                    except NameError:
+                        wordpress_up = False
+                    if not wordpress_up:
+                        launcher_failed[0] = True
             except Exception as e:
                 launcher_failed[0] = True
                 self.log(f"Error in _run_first_time_setup: {e}")
@@ -3525,7 +3549,7 @@ class OnionPressApp(rumps.App):
             if launcher_failed[0]:
                 if sw:
                     sw.set_status("Setup failed — check log for details")
-                    sw.add_log("ERROR: Launcher script failed")
+                    sw.add_log("ERROR: Launcher script failed — see ~/.onionpress/onionpress.log")
                 self.log("First-time setup failed")
                 break
 
