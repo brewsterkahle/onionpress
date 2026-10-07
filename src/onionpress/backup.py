@@ -305,7 +305,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         db_creds = _get_db_credentials()
         _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
 
-        # 1. Extract Tor keys (Arti OpenSSH keystore format)
+        # 1. Extract Tor keys (OpenSSH PEM, the delivered-key format)
         with _phase_timer(log_func, 'BACKUP', 'tor_keys'):
             log_func("Backup: extracting Tor keys...")
             tor_dir = os.path.join(staging, 'tor-keys')
@@ -802,7 +802,7 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         log_func(f"RESTORE_STATS: zip_bytes={zip_bytes} "
                  f"extracted_bytes={extracted_bytes} sql_bytes={sql_bytes}")
 
-        # 1. Restore Tor keys (Arti OpenSSH keystore format)
+        # 1. Restore Tor keys (OpenSSH PEM, the delivered-key format)
         with _phase_timer(log_func, 'RESTORE', 'tor_keys'):
             log_func("Restore: writing Tor keys...")
             key_path = os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private')
