@@ -2063,14 +2063,17 @@ print(json.dumps(containers))
         fi
     fi
 
-    # Get wayback queue count
+    # Wayback queue count: posts not yet archived (waiting plus in flight),
+    # from the plugin's own totals. The onionpress_wayback_queue option this
+    # used to read was the v3 JSON queue, which the v4 plugin deleted, so
+    # the count was always 0.
     local wayback_queue=0
-    wayback_queue=$(docker exec onionpress-wordpress wp option get onionpress_wayback_queue --allow-root 2>/dev/null | python3 -c "
+    wayback_queue=$(docker exec onionpress-wordpress wp eval 'echo json_encode(onionpress_wayback_queue_totals());' --allow-root 2>/dev/null | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
-    print(len(data) if isinstance(data, list) else 0)
-except:
+    print(int(data.get('remaining', 0)) + int(data.get('in_flight', 0)))
+except Exception:
     print(0)
 " 2>/dev/null || echo 0)
 
