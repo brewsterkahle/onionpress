@@ -301,14 +301,25 @@ class PortConfig:
     proxy_port: int
 
 
-def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str) -> None:
+def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str,
+                      log_func=None) -> None:
     """Stop an orphaned Colima VM left over from a crash or force-quit.
 
     If our Colima VM is running but the MenubarApp PID file is stale (or
     missing), the VM is orphaned and holding ports.  Stop it so the next
     launch gets port 8080 instead of needlessly offsetting.
+
+    log_func receives the progress lines; the MenubarApp passes its own
+    logger. Without one they go to the "onionpress" logging logger, which
+    has no handler in the app, so they only ever reached stderr.
     """
-    log = logging.getLogger("onionpress")
+    _logger = logging.getLogger("onionpress")
+
+    def warn(msg: str) -> None:
+        if log_func:
+            log_func(msg)
+        else:
+            _logger.warning(msg)
 
     # If a live MenubarApp already owns these ports, leave them alone
     if os.path.exists(pid_file):
@@ -337,15 +348,15 @@ def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str) -> None:
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return
 
-    log.warning("Found orphaned Colima VM from a previous crash — stopping it")
+    warn("Found orphaned Colima VM from a previous crash — stopping it (up to 60s)")
     try:
         subprocess.run(
             [colima_bin, "stop"],
             capture_output=True, timeout=60, env=env,
         )
-        log.warning("Orphaned Colima VM stopped successfully")
+        warn("Orphaned Colima VM stopped successfully")
     except (subprocess.TimeoutExpired, OSError) as e:
-        log.warning(f"Failed to stop orphaned Colima VM: {e}")
+        warn(f"Failed to stop orphaned Colima VM: {e}")
 
 
 def detect_port_offset() -> PortConfig:
