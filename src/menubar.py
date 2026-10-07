@@ -69,6 +69,10 @@ class OnionPressApp(rumps.App):
     def __init__(self):
         # Get paths first (fast - no I/O)
         self.app_support = os.path.expanduser("~/.onionpress")
+        # Read by write_status_to_volume from the first status tick; it used
+        # to be first assigned on the background_init thread, so a relaunch
+        # over an already-running VM could hit AttributeError in check_status.
+        self.startup_time = time.time()
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
 
         # Single-instance safety net via PID file
@@ -250,7 +254,8 @@ class OnionPressApp(rumps.App):
 
         # Stop any orphaned Colima VM from a previous crash before port detection
         colima_bin = os.path.join(self.bin_dir, "colima")
-        op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file)
+        op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file,
+                                    log_func=self.log)
 
         # If our previous instance just quit, wait briefly for its port
         # to free before detecting offset. Without this, the new
@@ -873,9 +878,10 @@ class OnionPressApp(rumps.App):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True, encoding='utf-8', errors='replace',
-                env={
-                    "DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"
-                }
+                # The full docker env (PATH, DOCKER_CONFIG, COLIMA_HOME...), not
+                # a bare DOCKER_HOST: with stderr merged into stdout, a docker
+                # CLI complaint used to land in the WordPress access log.
+                env=self._docker._build_env(self._paths),
             )
 
             # Start reader thread that splits logs into raw + filtered rotating logs
@@ -886,9 +892,9 @@ class OnionPressApp(rumps.App):
             )
             self.web_log_thread.start()
 
-            print(f"Started web log capture to {self._wp_access_log.current_path()}")
+            self.log(f"Started web log capture to {self._wp_access_log.current_path()}")
         except Exception as e:
-            print(f"Error starting web log capture: {e}")
+            self.log(f"Error starting web log capture: {e}")
             self.web_log_process = None
 
     def stop_web_log_capture(self):
@@ -946,7 +952,7 @@ class OnionPressApp(rumps.App):
 
     def _capture_supervisor_loop(self):
         docker_bin = os.path.join(self.bin_dir, "docker")
-        docker_env = {"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
+        docker_env = self._docker._build_env(self._paths)
         logs_dir = os.path.join(self.app_support, "logs")
         while not self._capture_shutdown.is_set():
             try:
@@ -3786,9 +3792,19 @@ class OnionPressApp(rumps.App):
     def view_logs(self, _):
         """Open logs in built-in log viewer"""
         log_file = self._onionpress_log.current_path()
+        # The launcher script (`onionpress start`) writes to a separate flat
+        # file, and every ERROR from start_containers lives there; until the
+        # two logs are unified, open both so a failed start is reachable
+        # from the menu.
+        launcher_log = os.path.join(self.app_support, "onionpress.log")
+        opened = False
         if os.path.exists(log_file):
             _LogViewerWindow.show_for_file(log_file, "OnionPress Log")
-        else:
+            opened = True
+        if os.path.exists(launcher_log):
+            _LogViewerWindow.show_for_file(launcher_log, "Launcher Log (onionpress start)")
+            opened = True
+        if not opened:
             rumps.alert("No logs available yet")
 
     @rumps.clicked("View Web Usage Log")

@@ -200,11 +200,18 @@ class HealthChecker:
                         pct = int(part.split("=")[1])
                         if pct < 100:
                             self._log(f"Checking Tor bootstrap status... {pct}%")
+                        self._control_port_fallback_logged = False
                         return pct >= 100, pct
                     except ValueError:
                         pass
 
-        # Fallback: parse container logs if the control port is unavailable
+        # Fallback: parse container logs if the control port is unavailable.
+        # Say so once: sleep/wake DEL_ONION/ADD_ONION, the watchdog's stall
+        # recovery and OnionHeaven all depend on that port, so a silent
+        # fallback here hides an outage of theirs.
+        if not getattr(self, "_control_port_fallback_logged", False):
+            self._log("Tor control port did not answer — reading bootstrap state from docker logs instead")
+            self._control_port_fallback_logged = True
         result = self.docker.run(
             ["logs", "--tail", "100", "onionpress-tor"],
             timeout=15,
