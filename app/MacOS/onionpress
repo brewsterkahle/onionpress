@@ -121,6 +121,18 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# One line naming the components that failed during this start, so "did
+# everything come up?" is a single grep rather than a read of the whole
+# log. Each guarded step appends its name to START_ERRORS.
+START_ERRORS=""
+log_start_summary() {
+    if [ -n "${START_ERRORS:-}" ]; then
+        log "START SUMMARY: failed components:${START_ERRORS} — see the ERROR/WARNING lines above in $LOG_FILE"
+    else
+        log "START SUMMARY: all components started"
+    fi
+}
+
 # Per-user lock file to prevent the same user from double-starting.
 # Only checked for 'start' — other commands (status, get, launch, etc.) are safe.
 PIDFILE="$DATA_DIR/onionpress.pid"
@@ -1696,7 +1708,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # Always start Tor — generate the onion address in parallel with WordPress
     # setup so it's ready when the user finishes configuring.
     log "Starting Tor containers..."
-    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
+    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 \
+        || { log "ERROR: Failed to start tor/onionheaven containers (rc=$?) — see $LOG_FILE"; START_ERRORS="$START_ERRORS tor"; }
 
     # Install Internet Archive Wayback Machine Link Fixer plugin —
     # stays bash for now (uses install_plugin.sh + activate_plugin.sh
@@ -1735,11 +1748,18 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
-    bundled_python -m onionpress.cli configure-ia-plugin
-    bundled_python -m onionpress.cli deactivate-wp-statistics
+    # Each of these exits 1 on failure; under set -e a bare call would end
+    # `onionpress start` here with only a traceback on stderr, skipping the
+    # timezone, clearnet-logging and readiness steps. Log and carry on.
+    local _step
+    for _step in configure-ia-plugin deactivate-wp-statistics; do
+        bundled_python -m onionpress.cli "$_step" >> "$LOG_FILE" 2>&1 \
+            || { log "WARNING: $_step failed (rc=$?) — continuing; see $LOG_FILE"; START_ERRORS="$START_ERRORS $_step"; }
+    done
     bundled_python -m onionpress.cli provision-post-install \
         --themes-dir "$RESOURCES_DIR/themes" \
-        --plugins-dir "$RESOURCES_DIR/plugins"
+        --plugins-dir "$RESOURCES_DIR/plugins" >> "$LOG_FILE" 2>&1 \
+        || { log "WARNING: provision-post-install failed (rc=$?) — themes/plugins may be missing; see $LOG_FILE"; START_ERRORS="$START_ERRORS provision-post-install"; }
 
     # install-from-backup: clean up staging + marker only after a successful
     # import + provisioning, so an interrupted run re-imports on the next start.
@@ -1751,7 +1771,11 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 
     # Tor-routed archive.org login can take 30s — background it so the
     # rest of start_containers returns promptly. No-op if keys are set.
-    bundled_python -m onionpress.cli ensure-archive-s3-keys &
+    # Run it from a subshell so it is not in this script's job table: the
+    # EXIT trap kills $(jobs -p), and `onionpress start` returns within a
+    # second on a not-yet-installed site, which used to SIGTERM this 30s
+    # login every time with nothing in the log.
+    ( bundled_python -m onionpress.cli ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 & )
 
     # Configure site timezones to match the host machine so imported
     # social-media timestamps display in local time. Idempotent.
@@ -1952,7 +1976,11 @@ wait_for_services() {
     else
         ONION_ADDR="Generating..."
     fi
-    return 1
+    # The WARNING above is the report. Returning 1 here ended `onionpress
+    # start` under set -e before the start summary and the "running" lines,
+    # and the Linux launcher already returns 0; a slow Tor bootstrap is not
+    # a failed start.
+    return 0
 }
 
 # Main execution
@@ -2341,6 +2369,8 @@ main() {
             # Actively poll until services are ready (replaces fixed sleep)
             wait_for_services
 
+            log_start_summary
+
             log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
             log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
@@ -2491,12 +2521,17 @@ main() {
             cd "$DOCKER_DIR"
             # --pull always force-pulls even when every other pull is
             # skipped, so it has to be dropped for local images too.
+            _tor_rc=0
             if using_local_images; then
-                docker compose up -d tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+                docker compose up -d tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
             else
-                docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
+                docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
             fi
-            log "Tor containers started"
+            if [ "$_tor_rc" -eq 0 ]; then
+                log "Tor containers started"
+            else
+                log "ERROR: Failed to start tor container (rc=$_tor_rc) — see $LOG_FILE"
+            fi
             ;;
 
         import-key)
