@@ -1828,7 +1828,29 @@ install_clearnet_logging() {
         }
         [ -n \"$wp_ip\" ] && check_and_add \"$wp_ip\" \"CLEARNET-wordpress: \"
         [ -n \"$db_ip\" ] && check_and_add \"$db_ip\" \"CLEARNET-db: \"
-    " 2>/dev/null && log "✓ Clearnet logging rules installed" || log "WARNING: Failed to install clearnet logging rules"
+    " >> "$LOG_FILE" 2>&1 &
+    # limactl shell hangs for good when the VM's sshd is wedged (the state
+    # recover_lima_vm exists for), and this runs after the containers are
+    # up, so `onionpress start` never returned. Bound it; macOS has no
+    # timeout(1). stderr goes to the log so a failure can say why.
+    local _ipt_pid=$! _ipt_waited=0 _ipt_rc=0
+    while kill -0 "$_ipt_pid" 2>/dev/null; do
+        if [ "$_ipt_waited" -ge 60 ]; then
+            kill "$_ipt_pid" 2>/dev/null
+            log "WARNING: clearnet logging rules not installed — limactl shell did not return within 60s (VM ssh wedged?)"
+            START_ERRORS="$START_ERRORS clearnet-logging"
+            return 0
+        fi
+        sleep 1
+        _ipt_waited=$((_ipt_waited + 1))
+    done
+    wait "$_ipt_pid" || _ipt_rc=$?
+    if [ "$_ipt_rc" -eq 0 ]; then
+        log "✓ Clearnet logging rules installed"
+    else
+        log "WARNING: Failed to install clearnet logging rules (rc=$_ipt_rc) — see $LOG_FILE"
+        START_ERRORS="$START_ERRORS clearnet-logging"
+    fi
 }
 
 # Function to stop containers
