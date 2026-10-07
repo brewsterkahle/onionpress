@@ -1683,6 +1683,65 @@ exit 0
         self.assertNotIn("limactl", restart)
 
 
+class TestStartFailuresAreSurfaced(unittest.TestCase):
+    """A component that fails during boot must leave a line in a log file
+    and must not take the launcher down silently (review of 2026-10-06).
+
+    launcher.sh and `onionpress start` run under set -e, so a bare failing
+    command exits the script before any `$?` check or ERROR line after it
+    can run; every colima start is therefore guarded on the same line.
+    `onionpress start` names the components that failed in one START
+    SUMMARY line before "OnionPress is running!", and the MenubarApp reads
+    the launcher's exit status instead of inferring "Stopped" from an
+    empty status list.
+    """
+
+    LAUNCHER = "app/MacOS/launcher.sh"
+    ONIONPRESS = "app/MacOS/onionpress"
+    MENUBAR = "src/menubar.py"
+
+    def test_every_colima_start_in_launcher_sh_is_rc_guarded(self):
+        text = _read(self.LAUNCHER)
+        body = TestKeyVolumeMigration._function_body(text, "initialize_colima")
+        starts = [m.start() for m in re.finditer(r'"\$BIN_DIR/colima" start \\', body)]
+        self.assertGreaterEqual(len(starts), 3, "expected first-run (x2) and restart colima starts")
+        for s in starts:
+            block = body[s:s + 700]
+            with self.subTest(start=block.splitlines()[0]):
+                self.assertRegex(
+                    block, r'2>&1( \\\n\s+| )\|\| (colima_rc=\$\?|log "ERROR)',
+                    "a colima start must capture or log its failure on the same "
+                    "command line; under set -e nothing after it runs otherwise")
+
+    def test_start_summary_precedes_every_running_line(self):
+        text = _read(self.ONIONPRESS)
+        running = list(re.finditer(r'^(\s+)log "OnionPress is running!"$', text, re.M))
+        self.assertGreaterEqual(len(running), 1)
+        for m in running:
+            previous = text[:m.start()].rstrip("\n").rsplit("\n", 1)[-1].strip()
+            self.assertEqual(previous, "log_start_summary", text[m.start() - 120:m.end()])
+        self.assertIn("\nlog_start_summary() {", text)
+        self.assertGreaterEqual(
+            text.count('START_ERRORS="$START_ERRORS'), 4,
+            "the guarded start steps append their name to START_ERRORS")
+
+    def test_wait_for_services_reports_without_failing_the_start(self):
+        # Linux already returns 0 here; under set -e a return 1 ended
+        # `onionpress start` before the summary and the running lines.
+        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
+            body = TestKeyVolumeMigration._function_body(_read(launcher), "wait_for_services")
+            with self.subTest(launcher=launcher):
+                self.assertNotRegex(body, r"\n\s+return 1\s*$")
+                self.assertIn("WARNING: Services not fully ready", body)
+
+    def test_menubar_reads_the_launchers_exit_status(self):
+        text = _read(self.MENUBAR)
+        self.assertNotIn('subprocess.run([self.launcher_script, "start"])\n', text,
+                         "start_service must not discard the launcher's return code")
+        self.assertIn('rc = subprocess.run([self.launcher_script, "start"]).returncode', text)
+        self.assertIn('"Status: Start failed — see View Logs"', text)
+
+
 if __name__ == "__main__":
     unittest.main()
 
