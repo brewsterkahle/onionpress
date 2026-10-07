@@ -462,7 +462,14 @@ command_exists() {
 
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
-    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1
+    local rc=0
+    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1 || rc=$?
+    # rc 1 is WordPress answering "not installed"; anything else is docker
+    # or wp-cli itself failing, which must not be mistaken for a fresh site.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+        log "wp core is-installed: docker exec failed (rc=$rc) — treating as not installed" >&2
+    fi
+    return $rc
 }
 
 # Function to generate and load database passwords
@@ -1627,13 +1634,19 @@ start_containers() {
         sleep 2
         wp_wait=$((wp_wait + 2))
     done
+    if [ $wp_wait -ge 60 ]; then
+        log "WARNING: WordPress did not answer on :${ONIONPRESS_WP_PORT:-8080} within 60s — continuing; the install check below may misreport a slow database as a fresh site"
+    fi
 
     # Check if WordPress is already set up (admin account created)
     # Retry a few times — the DB may still be warming up even though
     # WordPress HTTP is responding (wp core is-installed needs a live DB)
+    # 15 tries x 2s, matching the Linux launcher: 5 was short enough that a
+    # cold MariaDB (e.g. MARIADB_AUTO_UPGRADE after an image refresh) read as
+    # "WordPress not yet installed" and skipped the per-start repairs.
     local wp_installed=false
     local wp_check=0
-    while [ $wp_check -lt 5 ]; do
+    while [ $wp_check -lt 15 ]; do
         if wp_is_installed; then
             wp_installed=true
             break
