@@ -231,7 +231,11 @@ for nickname in wordpress healthcheck; do
     CTOR_SECRET="${CTOR_DIR}/hs_ed25519_secret_key"
     if [ -f "$PEM_KEY" ] && [ ! -f "$CTOR_SECRET" ]; then
         echo "Converting delivered key for $nickname to C Tor format..."
-        python3 /key-convert.py arti-to-ctor "$PEM_KEY" "$CTOR_DIR"
+        # Unchecked, a failed conversion left the directory without a secret
+        # key and C Tor minted a NEW onion address; the host only saw a
+        # "hostname mismatch". A visible restart loop beats a silent re-key.
+        python3 /key-convert.py arti-to-ctor "$PEM_KEY" "$CTOR_DIR" \
+            || { echo "ERROR: key conversion failed for $nickname — refusing to start: C Tor would mint a new onion address" >&2; exit 1; }
     fi
 done
 
@@ -241,10 +245,10 @@ for dir in /var/lib/tor/hidden_service/wordpress /var/lib/tor/hidden_service/hea
     chmod 700 "$dir"
 done
 
-# Generate torrc from template — strip HiddenServiceDir lines since the
-# watchdog manages onion services via ADD_ONION/DEL_ONION for clean sleep/wake.
+# torrc comes straight from the template. It carries no HiddenService*
+# lines: the watchdog manages onion services via ADD_ONION/DEL_ONION for
+# clean sleep/wake, so there is nothing to strip.
 cp /etc/tor/torrc.template /etc/tor/torrc
-sed -i '/^HiddenServiceDir /d; /^HiddenServicePort /d; /^HiddenServiceNumIntroductionPoints /d; /^# __WORDPRESS_API_PORT__/d' /etc/tor/torrc
 
 # Write onion service definitions for the watchdog to ADD_ONION.
 # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
