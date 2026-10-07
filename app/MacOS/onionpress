@@ -500,6 +500,13 @@ EOF
         export WORDPRESS_DB_PASSWORD
         export MYSQL_PASSWORD
         export MYSQL_ROOT_PASSWORD
+        # A truncated file (disk full on first run) sources fine and yields
+        # empty passwords; mariadb then refuses to initialise and the only
+        # symptom is a db restart loop. Say so here instead.
+        if [ -z "$WORDPRESS_DB_PASSWORD" ] || [ -z "$MYSQL_ROOT_PASSWORD" ]; then
+            log "ERROR: $secrets_file is incomplete (empty database password) — not starting. The database was initialised with these passwords, so restore the file rather than regenerating it."
+            exit 1
+        fi
     else
         log "ERROR: Secrets file not found at $secrets_file"
         exit 1
