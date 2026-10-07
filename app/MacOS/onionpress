@@ -1095,6 +1095,17 @@ install_docker() {
         fi
     fi
 
+    # Diffdisk cap (issue #230), same rule as launcher.sh: 20 GiB unless
+    # VM_DISK is set in ~/.onionpress/config before first launch. The cap is
+    # baked in at VM creation, so this fallback path has to pass it too or
+    # a VM created here gets Lima's 100 GiB default.
+    local VM_DISK=20 _cfg_disk
+    if [ -f "$DATA_DIR/config" ]; then
+        _cfg_disk=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2)
+        [ -n "$_cfg_disk" ] && VM_DISK="$_cfg_disk"
+    fi
+    log "Creating the Colima VM with a ${VM_DISK}GB diffdisk cap"
+
     # Should not happen if launcher worked, but handle it
     if [ "$VM_ARCH" = "aarch64" ]; then
         # Apple Silicon: use VZ backend (Virtualization.framework)
@@ -1107,6 +1118,7 @@ install_docker() {
             $(docs_mount_args) \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
+            --disk "$VM_DISK" \
             --arch "$VM_ARCH" \
             --vz-rosetta=false \
             >> "$LOG_FILE" 2>&1
@@ -1121,6 +1133,7 @@ install_docker() {
             $(docs_mount_args) \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
+            --disk "$VM_DISK" \
             --arch "$VM_ARCH" \
             >> "$LOG_FILE" 2>&1
     fi
