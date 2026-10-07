@@ -819,9 +819,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Use shared archive.org credentials for Wayback Machine archiving
+        # Use the shared archive.org credentials for Wayback Machine
+        # archiving; multisite.py holds the one copy, so rotating them is
+        # a single edit.
+        from onionpress import multisite as _multisite
         archive_s3_keys = self._fetch_archive_s3_keys(
-            'onionpress@internetarchive.eu', 'aat:aep7'
+            _multisite._ARCHIVE_LOGIN_EMAIL, _multisite._ARCHIVE_LOGIN_PASS
         )
         if archive_s3_keys is None and self.server.log_func:
             self.server.log_func("Warning: could not fetch archive.org S3 keys — Wayback archiving may not work")
