@@ -231,7 +231,7 @@ class TorControl:
         self._log("SIGNAL NEWNYM sent")
 
     def hsfetch(self, service_id: str) -> None:
-        """Force Tor to fetch a hidden service descriptor.
+        """Force Tor to fetch a onion service descriptor.
 
         Args:
             service_id: The service ID (without .onion suffix).

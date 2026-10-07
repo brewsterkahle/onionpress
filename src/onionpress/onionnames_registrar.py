@@ -28,7 +28,7 @@ from onionpress import onion_auth
 # ---------------------------------------------------------------------------
 
 # OnionHome's registrar lives at the same onion address as its OnionHeaven
-# API, on port 8083 (exposed through the hidden service).
+# API, on port 8083 (exposed through the onion service).
 DEFAULT_ONIONHOME_ADDRESS = (
     "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
 )
