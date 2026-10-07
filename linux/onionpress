@@ -83,6 +83,10 @@ fi
 # Ensure subtree exists for compose bind-mounts.
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
+# docker-compose.yml bind-mounts ${ONIONPRESS_DOCUMENTS_DIR}/Creations; without
+# this export it fell back to /tmp/onionpress-no-docs and ~/OnionPress/Creations
+# was never served on Linux (the macOS launcher has always exported it).
+export ONIONPRESS_DOCUMENTS_DIR="$DOCUMENTS_DIR"
 mkdir -p "$DOCUMENTS_DIR/Social Archives"
 touch "$DOCUMENTS_DIR/Social Archives/.onionpress-activated"
 
