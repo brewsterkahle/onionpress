@@ -284,6 +284,10 @@ initialize_colima() {
         # well under 5 GiB with auto-prune in the image-update path. The
         # value is baked in at VM creation; existing installs keep their
         # original cap and are unaffected by changing this number.
+        # launcher.sh runs under set -e: a bare failing `colima start` would
+        # exit here, before the rc check below ever ran, with no ERROR line
+        # and the MenubarApp left orphaned. Capture the status instead.
+        colima_rc=0
         if [ "$HOST_ARCH" = "arm64" ]; then
             # Apple Silicon: use VZ backend (Virtualization.framework)
             "$BIN_DIR/colima" start \
@@ -298,7 +302,7 @@ initialize_colima() {
                 --disk "$VM_DISK" \
                 --arch "$VM_ARCH" \
                 --vz-rosetta=false \
-                >> "$LOG_FILE" 2>&1
+                >> "$LOG_FILE" 2>&1 || colima_rc=$?
         else
             # Intel: use QEMU backend
             "$BIN_DIR/colima" start \
@@ -312,14 +316,14 @@ initialize_colima() {
                 --memory "$VM_MEMORY" \
                 --disk "$VM_DISK" \
                 --arch "$VM_ARCH" \
-                >> "$LOG_FILE" 2>&1
+                >> "$LOG_FILE" 2>&1 || colima_rc=$?
         fi
 
-        if [ $? -eq 0 ]; then
+        if [ "$colima_rc" -eq 0 ]; then
             touch "$COLIMA_HOME/.initialized"
             log "Colima initialized successfully"
         else
-            log "ERROR: Colima init failed"
+            log "ERROR: Colima init failed (rc=$colima_rc) — see $LOG_FILE"
             echo "ERROR: Failed to initialize container runtime." >&2
             echo "Check the logs for details: $LOG_FILE" >&2
             exit 1
@@ -349,7 +353,8 @@ initialize_colima() {
             --mount "$DATA_DIR/shared:w" \
             $(docs_mount_args) \
             --memory "$vm_mem" \
-            >> "$LOG_FILE" 2>&1
+            >> "$LOG_FILE" 2>&1 \
+            || log "ERROR: colima start failed (rc=$?) — see $LOG_FILE; the MenubarApp will keep waiting for Docker"
     fi
 }
 
@@ -382,5 +387,6 @@ log "Setup complete"
 # Stay alive so macOS can send us Apple Event quit (osascript -e 'quit app').
 # Forward SIGTERM to the MenubarApp so it runs its full cleanup.
 trap 'kill -TERM $MENUBAR_PID 2>/dev/null; wait $MENUBAR_PID 2>/dev/null' TERM INT HUP
-wait $MENUBAR_PID 2>/dev/null
-log "MenubarApp exited, launcher done"
+menubar_rc=0
+wait $MENUBAR_PID 2>/dev/null || menubar_rc=$?
+log "MenubarApp exited (rc=$menubar_rc), launcher done"
