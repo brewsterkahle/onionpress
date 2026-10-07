@@ -97,6 +97,10 @@ define( 'OP_WB_META_RESNAPSHOT_DONE',  '_op_wayback_resnapshot_done' );
 // wp_options keys.
 define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
 define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
+
+// The Wayback Machine's onion mirror; every SPN, status and CDX call goes here
+// through onionheaven's SOCKS proxy. One place to change it.
+define( 'OP_WB_ONION_HOST', 'web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion' );
 define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
 // 'yes' keeps a subsite out of the Wayback Machine entirely: the sweep
 // never visits it, the queue totals leave it out, and it never schedules
@@ -246,7 +250,7 @@ function onionpress_wayback_user_status() {
     if ( empty( $auth ) ) {
         return null;
     }
-    $ch = curl_init( 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status/user?t=' . time() );
+    $ch = curl_init( 'https://' . OP_WB_ONION_HOST . '/save/status/user?t=' . time() );
     onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
         CURLOPT_TIMEOUT    => 60,
@@ -363,7 +367,7 @@ function onionpress_wayback_submit_parallel( array $urls ) {
             $url = $urls[ $key ];
             $setups[ $key ] = function ( $ch ) use ( $url, $headers ) {
                 curl_setopt_array( $ch, array(
-                    CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
+                    CURLOPT_URL        => 'https://' . OP_WB_ONION_HOST . '/save',
                     CURLOPT_POST       => true,
                     CURLOPT_POSTFIELDS => http_build_query( array(
                         'url'                 => $url,
@@ -445,7 +449,7 @@ function onionpress_wayback_cdx_one_pass( array $urls ) {
         $setups = array();
         foreach ( $key_chunk as $key ) {
             $url_no_scheme = preg_replace( '#^https?://#', '', $urls[ $key ] );
-            $endpoint = 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/cdx/search/cdx?'
+            $endpoint = 'https://' . OP_WB_ONION_HOST . '/cdx/search/cdx?'
                 . 'url=' . urlencode( $url_no_scheme ) . '&output=json&limit=-1';
             $setups[ $key ] = function ( $ch ) use ( $endpoint, $headers ) {
                 curl_setopt_array( $ch, array(
@@ -503,7 +507,7 @@ function onionpress_wayback_poll_parallel( array $job_ids ) {
         foreach ( $parallel_group as $i => $chunk ) {
             $setups[ $i ] = function ( $ch ) use ( $chunk, $headers ) {
                 curl_setopt_array( $ch, array(
-                    CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status',
+                    CURLOPT_URL        => 'https://' . OP_WB_ONION_HOST . '/save/status',
                     CURLOPT_POST       => true,
                     CURLOPT_POSTFIELDS => http_build_query( array( 'job_ids' => implode( ',', $chunk ) ) ),
                     CURLOPT_TIMEOUT    => 60,
@@ -1520,7 +1524,7 @@ function onionpress_wayback_admin_page() {
         } else {
             $host = (string) ( $_SERVER['HTTP_HOST'] ?? '' );
             $wb_home = substr( $host, -6 ) === '.onion'
-                ? 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/'
+                ? 'https://' . OP_WB_ONION_HOST . '/'
                 : 'https://web.archive.org/';
         }
         ?>
