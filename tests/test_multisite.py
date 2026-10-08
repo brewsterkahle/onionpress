@@ -214,6 +214,7 @@ class TestMuPluginsList(unittest.TestCase):
             "onionpress-wayback-archive.php",
             "onionpress-onboarding.php",
             "onionpress-avatar.php",
+            "onionpress-research-vault.php",
         }
         missing = critical - set(multisite.MU_PLUGINS)
         self.assertFalse(
