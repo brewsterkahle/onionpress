@@ -210,9 +210,13 @@ function onionpress_bluesky_import_page() {
         'bluesky:%'
     ) );
 
+    // The daemon is kicked asynchronously, so on the "Sync now" POST it
+    // hasn't heartbeated yet — refresh on that request too, or the
+    // "refreshes automatically" promise in the notice doesn't hold.
+    $just_kicked = isset( $_POST['onionpress_bluesky_sync_now'] );
     ?>
     <div class="wrap">
-        <?php if ( $daemon_alive ) : ?>
+        <?php if ( $daemon_alive || $just_kicked ) : ?>
             <meta http-equiv="refresh" content="15">
         <?php endif; ?>
         <h1>Bluesky import</h1>
@@ -271,6 +275,25 @@ function onionpress_bluesky_import_page() {
                         swap). Click <strong>Reset cursors</strong> below and then
                         <strong>Sync now</strong> — already-imported posts will be
                         deduplicated automatically.</p>
+                </div>
+            <?php endif; ?>
+            <?php
+            // A dead daemon with an unfinished backfill used to render as a
+            // silent "0" — say so instead, and surface the last note, which
+            // carries the actual error when a tick failed.
+            if ( ! $daemon_alive && ! $just_kicked && $cursor_state !== 'done' ) : ?>
+                <div class="notice notice-warning">
+                    <p><strong>Sync is not running.</strong>
+                        <?php if ( $cursor_state === '' && $imported_now === 0 ) : ?>
+                            Nothing has been imported yet.
+                        <?php else : ?>
+                            The backfill is incomplete and paused.
+                        <?php endif; ?>
+                        Click <strong>Sync now</strong> below to start it.
+                        <?php if ( $last_note ) : ?>
+                            <br><small style="color:#666;">Last sync<?php echo $last_sync ? ' (' . esc_html( human_time_diff( $last_sync ) ) . ' ago)' : ''; ?>: <?php echo esc_html( $last_note ); ?></small>
+                        <?php endif; ?>
+                    </p>
                 </div>
             <?php endif; ?>
             <h2>Step 2 &mdash; Sync</h2>

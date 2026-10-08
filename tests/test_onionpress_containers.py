@@ -358,17 +358,15 @@ class TestBuildEnv(unittest.TestCase):
         env = cm._build_env()
         self.assertEqual(env["ONIONPRESS_WP_PORT"], "8080")
         self.assertEqual(env["ONIONPRESS_SOCKS_PORT"], "9050")
-        # Default with no config is C Tor (the TOR_IMPL=arti default was a bug,
-        # fixed so fresh installs / menubar-driven starts come up as C Tor).
-        self.assertEqual(env["TOR_IMPL"], "tor")
+        # There is one Tor implementation; no switch is exported.
+        self.assertNotIn("TOR_IMPL", env)
 
     def test_build_env_reads_config(self):
         with open(self.paths.config_file, "w") as f:
-            f.write("TOR_IMPL=tor\nCLOUDFLARE_TUNNEL_TOKEN=mytoken\n")
+            f.write("CLOUDFLARE_TUNNEL_TOKEN=mytoken\n")
         docker = mock.Mock(spec=Docker)
         cm = ContainerManager(docker, self.paths, self.port_config)
         env = cm._build_env()
-        self.assertEqual(env["TOR_IMPL"], "tor")
         self.assertEqual(env["CLOUDFLARE_TUNNEL_TOKEN"], "mytoken")
 
 

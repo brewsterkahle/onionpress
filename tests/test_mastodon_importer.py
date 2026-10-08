@@ -7,10 +7,10 @@ filter hook to inject canned API responses — no real Mastodon server
 is contacted.
 
 Sandbox safety: tests run against a dedicated subsite (slug
-`op-mastodon-test`) that the suite creates on first use. Earlier
-versions of this file picked the first non-root subsite, which silently
-clobbered real user blogs' routing options (see TestSandboxGuard
-below).
+`op-mastodon-test`) that each class creates afresh and deletes when it
+finishes. Earlier versions of this file picked the first non-root
+subsite, which silently clobbered real user blogs' routing options (see
+TestSandboxGuard below).
 
 Coverage focus: regressions we've hit in the field.
   1. Short page (count < PER_PAGE) MUST NOT mark backfill done — the
@@ -28,44 +28,22 @@ Coverage focus: regressions we've hit in the field.
   8. Sandbox guard refuses to run against a subsite with a real
      handle configured.
 
-Prerequisites (skips the suite if any fails):
-  - Docker running
-  - `onionpress-wordpress` container up
-  - Multisite enabled (so the dedicated test subsite can be created)
+Opt-in: skipped unless ONIONPRESS_INTEGRATION_TESTS=1, and refused on a
+live install — see wp_integration.py. Needs a multisite install with the
+plugin from this checkout in mu-plugins/.
 """
 
 import json
-import shutil
-import subprocess
+import os
+import sys
 import unittest
 import uuid
 
-_WP = "onionpress-wordpress"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wp_integration  # noqa: E402
 
-
-def _docker_exec(args, **kwargs):
-    return subprocess.run(
-        ["docker", "exec", _WP] + args,
-        capture_output=True, text=True, encoding='utf-8',
-        errors='replace', **kwargs,
-    )
-
-
-def _wp(args, url=None, **kwargs):
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
-    if url:
-        cmd.append("--url=" + url)
-    return _docker_exec(cmd, **kwargs)
-
-
-def _docker_available():
-    if not shutil.which("docker"):
-        return False
-    r = subprocess.run(
-        ["docker", "inspect", _WP, "--format={{.State.Running}}"],
-        capture_output=True, text=True, timeout=10,
-    )
-    return r.returncode == 0 and "true" in r.stdout
+_wp = wp_integration.wp
+_eval = wp_integration.wp_eval
 
 
 _SAFE_TEST_ACCOUNT_ID = "1"
@@ -97,8 +75,8 @@ _TOUCHED_OPTIONS = (
 )
 
 
-def _get_or_create_test_subsite():
-    """Return the dedicated test subsite URL, creating it on first call.
+class _MastodonSandbox(wp_integration.SandboxTestCase):
+    """Every class runs on the dedicated sandbox subsite.
 
     Earlier versions of this file picked the first non-root subsite —
     fine on a fresh CI install, catastrophic on a real machine where
@@ -107,38 +85,8 @@ def _get_or_create_test_subsite():
     user's Sync would then poll example.test forever. Use a slug
     that's obviously test-only so the same can never happen again.
     """
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    sites = json.loads(r.stdout)
-    needle = "/" + _TEST_SUBSITE_SLUG + "/"
-    for s in sites:
-        if s.get("path") == needle:
-            return s["url"].rstrip("/") + "/"
-    create = _wp(
-        ["site", "create",
-         "--slug=" + _TEST_SUBSITE_SLUG,
-         "--title=Mastodon Importer Test Sandbox",
-         "--porcelain"],
-        timeout=30,
-    )
-    if create.returncode != 0:
-        return None
-    # Re-list to get the canonical URL the network assigned.
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    sites = json.loads(r.stdout) if r.stdout.strip() else []
-    for s in sites:
-        if s.get("path") == needle:
-            return s["url"].rstrip("/") + "/"
-    return None
-
-
-def _eval(php, url):
-    """Run PHP inside WP, return stdout (stripped)."""
-    r = _wp(["eval", php], url=url, timeout=90)
-    return r.stdout.strip()
+    SANDBOX_SLUG = _TEST_SUBSITE_SLUG
+    SANDBOX_TITLE = "Mastodon Importer Test Sandbox"
 
 
 def _assert_test_sandbox(url):
@@ -230,16 +178,8 @@ def _delete_test_comments(url):
     """, url)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestMastodonImporterBackfill(unittest.TestCase):
+class TestMastodonImporterBackfill(_MastodonSandbox):
     """Backfill pagination semantics."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -332,16 +272,8 @@ class TestMastodonImporterBackfill(unittest.TestCase):
         self.assertIn("errs=1", out)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestMastodonImporterStatus(unittest.TestCase):
+class TestMastodonImporterStatus(_MastodonSandbox):
     """Per-status filter logic (include_replies / include_boosts / dedupe)."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -387,16 +319,8 @@ class TestMastodonImporterStatus(unittest.TestCase):
         self.assertEqual(r, "skipped")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestMastodonDaemonLock(unittest.TestCase):
+class TestMastodonDaemonLock(_MastodonSandbox):
     """Token-lock mutex semantics for the daemon entry point."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -456,17 +380,9 @@ class TestMastodonDaemonLock(unittest.TestCase):
         self.assertNotIn("deadTok", out)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestMastodonThreading(unittest.TestCase):
+class TestMastodonThreading(_MastodonSandbox):
     """Self-replies should fold into the parent post's comment thread,
     not flood the category archive as fragmentary top-level posts."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -817,19 +733,11 @@ class TestMastodonThreading(unittest.TestCase):
         self.assertEqual(self._comments_for(reply_id), "")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestMastodonContextFetch(unittest.TestCase):
+class TestMastodonContextFetch(_MastodonSandbox):
     """When we reply to someone else's toot, the parent (and ancestor
     chain back to one of our own toots, or up to the depth cap) is
     fetched from Mastodon and imported as context — so the
     conversation reads in full instead of as a fragmentary reply."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -1065,19 +973,11 @@ class TestMastodonContextFetch(unittest.TestCase):
         self.assertNotEqual(self._comment_post_id(our_reply_id), "0")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestHandleServerHelper(unittest.TestCase):
+class TestHandleServerHelper(_MastodonSandbox):
     """`onionpress_mastodon_handle_server()` parses the server out of a stored
     handle. The admin UI uses it to flag drift between the visible handle and
     the routing options — the symptom that bit a user's brewsterkahle subsite
     after tests poisoned _server / _account_id."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def _call(self, handle):
         h = json.dumps(handle).replace("'", "\\'")
@@ -1103,20 +1003,12 @@ class TestHandleServerHelper(unittest.TestCase):
         self.assertEqual(self._call("just-a-name"), "")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestSandboxGuard(unittest.TestCase):
+class TestSandboxGuard(_MastodonSandbox):
     """The sandbox guard is what prevents tests from poisoning a real subsite.
     It must reject any of _server / _account_id / _handle that look real, even
     if the others are sandbox values — the bug we're fixing was exactly this:
     _handle was real, _server and _account_id were sandbox, and the old guard
     only checked the latter two."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         # We poke options directly to simulate a poisoned subsite, then

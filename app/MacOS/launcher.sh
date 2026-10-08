@@ -95,6 +95,12 @@ export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+# Colima drives the host `docker` CLI: every start creates a "colima" context,
+# switches to it unless --activate=false, and every stop removes it again —
+# in whichever DOCKER_CONFIG it inherits. Hand it our own so the user's
+# ~/.docker (and any "colima" context of their own) is never touched.
+USER_DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}"
+export DOCKER_CONFIG="$DATA_DIR/docker-config"
 
 # Log file — daily rotation matching RotatingLog format (launcher-YYYY-MM-DD-001.log)
 LOGS_DIR="$DATA_DIR/logs"
@@ -124,6 +130,22 @@ log() {
 }
 
 log "Starting onionpress launcher..."
+
+# Releases through 2.5.1 ran Colima from here without DOCKER_CONFIG, leaving a
+# context in the user's Docker config aimed at our VM, made current. That
+# config is theirs to change; only say so.
+if grep -qsF "unix://$COLIMA_HOME/default/docker.sock" "$USER_DOCKER_CONFIG"/contexts/meta/*/meta.json; then
+    log "NOTE: $USER_DOCKER_CONFIG has a Docker context pointing at OnionPress's VM, left by OnionPress <= 2.5.1 — OnionPress leaves it alone; see 'docker context ls'"
+fi
+
+# Colima's start also prepends "Include $COLIMA_HOME/ssh_config" to
+# ~/.ssh/config (creating it) unless passed --ssh-config=false, as every start
+# below is. Colima rewrites that file on each start and stop whatever the flag;
+# while our VM runs it holds a "Host colima" that collides with a Colima of
+# the user's own. Releases through 2.5.1 added the line; again, only say so.
+if grep -qsxF "Include $COLIMA_HOME/ssh_config" "$HOME/.ssh/config"; then
+    log "NOTE: ~/.ssh/config has 'Include $COLIMA_HOME/ssh_config' (a 'Host colima' for OnionPress's VM), left by OnionPress <= 2.5.1 — OnionPress leaves it alone; delete that line to drop it"
+fi
 
 # Detect architecture (use sysctl to get actual hardware, not process architecture)
 # This is important because shell scripts may run under Rosetta on Apple Silicon
@@ -157,6 +179,50 @@ if [ ! -f "$COLIMA_HOME/.initialized" ]; then
 fi
 
 # Initialize Colima on first run
+# Make sure DOCKER_HOST resolves to *our own* VM's socket — never another Colima.
+#
+# Colima honours COLIMA_HOME, so Lima forwards the guest's /var/run/docker.sock
+# to $COLIMA_HOME/default/docker.sock (the `hostSocket:` entry in the instance's
+# lima.yaml). Launchers up to v2.4.110 assumed the socket always landed in
+# ~/.colima/ and symlinked that path into COLIMA_HOME to "bridge the gap". The
+# bridge could only ever fire when our own forward was missing — so in practice
+# it pointed DOCKER_HOST at whatever *other* Colima the user happened to be
+# running, and OnionPress then deployed wordpress/db/tor into that VM. Repair
+# any link left over from those versions, then wait for our own forward.
+ensure_docker_socket() {
+    local socket_path="$COLIMA_HOME/default/docker.sock"
+    local wait_secs="${1:-45}"
+    local waited=0
+    local target
+
+    if [ -L "$socket_path" ]; then
+        target=$(readlink "$socket_path")
+        case "$target" in
+            "$COLIMA_HOME"/*)
+                : ;;  # inside our own VM state — leave it alone
+            *)
+                log "WARNING: removing foreign Docker socket link ($socket_path -> $target)"
+                rm -f "$socket_path"
+                ;;
+        esac
+    fi
+
+    while [ "$waited" -lt "$wait_secs" ]; do
+        if [ -S "$socket_path" ]; then
+            [ "$waited" -gt 0 ] && log "Docker socket ready after ${waited}s"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log "ERROR: Docker socket never appeared at $socket_path after ${wait_secs}s"
+    log "  Lima's forward for the VM's /var/run/docker.sock is down."
+    log "  Diagnose: $COLIMA_HOME/_lima/colima/ha.stderr.log"
+    log "  Recover:  \"$BIN_DIR/colima\" stop && \"$BIN_DIR/colima\" start"
+    return 1
+}
+
 initialize_colima() {
     if [ ! -f "$COLIMA_HOME/.initialized" ]; then
         log "Initializing Colima container runtime..."
@@ -218,9 +284,15 @@ initialize_colima() {
         # well under 5 GiB with auto-prune in the image-update path. The
         # value is baked in at VM creation; existing installs keep their
         # original cap and are unaffected by changing this number.
+        # launcher.sh runs under set -e: a bare failing `colima start` would
+        # exit here, before the rc check below ever ran, with no ERROR line
+        # and the MenubarApp left orphaned. Capture the status instead.
+        colima_rc=0
         if [ "$HOST_ARCH" = "arm64" ]; then
             # Apple Silicon: use VZ backend (Virtualization.framework)
             "$BIN_DIR/colima" start \
+                --activate=false \
+                --ssh-config=false \
                 --vm-type vz \
                 --mount-type virtiofs \
                 --mount "$DATA_DIR/shared:w" \
@@ -230,10 +302,12 @@ initialize_colima() {
                 --disk "$VM_DISK" \
                 --arch "$VM_ARCH" \
                 --vz-rosetta=false \
-                >> "$LOG_FILE" 2>&1
+                >> "$LOG_FILE" 2>&1 || colima_rc=$?
         else
             # Intel: use QEMU backend
             "$BIN_DIR/colima" start \
+                --activate=false \
+                --ssh-config=false \
                 --vm-type qemu \
                 --mount-type sshfs \
                 --mount "$DATA_DIR/shared:w" \
@@ -242,14 +316,14 @@ initialize_colima() {
                 --memory "$VM_MEMORY" \
                 --disk "$VM_DISK" \
                 --arch "$VM_ARCH" \
-                >> "$LOG_FILE" 2>&1
+                >> "$LOG_FILE" 2>&1 || colima_rc=$?
         fi
 
-        if [ $? -eq 0 ]; then
+        if [ "$colima_rc" -eq 0 ]; then
             touch "$COLIMA_HOME/.initialized"
             log "Colima initialized successfully"
         else
-            log "ERROR: Colima init failed"
+            log "ERROR: Colima init failed (rc=$colima_rc) — see $LOG_FILE"
             echo "ERROR: Failed to initialize container runtime." >&2
             echo "Check the logs for details: $LOG_FILE" >&2
             exit 1
@@ -274,10 +348,13 @@ initialize_colima() {
         fi
         log "Starting Colima VM..."
         "$BIN_DIR/colima" start \
+            --activate=false \
+            --ssh-config=false \
             --mount "$DATA_DIR/shared:w" \
             $(docs_mount_args) \
             --memory "$vm_mem" \
-            >> "$LOG_FILE" 2>&1
+            >> "$LOG_FILE" 2>&1 \
+            || log "ERROR: colima start failed (rc=$?) — see $LOG_FILE; the MenubarApp will keep waiting for Docker"
     fi
 }
 
@@ -302,27 +379,14 @@ log "Menu bar app launched (PID: $MENUBAR_PID)"
 # Run initialization (menubar is now visible with gray icon during this)
 initialize_colima
 
-# Create symlink for Docker socket if needed
-# Colima forwards the socket to ~/.colima/default/docker.sock
-# but we configure DOCKER_HOST to use ~/.onionpress/colima/default/docker.sock
-# Create symlink to bridge this gap
-SOCKET_DIR="$COLIMA_HOME/default"
-SOCKET_PATH="$SOCKET_DIR/docker.sock"
-COLIMA_SOCKET="$HOME/.colima/default/docker.sock"
-
-if [ -S "$COLIMA_SOCKET" ]; then
-    if [ ! -e "$SOCKET_PATH" ] || [ ! -S "$SOCKET_PATH" ]; then
-        log "Creating Docker socket symlink..."
-        mkdir -p "$SOCKET_DIR"
-        ln -sf "$COLIMA_SOCKET" "$SOCKET_PATH"
-        log "Docker socket symlink created: $SOCKET_PATH -> $COLIMA_SOCKET"
-    fi
-fi
+# Point DOCKER_HOST at our own VM's socket (never a foreign Colima)
+ensure_docker_socket || true
 
 log "Setup complete"
 
 # Stay alive so macOS can send us Apple Event quit (osascript -e 'quit app').
 # Forward SIGTERM to the MenubarApp so it runs its full cleanup.
 trap 'kill -TERM $MENUBAR_PID 2>/dev/null; wait $MENUBAR_PID 2>/dev/null' TERM INT HUP
-wait $MENUBAR_PID 2>/dev/null
-log "MenubarApp exited, launcher done"
+menubar_rc=0
+wait $MENUBAR_PID 2>/dev/null || menubar_rc=$?
+log "MenubarApp exited (rc=$menubar_rc), launcher done"

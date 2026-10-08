@@ -170,9 +170,7 @@ def run_worker(config: StressConfig):
         os.path.join(run_dir, "phase.log"),
     )
 
-    # Detect Tor implementation
     workers = WorkerManager(config, docker, logger)
-    workers.detect_tor_impl()
     workers.detect_images()
 
     dashboard = Dashboard(config, docker, logger)
@@ -180,7 +178,7 @@ def run_worker(config: StressConfig):
     logger.write_phase_header(config, oh_version)
     _open_phase_log_window(logger.phase_log)
 
-    logger.log(f"=== OnionHeaven Stress Test ({workers.tor_label}) ===")
+    logger.log("=== OnionHeaven Stress Test (C Tor) ===")
     logger.log(f"OnionHeaven: {config.onionheaven_addr}")
     logger.log(f"Sites: {config.total} total ({config.healthy} stay healthy, {config.failing} will fail)")
     logger.log(f"Stress containers: {config.num_containers} x {config.per_ctr} sites/container")

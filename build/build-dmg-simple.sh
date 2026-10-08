@@ -17,6 +17,19 @@ DMG_PATH="$BUILD_DIR/$DMG_NAME"
 echo "Project directory: $PROJECT_DIR"
 echo "App path: $APP_PATH"
 
+# strip_pycache <dir> — remove __pycache__/ trees and stray *.pyc files from a
+# tree copied out of the source checkout. `make test-unit` leaves __pycache__
+# under src/onionpress/ and app/Resources/docker/tor/ (tests/test_onionnames.py
+# and tests/test_onionheaven_integration.py import from there), and `cp -R`
+# ships them: a DMG built right after the tests carried 31 .pyc files that a
+# clean-tree build did not. Same fix as build/build-linux.sh's collect_files.
+# Only point this at our own copies — never at the py2app output, which ships
+# a byte-compiled site.pyc next to __boot__.py on purpose.
+strip_pycache() {
+    find "$1" -type d -name __pycache__ -prune -exec rm -rf {} +
+    find "$1" -type f -name '*.pyc' -delete
+}
+
 # Assemble OnionPress.app from app/ source directory
 echo "Assembling OnionPress.app from app/ source..."
 rm -rf "$APP_PATH"
@@ -51,6 +64,7 @@ cp -R "$PROJECT_DIR/app/Resources/docker" "$APP_PATH/Contents/Resources/docker"
 cp -R "$PROJECT_DIR/app/Resources/plugins" "$APP_PATH/Contents/Resources/plugins"
 cp -R "$PROJECT_DIR/app/Resources/themes" "$APP_PATH/Contents/Resources/themes"
 cp -R "$PROJECT_DIR/app/Resources/scripts" "$APP_PATH/Contents/Resources/scripts"
+strip_pycache "$APP_PATH/Contents/Resources"
 cp "$PROJECT_DIR/app/Resources/"*.png "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_DIR/app/Resources/AppIcon.icns" "$APP_PATH/Contents/Resources/"
 cp "$PROJECT_DIR/app/Resources/config-template.txt" "$APP_PATH/Contents/Resources/"
@@ -206,7 +220,32 @@ fi
 # Build mkp224o as a universal binary for custom onion address prefixes.
 # Skip the full source build + cross-compile (~30s + libsodium crosscomp)
 # when we already have a cached universal binary for this pinned tag.
-if cache_get "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"; then
+#
+# MKP_OPT is not optional. mkp224o's configure.ac applies its own
+# "-O3 -march=native -fomit-frame-pointer" only when CFLAGS arrived unset (it
+# compares CFLAGS across AC_PROG_CC); the moment we pass CFLAGS — and we must,
+# to drive the universal cross-compile — that block is skipped whole and the
+# binary is built with NO optimisation at all. Nothing warns: configure
+# succeeds, make succeeds, mkp224o runs and mints correct addresses, 2.3x
+# slower than it should — 1.04M vs 2.37M keys/sec for this build's
+# --enable-ref10 backend, Apple M1 Pro, one thread.
+#
+# (Separately, and left alone here: --enable-ref10 is itself the slow choice
+# on ARM. Same machine, same flags, mkp224o's default donna backend does
+# 6.00M keys/sec — 2.5x ref10. Switching backends is a bigger call than
+# restoring -O3, and it cannot be validated for the x86_64 half of the
+# universal binary on an Apple Silicon host.)
+#
+# -march is deliberately absent: the -arch flags already fix the ISA, and the
+# universal binary has to run on every supported Mac. That is the same reason
+# app/Resources/docker/tor/Dockerfile pins an explicit baseline instead of
+# taking configure's -march=native — see docs/BUILDING.md, "Pinned inputs".
+#
+# The cache key carries these flags so an existing cache entry built without
+# them is not silently reused.
+MKP_OPT="-O3 -fomit-frame-pointer"
+MKP_CACHE_KEY="mkp224o-${MKP224O_VERSION}-O3-universal"
+if cache_get "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"; then
     echo "  mkp224o ${MKP224O_VERSION}: cache hit"
 elif command -v git >/dev/null 2>&1; then
     echo "  Building mkp224o ${MKP224O_VERSION} for custom onion address prefixes..."
@@ -260,7 +299,7 @@ elif command -v git >/dev/null 2>&1; then
     mkdir -p "$MKP_ARM64_DIR"
     cp -R "$TEMP_BIN_DIR/mkp224o-src"/* "$MKP_ARM64_DIR/"
     cd "$MKP_ARM64_DIR"
-    CFLAGS="-arch arm64 -mmacosx-version-min=13.0 -I$SODIUM_PREFIX/include" \
+    CFLAGS="-arch arm64 -mmacosx-version-min=13.0 $MKP_OPT -I$SODIUM_PREFIX/include" \
         LDFLAGS="-arch arm64" \
         ./configure --host=aarch64-apple-darwin --enable-ref10 > /dev/null 2>&1
     sed -i.bak "s| -lsodium| ${SODIUM_PREFIX}/lib/libsodium.a|g" GNUmakefile
@@ -273,7 +312,7 @@ elif command -v git >/dev/null 2>&1; then
     mkdir -p "$MKP_X86_DIR"
     cp -R "$TEMP_BIN_DIR/mkp224o-src"/* "$MKP_X86_DIR/"
     cd "$MKP_X86_DIR"
-    CFLAGS="-arch x86_64 -mmacosx-version-min=13.0 -I$SODIUM_X86_DIR/include" \
+    CFLAGS="-arch x86_64 -mmacosx-version-min=13.0 $MKP_OPT -I$SODIUM_X86_DIR/include" \
         LDFLAGS="-arch x86_64" \
         CC="clang -arch x86_64" \
         ./configure --host=x86_64-apple-darwin --enable-ref10 > /dev/null 2>&1
@@ -295,7 +334,7 @@ elif command -v git >/dev/null 2>&1; then
         else
             echo "  ✓ mkp224o statically linked (no libsodium dependency)"
         fi
-        cache_put "mkp224o-${MKP224O_VERSION}-universal" "$TEMP_BIN_DIR/mkp224o"
+        cache_put "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"
     elif [ -f "$MKP_ARM64_DIR/mkp224o" ]; then
         echo "  WARNING: x86_64 build failed, using arm64-only mkp224o"
         cp "$MKP_ARM64_DIR/mkp224o" "$TEMP_BIN_DIR/mkp224o"
@@ -446,6 +485,8 @@ fi
 # All shared code lives inside the package now — no flat-module cp dance.
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
 cp -r "$SCRIPTS_DIR/onionpress" "$SITE_PACKAGES/"
+# py2app copies this tree into the bundle verbatim, __pycache__ included.
+strip_pycache "$SITE_PACKAGES/onionpress"
 
 # Run py2app build using the root setup.py
 cd "$PROJECT_DIR"
@@ -481,6 +522,13 @@ fi
 # Remove broken .pyo symlinks — py2app creates these but .pyo files
 # haven't existed since Python 3.5. They break xattr/gatekeeper stripping.
 find "$MENUBAR_APP_DIR" -name '*.pyo' -type l ! -exec test -e {} \; -delete
+
+# No __pycache__/ anywhere in the bundle, whatever copied it in. A bytecode
+# cache is only ever read next to its .py source, so dropping one cannot break
+# an import — Python just recompiles on first use. Runs before signing so the
+# seal covers the swept tree. Stray *.pyc are deliberately NOT swept here: the
+# py2app output legitimately contains site.pyc (see strip_pycache above).
+find "$APP_PATH" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # Universal binaries in MenubarApp are fine — macOS runs the arm64 slice
 # natively on Apple Silicon without triggering a Rosetta prompt.
@@ -591,20 +639,90 @@ rm -rf "$MENUBAR_BUILD_DIR"
 
 echo "Creating styled DMG..."
 
-# Calculate DMG size (app size + 80MB headroom for hi-res background)
-APP_SIZE_KB=$(du -sk "$TEMP_DIR" | cut -f1)
-DMG_SIZE_KB=$((APP_SIZE_KB + 81920))
+# ─── Disk image tooling ──────────────────────────────────────────────────
+# `diskutil image` arrived with macOS 26, and on macOS 27 the hdiutil verbs
+# this script used — create -srcfolder, attach, detach, convert — each print
+# a deprecation warning naming their replacement (hdiutil(1) carries the
+# full verb-to-verb table). diskutil is used when the host has it; older
+# hosts fall back to hdiutil so the .dmg still builds on the macOS 13+ the
+# docs promise. DMG_TOOL=hdiutil forces the fallback — that is how it stays
+# testable on a current macOS, where hdiutil still works.
+#
+# Both paths were run on macOS 27 and their output compared: an APFS volume
+# named OnionPress either way (hdiutil defaults to APFS on 27 as well),
+# identical file contents and permissions, the pre-baked .DS_Store byte-for-
+# byte with its background alias resolving on the mounted volume, and a
+# CRC32-checksummed UDZO image that `hdiutil attach` (still used by the
+# in-app updater) mounts. The one difference: diskutil exposes no zlib
+# level, so its image is ~1 MB (0.8%) larger than hdiutil's zlib-level=9.
+if [ -z "${DMG_TOOL:-}" ]; then
+    if diskutil image --help >/dev/null 2>&1; then
+        DMG_TOOL=diskutil
+    else
+        DMG_TOOL=hdiutil
+    fi
+fi
+case "$DMG_TOOL" in
+    diskutil|hdiutil) echo "  Disk image tool: $DMG_TOOL" ;;
+    *) echo "ERROR: DMG_TOOL must be 'diskutil' or 'hdiutil', not '$DMG_TOOL'" >&2; exit 1 ;;
+esac
 
-# Step 1: Create read-write DMG
+# dmg_create_rw <source-folder> <image-path> — a read-write image holding
+# the folder's contents, its volume named OnionPress. The volume name is
+# load-bearing: the alias inside build/dmg-assets/DS_Store points at
+# /Volumes/OnionPress/.background/dmg-background.png. diskutil's RAW is the
+# format hdiutil calls UDRW (imageinfo reports it as such). diskutil takes
+# no size and leaves ~5% free (18 MB on a 380 MB payload) — ample for the
+# 10 KB .DS_Store written after mounting; hdiutil needs the size spelled
+# out, so that path keeps the old app-size-plus-80 MB headroom.
+dmg_create_rw() {
+    if [ "$DMG_TOOL" = diskutil ]; then
+        diskutil image create from --format RAW --volumeName "OnionPress" "$1" "$2"
+    else
+        hdiutil create -volname "OnionPress" -srcfolder "$1" -ov -format UDRW \
+            -size "$(( $(du -sk "$1" | cut -f1) + 81920 ))k" "$2"
+    fi
+}
+
+# dmg_attach <image-path> — mount read-write and print the mount point.
+# diskutil prints one tab-separated line per entity: device, content hint,
+# and — on the line for a mounted filesystem — the mount point. A RAW image
+# mounts read-write by default and has no checksum to verify, and Finder
+# only auto-opens volumes blessed for it, so hdiutil's -readwrite -noverify
+# -noautoopen need no counterpart.
+dmg_attach() {
+    local out
+    if [ "$DMG_TOOL" = diskutil ]; then
+        out=$(diskutil image attach "$1")
+        printf '%s\n' "$out" | awk -F'\t' '$NF ~ /^\/Volumes\// { print $NF; exit }'
+    else
+        out=$(hdiutil attach -readwrite -noverify -noautoopen "$1")
+        printf '%s\n' "$out" | grep '/Volumes/' | sed 's/.*\/Volumes/\/Volumes/'
+    fi
+}
+
+# dmg_eject <mount-point>
+dmg_eject() {
+    if [ "$DMG_TOOL" = diskutil ]; then
+        diskutil eject "$1" >/dev/null
+    else
+        hdiutil detach "$1" -quiet
+    fi
+}
+
+# dmg_compress <rw-image> <output> — read-only, zlib-compressed UDZO.
+dmg_compress() {
+    if [ "$DMG_TOOL" = diskutil ]; then
+        diskutil image create from --format UDZO "$1" "$2"
+    else
+        hdiutil convert "$1" -format UDZO -imagekey zlib-level=9 -o "$2"
+    fi
+}
+
+# Step 1: Create read-write DMG from the staged folder
 RW_DMG_PATH="$BUILD_DIR/onionpress-rw.dmg"
 rm -f "$RW_DMG_PATH"
-hdiutil create \
-    -volname "OnionPress" \
-    -srcfolder "$TEMP_DIR" \
-    -ov \
-    -format UDRW \
-    -size "${DMG_SIZE_KB}k" \
-    "$RW_DMG_PATH"
+dmg_create_rw "$TEMP_DIR" "$RW_DMG_PATH"
 
 # Clean up source temp dir (contents are now in the DMG)
 rm -rf "$TEMP_DIR"
@@ -612,10 +730,12 @@ rm -rf "$TEMP_DIR"
 # Step 2: Mount the read-write DMG
 # Eject any existing volume with the same name to avoid collisions
 echo "Mounting DMG for styling..."
-hdiutil detach "/Volumes/OnionPress" -quiet 2>/dev/null || true
-MOUNT_OUTPUT=$(hdiutil attach -readwrite -noverify -noautoopen "$RW_DMG_PATH")
-DEVICE=$(echo "$MOUNT_OUTPUT" | grep '/dev/' | head -1 | awk '{print $1}')
-MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep '/Volumes/' | sed 's/.*\/Volumes/\/Volumes/')
+dmg_eject "/Volumes/OnionPress" 2>/dev/null || true
+MOUNT_POINT=$(dmg_attach "$RW_DMG_PATH")
+if [ -z "$MOUNT_POINT" ] || [ ! -d "$MOUNT_POINT" ]; then
+    echo "ERROR: $DMG_TOOL attached $RW_DMG_PATH but reported no /Volumes mount point" >&2
+    exit 1
+fi
 # Extract just the volume name (basename of mount point)
 VOL_NAME=$(basename "$MOUNT_POINT")
 
@@ -660,15 +780,12 @@ fi
 echo "Finalizing DMG..."
 chmod -Rf go-w "$MOUNT_POINT" 2>/dev/null || true
 sync
-hdiutil detach "$MOUNT_POINT" -quiet
+dmg_eject "$MOUNT_POINT"
 
 # Step 5: Convert to compressed read-only DMG
 echo "Compressing DMG..."
 rm -f "$DMG_PATH"
-hdiutil convert "$RW_DMG_PATH" \
-    -format UDZO \
-    -imagekey zlib-level=9 \
-    -o "$DMG_PATH"
+dmg_compress "$RW_DMG_PATH" "$DMG_PATH"
 
 # Clean up read-write DMG
 rm -f "$RW_DMG_PATH"

@@ -108,15 +108,22 @@ add_action( 'http_api_curl', function ( $handle, $parsed_args = array(), $url = 
 
     curl_setopt( $handle, CURLOPT_PROXY, $proxy );
     curl_setopt( $handle, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5_HOSTNAME );
-    curl_setopt( $handle, CURLOPT_CONNECTTIMEOUT, 15 );
+    // Measured circuit-build time to other onion services regularly runs
+    // 15-30s cold — 15s was timing out real, reachable destinations before
+    // the connection even completed (e.g. the Following feature's feed
+    // checks flagging live sites as failed). 45s gives headroom without
+    // hanging forever on a truly dead circuit.
+    curl_setopt( $handle, CURLOPT_CONNECTTIMEOUT, 45 );
 
     // Tor is slower than direct, so raise short timeouts — but never LOWER a
     // caller that deliberately asked for more. This used to be a flat
     // CURLOPT_TIMEOUT of 30, which silently capped every large transfer
     // (core zips, social-archive media) at 30 seconds regardless of the
-    // timeout the caller passed to wp_remote_get().
+    // timeout the caller passed to wp_remote_get(). Floor raised to 60 to
+    // stay above the CONNECTTIMEOUT above — a 45s connect budget inside a
+    // 30s total timeout could never succeed.
     $timeout = isset( $parsed_args['timeout'] ) ? (int) $parsed_args['timeout'] : 0;
-    curl_setopt( $handle, CURLOPT_TIMEOUT, max( 30, $timeout ) );
+    curl_setopt( $handle, CURLOPT_TIMEOUT, max( 60, $timeout ) );
 }, 10, 3 );
 
 /**

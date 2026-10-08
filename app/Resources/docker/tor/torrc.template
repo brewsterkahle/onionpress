@@ -1,5 +1,4 @@
 # OnionPress C Tor configuration (generated from torrc.template)
-# Equivalent of arti.toml for C Tor
 
 SocksPort 0.0.0.0:9050
 

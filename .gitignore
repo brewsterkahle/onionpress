@@ -41,12 +41,14 @@ py2app_dist/
 # Assembled .app bundle (built from app/ source directory)
 OnionPress.app/
 
-# Firefox extension testing copy
-extension-firefox/
+# Generated build outputs (build/build-extension.sh)
+build/dist/
 
 # Stress test results (contain secret keys)
 onionheaven-stress-results/
 tests/onionheaven-stress-results/
 
 # Per-user Claude Code config (local permissions, hooks, etc.)
-.claude/
+# Commands are shared and travel with the repo; everything else stays local.
+.claude/*
+!.claude/commands/

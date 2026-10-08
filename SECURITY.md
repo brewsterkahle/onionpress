@@ -61,7 +61,7 @@ In particular, please report:
   the WordPress security team or the relevant plugin author. We track
   upstream advisories and ship updated images, but the bugs themselves
   aren't ours to fix.
-- Tor Project software (Arti, C Tor, the bundled `tor` binary). Report
+- Tor Project software (C Tor, the bundled `tor` binary). Report
   those to Tor.
 - Docker, Colima, or Lima vulnerabilities. Same — upstream reports.
 - Issues that require physical access to the user's Mac, or that

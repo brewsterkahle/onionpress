@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, urlparse
 from onion_auth import verify_payload, verify_name_payload
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    takeover_function, release_function, flush_sighup_tor,
+    takeover_function, release_function,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR,
 )
 import onionnames
@@ -832,9 +832,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     # These are called by the WordPress mu-plugin on user create/delete.
     # They are NOT meant to be reachable from outside the Docker network;
     # we enforce that by rejecting any source IP that isn't on the Docker
-    # bridge range. Tor-proxied traffic arrives at 127.0.0.1 (arti forwards
-    # connections locally), so explicitly denying 127.x blocks Tor-origin
-    # callers.
+    # bridge range. Tor-proxied traffic arrives at 127.0.0.1 (Tor forwards
+    # onion service connections locally), so explicitly denying 127.x blocks
+    # Tor-origin callers.
 
     def _name_local_src_ok(self):
         src = self.client_address[0]
@@ -1166,12 +1166,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             # release_function handles taken-over → online transition
             for row in existing:
                 release_function(conn, content_address, row["healthcheck_address"])
-            flush_sighup_tor()
 
         conn.close()
 
         # Write activation flag — signals the host to start the heartbeat
-        # monitor + takeover Arti container.  Written on every registration
+        # monitor + takeover Tor container.  Written on every registration
         # (not just the first) so the host watcher can restart the container
         # if it was stopped externally.
         activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
@@ -1240,7 +1239,6 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             ).fetchall()
             for row in rows:
                 takeover_function(conn, content_address, row["healthcheck_address"], force=True)
-        flush_sighup_tor()
 
         conn.close()
 

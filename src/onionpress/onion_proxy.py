@@ -819,9 +819,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # Use shared archive.org credentials for Wayback Machine archiving
+        # Use the shared archive.org credentials for Wayback Machine
+        # archiving; multisite.py holds the one copy, so rotating them is
+        # a single edit.
+        from onionpress import multisite as _multisite
         archive_s3_keys = self._fetch_archive_s3_keys(
-            'onionpress@internetarchive.eu', 'aat:aep7'
+            _multisite._ARCHIVE_LOGIN_EMAIL, _multisite._ARCHIVE_LOGIN_PASS
         )
         if archive_s3_keys is None and self.server.log_func:
             self.server.log_func("Warning: could not fetch archive.org S3 keys — Wayback archiving may not work")
@@ -901,13 +904,13 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     "RewriteRule ^index\\.php$ - [L]\n"
                     "\n"
                     "# add a trailing slash to /wp-admin\n"
-                    "RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\n"
+                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\n"
                     "\n"
                     "RewriteCond %{REQUEST_FILENAME} -f [OR]\n"
                     "RewriteCond %{REQUEST_FILENAME} -d\n"
                     "RewriteRule ^ - [L]\n"
-                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]\n"
-                    "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\.php)$ $2 [L]\n"
+                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?(wp-(content|admin|includes).*) $2 [L]\n"
+                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?(.*\\.php)$ $2 [L]\n"
                     "RewriteRule . index.php [L]\n"
                     "# END WordPress Multisite\n"
                 )

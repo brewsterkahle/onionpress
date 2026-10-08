@@ -87,6 +87,12 @@ pytest tests/                                        # if installed
 
 CI runs the same tests on every PR; broken tests block merge.
 
+The Bluesky, Mastodon, Twitter and Wayback integration suites are skipped
+unless `ONIONPRESS_INTEGRATION_TESTS=1` is set. They write to whatever
+`onionpress-wordpress` container `docker` reaches and refuse to run against
+a live install; see [Integration tests](docs/BUILDING.md#integration-tests)
+for what to run them against.
+
 ## Code style
 
 - **Default to no comments.** The codebase generally avoids comments that
@@ -127,11 +133,17 @@ CI runs the same tests on every PR; broken tests block merge.
 
 These aren't open to contributors, at least for now:
 
-- **Cutting releases.** Release tagging, DMG signing/notarization, and
-  upload to GitHub Releases require credentials only the maintainer has.
+- **Cutting releases.** Tagging and uploading to this repository's GitHub
+  Releases need write access to it. Nothing else does: the DMG is ad-hoc
+  signed (`codesign -s -`), not notarized, and every artifact — DMG, `.deb`,
+  extensions, container images — builds from a clone or a fork with no
+  maintainer credentials. See [docs/HOW-TO-BUILD.md](docs/HOW-TO-BUILD.md).
 - **`.github/workflows/docker-publish.yml`** — controls what
   `ghcr.io/brewsterkahle/onionpress-*` images contain. Supply chain;
-  changes go through extra review.
+  changes go through extra review. You can exercise a change end to end in
+  your fork first: the workflow runs on GitHub-hosted runners only and
+  publishes under the account that runs it, so a fork's "Run workflow"
+  produces `ghcr.io/<you>/onionpress-*` without touching the real images.
 - **The OnionHeaven hub registration protocol.** Changes affect every
   running install; coordinate with the maintainer before touching it.
 
@@ -139,6 +151,13 @@ You're welcome to propose changes to all of these via PR — merge stays
 with the maintainer.
 
 ## Build pipeline gotchas
+
+Start with **[docs/HOW-TO-BUILD.md](docs/HOW-TO-BUILD.md)** — requirements,
+install commands and the steps for every artifact; `make doctor` reports what
+your machine is missing. **[docs/BUILDING.md](docs/BUILDING.md)** is the
+reference behind it. The notes below are the traps that are not obvious from
+the scripts themselves.
+
 
 - **`py2app` vs `setuptools` 81+** — setuptools 81 (released 2026-02-06)
   removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still
@@ -149,6 +168,11 @@ with the maintainer.
   must use the bundled binary at
   `OnionPress.app/Contents/Resources/MenubarApp/Contents/MacOS/python`,
   never the system `python3`.
+- **Image pins live in one file.** `build/image-pins.env` is the source of
+  truth for the `ghcr.io/brewsterkahle/onionpress-*` digests; five files
+  embed those literals and `build/refresh-image-digests.sh` is the only
+  thing that writes them. `tests/test_image_pins.py` fails on drift.
+  Never hand-edit a digest — run the script. See [docs/BUILDING.md](docs/BUILDING.md).
 - **Two `Info.plist` files.** `OnionPress.app/Contents/Info.plist`
   (the parent) and `OnionPress.app/Contents/Resources/MenubarApp/Contents/Info.plist`
   (py2app's) must agree. `build/rebuild-menubar.sh` syncs them; if you

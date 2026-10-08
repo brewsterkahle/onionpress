@@ -1,3 +1,31 @@
+# Publishes onionpress-tor, onionpress-wordpress and onionpress-stress-worker.
+#
+# The development branch carries a copy of this file that differs only in
+# IMAGE_PREFIX ("dev-" there, "" here), so a run from development never
+# overwrites the onionpress-* images that shipped installs pull. A plain
+# `git merge development` into main would carry "dev-" along, so
+# tests/test_publish_workflow.py fails a push to main, or a pull request
+# into main, that still has it set.
+#
+# Nothing here needs anything outside GitHub. Both architectures build on
+# GitHub-hosted runners — ubuntu-latest for amd64, ubuntu-24.04-arm for
+# arm64, both free for public repositories — and the images go to the
+# namespace of whichever repository the run belongs to, so a fork publishes
+# ghcr.io/<you>/… without editing this file. Until September 2026 the arm64
+# half ran on the maintainer's own Mac as a self-hosted runner, which made
+# every image release depend on that one machine being online and left
+# everyone else unable to produce the arm64 images at all.
+#
+# The intermediate :build-amd64 / :build-arm64 tags live in the same
+# package as the merged manifest, so a dev run and a release run cannot
+# interleave on one manifest. The build caches keep main's scope names on
+# purpose: the GitHub Actions cache is already isolated per branch, and
+# keeping the scope lets a first dev build start warm from the release cache.
+#
+# GHCR creates a package private by default the first time it is pushed.
+# After the first run in a new namespace, make the packages public in the
+# package settings if anything needs to pull them anonymously.
+
 name: Build and publish Docker images
 
 on:
@@ -12,11 +40,18 @@ on:
 
 env:
   REGISTRY: ghcr.io
+  # GHCR namespace: the owner of the repository this run belongs to, so a
+  # fork publishes under its own account. GHCR names must be lowercase; if
+  # your login has capitals, set the IMAGE_NAMESPACE repository variable
+  # (Settings → Secrets and variables → Actions → Variables).
+  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || github.repository_owner }}
+  # "dev-" on the development branch; "" on main. See the header.
+  IMAGE_PREFIX: ""
   # Version tag: from release event (strip leading 'v') or manual input
   IMAGE_VERSION: ${{ github.event.release.tag_name && format('{0}', github.event.release.tag_name) || inputs.version }}
 
 jobs:
-  # --- Tor image: amd64 on GitHub, arm64 on self-hosted, then merge ---
+  # --- Tor image: amd64 and arm64 on GitHub-hosted runners, then merge ---
 
   build-tor-amd64:
     name: Build Tor image (amd64)
@@ -38,50 +73,38 @@ jobs:
           context: app/Resources/docker/tor
           platforms: linux/amd64
           push: true
-          # Always re-resolve FROM (wordpress:latest, rust/debian): without this a
-          # rebuild can silently reuse a cached base and ship an old WordPress.
+          # Always re-resolve FROM: the base is digest-pinned, so this fetches
+          # exactly the pinned Onimages tor image rather than whatever copy
+          # the runner cached under that name.
           pull: true
-          tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor:build-amd64
           cache-from: type=gha,scope=tor-amd64
           cache-to: type=gha,mode=max,scope=tor-amd64
 
   build-tor-arm64:
     name: Build Tor image (arm64)
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
-    # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to registry (write auth directly, skip credential helpers)
-        run: |
-          export DOCKER_CONFIG="${{ runner.temp }}/.docker"
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          mkdir -p "$DOCKER_CONFIG"
-          # Symlink cli-plugins so buildx is discoverable under custom DOCKER_CONFIG
-          ln -sfn "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
-          TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
-          cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
-          {
-            "auths": {
-              "${{ env.REGISTRY }}": {
-                "auth": "$TOKEN"
-              }
-            },
-            "credsStore": ""
-          }
-          ENDCFG
-      - name: Set up buildx
-        run: docker buildx create --name arm64builder --use 2>/dev/null || docker buildx use arm64builder
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
       - name: Build and push (arm64)
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --pull \
-            --push \
-            -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64 \
-            app/Resources/docker/tor
+        uses: docker/build-push-action@v6
+        with:
+          context: app/Resources/docker/tor
+          platforms: linux/arm64
+          push: true
+          pull: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor:build-arm64
+          cache-from: type=gha,scope=tor-arm64
+          cache-to: type=gha,mode=max,scope=tor-arm64
 
   merge-tor:
     name: Merge Tor manifests
@@ -99,19 +122,22 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Create multi-arch manifest
         run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:latest \
-            ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64 \
-            ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor"
+          docker buildx imagetools create -t "$IMAGE:latest" \
+            "$IMAGE:build-amd64" \
+            "$IMAGE:build-arm64"
 
           VERSION="${{ env.IMAGE_VERSION }}"
           VERSION="${VERSION#v}"  # strip leading v
           if [ -n "$VERSION" ]; then
-            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:$VERSION \
-              ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-amd64 \
-              ${{ env.REGISTRY }}/brewsterkahle/onionpress-tor:build-arm64
+            docker buildx imagetools create -t "$IMAGE:$VERSION" \
+              "$IMAGE:build-amd64" \
+              "$IMAGE:build-arm64"
           fi
+      - name: Show the merged manifest
+        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor:latest"
 
-  # --- WordPress image: amd64 on GitHub, arm64 on self-hosted, then merge ---
+  # --- WordPress image: amd64 and arm64 on GitHub-hosted runners, then merge ---
 
   build-wp-amd64:
     name: Build WordPress image (amd64)
@@ -133,50 +159,38 @@ jobs:
           context: app/Resources/docker/wordpress
           platforms: linux/amd64
           push: true
-          # Always re-resolve FROM (wordpress:latest, rust/debian): without this a
-          # rebuild can silently reuse a cached base and ship an old WordPress.
+          # Always re-resolve FROM: the base is digest-pinned, so this fetches
+          # exactly the pinned wordpress image rather than whatever copy the
+          # runner cached under that name.
           pull: true
-          tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress:build-amd64
           cache-from: type=gha,scope=wp-amd64
           cache-to: type=gha,mode=max,scope=wp-amd64
 
   build-wp-arm64:
     name: Build WordPress image (arm64)
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
-    # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to registry (write auth directly, skip credential helpers)
-        run: |
-          export DOCKER_CONFIG="${{ runner.temp }}/.docker"
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          mkdir -p "$DOCKER_CONFIG"
-          # Symlink cli-plugins so buildx is discoverable under custom DOCKER_CONFIG
-          ln -sfn "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
-          TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
-          cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
-          {
-            "auths": {
-              "${{ env.REGISTRY }}": {
-                "auth": "$TOKEN"
-              }
-            },
-            "credsStore": ""
-          }
-          ENDCFG
-      - name: Set up buildx
-        run: docker buildx create --name arm64builder --use 2>/dev/null || docker buildx use arm64builder
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
       - name: Build and push (arm64)
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --pull \
-            --push \
-            -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64 \
-            app/Resources/docker/wordpress
+        uses: docker/build-push-action@v6
+        with:
+          context: app/Resources/docker/wordpress
+          platforms: linux/arm64
+          push: true
+          pull: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress:build-arm64
+          cache-from: type=gha,scope=wp-arm64
+          cache-to: type=gha,mode=max,scope=wp-arm64
 
   merge-wp:
     name: Merge WordPress manifests
@@ -194,19 +208,22 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Create multi-arch manifest
         run: |
-          docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:latest \
-            ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64 \
-            ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress"
+          docker buildx imagetools create -t "$IMAGE:latest" \
+            "$IMAGE:build-amd64" \
+            "$IMAGE:build-arm64"
 
           VERSION="${{ env.IMAGE_VERSION }}"
           VERSION="${VERSION#v}"  # strip leading v
           if [ -n "$VERSION" ]; then
-            docker buildx imagetools create -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:$VERSION \
-              ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-amd64 \
-              ${{ env.REGISTRY }}/brewsterkahle/onionpress-wordpress:build-arm64
+            docker buildx imagetools create -t "$IMAGE:$VERSION" \
+              "$IMAGE:build-amd64" \
+              "$IMAGE:build-arm64"
           fi
+      - name: Show the merged manifest
+        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress:latest"
 
-  # --- Stress worker image: extends tor image with test scripts ---
+  # --- Stress worker image: extends the tor image this run just merged ---
 
   build-stress-worker-amd64:
     name: Build stress worker image (amd64)
@@ -229,49 +246,42 @@ jobs:
           context: tests/stress
           platforms: linux/amd64
           push: true
-          # Always re-resolve FROM (wordpress:latest, rust/debian): without this a
-          # rebuild can silently reuse a cached base and ship an old WordPress.
+          # Re-resolve the base so this extends the manifest merge-tor just
+          # published, not a copy cached on the runner.
           pull: true
-          tags: ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:build-amd64
+          # tests/stress/Dockerfile takes its base as ARG TOR_IMAGE. Without
+          # it the worker extends whatever the ARG's default names — the
+          # published production image, which on this branch or in a fork is
+          # somebody else's build, not the one this run just made.
+          build-args: |
+            TOR_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor:latest
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-stress-worker:build-amd64
 
   build-stress-worker-arm64:
     name: Build stress worker image (arm64)
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ubuntu-24.04-arm
     needs: [merge-tor]
     permissions:
       contents: read
       packages: write
-    # Uses Docker Desktop (/var/run/docker.sock) — independent of OnionPress's Colima
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to registry (write auth directly, skip credential helpers)
-        run: |
-          export DOCKER_CONFIG="${{ runner.temp }}/.docker"
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          mkdir -p "$DOCKER_CONFIG"
-          # Symlink cli-plugins so buildx is discoverable under custom DOCKER_CONFIG
-          ln -sfn "$HOME/.docker/cli-plugins" "$DOCKER_CONFIG/cli-plugins"
-          TOKEN=$(echo -n "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64)
-          cat > "$DOCKER_CONFIG/config.json" <<ENDCFG
-          {
-            "auths": {
-              "${{ env.REGISTRY }}": {
-                "auth": "$TOKEN"
-              }
-            },
-            "credsStore": ""
-          }
-          ENDCFG
-      - name: Set up buildx
-        run: docker buildx create --name arm64builder --use 2>/dev/null || docker buildx use arm64builder
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
       - name: Build and push (arm64)
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --pull \
-            --push \
-            -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:build-arm64 \
-            tests/stress
+        uses: docker/build-push-action@v6
+        with:
+          context: tests/stress
+          platforms: linux/arm64
+          push: true
+          pull: true
+          build-args: |
+            TOR_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor:latest
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-stress-worker:build-arm64
 
   merge-stress-worker:
     name: Merge stress worker manifests
@@ -289,7 +299,9 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Create multi-arch manifest
         run: |
-          docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:latest \
-            ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:build-amd64 \
-            ${{ env.REGISTRY }}/brewsterkahle/onionpress-stress-worker:build-arm64
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-stress-worker"
+          docker buildx imagetools create -t "$IMAGE:latest" \
+            "$IMAGE:build-amd64" \
+            "$IMAGE:build-arm64"
+      - name: Show the merged manifest
+        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-stress-worker:latest"

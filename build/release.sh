@@ -12,7 +12,7 @@
 #   the .deb a mandatory part of every release.
 #
 # THE CROSS-PLATFORM RULE THIS ENFORCES
-#   The .dmg can ONLY be built on macOS (hdiutil/py2app). So:
+#   The .dmg can ONLY be built on macOS (diskutil image/py2app). So:
 #     - On macOS: build .dmg + .deb, create-or-update the release, upload both.
 #     - On Linux: build .deb only. NEVER create a release (it would be
 #       .dmg-less and become "Latest", breaking the Mac download link).

@@ -130,13 +130,7 @@ sign_payload() {
 # ---------------------------------------------------------------------------
 
 echo ""
-TOR_IMPL=$(docker exec onionpress-tor sh -c 'echo ${TOR_IMPL:-arti}' 2>/dev/null || echo "arti")
-if [ "$TOR_IMPL" = "tor" ]; then
-    TOR_LABEL="C Tor"
-else
-    TOR_LABEL="Arti"
-fi
-printf "${YELLOW}OnionHeaven Local Functionality Test (${TOR_LABEL})${NC}\n"
+printf "${YELLOW}OnionHeaven Local Functionality Test (C Tor)${NC}\n"
 printf "${YELLOW}=================================================${NC}\n"
 echo ""
 
@@ -386,7 +380,7 @@ fi
 
 step 4 "Verify takeover propagation (keystore + 302 redirect via Tor)"
 
-# Takeover keys are installed in the onionheaven container's Arti, not onionpress-tor
+# Takeover keys are installed in the onionheaven container's C Tor, not onionpress-tor
 OH_CONTAINER="onionheaven"
 
 # Check that the onionheaven container is running (lazy activation should have started it)
@@ -397,37 +391,18 @@ else
 fi
 
 # Check that the key was installed (could be in onionheaven or a takeover container)
-ADDR_PREFIX="${CONTENT_ADDR:0:20}"
-OH_TOR_IMPL=$(docker exec "$OH_CONTAINER" sh -c 'echo ${TOR_IMPL:-tor}' 2>/dev/null || echo "tor")
+# C Tor: check HiddenServiceDir in onionheaven and takeover containers
 KEY_FOUND=false
-if [ "$OH_TOR_IMPL" = "tor" ]; then
-    # C Tor: check HiddenServiceDir in onionheaven and takeover containers
-    for check_ctr in "$OH_CONTAINER" $(docker ps --format '{{.Names}}' | grep "^onionheaven-takeover-"); do
-        KEY_EXISTS=$(docker exec "$check_ctr" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" 2>/dev/null || echo "")
-        if [ -n "$KEY_EXISTS" ]; then
-            pass "Key installed in $check_ctr C Tor HiddenServiceDir"
-            KEY_FOUND=true
-            break
-        fi
-    done
-    if [ "$KEY_FOUND" = false ]; then
-        log "  Key not found in any container's HiddenServiceDir (ADD_ONION may have installed it ephemerally)"
-    fi
-else
-    # Arti: check keystore for PEM key
-    KEY_EXISTS=$(docker exec "$OH_CONTAINER" sh -c "ls /var/lib/arti/state/keystore/hss/onionheaven_${ADDR_PREFIX}*/ks_hs_id* 2>/dev/null | head -1" || echo "")
+for check_ctr in "$OH_CONTAINER" $(docker ps --format '{{.Names}}' | grep "^onionheaven-takeover-"); do
+    KEY_EXISTS=$(docker exec "$check_ctr" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" 2>/dev/null || echo "")
     if [ -n "$KEY_EXISTS" ]; then
-        pass "Key installed in onionheaven Arti keystore"
-    else
-        KEY_EXISTS=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/arti/state/keystore/hss/ -name 'ks_hs_id*' 2>/dev/null | head -1" || echo "")
-        if [ -n "$KEY_EXISTS" ]; then
-            pass "Key installed in onionheaven Arti keystore"
-        else
-            fail "Key not found in onionheaven Arti keystore"
-            log "  Listing onionheaven keystore:"
-            docker exec "$OH_CONTAINER" sh -c "ls -la /var/lib/arti/state/keystore/hss/ 2>/dev/null" || true
-        fi
+        pass "Key installed in $check_ctr C Tor HiddenServiceDir"
+        KEY_FOUND=true
+        break
     fi
+done
+if [ "$KEY_FOUND" = false ]; then
+    log "  Key not found in any container's HiddenServiceDir (ADD_ONION may have installed it ephemerally)"
 fi
 
 # Check /status/<address> has last_taken_over timestamp
@@ -516,20 +491,11 @@ sleep 5
 # Check that the key was removed from the onionheaven container
 # Use the test address prefix to avoid false matches against real registrations
 TEST_ADDR_PREFIX="${CONTENT_ADDR:0:16}"
-if [ "$OH_TOR_IMPL" = "tor" ]; then
-    KEY_GONE=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_${TEST_ADDR_PREFIX}*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" || echo "")
-    if [ -z "$KEY_GONE" ]; then
-        pass "Key removed from onionheaven C Tor HiddenServiceDir"
-    else
-        fail "Key still present in onionheaven C Tor HiddenServiceDir: $KEY_GONE"
-    fi
+KEY_GONE=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/tor/hidden_service/ -path '*onionheaven_${TEST_ADDR_PREFIX}*' -name 'hs_ed25519_secret_key' 2>/dev/null | head -1" || echo "")
+if [ -z "$KEY_GONE" ]; then
+    pass "Key removed from onionheaven C Tor HiddenServiceDir"
 else
-    KEY_GONE=$(docker exec "$OH_CONTAINER" sh -c "find /var/lib/arti/state/keystore/hss/ -path '*${ADDR_PREFIX}*' 2>/dev/null | head -1" || echo "")
-    if [ -z "$KEY_GONE" ]; then
-        pass "Key removed from onionheaven Arti keystore"
-    else
-        fail "Key still present in onionheaven Arti keystore: $KEY_GONE"
-    fi
+    fail "Key still present in onionheaven C Tor HiddenServiceDir: $KEY_GONE"
 fi
 
 # Wait for Tor descriptor to expire, then verify the address no longer serves a 302

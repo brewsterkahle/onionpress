@@ -1,0 +1,25 @@
+# Docker does NOT read .gitignore, so __pycache__/ and *.pyc are invisible in
+# `git status` yet fully present in the build context. In the tor context that
+# was 544K of the 964K sent to the daemon, and `COPY wordlists /wordlists`
+# baked the .pyc files straight into the published image — making that layer's
+# cache key depend on whether the developer had run the test suite. Two of the
+# .pyc files had no .py source left in the repo at all (follow-fetch,
+# wayback-static), so deleted modules were still shipping as bytecode.
+#
+# tests/test_onionnames.py and tests/test_onionheaven_integration.py put
+# app/Resources/docker/tor on sys.path and import from it, so these
+# directories regenerate on every test run — an exclude is the only fix, not
+# a one-time delete.
+#
+# Deliberately a targeted exclude list rather than an exclude-all/allowlist:
+# the tor Dockerfile COPYs 18 individually named files, and an allowlist that
+# misses one fails late with a confusing "file not found" at COPY time.
+# The `**/` prefixes are required, not decorative. .dockerignore patterns are
+# matched against the whole context-relative path and `*` never crosses `/`,
+# so a bare `__pycache__/` excludes only the one at the context root. The tor
+# context has a second one under wordlists/, and `COPY wordlists /wordlists`
+# copies that directory wholesale — which is the exact path by which .pyc was
+# reaching the published image.
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store

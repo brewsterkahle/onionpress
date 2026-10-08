@@ -6,7 +6,10 @@
 #
 # You can customize this to any lowercase alphanumeric string.
 # Note: Only base32 characters allowed (a-z, 2-7). Numbers 0, 1, 8, 9 are not valid.
-# Maximum 5 characters. Longer prefixes take exponentially longer to generate:
+# Length must be 2 to 5 characters. An invalid prefix is rejected at setup; if
+# you hand-edit this file with a bad one, OnionPress falls back to 'op2' and
+# records why in ~/.onionpress/launcher.log.
+# Longer prefixes take exponentially longer to generate:
 # - 2 chars (op): < 1 second
 # - 3 chars (op2): < 1 second
 # - 4 chars (op24): 5-30 seconds
@@ -139,17 +142,16 @@ SHARE_ANALYTICS_WITH_ONIONHOME=no
 #
 # ONIONHOME_ADDRESS=op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion
 
-# Tor Implementation
-# Default: "tor" (Classic C Tor)
+# Locally Built Container Images (advanced, developer-only)
 #
-# Choose which Tor implementation to use for onion services:
+# Point OnionPress at container images you built yourself with
+# build/build-images.sh instead of the published ones. When either is set to a
+# non-ghcr.io reference, OnionPress stops pulling images on launch — otherwise
+# the pull would overwrite your local build before it ever started.
 #
-#   tor   - Classic C Tor (default). Faster onion service releases (sends
-#           DESTROY cells to intro relays), available via apt-get.
-#   arti  - Tor Project's modern Rust implementation. Native arm64
-#           on Apple Silicon, but lacks intro circuit teardown on release.
+# Unset them (or delete these lines) to go back to published images.
+# See docs/BUILDING.md in the OnionPress repository.
 #
-# Keys are automatically converted between formats when switching.
-# Requires restart to take effect.
-#
-TOR_IMPL=tor
+# ONIONPRESS_TOR_IMAGE=onionpress-tor:dev
+# ONIONPRESS_WORDPRESS_IMAGE=onionpress-wordpress:dev
+

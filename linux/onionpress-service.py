@@ -237,19 +237,22 @@ def write_status(
         )
         onboarded = opt.ok and opt.output.strip() in ("1", "true", "yes")
 
-    # Wayback queue depth (items waiting to be archived)
+    # Wayback queue depth: posts not yet archived (waiting plus in flight),
+    # from the plugin's own totals. The v4 plugin keeps per-post state in
+    # _op_wayback_* postmeta; the older _op_wayback_pending key it never
+    # writes, so counting that always reported 0.
     wayback_queue = 0
     wq = docker.exec(
         "onionpress-wordpress",
         ["wp", "--allow-root", "eval",
-         "echo count(get_posts(['post_type'=>'any','post_status'=>'any',"
-         "'meta_key'=>'_op_wayback_pending','posts_per_page'=>-1]));"],
+         "echo json_encode(onionpress_wayback_queue_totals());"],
         timeout=10, quiet=True,
     )
     if wq.ok:
         try:
-            wayback_queue = int(wq.output.strip())
-        except ValueError:
+            totals = json.loads(wq.output.strip())
+            wayback_queue = int(totals.get("remaining", 0)) + int(totals.get("in_flight", 0))
+        except (ValueError, AttributeError, TypeError):
             pass
 
     # mkp224o availability

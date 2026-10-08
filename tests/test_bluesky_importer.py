@@ -20,44 +20,23 @@ Coverage focus:
   9. Token-lock mutex: fresh lock blocks a second daemon; stale lock
      is taken over.
 
-Prerequisites (skips if not met):
-  - Docker running
-  - `onionpress-wordpress` container up with the plugin in mu-plugins/
-  - At least one subsite (we write to /brewsterkahle/ by default)
+Opt-in and sandboxed: skipped unless ONIONPRESS_INTEGRATION_TESTS=1,
+refused on a live install, and every class runs on a fresh
+`op-bluesky-test` subsite that is deleted afterwards — see
+wp_integration.py. Needs the plugin from this checkout in mu-plugins/.
 """
 
 import json
-import shutil
-import subprocess
+import os
+import sys
 import unittest
 import uuid
 
-_WP = "onionpress-wordpress"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wp_integration  # noqa: E402
 
-
-def _docker_exec(args, **kwargs):
-    return subprocess.run(
-        ["docker", "exec", _WP] + args,
-        capture_output=True, text=True, encoding='utf-8',
-        errors='replace', **kwargs,
-    )
-
-
-def _wp(args, url=None, **kwargs):
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
-    if url:
-        cmd.append("--url=" + url)
-    return _docker_exec(cmd, **kwargs)
-
-
-def _docker_available():
-    if not shutil.which("docker"):
-        return False
-    r = subprocess.run(
-        ["docker", "inspect", _WP, "--format={{.State.Running}}"],
-        capture_output=True, text=True, timeout=10,
-    )
-    return r.returncode == 0 and "true" in r.stdout
+_wp = wp_integration.wp
+_eval = wp_integration.wp_eval
 
 
 _SAFE_TEST_DID    = "did:plc:testactor"
@@ -84,41 +63,13 @@ _TOUCHED_OPTIONS = (
 )
 
 
-def _get_or_create_test_subsite():
-    """Return the dedicated test subsite URL, creating it on first call.
-    Earlier this file used _pick_site() — fine on a CI checkout, but on
-    a real machine it picked whatever subsite happened to come first
-    and silently overwrote its DID. Same trap as the Mastodon side."""
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    sites = json.loads(r.stdout)
-    needle = "/" + _TEST_SUBSITE_SLUG + "/"
-    for s in sites:
-        if s.get("path") == needle:
-            return s["url"].rstrip("/") + "/"
-    create = _wp(
-        ["site", "create",
-         "--slug=" + _TEST_SUBSITE_SLUG,
-         "--title=Bluesky Importer Test Sandbox",
-         "--porcelain"],
-        timeout=30,
-    )
-    if create.returncode != 0:
-        return None
-    r = _wp(["site", "list", "--fields=blog_id,path,url", "--format=json"],
-            timeout=15)
-    sites = json.loads(r.stdout) if r.stdout.strip() else []
-    for s in sites:
-        if s.get("path") == needle:
-            return s["url"].rstrip("/") + "/"
-    return None
-
-
-def _eval(php, url):
-    r = _wp(["eval", php], url=url, timeout=90)
-    return r.stdout.strip()
+class _BlueskySandbox(wp_integration.SandboxTestCase):
+    """Every class runs on the dedicated sandbox subsite. Earlier this
+    file used _pick_site() — fine on a CI checkout, but on a real machine
+    it picked whatever subsite happened to come first and silently
+    overwrote its DID. Same trap as the Mastodon side."""
+    SANDBOX_SLUG = _TEST_SUBSITE_SLUG
+    SANDBOX_TITLE = "Bluesky Importer Test Sandbox"
 
 
 def _assert_test_sandbox(url):
@@ -224,16 +175,8 @@ def _feed_item(uri=None, text="hello from test", created="2026-04-23T00:00:00Z",
     return item
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestBlueskyBackfill(unittest.TestCase):
+class TestBlueskyBackfill(_BlueskySandbox):
     """Backfill pagination + cursor semantics."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -317,16 +260,8 @@ class TestBlueskyBackfill(unittest.TestCase):
         self.assertIn("errs=1", out)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestBlueskyImportFilters(unittest.TestCase):
+class TestBlueskyImportFilters(_BlueskySandbox):
     """Per-item filter logic (replies/reposts) + dedupe."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -386,17 +321,9 @@ class TestBlueskyImportFilters(unittest.TestCase):
         self.assertEqual(r, "imported")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestBlueskyQuotePostRendering(unittest.TestCase):
+class TestBlueskyQuotePostRendering(_BlueskySandbox):
     """Quote-post rendering: inline blockquote with quoted author +
     text; muted one-liner for unavailable states."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -476,16 +403,8 @@ class TestBlueskyQuotePostRendering(unittest.TestCase):
         self.assertNotIn("cdn.bsky.app/x.jpg", out)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestBlueskyHandleResolution(unittest.TestCase):
+class TestBlueskyHandleResolution(_BlueskySandbox):
     """Handle → DID resolution at save time."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -519,16 +438,8 @@ class TestBlueskyHandleResolution(unittest.TestCase):
             f"expected WP_Error; got: {out}")
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestBlueskyDaemonLock(unittest.TestCase):
+class TestBlueskyDaemonLock(_BlueskySandbox):
     """Token-lock mutex semantics for the daemon entry point."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)
@@ -572,18 +483,10 @@ class TestBlueskyDaemonLock(unittest.TestCase):
         self.assertNotIn("deadTok", out)
 
 
-@unittest.skipUnless(_docker_available(), "requires running onionpress-wordpress container")
-class TestBlueskyThreading(unittest.TestCase):
+class TestBlueskyThreading(_BlueskySandbox):
     """Self- and external-replies fold into the parent post's comment
     thread. External replies trigger a context fetch via getPosts so
     the conversation reads in full instead of as a fragmentary reply."""
-
-    @classmethod
-    def setUpClass(cls):
-        url = _get_or_create_test_subsite()
-        if url is None:
-            raise unittest.SkipTest("could not get/create test subsite")
-        cls.url = url
 
     def setUp(self):
         _assert_test_sandbox(self.url)

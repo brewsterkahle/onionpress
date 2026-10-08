@@ -43,6 +43,7 @@ from onionpress.health import (
     decode_curl_reason,
 )
 from onionpress import config as op_config
+from onionpress import containers
 from onionpress.reachability_stats import ReachabilityStats
 from onionpress.system_metrics import host_metrics, container_metrics
 from onionpress.ui_helpers import (
@@ -53,6 +54,7 @@ from onionpress.ui_helpers import (
     BackupProgressWindow as _BackupProgressWindow,
     LogViewerActions as _LogViewerActions,
     LogViewerWindow as _LogViewerWindow,
+    ensure_edit_menu as _ensure_edit_menu,
 )
 from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
@@ -67,6 +69,10 @@ class OnionPressApp(rumps.App):
     def __init__(self):
         # Get paths first (fast - no I/O)
         self.app_support = os.path.expanduser("~/.onionpress")
+        # Read by write_status_to_volume from the first status tick; it used
+        # to be first assigned on the background_init thread, so a relaunch
+        # over an already-running VM could hit AttributeError in check_status.
+        self.startup_time = time.time()
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
 
         # Single-instance safety net via PID file
@@ -197,6 +203,11 @@ class OnionPressApp(rumps.App):
         # Initialize rumps WITHOUT icon first (fastest possible)
         super(OnionPressApp, self).__init__("", quit_button=None, template=False)
 
+        # LSUIElement apps have no visible menu bar, but ⌘-key equivalents
+        # (⌘V paste, ⌘C copy, …) are still dispatched through the main menu —
+        # without this, pasting a password into the setup window just beeps.
+        _ensure_edit_menu()
+
         # Detect first-run early so we can show the right window.
         # Use .setup_complete marker (written by Python after setup finishes)
         # instead of secrets (which the launcher recreates before Python starts).
@@ -230,7 +241,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.4.110"
+        self.version = "2.5.1"
 
         # Set up environment variables (fast - no I/O)
         docker_config_dir = os.path.join(self.app_support, "docker-config")
@@ -243,7 +254,8 @@ class OnionPressApp(rumps.App):
 
         # Stop any orphaned Colima VM from a previous crash before port detection
         colima_bin = os.path.join(self.bin_dir, "colima")
-        op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file)
+        op_config.stop_stale_colima(colima_bin, self.colima_home, self.pid_file,
+                                    log_func=self.log)
 
         # If our previous instance just quit, wait briefly for its port
         # to free before detecting offset. Without this, the new
@@ -421,7 +433,7 @@ class OnionPressApp(rumps.App):
         self._yellow_since = None          # Timestamp when entered yellow state
         self._last_check_complete_ts = time.time()  # Last time check_status finished a full pass
         self._was_ready = False            # Were we ever ready this session?
-        self._tor_internally_ready = False # Checks 1-4 passed (Arti+WordPress up)
+        self._tor_internally_ready = False # Checks 1-4 passed (Tor+WordPress up)
         # Reclaim fields kept for compatibility (notify_onionheaven_online still sets them)
         self._onionheaven_reclaim_succeeded = False
         self._onionheaven_reclaim_in_flight = False
@@ -462,6 +474,7 @@ class OnionPressApp(rumps.App):
         self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
         self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
         self._onionheaven_alert_in_menu = False
+        self._s3_keys_reconcile_started = False
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -647,6 +660,8 @@ class OnionPressApp(rumps.App):
         """Start the local .onion proxy server in a background thread."""
         if self.proxy_server is not None:
             return  # already running
+        if self._quitting:
+            return  # quit cleanup already stopped it; don't bring it back
 
         docker_bin = os.path.join(self.bin_dir, "docker")
         docker_env = os.environ.copy()
@@ -868,9 +883,10 @@ class OnionPressApp(rumps.App):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True, encoding='utf-8', errors='replace',
-                env={
-                    "DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"
-                }
+                # The full docker env (PATH, DOCKER_CONFIG, COLIMA_HOME...), not
+                # a bare DOCKER_HOST: with stderr merged into stdout, a docker
+                # CLI complaint used to land in the WordPress access log.
+                env=self._docker._build_env(self._paths),
             )
 
             # Start reader thread that splits logs into raw + filtered rotating logs
@@ -881,9 +897,9 @@ class OnionPressApp(rumps.App):
             )
             self.web_log_thread.start()
 
-            print(f"Started web log capture to {self._wp_access_log.current_path()}")
+            self.log(f"Started web log capture to {self._wp_access_log.current_path()}")
         except Exception as e:
-            print(f"Error starting web log capture: {e}")
+            self.log(f"Error starting web log capture: {e}")
             self.web_log_process = None
 
     def stop_web_log_capture(self):
@@ -941,7 +957,7 @@ class OnionPressApp(rumps.App):
 
     def _capture_supervisor_loop(self):
         docker_bin = os.path.join(self.bin_dir, "docker")
-        docker_env = {"DOCKER_HOST": f"unix://{self.colima_home}/default/docker.sock"}
+        docker_env = self._docker._build_env(self._paths)
         logs_dir = os.path.join(self.app_support, "logs")
         while not self._capture_shutdown.is_set():
             try:
@@ -1184,6 +1200,9 @@ class OnionPressApp(rumps.App):
 
         if waited >= max_wait:
             self.log("WARNING: Container runtime not ready after 3 minutes")
+            # The splash otherwise stays on "Preparing your site..." through
+            # the launcher's own 180s Docker wait that follows.
+            self.update_splash_status("Container runtime did not start in 3 minutes — see View Logs")
 
         # Check for port conflicts (another user's OnionPress or other process)
         # Only flag a conflict if ports are busy AND our own containers aren't running.
@@ -1311,7 +1330,9 @@ class OnionPressApp(rumps.App):
             )
             return result.stdout.strip()
         except Exception as e:
-            print(f"Error running command {command}: {e}")
+            # Went to stdout (launcher.log) before; a 60s timeout here is what
+            # makes a wedged Docker look like "Stopped", so it belongs in our log.
+            self.log(f"Error running command {command}: {e}")
             return None
 
     def check_tor_reachability(self, log_result=True):
@@ -1594,6 +1615,8 @@ class OnionPressApp(rumps.App):
         """Check if containers are running and get onion address"""
         if self._port_conflict:
             return
+        if self._quitting:
+            return  # a status tick during quit restarts what cleanup just stopped
         with self._checking_lock:
             if self.checking:
                 return
@@ -1651,16 +1674,29 @@ class OnionPressApp(rumps.App):
             # Check if containers are running
             status_json = self.run_command("status")
 
+            not_running = []
             if status_json and status_json != "[]":
                 try:
                     status = json.loads(status_json)
                     self.is_running = len(status) > 0 and all(
                         s.get("State", "").lower() == "running" for s in status
                     )
+                    not_running = sorted(
+                        f"{s.get('Name') or s.get('Service') or '?'} ({s.get('State') or '?'})"
+                        for s in status if s.get("State", "").lower() != "running")
                 except Exception:
                     self.is_running = False
             else:
                 self.is_running = False
+            if self.is_running:
+                self._start_failed_rc = None
+            # Any one container not "running" turns the whole app gray, so say
+            # which one, once per change: a tor restart loop should read as
+            # "onionpress-tor (restarting)" in the log, not as a bare Stopped.
+            if not_running != getattr(self, "_last_not_running", None):
+                if not_running:
+                    self.log("Containers not running: " + ", ".join(not_running))
+                self._last_not_running = not_running
 
             if self.is_running:
                 self._probe_vm_wedge()
@@ -1861,7 +1897,7 @@ class OnionPressApp(rumps.App):
 
                         # Auto-restart tor if stuck for 2+ minutes AND
                         # the container shows signs of actual trouble (broken
-                        # guards, circuit failures). If Arti is healthy but
+                        # guards, circuit failures). If Tor is healthy but
                         # just waiting for descriptor propagation, don't restart
                         # — that would reset progress.
                         # Uses cooldown (5 min) so we can retry if the spiral recurs.
@@ -2139,6 +2175,15 @@ class OnionPressApp(rumps.App):
                 return  # Don't update icon/menu during shutdown
 
             if state == "available":
+                # Reconcile archive.org S3 keys once per launch. Setup
+                # fetches them in a one-shot Tor call that can fail on a
+                # freshly bootstrapped Tor, and without keys the Wayback
+                # sweep silently skips every submission.
+                if not self._s3_keys_reconcile_started:
+                    self._s3_keys_reconcile_started = True
+                    threading.Thread(
+                        target=self._reconcile_archive_s3_keys,
+                        daemon=True).start()
                 self.icon = self.icon_running
                 onionname = self.read_config_value("ONIONNAME", "").strip()
                 short = self._short_onion(self.onion_address)
@@ -2186,7 +2231,9 @@ class OnionPressApp(rumps.App):
             else:
                 # Stopped
                 self.icon = self.icon_stopped
-                if self.onion_address and self.onion_address.endswith('.onion'):
+                if getattr(self, "_start_failed_rc", None) is not None:
+                    self.menu["Starting..."].title = "Status: Start failed — see View Logs"
+                elif self.onion_address and self.onion_address.endswith('.onion'):
                     self.menu["Starting..."].title = f"Stopped — {self._short_onion(self.onion_address)}"
                 else:
                     self.menu["Starting..."].title = "Status: Stopped"
@@ -2812,7 +2859,7 @@ class OnionPressApp(rumps.App):
             return None
         name = self.read_config_value("ONIONNAME", "")
         if name:
-            return f"http://{self.onion_address}/{name}"
+            return f"http://{self.onion_address}/{name}/"
         return f"http://{self.onion_address}/"
 
     @rumps.clicked("Copy Onion Address")
@@ -2861,7 +2908,7 @@ class OnionPressApp(rumps.App):
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
         name = self.read_config_value("ONIONNAME", "")
-        local_base = f"{self.local_url}/{name}" if name else self.local_url
+        local_base = f"{self.local_url}/{name}/" if name else self.local_url
         url = self._generate_login_url(local_base)
         subprocess.run(["open", url])
         self.log(f"Opened local site: {url}")
@@ -3042,20 +3089,12 @@ class OnionPressApp(rumps.App):
                     self.dismiss_launch_splash()
                     self.show_browser_install_dialog()
 
-    def validate_address_prefix(self, prefix):
-        """Validate an address prefix string.
-
-        Returns:
-            (valid, error_message, suggestion) tuple.
-        """
-        return op_config.validate_address_prefix(prefix)
-
     def check_address_prefix_change(self):
         """No-op: the vanity prefix is chosen once at install (welcome
         screen) and never changed on the fly. The old behaviour — detect a
         config ADDRESS_PREFIX that no longer matched the live address and
         regenerate the onion identity on startup — was removed (#256 phase
-        4b): it shared the churny stop -> delete arti-state -> regenerate
+        4b): it shared the churny stop -> delete key volume -> regenerate
         path and risked clobbering the address. Kept as a stub so the
         startup/restart call sites are unchanged; always proceeds."""
         return True
@@ -3087,7 +3126,16 @@ class OnionPressApp(rumps.App):
 
             # Start the service normally
             self.update_splash_status("Starting your site...")
-            subprocess.run([self.launcher_script, "start"])
+            self._start_failed_rc = None
+            rc = subprocess.run([self.launcher_script, "start"]).returncode
+            if rc != 0:
+                # Every hard stop in the launcher (Docker never answered, key
+                # volume missing, compose up failed three times) exits 1 with
+                # an ERROR line in ~/.onionpress/onionpress.log. Nothing read
+                # the rc before: the menu just said "Stopped" with no reason.
+                self._start_failed_rc = rc
+                self.log(f"onionpress start failed (rc={rc}) — see ~/.onionpress/onionpress.log for the ERROR line")
+                self.update_splash_status("Start failed — see View Logs")
             self._resync_ports()
 
             # Poll until WordPress is responding (replaces fixed sleep)
@@ -3529,10 +3577,23 @@ class OnionPressApp(rumps.App):
                     capture_output=True, text=True, encoding='utf-8', errors='replace'
                 )
                 if result.returncode != 0:
-                    # Don't treat as fatal — the launcher may return non-zero for
-                    # benign reasons (port offset log message hitting system `log`).
-                    # The milestone polling loop will detect real failures via timeout.
-                    self.log(f"Launcher exited with rc={result.returncode} (may be benign)")
+                    # capture_output swallowed the launcher's stderr, including
+                    # the tracebacks of its onionpress.cli steps; keep the tail.
+                    tail = (result.stderr or result.stdout or "").strip()[-4000:]
+                    self.log(f"Launcher exited with rc={result.returncode}")
+                    if tail:
+                        self.log("Launcher output (tail):\n" + tail)
+                    # Before WordPress has answered, a non-zero exit is the
+                    # launcher's own hard stop (Docker never ready, key volume,
+                    # compose up): fail now instead of sitting on "Downloading
+                    # components..." until the 10-minute timeout. After step 4
+                    # it is a late, non-fatal step, recorded by the log above.
+                    try:
+                        wordpress_up = step4_done
+                    except NameError:
+                        wordpress_up = False
+                    if not wordpress_up:
+                        launcher_failed[0] = True
             except Exception as e:
                 launcher_failed[0] = True
                 self.log(f"Error in _run_first_time_setup: {e}")
@@ -3565,7 +3626,7 @@ class OnionPressApp(rumps.App):
             if launcher_failed[0]:
                 if sw:
                     sw.set_status("Setup failed — check log for details")
-                    sw.add_log("ERROR: Launcher script failed")
+                    sw.add_log("ERROR: Launcher script failed — see ~/.onionpress/onionpress.log")
                 self.log("First-time setup failed")
                 break
 
@@ -3785,9 +3846,19 @@ class OnionPressApp(rumps.App):
     def view_logs(self, _):
         """Open logs in built-in log viewer"""
         log_file = self._onionpress_log.current_path()
+        # The launcher script (`onionpress start`) writes to a separate flat
+        # file, and every ERROR from start_containers lives there; until the
+        # two logs are unified, open both so a failed start is reachable
+        # from the menu.
+        launcher_log = os.path.join(self.app_support, "onionpress.log")
+        opened = False
         if os.path.exists(log_file):
             _LogViewerWindow.show_for_file(log_file, "OnionPress Log")
-        else:
+            opened = True
+        if os.path.exists(launcher_log):
+            _LogViewerWindow.show_for_file(launcher_log, "Launcher Log (onionpress start)")
+            opened = True
+        if not opened:
             rumps.alert("No logs available yet")
 
     @rumps.clicked("View Web Usage Log")
@@ -4116,7 +4187,7 @@ class OnionPressApp(rumps.App):
                 # install-from-backup: delegate to the launcher's `restore`,
                 # which now tears down + rebuilds the install directly from the
                 # backup (seeded key + imported DB/content) — no in-place
-                # overwrite and no .import-key-pending arti-state key-swap churn.
+                # overwrite and no .import-key-pending key-volume swap churn.
                 log_and_update("Rebuilding from backup (install-from-backup)…")
                 r = subprocess.run(
                     [self.launcher_script, "restore", password, zip_path],
@@ -4158,9 +4229,45 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=do_restore, daemon=True).start()
 
+    def _reconcile_archive_s3_keys(self):
+        """Ensure the Wayback sweep's archive.org S3 keys exist, retrying
+        a few times — first-boot Tor circuits are the flaky window that
+        loses the setup-time fetch. Idempotent: when keys are already
+        set the first attempt is a single `wp option get` and returns.
+        """
+        from onionpress import multisite
+        docker_bin = os.path.join(self.bin_dir, "docker")
+        for attempt in range(3):
+            if attempt:
+                time.sleep(120)
+            try:
+                if multisite.ensure_archive_s3_keys(
+                        docker_bin=docker_bin, log_func=self.log):
+                    return
+            except Exception as e:
+                self.log(f"archive.org S3 key reconcile attempt "
+                         f"{attempt + 1} failed: {e}")
+        self.log("WARNING: archive.org S3 keys still missing after "
+                 "retries — Wayback archiving is idle until they are set "
+                 "(Settings, or next launch retries)")
+
     def update_docker_images(self, show_notifications=True):
         """Update Docker images (WordPress, MariaDB, Tor)"""
         try:
+            # A pull would overwrite a locally built tag with the registry's
+            # copy — see containers.using_local_images(). The bash launchers
+            # gate their pulls the same way.
+            if containers.using_local_images(self._paths.config_file):
+                self.log("Skipping image update: running locally built images")
+                if show_notifications:
+                    self.show_native_alert(
+                        "Running Locally Built Images",
+                        "Image updates are skipped because ONIONPRESS_TOR_IMAGE "
+                        "or ONIONPRESS_WORDPRESS_IMAGE points at a locally built "
+                        "image.\nUnset it to resume updates from the registry.",
+                    )
+                return False
+
             self.log("Checking for Docker image updates...")
             docker_compose_file = os.path.join(self.parent_resources_dir, "docker", "docker-compose.yml")
 
@@ -4430,8 +4537,11 @@ class OnionPressApp(rumps.App):
         """Check for Docker updates in background thread"""
         images_updated = self.update_docker_images(show_notifications=True)
 
-        # Show final summary if no app update was available.
-        if not app_update_available and not images_updated:
+        # Show final summary if no app update was available. Not when running
+        # locally built images — update_docker_images() has already said so,
+        # and "all container images are up to date" would be a lie.
+        if (not app_update_available and not images_updated
+                and not containers.using_local_images(self._paths.config_file)):
             version = self.version
             self.show_native_alert(
                 "No Updates Available",
@@ -4875,7 +4985,7 @@ License: AGPL v3"""
                 'version': self.version,
                 'onion_address': onion_addr,
                 'onionname': self._read_config_value("ONIONNAME", ""),
-                'tor_impl': self._read_config_value("TOR_IMPL", "tor"),
+                'tor_impl': 'tor',  # the only implementation since 2026-09-24; kept for the OnionHome schema
                 'uptime_seconds': uptime_seconds,
                 'bootstrap_pct': bootstrap_pct,
                 'onion_reachable': onion_reachable,
@@ -5178,7 +5288,7 @@ License: AGPL v3"""
                 # On-the-fly vanity regeneration was removed (#256 phase 4b):
                 # the address is fixed at install (chosen on the welcome screen)
                 # and only changes via restore-from-backup. This used the churny
-                # stop -> delete arti-state -> regen path that risked clobbering
+                # stop -> delete key volume -> regen path that risked clobbering
                 # the address; it is now a no-op that reports back to the page.
                 self.log("Settings page: generate-vanity requested but disabled "
                          "(prefix is fixed at install) — ignoring")

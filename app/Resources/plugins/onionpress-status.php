@@ -135,8 +135,10 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
     $oh            = $status ? ( $status['onionheaven'] ?? array() ) : array();
     $load_avg      = $status ? ( $status['load_avg'] ?? array() ) : array();
     $host_uptime   = $status ? ( $status['host_uptime_seconds'] ?? 0 ) : 0;
-    $tor_impl      = $status ? ( $status['tor_impl'] ?? 'arti' ) : 'arti';
-    $tor_impl_label = $tor_impl === 'tor' ? 'C Tor' : 'Arti';
+    // C Tor is the only implementation since 2026-09-24 (Arti was removed);
+    // the field stays in the status JSON for the OnionHome schema.
+    $tor_impl      = $status ? ( $status['tor_impl'] ?? 'tor' ) : 'tor';
+    $tor_impl_label = $tor_impl === 'tor' ? 'C Tor' : $tor_impl;
 
     // State color
     $state_colors = array(
@@ -498,7 +500,7 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
             if(el)el.textContent=(s.bootstrap_pct||0)+'%';
             // Tor Implementation
             el=document.getElementById('op-tor-impl');
-            if(el){var ti=s.tor_impl||'arti';el.textContent=(ti==='tor'?'C Tor':'Arti');}
+            if(el){var ti=s.tor_impl||'tor';el.textContent=(ti==='tor'?'C Tor':ti);}
             var wq=s.wayback_queue_count||0;
             el=document.getElementById('op-wayback-row');
             if(el)el.style.display=wq>0?'':'none';

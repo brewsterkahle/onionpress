@@ -9,7 +9,7 @@
  *              no back-off chain — a failed submit is simply retried on a
  *              later tick. Two global gates throttle the whole sweep:
  *              (1) self-reachability of our onion, (2) SPN account slots.
- * Version:     4.0
+ * Version:     4.1
  * Network:     true
  */
 
@@ -20,8 +20,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 // ───────────────────────────── tunables ─────────────────────────────
 
 // How often wp-cron fires the entry point. The entry point runs a
-// daemon-style inner loop for up to OP_WB_LOOP_MAX_SEC, so cron only
-// has to fire as a watchdog that restarts the loop if it died. 5 min
+// daemon-style inner loop until the queue is drained (a stale mutex lets
+// the next tick take over), so cron only has to fire as a watchdog that
+// restarts the loop if it died. 5 min
 // is plenty — if the loop is still running, cron is a no-op (mutex).
 define( 'OP_WB_CRON_INTERVAL', 300 );
 
@@ -96,7 +97,17 @@ define( 'OP_WB_META_RESNAPSHOT_DONE',  '_op_wayback_resnapshot_done' );
 // wp_options keys.
 define( 'OP_WB_OPT_HOME',          'op_wayback_home_state' );
 define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
+
+// The Wayback Machine's onion mirror; every SPN, status and CDX call goes here
+// through onionheaven's SOCKS proxy. One place to change it.
+define( 'OP_WB_ONION_HOST', 'web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion' );
 define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
+// 'yes' keeps a subsite out of the Wayback Machine entirely: the sweep
+// never visits it, the queue totals leave it out, and it never schedules
+// a sweep of its own. The integration tests create their sandbox subsites
+// with it — on 2026-09-30 a live install's sweep submitted those sandboxes
+// to the public Wayback Machine.
+define( 'OP_WB_OPT_EXCLUDE',       'op_wayback_exclude' );
 
 // ─────────────────────────── logging + helpers ──────────────────────
 
@@ -123,6 +134,13 @@ function onionpress_wayback_auth_header() {
 }
 
 function onionpress_wayback_onion_addr() {
+    // Test hook: return a string to stand in for the address file. A test
+    // target must not have that file — it is what lets the live sweep
+    // build a URL at all.
+    $mock = apply_filters( 'onionpress_wayback_onion_addr_mock', null );
+    if ( $mock !== null ) {
+        return (string) $mock;
+    }
     $f = '/var/lib/onionpress/onion_address';
     if ( ! file_exists( $f ) ) {
         return '';
@@ -181,7 +199,11 @@ function onionpress_wayback_curl_common( $ch ) {
         CURLOPT_PROXYTYPE         => CURLPROXY_SOCKS5_HOSTNAME,
         CURLOPT_SSL_VERIFYPEER    => false,
         CURLOPT_SSL_VERIFYHOST    => 0,
-        CURLOPT_CONNECTTIMEOUT    => 15,
+        // Measured circuit-build time to archive.org's onion mirror
+        // regularly runs 20-30s cold (no cached circuit) — 15s was
+        // timing out essentially every call, silently. 45s gives
+        // headroom without letting a truly dead circuit hang forever.
+        CURLOPT_CONNECTTIMEOUT    => 45,
     ) );
 }
 
@@ -207,7 +229,7 @@ function onionpress_wayback_self_reachable( $onion ) {
     curl_setopt_array( $ch, array(
         CURLOPT_NOBODY         => true,
         CURLOPT_FOLLOWLOCATION => false, // a 302 means redirector, not us
-        CURLOPT_TIMEOUT        => 20,
+        CURLOPT_TIMEOUT        => 60,
     ) );
     curl_exec( $ch );
     $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
@@ -228,19 +250,28 @@ function onionpress_wayback_user_status() {
     if ( empty( $auth ) ) {
         return null;
     }
-    $ch = curl_init( 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status/user?t=' . time() );
+    $ch = curl_init( 'https://' . OP_WB_ONION_HOST . '/save/status/user?t=' . time() );
     onionpress_wayback_curl_common( $ch );
     curl_setopt_array( $ch, array(
-        CURLOPT_TIMEOUT    => 20,
+        CURLOPT_TIMEOUT    => 60,
         CURLOPT_HTTPHEADER => array(
             'Accept: application/json',
             'Authorization: ' . $auth,
         ),
     ) );
-    $response = curl_exec( $ch );
-    $code     = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $response  = curl_exec( $ch );
+    $code      = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+    $curl_errno = curl_errno( $ch );
+    $curl_err   = curl_error( $ch );
     curl_close( $ch );
     if ( $code !== 200 || ! $response ) {
+        // Logged because callers silently fall back to an optimistic
+        // slot count on null — without this, a transport failure here
+        // is invisible and looks identical to a real "40 slots" reply.
+        onionpress_wayback_log( sprintf(
+            'user_status call failed (code=%d, curl_errno=%d, curl_err=%s) — falling back to optimistic slot count',
+            $code, $curl_errno, $curl_err
+        ) );
         return null;
     }
     $body = @json_decode( (string) $response, true );
@@ -284,9 +315,10 @@ function onionpress_wayback_curl_multi( array $setups ) {
     foreach ( $handles as $key => $ch ) {
         $body = (string) curl_multi_getcontent( $ch );
         $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+        $err  = curl_error( $ch );
         curl_multi_remove_handle( $mh, $ch );
         curl_close( $ch );
-        $results[ $key ] = array( 'code' => $code, 'body' => $body );
+        $results[ $key ] = array( 'code' => $code, 'body' => $body, 'error' => $err );
     }
     curl_multi_close( $mh );
     return $results;
@@ -335,14 +367,14 @@ function onionpress_wayback_submit_parallel( array $urls ) {
             $url = $urls[ $key ];
             $setups[ $key ] = function ( $ch ) use ( $url, $headers ) {
                 curl_setopt_array( $ch, array(
-                    CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save',
+                    CURLOPT_URL        => 'https://' . OP_WB_ONION_HOST . '/save',
                     CURLOPT_POST       => true,
                     CURLOPT_POSTFIELDS => http_build_query( array(
                         'url'                 => $url,
                         'skip_first_archive'  => 1,
                         'js_behavior_timeout' => 0,
                     ) ),
-                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_TIMEOUT    => 60,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -355,6 +387,13 @@ function onionpress_wayback_submit_parallel( array $urls ) {
             }
             if ( $r['code'] < 200 || $r['code'] >= 400 || empty( $r['body'] ) ) {
                 $results[ $key ] = '';
+                // Previously silent — a transport failure here (e.g. a Tor
+                // circuit that never connected) looked identical to a
+                // healthy tick that just had nothing to submit.
+                onionpress_wayback_log( sprintf(
+                    'Submit failed for %s (url=%s, code=%d, curl_err=%s)',
+                    $key, $urls[ $key ], $r['code'], $r['error']
+                ) );
                 continue;
             }
             $data = @json_decode( $r['body'], true );
@@ -399,11 +438,6 @@ function onionpress_wayback_cdx_lookup_parallel( array $urls ) {
     return onionpress_wayback_cdx_one_pass( $urls );
 }
 
-// Back-compat alias for the new name.
-function onionpress_wayback_availability_parallel( array $urls ) {
-    return onionpress_wayback_cdx_lookup_parallel( $urls );
-}
-
 /**
  * Single CDX query pass. $urls is keyed map key → URL. Returns a
  * same-keyed map of key → timestamp (empty string on miss).
@@ -415,12 +449,12 @@ function onionpress_wayback_cdx_one_pass( array $urls ) {
         $setups = array();
         foreach ( $key_chunk as $key ) {
             $url_no_scheme = preg_replace( '#^https?://#', '', $urls[ $key ] );
-            $endpoint = 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/cdx/search/cdx?'
+            $endpoint = 'https://' . OP_WB_ONION_HOST . '/cdx/search/cdx?'
                 . 'url=' . urlencode( $url_no_scheme ) . '&output=json&limit=-1';
             $setups[ $key ] = function ( $ch ) use ( $endpoint, $headers ) {
                 curl_setopt_array( $ch, array(
                     CURLOPT_URL        => $endpoint,
-                    CURLOPT_TIMEOUT    => 25,
+                    CURLOPT_TIMEOUT    => 60,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -473,10 +507,10 @@ function onionpress_wayback_poll_parallel( array $job_ids ) {
         foreach ( $parallel_group as $i => $chunk ) {
             $setups[ $i ] = function ( $ch ) use ( $chunk, $headers ) {
                 curl_setopt_array( $ch, array(
-                    CURLOPT_URL        => 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/save/status',
+                    CURLOPT_URL        => 'https://' . OP_WB_ONION_HOST . '/save/status',
                     CURLOPT_POST       => true,
                     CURLOPT_POSTFIELDS => http_build_query( array( 'job_ids' => implode( ',', $chunk ) ) ),
-                    CURLOPT_TIMEOUT    => 40,
+                    CURLOPT_TIMEOUT    => 60,
                     CURLOPT_HTTPHEADER => $headers,
                 ) );
             };
@@ -676,11 +710,45 @@ function onionpress_wayback_sitewide_records() {
     return $records;
 }
 
+// ──────────────────────────── sites ─────────────────────────────────
+
+/**
+ * True if this subsite is kept out of the Wayback Machine
+ * (OP_WB_OPT_EXCLUDE). The filter lets one process see an excluded
+ * sandbox as included — the queue-totals test does — without the live
+ * sweep ever seeing it that way.
+ */
+function onionpress_wayback_site_excluded( $blog_id ) {
+    $value = function_exists( 'get_blog_option' )
+        ? get_blog_option( $blog_id, OP_WB_OPT_EXCLUDE, '' )
+        : get_option( OP_WB_OPT_EXCLUDE, '' );
+    return (bool) apply_filters( 'onionpress_wayback_site_excluded', $value === 'yes', (int) $blog_id );
+}
+
+/**
+ * The subsites the sweep works on: every site in the network except the
+ * excluded ones. The queue totals count the same set.
+ */
+function onionpress_wayback_sites() {
+    $sites = function_exists( 'get_sites' ) ? get_sites() : array();
+    if ( empty( $sites ) ) {
+        // Not multisite — fall back to single-site check.
+        $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
+    }
+    $out = array();
+    foreach ( $sites as $site ) {
+        if ( ! onionpress_wayback_site_excluded( (int) $site->blog_id ) ) {
+            $out[] = $site;
+        }
+    }
+    return $out;
+}
+
 // ──────────────────────────── sweep ─────────────────────────────────
 
 /**
- * Entry point wired to wp-cron. Runs a continuous inner loop for up
- * to OP_WB_LOOP_MAX_SEC, so one cron invocation can drive many sweep
+ * Entry point wired to wp-cron. Runs a continuous inner loop until
+ * the queue is drained, so one cron invocation can drive many sweep
  * iterations. Exits early when:
  *   - queue fully drained (no posts with job_id=null, archived_at=null)
  *   - a gate tells us to back off for longer than remaining budget
@@ -732,17 +800,14 @@ function onionpress_wayback_sweep() {
 }
 
 /**
- * Sum queue totals across every subsite in the network. Returns an
- * array with 'archived', 'in_flight', 'remaining', and 'total' post
- * counts (counting publish posts + pages only).
+ * Sum queue totals across every subsite the sweep works on (excluded
+ * subsites are left out). Returns an array with 'archived', 'in_flight',
+ * 'remaining', and 'total' post counts (counting publish posts + pages
+ * only).
  */
 function onionpress_wayback_queue_totals() {
     $out = array( 'archived' => 0, 'in_flight' => 0, 'remaining' => 0, 'total' => 0 );
-    $sites = function_exists( 'get_sites' ) ? get_sites() : array();
-    if ( empty( $sites ) ) {
-        $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
-    }
-    foreach ( $sites as $site ) {
+    foreach ( onionpress_wayback_sites() as $site ) {
         $bid = (int) $site->blog_id;
         if ( function_exists( 'switch_to_blog' ) ) switch_to_blog( $bid );
         try {
@@ -792,18 +857,13 @@ function onionpress_wayback_sweep_loop( $token ) {
         }
         update_option( $lock_key, $token . ':' . time(), false );
 
-        // Visit every subsite in the network. The daemon may have been
-        // invoked from any site's cron; we need to do work on whichever
-        // subsite actually has unarchived posts. Skip subsites whose
-        // queue is fully drained — they exit the iteration for free.
-        $sites = function_exists( 'get_sites' ) ? get_sites() : array();
-        if ( empty( $sites ) ) {
-            // Not multisite — fall back to single-site check.
-            $sites = array( (object) array( 'blog_id' => get_current_blog_id() ) );
-        }
-
+        // Visit every subsite in the network that isn't excluded. The
+        // daemon may have been invoked from any site's cron; we need to do
+        // work on whichever subsite actually has unarchived posts. Skip
+        // subsites whose queue is fully drained — they exit the iteration
+        // for free.
         $any_work = false;
-        foreach ( $sites as $site ) {
+        foreach ( onionpress_wayback_sites() as $site ) {
             $bid = (int) $site->blog_id;
             if ( function_exists( 'switch_to_blog' ) ) {
                 switch_to_blog( $bid );
@@ -1014,8 +1074,8 @@ function onionpress_wayback_sweep_iteration() {
         }
     }
 
-    // Second pass: for each SPN-errored job, verify against Wayback's
-    // /wayback/available (with CDX fallback). If there's a capture,
+    // Second pass: for each SPN-errored job, verify against the CDX index
+    // (the /wayback/available endpoint 404s on the onion mirror). If there's a capture,
     // mark archived; otherwise resubmit next tick.
     //
     // Cap the rescue burst so Tor SOCKS stays responsive to other
@@ -1174,6 +1234,13 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
         ) );
     }
 
+    // An excluded subsite never schedules a sweep: nothing on it is ever
+    // submitted, and a daemon started from its cron would only run
+    // alongside the network's own.
+    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
+        return;
+    }
+
     // Also clear any site-wide back-off so the immediate sweep runs.
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
 
@@ -1221,6 +1288,9 @@ add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
         'last_error_ext'  => '',
         'last_error_at'   => '',
     ) );
+    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
+        return; // never schedules a sweep — see save_post above
+    }
     delete_option( OP_WB_OPT_BACKOFF_UNTIL );
     wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
     onionpress_wayback_log( 'wp_insert_comment ' . $comment_id
@@ -1238,6 +1308,15 @@ add_filter( 'cron_schedules', function ( $schedules ) {
 } );
 
 add_action( 'init', function () {
+    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
+        // An excluded subsite never drives the sweep: drop any watchdog it
+        // scheduled before it was excluded.
+        if ( wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
+            wp_clear_scheduled_hook( 'onionpress_wayback_sweep' );
+        }
+        return;
+    }
+
     // (Re)schedule the sweep on the current watchdog schedule. Unschedule
     // any prior-schedule instances so we don't end up with two cron
     // entries for the same hook under different intervals.
@@ -1257,7 +1336,9 @@ add_action( 'init', function () {
     if ( ! wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
         wp_schedule_event( time(), 'onionpress_wayback_watchdog', 'onionpress_wayback_sweep' );
     }
+} );
 
+add_action( 'init', function () {
     // One-time v3 → v4 migration: drop the retry-machine postmeta we no
     // longer use. Preserve archived_at + snapshot_ts (the only real
     // outcome record) and job_id (active in-flight work).
@@ -1285,6 +1366,33 @@ add_action( 'init', function () {
 } );
 
 // ───────────────────────── admin page ───────────────────────────────
+
+/**
+ * Dashboard warning when SPN credentials are missing. Without them the
+ * sweep silently skips every submission (submit_parallel returns empty
+ * on blank auth), which looks identical to "working, just slow" —
+ * surface it where the admin will actually see it. Only shown once the
+ * site has published posts, so a fresh install whose background key
+ * fetch is still in flight doesn't flash a false alarm.
+ */
+add_action( 'admin_notices', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return;
+    }
+    $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+    if ( ! $screen || $screen->id !== 'dashboard' ) {
+        return;
+    }
+    if ( onionpress_wayback_auth_header() !== '' ) {
+        return;
+    }
+    if ( (int) wp_count_posts( 'post' )->publish === 0 ) {
+        return;
+    }
+    echo '<div class="notice notice-warning"><p><strong>Wayback archiving is not running.</strong> '
+        . 'This site has no archive.org credentials, so posts are not being saved to the Wayback Machine. '
+        . 'See <a href="' . esc_url( admin_url( 'admin.php?page=onionpress-wayback' ) ) . '">Wayback Archive</a> for details.</p></div>';
+} );
 
 /**
  * Register a Wayback admin submenu under the Social Archive top-level
@@ -1396,6 +1504,17 @@ function onionpress_wayback_admin_page() {
             <div class="notice notice-success is-dismissible"><p><?php echo esc_html( $msg ); ?></p></div>
         <?php endif; ?>
 
+        <?php if ( onionpress_wayback_auth_header() === '' ) : ?>
+            <div class="notice notice-error">
+                <p><strong>Not connected to archive.org — posts are not being archived.</strong>
+                    Save Page Now needs archive.org credentials, and none are configured, so
+                    every submission is skipped. OnionPress normally sets this up automatically
+                    during setup and retries on each launch; if this message persists, connect
+                    an archive.org account under
+                    <a href="<?php echo esc_url( admin_url( 'admin.php?page=onionpress-settings' ) ); ?>">OnionPress Settings</a>.</p>
+            </div>
+        <?php endif; ?>
+
         <?php
         // Context-aware Wayback link: onion when viewing via .onion,
         // clearnet otherwise. Uses the helper from the Social Archive
@@ -1405,7 +1524,7 @@ function onionpress_wayback_admin_page() {
         } else {
             $host = (string) ( $_SERVER['HTTP_HOST'] ?? '' );
             $wb_home = substr( $host, -6 ) === '.onion'
-                ? 'https://web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/'
+                ? 'https://' . OP_WB_ONION_HOST . '/'
                 : 'https://web.archive.org/';
         }
         ?>
@@ -1539,7 +1658,7 @@ function onionpress_wayback_admin_page() {
             WordPress serves again.</p>
         <p>If the daemon dies (crash, reboot, Mac sleep), the mutex lock goes stale after
             5 minutes and the next WordPress page view causes wp-cron to restart the daemon
-            from the persisted cursor. No progress is lost; no duplicates are created.</p>
+            from the per-post state in postmeta. No progress is lost; no duplicates are created.</p>
     </div>
     <?php
 }

@@ -5,10 +5,10 @@ OnionHeaven Takeover Worker — runs inside onionheaven-takeover-N containers.
 Watches the registry DB for rows assigned to this container with
 takeover_pending or release_pending flags set. Executes the actual
 tor-manager takeover/release commands locally (this container has its
-own Arti instance with keystore).
+own Tor instance with a control port).
 
-Each takeover container has its own Arti guard pool, preventing the
-circuit exhaustion cascade that occurs when a single Arti handles
+Each takeover container has its own Tor guard pool, preventing the
+circuit exhaustion cascade that occurs when a single Tor daemon handles
 too many onion services.
 
 Startup:
@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    _takeover_local, _release_local, flush_sighup_tor,
+    _takeover_local, _release_local,
     TOR_MANAGER, ONIONHEAVEN_DATA_DIR,
 )
 
@@ -57,11 +57,9 @@ def register_self(conn):
 def startup_reconciliation(conn):
     """Re-add taken-over services after container restart.
 
-    Container restart wipes ephemeral ADD_ONION services (C Tor) and
-    Arti config. Re-execute takeovers for entries still assigned to us
-    so they start serving again immediately.
-
-    For Arti: also cleans orphaned toml entries not backed by DB rows.
+    Container restart wipes ephemeral ADD_ONION services. Re-execute
+    takeovers for entries still assigned to us so they start serving again
+    immediately.
     """
     # Get the list of addresses to re-add (one-time snapshot, not a while loop)
     stale = conn.execute(
@@ -72,7 +70,7 @@ def startup_reconciliation(conn):
     count = 0
     for row in stale:
         addr = row[0]
-        ok = _takeover_local(addr, no_sighup=True)
+        ok = _takeover_local(addr)
         if ok:
             conn.execute(
                 "UPDATE registry SET takeover_pending = NULL "
@@ -85,165 +83,16 @@ def startup_reconciliation(conn):
         time.sleep(5)
 
     if count > 0:
-        flush_sighup_tor(force=True)  # Arti only
         log(f"takeover-worker: re-added {count} taken-over service(s) after restart")
-
-    # Clean orphaned services from Arti toml — entries not backed by DB rows
-    _clean_orphaned_services(conn)
     log("takeover-worker: reconciliation complete")
 
-
-def _clean_orphaned_services(conn):
-    """Remove Arti toml services that have no corresponding DB entry.
-
-    This handles the case where stress test cleanup deletes DB rows
-    but the takeover worker's Arti toml still has the service entries,
-    causing circuit exhaustion from publishing orphaned descriptors.
-
-    Uses line-by-line parsing (not regex) to avoid leaving orphaned
-    fragments that break the toml (e.g., bare [["80", ...]] lines).
-    """
-    import re
-    toml_path = "/etc/arti/arti-onionheaven.toml"
-    try:
-        with open(toml_path) as f:
-            toml_content = f.read()
-    except FileNotFoundError:
-        return
-
-    # Find all onion_services nicknames in the toml
-    nicknames = re.findall(r'\[onion_services\."(onionheaven_[^"]+)"\]', toml_content)
-    if not nicknames:
-        # Still check for broken fragments from previous buggy cleanup
-        _sanitize_toml(toml_path)
-        return
-
-    # Check which content addresses are still in the DB assigned to us
-    valid_addrs = set()
-    rows = conn.execute(
-        "SELECT DISTINCT content_address FROM registry "
-        "WHERE takeover_container = ?",
-        (CONTAINER_NAME,)
-    ).fetchall()
-    for row in rows:
-        # Nickname format: onionheaven_{first16chars}
-        addr = row[0]
-        valid_addrs.add(addr[:16] if len(addr) >= 16 else addr)
-
-    orphaned = []
-    for nick in nicknames:
-        suffix = nick.replace("onionheaven_", "")
-        if suffix not in valid_addrs:
-            orphaned.append(nick)
-
-    if not orphaned:
-        _sanitize_toml(toml_path)
-        return
-
-    log(f"takeover-worker: removing {len(orphaned)} orphaned service(s) from Arti toml")
-
-    # Try tor-manager release first (cleanest removal)
-    for nick in orphaned:
-        # Find full .onion address from the comment line
-        addr_match = re.search(
-            rf'# onionheaven:([a-z2-7]{{56}}\.onion)',
-            toml_content
-        )
-        # More specific: find comment that references this nickname's prefix
-        prefix = nick.replace("onionheaven_", "")
-        addr_match = re.search(
-            rf'# onionheaven:({prefix}[a-z2-7]*\.onion)',
-            toml_content
-        )
-        if addr_match:
-            full_addr = addr_match.group(1)
-            result = subprocess.run([TOR_MANAGER, "release", "--no-sighup", full_addr],
-                                    capture_output=True, text=True, timeout=30)
-            log(f"  released orphan {nick} ({full_addr}) rc={result.returncode}")
-
-    # After tor-manager release, also do a line-by-line cleanup to catch
-    # any fragments that tor-manager's awk might have missed
-    _sanitize_toml(toml_path)
-    flush_sighup_tor()
-
-
-def _sanitize_toml(toml_path):
-    """Remove broken fragments from Arti toml that would prevent config reload.
-
-    Previous cleanup bugs left orphaned lines like:
-      # onionheaven:xxx.onion
-      [["80", "127.0.0.1:8082"]]
-
-    The bare [["80", ...]] is parsed as an invalid TOML table header, which
-    breaks ALL config reloads (every SIGHUP fails). This sanitizer removes:
-      1. Lines that are bare proxy_ports values (no 'proxy_ports = ' prefix)
-      2. Orphaned comment lines (# onionheaven:xxx) not followed by a section header
-      3. Orphaned 'enabled = true' lines not inside a section
-    """
-    try:
-        with open(toml_path) as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        return
-
-    cleaned = []
-    i = 0
-    changed = False
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-
-        # Remove bare proxy_ports value lines (the main bug)
-        if stripped.startswith("[[") and "127.0.0.1" in stripped and stripped.endswith("]]"):
-            log(f"  sanitize: removing orphaned proxy_ports line: {stripped}")
-            changed = True
-            i += 1
-            continue
-
-        # Remove orphaned comment lines not followed by a proper section header
-        if stripped.startswith("# onionheaven:") and stripped.endswith(".onion"):
-            # Check if next non-blank line is a proper [onion_services."..."] header
-            j = i + 1
-            while j < len(lines) and lines[j].strip() == "":
-                j += 1
-            if j < len(lines) and lines[j].strip().startswith('[onion_services."'):
-                # This comment is properly associated with a service — keep it
-                cleaned.append(line)
-                i += 1
-                continue
-            else:
-                log(f"  sanitize: removing orphaned comment: {stripped}")
-                changed = True
-                i += 1
-                continue
-
-        cleaned.append(line)
-        i += 1
-
-    if changed:
-        # Remove excessive blank lines (more than 1 consecutive)
-        final = []
-        prev_blank = False
-        for line in cleaned:
-            if line.strip() == "":
-                if prev_blank:
-                    continue
-                prev_blank = True
-            else:
-                prev_blank = False
-            final.append(line)
-
-        with open(toml_path, "w") as f:
-            f.writelines(final)
-        log(f"  sanitize: cleaned toml written to {toml_path}")
 
 
 def process_takeovers(conn):
     """Process pending takeover requests one at a time with a pause between each.
 
-    C Tor: each ADD_ONION is instant and independent — the pause gives Tor time
-    to publish each descriptor before starting the next.
-    Arti: batches all config changes then sends one SIGHUP at the end.
+    Each ADD_ONION is instant and independent — the pause gives Tor time to
+    publish each descriptor before starting the next.
     """
     count = 0
     while True:
@@ -262,7 +111,7 @@ def process_takeovers(conn):
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing takeover for {ca}")
-        ok = _takeover_local(ca, no_sighup=True)
+        ok = _takeover_local(ca)
 
         if ok:
             # Clear pending flag — takeover succeeded
@@ -281,7 +130,6 @@ def process_takeovers(conn):
             break  # stop this batch, retry after LOOP_INTERVAL
 
     if count > 0:
-        flush_sighup_tor(force=True)  # Arti only; no-op for C Tor
         update_active_count(conn)
         log(f"takeover-worker: processed {count} takeover(s)")
     return count
@@ -304,7 +152,7 @@ def process_releases(conn):
         ca = row["content_address"]
         ha = row["healthcheck_address"]
         log(f"takeover-worker: executing release for {ca}")
-        ok = _release_local(ca, no_sighup=True)
+        ok = _release_local(ca)
 
         if ok:
             # Clear pending and assignment flags
@@ -320,7 +168,6 @@ def process_releases(conn):
             break
 
     if count > 0:
-        flush_sighup_tor()  # Arti only; no-op for C Tor
         update_active_count(conn)
         log(f"takeover-worker: processed {count} release(s)")
     return count
@@ -368,7 +215,7 @@ def process_audits(conn):
         )
         db_commit_with_retry(conn)
         # Release via local tor-manager and update DB
-        ok = _release_local(ca, no_sighup=True)
+        ok = _release_local(ca)
         if ok:
             conn.execute(
                 "UPDATE registry SET status = 'online', last_released = ?, "
@@ -383,7 +230,6 @@ def process_audits(conn):
                 (CONTAINER_NAME,)
             )
             db_commit_with_retry(conn)
-            flush_sighup_tor()
     else:
         # Confirmed dead — clear audit_pending
         conn.execute(

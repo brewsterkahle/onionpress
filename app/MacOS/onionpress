@@ -121,6 +121,18 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# One line naming the components that failed during this start, so "did
+# everything come up?" is a single grep rather than a read of the whole
+# log. Each guarded step appends its name to START_ERRORS.
+START_ERRORS=""
+log_start_summary() {
+    if [ -n "${START_ERRORS:-}" ]; then
+        log "START SUMMARY: failed components:${START_ERRORS} — see the ERROR/WARNING lines above in $LOG_FILE"
+    else
+        log "START SUMMARY: all components started"
+    fi
+}
+
 # Per-user lock file to prevent the same user from double-starting.
 # Only checked for 'start' — other commands (status, get, launch, etc.) are safe.
 PIDFILE="$DATA_DIR/onionpress.pid"
@@ -172,6 +184,8 @@ export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
+# Also where Colima's own `docker context` create/use/rm calls land: never
+# the user's ~/.docker (see launcher.sh).
 export DOCKER_CONFIG="$DATA_DIR/docker-config"
 export TZ="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo UTC)"
 
@@ -235,16 +249,43 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export CLOUDFLARE_TUNNEL_TOKEN
 
-# Tor implementation: "tor" (C Tor, default) or "arti"
-# Read from config file, default to C Tor
-TOR_IMPL="tor"
-if [ -f "$DATA_DIR/config" ]; then
-    _tor_impl=$(grep "^TOR_IMPL=" "$DATA_DIR/config" | cut -d= -f2)
-    if [ "$_tor_impl" = "tor" ] || [ "$_tor_impl" = "arti" ]; then
-        TOR_IMPL="$_tor_impl"
+# Locally built container images (development).
+#
+# build/build-images.sh builds the tor and wordpress images from this repo and
+# prints these two exports. Setting either here, or in ~/.onionpress/config,
+# repoints the whole stack: compose's tor/wordpress/onionheaven services, the
+# image pulls below, the OnionHeaven takeover workers and vanity-key
+# generation. See docs/BUILDING.md.
+#
+# The `| cut` is not cosmetic — a bare `var=$(grep ...)` takes grep's exit
+# status, so a missing key would return 1 and kill the script under `set -e`.
+# -f2- rather than -f2 so a value containing '=' is not truncated.
+for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do
+    if [ -z "$(eval echo \"\$$_img_var\")" ] && [ -f "$DATA_DIR/config" ]; then
+        _img_val=$(grep "^${_img_var}=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+        if [ -n "$_img_val" ]; then
+            eval "export ${_img_var}=\"\$_img_val\""
+        fi
     fi
-fi
-export TOR_IMPL
+done
+unset _img_var _img_val
+
+# True when the stack points at images built on this machine rather than
+# published ones. Every `docker pull` / `docker compose pull` below is gated
+# on this: without the gate they overwrite a local tag with the registry's
+# copy, so a developer would build an image, start the app, and silently test
+# someone else's build.
+using_local_images() {
+    local _ref
+    for _ref in "${ONIONPRESS_TOR_IMAGE:-}" "${ONIONPRESS_WORDPRESS_IMAGE:-}"; do
+        [ -n "$_ref" ] || continue
+        case "$_ref" in
+            ghcr.io/*) ;;   # explicitly pointed at a published image
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
 
 # Analytics directory — bind-mounted into the tor container so analytics
 # data survives VM deletion.  Lives under shared/ which is already
@@ -269,7 +310,7 @@ else
 fi
 
 # OnionHeaven farm — takeover worker containers
-# Each gets its own Arti instance (own guard pool) to prevent circuit exhaustion.
+# Each gets its own Tor instance (own guard pool) to prevent circuit exhaustion.
 # Starts with 2, scales up by 2 when threshold is hit.
 # The farm monitor and workers are managed by the onionheaven container itself
 # via farm_scale_requests in the registry DB.
@@ -279,7 +320,6 @@ ONIONHEAVEN_FARM_MONITOR_PID=""
 _start_takeover_worker() {
     local idx="$1"
     local name="onionheaven-takeover-${idx}"
-    local vol="onionpress-arti-state-takeover-${idx}"
 
     docker rm -f "$name" >> "$LOG_FILE" 2>&1 || true
 
@@ -290,14 +330,12 @@ _start_takeover_worker() {
         --log-opt max-size=10m \
         --log-opt max-file=3 \
         -e TZ="${TZ:-UTC}" \
-        -e TOR_IMPL="${TOR_IMPL:-tor}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \
-        -v "${vol}:/var/lib/arti/" \
         -v "onionpress-persistent-data:/var/lib/onionpress" \
         --restart unless-stopped \
-        "${ONIONHEAVEN_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest}" >> "$LOG_FILE" 2>&1; then
+        "${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43}}" >> "$LOG_FILE" 2>&1; then
         log "OnionHeaven farm: started takeover worker $name"
     else
         log "WARNING: Failed to start takeover worker $name"
@@ -436,7 +474,14 @@ command_exists() {
 
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
-    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1
+    local rc=0
+    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1 || rc=$?
+    # rc 1 is WordPress answering "not installed"; anything else is docker
+    # or wp-cli itself failing, which must not be mistaken for a fresh site.
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+        log "wp core is-installed: docker exec failed (rc=$rc) — treating as not installed" >&2
+    fi
+    return $rc
 }
 
 # Function to generate and load database passwords
@@ -474,6 +519,13 @@ EOF
         export WORDPRESS_DB_PASSWORD
         export MYSQL_PASSWORD
         export MYSQL_ROOT_PASSWORD
+        # A truncated file (disk full on first run) sources fine and yields
+        # empty passwords; mariadb then refuses to initialise and the only
+        # symptom is a db restart loop. Say so here instead.
+        if [ -z "$WORDPRESS_DB_PASSWORD" ] || [ -z "$MYSQL_ROOT_PASSWORD" ]; then
+            log "ERROR: $secrets_file is incomplete (empty database password) — not starting. The database was initialised with these passwords, so restore the file rather than regenerating it."
+            exit 1
+        fi
     else
         log "ERROR: Secrets file not found at $secrets_file"
         exit 1
@@ -482,6 +534,9 @@ EOF
 
 # Function to detect container runtime
 detect_container_runtime() {
+    # Called as RUNTIME=$(detect_container_runtime): stdout IS the return
+    # value, so every log line in here goes to stderr (tee still writes
+    # the file copy) or it ends up inside $RUNTIME.
     # Use bundled Colima
     if command_exists colima; then
         if [ -f "$COLIMA_HOME/.initialized" ]; then
@@ -508,35 +563,37 @@ detect_container_runtime() {
 
                 _need_restart=false
                 if [ "$_cfg_mem" -gt 0 ] 2>/dev/null && [ "$_vm_mem_gb" -gt 0 ] 2>/dev/null && [ "$_cfg_mem" -ne "$_vm_mem_gb" ]; then
-                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB"
+                    log "VM memory mismatch: config=${_cfg_mem}GB, running=${_vm_mem_gb}GB" >&2
                     _need_restart=true
                 fi
                 if [ "$_cfg_cpu" -gt 0 ] 2>/dev/null && [ "$_vm_cpus" -gt 0 ] 2>/dev/null && [ "$_cfg_cpu" -ne "$_vm_cpus" ]; then
-                    log "VM CPU mismatch: config=${_cfg_cpu}, running=${_vm_cpus}"
+                    log "VM CPU mismatch: config=${_cfg_cpu}, running=${_vm_cpus}" >&2
                     _need_restart=true
                 fi
                 if [ "$_need_restart" = true ]; then
-                    log "Restarting VM with ${_cfg_cpu} CPUs, ${_cfg_mem}GB RAM..."
+                    log "Restarting VM with ${_cfg_cpu} CPUs, ${_cfg_mem}GB RAM..." >&2
                     cd "$DOCKER_DIR"
                     docker compose down >> "$LOG_FILE" 2>&1 || true
                     "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1
                     "$BIN_DIR/colima" start \
+                        --activate=false \
+                        --ssh-config=false \
                         --mount "$DATA_DIR/shared:w" \
                         $(docs_mount_args) \
                         --cpu "$_cfg_cpu" \
                         --memory "$_cfg_mem" \
                         >> "$LOG_FILE" 2>&1
                     if [ $? -eq 0 ]; then
-                        log "VM restarted with ${_cfg_cpu} CPUs, ${_cfg_mem}GB"
+                        log "VM restarted with ${_cfg_cpu} CPUs, ${_cfg_mem}GB" >&2
                     else
-                        log "WARNING: VM restart failed"
+                        log "WARNING: VM restart failed" >&2
                     fi
                 fi
                 echo "colima-bundled"
                 return 0
             else
                 # Start Colima if stopped
-                log "Starting bundled Colima..."
+                log "Starting bundled Colima..." >&2
 
                 # Read VM memory/CPU from config so restarts honour changes
                 _restart_mem=2
@@ -549,6 +606,8 @@ detect_container_runtime() {
                 fi
 
                 "$BIN_DIR/colima" start \
+                    --activate=false \
+                    --ssh-config=false \
                     --mount "$DATA_DIR/shared:w" \
                     $(docs_mount_args) \
                     --cpu "$_restart_cpu" \
@@ -571,8 +630,53 @@ detect_container_runtime() {
     return 1
 }
 
-# Ensure both C Tor and Arti key formats exist in a directory.
-# Derives whichever is missing from whichever is present.
+# Make sure DOCKER_HOST resolves to *our own* VM's socket — never another Colima.
+#
+# Colima honours COLIMA_HOME, so Lima forwards the guest's /var/run/docker.sock
+# to $COLIMA_HOME/default/docker.sock (the `hostSocket:` entry in the instance's
+# lima.yaml). Launchers up to v2.4.110 assumed the socket always landed in
+# ~/.colima/ and symlinked that path into COLIMA_HOME to "bridge the gap". The
+# bridge could only ever fire when our own forward was missing — so in practice
+# it pointed DOCKER_HOST at whatever *other* Colima the user happened to be
+# running, and OnionPress then deployed wordpress/db/tor into that VM. Repair
+# any link left over from those versions, then wait for our own forward.
+ensure_docker_socket() {
+    local socket_path="$COLIMA_HOME/default/docker.sock"
+    local wait_secs="${1:-45}"
+    local waited=0
+    local target
+
+    if [ -L "$socket_path" ]; then
+        target=$(readlink "$socket_path")
+        case "$target" in
+            "$COLIMA_HOME"/*)
+                : ;;  # inside our own VM state — leave it alone
+            *)
+                log "WARNING: removing foreign Docker socket link ($socket_path -> $target)"
+                rm -f "$socket_path"
+                ;;
+        esac
+    fi
+
+    while [ "$waited" -lt "$wait_secs" ]; do
+        if [ -S "$socket_path" ]; then
+            [ "$waited" -gt 0 ] && log "Docker socket ready after ${waited}s"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    log "ERROR: Docker socket never appeared at $socket_path after ${wait_secs}s"
+    log "  Lima's forward for the VM's /var/run/docker.sock is down."
+    log "  Diagnose: $COLIMA_HOME/_lima/colima/ha.stderr.log"
+    log "  Recover:  \"$BIN_DIR/colima\" stop && \"$BIN_DIR/colima\" start"
+    return 1
+}
+
+# Ensure both key formats exist in a directory: C Tor's key files and the
+# OpenSSH PEM (ks_hs_id.ed25519_expanded_private) that the container and
+# OnionHeaven take. Derives whichever is missing from whichever is present.
 ensure_key_formats() {
     local dir="$1"
     bundled_python "$SCRIPTS_DIR/key_manager.py" ensure-formats "$dir" >> "$LOG_FILE" 2>&1
@@ -643,7 +747,7 @@ generate_vanity_address() {
     VANITY_ADDRESS=$(basename "$VANITY_DIR")
     log "Generated custom address: $VANITY_ADDRESS" >&2
 
-    # Ensure both key formats exist (mkp224o generates C Tor format, derive Arti PEM)
+    # Ensure both key formats exist (mkp224o generates C Tor format, derive the PEM)
     if ! ensure_key_formats "$VANITY_DIR"; then
         log "ERROR: ensure_key_formats failed for $VANITY_DIR" >&2
         return 1
@@ -695,7 +799,7 @@ WHAT THIS COMMAND DOES:
   1. Decodes the base32 key and validates it is exactly 64 bytes
   2. Derives the .onion address from the public key portion
   3. Writes key files to ~/.onionpress/shared/vanity-keys/<address>/
-     - ks_hs_id.ed25519_expanded_private  (OpenSSH PEM format for Arti)
+     - ks_hs_id.ed25519_expanded_private  (OpenSSH PEM, the format the container takes)
      - hostname                           (the .onion address)
   4. On next start, OnionPress will use this key
 
@@ -725,8 +829,10 @@ HELPEOF
         return 0
     fi
 
-    # Check if arti-state volume already exists (need to replace old key)
-    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
+    # Check if a key volume already exists (need to replace old key). The old
+    # name is checked too: an install that never started on this version has
+    # not migrated yet.
+    if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx 'onionpress-onion-keys\|onionpress-arti-state'; then
         echo "An onion address key already exists."
         echo ""
         if [ -n "$current_addr" ]; then
@@ -746,18 +852,21 @@ HELPEOF
         # Stop OnionPress if running
         echo "Stopping OnionPress..."
         stop_containers 2>/dev/null
-        # Remove old arti-state volume (must verify it's actually gone)
-        echo "Removing old arti-state volume..."
-        docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
-        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
-            echo "Volume still in use — force-removing containers..."
-            docker rm -f $(docker ps -aq --filter volume=onionpress-arti-state) >> "$LOG_FILE" 2>&1 || true
-            docker volume rm onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
-            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -q '^onionpress-arti-state$'; then
-                echo "ERROR: Could not remove old arti-state volume. Is another Docker client using it?" >&2
-                return 1
+        # Remove the old key volume (must verify it's actually gone); the
+        # pre-2026-09-25 name goes too so it cannot be migrated back later.
+        echo "Removing old key volume..."
+        for vol in onionpress-onion-keys onionpress-arti-state; do
+            docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
+            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
+                echo "Volume still in use — force-removing containers..."
+                docker rm -f $(docker ps -aq --filter "volume=$vol") >> "$LOG_FILE" 2>&1 || true
+                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
+                if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
+                    echo "ERROR: Could not remove old $vol volume. Is another Docker client using it?" >&2
+                    return 1
+                fi
             fi
-        fi
+        done
         # Also remove old tor-keys volume if it exists (migration leftover)
         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
         # Remove old vanity-keys directory
@@ -768,11 +877,11 @@ HELPEOF
         rm -rf "$DATA_DIR/shared/vanity-keys/"
     fi
 
-    # Mark that a key was imported so next startup removes the old arti-state volume
+    # Mark that a key was imported so next startup removes the old key volume
     # (needed when Docker isn't running and we can't remove the volume now)
     touch "$DATA_DIR/.import-key-pending"
 
-    # Write all key files (Arti PEM + C Tor + hostname)
+    # Write all key files (PEM + C Tor + hostname)
     if ! bundled_python "$SCRIPTS_DIR/key_manager.py" import-key "$key_b32" "$DATA_DIR/shared/vanity-keys" 2>>"$LOG_FILE"; then
         echo "ERROR: Failed to write key files" >&2
         return 1
@@ -1012,28 +1121,45 @@ install_docker() {
         fi
     fi
 
+    # Diffdisk cap (issue #230), same rule as launcher.sh: 20 GiB unless
+    # VM_DISK is set in ~/.onionpress/config before first launch. The cap is
+    # baked in at VM creation, so this fallback path has to pass it too or
+    # a VM created here gets Lima's 100 GiB default.
+    local VM_DISK=20 _cfg_disk
+    if [ -f "$DATA_DIR/config" ]; then
+        _cfg_disk=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2)
+        [ -n "$_cfg_disk" ] && VM_DISK="$_cfg_disk"
+    fi
+    log "Creating the Colima VM with a ${VM_DISK}GB diffdisk cap"
+
     # Should not happen if launcher worked, but handle it
     if [ "$VM_ARCH" = "aarch64" ]; then
         # Apple Silicon: use VZ backend (Virtualization.framework)
         "$BIN_DIR/colima" start \
+            --activate=false \
+            --ssh-config=false \
             --vm-type vz \
             --mount-type virtiofs \
             --mount "$DATA_DIR/shared:w" \
             $(docs_mount_args) \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
+            --disk "$VM_DISK" \
             --arch "$VM_ARCH" \
             --vz-rosetta=false \
             >> "$LOG_FILE" 2>&1
     else
         # Intel: use QEMU backend
         "$BIN_DIR/colima" start \
+            --activate=false \
+            --ssh-config=false \
             --vm-type qemu \
             --mount-type sshfs \
             --mount "$DATA_DIR/shared:w" \
             $(docs_mount_args) \
             --cpu "$VM_CPU" \
             --memory "$VM_MEMORY" \
+            --disk "$VM_DISK" \
             --arch "$VM_ARCH" \
             >> "$LOG_FILE" 2>&1
     fi
@@ -1066,12 +1192,28 @@ update_images() {
         return 0
     fi
 
+    if using_local_images; then
+        log "Skipping image update: running locally built images"
+        return 0
+    fi
+
     log "Checking for Docker image updates..."
 
     cd "$DOCKER_DIR"
 
-    # Pull latest images (WordPress, MariaDB, Tor)
-    local images=("ghcr.io/brewsterkahle/onionpress-tor:latest" "ghcr.io/brewsterkahle/onionpress-wordpress:latest" "mariadb:latest")
+    # Pull the images the stack actually runs. These were bare `:latest` tags
+    # while docker-compose.yml pinned by digest, so this loop warmed a layer
+    # the stack never started and then logged it as "up to date" — the Linux
+    # launcher has pinned here since v2.4.99. The pins come from
+    # build/image-pins.env via build/refresh-image-digests.sh, and
+    # tests/test_image_pins.py fails if they drift. Exporting
+    # ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE points this at a
+    # locally built stack. mariadb stays on :latest by design.
+    local images=(
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:b6724d1ac4f6c93595ae231a7d222ea7de29f697287fbde79cf779cb5c060290}"
+        "mariadb:latest"
+    )
     local updated=false
 
     for image in "${images[@]}"; do
@@ -1148,28 +1290,193 @@ configure_site_timezones() {
 # Function to set up OnionHeaven (onionheaven mode only)
 # Registration API now runs in the onionheaven container (web-server.py),
 # which creates its own data directories on the shared volume at startup.
+
+# Whether Docker has volume $1: 0 yes, 1 no, 2 Docker could not say (the
+# daemon is not up yet, e.g. the Colima VM is still booting). Callers must
+# treat 2 as "stop", never as "no": a missing key volume is the first-run
+# signal, so reading a Docker error as absence turns an upgrade into a first
+# run. Kept identical in the macOS and Linux launchers; a test enforces that.
+docker_volume_state() {
+    local names
+    names=$(docker volume ls --format '{{.Name}}' 2>>"$LOG_FILE") || return 2
+    printf '%s\n' "$names" | grep -qx -- "$1"
+}
+
+# Wait up to $1 seconds for the Docker daemon to answer; returns 1 if it
+# never does. Kept identical in the macOS and Linux launchers.
+wait_for_docker() {
+    local limit="$1" waited=0
+    while ! docker info >/dev/null 2>&1; do
+        if [ "$waited" -ge "$limit" ]; then
+            return 1
+        fi
+        if [ "$waited" -eq 0 ]; then
+            log "Waiting for Docker daemon to be ready..."
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    if [ "$waited" -gt 0 ]; then
+        log "Docker daemon ready after ${waited}s"
+    fi
+    return 0
+}
+
+# Whether Lima thinks the colima instance is up. "Running" with no Docker
+# answer is the wedge recover_lima_vm exists for.
+lima_vm_running() {
+    export COLIMA_HOME LIMA_HOME
+    "$BIN_DIR/limactl" list --format '{{.Status}}' colima 2>/dev/null | grep -qx Running
+}
+
+# Force-stop and restart the Lima VM. This is the one known recovery for the
+# wedged "Running but SSH refused" state the VM lands in occasionally after
+# long uptime / sleep, and (2026-10-02) after a macOS update killed the app
+# mid-stop: lima reports the instance Running, the guest even gets a DHCP
+# lease, but sshd never comes up, so `colima start` waits ten minutes for a
+# "running" event that never arrives and Docker stays unreachable. $1 labels
+# the log lines with the caller (start / restart). Returns 1 when the VM
+# would not come back; the caller decides what that means.
+recover_lima_vm() {
+    local who="$1"
+    log "$who: Docker daemon not reachable — restarting Lima VM first"
+    export COLIMA_HOME LIMA_HOME
+    "$BIN_DIR/limactl" stop -f colima >> "$LOG_FILE" 2>&1 || true
+    # Wait briefly for hostagent processes to fully die before starting
+    # again — lima can trip over itself otherwise.
+    sleep 3
+    if ! "$BIN_DIR/limactl" start colima >> "$LOG_FILE" 2>&1; then
+        log "$who: limactl start failed — giving up, user may need to reboot"
+        return 1
+    fi
+    log "$who: Lima VM restarted"
+    return 0
+}
+
+# wait_for_docker, plus one shot at the Lima wedge: when Docker has not
+# answered within $1 seconds but Lima still reports the VM Running, recover
+# the VM once and wait again with a fresh budget. Gives up (returns 1) only
+# after that second wait, or straight away when the VM is not Running at
+# all (a stopped VM is not the wedge; restarting it here would fight the
+# launcher's own `colima start`). $2 labels the log lines with the caller.
+wait_for_docker_or_recover_vm() {
+    local limit="$1" who="$2"
+    if wait_for_docker "$limit"; then
+        return 0
+    fi
+    if ! lima_vm_running; then
+        log "$who: Docker daemon not ready after ${limit}s and Lima does not report the VM Running — not recovering"
+        return 1
+    fi
+    log "$who: Docker daemon not ready after ${limit}s while Lima reports the VM Running — recovering the wedged VM"
+    recover_lima_vm "$who" || return 1
+    wait_for_docker "$limit"
+}
+
+# One-time migration of the onion service key volume from its historical
+# name. Until 2026-09-25 the delivered PEM lived in onionpress-arti-state at
+# state/keystore/hss/<name>/ (arti's keystore layout); it now lives in
+# onionpress-onion-keys at <name>/. This runs before the first-run check,
+# which keys off the NEW volume's existence — without it an upgraded install
+# would look like a fresh one and mint a new address. For the same reason it
+# refuses to let the start continue when the copy fails, or when Docker cannot
+# say which volumes exist: the old volume is left untouched and the next
+# start retries. Kept identical in the macOS and Linux launchers; a test
+# enforces that.
+migrate_key_volume() {
+    local state=0
+    docker_volume_state onionpress-onion-keys || state=$?
+    case "$state" in
+        0) return 0 ;;
+        2) log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+           return 1 ;;
+    esac
+    state=0
+    docker_volume_state onionpress-arti-state || state=$?
+    case "$state" in
+        1) return 0 ;;   # nothing to migrate: a fresh install, or one that never had a key volume
+        2) log "ERROR: Docker did not say whether onionpress-arti-state exists; not starting"
+           return 1 ;;
+    esac
+    log "Migrating the onion service key volume: onionpress-arti-state -> onionpress-onion-keys"
+    if ! docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
+        log "ERROR: could not create onionpress-onion-keys; not starting (the old key volume is untouched)"
+        return 1
+    fi
+    if ! docker run --rm \
+        -v onionpress-arti-state:/old:ro \
+        -v onionpress-onion-keys:/new \
+        alpine sh -c '
+            set -e
+            if [ -d /old/state/keystore/hss ]; then
+                cp -a /old/state/keystore/hss/. /new/
+            fi
+            chmod 700 /new
+            find /new -mindepth 1 -type d -exec chmod 700 {} +
+            find /new -type f -exec chmod 600 {} +
+            for n in $(ls /old/state/keystore/hss 2>/dev/null); do
+                if [ -f "/old/state/keystore/hss/$n/ks_hs_id.ed25519_expanded_private" ] \
+                   && ! cmp -s "/old/state/keystore/hss/$n/ks_hs_id.ed25519_expanded_private" \
+                              "/new/$n/ks_hs_id.ed25519_expanded_private"; then
+                    echo "key for $n did not copy intact" >&2
+                    exit 1
+                fi
+            done
+        ' >> "$LOG_FILE" 2>&1; then
+        docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1 || true
+        log "ERROR: key volume migration failed; not starting so the old key volume stays intact (see $LOG_FILE)"
+        return 1
+    fi
+    log "Key volume migrated; onionpress-arti-state is kept as a fallback until uninstall sweeps it"
+    return 0
+}
+
 # Function to start containers
 start_containers() {
     log "Starting OnionPress containers..."
 
     cd "$DOCKER_DIR"
 
+    # Docker has to answer before anything below asks whether a volume
+    # exists. Those checks used to read "Docker is not up yet" as "no such
+    # volume", and a missing key volume is the first-run signal: upgrading
+    # to 2.5.0 on 2026-09-30 while the Colima VM was still booting took the
+    # first-run path instead of migrating the key volume.
+    #
+    # If Docker never answers but Lima still reports the VM Running, the VM
+    # is in the wedge recover_lima_vm describes; the login-time start used
+    # to give up here (2026-10-02) while the menubar Restart path already
+    # knew how to recover. Both now share that recovery, tried once.
+    local vol_state key_state
+    if ! wait_for_docker_or_recover_vm 180 start; then
+        log "ERROR: Docker daemon not ready after 180s (one Lima VM recovery attempted if it was Running); not starting"
+        return 1
+    fi
+
     # Handle pending key import (volume couldn't be removed when Docker wasn't running)
     if [ -f "$DATA_DIR/.import-key-pending" ]; then
-        log "Pending key import detected — removing old arti-state and tor-state volumes..."
-        # Both keystores must be wiped: arti-state holds the Arti key, tor-state
-        # holds C Tor's /var/lib/tor/hidden_service/<name>/ pair. The entrypoint
-        # only converts Arti→C Tor when CTOR_SECRET is missing, so a stale
-        # tor-state would silently override the imported identity.
-        for vol in onionpress-arti-state onionpress-tor-state; do
+        log "Pending key import detected — removing old key and tor-state volumes..."
+        # Both keystores must be wiped: onion-keys holds the delivered PEM key,
+        # tor-state holds C Tor's /var/lib/tor/hidden_service/<name>/ pair. The
+        # entrypoint only converts PEM→C Tor when CTOR_SECRET is missing, so a
+        # stale tor-state would silently override the imported identity. The
+        # pre-2026-09-25 volume name goes too, or the migration below would
+        # bring the replaced identity back.
+        for vol in onionpress-onion-keys onionpress-arti-state onionpress-tor-state; do
             docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
+            vol_state=0; docker_volume_state "$vol" || vol_state=$?
+            if [ "$vol_state" -eq 0 ]; then
                 log "Volume $vol still in use — force-removing containers using it..."
                 docker rm -f $(docker ps -aq --filter "volume=$vol") >> "$LOG_FILE" 2>&1 || true
                 docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-                if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
-                    log "ERROR: Could not remove old $vol volume"
-                fi
+                vol_state=0; docker_volume_state "$vol" || vol_state=$?
+            fi
+            # Only a confirmed absence counts. Dropping the marker while an
+            # old keystore survives (or could not be checked) would silently
+            # keep the replaced identity, so leave it for the next start.
+            if [ "$vol_state" -ne 1 ]; then
+                log "ERROR: could not remove the old $vol volume; keeping the pending key import and not starting"
+                return 1
             fi
         done
         # Also remove old tor-keys volume if it exists (migration leftover)
@@ -1177,9 +1484,21 @@ start_containers() {
         rm -f "$DATA_DIR/.import-key-pending"
     fi
 
-    # Check if this is first run (no arti-state volume exists)
-    # Use --format + exact grep to avoid matching onionpress-arti-state-client
-    if ! docker volume ls --format '{{.Name}}' | grep -qx "onionpress-arti-state"; then
+    # Upgraded installs: bring the key volume over from its old name before
+    # the first-run check below looks for the new one.
+    if ! migrate_key_volume; then
+        log "ERROR: cannot start without the onion service key volume"
+        return 1
+    fi
+
+    # Check if this is first run (no key volume exists). Only Docker's
+    # confirmed "no" counts: an unanswered question is not a fresh install.
+    key_state=0; docker_volume_state onionpress-onion-keys || key_state=$?
+    if [ "$key_state" -eq 2 ]; then
+        log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+        return 1
+    fi
+    if [ "$key_state" -eq 1 ]; then
         log "First run detected - generating custom onion address..."
 
         # Read address prefix from config, default to "op2"
@@ -1195,16 +1514,47 @@ start_containers() {
             fi
         fi
 
-        log "Using address prefix: '$ADDRESS_PREFIX'"
-
-        # Validate prefix: base32 only (a-z, 2-7), max 5 chars
+        # Validate before announcing it — the old order logged
+        # "Using address prefix: 'elphin'" and only then the rejection, so the
+        # log's first statement about the prefix was the one that did not
+        # happen.
+        #
+        # These rules mirror config.validate_address_prefix(): base32 (a-z,
+        # 2-7), 2 to 5 characters. Keep them in step; the Python side is the
+        # source of truth and tests/test_address_prefix.py checks they agree.
+        #
+        # The fallback is deliberately silent-but-logged rather than fatal: a
+        # bad prefix must not stop the app starting. The real guard is
+        # validation at the point of entry (setup_window.py), because nobody
+        # reads this log — a user who typed "elphin" got an op2… address and
+        # the only evidence was here.
+        _prefix_problem=""
         if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is too long (${#ADDRESS_PREFIX} chars, max 5). Using default 'op2'."
-            ADDRESS_PREFIX="op2"
+            _prefix_problem="too long (${#ADDRESS_PREFIX} chars, max 5)"
+        elif [ ${#ADDRESS_PREFIX} -lt 2 ]; then
+            _prefix_problem="too short (${#ADDRESS_PREFIX} chars, min 2)"
         elif ! echo "$ADDRESS_PREFIX" | grep -qE '^[a-z2-7]+$'; then
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' contains invalid characters. Only a-z and 2-7 allowed. Using default 'op2'."
-            ADDRESS_PREFIX="op2"
+            _prefix_problem="contains characters that are not base32 (only a-z and 2-7; 0, 1, 8 and 9 are not valid)"
         fi
+
+        if [ -n "$_prefix_problem" ]; then
+            # Closest valid prefix, by the same rule the Python validator uses:
+            # lowercase, drop non-base32, truncate to 5.
+            _prefix_suggestion=$(echo "$ADDRESS_PREFIX" | tr '[:upper:]' '[:lower:]' \
+                | tr -cd 'a-z2-7' | cut -c1-5)
+            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is $_prefix_problem."
+            if [ ${#_prefix_suggestion} -ge 2 ]; then
+                log "       Falling back to 'op2'. To use the closest valid prefix, set"
+                log "       ADDRESS_PREFIX=$_prefix_suggestion in $DATA_DIR/config before first launch."
+            else
+                log "       Falling back to 'op2'. Edit ADDRESS_PREFIX in $DATA_DIR/config."
+            fi
+            ADDRESS_PREFIX="op2"
+            unset _prefix_suggestion
+        fi
+        unset _prefix_problem
+
+        log "Using address prefix: '$ADDRESS_PREFIX'"
 
         # Check for pre-existing imported key before generating a new one
         VANITY_DIR=""
@@ -1223,20 +1573,21 @@ start_containers() {
         fi
 
         if [ -n "$VANITY_DIR" ]; then
-            # Create arti-state volume and install OpenSSH key to Arti keystore path
-            if ! docker volume create onionpress-arti-state >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to create arti-state volume"
+            # Create the key volume and install the PEM where the entrypoint
+            # looks for it (<name>/ks_hs_id.ed25519_expanded_private, read as root)
+            if ! docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
+                log "ERROR: Failed to create the onionpress-onion-keys volume"
                 return 1
             fi
             if ! docker run --rm \
-                -v onionpress-arti-state:/dest \
+                -v onionpress-onion-keys:/dest \
                 --mount type=bind,source="$VANITY_DIR",target=/src \
-                alpine sh -c 'mkdir -p /dest/state/keystore/hss/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/state/keystore/hss/wordpress/ && chown -R 100:100 /dest/state && chmod 700 /dest/state /dest/state/keystore /dest/state/keystore/hss /dest/state/keystore/hss/wordpress && chmod 600 /dest/state/keystore/hss/wordpress/*' >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to copy address key to arti-state volume"
+                alpine sh -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
+                log "ERROR: Failed to copy address key to the onionpress-onion-keys volume"
                 return 1
             fi
 
-            log "Address key installed to arti-state volume"
+            log "Address key installed to the onionpress-onion-keys volume"
             log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
         else
             # Vanity generation failed. Continue with a random address so
@@ -1251,34 +1602,23 @@ start_containers() {
         # Not first run. The vanity prefix is fixed at install (#256 phase 4b)
         # — the old "config ADDRESS_PREFIX changed -> regenerate the onion
         # identity on startup" path was removed: it shared the churny
-        # compose-down + delete-arti-state + regenerate flow and risked
+        # compose-down + delete-key-volume + regenerate flow and risked
         # clobbering the address. Nothing to do here.
         :
-    fi
-
-    # Wait for Docker daemon to be ready (on first run, Colima VM may still be booting)
-    local docker_wait=0
-    while ! docker info >/dev/null 2>&1; do
-        if [ $docker_wait -eq 0 ]; then
-            log "Waiting for Docker daemon to be ready..."
-        fi
-        docker_wait=$((docker_wait + 2))
-        if [ $docker_wait -ge 180 ]; then
-            log "ERROR: Docker daemon not ready after 180s"
-            break
-        fi
-        sleep 2
-    done
-    if [ $docker_wait -gt 0 ] && docker info >/dev/null 2>&1; then
-        log "Docker daemon ready after ${docker_wait}s"
     fi
 
     # Update images if enabled in config
     update_images
 
-    # Pull pre-built images from GHCR (avoids local build when both image: and build: are set)
-    log "Pulling pre-built images..."
-    docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (will build locally)"
+    # Pull the images compose is about to start. This runs on every start,
+    # regardless of UPDATE_ON_LAUNCH — update_images() above is a separate,
+    # opt-in refresh, so gating only that one changes nothing here.
+    if using_local_images; then
+        log "Skipping image pull: running locally built images"
+    else
+        log "Pulling pre-built images..."
+        docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (using cached)"
+    fi
 
     # Always start WordPress and DB first
     local max_attempts=3
@@ -1306,13 +1646,19 @@ start_containers() {
         sleep 2
         wp_wait=$((wp_wait + 2))
     done
+    if [ $wp_wait -ge 60 ]; then
+        log "WARNING: WordPress did not answer on :${ONIONPRESS_WP_PORT:-8080} within 60s — continuing; the install check below may misreport a slow database as a fresh site"
+    fi
 
     # Check if WordPress is already set up (admin account created)
     # Retry a few times — the DB may still be warming up even though
     # WordPress HTTP is responding (wp core is-installed needs a live DB)
+    # 15 tries x 2s, matching the Linux launcher: 5 was short enough that a
+    # cold MariaDB (e.g. MARIADB_AUTO_UPGRADE after an image refresh) read as
+    # "WordPress not yet installed" and skipped the per-start repairs.
     local wp_installed=false
     local wp_check=0
-    while [ $wp_check -lt 5 ]; do
+    while [ $wp_check -lt 15 ]; do
         if wp_is_installed; then
             wp_installed=true
             break
@@ -1341,13 +1687,13 @@ RewriteBase /
 RewriteRule ^index\.php$ - [L]
 
 # add a trailing slash to /wp-admin
-RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]
+RewriteRule ^([_0-9a-zA-Z.-]+/)?wp-admin$ $1wp-admin/ [R=301,L]
 
 RewriteCond %{REQUEST_FILENAME} -f [OR]
 RewriteCond %{REQUEST_FILENAME} -d
 RewriteRule ^ - [L]
-RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]
-RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\.php)$ $2 [L]
+RewriteRule ^([_0-9a-zA-Z.-]+/)?(wp-(content|admin|includes).*) $2 [L]
+RewriteRule ^([_0-9a-zA-Z.-]+/)?(.*\.php)$ $2 [L]
 RewriteRule . index.php [L]
 # END WordPress Multisite
 HTEOF
@@ -1362,7 +1708,8 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
     # Always start Tor — generate the onion address in parallel with WordPress
     # setup so it's ready when the user finishes configuring.
     log "Starting Tor containers..."
-    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
+    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 \
+        || { log "ERROR: Failed to start tor/onionheaven containers (rc=$?) — see $LOG_FILE"; START_ERRORS="$START_ERRORS tor"; }
 
     # Install Internet Archive Wayback Machine Link Fixer plugin —
     # stays bash for now (uses install_plugin.sh + activate_plugin.sh
@@ -1401,11 +1748,18 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         fi
     fi
 
-    bundled_python -m onionpress.cli configure-ia-plugin
-    bundled_python -m onionpress.cli deactivate-wp-statistics
+    # Each of these exits 1 on failure; under set -e a bare call would end
+    # `onionpress start` here with only a traceback on stderr, skipping the
+    # timezone, clearnet-logging and readiness steps. Log and carry on.
+    local _step
+    for _step in configure-ia-plugin deactivate-wp-statistics; do
+        bundled_python -m onionpress.cli "$_step" >> "$LOG_FILE" 2>&1 \
+            || { log "WARNING: $_step failed (rc=$?) — continuing; see $LOG_FILE"; START_ERRORS="$START_ERRORS $_step"; }
+    done
     bundled_python -m onionpress.cli provision-post-install \
         --themes-dir "$RESOURCES_DIR/themes" \
-        --plugins-dir "$RESOURCES_DIR/plugins"
+        --plugins-dir "$RESOURCES_DIR/plugins" >> "$LOG_FILE" 2>&1 \
+        || { log "WARNING: provision-post-install failed (rc=$?) — themes/plugins may be missing; see $LOG_FILE"; START_ERRORS="$START_ERRORS provision-post-install"; }
 
     # install-from-backup: clean up staging + marker only after a successful
     # import + provisioning, so an interrupted run re-imports on the next start.
@@ -1417,7 +1771,11 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
 
     # Tor-routed archive.org login can take 30s — background it so the
     # rest of start_containers returns promptly. No-op if keys are set.
-    bundled_python -m onionpress.cli ensure-archive-s3-keys &
+    # Run it from a subshell so it is not in this script's job table: the
+    # EXIT trap kills $(jobs -p), and `onionpress start` returns within a
+    # second on a not-yet-installed site, which used to SIGTERM this 30s
+    # login every time with nothing in the log.
+    ( bundled_python -m onionpress.cli ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 & )
 
     # Configure site timezones to match the host machine so imported
     # social-media timestamps display in local time. Idempotent.
@@ -1470,7 +1828,29 @@ install_clearnet_logging() {
         }
         [ -n \"$wp_ip\" ] && check_and_add \"$wp_ip\" \"CLEARNET-wordpress: \"
         [ -n \"$db_ip\" ] && check_and_add \"$db_ip\" \"CLEARNET-db: \"
-    " 2>/dev/null && log "✓ Clearnet logging rules installed" || log "WARNING: Failed to install clearnet logging rules"
+    " >> "$LOG_FILE" 2>&1 &
+    # limactl shell hangs for good when the VM's sshd is wedged (the state
+    # recover_lima_vm exists for), and this runs after the containers are
+    # up, so `onionpress start` never returned. Bound it; macOS has no
+    # timeout(1). stderr goes to the log so a failure can say why.
+    local _ipt_pid=$! _ipt_waited=0 _ipt_rc=0
+    while kill -0 "$_ipt_pid" 2>/dev/null; do
+        if [ "$_ipt_waited" -ge 60 ]; then
+            kill "$_ipt_pid" 2>/dev/null
+            log "WARNING: clearnet logging rules not installed — limactl shell did not return within 60s (VM ssh wedged?)"
+            START_ERRORS="$START_ERRORS clearnet-logging"
+            return 0
+        fi
+        sleep 1
+        _ipt_waited=$((_ipt_waited + 1))
+    done
+    wait "$_ipt_pid" || _ipt_rc=$?
+    if [ "$_ipt_rc" -eq 0 ]; then
+        log "✓ Clearnet logging rules installed"
+    else
+        log "WARNING: Failed to install clearnet logging rules (rc=$_ipt_rc) — see $LOG_FILE"
+        START_ERRORS="$START_ERRORS clearnet-logging"
+    fi
 }
 
 # Function to stop containers
@@ -1618,7 +1998,11 @@ wait_for_services() {
     else
         ONION_ADDR="Generating..."
     fi
-    return 1
+    # The WARNING above is the report. Returning 1 here ended `onionpress
+    # start` under set -e before the start summary and the "running" lines,
+    # and the Linux launcher already returns 0; a slow Tor bootstrap is not
+    # a failed start.
+    return 0
 }
 
 # Main execution
@@ -1856,8 +2240,8 @@ restore_backup() {
     onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
     log "Restore: backup from $onion_address"
 
-    # 1. Restore Tor keys — accept either C Tor or Arti format.
-    #    Mac uses Arti only; if backup has only C Tor keys, convert to Arti PEM.
+    # 1. Restore Tor keys — accept either C Tor or PEM format.
+    #    The container takes the PEM; if the backup has only C Tor keys, derive it.
     local ctor_secret="$staging/tor-keys/hs_ed25519_secret_key"
     local ctor_public="$staging/tor-keys/hs_ed25519_public_key"
     local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
@@ -2002,22 +2386,8 @@ main() {
 
             log "Detected container runtime: $RUNTIME"
 
-            # Create symlink for Docker socket if needed
-            # Colima forwards the socket to ~/.colima/default/docker.sock
-            # but we configure DOCKER_HOST to use ~/.onionpress/colima/default/docker.sock
-            # Create symlink to bridge this gap
-            SOCKET_DIR="$COLIMA_HOME/default"
-            SOCKET_PATH="$SOCKET_DIR/docker.sock"
-            COLIMA_SOCKET="$HOME/.colima/default/docker.sock"
-
-            if [ -S "$COLIMA_SOCKET" ]; then
-                if [ ! -e "$SOCKET_PATH" ] || [ ! -S "$SOCKET_PATH" ]; then
-                    log "Creating Docker socket symlink..."
-                    mkdir -p "$SOCKET_DIR"
-                    ln -sf "$COLIMA_SOCKET" "$SOCKET_PATH"
-                    log "Docker socket symlink created: $SOCKET_PATH -> $COLIMA_SOCKET"
-                fi
-            fi
+            # Point DOCKER_HOST at our own VM's socket (never a foreign Colima)
+            ensure_docker_socket || true
 
             # Setup database passwords (generates random passwords on first run)
             setup_db_passwords
@@ -2027,6 +2397,8 @@ main() {
 
             # Actively poll until services are ready (replaces fixed sleep)
             wait_for_services
+
+            log_start_summary
 
             log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
@@ -2146,19 +2518,11 @@ main() {
             # stop and restart the VM first, then proceed. This turns
             # the menubar "Restart" item into a reliable recovery for
             # the wedge we've seen 5× in 30 days on a single machine.
+            # The same recovery runs from the start path when its Docker
+            # wait times out (see wait_for_docker_or_recover_vm).
             if ! docker info >/dev/null 2>&1; then
-                log "restart: Docker daemon not reachable — restarting Lima VM first"
-                export COLIMA_HOME LIMA_HOME
-                "$BIN_DIR/limactl" stop -f colima >> "$LOG_FILE" 2>&1 || true
-                # Wait briefly for hostagent processes to fully die
-                # before starting again — lima can trip over itself
-                # otherwise.
-                sleep 3
-                if ! "$BIN_DIR/limactl" start colima >> "$LOG_FILE" 2>&1; then
-                    log "restart: limactl start failed — giving up, user may need to reboot"
-                    exit 1
-                fi
-                log "restart: Lima VM restarted, resuming normal restart"
+                recover_lima_vm restart || exit 1
+                log "restart: resuming normal restart"
             fi
             setup_db_passwords
             # Pull updated images before stop_containers: the OnionHeaven
@@ -2184,8 +2548,19 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
-            docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor container"
-            log "Tor containers started"
+            # --pull always force-pulls even when every other pull is
+            # skipped, so it has to be dropped for local images too.
+            _tor_rc=0
+            if using_local_images; then
+                docker compose up -d tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
+            else
+                docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
+            fi
+            if [ "$_tor_rc" -eq 0 ]; then
+                log "Tor containers started"
+            else
+                log "ERROR: Failed to start tor container (rc=$_tor_rc) — see $LOG_FILE"
+            fi
             ;;
 
         import-key)
@@ -2262,9 +2637,9 @@ main() {
             setup_wordpress_cli "$@"
             if [ -n "$has_from_backup" ]; then
                 # --from-backup restored keys to vanity-keys/ — need to reinstall
-                # into the arti-state volume so Tor uses the restored address.
+                # into the key volume so Tor uses the restored address.
                 # Use .import-key-pending flag so start_containers removes the old
-                # arti-state volume and installs the restored key.
+                # key volume and installs the restored key.
                 log "Setup --from-backup: flagging key reimport..."
                 touch "$DATA_DIR/.import-key-pending"
                 stop_containers
@@ -2318,7 +2693,7 @@ main() {
             fi
             # install-from-backup: the Python CLI tears the install down and
             # rebuilds it from the backup (seeded key + imported DB/content),
-            # replacing the old in-place overwrite + arti-state key-swap churn
+            # replacing the old in-place overwrite + key-volume swap churn
             # (no .import-key-pending, no manual multisite/Tor dance).
             bundled_python -m onionpress.cli restore "$restore_pass" "$restore_path"
             echo "Done! OnionPress rebuilt from backup."
@@ -2436,7 +2811,7 @@ main() {
             setup_db_passwords
             # cli restore tears down (already reset above) and rebuilds the
             # install directly from the backup — seeded key + imported DB/
-            # content, no in-place overwrite or arti-state key-swap churn.
+            # content, no in-place overwrite or key-volume swap churn.
             bundled_python -m onionpress.cli restore "$scrub_pass" "$scrub_backup"
             echo "  Restore and restart complete."
 

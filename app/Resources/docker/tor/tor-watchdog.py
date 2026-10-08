@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tor control port watchdog — monitors Tor health and manages onion services.
 
-Runs inside every C Tor container. Connects to the local control port,
+Runs inside every Tor container. Connects to the local control port,
 manages onion services via ADD_ONION/DEL_ONION, subscribes to events,
 and recovers from failures (stale guards, bootstrap stalls, etc.).
 
@@ -10,7 +10,6 @@ Signal protocol (from host MenubarApp via docker exec kill):
   USR2 = wake   → ADD_ONION all services (re-publish on existing circuits)
 
 Usage: Started by entrypoint.sh in the background after Tor launches.
-       Only runs when TOR_IMPL=tor (not Arti).
 """
 
 import base64
@@ -836,9 +835,6 @@ def run():
 
 if __name__ == "__main__":
     # Only run for C Tor
-    if os.environ.get("TOR_IMPL", "tor") != "tor":
-        log("TOR_IMPL is not 'tor' — watchdog not needed for Arti")
-        sys.exit(0)
 
     # Install signal handlers
     signal.signal(signal.SIGUSR1, _handle_usr1)

@@ -11,6 +11,8 @@ below has a comment pointing at the incident it's guarding against.
 import ast
 import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -135,43 +137,40 @@ class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
         )
 
 
-class TestTorImplDefaultsToCTor(unittest.TestCase):
-    """C Tor (TOR_IMPL=tor) has been the default since 2026-03-16. But the
-    CLI-rewrite foundation (commit c15d8dd9, 2026-03-20) introduced
-    read_value(..., "TOR_IMPL", "arti") in containers.py and cli.py — so on
-    a fresh install with no TOR_IMPL in config (the normal case, since the
-    value only gets written when it's non-default), those paths brought the
-    stack up as Arti and the menubar settings window showed "arti". Every
-    TOR_IMPL default must be "tor" to match config.py DEFAULTS, the bash
-    launcher, settings_ui, and menubar.py.
+class TestNoTorImplementationSwitch(unittest.TestCase):
+    """TOR_IMPL chose between C Tor and Arti until 2026-09-24. Arti was then
+    removed: it hosts a site acceptably, but it has no control interface and
+    sleep/wake, the watchdog's stall recovery and the OnionHeaven takeover
+    pipeline are all built on the control port. The switch must not creep
+    back into the app, the launchers or the compose file — a value nobody
+    honours is worse than none.
     """
 
-    def test_no_tor_impl_default_is_arti_or_unknown(self):
+    FILES = [
+        "app/MacOS/onionpress", "linux/onionpress",
+        "app/Resources/docker/docker-compose.yml",
+        "app/Resources/docker/tor/entrypoint.sh",
+        "app/Resources/config-template.txt",
+    ]
+
+    def test_tor_impl_is_gone(self):
         import glob
+        paths = glob.glob(os.path.join(PROJECT_ROOT, "src", "**", "*.py"), recursive=True)
+        paths += [os.path.join(PROJECT_ROOT, f) for f in self.FILES]
         offenders = []
-        pat = re.compile(r'TOR_IMPL"\s*,\s*"(arti|unknown)"')
-        py_files = glob.glob(os.path.join(PROJECT_ROOT, "src", "**", "*.py"),
-                             recursive=True)
-        for path in py_files:
+        for path in paths:
             with open(path, "r", encoding="utf-8") as f:
                 for lineno, line in enumerate(f, 1):
-                    if pat.search(line):
-                        rel = os.path.relpath(path, PROJECT_ROOT)
-                        offenders.append(f"{rel}:{lineno}: {line.strip()}")
+                    if "TOR_IMPL" in line:
+                        offenders.append(f"{os.path.relpath(path, PROJECT_ROOT)}:{lineno}: {line.strip()}")
         self.assertEqual(
             offenders, [],
-            "TOR_IMPL must default to \"tor\" (C Tor) everywhere. Found "
-            "non-tor defaults:\n" + "\n".join(offenders),
+            "TOR_IMPL was removed with Arti on 2026-09-24. Found:\n" + "\n".join(offenders),
         )
 
-    def test_config_defaults_tor_impl_is_tor(self):
+    def test_config_defaults_have_no_tor_impl(self):
         cfg = _read("src/onionpress/config.py")
-        self.assertRegex(
-            cfg,
-            r'"TOR_IMPL":\s*"tor"',
-            "config.py DEFAULTS must keep TOR_IMPL = \"tor\".",
-        )
-
+        self.assertNotIn('"TOR_IMPL"', cfg, "config.py must not define TOR_IMPL.")
 
 class TestMakefilePrecheckUsesCorrectPath(unittest.TestCase):
     """The Makefile's `make test` target asserts required source files
@@ -1271,5 +1270,643 @@ class TestScrubVerifyChecks(unittest.TestCase):
         )
 
 
+
+class TestKeyVolumeMigration(unittest.TestCase):
+    """The onion service key volume was renamed on 2026-09-25 from
+    onionpress-arti-state (layout state/keystore/hss/<name>/) to
+    onionpress-onion-keys (layout <name>/). Both launchers use the volume's
+    existence as the first-run signal, so an upgraded install that skipped
+    the migration would look fresh and mint a new address. The migration
+    therefore has to exist in both launchers, be the same code, and run
+    before the first-run check.
+    """
+
+    LAUNCHERS = ["app/MacOS/onionpress", "linux/onionpress"]
+
+    @staticmethod
+    def _function_body(text, name):
+        start = text.index(f"\n{name}() {{")
+        end = text.index("\n}\n", start)
+        return text[start:end]
+
+    def test_launchers_carry_the_same_migration(self):
+        bodies = [self._function_body(_read(f), "migrate_key_volume") for f in self.LAUNCHERS]
+        self.assertEqual(
+            bodies[0], bodies[1],
+            "migrate_key_volume() must be identical in the macOS and Linux "
+            "launchers; edit both.",
+        )
+        self.assertIn("onionpress-arti-state:/old:ro", bodies[0])
+        self.assertIn("onionpress-onion-keys:/new", bodies[0])
+
+    def test_migration_runs_before_first_run_detection(self):
+        for f in self.LAUNCHERS:
+            text = _read(f)
+            with self.subTest(launcher=f):
+                # Inside start_containers: the call must come before the first
+                # look for the new volume (the function's own early-return
+                # check sits above start_containers and does not count).
+                sc = text.index("\nstart_containers() {")
+                call = text.index("if ! migrate_key_volume; then", sc)
+                check = text.index("docker_volume_state onionpress-onion-keys", sc)
+                self.assertLess(
+                    call, check,
+                    "migrate_key_volume must be called before the first-run "
+                    "check that looks for the new volume.",
+                )
+                for old_name_check in ('grep -qx "onionpress-arti-state"',
+                                       "docker_volume_state onionpress-arti-state"):
+                    self.assertNotIn(
+                        old_name_check, text[sc:],
+                        "First-run detection must key off the new volume name "
+                        "only (the old name may appear only in "
+                        "migrate_key_volume and the wipe lists).",
+                    )
+
+    def test_launchers_carry_the_same_docker_helpers(self):
+        for name in ("docker_volume_state", "wait_for_docker"):
+            bodies = [self._function_body(_read(f), name) for f in self.LAUNCHERS]
+            with self.subTest(function=name):
+                self.assertEqual(
+                    bodies[0], bodies[1],
+                    f"{name}() must be identical in the macOS and Linux "
+                    "launchers; edit both.",
+                )
+
+    def test_start_waits_for_docker_before_any_volume_check(self):
+        """Every "does this volume exist?" check used to read a Docker error
+        as "no". A missing key volume is the first-run signal, so on
+        2026-09-30 an upgrade to 2.5.0 whose Colima VM was still booting took
+        the first-run path instead of migrating the key volume. Docker has to
+        answer first, and a start that never gets an answer has to stop.
+        """
+        for f in self.LAUNCHERS:
+            body = self._function_body(_read(f), "start_containers")
+            with self.subTest(launcher=f):
+                # macOS waits through wait_for_docker_or_recover_vm (one Lima
+                # VM recovery, see TestStartRecoversWedgedLimaVM); Linux has
+                # no VM and waits directly.
+                wait = body.index("if ! wait_for_docker")
+                for later in (".import-key-pending",
+                              "if ! migrate_key_volume; then",
+                              "docker_volume_state onionpress-onion-keys"):
+                    self.assertLess(
+                        wait, body.index(later),
+                        f"start_containers must wait for Docker before "
+                        f"{later!r}.",
+                    )
+                self.assertRegex(
+                    body[wait:wait + 200],
+                    r"if ! wait_for_docker(_or_recover_vm)? \d+( \w+)?; then\n\s+log [^\n]*\n\s+return 1",
+                    "start_containers must stop when Docker never answers, "
+                    "not carry on to the volume checks.",
+                )
+                self.assertNotIn(
+                    "docker volume ls", body,
+                    "start_containers must ask about volumes through "
+                    "docker_volume_state, which tells an absent volume from "
+                    "a Docker that did not answer.",
+                )
+
+    def test_wipes_remove_both_names(self):
+        """A replaced identity (key import, restore) must delete the old-name
+        volume too, or the next start would migrate it back over the new key.
+        """
+        for f in self.LAUNCHERS + ["src/onionpress/cli.py", "src/onionpress/backup.py"]:
+            text = _read(f)
+            with self.subTest(file=f):
+                self.assertIn("onionpress-onion-keys", text)
+                self.assertIn("onionpress-arti-state", text)
+
+    def test_compose_mounts_the_new_volume(self):
+        compose = "\n".join(
+            line for line in _read("app/Resources/docker/docker-compose.yml").splitlines()
+            if not line.lstrip().startswith("#"))
+        self.assertIn("onion-keys:/var/lib/onionpress-keys/", compose)
+        self.assertIn("name: onionpress-onion-keys", compose)
+        self.assertNotIn("onionpress-arti-state", compose)
+        entrypoint = _read("app/Resources/docker/tor/entrypoint.sh")
+        self.assertIn('KEYS_DIR="/var/lib/onionpress-keys"', entrypoint)
+        self.assertNotIn("/var/lib/arti", entrypoint)
+
+
+class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
+    """Colima (v0.8.1, environment/container/docker/context.go) drives the
+    host `docker` CLI: every start creates a "colima" context and, unless
+    started with --activate=false, makes it the current one; every stop or
+    delete runs `docker context rm --force colima`. All of it lands in
+    whichever DOCKER_CONFIG Colima inherits. launcher.sh never set one, so on
+    2026-09-30 ~/.docker had currentContext "colima" aimed at the live
+    OnionPress VM: the user's own `docker`, and the docker-backed tests with
+    it, ran against the live site. The same calls take over, and on stop
+    delete, a "colima" context that belongs to a Colima of the user's own.
+
+    Every Colima run therefore gets OnionPress's private DOCKER_CONFIG, and
+    every start also passes --activate=false. It has to be spelled with "=":
+    `--activate false` makes "false" the profile name, i.e. a second VM.
+    (`limactl start` in the restart path skips Colima's provisioning, so it
+    never touches a context.)
+    """
+
+    SHELL_LAUNCHERS = ["app/MacOS/launcher.sh", "app/MacOS/onionpress"]
+    PY_WRAPPER = "src/onionpress/colima.py"  # Colima._run prepends the binary
+    SHELL_START = re.compile(r'(?i)colima(_bin)?"? start\b')
+    SHELL_RUN = re.compile(
+        r'(?i)colima(_bin)?"? (start|stop|restart|delete|status|list|version)\b')
+
+    @staticmethod
+    def _shell_commands(text, pattern):
+        """(line index, command) for each non-comment line matching pattern,
+        joined with its backslash-continued lines."""
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines):
+            first, line = i, lines[i]
+            i += 1
+            if line.lstrip().startswith("#") or not pattern.search(line):
+                continue
+            cmd = [line]
+            while cmd[-1].rstrip().endswith("\\") and i < len(lines):
+                cmd.append(lines[i])
+                i += 1
+            yield first, "\n".join(cmd)
+
+    @classmethod
+    def _py_colima_starts(cls):
+        """(file, argv words) for each list literal under src/ that starts
+        Colima: [<colima binary>, "start", ...], or ["start", ...] in the
+        Colima wrapper."""
+        for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src")):
+            for name in sorted(names):
+                if not name.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), PROJECT_ROOT)
+                for node in ast.walk(ast.parse(_read(rel))):
+                    if not isinstance(node, ast.List) or not node.elts:
+                        continue
+                    words = [str(e.value) if isinstance(e, ast.Constant) else ast.unparse(e)
+                             for e in node.elts]
+                    if (rel == cls.PY_WRAPPER and words[0] == "start") or (
+                            len(words) > 1 and "colima" in words[0].lower()
+                            and words[1] == "start"):
+                        yield rel, words
+
+    def test_every_colima_start_passes_activate_false(self):
+        for f in self.SHELL_LAUNCHERS:
+            starts = [cmd for _, cmd in self._shell_commands(_read(f), self.SHELL_START)]
+            with self.subTest(launcher=f):
+                self.assertTrue(starts, f"no colima start found in {f}; update this test")
+                for cmd in starts:
+                    self.assertIn("--activate=false", cmd.split(), cmd)
+        py_starts = list(self._py_colima_starts())
+        self.assertIn(self.PY_WRAPPER, {f for f, _ in py_starts},
+                      "Colima.start's argv not found; update this test")
+        for f, words in py_starts:
+            with self.subTest(file=f, argv=words[:2]):
+                self.assertIn("--activate=false", words)
+
+    def test_every_colima_run_gets_the_private_docker_config(self):
+        for f in self.SHELL_LAUNCHERS:
+            text = _read(f)
+            with self.subTest(launcher=f):
+                export = re.search(
+                    r'^export DOCKER_CONFIG="\$DATA_DIR/docker-config"$', text, re.M)
+                self.assertIsNotNone(
+                    export, "export DOCKER_CONFIG at top level, unconditionally")
+                runs = [n for n, _ in self._shell_commands(text, self.SHELL_RUN)]
+                self.assertTrue(runs, f"no colima call found in {f}; update this test")
+                self.assertLess(
+                    text[:export.start()].count("\n"), min(runs),
+                    "DOCKER_CONFIG must be exported before Colima first runs.")
+                self.assertEqual(
+                    len(re.findall(r"(?<![\w$])DOCKER_CONFIG=", text)), 1,
+                    "Nothing else may re-point DOCKER_CONFIG.")
+                self.assertNotRegex(text, r"\bunset\b[^\n]*\bDOCKER_CONFIG\b")
+
+        wrapper = _read(self.PY_WRAPPER)
+        run = next(n for n in ast.walk(ast.parse(wrapper))
+                   if isinstance(n, ast.FunctionDef) and n.name == "_run")
+        self.assertIn('env["DOCKER_CONFIG"] = self.paths.docker_config_dir',
+                      ast.get_source_segment(wrapper, run))
+
+        # The MenubarApp builds every colima env from os.environ (its stop and
+        # delete would remove a "colima" context too), so it must set it first.
+        menubar = _read("src/menubar.py")
+        self.assertLess(
+            menubar.index('os.environ["DOCKER_CONFIG"] = docker_config_dir'),
+            min(menubar.index(s) for s in ("stop_stale_colima(", "[colima_bin,")))
+
+
+class TestColimaStaysOutOfUserSSHConfig(unittest.TestCase):
+    """Colima (v0.8.1, app/app.go generateSSHConfig) ends every start by
+    writing $COLIMA_HOME/ssh_config, a "Host colima" for each running VM, and
+    unless started with --ssh-config=false also prepends "Include
+    $COLIMA_HOME/ssh_config" to ~/.ssh/config, creating the file if needed.
+    The flag defaults to true and is saved as sshConfig in colima.yaml. No
+    release through 2.5.1 passed it, so every install aimed "colima" in the
+    user's SSH config at the OnionPress VM, colliding with the "Host colima"
+    of any Colima of the user's own.
+
+    Every start therefore passes --ssh-config=false, spelled with "=" like
+    --activate=false. Nothing needs the entry: `limactl shell`, which the
+    launchers and the MenubarApp use, runs ssh with -F /dev/null. An Include
+    left by an older release stays the user's to remove: launcher.sh only
+    reads the file to log a note, and nothing else refers to ~/.ssh.
+    """
+
+    COLIMA = TestColimaStaysOutOfUserDockerConfig  # its launchers and helpers
+    LAUNCHER = "app/MacOS/launcher.sh"
+
+    def test_every_colima_start_passes_ssh_config_false(self):
+        c = self.COLIMA
+        starts = [(f, cmd.split()) for f in c.SHELL_LAUNCHERS
+                  for _, cmd in c._shell_commands(_read(f), c.SHELL_START)]
+        starts += c._py_colima_starts()
+        found = {f for f, _ in starts}
+        for f in (*c.SHELL_LAUNCHERS, c.PY_WRAPPER):
+            self.assertIn(f, found, f"no colima start found in {f}; update this test")
+        for f, words in starts:
+            with self.subTest(file=f):
+                # Exactly this word: `--ssh-config false` is the bare flag
+                # (true) plus a profile named "false", and a later one wins.
+                self.assertEqual([w for w in words if w.startswith("--ssh-config")],
+                                 ["--ssh-config=false"], " ".join(words))
+
+    def test_launcher_only_notes_an_include_left_behind(self):
+        note = re.search(r'^if grep [^\n]*"\$HOME/\.ssh/config"; then\n.*?^fi$',
+                         _read(self.LAUNCHER), re.M | re.S)
+        self.assertIsNotNone(note, "launcher.sh's ~/.ssh/config note not found; update this test")
+        colima_home = "/Users/someone/.onionpress/colima"
+        include = f"Include {colima_home}/ssh_config"  # as Colima writes it
+        cases = [
+            (include, True),  # Colima created the file: no trailing newline
+            (f"{include}\n\nHost example.org\n    User someone\n", True),  # prepended
+            (f"# {include}\n", False),
+            ("Include /Users/someone/.colima/ssh_config\n", False),  # their own Colima
+            (None, False),
+        ]
+        for content, noted in cases:
+            with self.subTest(content=content), tempfile.TemporaryDirectory() as home:
+                ssh_config = os.path.join(home, ".ssh", "config")
+                if content is not None:
+                    os.mkdir(os.path.dirname(ssh_config))
+                    with open(ssh_config, "w", encoding="utf-8") as f:
+                        f.write(content)
+                out = subprocess.run(
+                    ["bash", "-c", 'set -e\nlog() { printf "%s\\n" "$1"; }\n' + note.group(0)],
+                    env={"HOME": home, "COLIMA_HOME": colima_home, "PATH": "/usr/bin:/bin"},
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                notes = out.stdout.splitlines()
+                self.assertEqual(len(notes), int(noted), notes)
+                if noted:
+                    self.assertIn(f"{colima_home}/ssh_config", notes[0])
+                if content is None:
+                    self.assertFalse(os.path.exists(os.path.dirname(ssh_config)))
+                else:
+                    with open(ssh_config, encoding="utf-8") as f:
+                        self.assertEqual(f.read(), content, "~/.ssh/config is the user's")
+
+        # ...and nothing else refers to ~/.ssh at all.
+        sources = list(self.COLIMA.SHELL_LAUNCHERS) + sorted(
+            os.path.relpath(os.path.join(dirpath, name), PROJECT_ROOT)
+            for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src"))
+            for name in names if name.endswith(".py"))
+        for f in sources:
+            for line in _read(f).splitlines():
+                line = line.strip()
+                if re.search(r"\.ssh\b", line) and not line.startswith("#"):
+                    with self.subTest(file=f, line=line):
+                        self.assertEqual(f, self.LAUNCHER)
+                        self.assertRegex(line, r'^(if grep -q\w* |log ")')
+
+
+class TestStartRecoversWedgedLimaVM(unittest.TestCase):
+    """Runs the macOS launcher's Docker wait under bash against stub `docker`
+    and `limactl` binaries.
+
+    Incident: on 2026-10-02 a macOS update killed OnionPress mid-stop, and
+    the login-time start found the Lima VM in the known "Running but SSH
+    refused" wedge: `colima start` hung ten minutes waiting for sshd while
+    `onionpress start` gave up at "Docker daemon not ready after 180s",
+    leaving a gray menubar and an unreachable VM. The menubar Restart path
+    already recovered that wedge (limactl stop -f, then start); the start
+    path must do the same, once, with a fresh Docker wait afterwards.
+
+    The docker stub fails until $STUB_DIR/docker-up exists; the limactl stub
+    reports $STUB_LIMA_STATUS from `list`, and its `start` either heals
+    Docker (creates that file), fails, or does nothing.
+    """
+
+    LAUNCHER = "app/MacOS/onionpress"
+    FUNCTIONS = ("wait_for_docker", "lima_vm_running", "recover_lima_vm",
+                 "wait_for_docker_or_recover_vm")
+    DOCKER_STUB = """#!/bin/sh
+printf 'docker %s\\n' "$*" >> "$STUB_CALLS"
+[ -e "$STUB_DIR/docker-up" ] && exit 0
+echo "Cannot connect to the Docker daemon at unix:///stub/docker.sock." >&2
+exit 1
+"""
+    LIMACTL_STUB = """#!/bin/sh
+printf 'limactl %s\\n' "$*" >> "$STUB_CALLS"
+case "$1" in
+    list) echo "$STUB_LIMA_STATUS" ;;
+    start)
+        [ "$STUB_LIMA_START" = fail ] && exit 1
+        [ "$STUB_LIMA_START" = heals ] && touch "$STUB_DIR/docker-up"
+        ;;
+esac
+exit 0
+"""
+
+    def _run(self, snippet, *, docker="down", lima="Running", start="heals"):
+        text = _read(self.LAUNCHER)
+        functions = "".join(
+            TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
+            for name in self.FUNCTIONS)
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.mkdir(bin_dir)
+            for name, body in (("docker", self.DOCKER_STUB),
+                               ("limactl", self.LIMACTL_STUB)):
+                path = os.path.join(bin_dir, name)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(body)
+                os.chmod(path, 0o755)
+            if docker == "up":
+                open(os.path.join(tmp, "docker-up"), "w").close()
+            calls = os.path.join(tmp, "calls")
+            for name in (calls, os.path.join(tmp, "log")):
+                open(name, "w").close()
+            script = (
+                "set -e\n"
+                f'LOG_FILE="{tmp}/log"; BIN_DIR="{bin_dir}"\n'
+                f'COLIMA_HOME="{tmp}/colima"; LIMA_HOME="{tmp}/colima/_lima"\n'
+                'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
+                "sleep() { :; }\n"  # the 180 s budgets pass instantly
+                + functions + snippet + "\n")
+            env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
+                   "STUB_DIR": tmp, "STUB_CALLS": calls,
+                   "STUB_LIMA_STATUS": lima, "STUB_LIMA_START": start}
+            out = subprocess.run(["bash", "-c", script], env=env,
+                                 capture_output=True, text=True, timeout=60)
+            with open(calls, encoding="utf-8") as f:
+                made = f.read().splitlines()
+            with open(os.path.join(tmp, "log"), encoding="utf-8") as f:
+                logged = f.read()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.strip(), made, logged
+
+    WAIT = "rc=0; wait_for_docker_or_recover_vm 180 start || rc=$?; echo $rc"
+
+    @staticmethod
+    def _recoveries(calls):
+        return [c for c in calls if c in ("limactl stop -f colima",
+                                          "limactl start colima")]
+
+    def test_recovers_the_wedge_once_and_waits_again(self):
+        rc, calls, logged = self._run(self.WAIT)
+        self.assertEqual(rc, "0")
+        self.assertEqual(self._recoveries(calls),
+                         ["limactl stop -f colima", "limactl start colima"])
+        # A full first budget was spent (180 s in 2 s steps, plus the final
+        # check) before Lima was asked, and Docker was asked again after.
+        first_wait = calls.index("limactl list --format {{.Status}} colima")
+        self.assertEqual(calls[:first_wait], ["docker info"] * 91)
+        self.assertEqual(calls[-1], "docker info")
+        self.assertIn("start: Docker daemon not ready after 180s while Lima "
+                      "reports the VM Running", logged)
+        self.assertIn("start: Lima VM restarted", logged)
+
+    def test_gives_up_after_the_second_wait_without_a_second_recovery(self):
+        rc, calls, _ = self._run(self.WAIT, start="noop")
+        self.assertEqual(rc, "1")
+        self.assertEqual(self._recoveries(calls),
+                         ["limactl stop -f colima", "limactl start colima"],
+                         "exactly one recovery attempt")
+        self.assertEqual(calls.count("docker info"), 2 * 91,
+                         "two full budgets, no third")
+
+    def test_gives_up_when_the_vm_will_not_restart(self):
+        rc, calls, logged = self._run(self.WAIT, start="fail")
+        self.assertEqual(rc, "1")
+        self.assertEqual(calls.count("docker info"), 91,
+                         "no second wait when limactl start failed")
+        self.assertIn("start: limactl start failed", logged)
+
+    def test_does_not_touch_a_vm_lima_reports_stopped(self):
+        # A stopped VM is not the wedge: `colima start` (launcher.sh or
+        # detect_container_runtime) owns that case, and a stop -f here would
+        # fight it.
+        for status in ("Stopped", "Broken", ""):
+            with self.subTest(status=status):
+                rc, calls, logged = self._run(self.WAIT, lima=status)
+                self.assertEqual(rc, "1")
+                self.assertEqual(self._recoveries(calls), [])
+                self.assertIn("not recovering", logged)
+
+    def test_no_lima_calls_when_docker_answers(self):
+        rc, calls, _ = self._run(self.WAIT, docker="up")
+        self.assertEqual(rc, "0")
+        self.assertEqual(calls, ["docker info"])
+
+    def test_start_and_restart_share_the_recovery(self):
+        text = _read(self.LAUNCHER)
+        start = TestKeyVolumeMigration._function_body(text, "start_containers")
+        self.assertIn("if ! wait_for_docker_or_recover_vm 180 start; then", start)
+        main = text[text.index("\nmain() {"):]
+        restart = main[main.index("        restart)"):main.index("        status)")]
+        self.assertIn("recover_lima_vm restart || exit 1", restart)
+        # The stop -f / start pair lives in recover_lima_vm only.
+        self.assertEqual(text.count('limactl" stop -f colima'), 1)
+        self.assertEqual(text.count('limactl" start colima'), 1)
+        self.assertNotIn("limactl", restart)
+
+
+class TestStartFailuresAreSurfaced(unittest.TestCase):
+    """A component that fails during boot must leave a line in a log file
+    and must not take the launcher down silently (review of 2026-10-06).
+
+    launcher.sh and `onionpress start` run under set -e, so a bare failing
+    command exits the script before any `$?` check or ERROR line after it
+    can run; every colima start is therefore guarded on the same line.
+    `onionpress start` names the components that failed in one START
+    SUMMARY line before "OnionPress is running!", and the MenubarApp reads
+    the launcher's exit status instead of inferring "Stopped" from an
+    empty status list.
+    """
+
+    LAUNCHER = "app/MacOS/launcher.sh"
+    ONIONPRESS = "app/MacOS/onionpress"
+    MENUBAR = "src/menubar.py"
+
+    def test_every_colima_start_in_launcher_sh_is_rc_guarded(self):
+        text = _read(self.LAUNCHER)
+        body = TestKeyVolumeMigration._function_body(text, "initialize_colima")
+        starts = [m.start() for m in re.finditer(r'"\$BIN_DIR/colima" start \\', body)]
+        self.assertGreaterEqual(len(starts), 3, "expected first-run (x2) and restart colima starts")
+        for s in starts:
+            block = body[s:s + 700]
+            with self.subTest(start=block.splitlines()[0]):
+                self.assertRegex(
+                    block, r'2>&1( \\\n\s+| )\|\| (colima_rc=\$\?|log "ERROR)',
+                    "a colima start must capture or log its failure on the same "
+                    "command line; under set -e nothing after it runs otherwise")
+
+    def test_start_summary_precedes_every_running_line(self):
+        text = _read(self.ONIONPRESS)
+        running = list(re.finditer(r'^(\s+)log "OnionPress is running!"$', text, re.M))
+        self.assertGreaterEqual(len(running), 1)
+        for m in running:
+            previous = text[:m.start()].rstrip("\n").rsplit("\n", 1)[-1].strip()
+            self.assertEqual(previous, "log_start_summary", text[m.start() - 120:m.end()])
+        self.assertIn("\nlog_start_summary() {", text)
+        self.assertGreaterEqual(
+            text.count('START_ERRORS="$START_ERRORS'), 4,
+            "the guarded start steps append their name to START_ERRORS")
+
+    def test_wait_for_services_reports_without_failing_the_start(self):
+        # Linux already returns 0 here; under set -e a return 1 ended
+        # `onionpress start` before the summary and the running lines.
+        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
+            body = TestKeyVolumeMigration._function_body(_read(launcher), "wait_for_services")
+            with self.subTest(launcher=launcher):
+                self.assertNotRegex(body, r"\n\s+return 1\s*$")
+                self.assertIn("WARNING: Services not fully ready", body)
+
+    def test_menubar_reads_the_launchers_exit_status(self):
+        text = _read(self.MENUBAR)
+        self.assertNotIn('subprocess.run([self.launcher_script, "start"])\n', text,
+                         "start_service must not discard the launcher's return code")
+        self.assertIn('rc = subprocess.run([self.launcher_script, "start"]).returncode', text)
+        self.assertIn('"Status: Start failed — see View Logs"', text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
+    """Runs the launchers' own functions under bash against a stub `docker`,
+    so the checks are exercised, not just read. STUB_MODE=down makes every
+    docker call fail the way an unreachable daemon does; otherwise
+    `docker volume ls` lists STUB_VOLUMES and everything else succeeds.
+    """
+
+    LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
+    FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
+                 "start_containers")
+    # macOS only: start_containers waits through these (Linux has no VM).
+    # Without a limactl on PATH they report the VM as not Running, so the
+    # Docker-down cases below still stop without any recovery attempt.
+    OPTIONAL_FUNCTIONS = ("lima_vm_running", "recover_lima_vm",
+                          "wait_for_docker_or_recover_vm")
+
+    STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_CALLS"
+if [ "$STUB_MODE" = down ]; then
+    echo "Cannot connect to the Docker daemon at unix:///stub/docker.sock." >&2
+    exit 1
+fi
+if [ "$1 $2" = "volume ls" ]; then
+    for v in $STUB_VOLUMES; do echo "$v"; done
+fi
+exit 0
+"""
+
+    def _run(self, launcher, snippet, mode="up", volumes="", pending=False):
+        text = _read(launcher)
+        names = list(self.FUNCTIONS) + [
+            n for n in self.OPTIONAL_FUNCTIONS if f"\n{n}() {{" in text]
+        functions = "".join(
+            TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
+            for name in names)
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.mkdir(bin_dir)
+            stub = os.path.join(bin_dir, "docker")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(self.STUB)
+            os.chmod(stub, 0o755)
+            if pending:
+                open(os.path.join(tmp, ".import-key-pending"), "w").close()
+            calls = os.path.join(tmp, "calls")
+            open(calls, "w").close()
+            script = (
+                "set -e\n"
+                f'LOG_FILE="{tmp}/log"; DATA_DIR="{tmp}"; DOCKER_DIR="{tmp}"\n'
+                'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
+                "sleep() { :; }\n"  # wait_for_docker's 180 s pass instantly
+                + functions + snippet + "\n")
+            env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
+                   "STUB_MODE": mode, "STUB_VOLUMES": volumes,
+                   "STUB_CALLS": calls}
+            out = subprocess.run(["bash", "-c", script], env=env,
+                                 capture_output=True, text=True, timeout=60)
+            with open(calls, encoding="utf-8") as f:
+                docker_calls = f.read().splitlines()
+            marker_left = os.path.exists(os.path.join(tmp, ".import-key-pending"))
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout, docker_calls, marker_left
+
+    def _state_of(self, launcher, name, **kw):
+        out, _, _ = self._run(
+            launcher, f"s=0; docker_volume_state {name} || s=$?; echo $s", **kw)
+        return int(out.strip())
+
+    def test_volume_state_tells_absent_from_unanswered(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                up = {"volumes": "onionpress-arti-state onionpress-onion-keys-old"}
+                self.assertEqual(self._state_of(f, "onionpress-arti-state", **up), 0)
+                self.assertEqual(self._state_of(f, "onionpress-onion-keys", **up), 1,
+                                 "only an exact name may match")
+                self.assertEqual(self._state_of(f, "onionpress-onion-keys", mode="down"), 2)
+
+    def test_migration_refuses_when_docker_does_not_answer(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                out, calls, _ = self._run(
+                    f, "rc=0; migrate_key_volume || rc=$?; echo $rc", mode="down")
+                self.assertEqual(out.strip(), "1")
+                self.assertFalse([c for c in calls if not c.startswith("volume ls")],
+                                 f"nothing but the question may run: {calls}")
+
+    def test_migration_copies_only_when_just_the_old_volume_exists(self):
+        cases = {
+            "onionpress-arti-state": True,                          # upgrade
+            "onionpress-onion-keys onionpress-arti-state": False,   # already migrated
+            "": False,                                              # fresh install
+        }
+        for f in self.LAUNCHERS:
+            for volumes, copies in cases.items():
+                with self.subTest(launcher=f, volumes=volumes):
+                    out, calls, _ = self._run(
+                        f, "rc=0; migrate_key_volume || rc=$?; echo $rc",
+                        volumes=volumes)
+                    self.assertEqual(out.strip(), "0")
+                    self.assertEqual(
+                        "volume create onionpress-onion-keys" in calls, copies, calls)
+
+    def test_start_stops_before_any_volume_check_when_docker_never_answers(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                out, calls, marker_left = self._run(
+                    f, "rc=0; start_containers || rc=$?; echo $rc",
+                    mode="down", pending=True)
+                self.assertEqual(out.strip(), "1")
+                self.assertEqual(set(calls), {"info"},
+                                 f"only `docker info` may run: {sorted(set(calls))}")
+                self.assertTrue(marker_left)
+
+    def test_pending_import_is_kept_when_an_old_keystore_survives(self):
+        # tor-state stays listed however often it is removed.
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                out, calls, marker_left = self._run(
+                    f, "rc=0; start_containers || rc=$?; echo $rc",
+                    volumes="onionpress-tor-state", pending=True)
+                self.assertEqual(out.strip(), "1")
+                self.assertTrue(marker_left,
+                                "the key import must be retried on the next start")
+                self.assertNotIn("volume create onionpress-onion-keys", calls)
