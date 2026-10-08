@@ -21,8 +21,6 @@ import subprocess
 import sys
 from typing import Optional
 
-from .config import validate_address_prefix
-
 
 # Pinned to digest. The literal below is propagated from build/image-pins.env
 # by build/refresh-image-digests.sh, which writes every consumer at once;
@@ -219,6 +217,10 @@ def generate_vanity_in_container(
     # returning an old address as if freshly minted.
     if not prefix:
         raise ValueError("prefix must not be empty")
+    # Imported here, not at module scope: config imports this module for
+    # get_running_wp_port(), so a top-level import would be circular.
+    from .config import validate_address_prefix
+
     prefix_ok, prefix_error, _ = validate_address_prefix(prefix)
     if not prefix_ok:
         raise ValueError(prefix_error.splitlines()[0])
