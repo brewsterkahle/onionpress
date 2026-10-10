@@ -57,16 +57,21 @@ class HealthResult:
     wp_healthy: bool = False
     tor_bootstrapped: bool = False
     tor_internally_ready: bool = False  # Checks 1-4 passed
-    tor_externally_reachable: bool = False  # Check 5 passed (dual-probe)
+    # Check 5 (dual-probe) is tri-state: None until it actually runs — the
+    # gate below is the ONLY place that assigns it. Do not default this to
+    # False: an unrun check and a check that came back negative must stay
+    # distinguishable all the way out to status.json (see write_status()
+    # in linux/onionpress-service.py and menubar.py's write_status_to_volume).
+    tor_externally_reachable: Optional[bool] = None
     onion_address: str = ""
     bootstrap_pct: int = 0
-    external_http_code: str = ""  # HTTP status from external reachability check
+    external_http_code: Optional[str] = None  # HTTP status from external reachability check
     errors: list[str] = field(default_factory=list)
 
     @property
     def ready(self) -> bool:
         """Service is fully operational."""
-        return self.wp_healthy and self.tor_externally_reachable
+        return self.wp_healthy and self.tor_externally_reachable is True
 
 
 @dataclass

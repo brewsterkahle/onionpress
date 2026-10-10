@@ -56,6 +56,31 @@ add_action( 'init', function () {
     // intermediate from caching the cookies and serving them to the next
     // visitor.
     nocache_headers();
-    wp_redirect( remove_query_arg( 'op_login' ) );
+
+    // Land the caller wherever it asked (e.g. the static homepage, which
+    // never runs PHP and so could never carry the token itself — the
+    // menubar app instead points here, at wp-login.php, then redirects
+    // back). Only a same-request relative path is accepted: WordPress's
+    // core redirect validator checks the *configured* home_url host,
+    // which — same as the cookie domain above — can differ from the
+    // actual request host (.onion vs localhost), so it can't be used to
+    // validate this. Sanitize BEFORE validating, not after: wp_redirect()
+    // calls wp_sanitize_redirect() internally right before it sends the
+    // Location header, and that strips characters outside a fixed
+    // allowlist — validating the raw value first lets a stripped
+    // character sitting between two slashes (e.g. "/\evil.com" or
+    // "/%09/evil.com") collapse into "//evil.com" after sanitizing,
+    // which browsers resolve as protocol-relative. The regex below
+    // additionally rejects a leading backslash right after the slash,
+    // since some browsers normalize "/\host" the same way.
+    $redirect_to = remove_query_arg( 'op_login' );
+    if ( ! empty( $_GET['redirect_to'] ) ) {
+        $requested = wp_sanitize_redirect( wp_unslash( $_GET['redirect_to'] ) );
+        if ( preg_match( '#^/($|[^/\\\\])#', $requested ) ) {
+            $redirect_to = $requested;
+        }
+    }
+
+    wp_redirect( $redirect_to );
     exit;
 } );
