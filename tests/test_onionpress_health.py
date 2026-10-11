@@ -307,6 +307,49 @@ class TestCheckExternalReachability(unittest.TestCase):
         reachable, _code = hc.check_external_reachability("op2abc.onion")
         self.assertFalse(reachable)
 
+    def test_timeout_is_retried_once_on_isolated_circuits(self):
+        # 2026-10-11: a joined-but-dead rendezvous circuit made every
+        # probe through onionpress-tor time out for minutes while fresh
+        # circuits reached the site at once. rc=28 → one retry with a
+        # per-probe SOCKS username so Tor can't reuse the stale circuit.
+        docker = mock.Mock()
+        docker.exec.side_effect = [
+            _fail(code=28),  # plain probe: curl timeout
+            _ok("\n---STATUS---301"),  # isolated retry: success
+        ]
+        hc = HealthChecker(docker)
+        reachable, code = hc._probe_onion_via("onionpress-tor", "op2abc.onion")
+        self.assertTrue(reachable)
+        self.assertEqual(code, "301")
+        self.assertEqual(docker.exec.call_count, 2)
+        first = docker.exec.call_args_list[0].args[1]
+        retry = docker.exec.call_args_list[1].args[1]
+        self.assertNotIn("--proxy-user", first)
+        self.assertIn("--proxy-user", retry)
+        user = retry[retry.index("--proxy-user") + 1]
+        self.assertTrue(user.startswith("onionpress-probe-"), user)
+        self.assertTrue(user.endswith(":x"), user)
+
+    def test_timeout_twice_is_reported_as_timeout(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = [_fail(code=28), _fail(code=28)]
+        hc = HealthChecker(docker)
+        reachable, code = hc._probe_onion_via("onionpress-tor", "op2abc.onion")
+        self.assertFalse(reachable)
+        self.assertEqual(code, "000:rc=28")
+        self.assertEqual(docker.exec.call_count, 2)
+
+    def test_socks_failure_is_not_retried(self):
+        # rc=97 is Tor refusing the SOCKS connect (descriptor missing or
+        # unusable); fresh circuits can't change that — same client cache.
+        docker = mock.Mock()
+        docker.exec.side_effect = [_fail(code=97)]
+        hc = HealthChecker(docker)
+        reachable, code = hc._probe_onion_via("onionpress-tor", "op2abc.onion")
+        self.assertFalse(reachable)
+        self.assertEqual(code, "000:rc=97")
+        self.assertEqual(docker.exec.call_count, 1)
+
     def test_empty_address(self):
         docker = mock.Mock()
         hc = HealthChecker(docker)
