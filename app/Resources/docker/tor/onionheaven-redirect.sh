@@ -8,6 +8,25 @@
 
 REDIRECT_PORT=8082
 WAYBACK_ONION="web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+LOG_FIELD_MAX=200  # longest request path / host / request line we log
+
+# Request logging (issue #74). One line per handled request, to STDERR:
+# under socat's --handle-request, stdout IS the client socket, while stderr
+# is inherited from socat and lands in the container log (which the
+# analytics upload ships to OnionHome). Called after the response has been
+# written, so a slow or closed log destination can never delay or break a
+# response, and it must never fail the handler.
+log_request() {
+    # $1=method $2=path $3=host $4=outcome (status and redirect target)
+    printf '[%s] redirect: %s %s Host: %s -> %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" "$3" "$4" >&2 || true
+}
+
+# Client-supplied text, made safe for a log line: printable ASCII only
+# (no CR/LF, so a request cannot forge log lines) and bounded in length.
+log_safe() {
+    printf '%s' "$1" | LC_ALL=C tr -cd '\041-\176' | cut -c1-"$LOG_FIELD_MAX"
+}
 
 # Handle a single HTTP request (called by socat via --handle-request)
 handle_request() {
@@ -15,16 +34,35 @@ handle_request() {
     local host=""
     local path="/"
     local line=""
+    local method=""
+    local log_path=""
+    local log_host=""
 
-    # Read request line (e.g., "GET /some-page HTTP/1.1")
+    # Read request line (e.g., "GET /some-page HTTP/1.1"). `cut -s` so a
+    # line with no space yields an empty path (defaulted to / below)
+    # instead of the whole line.
     read -r request_line
-    request_line=$(echo "$request_line" | tr -d '\r')
-    path=$(echo "$request_line" | cut -d' ' -f2)
+    request_line=$(printf '%s' "$request_line" | tr -d '\r')
+    method=$(printf '%s' "$request_line" | cut -d' ' -f1)
+    path=$(printf '%s' "$request_line" | cut -s -d' ' -f2)
+
+    case "$method" in
+        ""|*[!A-Z]*) method="" ;;
+    esac
+    if [ -z "$method" ]; then
+        # Not an HTTP request line (a probe, a closed connection, garbage).
+        # Logged BEFORE the reply here: the peer may already be gone, and a
+        # write to a closed socket ends this handler.
+        log_request "-" "'$(log_safe "$request_line")'" "-" "400 malformed request line"
+        printf "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Request"
+        return
+    fi
 
     # Default path to / if empty
     if [ -z "$path" ]; then
         path="/"
     fi
+    log_path=$(log_safe "$path")
 
     # Read headers to find Host
     while read -r line; do
@@ -37,11 +75,14 @@ handle_request() {
         esac
     done
 
+    log_host=$(log_safe "$host")
+
     if [ -z "$host" ]; then
         # No Host header — return a simple error
         local body="No Host header provided."
         local len=${#body}
         printf "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" "$len" "$body"
+        log_request "$method" "$log_path" "-" "400 no Host header"
         return
     fi
 
@@ -60,6 +101,7 @@ handle_request() {
                         "SELECT status FROM registry WHERE content_address='${host}' LIMIT 1" 2>/dev/null || echo "")
                     if [ "$status" = "online" ]; then
                         # Address has been released — drop connection (circuit breaker)
+                        log_request "$method" "$log_path" "$log_host" "dropped (address released, status=online)"
                         exit 0
                     fi
                     ;;
@@ -85,6 +127,10 @@ handle_request() {
     # change to status code / redirect shape doesn't silently flip
     # takeover responses past client reachability gates.
     printf "HTTP/1.0 302 Found\r\nLocation: %s\r\nContent-Type: text/html\r\nContent-Length: %d\r\nX-OnionHeaven-Takeover: 1\r\nConnection: close\r\n\r\n%s" "$wayback_url" "$len" "$body"
+
+    # Response written; now the log line (never before, see log_request).
+    # The target repeats host and path, so log just the fixed prefix of it.
+    log_request "$method" "$log_path" "$log_host" "302 http://${WAYBACK_ONION}/web/http://${log_host}${log_path}"
 
     # Record redirect timestamp in DB (best-effort, don't block response)
     # Updates all rows for this content_address since the redirect applies to the address, not a specific instance.
