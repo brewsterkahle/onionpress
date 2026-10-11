@@ -16,7 +16,8 @@ from onionpress.health import (
     RESTART_COOLDOWN_SECONDS, RECLAIM_RETRY_SECONDS,
     POLL_READY_SECONDS, POLL_STARTING_SECONDS, POLL_OFFLINE_SECONDS,
     WEDGE_LOAD_WARN, WEDGE_LOAD_ALARM, WEDGE_FAILING_STREAK_ALARM,
-    decode_curl_reason,
+    REPUBLISH_AFTER_UNREACHABLE_SECONDS, REPUBLISH_COOLDOWN_SECONDS,
+    RepublishTrigger, decode_curl_reason,
 )
 
 
@@ -669,6 +670,134 @@ class TestDecodeCurlReason(unittest.TestCase):
         # Pathological "rc=" with no number — treat as unknown rather
         # than crashing or returning a confusing "curl rc=".
         self.assertEqual(decode_curl_reason("000rc="), "unknown")
+
+
+class TestRepublishTrigger(unittest.TestCase):
+    """Issue #266 plan item 1: the outcome-verified republish trigger.
+
+    Pure policy over (internally_ready, reachable, http_code) per cycle.
+    Time is passed in, so these run instantly.
+    """
+
+    def _wedge(self, t, trig, code="000:rc=97", ready=True):
+        return trig.observe(t, ready, False, code)
+
+    def test_thresholds_match_issue_266_plan(self):
+        # 10 min of continuous failure, at most one request per 15 min.
+        self.assertEqual(REPUBLISH_AFTER_UNREACHABLE_SECONDS, 600)
+        self.assertEqual(REPUBLISH_COOLDOWN_SECONDS, 900)
+
+    def test_never_fires_before_the_failure_window(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        for t in range(0, 600, 30):
+            self.assertFalse(self._wedge(t, trig), f"fired early at t={t}")
+
+    def test_fires_once_window_elapsed_then_respects_cooldown(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        self._wedge(0, trig)
+        self.assertTrue(self._wedge(600, trig))
+        # Still failing: no second request inside the cooldown...
+        for t in range(630, 1500, 30):
+            self.assertFalse(self._wedge(t, trig), f"re-fired at t={t}")
+        # ...but one more once it expires.
+        self.assertTrue(self._wedge(1500, trig))
+
+    def test_a_single_success_resets_the_window(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        self._wedge(0, trig)
+        self._wedge(300, trig)
+        # The 2-fail debounce in the menubar means one probe success is a
+        # real recovery, not noise — start over.
+        self.assertFalse(trig.observe(330, True, True, "301"))
+        self.assertIsNone(trig.failing_since)
+        self._wedge(360, trig)
+        self.assertFalse(self._wedge(900, trig))   # only 540s into the new window
+        self.assertTrue(self._wedge(960, trig))
+
+    def test_requires_internal_readiness(self):
+        # Hostname missing / not bootstrapped / WP down from tor: a
+        # republish can't help, and the watchdog's own stall logic owns
+        # those. Never counts towards the window.
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        for t in range(0, 1200, 30):
+            self.assertFalse(trig.observe(t, False, False, "000:rc=97"))
+        self.assertIsNone(trig.failing_since)
+
+    def test_only_the_wedge_code_family_counts(self):
+        # rc=28 (dead intro circuits) and rc=97 (descriptor missing or
+        # unusable) are the two families from the fleet data; a bare
+        # "000" is a curl that got no HTTP status at all.
+        for code in ("000", "000:rc=28", "000:rc=97", "000:rc=7"):
+            trig = RepublishTrigger(failing_for=600, cooldown=900)
+            self._wedge(0, trig, code=code)
+            self.assertTrue(self._wedge(600, trig, code=code), code)
+        # Takeover is the heartbeat's job; HTTP errors are WordPress's.
+        for code in ("takeover", "302", "500", "503", "degraded:ext=000:rc=28", ""):
+            trig = RepublishTrigger(failing_for=600, cooldown=900)
+            self._wedge(0, trig, code=code)
+            self.assertFalse(self._wedge(600, trig, code=code), code)
+            self.assertIsNone(trig.failing_since, code)
+
+    def test_unknown_reachability_does_not_count(self):
+        # None = Check 5 never ran (e.g. no internet); not a verdict.
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        self.assertFalse(trig.observe(0, True, None, None))
+        self.assertFalse(trig.observe(600, True, None, None))
+        self.assertIsNone(trig.failing_since)
+
+    def test_reset_forgets_the_window_but_not_the_cooldown(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        self._wedge(0, trig)
+        self.assertTrue(self._wedge(600, trig))
+        trig.reset()                       # e.g. internet dropped
+        self.assertIsNone(trig.failing_since)
+        self._wedge(700, trig)             # back online, still wedged
+        self.assertFalse(self._wedge(1300, trig))  # window ok, cooldown not
+        self.assertTrue(self._wedge(1500, trig))
+
+    def test_failing_seconds_reports_the_window(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        self.assertEqual(trig.failing_seconds(100), 0)
+        self._wedge(100, trig)
+        self.assertEqual(trig.failing_seconds(400), 300)
+        trig.observe(401, True, True, "200")
+        self.assertEqual(trig.failing_seconds(500), 0)
+
+
+class TestHealthMonitorRepublish(unittest.TestCase):
+    """The Linux service's entry point: HealthMonitor.should_request_republish."""
+
+    def test_monitor_owns_a_trigger_and_feeds_it_the_health_result(self):
+        monitor = HealthMonitor()
+        self.assertIsInstance(monitor.republish, RepublishTrigger)
+        hr = HealthResult(
+            wp_healthy=True, tor_bootstrapped=True, bootstrap_pct=100,
+            onion_address="op2abc.onion", tor_internally_ready=True,
+            tor_externally_reachable=False, external_http_code="000:rc=28",
+        )
+        base = 1_000_000.0
+        with mock.patch("onionpress.health.time.time", return_value=base):
+            self.assertFalse(monitor.should_request_republish(hr))
+        with mock.patch("onionpress.health.time.time", return_value=base + 599):
+            self.assertFalse(monitor.should_request_republish(hr))
+        with mock.patch("onionpress.health.time.time", return_value=base + 600):
+            self.assertTrue(monitor.should_request_republish(hr))
+        with mock.patch("onionpress.health.time.time", return_value=base + 601):
+            self.assertFalse(monitor.should_request_republish(hr))
+
+    def test_a_healthy_result_resets(self):
+        monitor = HealthMonitor()
+        bad = HealthResult(tor_internally_ready=True,
+                           tor_externally_reachable=False,
+                           external_http_code="000:rc=97")
+        good = HealthResult(wp_healthy=True, tor_internally_ready=True,
+                            tor_externally_reachable=True,
+                            external_http_code="301")
+        with mock.patch("onionpress.health.time.time", return_value=0.0):
+            monitor.should_request_republish(bad)
+        with mock.patch("onionpress.health.time.time", return_value=300.0):
+            self.assertFalse(monitor.should_request_republish(good))
+        self.assertIsNone(monitor.republish.failing_since)
 
 
 if __name__ == "__main__":

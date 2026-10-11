@@ -342,6 +342,14 @@ def _read_config_value(key: str, default: str) -> str:
     return read_value(os.path.join(DATA_DIR, "config"), key, default)
 
 
+def _republish_on_unreachable_enabled() -> bool:
+    """REPUBLISH_ON_UNREACHABLE in ~/.onionpress/config; default on.
+    "no" keeps the issue #266 trigger in log-only mode (evaluated, never
+    sent) — same knob as the Mac menubar."""
+    value = _read_config_value("REPUBLISH_ON_UNREACHABLE", "yes")
+    return str(value).strip().lower() not in ("no", "0", "false", "off")
+
+
 def _handle_sleep(docker: Docker) -> None:
     """DEL_ONION via watchdogs so the OnionHeaven hub can take over without
     competing descriptors — same as src/menubar.py handle_sleep()."""
@@ -507,6 +515,29 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
             if monitor.should_restart_tor(checker.tor_container_unhealthy()):
                 log("Auto-restarting Tor container")
                 docker.run(["restart", "onionpress-tor"], timeout=30)
+
+            # Issue #266: outcome-verified recovery — same trigger as
+            # src/menubar.py check_status(). Unreachable through the Tor
+            # network for 10+ min with Tor internally healthy means the
+            # HSDirs hold a descriptor whose intro points no longer answer
+            # for us; ask the watchdog for a forced DEL+ADD republish.
+            if monitor.should_request_republish(hr):
+                failing = monitor.republish.failing_seconds(time.time())
+                reason = f"unreachable {failing}s http={hr.external_http_code}"
+                if not _republish_on_unreachable_enabled():
+                    log(f"reachability: unreachable for {failing}s "
+                        f"(http={hr.external_http_code}) — would request "
+                        f"descriptor republish (REPUBLISH_ON_UNREACHABLE=no, "
+                        f"log-only)")
+                elif launcher_ops.request_watchdog_republish(
+                        docker, "onionpress-tor", reason):
+                    log(f"reachability: unreachable for {failing}s "
+                        f"(http={hr.external_http_code}) — requested "
+                        f"descriptor republish from tor-watchdog")
+                else:
+                    log(f"reachability: unreachable for {failing}s "
+                        f"(http={hr.external_http_code}) — republish "
+                        f"request to tor-watchdog FAILED (docker exec)")
 
             write_status(
                 docker=docker,
