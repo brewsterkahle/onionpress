@@ -888,8 +888,21 @@ HELPEOF
     fi
 
     # Update ADDRESS_PREFIX in config to match the imported address
-    # so the startup prefix check doesn't flag a mismatch
-    local addr_prefix=$(echo "$address" | cut -c1-3)
+    # so the startup prefix check doesn't flag a mismatch. Keep the user's
+    # configured prefix length instead of always truncating to 3 (#116);
+    # same logic as the Linux launcher, bounded by the 2-5 character rule
+    # the startup check enforces so the written value stays valid.
+    local current_prefix=""
+    if [ -f "$DATA_DIR/config" ]; then
+        current_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+    fi
+    local prefix_len=${#current_prefix}
+    if [ "$prefix_len" -lt 2 ]; then
+        prefix_len=3
+    elif [ "$prefix_len" -gt 5 ]; then
+        prefix_len=5
+    fi
+    local addr_prefix=$(echo "$address" | cut -c1-"$prefix_len")
     if [ -f "$DATA_DIR/config" ] && grep -q "^ADDRESS_PREFIX=" "$DATA_DIR/config"; then
         sed -i '' "s/^ADDRESS_PREFIX=.*/ADDRESS_PREFIX=$addr_prefix/" "$DATA_DIR/config"
     else
