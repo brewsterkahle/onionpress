@@ -12,6 +12,29 @@ CONTENT_HOSTNAME_FILE="/var/lib/tor/hidden_service/wordpress/hostname"
 HEALTHCHECK_HOSTNAME_FILE="/var/lib/tor/hidden_service/healthcheck/hostname"
 VERSION_FILE="/var/lib/tor/healthcheck-version"
 STARTED_FILE="/var/lib/tor/healthcheck-started"
+LOG_FIELD_MAX=200  # longest request path / request line we put in a log line
+
+# HTTP status of the response the current handler wrote; read by the
+# per-request log line in handle_request.
+STATUS=""
+
+# Request logging (issue #74). One line per handled request, to STDERR:
+# under socat's --handle-request, stdout IS the client socket, while stderr
+# is inherited from socat and lands in the container log (which the
+# analytics upload ships to OnionHome). Called after the response has been
+# written, so a slow or closed log destination can never delay or break a
+# response, and it must never fail the handler.
+log_request() {
+    # $1=method $2=path $3=outcome
+    printf '[%s] healthcheck: %s %s -> %s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" "$3" >&2 || true
+}
+
+# Client-supplied text, made safe for a log line: printable ASCII only
+# (no CR/LF, so a request cannot forge log lines) and bounded in length.
+log_safe() {
+    printf '%s' "$1" | LC_ALL=C tr -cd '\041-\176' | cut -c1-"$LOG_FIELD_MAX"
+}
 
 # Read version from file if available (set by entrypoint)
 get_version() {
@@ -138,6 +161,7 @@ handle_get() {
         "$messages")
 
     local len=${#body}
+    STATUS=200
     printf "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" "$len" "$body"
 }
 
@@ -147,6 +171,7 @@ handle_post() {
     local body=""
 
     if [ "$content_length" -gt "$MAX_REQUEST_BODY" ] 2>/dev/null; then
+        STATUS=413
         printf "HTTP/1.0 413 Request Entity Too Large\r\nContent-Type: text/plain\r\nContent-Length: 22\r\n\r\nRequest body too large"
         return
     fi
@@ -156,6 +181,7 @@ handle_post() {
     fi
 
     if [ -z "$body" ]; then
+        STATUS="400 empty body"
         printf "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nEmpty body."
         return
     fi
@@ -170,6 +196,7 @@ handle_post() {
 
     local reply='{"stored":true}'
     local len=${#reply}
+    STATUS="200 stored"
     printf "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" "$len" "$reply"
 }
 
@@ -178,11 +205,29 @@ handle_request() {
     local request_line=""
     local content_length=0
     local line=""
+    local method=""
+    local path=""
+    local log_path=""
 
-    # Read request line
+    # Read request line (e.g. "GET / HTTP/1.1"). `cut -s` so a line with no
+    # space yields an empty path instead of the whole line.
     read -r request_line
-    request_line=$(echo "$request_line" | tr -d '\r')
-    method=$(echo "$request_line" | cut -d' ' -f1)
+    request_line=$(printf '%s' "$request_line" | tr -d '\r')
+    method=$(printf '%s' "$request_line" | cut -d' ' -f1)
+    path=$(printf '%s' "$request_line" | cut -s -d' ' -f2)
+
+    case "$method" in
+        ""|*[!A-Z]*) method="" ;;
+    esac
+    if [ -z "$method" ]; then
+        # Not an HTTP request line (a probe, a closed connection, garbage).
+        # Logged BEFORE the reply here: the peer may already be gone, and a
+        # write to a closed socket ends this handler.
+        log_request "-" "'$(log_safe "$request_line")'" "400 malformed request line"
+        printf "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nBad Request"
+        return
+    fi
+    log_path=$(log_safe "${path:-/}")
 
     # Read headers
     while read -r line; do
@@ -195,13 +240,17 @@ handle_request() {
         esac
     done
 
+    STATUS=""
     if [ "$method" = "GET" ]; then
         handle_get
     elif [ "$method" = "POST" ]; then
         handle_post "$content_length"
     else
+        STATUS=405
         printf "HTTP/1.0 405 Method Not Allowed\r\nContent-Type: text/plain\r\nContent-Length: 18\r\n\r\nMethod Not Allowed"
     fi
+    # Response written; now the log line (never before, see log_request).
+    log_request "$method" "$log_path" "${STATUS:-?}"
 }
 
 # Dispatch: when called with --handle-request, handle a single request from stdin/stdout

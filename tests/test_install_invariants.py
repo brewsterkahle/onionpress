@@ -2069,3 +2069,123 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
 
     def test_py2app_bundles_the_module(self):
         self.assertIn("'onionpress.derivatives'", _read("setup.py"))
+
+class TestTorServicesLogEachRequest(unittest.TestCase):
+    """The healthcheck server (port 8081) and the OnionHeaven redirect
+    service (port 8082) in the tor image used to handle requests silently,
+    so there was no way to see from `docker logs` whether the hub was
+    polling a healthcheck address or a taken-over address was serving
+    redirects (issue #74). Each now writes one line per request to stderr
+    (stdout is the client socket under socat), after the response.
+
+    These run the handlers under `sh` on canned requests — no Docker, no
+    network: the healthcheck GET path (which probes wordpress:80) is not
+    exercised, the others are.
+    """
+
+    SCRIPTS = ("app/Resources/docker/tor/healthcheck-server.sh",
+               "app/Resources/docker/tor/onionheaven-redirect.sh")
+
+    def test_scripts_parse(self):
+        for rel in self.SCRIPTS:
+            for shell in ("bash", "sh"):
+                with self.subTest(script=rel, shell=shell):
+                    r = subprocess.run([shell, "-n", os.path.join(PROJECT_ROOT, rel)],
+                                       capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_log_line_goes_to_stderr_after_the_response(self):
+        for rel in self.SCRIPTS:
+            with self.subTest(script=rel):
+                src = _read(rel)
+                self.assertIn("log_request() {", src)
+                self.assertRegex(src, r"log_request\(\) \{[^}]*>&2 \|\| true",
+                                 "the log write must go to stderr and never fail the handler")
+                self.assertIn('cut -c1-"$LOG_FIELD_MAX"', src,
+                              "client-supplied text in the log line must be bounded")
+                self.assertIn("tr -cd '\\041-\\176'", src,
+                              "client-supplied text must be reduced to printable ASCII")
+        hc = _read(self.SCRIPTS[0])
+        self.assertLess(hc.index('printf "HTTP/1.0 200 OK'),
+                        hc.index('log_request "$method" "$log_path"'),
+                        "healthcheck: log after the response is written")
+        rd = _read(self.SCRIPTS[1])
+        self.assertLess(rd.index('printf "HTTP/1.0 302 Found'),
+                        rd.index('log_request "$method" "$log_path" "$log_host" "302 '),
+                        "redirect: log after the response is written")
+
+    def _handle(self, script_text, request, env=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "msgs"))  # the listener's main does this
+            path = os.path.join(tmp, "svc.sh")
+            with open(path, "w") as f:
+                f.write(script_text.replace(
+                    "/var/lib/tor/healthcheck-messages", os.path.join(tmp, "msgs")))
+            r = subprocess.run(["sh", path, "--handle-request"], input=request,
+                               capture_output=True, text=True, timeout=30,
+                               env={**os.environ, **(env or {})})
+        return r.stdout, r.stderr
+
+    LOG_RE = r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] "
+
+    def test_healthcheck_logs_method_path_and_status(self):
+        hc = _read(self.SCRIPTS[0])
+        out, err = self._handle(hc, "POST /?from=hub HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+        # text=True normalises the response's CRLF to LF, so match the status line only.
+        self.assertTrue(out.startswith("HTTP/1.0 200 OK\n"), out)
+        self.assertNotIn("healthcheck:", out, "the log line must not leak into the response")
+        self.assertRegex(err, self.LOG_RE + r"healthcheck: POST /\?from=hub -> 200 stored\n$")
+
+        out, err = self._handle(hc, "DELETE /x HTTP/1.1\r\n\r\n")
+        self.assertTrue(out.startswith("HTTP/1.0 405"), out)
+        self.assertRegex(err, self.LOG_RE + r"healthcheck: DELETE /x -> 405\n$")
+
+    def test_healthcheck_logs_malformed_and_bounds_the_path(self):
+        hc = _read(self.SCRIPTS[0])
+        out, err = self._handle(hc, "\x01junk\r\nline\r\n\r\n")
+        self.assertTrue(out.startswith("HTTP/1.0 400"), out)
+        self.assertRegex(err, self.LOG_RE + r"healthcheck: - 'junk' -> 400 malformed request line\n$")
+        self.assertEqual(err.count("\n"), 1, "control characters must not add log lines")
+
+        out, err = self._handle(hc, "POST /" + "a" * 1000 + " HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+        self.assertTrue(out.startswith("HTTP/1.0 400"), out)
+        self.assertLess(len(err), 300, "a 1000-byte path must be cut down in the log")
+        self.assertIn("/" + "a" * 199 + " ->", err)
+
+    def test_redirect_logs_host_status_and_target(self):
+        rd = _read(self.SCRIPTS[1])
+        onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz234567.onion"
+        out, err = self._handle(rd, f"GET /p?x=1 HTTP/1.1\r\nHost: {onion}\r\n\r\n")
+        self.assertTrue(out.startswith("HTTP/1.0 302 Found\n"), out)
+        self.assertNotIn("redirect:", out, "the log line must not leak into the response")
+        self.assertRegex(err, self.LOG_RE + r"redirect: GET /p\?x=1 Host: " + re.escape(onion)
+                         + r" -> 302 http://web\.archive[a-z2-7]+\.onion/web/http://"
+                         + re.escape(onion) + r"/p\?x=1\n$")
+
+        out, err = self._handle(rd, "GET / HTTP/1.1\r\n\r\n")
+        self.assertTrue(out.startswith("HTTP/1.0 400"), out)
+        self.assertRegex(err, self.LOG_RE + r"redirect: GET / Host: - -> 400 no Host header\n$")
+
+        out, err = self._handle(rd, "")
+        self.assertTrue(out.startswith("HTTP/1.0 400"), out)
+        self.assertRegex(err, self.LOG_RE + r"redirect: - '' Host: - -> 400 malformed request line\n$")
+
+        # A Host header cannot forge a second log line.
+        out, err = self._handle(rd, "GET /a HTTP/1.1\r\nHost: evil\x1b[1m.onion\r\n\r\n")
+        self.assertEqual(err.count("\n"), 1, err)
+        self.assertNotIn("\x1b", err)
+
+
+class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
+    """`onionpress get <url>` (issue #70) lives in src/onionpress/cli.py;
+    both bash launchers must forward it there with the arguments intact,
+    or the command exists on one platform only."""
+
+    def test_both_launchers_forward_get(self):
+        self.assertIn('bundled_python -m onionpress.cli get "${@:2}"',
+                      _read("app/MacOS/onionpress"))
+        self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
+
+    def test_both_launchers_list_get_in_usage(self):
+        self.assertRegex(_read("app/MacOS/onionpress"), r"(?m)^  get\s+Fetch a URL over Tor")
+        self.assertIn("|get|", _read("linux/onionpress"))
