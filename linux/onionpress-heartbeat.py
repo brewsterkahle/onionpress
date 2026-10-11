@@ -6,7 +6,7 @@ Registers this OnionPress instance with an OnionHeaven hub and sends
 periodic heartbeats. Runs as a systemd service.
 
 Reads config from ~/.onionpress/config:
-  REGISTER_WITH_ONIONHEAVEN=yes|no  (default: yes)
+  REGISTER_WITH_ONIONHEAVEN=yes|no  (default: unset = not enabled; opt-in)
   ONIONHEAVEN_ADDRESS=<hub .onion>  (default: centralized OH)
   SHARE_ANALYTICS_WITH_ONIONHOME=yes  (opt-in; anything else = no upload)
 
@@ -1166,7 +1166,9 @@ def main():
 
     # Read initial config
     config = read_config()
-    enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() != "no"
+    # Opt-in: only an explicit "yes" registers. Unset means the user has
+    # not decided yet (the tray / `onionpress onionheaven` ask them).
+    enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() == "yes"
     _current_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
 
     # Opt-in analytics upload to OnionHome. Started for every node, hub
@@ -1191,7 +1193,8 @@ def main():
     if enabled:
         _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
     else:
-        log.info("Registration disabled (REGISTER_WITH_ONIONHEAVEN=no)")
+        log.info("Registration not enabled (REGISTER_WITH_ONIONHEAVEN is not 'yes'; "
+                 "enable with: onionpress onionheaven enable)")
 
     # Establish the persistent HubConnection now that registration has
     # primed Tor's circuit to the hub. Subsequent /online heartbeats go
@@ -1244,7 +1247,7 @@ def main():
 
         # Re-read config each cycle
         config = read_config()
-        new_enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() != "no"
+        new_enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() == "yes"
         new_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
         analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
 
@@ -1361,7 +1364,7 @@ def offline_once():
             root.removeHandler(h)
 
     config = read_config()
-    if config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() == "no":
+    if config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() != "yes":
         return 0
     hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
 

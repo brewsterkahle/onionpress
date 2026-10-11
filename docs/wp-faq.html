@@ -331,11 +331,11 @@
         <div class="op-faq-a">
             OnionHeaven is a community backup network built into OnionPress. It keeps your site reachable at the same .onion address even when your computer is off, asleep, or disconnected.
             <br><br>
-            <strong>How it works:</strong> While your computer is running, OnionPress sends a quiet heartbeat to the OnionHeaven network to say "I'm online." If your computer goes offline and the heartbeats stop, another OnionPress node in the network steps in and serves a cached copy of your site at your .onion address. When you come back online, OnionPress automatically reclaims your address and serves the live site again. The whole process is seamless &mdash; your visitors always see your site.
+            <strong>How it works:</strong> While your computer is running, OnionPress sends a quiet heartbeat to the OnionHeaven network to say "I'm online." If your computer goes offline and the heartbeats stop, the OnionHeaven network takes over your .onion address and redirects visitors to the Wayback Machine's archived copy of your site. OnionHeaven doesn't store a copy of your site itself &mdash; what visitors see is the most recent snapshot the Wayback Machine has. When you come back online, OnionPress automatically reclaims your address and serves the live site again. Your visitors never hit a dead address.
             <br><br>
-            <strong>What about my onion service key?</strong> Your key is shared with the OnionHeaven network so that a backup node can serve your address while you're away. The network is run by the Internet Archive, the same nonprofit that runs the Wayback Machine. Your key is only used to keep your site available &mdash; nothing else.
+            <strong>What about my onion service key?</strong> When you enable OnionHeaven, a copy of your onion service private key is sent to the OnionHeaven hub so it can publish your address while you're away. The hub is run by the Internet Archive, the same nonprofit that runs the Wayback Machine. Your key is only used to keep your site available &mdash; nothing else.
             <br><br>
-            OnionHeaven is automatic &mdash; there's nothing to configure. It starts working as soon as your OnionPress site is up.
+            <strong>Is it on by default?</strong> No. Because it shares your key, OnionHeaven is opt-in. The first time your site comes online, OnionPress asks whether to enable it, and we strongly recommend saying yes &mdash; without it, visitors get a connection error whenever your computer is off. You can change your choice at any time: on Mac under <em>Settings &rarr; Keep site reachable via OnionHeaven</em>, on Linux with <code>onionpress onionheaven enable</code> or <code>disable</code>.
         </div>
     </div>
 

@@ -99,6 +99,60 @@ def _run_docker_rc(app, args, timeout=15):
 
 
 # ---------------------------------------------------------------------------
+# Registration choice (opt-in)
+# ---------------------------------------------------------------------------
+
+# REGISTER_WITH_ONIONHEAVEN is tri-state:
+#   "yes"  — the user opted in: register and heartbeat.
+#   "no"   — the user opted out: never register, never ask again.
+#   unset  — the user has not decided yet: do NOT register, and the UI
+#            prompts them to enable it at startup once Tor is up.
+# Registration is opt-in because enabling it sends the site's onion private
+# key to the hub (see the prompt text below). Only an explicit "yes" turns
+# it on — a missing or empty value must never silently register.
+
+REGISTRATION_PROMPT_TITLE = "Keep your site reachable when your computer is off?"
+
+REGISTRATION_PROMPT_MESSAGE = (
+    "OnionHeaven keeps your .onion address working while your computer is "
+    "off, asleep, or disconnected. When your heartbeats stop, the OnionHeaven "
+    "hub takes over your address and sends visitors to the Wayback Machine's "
+    "archived copy of your site. When you come back online, your live site "
+    "takes over again automatically.\n\n"
+    "Without it, visitors get a connection error whenever your computer is "
+    "off.\n\n"
+    "What is shared: a copy of your onion service private key is sent to the "
+    "OnionHeaven hub, run by the Internet Archive, so it can publish your "
+    "address on your behalf. The key is used only to keep your site reachable. "
+    "If you later disable OnionHeaven, the hub stops using it.\n\n"
+    "We strongly recommend enabling this. You can change it at any time under "
+    "Settings."
+)
+
+
+def registration_choice(value):
+    """Normalize a REGISTER_WITH_ONIONHEAVEN config value.
+
+    Returns "yes", "no", or None (undecided). Anything other than an
+    explicit yes/no — including an empty string or a missing key — is
+    treated as undecided so a typo can never opt a user in.
+    """
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    if v in ("yes", "true", "1", "on"):
+        return "yes"
+    if v in ("no", "false", "0", "off"):
+        return "no"
+    return None
+
+
+def get_registration_choice(app):
+    """The user's current OnionHeaven choice from the config file."""
+    return registration_choice(app.read_config_value("REGISTER_WITH_ONIONHEAVEN", ""))
+
+
+# ---------------------------------------------------------------------------
 # Registration client (runs on normal OnionPress instances)
 # ---------------------------------------------------------------------------
 
@@ -137,9 +191,12 @@ def register_with_onionheaven(app):
     Sets app._onionheaven_registration_succeeded on success;
     clears app._onionheaven_registration_in_flight when done.
     """
-    # Check if registration is disabled
-    if app.read_config_value("REGISTER_WITH_ONIONHEAVEN", "yes").lower() == "no":
-        app.log("OnionHeaven registration disabled (REGISTER_WITH_ONIONHEAVEN=no)")
+    # Opt-in: only an explicit "yes" registers. Unset means the user has
+    # not decided yet (the menubar prompts them); "no" means they opted out.
+    choice = get_registration_choice(app)
+    if choice != "yes":
+        app.log("OnionHeaven registration not enabled "
+                f"(REGISTER_WITH_ONIONHEAVEN={'no' if choice == 'no' else 'unset'})")
         app._onionheaven_registration_in_flight = False
         return
 
