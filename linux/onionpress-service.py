@@ -527,21 +527,17 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
             # HSDirs hold a descriptor whose intro points no longer answer
             # for us; ask the watchdog for a forced DEL+ADD republish.
             if monitor.should_request_republish(hr):
-                failing = monitor.republish.failing_seconds(time.time())
-                reason = f"unreachable {failing}s http={hr.external_http_code}"
+                reason = monitor.republish.describe(time.time())
                 if not _republish_on_unreachable_enabled():
-                    log(f"reachability: unreachable for {failing}s "
-                        f"(http={hr.external_http_code}) — would request "
+                    log(f"reachability: {reason} — would request "
                         f"descriptor republish (REPUBLISH_ON_UNREACHABLE=no, "
                         f"log-only)")
                 elif launcher_ops.request_watchdog_republish(
                         docker, "onionpress-tor", reason):
-                    log(f"reachability: unreachable for {failing}s "
-                        f"(http={hr.external_http_code}) — requested "
+                    log(f"reachability: {reason} — requested "
                         f"descriptor republish from tor-watchdog")
                 else:
-                    log(f"reachability: unreachable for {failing}s "
-                        f"(http={hr.external_http_code}) — republish "
+                    log(f"reachability: {reason} — republish "
                         f"request to tor-watchdog FAILED (docker exec)")
 
             write_status(

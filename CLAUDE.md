@@ -141,6 +141,24 @@
   (torproject, duckduckgo — only contacted while the hub is down). Each cycle logs
   one `probe verdict=… ext=… self=… hub=…` line with `*_tor_ms`/`*_app_ms` (Tor path
   vs server time to first byte); healthy cycles log it at most every 5 min.
+- **The republish window is rate-based, not continuous** (`RepublishTrigger`):
+  a request is due when ≥ 50% of the probes in the last 10 min failed with a wedge
+  code, the window (opened by the first failure) is ≥ 10 min old, and the current
+  probe failed; 5 passes in a row end it. A single pass no longer resets it — a
+  descriptor with two of three intro points dead fails ~2/3 of visitors and never
+  fails continuously, so the old rule never fired for it.
+- **On the failure path the app asks both tors why** (`HealthChecker.classify_wedge`,
+  cached 2 min): `GETINFO hs/service/desc/id` on onionpress-tor vs an `HSFETCH` +
+  `hs/client/desc/id` on onionheaven. Classes: `desc-missing` (every HSDir FAILED
+  NOT_FOUND), `desc-stale` (same signing cert, lower revision — publication failed),
+  `desc-current` (HSDirs serve exactly ours → intro points dead), `desc-other`
+  (different lineage: period skew or pre-DEL+ADD incarnation), `fetch-error`,
+  `unknown`. Revision counters are only comparable within one signing-cert lineage
+  (v3 OPE per period), hence the cert check. `desc-missing`/`desc-stale` get a 5-min
+  window instead of 10 (`REPUBLISH_FAST_CLASSES`); the watchdog's 5-min-after-upload
+  guard caps a false fire during benign propagation. The class rides in the `probe`
+  log line (`why=… fetch=… ours_rev=… theirs_rev=…`), `HealthResult.wedge_class`,
+  and the reason string sent to the watchdog.
 - **Both wake handlers reset the republish window** (`_republish_trigger.reset()` on
   Mac, `monitor.republish.reset()` on Linux, test-enforced): the trigger uses wall
   clock, so a failure seen just before sleep would otherwise fire DEL+ADD on the

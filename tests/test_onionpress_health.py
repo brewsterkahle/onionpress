@@ -1,6 +1,7 @@
 """Tests for src/onionpress/health.py."""
 
 import os
+import re
 import sys
 import time
 import unittest
@@ -21,7 +22,9 @@ from onionpress.health import (
     PROBE_PATH, PROBE_PATH_FALLBACK, PROBE_STATIC_RECHECK_SECONDS,
     PROBE_TIMEOUT_SECONDS, PROBE_RETRY_TIMEOUT_SECONDS,
     PROBE_LOG_HEALTHY_INTERVAL_SECONDS, ONIONHEAVEN_HUB_ADDRESS,
-    WELL_KNOWN_ONIONS,
+    WELL_KNOWN_ONIONS, REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS,
+    REPUBLISH_FAST_CLASSES, REPUBLISH_MIN_FAILURE_RATIO,
+    REPUBLISH_RECOVERY_STREAK, WEDGE_CLASSIFY_TTL_SECONDS,
 )
 
 
@@ -280,7 +283,20 @@ def _dispatch(table):
 
     def side_effect(container, argv, timeout=30, **kw):
         if argv[0] == "sh":
-            key = (container, "ctl")
+            # Specific first ("ctl:GETINFO hs/client/desc/id", "ctl:HSFETCH",
+            # ...), then the generic ("ctl") answer for everything else.
+            m = re.search(r"(HSFETCH|GETINFO) (\S+?)\\r", argv[2])
+            cmd = ""
+            if m and m.group(1) == "HSFETCH":
+                cmd = "HSFETCH"                   # drop the address
+            elif m:
+                cmd = f"GETINFO {m.group(2)}"
+                if cmd.startswith("GETINFO hs/"):
+                    cmd = cmd.rsplit("/", 1)[0]   # drop the address
+            specific = (container, "ctl:" + cmd) if cmd else None
+            key = specific if specific in table else (container, "ctl")
+            if specific and specific not in table and key not in table:
+                key = specific
         else:
             url = argv[-1]
             kind = url.split("//", 1)[1] + (":iso" if "--proxy-user" in argv else "")
@@ -306,6 +322,41 @@ DUCKDUCKGO = f"{WELL_KNOWN_ONIONS[1][1]}/"
 CIRCUITS_UP = _ok("250-status/circuit-established=1\r\n250 OK")
 CIRCUITS_DOWN = _ok("250-status/circuit-established=0\r\n250 OK")
 
+OURS_DESC = _ok(
+    "250+hs/service/desc/id/op2abc=\r\nhs-descriptor 3\r\ndescriptor-lifetime 180\r\n"
+    "descriptor-signing-key-cert\r\n-----BEGIN ED25519 CERT-----\r\nAQgABvkAAAAA\r\nBBBB\r\n"
+    "-----END ED25519 CERT-----\r\nrevision-counter 5575074206\r\nsuperencrypted\r\n.\r\n250 OK")
+
+
+def _client_desc(cert="AQgABvkAAAAABBBB", rev=5575074206):
+    return _ok(
+        "250+hs/client/desc/id/op2abc=\r\nhs-descriptor 3\r\ndescriptor-lifetime 180\r\n"
+        f"descriptor-signing-key-cert\r\n-----BEGIN ED25519 CERT-----\r\n{cert}\r\n"
+        f"-----END ED25519 CERT-----\r\nrevision-counter {rev}\r\nsuperencrypted\r\n.\r\n250 OK")
+
+
+FETCH_RECEIVED = _ok(
+    "250 OK\r\n250 OK\r\n250 OK\r\n"
+    "650 HS_DESC REQUESTED op2abc NO_AUTH $8416B5F0~Relay05 uqayzFnb HSDIR_INDEX=A\r\n"
+    "650 HS_DESC RECEIVED op2abc NO_AUTH $8416B5F0~Relay05 uqayzFnb")
+FETCH_NOT_FOUND = _ok(
+    "250 OK\r\n250 OK\r\n250 OK\r\n"
+    "650 HS_DESC REQUESTED op2abc NO_AUTH $8416B5F0~Relay05 uqayzFnb HSDIR_INDEX=A\r\n"
+    "650 HS_DESC FAILED op2abc NO_AUTH $8416B5F0~Relay05 uqayzFnb REASON=NOT_FOUND\r\n"
+    "650 HS_DESC REQUESTED op2abc NO_AUTH $C0FFEE~Relay06 uqayzFnb HSDIR_INDEX=B\r\n"
+    "650 HS_DESC FAILED op2abc NO_AUTH $C0FFEE~Relay06 uqayzFnb REASON=NOT_FOUND")
+
+
+
+# What the classifier asks on every wedge-code failure path; merged into
+# dual-probe tests so its control-port sessions have answers.
+CLASSIFY_TABLE = {
+    ("onionpress-tor", "ctl:GETINFO hs/service/desc/id"): OURS_DESC,
+    ("onionheaven", "ctl:HSFETCH"): FETCH_RECEIVED,
+    ("onionheaven", "ctl:GETINFO hs/client/desc/id"): _client_desc(),
+}
+
+
 
 class TestCheckExternalReachability(unittest.TestCase):
     def test_reachable_external_succeeds_fast_path(self):
@@ -327,6 +378,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionpress-tor", STATIC): _fail(code=97),
             ("onionheaven", "ctl"): CIRCUITS_UP,
             ("onionheaven", HUB): _resp("200", body="hub"),
+            **CLASSIFY_TABLE,
         })
         hc = HealthChecker(docker)
         reachable, code = hc.check_external_reachability(SITE)
@@ -346,6 +398,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionheaven", HUB): _fail(),
             ("onionheaven", TORPROJECT): _fail(),
             ("onionheaven", DUCKDUCKGO): _fail(),
+            **CLASSIFY_TABLE,
         })
         hc = HealthChecker(docker)
         reachable, code = hc.check_external_reachability(SITE)
@@ -362,6 +415,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionpress-tor", STATIC): _resp("200"),
             ("onionheaven", "ctl"): CIRCUITS_UP,
             ("onionheaven", HUB): _resp("200", body="hub"),
+            **CLASSIFY_TABLE,
         })
         hc = HealthChecker(docker)
         reachable, _code = hc.check_external_reachability(SITE)
@@ -378,6 +432,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionpress-tor", STATIC): _resp("301"),
             ("onionheaven", "ctl"): CIRCUITS_UP,
             ("onionheaven", HUB): _resp("200", body="hub"),
+            **CLASSIFY_TABLE,
         }
         docker.exec.side_effect = _dispatch(table)
         hc = HealthChecker(docker)
@@ -455,6 +510,7 @@ class TestCheckExternalReachability(unittest.TestCase):
             ("onionheaven", HUB): _fail(),
             ("onionheaven", TORPROJECT): _fail(),
             ("onionheaven", DUCKDUCKGO): _fail(),
+            **CLASSIFY_TABLE,
         })
         hc = HealthChecker(docker)
         r1, _ = hc.check_external_reachability(SITE)
@@ -603,6 +659,7 @@ class TestProbeLogLine(unittest.TestCase):
             ("onionpress-tor", STATIC): _resp("301", timings="1.500 1.680 1.700"),
             ("onionheaven", "ctl"): CIRCUITS_UP,
             ("onionheaven", HUB): _resp("200", body="hub"),
+            **CLASSIFY_TABLE,
         })
         logs = []
         hc = HealthChecker(docker, log_func=logs.append)
@@ -1011,17 +1068,83 @@ class TestRepublishTrigger(unittest.TestCase):
         # ...but one more once it expires.
         self.assertTrue(self._wedge(1500, trig))
 
-    def test_a_single_success_resets_the_window(self):
+    def test_a_single_success_no_longer_resets_but_a_streak_does(self):
+        # Review item 2: a descriptor with two of three intro points dead
+        # fails ~2/3 of visitors and never fails continuously. One lucky
+        # probe is not a recovery; REPUBLISH_RECOVERY_STREAK of them is.
         trig = RepublishTrigger(failing_for=600, cooldown=900)
         self._wedge(0, trig)
         self._wedge(300, trig)
-        # The 2-fail debounce in the menubar means one probe success is a
-        # real recovery, not noise — start over.
         self.assertFalse(trig.observe(330, True, True, "301"))
-        self.assertIsNone(trig.failing_since)
+        self.assertEqual(trig.failing_since, 0)          # window survives
         self._wedge(360, trig)
-        self.assertFalse(self._wedge(900, trig))   # only 540s into the new window
-        self.assertTrue(self._wedge(960, trig))
+        self.assertTrue(self._wedge(600, trig))          # 4/5 failed, 600 s old
+        trig2 = RepublishTrigger(failing_for=600, cooldown=900)
+        self._wedge(0, trig2)
+        for t in range(30, 30 * (REPUBLISH_RECOVERY_STREAK + 1), 30):
+            self.assertFalse(trig2.observe(t, True, True, "301"))
+        self.assertIsNone(trig2.failing_since)          # recovered
+        self._wedge(400, trig2)
+        self.assertFalse(self._wedge(900, trig2))        # new window, 500 s
+        self.assertTrue(self._wedge(1000, trig2))
+
+    def test_partial_failure_fires(self):
+        # Alternating fail/pass every 30 s: the old rule reset on every
+        # pass and never fired. Half the probes failing for 10 min is a
+        # wedge for half the visitors.
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        fired = []
+        for i, t in enumerate(range(0, 601, 30)):
+            if i % 2 == 0:
+                fired.append((t, self._wedge(t, trig)))
+            else:
+                self.assertFalse(trig.observe(t, True, True, "301"))
+        self.assertEqual([t for t, f in fired if f], [600])
+        self.assertGreaterEqual(trig.failure_ratio(), REPUBLISH_MIN_FAILURE_RATIO)
+
+    def test_below_the_failure_ratio_never_fires(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        for i, t in enumerate(range(0, 1201, 30)):
+            if i % 3 == 0:
+                self.assertFalse(self._wedge(t, trig), f"fired at t={t}")
+            else:
+                self.assertFalse(trig.observe(t, True, True, "301"))
+        # Two passes then one fail: the recovery streak (5) is never met,
+        # so the window persists, but 1/3 failed is below the ratio.
+        self.assertLess(trig.failure_ratio(), REPUBLISH_MIN_FAILURE_RATIO)
+
+    def test_fast_window_for_proven_publication_failures(self):
+        # Review item 1: when every wedge sample says the HSDirs lack our
+        # current descriptor, 5 min is enough — the benign propagation
+        # cluster is shorter and the watchdog guards a fresh upload.
+        for cls in REPUBLISH_FAST_CLASSES:
+            trig = RepublishTrigger(failing_for=600, cooldown=900, fast_for=300)
+            for t in range(0, 300, 30):
+                self.assertFalse(trig.observe(t, True, False, "000:rc=97", cls), cls)
+            self.assertTrue(trig.observe(300, True, False, "000:rc=97", cls), cls)
+            self.assertEqual(trig.required_window(), 300)
+        # Ambiguous classes keep the full window...
+        for cls in ("desc-current", "desc-other", "fetch-error", "unknown", "", None):
+            trig = RepublishTrigger(failing_for=600, cooldown=900, fast_for=300)
+            for t in range(0, 600, 30):
+                self.assertFalse(trig.observe(t, True, False, "000:rc=28", cls), cls)
+            self.assertTrue(trig.observe(600, True, False, "000:rc=28", cls), cls)
+        # ...and one ambiguous sample in the window disqualifies the fast path.
+        trig = RepublishTrigger(failing_for=600, cooldown=900, fast_for=300)
+        trig.observe(0, True, False, "000:rc=97", "desc-missing")
+        trig.observe(30, True, False, "000:rc=28", "unknown")
+        for t in range(60, 600, 30):
+            self.assertFalse(trig.observe(t, True, False, "000:rc=97", "desc-missing"))
+        self.assertEqual(trig.required_window(), 600)
+        self.assertTrue(trig.observe(600, True, False, "000:rc=97", "desc-missing"))
+
+    def test_describe_summarises_the_window(self):
+        trig = RepublishTrigger(failing_for=600, cooldown=900)
+        trig.observe(0, True, False, "000:rc=97", "desc-stale")
+        trig.observe(30, True, True, "301")
+        trig.observe(60, True, False, "000:rc=97", "desc-stale")
+        self.assertEqual(trig.describe(90),
+                         "unreachable 90s, 2/3 probes failed, http=000:rc=97, why=desc-stale")
 
     def test_requires_internal_readiness(self):
         # Hostname missing / not bootstrapped / WP down from tor: a
@@ -1070,7 +1193,15 @@ class TestRepublishTrigger(unittest.TestCase):
         self._wedge(100, trig)
         self.assertEqual(trig.failing_seconds(400), 300)
         trig.observe(401, True, True, "200")
+        self.assertEqual(trig.failing_seconds(500), 400)   # one pass: still open
+        trig.reset()
         self.assertEqual(trig.failing_seconds(500), 0)
+
+    def test_thresholds_for_the_fast_window(self):
+        self.assertEqual(REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS, 300)
+        self.assertEqual(REPUBLISH_FAST_CLASSES, ("desc-missing", "desc-stale"))
+        self.assertEqual(REPUBLISH_MIN_FAILURE_RATIO, 0.5)
+        self.assertEqual(REPUBLISH_RECOVERY_STREAK, 5)
 
 
 class TestHealthMonitorRepublish(unittest.TestCase):
@@ -1094,6 +1225,18 @@ class TestHealthMonitorRepublish(unittest.TestCase):
         with mock.patch("onionpress.health.time.time", return_value=base + 601):
             self.assertFalse(monitor.should_request_republish(hr))
 
+    def test_monitor_passes_the_wedge_class_to_the_trigger(self):
+        monitor = HealthMonitor()
+        hr = HealthResult(tor_internally_ready=True, tor_externally_reachable=False,
+                          external_http_code="000:rc=97", wedge_class="desc-missing")
+        with mock.patch("onionpress.health.time.time", return_value=0.0):
+            monitor.should_request_republish(hr)
+        self.assertEqual(monitor.republish.last_class, "desc-missing")
+        self.assertEqual(monitor.republish.required_window(),
+                         REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS)
+        with mock.patch("onionpress.health.time.time", return_value=300.0):
+            self.assertTrue(monitor.should_request_republish(hr))
+
     def test_a_healthy_result_resets(self):
         monitor = HealthMonitor()
         bad = HealthResult(tor_internally_ready=True,
@@ -1106,7 +1249,137 @@ class TestHealthMonitorRepublish(unittest.TestCase):
             monitor.should_request_republish(bad)
         with mock.patch("onionpress.health.time.time", return_value=300.0):
             self.assertFalse(monitor.should_request_republish(good))
+        # Rate-based window: a pass is a sample, not a reset; the window
+        # only ends after REPUBLISH_RECOVERY_STREAK passes in a row.
+        self.assertEqual(monitor.republish.failing_since, 0.0)
+        for t in range(330, 330 + 30 * REPUBLISH_RECOVERY_STREAK, 30):
+            with mock.patch("onionpress.health.time.time", return_value=float(t)):
+                monitor.should_request_republish(good)
         self.assertIsNone(monitor.republish.failing_since)
+
+
+class TestClassifyWedge(unittest.TestCase):
+    """Review item 1: ask both tors what they hold instead of guessing from curl."""
+
+    def _hc(self, fetch, theirs, ours=OURS_DESC):
+        docker = mock.Mock()
+        table = {
+            ("onionpress-tor", "ctl:GETINFO hs/service/desc/id"): ours,
+            ("onionheaven", "ctl:HSFETCH"): fetch,
+        }
+        if theirs is not None:
+            table[("onionheaven", "ctl:GETINFO hs/client/desc/id")] = theirs
+        docker.exec.side_effect = _dispatch(table)
+        return HealthChecker(docker), docker
+
+    def test_descriptor_missing(self):
+        hc, docker = self._hc(FETCH_NOT_FOUND, None)
+        r = hc.classify_wedge("op2abc.onion")
+        self.assertEqual(r["why"], "desc-missing")
+        self.assertEqual(r["fetch"], "not-found")
+        self.assertEqual(r["ours_rev"], 5575074206)
+        self.assertIsNone(r["theirs_rev"])
+        # No client-cache read when nothing was received.
+        keys = [k for k, _ in docker.exec.side_effect.calls]
+        self.assertNotIn(("onionheaven", "ctl:GETINFO hs/client/desc/id"), keys)
+
+    def test_descriptor_stale(self):
+        hc, _ = self._hc(FETCH_RECEIVED, _client_desc(rev=5575074000))
+        r = hc.classify_wedge("op2abc.onion")
+        self.assertEqual(r["why"], "desc-stale")
+        self.assertEqual((r["ours_rev"], r["theirs_rev"]), (5575074206, 5575074000))
+
+    def test_descriptor_current_means_intro_points(self):
+        hc, _ = self._hc(FETCH_RECEIVED, _client_desc())
+        self.assertEqual(hc.classify_wedge("op2abc.onion")["why"], "desc-current")
+
+    def test_other_lineage_is_ambiguous(self):
+        # A different signing cert: time-period skew or the incarnation
+        # before the last DEL+ADD. Revision counters are not comparable
+        # across lineages, so this must not become desc-stale.
+        hc, _ = self._hc(FETCH_RECEIVED, _client_desc(cert="ZZZZOTHER", rev=1))
+        self.assertEqual(hc.classify_wedge("op2abc.onion")["why"], "desc-other")
+
+    def test_fetch_errors_are_not_evidence(self):
+        for events, outcome in (
+            (_ok("250 OK\r\n650 HS_DESC FAILED op2abc NO_AUTH $X y REASON=QUERY_NO_HSDIR"),
+             "query-no-hsdir"),
+            (_ok("250 OK\r\n250 OK\r\n250 OK"), "no-events"),
+            (_fail(), "no-events"),
+        ):
+            hc, _ = self._hc(events, None)
+            r = hc.classify_wedge("op2abc.onion")
+            self.assertEqual(r["why"], "fetch-error", outcome)
+            self.assertEqual(r["fetch"], outcome)
+
+    def test_unknown_when_our_tor_does_not_answer(self):
+        hc, _ = self._hc(FETCH_RECEIVED, _client_desc(), ours=_fail())
+        r = hc.classify_wedge("op2abc.onion")
+        self.assertEqual(r["why"], "unknown")
+        self.assertIsNone(r["ours_rev"])
+
+    def test_cached_per_address(self):
+        hc, docker = self._hc(FETCH_NOT_FOUND, None)
+        with mock.patch("onionpress.health.time.time", return_value=1000.0):
+            hc.classify_wedge("op2abc.onion")
+            hc.classify_wedge("op2abc.onion")
+        n = docker.exec.call_count
+        with mock.patch("onionpress.health.time.time",
+                        return_value=1000.0 + WEDGE_CLASSIFY_TTL_SECONDS + 1):
+            hc.classify_wedge("op2abc.onion")
+        self.assertEqual(docker.exec.call_count, 2 * n)
+
+    def test_fetch_session_waits_for_events(self):
+        hc, docker = self._hc(FETCH_NOT_FOUND, None)
+        hc.classify_wedge("op2abc.onion")
+        argv = next(a for k, a in docker.exec.side_effect.calls if k == ("onionheaven", "ctl:HSFETCH"))
+        self.assertIn("SETEVENTS HS_DESC\\r\\nHSFETCH op2abc\\r\\n", argv[2])
+        self.assertIn("; sleep 20; printf \"QUIT", argv[2])
+
+    def test_failure_path_classifies_and_logs_why(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _fail(code=97),
+            ("onionpress-tor", STATIC): _resp("301"),
+            ("onionheaven", "ctl:GETINFO status/circuit-established"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("200", body="hub"),
+            ("onionpress-tor", "ctl:GETINFO hs/service/desc/id"): OURS_DESC,
+            ("onionheaven", "ctl:HSFETCH"): FETCH_NOT_FOUND,
+        })
+        logs = []
+        hc = HealthChecker(docker, log_func=logs.append)
+        reachable, code = hc.check_external_reachability(SITE)
+        self.assertFalse(reachable)
+        self.assertEqual(hc.last_probe["why"], "desc-missing")
+        line = next(m for m in logs if m.startswith("probe "))
+        self.assertIn("why=desc-missing", line)
+        self.assertIn("fetch=not-found", line)
+        self.assertIn("ours_rev=5575074206", line)
+        # full_check carries it to the trigger.
+        hr = HealthResult(tor_internally_ready=True)
+        with mock.patch.object(hc, "check_wordpress_local", return_value=True), \
+             mock.patch.object(hc, "check_tor_bootstrap", return_value=(True, 100)), \
+             mock.patch.object(hc, "check_tor_hostname", return_value=SITE), \
+             mock.patch.object(hc, "check_internal_connectivity", return_value=True), \
+             mock.patch.object(hc, "check_external_reachability", return_value=(False, "000:rc=97")):
+            hr = hc.full_check()
+        self.assertEqual(hr.wedge_class, "desc-missing")
+
+    def test_no_classification_for_non_wedge_codes(self):
+        # Takeover/HTTP errors are not the HSDirs' doing: no HSFETCH.
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _resp("302", body="", takeover=True),
+            ("onionpress-tor", STATIC): _resp("301"),
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("200", body="hub"),
+        })
+        hc = HealthChecker(docker)
+        reachable, code = hc.check_external_reachability(SITE)
+        self.assertEqual(code, "takeover")
+        keys = [k for k, _ in docker.exec.side_effect.calls]
+        self.assertNotIn(("onionheaven", "ctl:HSFETCH"), keys)
+        self.assertNotIn("why", hc.last_probe)
 
 
 class TestWakeResetsRepublishWindow(unittest.TestCase):
