@@ -9,6 +9,7 @@ import re
 import subprocess
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -61,6 +62,12 @@ PROBE_RETRY_TIMEOUT_SECONDS = 20
 # Healthy probes log one structured `probe` line at most this often;
 # unhealthy ones log every time (see HealthChecker._log_probe).
 PROBE_LOG_HEALTHY_INTERVAL_SECONDS = 300
+# Wedge classification (HealthChecker.classify_wedge): one HSFETCH on
+# onionheaven's tor plus two GETINFOs, on the failure path only, cached
+# this long. The fetch wait is how long we collect HS_DESC events; a
+# fetch from a working HSDir answers in well under 15 s.
+WEDGE_CLASSIFY_TTL_SECONDS = 120
+WEDGE_CLASSIFY_FETCH_WAIT_SECONDS = 20
 
 # Onions used to decide whether onionheaven's tor is itself able to reach
 # anything, when it says our site is unreachable but our own tor disagrees.
@@ -139,6 +146,10 @@ class HealthResult:
     onion_address: str = ""
     bootstrap_pct: int = 0
     external_http_code: Optional[str] = None  # HTTP status from external reachability check
+    # Why the dual probe failed, from HealthChecker.classify_wedge()
+    # (desc-missing, desc-stale, desc-current, desc-other, fetch-error,
+    # unknown); None when reachable or not classified.
+    wedge_class: Optional[str] = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -255,25 +266,32 @@ class HealthChecker:
             self._log("✓ Local access: WordPress responding")
         return True
 
-    def _control_getinfo(self, container: str, key: str) -> str:
-        """GETINFO `key` on `container`'s control port; "" if it did not answer.
+    def _control_session(self, container: str, commands: list[str], wait: int = 0) -> str:
+        """Run control-port `commands` on `container`; "" if it did not answer.
 
         Cookie auth over nc, the same way the bash launchers do it. Both
         tor containers (onionpress-tor, onionheaven) run the same image
-        with ControlPort 9051 and CookieAuthentication 1.
+        with ControlPort 9051 and CookieAuthentication 1. With `wait`,
+        the session stays open that many seconds before QUIT so
+        asynchronous events (SETEVENTS) can arrive.
         """
-        result = self.docker.exec(
-            container,
-            ["sh", "-c",
-             'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
-             '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
-             f'GETINFO {key}\\r\\nQUIT\\r\\n"'
-             ' | nc -w 5 127.0.0.1 9051'],
-            timeout=15,
-        )
+        auth = ('printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
+                '| od -A n -t x1 | tr -d \' \\n\')\\r\\n')
+        body = "".join(f"{c}\\r\\n" for c in commands)
+        if wait > 0:
+            script = (f'({auth}{body}"; sleep {int(wait)}; printf "QUIT\\r\\n")'
+                      ' | nc -w 5 127.0.0.1 9051')
+        else:
+            script = f'{auth}{body}QUIT\\r\\n" | nc -w 5 127.0.0.1 9051'
+        result = self.docker.exec(container, ["sh", "-c", script],
+                                  timeout=15 + int(wait))
         if not result.ok:
             return ""
         return result.output or ""
+
+    def _control_getinfo(self, container: str, key: str) -> str:
+        """GETINFO `key` on `container`'s control port; "" if it did not answer."""
+        return self._control_session(container, [f"GETINFO {key}"])
 
     def check_tor_bootstrap(self) -> tuple[bool, int]:
         """Check Tor bootstrap status via control port (with log fallback).
@@ -563,6 +581,125 @@ class HealthChecker:
                 return True
         return False
 
+    # ----- why did it fail? ask both tors (issue #266, review item 1) -------
+
+    @staticmethod
+    def _parse_descriptor(text: str) -> dict:
+        """Pull what we compare out of a v3 descriptor's plaintext layer.
+
+        `revision-counter` orders rebuilds of one descriptor lineage; the
+        descriptor-signing-key cert identifies the lineage (C Tor keeps
+        the signing key for the descriptor's lifetime and mints a new one
+        per DEL+ADD and per time period). Counters are only comparable
+        inside one lineage — v3 derives them from an OPE of the time
+        since the period start under a per-period key — hence the cert.
+        """
+        out: dict = {"rev": None, "cert": ""}
+        m = re.search(r"^revision-counter (\d+)", text, re.M)
+        if m:
+            out["rev"] = int(m.group(1))
+        # Control-port output keeps its \r\n line endings.
+        m = re.search(
+            r"descriptor-signing-key-cert\s*-----BEGIN ED25519 CERT-----\r?\n(.*?)\r?\n-----END ED25519 CERT-----",
+            text, re.S)
+        if m:
+            out["cert"] = re.sub(r"\s+", "", m.group(1))
+        return out
+
+    def _service_descriptor(self, onion_address: str) -> dict:
+        """The descriptor our own tor currently holds for the service."""
+        addr = onion_address.replace(".onion", "")
+        return self._parse_descriptor(
+            self._control_getinfo("onionpress-tor", f"hs/service/desc/id/{addr}"))
+
+    def _client_fetch(self, onion_address: str) -> tuple[str, dict]:
+        """Make onionheaven's tor fetch our descriptor from the HSDirs.
+
+        Returns (outcome, descriptor): outcome is "received", "not-found"
+        (every HSDir asked said so), another HS_DESC FAILED reason in
+        lower case, or "no-events" if nothing came back in the wait.
+        The descriptor is whatever the client cache holds afterwards.
+        """
+        addr = onion_address.replace(".onion", "")
+        events = self._control_session(
+            "onionheaven", ["SETEVENTS HS_DESC", f"HSFETCH {addr}"],
+            wait=WEDGE_CLASSIFY_FETCH_WAIT_SECONDS)
+        received = False
+        reasons: list[str] = []
+        for line in events.splitlines():
+            if f"HS_DESC RECEIVED {addr}" in line:
+                received = True
+            elif f"HS_DESC FAILED {addr}" in line:
+                m = re.search(r"REASON=(\S+)", line)
+                reasons.append(m.group(1).lower() if m else "unknown")
+        if received:
+            outcome = "received"
+        elif reasons and all(r == "not_found" for r in reasons):
+            outcome = "not-found"
+        elif reasons:
+            outcome = reasons[-1].replace("_", "-")
+        else:
+            outcome = "no-events"
+        desc = {"rev": None, "cert": ""}
+        if outcome == "received":
+            desc = self._parse_descriptor(
+                self._control_getinfo("onionheaven", f"hs/client/desc/id/{addr}"))
+        return outcome, desc
+
+    def classify_wedge(self, onion_address: str) -> dict:
+        """Say why the site is unreachable, from what the two tors hold.
+
+        The curl exit code lumps "descriptor not on the HSDirs", "HSDirs
+        serve an older revision than we uploaded" and "descriptor is
+        current but the intro points are dead" into one rc. Comparing the
+        descriptor onionheaven's tor can fetch with the one our tor says
+        it published tells them apart:
+
+          desc-missing  no HSDir has it (every fetch FAILED NOT_FOUND)
+          desc-stale    same lineage, lower revision than ours — our last
+                        rebuild never reached the HSDirs
+          desc-current  the HSDirs serve exactly what we published, so
+                        the intro points it names are what is failing
+          desc-other    a descriptor of ours but not the current one
+                        (time-period skew, or an incarnation before the
+                        last DEL+ADD) — ambiguous
+          fetch-error   the client could not ask (no HSDir, rate limit,
+                        no events) — not evidence about us
+          unknown       our own tor did not answer
+
+        desc-missing and desc-stale are unambiguous publication failures
+        and get the shorter republish window (REPUBLISH_FAST_CLASSES).
+        Cached for WEDGE_CLASSIFY_TTL_SECONDS: an HSFETCH per cycle would
+        be rude to the HSDirs while yellow polls every 5 s.
+        """
+        now = time.time()
+        cached = getattr(self, "_wedge_class_cache", None)
+        if (cached and cached[0] == onion_address
+                and (now - cached[1]) < WEDGE_CLASSIFY_TTL_SECONDS):
+            return cached[2]
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="classify") as pool:
+            f_ours = pool.submit(self._service_descriptor, onion_address)
+            f_theirs = pool.submit(self._client_fetch, onion_address)
+            ours = f_ours.result()
+            fetch, theirs = f_theirs.result()
+        if fetch == "not-found":
+            why = "desc-missing"
+        elif fetch != "received":
+            why = "fetch-error"
+        elif not ours["cert"]:
+            why = "unknown"
+        elif theirs["cert"] != ours["cert"]:
+            why = "desc-other"
+        elif (theirs["rev"] is not None and ours["rev"] is not None
+                and theirs["rev"] < ours["rev"]):
+            why = "desc-stale"
+        else:
+            why = "desc-current"
+        result = {"why": why, "fetch": fetch,
+                  "ours_rev": ours["rev"], "theirs_rev": theirs["rev"]}
+        self._wedge_class_cache = (onion_address, now, result)
+        return result
+
     # ----- the dual probe ---------------------------------------------------
 
     def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
@@ -604,17 +741,25 @@ class HealthChecker:
             self._log_probe("reachable", ext=ext)
             return True, ext.code
 
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="probe") as pool:
-            f_retry = None
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="probe") as pool:
+            f_retry = f_why = None
             if ext.code == "000:rc=28":
                 f_retry = pool.submit(
                     self._curl_site, "onionheaven", onion_address,
                     self._isolation_nonce(), PROBE_RETRY_TIMEOUT_SECONDS)
+            if RepublishTrigger.is_wedge_code(ext.code):
+                f_why = pool.submit(self.classify_wedge, onion_address)
             f_self = pool.submit(self._probe_onion_via, "onionpress-tor", onion_address)
             f_hub = pool.submit(self.check_onionheaven_tor_healthy)
             ext_retry = f_retry.result() if f_retry else None
             self_pr = f_self.result()
             hub_ok = f_hub.result()
+            wedge = None
+            if f_why is not None:
+                try:
+                    wedge = f_why.result()
+                except Exception as e:  # classification is advisory
+                    self._log(f"Reachability: wedge classification failed: {e}")
 
         if ext_retry is not None:
             if ext_retry.ok:
@@ -623,7 +768,7 @@ class HealthChecker:
                     "succeeded on fresh circuits — stale rendezvous circuit"
                 )
                 self._log_probe("reachable", ext=ext, ext_retry=ext_retry,
-                                self_pr=self_pr, hub_ok=hub_ok)
+                                self_pr=self_pr, hub_ok=hub_ok, wedge=wedge)
                 return True, ext_retry.code
             ext = ext_retry
 
@@ -631,7 +776,7 @@ class HealthChecker:
             # Both failed — genuinely unreachable. Prefer ext_code since
             # existing callers know how to format onionheaven failures.
             self._log_probe("unreachable", ext=ext, ext_retry=ext_retry,
-                            self_pr=self_pr, hub_ok=hub_ok)
+                            self_pr=self_pr, hub_ok=hub_ok, wedge=wedge)
             return False, ext.code
 
         # Disagreement: self says yes, external says no. Is the external
@@ -642,7 +787,7 @@ class HealthChecker:
                 f"trusting self-probe (ext={ext.code})"
             )
             self._log_probe("degraded", ext=ext, ext_retry=ext_retry,
-                            self_pr=self_pr, hub_ok=hub_ok)
+                            self_pr=self_pr, hub_ok=hub_ok, wedge=wedge)
             return True, f"degraded:ext={ext.code}"
 
         # External probe is healthy and still can't reach us. That's a
@@ -653,7 +798,7 @@ class HealthChecker:
             f"(ext={ext.code}, self={self_pr.code}) — likely descriptor issue"
         )
         self._log_probe("unreachable", ext=ext, ext_retry=ext_retry,
-                        self_pr=self_pr, hub_ok=hub_ok)
+                        self_pr=self_pr, hub_ok=hub_ok, wedge=wedge)
         return False, ext.code
 
     def _log_probe(
@@ -661,6 +806,7 @@ class HealthChecker:
         ext_retry: ProbeResult | None = None,
         self_pr: ProbeResult | None = None,
         hub_ok: bool | None = None,
+        wedge: dict | None = None,
     ) -> None:
         """One key=value line per probe, for fleet log mining.
 
@@ -686,6 +832,10 @@ class HealthChecker:
                 record[f"{name}_ms"] = pr.total_ms
         if hub_ok is not None:
             record["hub"] = "ok" if hub_ok else "down"
+        if wedge:
+            for key in ("why", "fetch", "ours_rev", "theirs_rev"):
+                if wedge.get(key) is not None:
+                    record[key] = wedge[key]
         self.last_probe = record
         if verdict == "reachable":
             last = getattr(self, "_last_healthy_probe_log", 0.0)
@@ -863,6 +1013,7 @@ class HealthChecker:
             hr.tor_externally_reachable = reachable
             hr.external_http_code = http_code
             if not reachable:
+                hr.wedge_class = getattr(self, "last_probe", {}).get("why")
                 if http_code in ("000", ""):
                     hr.errors.append("Onion service not yet reachable through Tor network")
                 else:
@@ -891,6 +1042,18 @@ REPUBLISH_AFTER_UNREACHABLE_SECONDS = 600
 # turn into DEL_ONION/ADD_ONION churn. The watchdog enforces its own
 # cooldown too; this one just keeps the host side quiet.
 REPUBLISH_COOLDOWN_SECONDS = 900
+# Shorter window when classification proves the HSDirs lack our current
+# descriptor (desc-missing, desc-stale). The fleet's benign propagation
+# cluster is < 5 min, and the watchdog refuses to tear down a descriptor
+# uploaded < 5 min ago, so a false fire during propagation costs nothing.
+REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS = 300
+REPUBLISH_FAST_CLASSES = ("desc-missing", "desc-stale")
+# Rate-based window: fire when at least this share of the window's probes
+# failed (a descriptor with two of three intro points dead fails ~2/3 of
+# visitors and never fails continuously), and treat this many consecutive
+# successes as a recovery that ends the window.
+REPUBLISH_MIN_FAILURE_RATIO = 0.5
+REPUBLISH_RECOVERY_STREAK = 5
 POLL_READY_SECONDS = 30            # Poll interval when ready
 POLL_OFFLINE_SECONDS = 10          # Poll interval when offline
 POLL_STARTING_SECONDS = 5          # Poll interval when starting/stuck
@@ -923,7 +1086,7 @@ class RepublishTrigger:
     should be sent. Shared by the Mac menubar and the Linux service so
     both platforms fire on the same evidence.
 
-    A cycle counts towards the failure window only when all of these hold:
+    A cycle is a *wedge sample* only when all of these hold:
       - Tor is internally ready (bootstrapped, hostname present, WordPress
         reachable from the tor container) — otherwise the problem isn't
         descriptor publication and a republish can't help;
@@ -933,19 +1096,55 @@ class RepublishTrigger:
         codes ("takeover", "302") are excluded on purpose: during an
         OnionHeaven takeover the heartbeat's /online is the reclaim path,
         and republishing would just fight the hub's replica every cooldown.
-    Any other outcome resets the window.
+    A reachable cycle is a *success sample*. Anything else (no probe ran,
+    not internally ready, a non-wedge failure) is not evidence either way
+    and clears the window, as before.
+
+    The window is rate-based (issue #266, review item 2). A descriptor
+    lists three intro points; with two dead, visitors fail two times in
+    three, and the old "continuous failure" rule — which reset on any
+    single success — never fired, so that site stayed degraded until
+    Tor's own maintenance happened by. Now a request is due when, over
+    the last `failing_for` seconds, at least `min_failure_ratio` of the
+    samples were wedge samples, the window is at least that old, and the
+    current sample is a wedge sample. `recovery_streak` consecutive
+    successes end the window: that is a recovery, not a lucky circuit.
+
+    Classification shortens the window (review item 1): when every wedge
+    sample in the window carries a class in REPUBLISH_FAST_CLASSES —
+    the HSDirs provably lack our current descriptor — `fast_for` applies
+    instead. The benign propagation cluster in the fleet data is under
+    5 min, and the watchdog's own 5-min-after-upload guard caps the cost
+    of a false fire during one.
     """
 
     def __init__(
         self,
         failing_for: float = REPUBLISH_AFTER_UNREACHABLE_SECONDS,
         cooldown: float = REPUBLISH_COOLDOWN_SECONDS,
+        fast_for: float = REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS,
+        min_failure_ratio: float = REPUBLISH_MIN_FAILURE_RATIO,
+        recovery_streak: int = REPUBLISH_RECOVERY_STREAK,
     ):
         self.failing_for = failing_for
         self.cooldown = cooldown
-        self.failing_since: float | None = None
+        self.fast_for = fast_for
+        self.min_failure_ratio = min_failure_ratio
+        self.recovery_streak = recovery_streak
+        # (t, wedged, wedge_class) for the last `failing_for` seconds —
+        # the ratio is computed over these. The window itself opens at
+        # the first wedge sample and is timed from `window_start`, so a
+        # long outage is not shortened by its oldest samples ageing out.
+        self.samples: deque = deque()
+        self.window_start: float | None = None
         self.last_requested: float | None = None
         self.last_code: str = ""
+        self.last_class: str = ""
+
+    @property
+    def failing_since(self) -> float | None:
+        """When the current window opened (first wedge sample), None if none."""
+        return self.window_start
 
     @staticmethod
     def is_wedge_code(http_code: str | None) -> bool:
@@ -958,6 +1157,7 @@ class RepublishTrigger:
         internally_ready: bool,
         reachable: bool | None,
         http_code: str | None,
+        wedge_class: str | None = None,
     ) -> bool:
         """Record one probe outcome. Returns True when a request is due.
 
@@ -971,14 +1171,31 @@ class RepublishTrigger:
             and reachable is False
             and self.is_wedge_code(http_code)
         )
-        if not wedged:
-            self.failing_since = None
+        success = bool(internally_ready) and reachable is True
+        if not wedged and not success:
+            self.reset()
+            return False
+        if success and self.window_start is None:
+            return False                     # healthy and no window: nothing to track
+        if self.window_start is None:
+            self.window_start = now
+        self.samples.append((now, wedged, str(wedge_class or "") if wedged else ""))
+        while self.samples and self.samples[0][0] < now - self.failing_for:
+            self.samples.popleft()
+        if success:
+            streak = 0
+            for _, w, _ in reversed(self.samples):
+                if w:
+                    break
+                streak += 1
+            if streak >= self.recovery_streak or not any(w for _, w, _ in self.samples):
+                self.reset()
             return False
         self.last_code = str(http_code or "")
-        if self.failing_since is None:
-            self.failing_since = now
+        self.last_class = str(wedge_class or "")
+        if self.failure_ratio() < self.min_failure_ratio:
             return False
-        if (now - self.failing_since) < self.failing_for:
+        if (now - self.window_start) < self.required_window():
             return False
         if (self.last_requested is not None
                 and (now - self.last_requested) < self.cooldown):
@@ -986,19 +1203,43 @@ class RepublishTrigger:
         self.last_requested = now
         return True
 
-    def reset(self) -> None:
-        """Forget the current failure window (not the cooldown).
+    def required_window(self) -> float:
+        """`fast_for` when every wedge sample has a fast class, else `failing_for`."""
+        classes = [c for _, w, c in self.samples if w]
+        if classes and all(c in REPUBLISH_FAST_CLASSES for c in classes):
+            return self.fast_for
+        return self.failing_for
 
-        For cycles where no probe ran at all — no internet, stack stopped —
-        so an offline gap never counts towards the window.
+    def failure_ratio(self) -> float:
+        """Share of samples in the window that were wedge samples (0 if empty)."""
+        if not self.samples:
+            return 0.0
+        return sum(1 for _, w, _ in self.samples if w) / len(self.samples)
+
+    def reset(self) -> None:
+        """Forget the current window (not the cooldown).
+
+        For cycles where no probe ran at all — no internet, stack stopped,
+        system wake — so an offline gap never counts towards the window.
         """
-        self.failing_since = None
+        self.samples.clear()
+        self.window_start = None
 
     def failing_seconds(self, now: float) -> int:
-        """How long the current wedge window has lasted (0 if none)."""
-        if self.failing_since is None:
+        """How long the current window has lasted (0 if none)."""
+        if self.window_start is None:
             return 0
-        return int(now - self.failing_since)
+        return int(now - self.window_start)
+
+    def describe(self, now: float) -> str:
+        """One phrase for the log/reason: window, ratio, class, code."""
+        failed = sum(1 for _, w, _ in self.samples if w)
+        parts = [f"unreachable {self.failing_seconds(now)}s",
+                 f"{failed}/{len(self.samples)} probes failed",
+                 f"http={self.last_code}"]
+        if self.last_class:
+            parts.append(f"why={self.last_class}")
+        return ", ".join(parts)
 
 
 class HealthMonitor:
@@ -1141,6 +1382,7 @@ class HealthMonitor:
             result.tor_internally_ready,
             result.tor_externally_reachable,
             result.external_http_code,
+            result.wedge_class,
         )
 
     def should_reclaim(self) -> bool:

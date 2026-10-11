@@ -469,6 +469,7 @@ class OnionPressApp(rumps.App):
         # Tor network for 10+ min while Tor is internally healthy.
         self._republish_trigger = RepublishTrigger()
         self._last_probe_code = ""
+        self._last_probe_why = ""
         self._last_probe_ms = 0
         self._last_reachability = (None, None)  # tri-state (reachable, http_code); None = never checked
         self._last_snapshot_ts = time.time()
@@ -1357,6 +1358,7 @@ class OnionPressApp(rumps.App):
         self._tor_internally_ready = False
         self._last_probe_code = ""
         self._last_probe_ms = 0
+        self._last_probe_why = ""
         # External reachability is tri-state, read by
         # write_status_to_volume() from a DIFFERENT thread than this one.
         # Stored as a single (reachable, http_code) tuple — one attribute,
@@ -1410,6 +1412,12 @@ class OnionPressApp(rumps.App):
             reachable, http_code = self._health_checker.check_external_reachability(self.onion_address)
             self._last_probe_ms = int((time.monotonic() - _probe_start) * 1000)
             self._last_probe_code = http_code or ""
+            # Issue #266: why the probe failed, from the classifier that
+            # compares the descriptor onionheaven's tor can fetch with the
+            # one our tor says it published ("" when reachable/unclassified).
+            self._last_probe_why = (
+                "" if reachable else
+                str(getattr(self._health_checker, "last_probe", {}).get("why") or ""))
             self._last_reachability = (reachable, http_code or None)
             if not reachable:
                 if log_result:
@@ -1778,7 +1786,8 @@ class OnionPressApp(rumps.App):
                             time.time(),
                             self._tor_internally_ready,
                             tor_reachable,
-                            self._last_probe_code):
+                            self._last_probe_code,
+                            self._last_probe_why):
                         self._request_descriptor_republish()
 
                     previous_ready = self.is_ready
@@ -2542,12 +2551,10 @@ class OnionPressApp(rumps.App):
         The watchdog applies its own cooldown and a minimum descriptor
         age before acting (tor-watchdog.py check_republish_request).
         """
-        failing = self._republish_trigger.failing_seconds(time.time())
-        reason = f"unreachable {failing}s http={self._last_probe_code}"
+        reason = self._republish_trigger.describe(time.time())
         if not self._republish_on_unreachable_enabled():
             self.log(
-                f"reachability: unreachable for {failing}s "
-                f"(http={self._last_probe_code}) — would request descriptor "
+                f"reachability: {reason} — would request descriptor "
                 f"republish (REPUBLISH_ON_UNREACHABLE=no, log-only)"
             )
             return
@@ -2555,14 +2562,12 @@ class OnionPressApp(rumps.App):
             self._docker, "onionpress-tor", reason)
         if ok:
             self.log(
-                f"reachability: unreachable for {failing}s "
-                f"(http={self._last_probe_code}) — requested descriptor "
+                f"reachability: {reason} — requested descriptor "
                 f"republish from tor-watchdog"
             )
         else:
             self.log(
-                f"reachability: unreachable for {failing}s "
-                f"(http={self._last_probe_code}) — republish request to "
+                f"reachability: {reason} — republish request to "
                 f"tor-watchdog FAILED (docker exec)"
             )
 
