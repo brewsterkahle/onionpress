@@ -52,11 +52,16 @@
             font-size: 16px;
         }
         
-        .setting-group p {
+        .setting-group p,
+        .setting-group ul {
             color: #666;
             font-size: 13px;
             line-height: 1.5;
             margin-bottom: 12px;
+        }
+
+        .setting-group ul {
+            padding-left: 20px;
         }
         
         .input-group {
@@ -193,8 +198,14 @@
             
             <!-- Internet Archive Plugin -->
             <div class="setting-group">
-                <h3>📚 Internet Archive Link Fixer Plugin</h3>
-                <p>Automatically install and activate the Internet Archive Wayback Machine Link Fixer plugin. Helps combat link rot by archiving your outbound links and redirecting to archived versions when links break.</p>
+                <h3>📚 Archive Your Posts to Make Your Site Robust</h3>
+                <p>Automatically install and activate the Internet Archive Wayback Machine Link Fixer plugin.</p>
+                <ul>
+                    <li>Archived posts stay available when your site is offline</li>
+                    <li>Archives your own posts on every update</li>
+                    <li>Redirects broken outbound links to their archived versions</li>
+                    <li>Uses the Internet Archive's Wayback Machine</li>
+                </ul>
                 <div class="input-group">
                     <label>
                         <input type="checkbox" id="installIaPlugin" name="installIaPlugin">

@@ -20,14 +20,15 @@
 #
 ADDRESS_PREFIX=op2
 
-# Internet Archive Wayback Machine Link Fixer Plugin
-# Default: "yes" (automatically installs and activates the plugin)
+# Archive Your Posts to Make Your Site Robust
+# Default: "yes" (automatically installs and activates the Internet Archive
+# Wayback Machine Link Fixer plugin)
 #
-# The Internet Archive Wayback Machine Link Fixer plugin helps combat link rot by:
-# - Automatically scanning your posts for outbound links
-# - Creating archived versions in the Wayback Machine
-# - Redirecting to archived versions when links break
-# - Archiving your own posts on every update
+# The plugin:
+# - Keeps archived posts available when your site is offline
+# - Archives your own posts on every update
+# - Redirects broken outbound links to their archived versions
+# - Uses the Internet Archive's Wayback Machine
 #
 # Set to "no" to disable automatic installation of this plugin.
 # More info: https://wordpress.org/plugins/internet-archive-wayback-machine-link-fixer/
