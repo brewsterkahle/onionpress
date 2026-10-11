@@ -64,12 +64,13 @@ SETTINGS_HELP = {
         "images when the app launches. Ensures you have the latest security patches."
     ),
     "INSTALL_IA_PLUGIN": (
-        "Internet Archive Wayback Machine Link Fixer Plugin\n\n"
-        "Automatically installs and activates the IA Link Fixer plugin, which:\n"
-        "  - Scans posts for outbound links\n"
-        "  - Creates archived versions in the Wayback Machine\n"
-        "  - Redirects to archived versions when links break\n"
-        "  - Archives your own posts on every update"
+        "Archive Your Posts to Make Your Site Robust\n\n"
+        "Automatically installs and activates the Internet Archive Wayback "
+        "Machine Link Fixer plugin, which:\n"
+        "  - Keeps archived posts available when your site is offline\n"
+        "  - Archives your own posts on every update\n"
+        "  - Redirects broken outbound links to their archived versions\n"
+        "  - Uses the Internet Archive's Wayback Machine"
     ),
     "REGISTER_WITH_ONIONHEAVEN": (
         "Keep Site Reachable via OnionHeaven (recommended)\n\n"
