@@ -3150,7 +3150,10 @@ sys.exit(0 if provision_interactive() else 1)
             # Clean OnionHeaven state in the shared persistent volume
             if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
                 log "Resetting OnionHeaven..."
-                docker exec onionheaven curl -s -X POST http://127.0.0.1:8083/reset-onionheaven >> "$LOG_FILE" 2>&1 || true
+                # The API server runs in onionpress-tor, not in the onionheaven
+                # container, so address it by name across the compose network;
+                # it only accepts /reset-onionheaven from Docker-bridge sources.
+                docker exec onionheaven curl -s -X POST http://onionpress-tor:8083/reset-onionheaven >> "$LOG_FILE" 2>&1 || true
             fi
 
             log "OnionPress reset and restarted"
@@ -3350,7 +3353,10 @@ sys.exit(0 if provision_interactive() else 1)
                 exit 1
             fi
 
-            result=$(docker exec onionheaven curl -s -X POST http://127.0.0.1:8083/reset-onionheaven 2>&1)
+            # web-server.py listens in onionpress-tor; curl it from the
+            # onionheaven container so the request arrives from a Docker-bridge
+            # address (the only sources the endpoint accepts).
+            result=$(docker exec onionheaven curl -s -X POST http://onionpress-tor:8083/reset-onionheaven 2>&1)
             echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
             log "OnionHeaven reset complete"
             ;;

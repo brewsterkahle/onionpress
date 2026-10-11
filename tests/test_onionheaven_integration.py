@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
@@ -87,6 +88,10 @@ def _make_arti_pem(expanded_key, public_key):
 SERVER_DIR = os.path.join(PROJECT_DIR, "app", "Resources", "docker", "tor")
 SERVER_SCRIPT = os.path.join(SERVER_DIR, "web-server.py")
 
+# How long the stubbed /reset-onionheaven holds the reset lock. Long enough
+# that a second request can be sent while the first is still inside it.
+RESET_STUB_SECONDS = 1.5
+
 
 def _find_free_port():
     with socket.socket() as s:
@@ -97,10 +102,16 @@ def _find_free_port():
 class ServerProcess:
     """Manages a local web-server.py process for testing."""
 
-    def __init__(self, port=None):
+    def __init__(self, port=None, trust_loopback_as_bridge=False):
         self.port = port or _find_free_port()
         self.proc = None
         self._tmpdir = None
+        # Test clients can only connect from 127.0.0.1. The Docker-bridge
+        # guard must reject that (it is how Tor-origin traffic arrives), so
+        # the bridge-only endpoints can only be exercised past the guard by
+        # patching it in the server process. Off by default so the default
+        # server still proves the guard rejects loopback.
+        self.trust_loopback_as_bridge = trust_loopback_as_bridge
 
     def start(self):
         self._tmpdir = tempfile.mkdtemp(prefix="onionheaven-test-")
@@ -113,7 +124,9 @@ class ServerProcess:
         # Override paths so the server uses our temp dir
         env["ONIONHEAVEN_DATA_DIR"] = data_dir
         env["ONIONHEAVEN_LISTEN_PORT"] = str(self.port)
-        env["ONIONHEAVEN_ENFORCE_AUTH"] = "1"
+        # Signature verification is unconditional since the #126 fix — the
+        # old ONIONHEAVEN_ENFORCE_AUTH switch (which this harness set to
+        # defeat the loopback bypass) no longer exists.
 
         self.proc = subprocess.Popen(
             [sys.executable, "-c", f"""
@@ -143,6 +156,14 @@ def _stub_release(conn, ca, ha, force=False):
     conn.commit()
 onionheaven_common.takeover_function = _stub_takeover
 onionheaven_common.release_function = _stub_release
+# Stand-in for the real reset (which docker-execs workers): slow enough
+# that two requests overlap, so the 409 concurrency guard is observable.
+def _stub_reset(conn=None):
+    import time as _t
+    _t.sleep({RESET_STUB_SECONDS})
+    return {{"stress_cleaned": 0, "real_migrated": 0, "old_workers_removed": 0,
+             "new_workers_spawned": 0, "duplicate_heartbeats_killed": 0}}
+onionheaven_common.reset_onionheaven = _stub_reset
 
 # Import web-server.py (dash in filename, can't use normal import)
 spec = importlib.util.spec_from_file_location(
@@ -154,6 +175,8 @@ spec.loader.exec_module(srv)
 
 srv.LISTEN_PORT = {self.port}
 srv.KEYS_DIR = {keys_dir!r}
+if {self.trust_loopback_as_bridge!r}:
+    srv.OnionHeavenHandler._docker_network_src_ok = lambda self: True
 srv.main()
 """],
             stdout=subprocess.PIPE,
@@ -522,6 +545,168 @@ class TestStatusLookup(unittest.TestCase):
         expanded, pub, addr = _make_test_keypair()
         code, data = _get(f"{server.base_url}/status/{addr}")
         self.assertEqual(code, 404)
+
+
+class TestOnionOriginAuth(unittest.TestCase):
+    """Loopback callers get no signature bypass (issue #126).
+
+    Tor hands every onion-service request to web-server.py from
+    127.0.0.1 — the same address this test client connects from. Until
+    the #126 fix, is_local_request() waved such requests through
+    signature verification, so anyone over Tor could /offline or
+    /unregister any registered address. These tests pin the fix: an
+    unsigned or badly signed loopback request is rejected and leaves the
+    registry untouched, while a correctly signed one still works.
+    """
+
+    def setUp(self):
+        self.expanded, self.pub, self.addr = _make_test_keypair()
+        self.hc_addr = _make_test_keypair()[2]
+        pem = _make_arti_pem(self.expanded, self.pub)
+        ts = onion_auth.make_timestamp()
+        sig = onion_auth.sign_payload(
+            self.expanded, self.pub, "online", self.addr, self.hc_addr, ts)
+        code, data = _post(f"{server.base_url}/online", {
+            "content_address": self.addr,
+            "healthcheck_address": self.hc_addr,
+            "arti_key_pem": base64.b64encode(pem).decode("ascii"),
+            "timestamp": ts,
+            "signature": sig,
+        })
+        assert code == 200 and data.get("registered"), f"Setup register failed: {data}"
+
+    def _status(self):
+        code, data = _get(f"{server.base_url}/status/{self.addr}")
+        self.assertEqual(code, 200)
+        return data["entries"][0]["status"]
+
+    def test_unsigned_offline_from_loopback_rejected(self):
+        code, data = _post(f"{server.base_url}/offline", {
+            "content_address": self.addr,
+            "healthcheck_address": self.hc_addr,
+        })
+        self.assertEqual(code, 403, data)
+        self.assertIn("error", data)
+        self.assertEqual(self._status(), "online")
+
+    def test_unsigned_unregister_from_loopback_rejected(self):
+        code, data = _post(f"{server.base_url}/unregister", {
+            "content_address": self.addr,
+            "healthcheck_address": self.hc_addr,
+        })
+        self.assertEqual(code, 403, data)
+        self.assertEqual(self._status(), "online")
+
+    def test_garbage_signature_from_loopback_rejected(self):
+        ts = onion_auth.make_timestamp()
+        for endpoint in ("offline", "unregister"):
+            code, data = _post(f"{server.base_url}/{endpoint}", {
+                "content_address": self.addr,
+                "healthcheck_address": self.hc_addr,
+                "timestamp": ts,
+                "signature": base64.b64encode(b"\x00" * 64).decode("ascii"),
+            })
+            self.assertEqual(code, 403, f"{endpoint}: {data}")
+        self.assertEqual(self._status(), "online")
+
+    def test_unsigned_online_from_loopback_rejected(self):
+        """/online was partly protected by the key-derivation check; the
+        signature must still be required so a replayed key file is not
+        enough to re-register someone else's address."""
+        pem = _make_arti_pem(self.expanded, self.pub)
+        code, data = _post(f"{server.base_url}/online", {
+            "content_address": self.addr,
+            "healthcheck_address": self.hc_addr,
+            "arti_key_pem": base64.b64encode(pem).decode("ascii"),
+        })
+        self.assertEqual(code, 403, data)
+
+    def test_signed_offline_and_unregister_still_work(self):
+        def signed(endpoint):
+            ts = onion_auth.make_timestamp()
+            sig = onion_auth.sign_payload(
+                self.expanded, self.pub, endpoint, self.addr, self.hc_addr, ts)
+            return _post(f"{server.base_url}/{endpoint}", {
+                "content_address": self.addr,
+                "healthcheck_address": self.hc_addr,
+                "timestamp": ts,
+                "signature": sig,
+            })
+
+        code, data = signed("offline")
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("offline"))
+        self.assertEqual(self._status(), "taken-over")
+
+        code, data = signed("unregister")
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("unregistered"))
+        self.assertEqual(self._status(), "unregistered")
+
+
+class TestResetAccess(unittest.TestCase):
+    """POST /reset-onionheaven is Docker-bridge-only (issue #126).
+
+    It docker-execs through the mounted socket, so a Tor-origin caller
+    (which arrives from loopback, exactly like this test client) must be
+    refused before anything runs. The stubbed reset in the server process
+    sleeps RESET_STUB_SECONDS, so a fast 403 also proves the handler
+    never reached it.
+    """
+
+    def test_reset_from_non_bridge_address_refused(self):
+        t0 = time.monotonic()
+        code, data = _post(f"{server.base_url}/reset-onionheaven", {})
+        self.assertEqual(code, 403, data)
+        self.assertEqual(data.get("error"), "local-only endpoint")
+        self.assertLess(time.monotonic() - t0, RESET_STUB_SECONDS)
+
+
+class TestResetConcurrency(unittest.TestCase):
+    """A second /reset-onionheaven while one runs gets 409 (issue #126).
+
+    Runs against a separate server whose bridge guard is patched to accept
+    the test client's loopback address, so the request reaches the lock.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ServerProcess(trust_loopback_as_bridge=True)
+        cls.server.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def _reset(self):
+        return _post(f"{self.server.base_url}/reset-onionheaven", {})
+
+    def test_second_concurrent_reset_gets_409(self):
+        first = {}
+
+        def run_first():
+            first["result"] = self._reset()
+
+        t = threading.Thread(target=run_first)
+        t.start()
+        # Give the first request time to get inside the lock, but not
+        # enough for the stubbed reset to finish.
+        time.sleep(RESET_STUB_SECONDS / 3)
+        code, data = self._reset()
+        self.assertEqual(code, 409, data)
+        self.assertIn("already in progress", data.get("error", ""))
+
+        t.join(timeout=RESET_STUB_SECONDS * 4)
+        self.assertFalse(t.is_alive(), "first reset did not finish")
+        code, data = first["result"]
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("reset"))
+
+        # The lock is released once the first run finishes, so a
+        # sequential reset works again.
+        code, data = self._reset()
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("reset"))
 
 
 if __name__ == "__main__":

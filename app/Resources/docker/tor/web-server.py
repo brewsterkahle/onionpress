@@ -8,17 +8,34 @@ Lightweight HTTP server (Python stdlib only) that handles:
 
 Runs inside the tor container on port 8083, exposed through the onion service.
 
+Access rules. Port 8083 is published on every node's wordpress onion
+service, so everything below is reachable by anyone over Tor. Tor hands
+onion-service connections to this process from 127.0.0.1, which is why a
+loopback source address proves nothing and is never trusted on its own.
+The only source-address trust is the Docker bridge range (172.x / 10.x):
+those requests can only come from a container on the compose network.
+
 Endpoints:
-  POST /online       — Heartbeat / register (upserts registry entry, optionally stores arti key)
+  POST /online       — Heartbeat / register (upserts registry entry, stores arti key).
+                       Requires a valid ed25519 signature from the content
+                       address's own key, from every source address.
   POST /unregister   — Release takeover (DEL_ONION + decrement worker), mark
                        row status='unregistered', delete arti key file.
                        Row is NOT deleted — a subsequent /online from the same
                        (content_address, healthcheck_address) transitions
                        status back to 'online' (re-registration).
-  POST /offline      — Notify OnionHeaven that instance is going offline
-  POST /reset-onionheaven — Clean stress tests + refresh workers with current code (internal only)
+                       Signature required, from every source address.
+  POST /offline      — Notify OnionHeaven that instance is going offline.
+                       Signature required, from every source address.
+  POST /reset-onionheaven — Clean stress tests + refresh workers with current
+                       code. Docker-bridge sources only (the `onionpress
+                       reset` CLI reaches it via docker exec from the
+                       onionheaven container); Tor-origin callers get 403.
+                       One run at a time — a concurrent call gets 409.
   POST /logs/manifest — (OnionHome only) Accept log file manifests for analytics sharing
   POST /logs/upload   — (OnionHome only) Accept log file uploads for analytics sharing
+  POST /api/name/register, /release — (OnionHome only) signature required
+  POST /api/name/register-local, /release-local — Docker-bridge sources only
   GET  /status       — Public status summary (no auth)
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
@@ -326,27 +343,25 @@ def derive_onion_address(public_key_32):
 # Auth helper
 # ---------------------------------------------------------------------------
 
-def is_local_request(handler):
-    """Check if request is from localhost or Docker network (skip auth)."""
-    if os.environ.get("ONIONHEAVEN_ENFORCE_AUTH") == "1":
-        return False
-    addr = handler.client_address[0]
-    return (
-        addr == "127.0.0.1"
-        or addr == "::1"
-        or addr.startswith("172.")
-        or addr.startswith("10.")
-    )
+# Only one /reset-onionheaven may run at a time (issue #126). The operation
+# tears down and respawns every takeover worker and waits up to 90s for
+# them to bootstrap; two overlapping runs would double-spawn workers and
+# race each other's registry edits. Non-blocking acquire → 409 on overlap.
+_RESET_LOCK = threading.Lock()
 
 
 def _verify_signature(handler, data, endpoint):
-    """Verify ed25519 signature on a request.
+    """Verify the ed25519 signature on a request.
 
-    Returns (ok, error_message). Skips verification for local requests.
+    Returns (ok, error_message). Verification is unconditional: the
+    signature IS the ownership proof, and the source address carries no
+    information — Tor delivers every onion-service request from
+    127.0.0.1, so a loopback "local request" bypass (removed in the fix
+    for #126) let anyone over Tor /offline or /unregister any address.
+    Every legitimate caller (Mac menubar app, Linux heartbeat daemon,
+    stress-test workers) signs; nothing inside the container posts to
+    these endpoints.
     """
-    if is_local_request(handler):
-        return True, ""
-
     content_address = data.get("content_address", "")
     healthcheck_address = data.get("healthcheck_address", "")
     timestamp = data.get("timestamp", "")
@@ -827,16 +842,17 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"released": True, "onionname": name})
 
-    # -- Local sign-and-forward endpoints ----------------------------------
+    # -- Docker-network-only endpoints ------------------------------------
     #
-    # These are called by the WordPress mu-plugin on user create/delete.
-    # They are NOT meant to be reachable from outside the Docker network;
-    # we enforce that by rejecting any source IP that isn't on the Docker
-    # bridge range. Tor-proxied traffic arrives at 127.0.0.1 (Tor forwards
-    # onion service connections locally), so explicitly denying 127.x blocks
-    # Tor-origin callers.
+    # /api/name/{register,release}-local are called by the WordPress
+    # mu-plugin on user create/delete; /reset-onionheaven by the
+    # `onionpress reset` CLI via docker exec. None of them are meant to be
+    # reachable from outside the Docker network; we enforce that by
+    # rejecting any source IP that isn't on the Docker bridge range.
+    # Tor-proxied traffic arrives at 127.0.0.1 (Tor forwards onion service
+    # connections locally), so denying loopback blocks Tor-origin callers.
 
-    def _name_local_src_ok(self):
+    def _docker_network_src_ok(self):
         src = self.client_address[0]
         if src.startswith("172.") or src.startswith("10."):
             return True
@@ -855,7 +871,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
     def _handle_name_local(self, endpoint):
         """Shared implementation for /api/name/{register,release}-local."""
-        if not self._name_local_src_ok():
+        if not self._docker_network_src_ok():
             self._send_json(403, {"error": "local-only endpoint"})
             return
 
@@ -1033,9 +1049,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 return
 
             # Verify the key derives to content_address. Without this, a
-            # buggy client (or a request that slipped past signature
-            # verification via the local-bypass) can overwrite a stored
-            # key with bytes that decode to a different address. The key
+            # buggy client can overwrite a stored key with bytes that
+            # decode to a different address. The key
             # is unrecoverable once clobbered — only the authoritative
             # OnionPress instance for that address holds the original.
             public_key = extract_public_key_from_arti_pem(arti_pem)
@@ -1253,12 +1268,24 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         """Clean stress tests + refresh all takeover workers with current code.
 
         Removes stress test entries, tears down old workers, spawns fresh ones
-        with patched code, and migrates real takeovers. No auth required —
-        reachable only from within the Docker network.
+        with patched code, and migrates real takeovers. It runs `docker exec`
+        through the mounted socket, so it is restricted to Docker-bridge
+        sources (same guard as the *-local name endpoints) — before #126 it
+        had no gate at all and was callable by anyone over Tor. Serialized
+        by _RESET_LOCK: a second call while one is running gets 409.
         """
-        from onionheaven_common import reset_onionheaven
-        stats = reset_onionheaven()
-        self._send_json(200, {"reset": True, **stats})
+        if not self._docker_network_src_ok():
+            self._send_json(403, {"error": "local-only endpoint"})
+            return
+        if not _RESET_LOCK.acquire(blocking=False):
+            self._send_json(409, {"error": "reset already in progress"})
+            return
+        try:
+            from onionheaven_common import reset_onionheaven
+            stats = reset_onionheaven()
+            self._send_json(200, {"reset": True, **stats})
+        finally:
+            _RESET_LOCK.release()
 
 
     # -- POST /logs/manifest (OnionHome only) ---------------------------------
