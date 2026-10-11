@@ -290,26 +290,58 @@ class HealthChecker:
         return reachable=False with the sentinel http_code "takeover"
         so the caller can log + account for it cleanly. Curl transport
         failure returns "000:rc=<exit>".
+
+        A curl timeout (rc=28) is retried once on fresh circuits. Tor
+        reuses an open rendezvous circuit to the same service for new
+        streams, and a rendezvous that joined but never passes data
+        (seen 2026-10-11 on onionpress-tor right after a cold start:
+        HSCR_JOINED, every stream on it timed out for minutes while a
+        fresh visitor got a 301) poisons every later probe until Tor
+        gives up on it. Per-probe SOCKS auth credentials put the retry
+        in its own isolation group (IsolateSOCKSAuth is on by default),
+        so it has to build its own circuits. Only the retry is isolated:
+        the healthy path keeps the cheap warm-circuit reuse.
         """
         if not onion_address:
             return False, ""
+        ok, code = self._curl_onion(container, onion_address)
+        if code == "000:rc=28":
+            nonce = f"onionpress-probe-{int(time.time() * 1000)}"
+            ok2, code2 = self._curl_onion(container, onion_address, isolate=nonce)
+            if ok2:
+                self._log(
+                    f"Reachability: probe via {container} timed out but "
+                    f"succeeded on fresh circuits — stale rendezvous circuit"
+                )
+            return ok2, code2
+        return ok, code
+
+    def _curl_onion(
+        self, container: str, onion_address: str, isolate: str | None = None,
+    ) -> tuple[bool, str]:
+        """One curl through `container`'s SOCKS; see _probe_onion_via.
+
+        `isolate` is a SOCKS username; any value forces Tor to serve the
+        request on circuits of its own (stream isolation by auth).
+        """
         # -D - dumps response headers to stdout; -o /dev/null suppresses
         # the body; -w appends "---<code>" at the very end so we can
         # split headers from status. The delimiter must be something
         # that can't appear in an RFC-compliant HTTP header.
-        result = self.docker.exec(
-            container,
-            [
-                "curl", "-s", "--max-time", "30",
-                "--socks5-hostname", "127.0.0.1:9050",
-                "-o", "/dev/null",
-                "-D", "-",
-                "-w", "\n---STATUS---%{http_code}",
-                "-H", "User-Agent: OnionPress-HealthCheck",
-                f"http://{onion_address}/",
-            ],
-            timeout=45,
-        )
+        argv = [
+            "curl", "-s", "--max-time", "30",
+            "--socks5-hostname", "127.0.0.1:9050",
+        ]
+        if isolate:
+            argv += ["--proxy-user", f"{isolate}:x"]
+        argv += [
+            "-o", "/dev/null",
+            "-D", "-",
+            "-w", "\n---STATUS---%{http_code}",
+            "-H", "User-Agent: OnionPress-HealthCheck",
+            f"http://{onion_address}/",
+        ]
+        result = self.docker.exec(container, argv, timeout=45)
         if not result.ok:
             return False, f"000:rc={result.returncode}"
         raw = result.output or ""
