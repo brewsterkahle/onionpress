@@ -63,6 +63,30 @@ function onionpress_onboarding_register_page() {
 }
 
 /**
+ * "New Post" in the admin bar, right after the site name (core adds the
+ * site-name node at priority 30; "+ New" sits further right at 70).
+ *
+ * User testing (#193): a first-time user wanted to write a post and could
+ * not find where to start — "Edit Site" is not an obvious path and the
+ * generic "+ New" dropdown does not say "post". One explicit, always-visible
+ * entry fixes that. Shown on the front end and in wp-admin for anyone who
+ * can write posts on the current site; `admin_url()` resolves to the
+ * current blog, so on a per-user subsite it opens that subsite's editor.
+ */
+add_action( 'admin_bar_menu', 'onionpress_onboarding_new_post_node', 31 );
+function onionpress_onboarding_new_post_node( $wp_admin_bar ) {
+    if ( ! is_user_logged_in() || ! current_user_can( 'edit_posts' ) ) {
+        return;
+    }
+    $wp_admin_bar->add_node( [
+        'id'    => 'onionpress-new-post',
+        'title' => '<span class="ab-icon dashicons dashicons-edit"></span><span class="ab-label">New Post</span>',
+        'href'  => admin_url( 'post-new.php' ),
+        'meta'  => [ 'title' => 'Write a new post' ],
+    ] );
+}
+
+/**
  * Read the .onion address from the shared volume.
  */
 function onionpress_onboarding_get_onion() {
