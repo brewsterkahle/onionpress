@@ -62,6 +62,21 @@ else
     SUDO=""
 fi
 
+# Refuse to run as root itself (not via sudo). Docker is set up in rootless
+# mode for the user who will run OnionPress, and dockerd-rootless-setuptool.sh
+# refuses to install for uid 0 — so a root login would get as far as
+# installing Docker and then abort (issue #265). Fail before touching anything.
+if [ "$REAL_UID" -eq 0 ]; then
+    echo "ERROR: Do not run the installer as root."
+    echo "  OnionPress runs Docker in rootless mode, which needs a normal user"
+    echo "  account with sudo. Create one, switch to it, and rerun the installer:"
+    echo ""
+    echo "    adduser onionpress && usermod -aG sudo onionpress"
+    echo "    su - onionpress"
+    echo "    curl -sSL https://raw.githubusercontent.com/brewsterkahle/onionpress/main/linux/install.sh | bash"
+    exit 1
+fi
+
 # ─── Install Docker (rootless) ──────────────────────────────────────
 
 # Helper to run a command as the real user (not root)
@@ -331,7 +346,9 @@ $SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" "$INSTALL_DIR/"
 # DEL_ONION/ADD_ONION. Without this, a laptop close-lid leaves a stale
 # descriptor on the DHT for minutes until missed heartbeats finally
 # trigger the hub takeover. See linux/onionpress-sleep-hook for details.
-$SUDO install -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
+# -D creates /usr/lib/systemd/system-sleep/, which does not exist on a
+# fresh Debian 13 (issue #264).
+$SUDO install -D -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
     /usr/lib/systemd/system-sleep/onionpress
 
 # LAN bind: the compose file defaults to 127.0.0.1, but the Linux launcher
