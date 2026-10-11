@@ -85,6 +85,115 @@ def default_site_title() -> str:
     return "My OnionPress Site"
 
 
+# ─── First post ──────────────────────────────────────────────────────────────
+
+# WordPress seeds every new site with a "Hello world!" post (ID 1). A brand
+# new OnionPress site replaces it with this onboarding post (#193): it tells
+# the author what the site is for and where to start, and it is the only
+# thing a visitor sees until the first real post. Block markup so it opens
+# cleanly in the block editor; the author is free to edit or delete it.
+#
+# WP_DEFAULT_POST_TITLE is the exact string core writes
+# (wp_install_defaults → __('Hello world!')); install_welcome_post only
+# touches post 1 while that is still its title.
+WP_DEFAULT_POST_TITLE = "Hello world!"
+WP_DEFAULT_COMMENT_AUTHOR = "A WordPress Commenter"
+
+WELCOME_POST_TITLE = "Welcome to your OnionPress site"
+WELCOME_POST_SLUG = "welcome-to-onionpress"
+WELCOME_POST_CONTENT = """\
+<!-- wp:paragraph -->
+<p>This site is yours. It runs on your own computer as a Tor onion service, so no company can close your account, bury your writing, or decide who gets to read it. There is no feed here and no algorithm, just you and the people who choose to visit.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading">What you can do here</h2>
+<!-- /wp:heading -->
+
+<!-- wp:list -->
+<ul class="wp-block-list"><!-- wp:list-item -->
+<li><strong>Write.</strong> Click <strong>New Post</strong> in the bar at the top and start typing. The moment you press Publish, it is live at your .onion address.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li><strong>Share it.</strong> In the OnionPress menubar, choose <strong>Open in Tor Browser</strong> to see your site the way visitors do, and copy your address or onionname to pass along.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li><strong>Follow and be followed.</strong> Other OnionPress sites can follow you by onionname, and you can follow them from the <strong>Following</strong> section of your settings. Sites link to sites, with no platform in between.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li><strong>Keep what you make.</strong> Drop files into <strong>My Creations</strong> in your OnionPress folder to publish them here, and use <strong>Backup</strong> in the menubar for an encrypted copy of your whole site that you can restore anywhere.</li>
+<!-- /wp:list-item --></ul>
+<!-- /wp:list -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading">Make it yours</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>This post is only a starting point. Edit it, delete it, or leave it up as a reminder of why you set this up: to publish freely, keep what you write, and own it.</p>
+<!-- /wp:paragraph -->
+"""
+
+
+def install_welcome_post(
+    *,
+    blog_url: str,
+    docker_bin: str = "docker",
+    log_func: Callable[[str], None] | None = None,
+) -> bool:
+    """Replace WordPress's stock "Hello world!" post on a freshly created
+    site with the OnionPress onboarding post (#193).
+
+    Safe to call on any site: post 1 is only rewritten while its title is
+    still the WordPress default, so a site the author has already touched,
+    a restored backup, or an upgraded install is never altered. Returns
+    True when the welcome post is in place (or post 1 was left alone on
+    purpose), False when the replacement itself failed.
+    """
+    def log(msg: str) -> None:
+        if log_func:
+            log_func(msg)
+
+    def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [docker_bin, "exec", "onionpress-wordpress",
+             "wp", "--allow-root"] + list(args),
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
+
+    url_arg = f"--url={blog_url}"
+    r = wp("post", "get", "1", "--field=post_title", url_arg)
+    title = (r.stdout or "").strip()
+    if r.returncode != 0 or title != WP_DEFAULT_POST_TITLE:
+        log(f"Post 1 is not the stock '{WP_DEFAULT_POST_TITLE}' post "
+            f"(got {title!r}) — leaving it alone")
+        return True
+
+    r = wp("post", "update", "1",
+           f"--post_title={WELCOME_POST_TITLE}",
+           f"--post_name={WELCOME_POST_SLUG}",
+           f"--post_content={WELCOME_POST_CONTENT}",
+           "--post_status=publish",
+           url_arg)
+    if r.returncode != 0:
+        log(f"WARNING: welcome post update failed: {r.stderr.strip()[:200]}")
+        return False
+    log(f"Welcome post installed in place of '{WP_DEFAULT_POST_TITLE}'")
+
+    # Core also seeds a sample comment on post 1. A fake comment under the
+    # welcome post is confusing, so drop it — but only the stock one.
+    r = wp("comment", "get", "1", "--field=comment_author", url_arg)
+    if r.returncode == 0 and (r.stdout or "").strip() == WP_DEFAULT_COMMENT_AUTHOR:
+        wp("comment", "delete", "1", "--force", url_arg)
+        log("Stock sample comment removed")
+    return True
+
+
 # ─── Provisioning ────────────────────────────────────────────────────────────
 
 def provision_primary_subsite(
@@ -109,6 +218,7 @@ def provision_primary_subsite(
       4. Resolve blog_id and set primary_blog usermeta
       5. wp theme activate onionpress on the subsite
       6. wp option update limit_login_show_top_bar_menu_item 0
+      7. install_welcome_post — swap "Hello world!" for the onboarding post
 
     Returns True (best-effort — individual failures are logged but do
     not block the wizard).
@@ -185,6 +295,16 @@ def provision_primary_subsite(
     #    mostly bot traffic; the badge is noise rather than signal).
     wp("option", "update", "limit_login_show_top_bar_menu_item", "0",
        f"--url=http://localhost/{onionname}/")
+
+    # 7. First post. `wp site create` seeded the subsite with WordPress's
+    #    "Hello world!"; a new author should instead find a post that says
+    #    what this site is for and where to start writing (#193). Guarded
+    #    on the stock title, so a re-run on an existing subsite is a no-op.
+    install_welcome_post(
+        blog_url=f"http://localhost/{onionname}/",
+        docker_bin=docker_bin,
+        log_func=log_func,
+    )
 
     log(f"Subsite /{onionname}/ ready")
     return True
