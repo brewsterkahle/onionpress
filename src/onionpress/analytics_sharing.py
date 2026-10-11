@@ -3,6 +3,14 @@
 Background thread that periodically uploads completed (rolled) log files
 to the OnionHome hub for remote debugging.  Only runs when the user has
 set ``SHARE_ANALYTICS_WITH_ONIONHOME=yes`` in their config.
+
+The loop is host-agnostic: it talks to an ``app`` object that supplies
+config, logging, the onion addresses, the log files and a way to reach
+``docker``.  On macOS that object is the menubar app; on Linux it is the
+``AnalyticsHost`` adapter in ``linux/onionpress-heartbeat.py`` (the
+heartbeat daemon runs the same loop on the same daily cadence).  Before
+that adapter existed no Linux install ever uploaded, whatever the opt-in
+said (issue #207).
 """
 
 import base64
@@ -204,7 +212,13 @@ def _do_upload_cycle(app, include_active=False):
                     try:
                         size = os.path.getsize(path)
                         if size > 0:
-                            name = os.path.basename(path)
+                            # RotatingLog's active file already carries a
+                            # dated, per-roll name. A log whose on-disk
+                            # name is reused across rotations (the Linux
+                            # adapter's plain files) supplies a stable
+                            # name of its own via current_name().
+                            name_fn = getattr(log_inst, "current_name", None)
+                            name = name_fn() if callable(name_fn) else os.path.basename(path)
                             # Avoid duplicates
                             if not any(f["name"] == name for f in all_files):
                                 all_files.append({"name": name, "size": size, "path": path})
@@ -218,10 +232,13 @@ def _do_upload_cycle(app, include_active=False):
     container_patterns = ["container-*.log.gz"]
     if include_active:
         container_patterns.append("container-*.log")
+    # Match on path as well as name: a host may advertise a file under a
+    # name that differs from its on-disk name (the Linux adapter does, so
+    # a plain ``container-tor.log`` gets a stable, rotation-proof name).
     for pattern in container_patterns:
         for p in sorted(_glob.glob(os.path.join(logs_dir, pattern))):
             name = os.path.basename(p)
-            if any(f["name"] == name for f in all_files):
+            if any(f["name"] == name or f["path"] == p for f in all_files):
                 continue
             try:
                 size = os.path.getsize(p)
@@ -236,7 +253,8 @@ def _do_upload_cycle(app, include_active=False):
         name = os.path.basename(p)
         try:
             size = os.path.getsize(p)
-            if size > 0 and not any(f["name"] == name for f in all_files):
+            if size > 0 and not any(f["name"] == name or f["path"] == p
+                                    for f in all_files):
                 all_files.append({"name": name, "size": size, "path": p})
         except OSError:
             pass
@@ -344,7 +362,7 @@ def _do_upload_cycle(app, include_active=False):
         "healthcheck_address": hc_addr,
         "version": getattr(app, "version", "unknown"),
         "tor_impl": "tor",  # the only implementation since 2026-09-24; kept for the OnionHome schema
-        "os_version": platform.mac_ver()[0] or "unknown",
+        "os_version": _os_version(),
         "files": [{"name": f["name"], "size": f["size"]} for f in all_files],
         "timestamp": timestamp,
         "signature": signature,
@@ -436,17 +454,43 @@ def _do_upload_cycle(app, include_active=False):
     return {"status": "ok", "wanted": len(wanted_names), "uploaded": uploaded_count}
 
 
+def _os_version():
+    """Host OS version string for the manifest, on either platform."""
+    if platform.system() == "Darwin":
+        return platform.mac_ver()[0] or "unknown"
+    try:
+        release = platform.freedesktop_os_release()
+        pretty = release.get("PRETTY_NAME") or release.get("NAME")
+        if pretty:
+            return f"{pretty} ({platform.release()})"
+    except (OSError, AttributeError):
+        pass
+    return f"{platform.system()} {platform.release()}".strip() or "unknown"
+
+
+def _docker_command(app):
+    """Return ``(docker_bin, env)`` for reaching the onionpress-tor container.
+
+    A host that knows how to reach its own Docker (the Linux heartbeat
+    daemon, where ``docker`` is on PATH and the rootless socket comes
+    from the ambient environment) exposes ``docker_command()``.  The
+    menubar app has no such method, so it gets the Colima socket from
+    onionheaven's helpers, as before.
+    """
+    hook = getattr(app, "docker_command", None)
+    if callable(hook):
+        return hook()
+    from onionpress import onionheaven
+    return onionheaven._docker_bin(app), onionheaven._docker_env(app)
+
+
 def _post_json(app, url, payload_dict):
     """POST JSON to *url* via docker exec curl through Tor SOCKS.
 
     Uses stdin piping to avoid ARG_MAX limits on large payloads.
     Returns parsed JSON response or None on failure.
     """
-    # Import docker helpers from onionheaven (same pattern)
-    from onionpress import onionheaven
-
-    docker_bin = onionheaven._docker_bin(app)
-    docker_env = onionheaven._docker_env(app)
+    docker_bin, docker_env = _docker_command(app)
 
     payload_json = json.dumps(payload_dict)
 
