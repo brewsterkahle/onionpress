@@ -2741,6 +2741,14 @@ sys.exit(0 if provision_interactive() else 1)
             op_py admin-password
             ;;
 
+        get)
+            # Fetch a URL over Tor and print the body — for checking whether
+            # a .onion is reachable. cmd_get in src/onionpress/cli.py runs
+            # curl inside the tor container. "${@:2}" forwards the URL and
+            # flags (-i, --max-time) verbatim.
+            op_py get "${@:2}"
+            ;;
+
         logs)
             cd "$DOCKER_DIR"
             docker compose logs -f
@@ -3410,7 +3418,7 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|setup|onionheaven|reset|reset-onionheaven|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|get|setup|onionheaven|reset|reset-onionheaven|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac

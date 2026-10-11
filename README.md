@@ -56,6 +56,7 @@ sudo systemctl start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
+To check that a site is reachable over Tor: `onionpress get http://<address>.onion/` (fetches through the tor container and prints the page).
 
 ### macOS Security Warning
 

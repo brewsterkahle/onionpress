@@ -2643,6 +2643,15 @@ main() {
             _validate_oh_address "$2"
             ;;
 
+        get)
+            # Fetch a URL over Tor and print the body — for checking whether
+            # a .onion is reachable. Delegated to src/onionpress/cli.py
+            # cmd_get, which runs curl inside the tor container (a SOCKS
+            # connection from the host does not work through Colima's port
+            # forwarding). "${@:2}" forwards the URL and flags verbatim.
+            bundled_python -m onionpress.cli get "${@:2}"
+            ;;
+
         provision-post-install)
             # Delegated to src/onionpress/multisite.py:provision_post_install
             # so Mac and Linux share one implementation. The bash sub-
@@ -3030,6 +3039,8 @@ User commands:
   status        Show container status
   address       Show your .onion address
   logs          Tail container logs
+  get           Fetch a URL over Tor and print the body (is this .onion up?)
+                (-i to include response headers, --max-time SECONDS)
   update        Check GitHub for a new release and install it
                 (--check to only check, -y to skip prompt)
   backup        Create an encrypted backup zip
@@ -3044,6 +3055,7 @@ Advanced / internal (used by the menubar app or scripts):
 Examples:
   $0 status
   $0 address
+  $0 get http://<some-address>.onion/
   $0 update --check
   $0 update -y
   $0 backup <password> [output_path]
