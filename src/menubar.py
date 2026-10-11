@@ -62,6 +62,7 @@ from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress.power import CaffeineManager
 from onionpress import launcher_ops
+from onionpress import splash_tips
 
 
 
@@ -230,6 +231,9 @@ class OnionPressApp(rumps.App):
         # Always show splash first — setup window replaces it from auto_start()
         self.launch_splash = None
         self.launch_splash_time_field = None
+        self.launch_splash_tip_field = None
+        self.launch_splash_tip_timer = None
+        self._launch_splash_tip_tick = 0
         self.show_launch_splash()
 
         # Now load icon files (this does I/O but splash is already showing)
@@ -574,6 +578,22 @@ class OnionPressApp(rumps.App):
             time_field.setFont_(small_font)
             content_view.addSubview_(time_field)
 
+            # Rotating "what you can do" tip under the status line (#166).
+            # Two wrapped lines of small secondary text in the gap between the
+            # status line (y=90) and the buttons (y=52).
+            tip_field = AppKit.NSTextField.alloc().initWithFrame_(AppKit.NSMakeRect(20, 56, 280, 32))
+            tip_field.setStringValue_(splash_tips.tip_at(0))
+            tip_field.setBezeled_(False)
+            tip_field.setDrawsBackground_(False)
+            tip_field.setEditable_(False)
+            tip_field.setSelectable_(False)
+            tip_field.setAlignment_(AppKit.NSTextAlignmentCenter)
+            tip_field.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+            tip_field.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+            tip_field.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+            tip_field.cell().setWraps_(True)
+            content_view.addSubview_(tip_field)
+
             # Add View Log button
             view_log_button = AppKit.NSButton.alloc().initWithFrame_(AppKit.NSMakeRect(20, 20, 130, 32))
             view_log_button.setTitle_("View Log")
@@ -604,6 +624,9 @@ class OnionPressApp(rumps.App):
 
             self.launch_splash = window
             self.launch_splash_time_field = time_field  # Store reference for updates
+            self.launch_splash_tip_field = tip_field
+            self._launch_splash_tip_tick = 0
+            self.start_splash_tip_rotation()
 
             # Log splash creation
             try:
@@ -617,6 +640,7 @@ class OnionPressApp(rumps.App):
     def dismiss_launch_splash(self):
         """Dismiss the launch splash window"""
         def dismiss():
+            self.stop_splash_tip_rotation()
             if self.launch_splash:
                 try:
                     self.log("Dismissing launch splash")
@@ -635,6 +659,46 @@ class OnionPressApp(rumps.App):
             if self.launch_splash_time_field:
                 self.launch_splash_time_field.setStringValue_(message)
         _main_thread(_update)
+
+    def start_splash_tip_rotation(self):
+        """Cycle the splash's tip label while the splash is up (#166).
+
+        Called on the main thread from show_launch_splash(). The NSTimer is
+        scheduled on the main run loop in the common modes so it keeps
+        firing while a menu is open; which tip shows is decided by the pure
+        ``onionpress.splash_tips.tip_at`` so the order is unit-testable.
+        The timer is invalidated by stop_splash_tip_rotation(), which every
+        splash-dismiss path goes through.
+        """
+        try:
+            def _advance(_timer):
+                try:
+                    if not self.launch_splash or not self.launch_splash_tip_field:
+                        self.stop_splash_tip_rotation()
+                        return
+                    self._launch_splash_tip_tick += 1
+                    self.launch_splash_tip_field.setStringValue_(
+                        splash_tips.tip_at(self._launch_splash_tip_tick))
+                except Exception as e:
+                    self.log(f"Splash tip rotation error: {e}")
+
+            timer = AppKit.NSTimer.timerWithTimeInterval_repeats_block_(
+                splash_tips.TIP_INTERVAL_SECONDS, True, _advance)
+            AppKit.NSRunLoop.mainRunLoop().addTimer_forMode_(timer, AppKit.NSRunLoopCommonModes)
+            self.launch_splash_tip_timer = timer
+        except Exception as e:
+            # Tips are a nicety; the splash must still show without them.
+            self.log(f"Could not start splash tip rotation: {e}")
+
+    def stop_splash_tip_rotation(self):
+        """Stop the splash tip timer (main thread; idempotent)."""
+        timer = self.launch_splash_tip_timer
+        self.launch_splash_tip_timer = None
+        if timer is not None:
+            try:
+                timer.invalidate()
+            except Exception as e:
+                self.log(f"Error stopping splash tip rotation: {e}")
 
     def openLogFile_(self, sender):
         """Action handler for View Log button — open in built-in log viewer"""
