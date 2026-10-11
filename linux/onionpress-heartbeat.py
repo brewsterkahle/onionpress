@@ -8,14 +8,25 @@ periodic heartbeats. Runs as a systemd service.
 Reads config from ~/.onionpress/config:
   REGISTER_WITH_ONIONHEAVEN=yes|no  (default: yes)
   ONIONHEAVEN_ADDRESS=<hub .onion>  (default: centralized OH)
+  SHARE_ANALYTICS_WITH_ONIONHOME=yes  (opt-in; anything else = no upload)
 
-Imports onion_auth and key_manager from /opt/onionpress/scripts/.
+Also hosts the opt-in analytics upload loop (onionpress.analytics_sharing)
+so a Linux install ships its logs to OnionHome on the same daily cadence
+as the Mac menubar app. The daemon is the natural home for it: it already
+runs continuously under systemd and re-reads the config every cycle.
+Before this, nothing on Linux ever ran the upload cycle (issue #207).
+
+Imports onion_auth and key_manager from /opt/onionpress/scripts/ and the
+onionpress package from /opt/onionpress/lib/ (both laid down by
+install.sh and the .deb).
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -51,6 +62,13 @@ except ImportError:
 # Add scripts directory to path for onion_auth and key_manager imports
 SCRIPTS_DIR = "/opt/onionpress/scripts"
 sys.path.insert(0, SCRIPTS_DIR)
+# The shared package (src/onionpress/) is installed next to it under lib/;
+# the launcher's op_py reaches it via PYTHONPATH, we add it here. Only the
+# analytics upload needs it, and that import is deferred and guarded so an
+# install without lib/ still heartbeats.
+LIB_DIR = os.path.join(os.path.dirname(SCRIPTS_DIR), "lib")
+if LIB_DIR not in sys.path:
+    sys.path.append(LIB_DIR)
 
 import key_manager
 import onion_auth
@@ -87,6 +105,7 @@ _pub_key = None
 _running = True
 _registered = False  # Set True after first successful registration; read by SleepInhibitor.
 _hub_conn = None     # Persistent HubConnection (set up after first /online).
+_analytics_host = None  # AnalyticsHost once the upload loop has been started.
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +688,215 @@ def _read_version():
 
 
 # ---------------------------------------------------------------------------
+# Analytics upload (opt-in) — onionpress.analytics_sharing on Linux
+# ---------------------------------------------------------------------------
+
+ANALYTICS_CONFIG_KEY = "SHARE_ANALYTICS_WITH_ONIONHOME"
+_FIRST_LINE_DATE_RE = re.compile(rb"^\[(\d{4}-\d{2}-\d{2})")
+
+
+def _advertised_log_name(log_type, path):
+    """Name under which OnionHome stores *path*, stable for the file's life.
+
+    The Linux logs are plain files rotated by suffix (``onionpress.log``
+    → ``onionpress.log.1``), so the on-disk name is not a stable identity:
+    after a rotation ``onionpress.log`` is a brand-new, smaller file, and
+    OnionHome (which re-requests a name only when the offered size grows)
+    would not ask for it again until it outgrew the old snapshot. Naming
+    the file by its first line instead — ``<type>-<date>-<8 hex>.log``,
+    date taken from a ``[YYYY-MM-DD`` prefix when there is one — gives a
+    name that survives rotation (the first line never changes) and that
+    the hub already holds a smaller snapshot of, so it keeps re-requesting
+    the growing file. Returns None for a file with no complete first line
+    yet (nothing worth shipping).
+    """
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline(4096)
+    except OSError:
+        return None
+    if not first.endswith(b"\n"):
+        return None
+    tag = hashlib.sha256(first).hexdigest()[:8]
+    m = _FIRST_LINE_DATE_RE.match(first)
+    if m:
+        return f"{log_type}-{m.group(1).decode('ascii')}-{tag}.log"
+    return f"{log_type}-{tag}.log"
+
+
+class _RotatedPlainLog:
+    """Duck-typed stand-in for onionpress.log_rotation.RotatingLog.
+
+    The Mac app hands analytics_sharing RotatingLog objects; the Linux
+    launcher writes plain files and rotates them to ``.1``, ``.2``, ``.3``
+    (``rotate_log`` in linux/onionpress, and the container capture loop).
+    This exposes those the way ``_do_upload_cycle`` expects: the active
+    file via ``current_path()`` and the rotated ones via
+    ``completed_files()``, each under its stable advertised name.
+    """
+
+    def __init__(self, path, log_type):
+        self._path = path
+        self._log_type = log_type
+
+    def current_path(self):
+        return self._path
+
+    def current_name(self):
+        """Advertised name of the active file (see _advertised_log_name);
+        the plain basename only while the file has no complete line."""
+        return (_advertised_log_name(self._log_type, self._path)
+                or os.path.basename(self._path))
+
+    def completed_files(self):
+        result = []
+        for n in range(1, 10):
+            p = f"{self._path}.{n}"
+            if not os.path.isfile(p):
+                break
+            name = _advertised_log_name(self._log_type, p)
+            if name is None:
+                continue
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            if size > 0:
+                result.append({"name": name, "size": size, "path": p})
+        return result
+
+
+def _linux_has_default_route():
+    """True if the kernel has a default route (v4 or v6); True on any
+    read error so a quirky /proc never blocks the upload — the manifest
+    POST reports its own failure and the loop backs off from that."""
+    try:
+        with open("/proc/net/route") as fh:
+            next(fh, None)  # header
+            for line in fh:
+                parts = line.split()
+                if len(parts) > 1 and parts[1] == "00000000":
+                    return True
+    except OSError:
+        return True
+    try:
+        with open("/proc/net/ipv6_route") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) > 1 and parts[0] == "0" * 32 and parts[1] == "00":
+                    return True
+    except OSError:
+        return True
+    return False
+
+
+class AnalyticsHost:
+    """The ``app`` object onionpress.analytics_sharing drives on Linux.
+
+    Mirrors the attributes the Mac menubar app exposes to the sharing
+    loop: config access, logging, onion addresses, version, the log files
+    to offer, the latest status snapshot, and how to reach docker.
+    """
+
+    _sleeping = False  # the SleepInhibitor flushes /offline; uploads just retry
+
+    def __init__(self, content_addr, hc_addr, data_dir=None):
+        self.app_support = data_dir or DATA_DIR
+        self.onion_address = content_addr
+        self.healthcheck_address = hc_addr
+        self.version = _read_version()
+        logs_dir = os.path.join(self.app_support, "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        # Same attribute names analytics_sharing looks for on the Mac app.
+        # The active files are also found by _do_upload_cycle's own
+        # container-*.log scan; it dedupes by path, so they ship once,
+        # under the name given here.
+        self._onionpress_log = _RotatedPlainLog(
+            os.path.join(self.app_support, "onionpress.log"), "onionpress")
+        self._tor_log = _RotatedPlainLog(
+            os.path.join(logs_dir, "container-tor.log"), "container-tor")
+        self._onionheaven_log = _RotatedPlainLog(
+            os.path.join(logs_dir, "container-onionheaven.log"),
+            "container-onionheaven")
+
+    # -- what analytics_sharing calls --------------------------------------
+
+    def read_config_value(self, key, default=""):
+        return read_config().get(key, default)
+
+    def log(self, msg):
+        log.info("%s", msg)
+
+    def check_internet_connectivity(self):
+        return _linux_has_default_route()
+
+    def docker_command(self):
+        """``docker`` from PATH with the daemon's own environment — the
+        rootless socket is found the same way every other docker call in
+        this file finds it."""
+        return "docker", None
+
+    @property
+    def _last_status_payload(self):
+        """The launcher's status.json (machine state, no secrets), offered
+        as the dated status snapshot the Mac app also ships."""
+        try:
+            with open(os.path.join(self.app_support, "status.json")) as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+
+def _import_analytics_sharing():
+    try:
+        from onionpress import analytics_sharing
+    except ImportError as e:
+        log.warning("Analytics sharing: unavailable on this install "
+                    "(cannot import onionpress.analytics_sharing from %s: %s)",
+                    LIB_DIR, e)
+        return None
+    return analytics_sharing
+
+
+def _start_analytics_sharing(content_addr, hc_addr):
+    """Start the daily upload loop (a daemon thread). Idempotent.
+
+    The loop itself re-reads SHARE_ANALYTICS_WITH_ONIONHOME every time it
+    wakes and uploads only on an explicit ``yes``, exactly like the Mac.
+    """
+    global _analytics_host
+    if _analytics_host is not None:
+        return _analytics_host
+    analytics_sharing = _import_analytics_sharing()
+    if analytics_sharing is None:
+        return None
+    _analytics_host = AnalyticsHost(content_addr, hc_addr)
+    analytics_sharing.start_analytics_sharing(_analytics_host)
+    enabled = _analytics_host.read_config_value(ANALYTICS_CONFIG_KEY, "no").lower()
+    log.info("Analytics sharing: loop started (%s=%s)",
+             ANALYTICS_CONFIG_KEY, enabled or "unset")
+    return _analytics_host
+
+
+def _poll_analytics_opt_in(previous, config):
+    """Per-cycle check of the opt-in flag. Returns its current value.
+
+    When it flips to ``yes`` the loop is woken so the first upload happens
+    now rather than at the next daily window — the Mac does the same when
+    the setting is saved. A flip away from ``yes`` needs nothing: the loop
+    checks the flag before every upload.
+    """
+    current = config.get(ANALYTICS_CONFIG_KEY, "no").strip().lower()
+    if current == "yes" and previous != "yes" and _analytics_host is not None:
+        analytics_sharing = _import_analytics_sharing()
+        if analytics_sharing is not None:
+            log.info("Analytics sharing: enabled in config, uploading now")
+            analytics_sharing.trigger_upload()
+    return current
+
+
+# ---------------------------------------------------------------------------
 # Signal handlers
 # ---------------------------------------------------------------------------
 
@@ -941,12 +1169,20 @@ def main():
     enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() != "no"
     _current_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
 
+    # Opt-in analytics upload to OnionHome. Started for every node, hub
+    # included (OnionHome is a different hub than OnionHeaven), before the
+    # self-hub check below. Uploads only ever happen on an explicit
+    # SHARE_ANALYTICS_WITH_ONIONHOME=yes, re-read at every wake.
+    _start_analytics_sharing(_content_addr, _hc_addr)
+    analytics_opt_in = _poll_analytics_opt_in(None, config)
+
     # Self-registration check: if our address IS the hub, skip all client activity
     if _content_addr == _current_hub:
         log.info("This node IS the OnionHeaven hub (%s) — skipping client registration", _current_hub)
         # Sleep forever (or until signal) — the server container handles everything
         while _running:
             time.sleep(60)
+            analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, read_config())
         return
 
     global _registered, _hub_conn
@@ -1010,6 +1246,7 @@ def main():
         config = read_config()
         new_enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "yes").lower() != "no"
         new_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
+        analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
 
         # Handle hub address change
         if new_hub != _current_hub and _registered:
