@@ -148,8 +148,14 @@
   from `config-template.txt`. Mac configs without the line (older installs,
   or ones the launcher's inline fallback created; Ivar's live install is one)
   used to register via the `yes` default and are now treated as undecided,
-  so they get the startup prompt once at next launch. Verified 2026-10-11 on
-  the live install: the prompt appeared 1 s after "System fully operational".
+  so they get the startup prompt at next launch. **Decided 2026-10-11
+  (Ivar): no heartbeat without an explicit yes, and no automatic migration.**
+  Such an install goes silent at the upgrade, and the hub takes its address
+  over within ~10 minutes of the last heartbeat, serving the Wayback copy
+  until the user clicks Enable (one click re-registers and reclaims it).
+  Seen on the live install: prompt 1 s after "System fully operational",
+  takeover header 12 minutes later. Do not "fix" this by writing `yes`
+  for existing installs; it was rejected as an opt-in without consent.
 - Linux CLI: `onionpress onionheaven enable|disable|status`. The heartbeat
   daemon re-reads the config every cycle, so enabling needs no restart on
   either platform.
