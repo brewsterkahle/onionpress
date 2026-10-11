@@ -130,6 +130,21 @@
   the watchdog, never within 5 min of an HS_DESC UPLOADED event. Takeover codes never
   trigger it (the heartbeat's /online is the reclaim path).
 - `REPUBLISH_ON_UNREACHABLE=no` in `~/.onionpress/config` makes it log-only.
+- **The dual probe fetches `/.onionpress-health`**, a static file Apache serves from
+  the WordPress image (`onionpress-health.conf`, no PHP), and checks the body for
+  `onionpress-health`; `PROBE_PATH`/`PROBE_BODY_MARKER` in `health.py` and the Alias
+  in the conf are test-locked together. Older images answer 404 and the probe falls
+  back to `/` for an hour, so the app may ship before the image, never the reverse
+  constraint. The failure path runs the isolated retry, self-probe and onionheaven
+  health check concurrently (~50 s worst case, was ~150 s); onionheaven's health is
+  judged by `status/circuit-established`, then the hub, then two well-known onions
+  (torproject, duckduckgo — only contacted while the hub is down). Each cycle logs
+  one `probe verdict=… ext=… self=… hub=…` line with `*_tor_ms`/`*_app_ms` (Tor path
+  vs server time to first byte); healthy cycles log it at most every 5 min.
+- **Both wake handlers reset the republish window** (`_republish_trigger.reset()` on
+  Mac, `monitor.republish.reset()` on Linux, test-enforced): the trigger uses wall
+  clock, so a failure seen just before sleep would otherwise fire DEL+ADD on the
+  first probe after wake, on top of the watchdog's own wake ADD.
 - The request path is a literal in both `launcher_ops.py` and `tor-watchdog.py`; a test
   fails if they drift. The watchdog ships in the tor image, so this needs an image
   publish + `build/refresh-image-digests.sh` to reach users.

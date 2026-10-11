@@ -18,6 +18,10 @@ from onionpress.health import (
     WEDGE_LOAD_WARN, WEDGE_LOAD_ALARM, WEDGE_FAILING_STREAK_ALARM,
     REPUBLISH_AFTER_UNREACHABLE_SECONDS, REPUBLISH_COOLDOWN_SECONDS,
     RepublishTrigger, decode_curl_reason,
+    PROBE_PATH, PROBE_PATH_FALLBACK, PROBE_STATIC_RECHECK_SECONDS,
+    PROBE_TIMEOUT_SECONDS, PROBE_RETRY_TIMEOUT_SECONDS,
+    PROBE_LOG_HEALTHY_INTERVAL_SECONDS, ONIONHEAVEN_HUB_ADDRESS,
+    WELL_KNOWN_ONIONS,
 )
 
 
@@ -255,13 +259,61 @@ class TestCheckInternetConnectivity(unittest.TestCase):
             self.assertTrue(HealthChecker.check_internet_connectivity())
 
 
+def _resp(code, body="onionpress-health ok", takeover=False, timings="0.900 1.100 1.200"):
+    """A full curl response as _curl_onion sees it: headers, body, -w tail."""
+    headers = f"HTTP/1.1 {code} X\r\nContent-Type: text/plain\r\n"
+    if takeover:
+        headers += "X-OnionHeaven-Takeover: 1\r\n"
+    return _ok(f"{headers}\r\n{body}\n---STATUS---{code} {timings}")
+
+
+def _dispatch(table):
+    """docker.exec side_effect keyed on what the probe asked for.
+
+    The failure path of check_external_reachability runs its legs
+    concurrently, so a positional side_effect list is racy. Keys are
+    (container, "ctl") for a control-port GETINFO, else
+    (container, "<host><path>[:iso]") for a curl, ":iso" when the call
+    carries --proxy-user. A list value is consumed one call at a time.
+    """
+    calls = []
+
+    def side_effect(container, argv, timeout=30, **kw):
+        if argv[0] == "sh":
+            key = (container, "ctl")
+        else:
+            url = argv[-1]
+            kind = url.split("//", 1)[1] + (":iso" if "--proxy-user" in argv else "")
+            key = (container, kind)
+        calls.append((key, list(argv)))
+        if key not in table:
+            raise AssertionError(f"unexpected docker.exec {key}")
+        val = table[key]
+        if isinstance(val, list):
+            return val.pop(0)
+        return val
+
+    side_effect.calls = calls
+    return side_effect
+
+
+SITE = "op2abc.onion"
+STATIC = f"{SITE}{PROBE_PATH}"
+ROOT = f"{SITE}/"
+HUB = f"{ONIONHEAVEN_HUB_ADDRESS}/"
+TORPROJECT = f"{WELL_KNOWN_ONIONS[0][1]}/"
+DUCKDUCKGO = f"{WELL_KNOWN_ONIONS[1][1]}/"
+CIRCUITS_UP = _ok("250-status/circuit-established=1\r\n250 OK")
+CIRCUITS_DOWN = _ok("250-status/circuit-established=0\r\n250 OK")
+
+
 class TestCheckExternalReachability(unittest.TestCase):
     def test_reachable_external_succeeds_fast_path(self):
         # Hot path: onionheaven returns 200, we short-circuit without probing self.
         docker = mock.Mock()
-        docker.exec.return_value = _ok("200")
+        docker.exec.return_value = _resp("200")
         hc = HealthChecker(docker)
-        reachable, code = hc.check_external_reachability("op2abc.onion")
+        reachable, code = hc.check_external_reachability(SITE)
         self.assertTrue(reachable)
         self.assertEqual(code, "200")
         # Exactly one docker.exec — we didn't waste probes.
@@ -270,26 +322,33 @@ class TestCheckExternalReachability(unittest.TestCase):
     def test_unreachable_both_fail(self):
         # External fails, self fails → genuinely unreachable.
         docker = mock.Mock()
-        docker.exec.side_effect = [
-            _fail(),  # external probe via onionheaven
-            _fail(),  # self probe via onionpress-tor
-        ]
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _fail(code=97),
+            ("onionpress-tor", STATIC): _fail(code=97),
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("200", body="hub"),
+        })
         hc = HealthChecker(docker)
-        reachable, _code = hc.check_external_reachability("op2abc.onion")
+        reachable, code = hc.check_external_reachability(SITE)
         self.assertFalse(reachable)
+        self.assertEqual(code, "000:rc=97")
 
     def test_reachable_self_ok_onionheaven_sick(self):
         # Today's yellow-state bug: onionheaven's tor stuck, our tor fine.
         # External probe fails, self probe succeeds, onionheaven can't
-        # reach the hub either → trust self, report reachable.
+        # reach the hub or any well-known onion either → trust self,
+        # report reachable.
         docker = mock.Mock()
-        docker.exec.side_effect = [
-            _ok("000"),   # external probe: curl "ok" but HTTP 000 (timeout)
-            _ok("301"),   # self probe: success
-            _fail(),      # onionheaven hub probe: fails (probe is sick)
-        ]
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _ok("000"),   # curl "ok" but HTTP 000
+            ("onionpress-tor", STATIC): _resp("301"),
+            ("onionheaven", "ctl"): _fail(),
+            ("onionheaven", HUB): _fail(),
+            ("onionheaven", TORPROJECT): _fail(),
+            ("onionheaven", DUCKDUCKGO): _fail(),
+        })
         hc = HealthChecker(docker)
-        reachable, code = hc.check_external_reachability("op2abc.onion")
+        reachable, code = hc.check_external_reachability(SITE)
         self.assertTrue(reachable)
         self.assertTrue(code.startswith("degraded:"))
 
@@ -298,14 +357,42 @@ class TestCheckExternalReachability(unittest.TestCase):
         # onionheaven's tor is working fine (can reach the hub), yet
         # onionheaven can't reach us → we're dark to outside visitors.
         docker = mock.Mock()
-        docker.exec.side_effect = [
-            _ok("000"),    # external probe to us: fails
-            _ok("200"),    # self probe: success
-            _ok("200"),    # onionheaven hub probe: healthy
-        ]
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _ok("000"),
+            ("onionpress-tor", STATIC): _resp("200"),
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("200", body="hub"),
+        })
         hc = HealthChecker(docker)
-        reachable, _code = hc.check_external_reachability("op2abc.onion")
+        reachable, _code = hc.check_external_reachability(SITE)
         self.assertFalse(reachable)
+
+    def test_failure_path_runs_legs_concurrently_with_short_retry(self):
+        # ext times out → the isolated external retry, the self-probe and
+        # the onionheaven health check all run at once; the retry gets the
+        # shorter budget. Serially this was up to ~150 s per cycle.
+        docker = mock.Mock()
+        table = {
+            ("onionheaven", STATIC): _fail(code=28),
+            ("onionheaven", STATIC + ":iso"): _resp("200"),
+            ("onionpress-tor", STATIC): _resp("301"),
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("200", body="hub"),
+        }
+        docker.exec.side_effect = _dispatch(table)
+        hc = HealthChecker(docker)
+        reachable, code = hc.check_external_reachability(SITE)
+        self.assertTrue(reachable)
+        self.assertEqual(code, "200")
+        keys = [k for k, _ in docker.exec.side_effect.calls]
+        self.assertIn(("onionheaven", STATIC + ":iso"), keys)
+        self.assertIn(("onionpress-tor", STATIC), keys)
+        self.assertIn(("onionheaven", "ctl"), keys)
+        first = next(a for k, a in docker.exec.side_effect.calls if k == ("onionheaven", STATIC))
+        retry = next(a for k, a in docker.exec.side_effect.calls if k == ("onionheaven", STATIC + ":iso"))
+        self.assertEqual(first[first.index("--max-time") + 1], str(PROBE_TIMEOUT_SECONDS))
+        self.assertEqual(retry[retry.index("--max-time") + 1], str(PROBE_RETRY_TIMEOUT_SECONDS))
+        self.assertEqual(hc.last_probe["ext_retry"], "200")
 
     def test_timeout_is_retried_once_on_isolated_circuits(self):
         # 2026-10-11: a joined-but-dead rendezvous circuit made every
@@ -315,10 +402,10 @@ class TestCheckExternalReachability(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.side_effect = [
             _fail(code=28),  # plain probe: curl timeout
-            _ok("\n---STATUS---301"),  # isolated retry: success
+            _resp("301"),    # isolated retry: success
         ]
         hc = HealthChecker(docker)
-        reachable, code = hc._probe_onion_via("onionpress-tor", "op2abc.onion")
+        reachable, code = hc._probe_onion_via("onionpress-tor", SITE)
         self.assertTrue(reachable)
         self.assertEqual(code, "301")
         self.assertEqual(docker.exec.call_count, 2)
@@ -334,7 +421,7 @@ class TestCheckExternalReachability(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.side_effect = [_fail(code=28), _fail(code=28)]
         hc = HealthChecker(docker)
-        reachable, code = hc._probe_onion_via("onionpress-tor", "op2abc.onion")
+        reachable, code = hc._probe_onion_via("onionpress-tor", SITE)
         self.assertFalse(reachable)
         self.assertEqual(code, "000:rc=28")
         self.assertEqual(docker.exec.call_count, 2)
@@ -345,7 +432,7 @@ class TestCheckExternalReachability(unittest.TestCase):
         docker = mock.Mock()
         docker.exec.side_effect = [_fail(code=97)]
         hc = HealthChecker(docker)
-        reachable, code = hc._probe_onion_via("onionpress-tor", "op2abc.onion")
+        reachable, code = hc._probe_onion_via("onionpress-tor", SITE)
         self.assertFalse(reachable)
         self.assertEqual(code, "000:rc=97")
         self.assertEqual(docker.exec.call_count, 1)
@@ -358,19 +445,198 @@ class TestCheckExternalReachability(unittest.TestCase):
         docker.exec.assert_not_called()
 
     def test_onionheaven_health_is_cached(self):
-        # Caching: two disagreement cycles within 60s should hit the
-        # onionheaven-hub probe exactly once.
+        # Caching: two disagreement cycles within 60s should run the
+        # onionheaven health check exactly once.
         docker = mock.Mock()
-        docker.exec.side_effect = [
-            _ok("000"), _ok("301"), _fail(),  # cycle 1: ext, self, hub (fails → sick)
-            _ok("000"), _ok("301"),           # cycle 2: ext, self — hub cached
-        ]
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _ok("000"),
+            ("onionpress-tor", STATIC): _resp("301"),
+            ("onionheaven", "ctl"): _fail(),
+            ("onionheaven", HUB): _fail(),
+            ("onionheaven", TORPROJECT): _fail(),
+            ("onionheaven", DUCKDUCKGO): _fail(),
+        })
         hc = HealthChecker(docker)
-        r1, _ = hc.check_external_reachability("op2abc.onion")
-        r2, _ = hc.check_external_reachability("op2abc.onion")
+        r1, _ = hc.check_external_reachability(SITE)
+        r2, _ = hc.check_external_reachability(SITE)
         self.assertTrue(r1)
         self.assertTrue(r2)
-        self.assertEqual(docker.exec.call_count, 5)
+        keys = [k for k, _ in docker.exec.side_effect.calls]
+        self.assertEqual(keys.count(("onionheaven", HUB)), 1)
+        self.assertEqual(keys.count(("onionheaven", "ctl")), 1)
+        self.assertEqual(keys.count(("onionheaven", STATIC)), 2)
+
+
+class TestProbeTransport(unittest.TestCase):
+    """_curl_onion: the static health target, timings, identity, fallback."""
+
+    def test_probes_the_static_file_and_splits_the_latency(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _resp("200", timings="0.900 1.100 1.200")
+        hc = HealthChecker(docker)
+        pr = hc._curl_onion("onionheaven", SITE)
+        self.assertTrue(pr.ok)
+        self.assertEqual(pr.code, "200")
+        self.assertEqual((pr.tor_ms, pr.app_ms, pr.total_ms), (900, 200, 1200))
+        argv = docker.exec.call_args.args[1]
+        self.assertEqual(argv[-1], f"http://{STATIC}")
+        # The static file is fetched (it carries the marker); "/" never is.
+        self.assertEqual(argv[argv.index("-o") + 1], "-")
+        self.assertEqual(argv[argv.index("--max-time") + 1], "30")
+        # Tuple unpacking still works for older callers.
+        ok, code = pr
+        self.assertEqual((ok, code), (True, "200"))
+
+    def test_legacy_bare_status_output_still_parses(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _ok("200")
+        hc = HealthChecker(docker)
+        pr = hc._curl_onion("onionheaven", SITE)
+        self.assertTrue(pr.ok)
+        self.assertEqual((pr.tor_ms, pr.app_ms), (-1, -1))
+
+    def test_static_file_without_marker_is_not_our_site(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _resp("200", body="<html>Welcome to the captive portal</html>")
+        hc = HealthChecker(docker)
+        pr = hc._curl_onion("onionheaven", SITE)
+        self.assertFalse(pr.ok)
+        self.assertEqual(pr.code, "foreign")
+        # ...and "foreign" is not a wedge code: no republish for it.
+        self.assertFalse(RepublishTrigger.is_wedge_code("foreign"))
+
+    def test_takeover_header_wins_on_the_static_path(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _resp("302", body="", takeover=True)
+        hc = HealthChecker(docker)
+        pr = hc._curl_onion("onionheaven", SITE)
+        self.assertFalse(pr.ok)
+        self.assertEqual(pr.code, "takeover")
+
+    def test_404_falls_back_to_root_and_remembers(self):
+        # An older WordPress image has no /.onionpress-health: the probe
+        # must keep working against it, now and for the next hour.
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _resp("404", body="Not Found"),
+            ("onionheaven", ROOT): _resp("301", body=""),
+        })
+        logs = []
+        hc = HealthChecker(docker, log_func=logs.append)
+        pr = hc._curl_site("onionheaven", SITE)
+        self.assertTrue(pr.ok)
+        self.assertEqual(pr.code, "301")
+        self.assertEqual(pr.path, PROBE_PATH_FALLBACK)
+        root_argv = next(a for k, a in docker.exec.side_effect.calls if k == ("onionheaven", ROOT))
+        self.assertEqual(root_argv[root_argv.index("-o") + 1], "/dev/null")
+        self.assertTrue(any("404" in m and "/.onionpress-health" in m for m in logs), logs)
+        # Second probe goes straight to "/".
+        hc._curl_site("onionheaven", SITE)
+        keys = [k for k, _ in docker.exec.side_effect.calls]
+        self.assertEqual(keys, [("onionheaven", STATIC), ("onionheaven", ROOT),
+                                ("onionheaven", ROOT)])
+        self.assertEqual(hc._probe_path(), PROBE_PATH_FALLBACK)
+        # ...until the recheck window passes.
+        with mock.patch("onionpress.health.time.time",
+                        return_value=time.time() + PROBE_STATIC_RECHECK_SECONDS + 1):
+            self.assertEqual(hc._probe_path(), PROBE_PATH)
+
+
+class TestOnionheavenTorHealthy(unittest.TestCase):
+    """The external vantage point must be checked against more than one oracle."""
+
+    def test_no_circuits_is_a_definite_no_without_any_curl(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({("onionheaven", "ctl"): CIRCUITS_DOWN})
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_onionheaven_tor_healthy())
+        self.assertEqual(docker.exec.call_count, 1)
+
+    def test_hub_down_but_well_known_onion_answers(self):
+        # Before: hub down ⇒ every external failure downgraded to
+        # "degraded" ⇒ wedge detection silently off fleet-wide.
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _fail(code=28),
+            ("onionheaven", TORPROJECT): _resp("200", body="Tor Project"),
+        })
+        logs = []
+        hc = HealthChecker(docker, log_func=logs.append)
+        self.assertTrue(hc.check_onionheaven_tor_healthy())
+        keys = [k for k, _ in docker.exec.side_effect.calls]
+        self.assertNotIn(("onionheaven", DUCKDUCKGO), keys)  # stopped at first answer
+        self.assertTrue(any("torproject" in m for m in logs), logs)
+
+    def test_third_party_onions_see_no_traffic_while_the_hub_answers(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("503", body="maintenance"),
+        })
+        hc = HealthChecker(docker)
+        # Any HTTP answer proves the circuits work, even a 503.
+        self.assertTrue(hc.check_onionheaven_tor_healthy())
+        self.assertEqual(docker.exec.call_count, 2)
+
+    def test_nothing_answers(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", "ctl"): _ok("250 OK"),   # no circuit-established line
+            ("onionheaven", HUB): _fail(code=28),
+            ("onionheaven", TORPROJECT): _ok("000"),
+            ("onionheaven", DUCKDUCKGO): _fail(code=97),
+        })
+        hc = HealthChecker(docker)
+        self.assertFalse(hc.check_onionheaven_tor_healthy())
+        self.assertEqual(docker.exec.call_count, 4)
+
+
+class TestProbeLogLine(unittest.TestCase):
+    """One structured `probe` line per cycle, for fleet mining."""
+
+    def test_unreachable_logs_every_leg(self):
+        docker = mock.Mock()
+        docker.exec.side_effect = _dispatch({
+            ("onionheaven", STATIC): _fail(code=28),
+            ("onionheaven", STATIC + ":iso"): _fail(code=28),
+            ("onionpress-tor", STATIC): _resp("301", timings="1.500 1.680 1.700"),
+            ("onionheaven", "ctl"): CIRCUITS_UP,
+            ("onionheaven", HUB): _resp("200", body="hub"),
+        })
+        logs = []
+        hc = HealthChecker(docker, log_func=logs.append)
+        reachable, code = hc.check_external_reachability(SITE)
+        self.assertFalse(reachable)
+        line = next(m for m in logs if m.startswith("probe "))
+        fields = dict(kv.split("=", 1) for kv in line[len("probe "):].split())
+        self.assertEqual(fields["verdict"], "unreachable")
+        self.assertEqual(fields["ext"], "000:rc=28")
+        self.assertEqual(fields["ext_retry"], "000:rc=28")
+        self.assertEqual(fields["self"], "301")
+        self.assertEqual(fields["self_tor_ms"], "1500")
+        self.assertEqual(fields["self_app_ms"], "180")
+        self.assertEqual(fields["hub"], "ok")
+        self.assertEqual(fields["path"], PROBE_PATH)
+        self.assertEqual(hc.last_probe["verdict"], "unreachable")
+
+    def test_healthy_probes_are_rate_limited(self):
+        docker = mock.Mock()
+        docker.exec.return_value = _resp("200")
+        logs = []
+        hc = HealthChecker(docker, log_func=logs.append)
+        with mock.patch("onionpress.health.time.time", return_value=1000.0):
+            hc.check_external_reachability(SITE)
+            hc.check_external_reachability(SITE)
+        with mock.patch("onionpress.health.time.time",
+                        return_value=1000.0 + PROBE_LOG_HEALTHY_INTERVAL_SECONDS + 1):
+            hc.check_external_reachability(SITE)
+        probe_lines = [m for m in logs if m.startswith("probe ")]
+        self.assertEqual(len(probe_lines), 2)
+        self.assertIn("verdict=reachable", probe_lines[0])
+        self.assertIn("ext_tor_ms=900", probe_lines[0])
+        # The record is still refreshed on every call, logged or not.
+        self.assertEqual(hc.last_probe["ext"], "200")
 
 
 class TestTorContainerUnhealthy(unittest.TestCase):
@@ -841,6 +1107,36 @@ class TestHealthMonitorRepublish(unittest.TestCase):
         with mock.patch("onionpress.health.time.time", return_value=300.0):
             self.assertFalse(monitor.should_request_republish(good))
         self.assertIsNone(monitor.republish.failing_since)
+
+
+class TestWakeResetsRepublishWindow(unittest.TestCase):
+    """Issue #266: a pre-sleep failure window must not survive a wake.
+
+    RepublishTrigger counts wall-clock time. A probe that failed just
+    before a long sleep would otherwise make the first failing probe
+    after wake look like 10+ min of unreachability and fire DEL+ADD on
+    top of the watchdog's own wake ADD. Both platforms reset the window
+    in their wake handler; this pins that in the source since neither
+    handler is importable without a desktop session.
+    """
+
+    ROOT = os.path.join(os.path.dirname(__file__), "..")
+
+    def _body(self, path, start_marker, end_marker):
+        src = open(os.path.join(self.ROOT, path), encoding="utf-8").read()
+        start = src.index(start_marker)
+        return src[start:src.index(end_marker, start)]
+
+    def test_mac_handle_wake_resets_the_trigger(self):
+        body = self._body("src/menubar.py", "    def handle_wake(self):",
+                          "    def start_status_checker(self):")
+        self.assertIn("self._republish_trigger.reset()", body)
+
+    def test_linux_wake_transition_resets_the_trigger(self):
+        body = self._body("linux/onionpress-service.py",
+                          "if _was_sleeping and not is_sleeping_now:",
+                          "_was_sleeping = is_sleeping_now")
+        self.assertIn("monitor.republish.reset()", body)
 
 
 if __name__ == "__main__":

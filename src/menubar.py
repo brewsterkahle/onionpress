@@ -2750,6 +2750,16 @@ class OnionPressApp(rumps.App):
         # Done before USR2 so the snapshot reflects the just-finished session.
         self._maybe_emit_snapshot(force=True)
         self._reachability_stats.reset_session(time.time())
+        # Issue #266: the republish trigger counts wall-clock time, and a
+        # probe that failed just before sleep leaves its window start
+        # behind. Without this, the first failing probe after a long sleep
+        # sees "10+ min unreachable" and asks the watchdog for DEL+ADD
+        # while it is still re-adding the services after USR2 — the exact
+        # churn the reconciler is meant to prevent — and the 15 min host
+        # cooldown then blocks a request that might really be needed.
+        # (Monotonic clocks also pause during sleep on macOS and Linux, so
+        # an explicit reset is the fix, not a different clock.)
+        self._republish_trigger.reset()
         self._sleeping = False
         self.startup_time = time.time()  # Reset so "launched in Xs" shows time since wake
         self.caffeine.start()

@@ -7,7 +7,9 @@ The MenubarApp (or CLI) creates a HealthMonitor and calls check() periodically.
 import json
 import re
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -30,6 +32,77 @@ CURL_RC_REASONS = {
     "56": "connection reset",
     "97": "SOCKS handshake failed (descriptor not yet available)",
 }
+
+
+# ---------------------------------------------------------------------------
+# Tor-network probe (issue #266 dual probe)
+# ---------------------------------------------------------------------------
+
+# The probe fetches a static file that Apache serves straight from the
+# WordPress image (app/Resources/docker/wordpress/onionpress-health.conf),
+# never touching PHP. Fetching "/" ran WordPress, so a slow site could
+# exhaust the curl budget on a perfectly healthy Tor path and register as
+# rc=28 — the same code as dead intro points. Images older than the conf
+# answer 404 on this path; the probe then falls back to "/" and remembers
+# that for PROBE_STATIC_RECHECK_SECONDS.
+PROBE_PATH = "/.onionpress-health"
+PROBE_PATH_FALLBACK = "/"
+PROBE_STATIC_RECHECK_SECONDS = 3600
+# The static file carries this marker so a 200 from something that is not
+# our Apache (a replica without the takeover header, a captive page) is
+# not mistaken for the site being up.
+PROBE_BODY_MARKER = "onionpress-health"
+# First attempt: generous, a cold rendezvous can take ~15 s. The isolated
+# retry after a timeout builds fresh circuits and only needs to prove the
+# site answers at all, so it gets a shorter budget — it runs on the
+# failure path, where every second delays the verdict.
+PROBE_TIMEOUT_SECONDS = 30
+PROBE_RETRY_TIMEOUT_SECONDS = 20
+# Healthy probes log one structured `probe` line at most this often;
+# unhealthy ones log every time (see HealthChecker._log_probe).
+PROBE_LOG_HEALTHY_INTERVAL_SECONDS = 300
+
+# Onions used to decide whether onionheaven's tor is itself able to reach
+# anything, when it says our site is unreachable but our own tor disagrees.
+# The hub is tried first; the others only when it does not answer, so
+# third-party onions see traffic only while the hub is down. Any HTTP
+# answer from any one of them proves the client has working circuits.
+# Addresses verified 2026-10-11 on the owners' own pages:
+#   torproject.org  — support.torproject.org/onionservices (v3 example)
+#   duckduckgo.com  — duckduckgo.com/duckduckgo-help-pages/privacy/no-tracking
+ONIONHEAVEN_HUB_ADDRESS = (
+    "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+)
+WELL_KNOWN_ONIONS = (
+    ("torproject", "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion"),
+    ("duckduckgo", "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion"),
+)
+
+
+@dataclass
+class ProbeResult:
+    """One curl through a container's Tor SOCKS port.
+
+    `ok` and `code` are what the old (reachable, http_code) tuple carried;
+    iterating a ProbeResult yields exactly those two so existing callers
+    keep working. The timings split the round trip where curl can see
+    the seam: with socks5h, Tor answers the SOCKS CONNECT only once the
+    stream is attached, i.e. after descriptor fetch, introduction and
+    rendezvous — that is `tor_ms` (curl's time_pretransfer). The server's
+    own time to first byte is `app_ms`. -1 means curl never got that far
+    or the output carried no timings.
+    """
+    ok: bool
+    code: str
+    container: str = ""
+    path: str = ""
+    isolated: bool = False
+    tor_ms: int = -1
+    app_ms: int = -1
+    total_ms: int = -1
+
+    def __iter__(self):
+        return iter((self.ok, self.code))
 
 
 def decode_curl_reason(http_code: str) -> str:
@@ -182,6 +255,26 @@ class HealthChecker:
             self._log("✓ Local access: WordPress responding")
         return True
 
+    def _control_getinfo(self, container: str, key: str) -> str:
+        """GETINFO `key` on `container`'s control port; "" if it did not answer.
+
+        Cookie auth over nc, the same way the bash launchers do it. Both
+        tor containers (onionpress-tor, onionheaven) run the same image
+        with ControlPort 9051 and CookieAuthentication 1.
+        """
+        result = self.docker.exec(
+            container,
+            ["sh", "-c",
+             'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
+             '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
+             f'GETINFO {key}\\r\\nQUIT\\r\\n"'
+             ' | nc -w 5 127.0.0.1 9051'],
+            timeout=15,
+        )
+        if not result.ok:
+            return ""
+        return result.output or ""
+
     def check_tor_bootstrap(self) -> tuple[bool, int]:
         """Check Tor bootstrap status via control port (with log fallback).
 
@@ -189,17 +282,9 @@ class HealthChecker:
             (bootstrapped, percentage) — bootstrapped is True if 100%.
         """
         # Primary: query control port directly (reliable, not affected by log rotation)
-        result = self.docker.exec(
-            "onionpress-tor",
-            ["sh", "-c",
-             'printf "AUTHENTICATE $(cat /var/lib/tor/control_auth_cookie '
-             '| od -A n -t x1 | tr -d \' \\n\')\\r\\n'
-             'GETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n"'
-             ' | nc -w 5 127.0.0.1 9051'],
-            timeout=15,
-        )
-        if result.ok and "PROGRESS=" in result.output:
-            for part in result.output.split():
+        answer = self._control_getinfo("onionpress-tor", "status/bootstrap-phase")
+        if "PROGRESS=" in answer:
+            for part in answer.split():
                 if part.startswith("PROGRESS="):
                     try:
                         pct = int(part.split("=")[1])
@@ -266,30 +351,128 @@ class HealthChecker:
         )
         return result.ok
 
-    # Well-known onion used to probe whether onionheaven's tor is itself
-    # healthy. If onionheaven can reach the OnionHeaven hub it clearly
-    # has working circuits; if it can't reach anything, its "our onion
-    # is unreachable" verdict is meaningless. Value matches the hub
-    # address in MEMORY.md / onionheaven code.
-    _ONIONHEAVEN_HUB_ADDRESS = (
-        "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
-    )
     # Cache onionheaven-tor-healthy result this long, since we only need
     # it on self✓/external✗ disagreement and don't want to re-probe the
     # hub on every health cycle.
     _ONIONHEAVEN_HEALTH_TTL_SECONDS = 60.0
+    # Kept as class attributes for callers/tests that reach for them here.
+    _ONIONHEAVEN_HUB_ADDRESS = ONIONHEAVEN_HUB_ADDRESS
 
-    def _probe_onion_via(self, container: str, onion_address: str) -> tuple[bool, str]:
-        """Curl an onion address through `container`'s local SOCKS (127.0.0.1:9050).
+    # ----- probe transport ------------------------------------------------
 
-        Returns (reachable, http_code). 200/301 from the real site counts
-        as reachable; anything else (including 302 from the OnionHeaven
-        takeover redirector) does not. Also inspects response headers
-        for `X-OnionHeaven-Takeover: 1` — if present, we're talking to
-        the hub's takeover replica regardless of status code, and we
-        return reachable=False with the sentinel http_code "takeover"
-        so the caller can log + account for it cleanly. Curl transport
-        failure returns "000:rc=<exit>".
+    def _probe_path(self) -> str:
+        """The URL path to probe: the static file, or "/" while the
+        WordPress image is known not to serve it."""
+        until = getattr(self, "_static_probe_unsupported_until", 0.0)
+        if time.time() < until:
+            return PROBE_PATH_FALLBACK
+        return PROBE_PATH
+
+    def _curl_onion(
+        self, container: str, onion_address: str, isolate: str | None = None,
+        path: str = PROBE_PATH, timeout: int = PROBE_TIMEOUT_SECONDS,
+    ) -> ProbeResult:
+        """One curl through `container`'s SOCKS; see _probe_onion_via.
+
+        `isolate` is a SOCKS username; any value forces Tor to serve the
+        request on circuits of its own (stream isolation by auth).
+        """
+        # -D - dumps response headers to stdout; the body follows when we
+        # ask for it (-o -), and -w appends "---STATUS---<code> <timings>"
+        # at the very end. The delimiter must be something that can't
+        # appear in an RFC-compliant HTTP header or in the health file.
+        argv = [
+            "curl", "-s", "--max-time", str(timeout),
+            "--socks5-hostname", "127.0.0.1:9050",
+        ]
+        if isolate:
+            argv += ["--proxy-user", f"{isolate}:x"]
+        # The static health file is a few bytes and carries the identity
+        # marker, so fetch it; "/" is a whole WordPress page we never read.
+        argv += ["-o", "-" if path != PROBE_PATH_FALLBACK else "/dev/null"]
+        argv += [
+            "-D", "-",
+            "-w", ("\n---STATUS---%{http_code} %{time_pretransfer} "
+                   "%{time_starttransfer} %{time_total}"),
+            "-H", "User-Agent: OnionPress-HealthCheck",
+            f"http://{onion_address}{path}",
+        ]
+        pr = ProbeResult(ok=False, code="", container=container, path=path,
+                         isolated=bool(isolate))
+        result = self.docker.exec(container, argv, timeout=timeout + 15)
+        if not result.ok:
+            pr.code = f"000:rc={result.returncode}"
+            return pr
+        raw = result.output or ""
+        headers_part, _, tail = raw.rpartition("---STATUS---")
+        fields = tail.split() if headers_part else [raw.strip()]
+        pr.code = fields[0] if fields else ""
+        if len(fields) >= 4:
+            try:
+                pre, start, total = (float(fields[1]), float(fields[2]),
+                                     float(fields[3]))
+                pr.tor_ms = round(pre * 1000)
+                pr.app_ms = max(round((start - pre) * 1000), 0)
+                pr.total_ms = round(total * 1000)
+            except ValueError:
+                pass
+        body = ""
+        if headers_part:
+            # Case-insensitive header match; curl echoes headers verbatim.
+            head, sep, body = headers_part.partition("\r\n\r\n")
+            if not sep:
+                head, _, body = headers_part.partition("\n\n")
+            for line in head.splitlines():
+                name, _, value = line.partition(":")
+                if (name.strip().lower() == "x-onionheaven-takeover"
+                        and value.strip() == "1"):
+                    pr.code = "takeover"
+                    return pr
+        pr.ok = pr.code in ("200", "301")
+        # A real 200 for the static file that lacks the marker did not come
+        # from our Apache. Only a full response (headers present) can be
+        # judged; legacy "200"-only output has no body to look at.
+        if (pr.ok and pr.code == "200" and path == PROBE_PATH and headers_part
+                and PROBE_BODY_MARKER not in body):
+            pr.ok = False
+            pr.code = "foreign"
+        return pr
+
+    def _curl_site(
+        self, container: str, onion_address: str, isolate: str | None = None,
+        timeout: int = PROBE_TIMEOUT_SECONDS,
+    ) -> ProbeResult:
+        """_curl_onion against our own site, with the static-path fallback.
+
+        A 404 on the static path means a WordPress image older than
+        onionpress-health.conf: probe "/" instead, now and for the next
+        hour, so an app update never outruns the image it is paired with.
+        """
+        path = self._probe_path()
+        pr = self._curl_onion(container, onion_address, isolate, path, timeout)
+        if path == PROBE_PATH and pr.code == "404":
+            self._static_probe_unsupported_until = (
+                time.time() + PROBE_STATIC_RECHECK_SECONDS)
+            self._log(
+                f"Reachability: {PROBE_PATH} is 404 via {container} (WordPress "
+                f"image predates the health file) — probing / instead for "
+                f"{PROBE_STATIC_RECHECK_SECONDS // 60} min"
+            )
+            pr = self._curl_onion(container, onion_address, isolate,
+                                  PROBE_PATH_FALLBACK, timeout)
+        return pr
+
+    def _probe_onion_via(self, container: str, onion_address: str) -> ProbeResult:
+        """Curl our onion address through `container`'s local SOCKS (127.0.0.1:9050).
+
+        Returns a ProbeResult (iterable as (reachable, http_code)). 200/301
+        from the real site counts as reachable; anything else (including
+        302 from the OnionHeaven takeover redirector) does not. Also
+        inspects response headers for `X-OnionHeaven-Takeover: 1` — if
+        present, we're talking to the hub's takeover replica regardless
+        of status code, and we return reachable=False with the sentinel
+        http_code "takeover" so the caller can log + account for it
+        cleanly. Curl transport failure returns "000:rc=<exit>".
 
         A curl timeout (rc=28) is retried once on fresh circuits. Tor
         reuses an open rendezvous circuit to the same service for new
@@ -303,59 +486,25 @@ class HealthChecker:
         the healthy path keeps the cheap warm-circuit reuse.
         """
         if not onion_address:
-            return False, ""
-        ok, code = self._curl_onion(container, onion_address)
-        if code == "000:rc=28":
-            nonce = f"onionpress-probe-{int(time.time() * 1000)}"
-            ok2, code2 = self._curl_onion(container, onion_address, isolate=nonce)
-            if ok2:
+            return ProbeResult(ok=False, code="", container=container)
+        pr = self._curl_site(container, onion_address)
+        if pr.code == "000:rc=28":
+            pr2 = self._curl_site(container, onion_address,
+                                  isolate=self._isolation_nonce(),
+                                  timeout=PROBE_RETRY_TIMEOUT_SECONDS)
+            if pr2.ok:
                 self._log(
                     f"Reachability: probe via {container} timed out but "
                     f"succeeded on fresh circuits — stale rendezvous circuit"
                 )
-            return ok2, code2
-        return ok, code
+            return pr2
+        return pr
 
-    def _curl_onion(
-        self, container: str, onion_address: str, isolate: str | None = None,
-    ) -> tuple[bool, str]:
-        """One curl through `container`'s SOCKS; see _probe_onion_via.
+    @staticmethod
+    def _isolation_nonce() -> str:
+        return f"onionpress-probe-{int(time.time() * 1000)}-{threading.get_ident()}"
 
-        `isolate` is a SOCKS username; any value forces Tor to serve the
-        request on circuits of its own (stream isolation by auth).
-        """
-        # -D - dumps response headers to stdout; -o /dev/null suppresses
-        # the body; -w appends "---<code>" at the very end so we can
-        # split headers from status. The delimiter must be something
-        # that can't appear in an RFC-compliant HTTP header.
-        argv = [
-            "curl", "-s", "--max-time", "30",
-            "--socks5-hostname", "127.0.0.1:9050",
-        ]
-        if isolate:
-            argv += ["--proxy-user", f"{isolate}:x"]
-        argv += [
-            "-o", "/dev/null",
-            "-D", "-",
-            "-w", "\n---STATUS---%{http_code}",
-            "-H", "User-Agent: OnionPress-HealthCheck",
-            f"http://{onion_address}/",
-        ]
-        result = self.docker.exec(container, argv, timeout=45)
-        if not result.ok:
-            return False, f"000:rc={result.returncode}"
-        raw = result.output or ""
-        headers_part, _, tail = raw.rpartition("---STATUS---")
-        http_code = tail.strip() if headers_part else raw.strip()
-        # Case-insensitive header match; curl echoes headers verbatim.
-        if headers_part:
-            for line in headers_part.splitlines():
-                name, _, value = line.partition(":")
-                if name.strip().lower() == "x-onionheaven-takeover" and value.strip() == "1":
-                    return False, "takeover"
-        return http_code in ("200", "301"), http_code
-
-    def check_self_reachability(self, onion_address: str) -> tuple[bool, str]:
+    def check_self_reachability(self, onion_address: str) -> ProbeResult:
         """Probe our onion through onionpress-tor's own SOCKS.
 
         Confirmed by timing (15s cold, 1.7s warm) that C Tor routes
@@ -365,6 +514,8 @@ class HealthChecker:
         """
         return self._probe_onion_via("onionpress-tor", onion_address)
 
+    # ----- is the external vantage point itself working? ------------------
+
     def check_onionheaven_tor_healthy(self) -> bool:
         """Is onionheaven's tor able to reach any onion at all?
 
@@ -372,14 +523,47 @@ class HealthChecker:
         check_external_reachability. Cached for 60s since onionheaven
         health changes on a container-lifetime scale, not a single
         health-cycle scale.
+
+        Three rungs, cheapest first:
+          1. `GETINFO status/circuit-established` on onionheaven's control
+             port. A 0 is a definite no — no curl can succeed — and costs
+             no Tor traffic. Anything else is inconclusive.
+          2. The OnionHeaven hub.
+          3. The WELL_KNOWN_ONIONS, one at a time, only if the hub did not
+             answer. Before this the hub was the single oracle: with the
+             hub down, every external failure was downgraded to
+             "degraded" and reported as reachable, so wedge detection
+             switched itself off fleet-wide, silently.
+        Any HTTP answer at all (even a 503) proves the circuits work.
         """
         now = time.time()
         cached = getattr(self, "_onionheaven_health_cache", None)
         if cached and (now - cached[0]) < self._ONIONHEAVEN_HEALTH_TTL_SECONDS:
             return cached[1]
-        ok, _ = self._probe_onion_via("onionheaven", self._ONIONHEAVEN_HUB_ADDRESS)
+        ok = self._onionheaven_can_reach_anything()
         self._onionheaven_health_cache = (now, ok)
         return ok
+
+    def _onionheaven_can_reach_anything(self) -> bool:
+        answer = self._control_getinfo("onionheaven", "status/circuit-established")
+        if "circuit-established=0" in answer:
+            self._log("Reachability: onionheaven tor has no established circuits")
+            return False
+        for name, onion in (("hub", ONIONHEAVEN_HUB_ADDRESS),) + WELL_KNOWN_ONIONS:
+            pr = self._curl_onion("onionheaven", onion, path=PROBE_PATH_FALLBACK)
+            reached = bool(pr.code) and not pr.code.startswith("000") \
+                and pr.code != "takeover"
+            if reached:
+                if name != "hub":
+                    self._log(
+                        f"Reachability: onionheaven tor cannot reach the "
+                        f"OnionHeaven hub but reached {name} ({pr.code}) — "
+                        f"treating its verdicts as trustworthy"
+                    )
+                return True
+        return False
+
+    # ----- the dual probe ---------------------------------------------------
 
     def check_external_reachability(self, onion_address: str) -> tuple[bool, str]:
         """Check if our onion service is reachable through the Tor network.
@@ -388,15 +572,25 @@ class HealthChecker:
           - Probe via onionheaven (independent tor, separate circuits).
             If it succeeds, we're reachable — done. This is the hot path
             and costs exactly one curl.
-          - If it fails, probe via onionpress-tor (our own tor — self-
-            connection via real circuits). If that fails too, we're
-            genuinely down.
+          - If it fails, the rest runs concurrently rather than one
+            30 s curl after another: the isolated retry of the external
+            probe (only after a timeout), the self-probe via
+            onionpress-tor (our own tor — self-connection via real
+            circuits, with its own retry), and the "is onionheaven's tor
+            itself working" check. Serially this path took up to ~150 s
+            inside a 30 s poll loop; now it is bounded by the slowest leg.
+          - If the external retry succeeds, we're reachable (stale
+            rendezvous circuit, logged).
+          - If the self-probe fails too, we're genuinely down.
           - If self✓ and external✗, disambiguate: is onionheaven's tor
-            itself working? If it can't reach the OnionHeaven hub
-            either, the external verdict is untrustworthy — report
-            reachable with code "degraded:<ext>". Otherwise report
-            unreachable (likely a descriptor-publish issue, which is
-            invisible to our own tor but real for outside visitors).
+            itself working? If it can't reach any onion either, the
+            external verdict is untrustworthy — report reachable with
+            code "degraded:<ext>". Otherwise report unreachable (likely
+            a descriptor-publish issue, which is invisible to our own
+            tor but real for outside visitors).
+
+        Every call records its legs in `self.last_probe` and logs one
+        structured `probe ...` line (see _log_probe).
 
         Returns (reachable, http_code). Only 200/301 from at least one
         probe counts as reachable; 302 from external means OnionHeaven
@@ -405,33 +599,100 @@ class HealthChecker:
         if not onion_address:
             return False, ""
 
-        ext_ok, ext_code = self._probe_onion_via("onionheaven", onion_address)
-        if ext_ok:
-            return True, ext_code
+        ext = self._curl_site("onionheaven", onion_address)
+        if ext.ok:
+            self._log_probe("reachable", ext=ext)
+            return True, ext.code
 
-        self_ok, self_code = self._probe_onion_via("onionpress-tor", onion_address)
-        if not self_ok:
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="probe") as pool:
+            f_retry = None
+            if ext.code == "000:rc=28":
+                f_retry = pool.submit(
+                    self._curl_site, "onionheaven", onion_address,
+                    self._isolation_nonce(), PROBE_RETRY_TIMEOUT_SECONDS)
+            f_self = pool.submit(self._probe_onion_via, "onionpress-tor", onion_address)
+            f_hub = pool.submit(self.check_onionheaven_tor_healthy)
+            ext_retry = f_retry.result() if f_retry else None
+            self_pr = f_self.result()
+            hub_ok = f_hub.result()
+
+        if ext_retry is not None:
+            if ext_retry.ok:
+                self._log(
+                    "Reachability: probe via onionheaven timed out but "
+                    "succeeded on fresh circuits — stale rendezvous circuit"
+                )
+                self._log_probe("reachable", ext=ext, ext_retry=ext_retry,
+                                self_pr=self_pr, hub_ok=hub_ok)
+                return True, ext_retry.code
+            ext = ext_retry
+
+        if not self_pr.ok:
             # Both failed — genuinely unreachable. Prefer ext_code since
             # existing callers know how to format onionheaven failures.
-            return False, ext_code
+            self._log_probe("unreachable", ext=ext, ext_retry=ext_retry,
+                            self_pr=self_pr, hub_ok=hub_ok)
+            return False, ext.code
 
         # Disagreement: self says yes, external says no. Is the external
         # probe trustworthy?
-        if not self.check_onionheaven_tor_healthy():
+        if not hub_ok:
             self._log(
                 f"Reachability: onionheaven tor is itself unhealthy — "
-                f"trusting self-probe (ext={ext_code})"
+                f"trusting self-probe (ext={ext.code})"
             )
-            return True, f"degraded:ext={ext_code}"
+            self._log_probe("degraded", ext=ext, ext_retry=ext_retry,
+                            self_pr=self_pr, hub_ok=hub_ok)
+            return True, f"degraded:ext={ext.code}"
 
         # External probe is healthy and still can't reach us. That's a
         # real problem for outside visitors (likely descriptor-publish
         # failure) even though our own tor can rendezvous to itself.
         self._log(
             f"Reachability: onionheaven healthy but can't reach us "
-            f"(ext={ext_code}, self={self_code}) — likely descriptor issue"
+            f"(ext={ext.code}, self={self_pr.code}) — likely descriptor issue"
         )
-        return False, ext_code
+        self._log_probe("unreachable", ext=ext, ext_retry=ext_retry,
+                        self_pr=self_pr, hub_ok=hub_ok)
+        return False, ext.code
+
+    def _log_probe(
+        self, verdict: str, ext: ProbeResult,
+        ext_retry: ProbeResult | None = None,
+        self_pr: ProbeResult | None = None,
+        hub_ok: bool | None = None,
+    ) -> None:
+        """One key=value line per probe, for fleet log mining.
+
+        The #266 analysis was regexes over free-text lines; this gives it
+        a stable record: verdict, every leg's code, and the Tor-path vs
+        application split of the latency (tor_ms = until the SOCKS
+        stream attached, app_ms = server time to first byte). Healthy
+        probes are rate-limited to one line per
+        PROBE_LOG_HEALTHY_INTERVAL_SECONDS so the ready-state log stays
+        quiet; anything else logs every cycle.
+        """
+        now = time.time()
+        record = {"verdict": verdict, "path": ext.path or PROBE_PATH}
+        legs = [("ext", ext), ("ext_retry", ext_retry), ("self", self_pr)]
+        for name, pr in legs:
+            if pr is None:
+                continue
+            record[name] = pr.code or "-"
+            if pr.tor_ms >= 0:
+                record[f"{name}_tor_ms"] = pr.tor_ms
+                record[f"{name}_app_ms"] = pr.app_ms
+            elif pr.total_ms >= 0:
+                record[f"{name}_ms"] = pr.total_ms
+        if hub_ok is not None:
+            record["hub"] = "ok" if hub_ok else "down"
+        self.last_probe = record
+        if verdict == "reachable":
+            last = getattr(self, "_last_healthy_probe_log", 0.0)
+            if now - last < PROBE_LOG_HEALTHY_INTERVAL_SECONDS:
+                return
+            self._last_healthy_probe_log = now
+        self._log("probe " + " ".join(f"{k}={v}" for k, v in record.items()))
 
     def check_vm_wedge(self) -> Optional["WedgeSignals"]:
         """Probe for VM/FUSE wedge conditions (onionpress.org Apr 2026 incident).

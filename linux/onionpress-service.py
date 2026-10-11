@@ -451,6 +451,11 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
         is_sleeping_now = _sleeping_event.is_set()
         if _was_sleeping and not is_sleeping_now:
             monitor.state.wordpress_confirmed = False
+            # Issue #266: forget any pre-sleep failure window so the first
+            # probe after wake can't look like 10+ min of unreachability
+            # and trigger DEL+ADD on top of the watchdog's own wake ADD
+            # (mirrors src/menubar.py handle_wake).
+            monitor.republish.reset()
             log("Wake transition — will re-verify WordPress on next poll")
         _was_sleeping = is_sleeping_now
 
