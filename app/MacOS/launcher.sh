@@ -358,8 +358,13 @@ initialize_colima() {
     fi
 }
 
-# Check if menubar app is already running
-if pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" >/dev/null 2>&1; then
+# Check if menubar app is already running.
+# Anchored: the real process's command line is exactly the executable
+# path, with no arguments. A bare substring match also hit any process
+# that merely mentioned the path in its arguments (a shell, grep, tail,
+# editor...), and then this block exited without starting the app at all
+# (seen 2026-10-11: a test script's pgrep -f quoting the same path).
+if pgrep -u "$(whoami)" -f '^[^ ]*MenubarApp/Contents/MacOS/OnionPress( |$)' >/dev/null 2>&1; then
     echo "" >> "$LOG_FILE"
     echo "============================================================" >> "$LOG_FILE"
     log "=== Launcher restarted (app already running) ==="

@@ -2436,10 +2436,12 @@ main() {
                 MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
             fi
             if [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; then
-                # Match the py2app-frozen MenubarApp binary path — narrow
-                # enough that we don't collide with other OnionPress
-                # processes (launcher, shell scripts).
-                MENUBAR_PID=$(pgrep -u "$(whoami)" -f "MenubarApp/Contents/MacOS/OnionPress" 2>/dev/null | head -1)
+                # Match the py2app-frozen MenubarApp binary path, anchored
+                # so only a command line that IS that executable matches —
+                # not a shell, grep or tail that merely names the path in
+                # its arguments (a bare substring match would SIGTERM
+                # those instead of the app).
+                MENUBAR_PID=$(pgrep -u "$(whoami)" -f '^[^ ]*MenubarApp/Contents/MacOS/OnionPress( |$)' 2>/dev/null | head -1)
             fi
 
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
