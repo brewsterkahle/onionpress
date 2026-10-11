@@ -37,6 +37,7 @@ from onionpress.platform import resolve_paths
 from onionpress.docker import Docker
 from onionpress.health import (
     HealthChecker,
+    RepublishTrigger,
     WEDGE_LOAD_WARN,
     WEDGE_LOAD_ALARM,
     WEDGE_FAILING_STREAK_ALARM,
@@ -463,6 +464,10 @@ class OnionPressApp(rumps.App):
         # probe (silent), transitions emit one log line at the icon-flip
         # debounce, snapshots fire at sleep/wake and every ~12h.
         self._reachability_stats = ReachabilityStats()
+        # Issue #266: outcome-verified recovery. Fed every external-probe
+        # outcome; fires once the service has been unreachable through the
+        # Tor network for 10+ min while Tor is internally healthy.
+        self._republish_trigger = RepublishTrigger()
         self._last_probe_code = ""
         self._last_probe_ms = 0
         self._last_reachability = (None, None)  # tri-state (reachable, http_code); None = never checked
@@ -1736,6 +1741,9 @@ class OnionPressApp(rumps.App):
                     # whatever it was before the internet dropped — reporting
                     # a stale "reachable" verdict while genuinely offline.
                     self._last_reachability = (None, None)
+                    # No probe ran, so this cycle is evidence of nothing:
+                    # don't let an offline gap count towards a republish.
+                    self._republish_trigger.reset()
                     # Track yellow/starting state
                     if self._yellow_since is None:
                         self._yellow_since = time.time()
@@ -1761,6 +1769,17 @@ class OnionPressApp(rumps.App):
                         self._last_probe_code,
                         self._last_probe_ms,
                     )
+                    # Issue #266: if the dual probe keeps failing while Tor
+                    # is internally fine, the HSDirs hold a descriptor whose
+                    # intro points no longer answer for us and Tor won't
+                    # republish on its own for up to two hours. Ask the
+                    # watchdog for a forced republish (DEL+ADD) instead.
+                    if self._republish_trigger.observe(
+                            time.time(),
+                            self._tor_internally_ready,
+                            tor_reachable,
+                            self._last_probe_code):
+                        self._request_descriptor_republish()
 
                     previous_ready = self.is_ready
                     ready_now = wordpress_ready and tor_reachable
@@ -2065,6 +2084,7 @@ class OnionPressApp(rumps.App):
                 # last verdict rather than let a stale "reachable: true"
                 # from before the stop keep being reported.
                 self._last_reachability = (None, None)
+                self._republish_trigger.reset()
                 # Don't reset auto_opened_browser — browser is already open
                 self._wp_installed = None  # Reset for next start
                 self._wp_not_installed_count = 0
@@ -2501,6 +2521,50 @@ class OnionPressApp(rumps.App):
         """Send a Unix signal to the tor-watchdog process inside a container.
         Thin delegate to launcher_ops.signal_watchdog() — shared with Linux."""
         return launcher_ops.signal_watchdog(self._docker, container, sig)
+
+    def _republish_on_unreachable_enabled(self):
+        """REPUBLISH_ON_UNREACHABLE in ~/.onionpress/config; default on.
+
+        Set it to "no" to keep the trigger in log-only mode (the trigger
+        still evaluates, the request is just not sent) — the staged
+        rollout issue #266 asks for.
+        """
+        value = self._read_config_value("REPUBLISH_ON_UNREACHABLE", "yes")
+        return str(value).strip().lower() not in ("no", "0", "false", "off")
+
+    def _request_descriptor_republish(self):
+        """Ask onionpress-tor's watchdog to DEL+ADD its onion services.
+
+        Reached only from the RepublishTrigger in check_status(): the
+        service has been unreachable through the Tor network for
+        REPUBLISH_AFTER_UNREACHABLE_SECONDS with Tor internally healthy,
+        and no request went out in the last REPUBLISH_COOLDOWN_SECONDS.
+        The watchdog applies its own cooldown and a minimum descriptor
+        age before acting (tor-watchdog.py check_republish_request).
+        """
+        failing = self._republish_trigger.failing_seconds(time.time())
+        reason = f"unreachable {failing}s http={self._last_probe_code}"
+        if not self._republish_on_unreachable_enabled():
+            self.log(
+                f"reachability: unreachable for {failing}s "
+                f"(http={self._last_probe_code}) — would request descriptor "
+                f"republish (REPUBLISH_ON_UNREACHABLE=no, log-only)"
+            )
+            return
+        ok = launcher_ops.request_watchdog_republish(
+            self._docker, "onionpress-tor", reason)
+        if ok:
+            self.log(
+                f"reachability: unreachable for {failing}s "
+                f"(http={self._last_probe_code}) — requested descriptor "
+                f"republish from tor-watchdog"
+            )
+        else:
+            self.log(
+                f"reachability: unreachable for {failing}s "
+                f"(http={self._last_probe_code}) — republish request to "
+                f"tor-watchdog FAILED (docker exec)"
+            )
 
     def _record_suspend_offline(self, ok, elapsed_ms):
         """Log one suspend's /offline outcome as a greppable SUSPEND-RACE line.

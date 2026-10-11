@@ -118,6 +118,22 @@
 - Exporting `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoints the
   whole stack at locally built images. See `docs/BUILDING.md`.
 
+## Onion Service Recovery (issue #266)
+- **The app's dual probe is the only measure of real reachability.** When it fails
+  continuously for 10 min with Tor internally healthy (`RepublishTrigger` in
+  `src/onionpress/health.py`, used by `src/menubar.py` and `linux/onionpress-service.py`),
+  the app writes a request file inside the tor container
+  (`launcher_ops.request_watchdog_republish`) and `tor-watchdog.py` answers with
+  DEL_ONION + ADD_ONION — fresh intro points, immediate descriptor upload. Without it,
+  C Tor keeps a dead descriptor on the HSDirs until its next scheduled upload (60–120 min).
+- Rate limits: one request per 15 min on the host, one forced republish per 15 min in
+  the watchdog, never within 5 min of an HS_DESC UPLOADED event. Takeover codes never
+  trigger it (the heartbeat's /online is the reclaim path).
+- `REPUBLISH_ON_UNREACHABLE=no` in `~/.onionpress/config` makes it log-only.
+- The request path is a literal in both `launcher_ops.py` and `tor-watchdog.py`; a test
+  fails if they drift. The watchdog ships in the tor image, so this needs an image
+  publish + `build/refresh-image-digests.sh` to reach users.
+
 ## Security
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
 - Do not commit or log database passwords.

@@ -9,6 +9,17 @@ Signal protocol (from host MenubarApp via docker exec kill):
   USR1 = sleep  → DEL_ONION all services (Tor stays running with circuits)
   USR2 = wake   → ADD_ONION all services (re-publish on existing circuits)
 
+Republish request (from the host app via docker exec, issue #266):
+  a file at REPUBLISH_REQUEST_PATH, written by
+  onionpress.launcher_ops.request_watchdog_republish() once the app has
+  watched the service be unreachable through the Tor network for 10+ min
+  while Tor itself looked healthy. The watchdog answers with DEL_ONION +
+  ADD_ONION (fresh intro points, immediate descriptor upload) — the same
+  action the HS_DESC stall monitor has run thousands of times in the
+  field — subject to its own cooldown. Level-triggered, so a request that
+  lands during a cooldown or a frozen container is acted on later rather
+  than lost or duplicated.
+
 Usage: Started by entrypoint.sh in the background after Tor launches.
 """
 
@@ -38,6 +49,12 @@ FAILED_NODE_THRESHOLD = 5       # failures within window → DROPGUARDS
 FAILED_NODE_WINDOW = 60         # seconds
 BOOTSTRAP_STALL_TIMEOUT = 120   # no progress for 2 min → DROPGUARDS
 HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → DEL+ADD
+
+# Host-requested republish (issue #266). Path must match
+# onionpress.launcher_ops.WATCHDOG_REPUBLISH_REQUEST_PATH (test-enforced).
+REPUBLISH_REQUEST_PATH = "/run/tor-watchdog/republish-requested"
+REPUBLISH_COOLDOWN = 900            # at most one forced republish per 15 min
+REPUBLISH_MIN_AGE_AFTER_UPLOAD = 300  # never tear down a descriptor < 5 min old
 # Reconnect delay when control port isn't available yet
 CONNECT_RETRY_DELAY = 5
 
@@ -337,6 +354,10 @@ class WatchdogState:
         self.services = []  # discovered onion services
         self.services_active = False  # True when ADD_ONION has been done
         self.sleeping = False  # True between USR1 (sleep) and USR2 (wake)
+        # Host-requested republish bookkeeping
+        self.last_forced_republish = 0   # when we last did DEL+ADD on request
+        self.last_hs_desc_uploaded = 0   # wall-clock of the last HS_DESC UPLOADED
+        self.republish_deferred_logged = False  # one "deferring" line per request
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +549,7 @@ def process_event(line, cmd_sock, state):
             log(f"HS_DESC UPLOADED (trigger={state.last_recovery_trigger} "
                 f"elapsed={elapsed:.1f}s)")
         state.hs_desc_uploaded_since_recovery = True
+        state.last_hs_desc_uploaded = time.time()
         return
     if "HS_DESC UPLOAD " in line:
         state.hs_desc_upload_started_since_recovery = True
@@ -558,9 +580,99 @@ def _extract_bootstrap_pct(line):
     return None
 
 
+def read_republish_request():
+    """Return the reason text of a pending host republish request, or None."""
+    try:
+        with open(REPUBLISH_REQUEST_PATH) as f:
+            return " ".join(f.read().split())[:200] or "unspecified"
+    except OSError:
+        return None
+
+
+def clear_republish_request():
+    """Remove a pending request file (idempotent)."""
+    try:
+        os.remove(REPUBLISH_REQUEST_PATH)
+    except OSError:
+        pass
+
+
+def force_republish(cmd_sock, state, reason):
+    """DEL_ONION + ADD_ONION every managed service and arm the stall monitor.
+
+    Fresh intro points, immediate descriptor upload. Shared by the host
+    republish request and (via the same DEL+ADD) the HS_DESC stall path.
+    """
+    now = time.time()
+    log(f"Republish requested by host ({reason}) — DEL+ADD to force fresh descriptors")
+    del_all_services(cmd_sock, state.services)
+    added, collisions = add_all_services(cmd_sock, state.services)
+    state.services_active = (added + collisions) > 0
+    state.last_forced_republish = now
+    # Arm the HS_DESC stall monitor so a republish that never uploads gets
+    # the existing DEL+ADD retry after HS_DESC_UPLOAD_TIMEOUT.
+    state.last_recovery_time = now
+    state.last_recovery_trigger = "republish-request"
+    state.hs_desc_uploaded_since_recovery = False
+    state.hs_desc_upload_started_since_recovery = False
+    state.hs_desc_upload_failed_since_recovery = False
+    state.hs_desc_last_failed_reason = ""
+    return added
+
+
+def check_republish_request(cmd_sock, state):
+    """Act on a host republish request if one is pending and it is safe to.
+
+    Called from check_stalls() (every recv timeout, ~5s). The file is
+    left in place while we can't act — not bootstrapped, inside the
+    cooldown, or the current descriptor is younger than
+    REPUBLISH_MIN_AGE_AFTER_UPLOAD — so the request is honoured as soon
+    as the guard clears, and repeated requests from the host coalesce
+    into one action. It is discarded when it can't apply at all (asleep,
+    no services).
+    """
+    reason = read_republish_request()
+    if reason is None:
+        state.republish_deferred_logged = False
+        return False
+
+    if state.sleeping or not state.services:
+        why = "asleep" if state.sleeping else "no services configured"
+        log(f"Republish request ({reason}) ignored — {why}")
+        clear_republish_request()
+        state.republish_deferred_logged = False
+        return False
+
+    now = time.time()
+    hold = None
+    if not state.bootstrapped:
+        hold = "Tor not bootstrapped"
+    elif now - state.last_forced_republish < REPUBLISH_COOLDOWN:
+        hold = (f"cooldown, last forced republish "
+                f"{int(now - state.last_forced_republish)}s ago")
+    elif (state.last_hs_desc_uploaded
+          and now - state.last_hs_desc_uploaded < REPUBLISH_MIN_AGE_AFTER_UPLOAD):
+        hold = (f"descriptor uploaded only "
+                f"{int(now - state.last_hs_desc_uploaded)}s ago")
+    if hold:
+        if not state.republish_deferred_logged:
+            log(f"Republish request ({reason}) deferred — {hold}")
+            state.republish_deferred_logged = True
+        return False
+
+    clear_republish_request()
+    state.republish_deferred_logged = False
+    force_republish(cmd_sock, state, reason)
+    return True
+
+
 def check_stalls(cmd_sock, state):
     """Periodic check for stalls that events alone can't catch."""
     now = time.time()
+
+    # Host-requested republish (issue #266). Checked first so a request
+    # isn't shadowed by the heartbeat/stall logic below.
+    check_republish_request(cmd_sock, state)
 
     # Periodic heartbeat log (every 5 minutes)
     if now - state.last_heartbeat_log > 300:
@@ -657,6 +769,9 @@ def run():
 
     log("Starting tor-watchdog")
     state = WatchdogState()
+    # A request left over from a previous life of this container is moot:
+    # the ADD_ONION we are about to do is itself a fresh publish.
+    clear_republish_request()
 
     # Discover onion services from disk (keys + torrc port mappings)
     state.services = discover_services()

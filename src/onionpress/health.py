@@ -585,6 +585,19 @@ YELLOW_TO_RESTART_SECONDS = 120    # 2 min in yellow → eligible for restart
 YELLOW_TO_WEDGE_WARNING_SECONDS = 600   # 10 min in yellow → emit wedge warning
 RESTART_COOLDOWN_SECONDS = 300     # 5 min between auto-restarts
 RECLAIM_RETRY_SECONDS = 60         # Retry OnionHeaven reclaim every 60s
+# Outcome-verified descriptor republish (issue #266, plan item 1). The
+# app's dual probe is the only component that measures real reachability
+# through the Tor network; when it fails continuously for this long while
+# Tor is internally healthy, the HSDirs are holding a descriptor whose intro
+# points no longer answer for us (seen 2026-10-11: INTRODUCE_ACK nack
+# reason 1 on every intro point, service throttled from re-uploading for
+# another hour). Fleet data in #266: healthy propagation clears in < 5 min
+# (p50 2.5 min), so 10 min never fires on a benign publish.
+REPUBLISH_AFTER_UNREACHABLE_SECONDS = 600
+# At most one request per cooldown so a genuinely dead Tor network can't
+# turn into DEL_ONION/ADD_ONION churn. The watchdog enforces its own
+# cooldown too; this one just keeps the host side quiet.
+REPUBLISH_COOLDOWN_SECONDS = 900
 POLL_READY_SECONDS = 30            # Poll interval when ready
 POLL_OFFLINE_SECONDS = 10          # Poll interval when offline
 POLL_STARTING_SECONDS = 5          # Poll interval when starting/stuck
@@ -609,6 +622,92 @@ class HealthState:
     wedge_warning_fired: bool = False
 
 
+class RepublishTrigger:
+    """Decide when to ask the tor-watchdog for a forced descriptor republish.
+
+    Pure policy, no I/O: feed it one external-probe outcome per health
+    cycle via observe() and it returns True on the cycle where a request
+    should be sent. Shared by the Mac menubar and the Linux service so
+    both platforms fire on the same evidence.
+
+    A cycle counts towards the failure window only when all of these hold:
+      - Tor is internally ready (bootstrapped, hostname present, WordPress
+        reachable from the tor container) — otherwise the problem isn't
+        descriptor publication and a republish can't help;
+      - the dual probe said unreachable;
+      - the code is in the wedge family: "000", "000:rc=28" (dead intro
+        circuits), "000:rc=97" (descriptor missing/unusable). Takeover
+        codes ("takeover", "302") are excluded on purpose: during an
+        OnionHeaven takeover the heartbeat's /online is the reclaim path,
+        and republishing would just fight the hub's replica every cooldown.
+    Any other outcome resets the window.
+    """
+
+    def __init__(
+        self,
+        failing_for: float = REPUBLISH_AFTER_UNREACHABLE_SECONDS,
+        cooldown: float = REPUBLISH_COOLDOWN_SECONDS,
+    ):
+        self.failing_for = failing_for
+        self.cooldown = cooldown
+        self.failing_since: float | None = None
+        self.last_requested: float | None = None
+        self.last_code: str = ""
+
+    @staticmethod
+    def is_wedge_code(http_code: str | None) -> bool:
+        """True for the probe outcomes a republish can repair."""
+        return str(http_code or "").startswith("000")
+
+    def observe(
+        self,
+        now: float,
+        internally_ready: bool,
+        reachable: bool | None,
+        http_code: str | None,
+    ) -> bool:
+        """Record one probe outcome. Returns True when a request is due.
+
+        The caller decides whether to send the request or only log that
+        it would have (REPUBLISH_ON_UNREACHABLE=no); either way the
+        cooldown starts, so log-only mode reports the same cadence the
+        live mode would act on.
+        """
+        wedged = (
+            bool(internally_ready)
+            and reachable is False
+            and self.is_wedge_code(http_code)
+        )
+        if not wedged:
+            self.failing_since = None
+            return False
+        self.last_code = str(http_code or "")
+        if self.failing_since is None:
+            self.failing_since = now
+            return False
+        if (now - self.failing_since) < self.failing_for:
+            return False
+        if (self.last_requested is not None
+                and (now - self.last_requested) < self.cooldown):
+            return False
+        self.last_requested = now
+        return True
+
+    def reset(self) -> None:
+        """Forget the current failure window (not the cooldown).
+
+        For cycles where no probe ran at all — no internet, stack stopped —
+        so an offline gap never counts towards the window.
+        """
+        self.failing_since = None
+
+    def failing_seconds(self, now: float) -> int:
+        """How long the current wedge window has lasted (0 if none)."""
+        if self.failing_since is None:
+            return 0
+        return int(now - self.failing_since)
+
+
 class HealthMonitor:
     """Stateful health monitor that tracks changes across check cycles.
 
@@ -619,6 +718,7 @@ class HealthMonitor:
     def __init__(self, log_func: Callable[[str], None] | None = None):
         self.state = HealthState()
         self.log_func = log_func
+        self.republish = RepublishTrigger()
 
     def _log(self, msg: str) -> None:
         if self.log_func:
@@ -733,6 +833,22 @@ class HealthMonitor:
             return False
         self.state.wedge_warning_fired = True
         return True
+
+    def should_request_republish(self, result: HealthResult) -> bool:
+        """Feed this cycle's dual-probe outcome to the republish trigger.
+
+        Returns True on the cycle where the caller should ask the tor
+        container's watchdog for a forced DEL_ONION/ADD_ONION republish
+        (see launcher_ops.request_watchdog_republish). Mirrors what the
+        Mac menubar does inline in check_status() with the same
+        RepublishTrigger.
+        """
+        return self.republish.observe(
+            time.time(),
+            result.tor_internally_ready,
+            result.tor_externally_reachable,
+            result.external_http_code,
+        )
 
     def should_reclaim(self) -> bool:
         """Decide whether to send OnionHeaven /online reclaim.

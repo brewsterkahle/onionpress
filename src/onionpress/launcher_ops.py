@@ -336,6 +336,45 @@ def signal_watchdog(docker, container: str, sig: str) -> bool:
     return bool(getattr(result, "ok", False))
 
 
+# Where the tor-watchdog looks for a host-requested descriptor republish.
+# Inside the tor container's own filesystem (not the shared onionpress-data
+# volume) so only something with docker exec on that container — the app —
+# can request one. Level-triggered: the file sits there until the watchdog
+# acts on it or discards it, so a request made while the container is
+# frozen or the watchdog is in its cooldown is coalesced, never lost or
+# duplicated. Must match REPUBLISH_REQUEST_PATH in
+# app/Resources/docker/tor/tor-watchdog.py (a test enforces it).
+WATCHDOG_REPUBLISH_REQUEST_PATH = "/run/tor-watchdog/republish-requested"
+
+
+def request_watchdog_republish(docker, container: str, reason: str) -> bool:
+    """Ask the tor-watchdog in `container` to force a descriptor republish.
+
+    Writes the request file the watchdog polls (see
+    WATCHDOG_REPUBLISH_REQUEST_PATH); the watchdog answers with
+    DEL_ONION + ADD_ONION for every service it manages, which mints fresh
+    intro points and uploads a new descriptor immediately instead of at
+    Tor's next scheduled upload (up to two hours away). This is the
+    outcome-verified recovery loop from issue #266: the caller has watched
+    the service be unreachable through the Tor network for
+    health.REPUBLISH_AFTER_UNREACHABLE_SECONDS while Tor itself looked
+    healthy.
+
+    `reason` is free text for the watchdog's log line. Returns True if the
+    request file was written. A tor image whose watchdog predates the
+    request file simply never reads it — harmless.
+    """
+    reason = " ".join(str(reason or "").split())[:200] or "unspecified"
+    result = docker.exec(
+        container,
+        ["sh", "-c",
+         'mkdir -p "$(dirname "$2")" && printf \'%s\\n\' "$1" > "$2"',
+         "_", reason, WATCHDOG_REPUBLISH_REQUEST_PATH],
+        timeout=10,
+    )
+    return bool(getattr(result, "ok", False))
+
+
 def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int]:
     """Read the host port our own WordPress container actually published.
 
