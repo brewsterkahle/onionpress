@@ -88,6 +88,24 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_restore.assert_called_once_with("mypass", "/tmp/backup.zip")
 
     @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_regenerate_derivatives_command(self, MockCLI):
+        """The launchers spawn this on every start when a restore left the
+        pending marker (#257)."""
+        instance = MockCLI.return_value
+        instance.cmd_regenerate_derivatives.return_value = 0
+        self.assertEqual(main(["regenerate-derivatives"]), 0)
+        instance.cmd_regenerate_derivatives.assert_called_once_with()
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_prune_image_derivatives_command(self, MockCLI):
+        """The Linux launcher's bash create_backup calls this (#257)."""
+        instance = MockCLI.return_value
+        instance.cmd_prune_image_derivatives.return_value = 0
+        self.assertEqual(
+            main(["prune-image-derivatives", "--uploads-dir", "/tmp/stage/uploads"]), 0)
+        instance.cmd_prune_image_derivatives.assert_called_once_with("/tmp/stage/uploads")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
     def test_reset_with_yes(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_reset.return_value = 0

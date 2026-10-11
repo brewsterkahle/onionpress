@@ -1994,3 +1994,78 @@ exit 0
                 self.assertTrue(marker_left,
                                 "the key import must be retried on the next start")
                 self.assertNotIn("volume create onionpress-onion-keys", calls)
+
+
+class TestDerivativeRegenerationWiring(unittest.TestCase):
+    """Issue #257: backups leave WordPress's regenerable image derivatives
+    out, so the two halves have to ship together — a restore must leave the
+    pending marker, every launcher start must act on it, and the fallback
+    mu-plugin must be installed. Shipping the backup side alone would mean
+    broken images after a restore.
+    """
+
+    LAUNCHERS = ["app/MacOS/onionpress", "linux/onionpress"]
+    HOST_MARKER = ".regenerate-derivatives-pending"
+    CONTAINER_MARKER = "/var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives"
+
+    @staticmethod
+    def _function_body(text, name):
+        start = text.index(f"\n{name}() {{")
+        end = text.index("\n}\n", start)
+        return text[start:end]
+
+    def test_launchers_carry_the_same_pending_check(self):
+        bodies = [self._function_body(_read(f), "regenerate_derivatives_pending")
+                  for f in self.LAUNCHERS]
+        self.assertEqual(
+            bodies[0], bodies[1],
+            "regenerate_derivatives_pending() must be identical in the macOS "
+            "and Linux launchers; edit both.")
+        self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', bodies[0])
+        self.assertIn(self.CONTAINER_MARKER, bodies[0])
+
+    def test_every_launcher_start_kicks_off_regeneration_when_pending(self):
+        for f in self.LAUNCHERS:
+            text = _read(f)
+            with self.subTest(launcher=f):
+                sc = text.index("\nstart_containers() {")
+                sc_end = text.index("\n}\n", sc)
+                body = text[sc:sc_end]
+                guard = body.index("regenerate_derivatives_pending; then")
+                kick = body.index("regenerate-derivatives", guard)
+                self.assertLess(guard, kick, "the kick-off must be guarded on the marker")
+                # Detached in a subshell (not in the script's job table) and
+                # after provision-post-install so the fallback mu-plugin is
+                # already installed when the sweep starts.
+                kick_line = body[body.rfind("\n", 0, kick):body.index("\n", kick)]
+                self.assertRegex(kick_line, r"^\s*\(\s*\S.*regenerate-derivatives.*&\s*\)\s*$")
+                self.assertLess(body.index("provision-post-install"), guard)
+
+    def test_python_marker_paths_match_the_launchers(self):
+        from onionpress import derivatives
+        self.assertEqual(derivatives.HOST_MARKER, self.HOST_MARKER)
+        self.assertEqual(derivatives.CONTAINER_MARKER, self.CONTAINER_MARKER)
+
+    def test_linux_bash_backup_and_restore_carry_the_feature(self):
+        """linux/onionpress still has its own inline create_backup and
+        restore_backup (issue #203); they must prune via the shared Python
+        classification and leave the marker like the Python paths do."""
+        text = _read("linux/onionpress")
+        create = self._function_body(text, "create_backup")
+        self.assertIn("prune-image-derivatives", create)
+        self.assertIn("uploads/.onionpress-regenerate-derivatives", create)
+        self.assertIn("excludes_image_derivatives", create)
+        restore = self._function_body(text, "restore_backup")
+        self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', restore)
+
+    def test_fallback_mu_plugin_is_shipped(self):
+        from onionpress import multisite
+        self.assertIn("onionpress-image-fallback.php", multisite.MU_PLUGINS)
+        plugin = _read("app/Resources/plugins/onionpress-image-fallback.php")
+        for hook in ("wp_get_attachment_image_src", "wp_calculate_image_srcset",
+                     "wp_content_img_tag"):
+            self.assertIn(hook, plugin)
+        self.assertIn("/uploads/.onionpress-regenerate-derivatives", plugin)
+
+    def test_py2app_bundles_the_module(self):
+        self.assertIn("'onionpress.derivatives'", _read("setup.py"))

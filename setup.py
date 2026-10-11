@@ -84,6 +84,7 @@ OPTIONS = {
                  'onionpress.reachability_stats',
                  'onionpress.system_metrics',
                  'onionpress.multisite',
+                 'onionpress.derivatives',
                  'onionpress.scrub',
                  'onionpress.mac_power',
                  'onionpress.redact'],

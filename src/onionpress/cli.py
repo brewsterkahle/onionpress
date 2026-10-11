@@ -95,6 +95,11 @@ class OnionPressCLI:
 
             # Start Tor if WordPress is installed
             if self.containers.wp_is_installed():
+                # A restore may have left image sizes to rebuild (#257);
+                # runs detached, resumable, no-op without the marker.
+                from . import derivatives
+                derivatives.spawn_regeneration(
+                    self.paths.data_dir, self.log, self.paths.log_file)
                 self.containers.start_tor()
 
                 # Wait for Tor
@@ -257,6 +262,12 @@ class OnionPressCLI:
                                   ".install-from-backup")
             if os.path.exists(marker):
                 os.remove(marker)
+            # Rebuild the image sizes the backup left out (#257) — detached,
+            # so this command returns now; the marker survives an
+            # interruption and every launcher start re-kicks it until done.
+            from . import derivatives
+            derivatives.spawn_regeneration(
+                self.paths.data_dir, self.log, self.paths.log_file)
             print("Restore complete. OnionPress rebuilt from backup.")
             return 0
         except Exception as e:
@@ -294,6 +305,30 @@ class OnionPressCLI:
         except Exception as e:
             self.log(f"Install-from-backup import failed: {e}")
             return 1
+
+    def cmd_regenerate_derivatives(self) -> int:
+        """Rebuild the image sizes a restored backup left out, if a marker
+        says one did (#257). Synchronous — the launchers run it detached in
+        the background. Exit 0 = nothing pending or sweep complete (markers
+        cleared); 1 = could not finish, markers kept for the next start.
+        """
+        from . import derivatives
+        ok = derivatives.regenerate_if_pending(
+            self.paths.data_dir, self.log, docker_bin=self.docker.docker_bin)
+        return 0 if ok else 1
+
+    def cmd_prune_image_derivatives(self, uploads_dir: str) -> int:
+        """Delete regenerable -WxH/-scaled image copies from a backup's
+        staged uploads dir and print `<files> <bytes>`. Used by the Linux
+        launcher's bash create_backup so both platforms share one
+        classification (#257)."""
+        from . import derivatives
+        if not os.path.isdir(uploads_dir):
+            print("0 0")
+            return 0
+        removed, freed = derivatives.prune_image_derivatives(uploads_dir, self.log)
+        print(f"{removed} {freed}")
+        return 0
 
     def cmd_smoke_test_wayback(self) -> int:
         """End-to-end smoke test of the Wayback archiving pipeline.
@@ -634,6 +669,18 @@ def main(argv: list[str] = None) -> int:
         "--staging", required=True,
         help="Path to the already-extracted backup staging directory")
 
+    sub.add_parser(
+        "regenerate-derivatives",
+        help="Rebuild the resized image copies a restored backup left out "
+             "(no-op unless a restore left the pending marker; resumable)")
+    p_prune = sub.add_parser(
+        "prune-image-derivatives",
+        help="Delete regenerable -WxH/-scaled image copies from a staged "
+             "uploads dir (backup helper); prints '<files> <bytes>'")
+    p_prune.add_argument(
+        "--uploads-dir", required=True,
+        help="Path to the staged wp-content/uploads directory")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -658,6 +705,10 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_restore(args.password, args.backup_file)
     elif args.command == "import-backup-artifacts":
         return cli.cmd_import_backup_artifacts(args.staging)
+    elif args.command == "regenerate-derivatives":
+        return cli.cmd_regenerate_derivatives()
+    elif args.command == "prune-image-derivatives":
+        return cli.cmd_prune_image_derivatives(args.uploads_dir)
     elif args.command == "reset":
         return cli.cmd_reset(yes=args.yes)
     elif args.command == "smoke-test-wayback":
