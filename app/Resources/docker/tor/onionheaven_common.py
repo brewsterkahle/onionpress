@@ -705,16 +705,38 @@ def get_addr_serving_status(conn, content_address):
 def takeover_function(conn, content_address, healthcheck_address, force=False):
     """Handle takeover for a single registry row.
 
-    1. Mark the row status='taken-over' and record last_taken_over.
-    2. Check guards:
-       - No OTHER row for same content_address already has status='taken-over'
-       - No other row for content_address has status='online'
-       - last_healthy is stale (now - last_healthy > PROPAGATION_DELAY) OR force=True
-    3. Pick the bootstrapped worker with fewest addresses → docker exec takeover.
-    4. If all workers are at max_services and <2 building, spawn 2 more.
-    """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    The status transition is the LAST step, not the first. Until #232 the
+    row was flipped to status='taken-over' and committed before any guard
+    ran, and a guard that then declined returned without rolling back. The
+    guard that fired in practice was the last_healthy one: an /online
+    heartbeat landing between the heartbeat loop's staleness check and this
+    call refreshed last_healthy, so the function correctly refused to take
+    over — but had already recorded a takeover. No ADD_ONION was ever
+    queued, nothing set takeover_pending/release_pending, and the audit
+    pipeline locked the orphan into confirmed_dead. RECONCILE repaired the
+    symptom every 20 s; this ordering was the cause.
 
+    1. Read the row. Bail if it is missing, or if status != 'online' and
+       not force.
+    2. Guards — reads only, no registry writes:
+       - no OTHER row for this content_address already has status='taken-over'
+       - no other row for this content_address has status='online'
+       - last_healthy is stale (now - last_healthy > PROPAGATION_DELAY) or force
+    3. Pick a worker (preferring the row's previous takeover_container so
+       takeover/release cycles do not strand ADD_ONION services on other
+       workers) and queue the ADD_ONION via _exec_takeover. If no worker is
+       bootstrapped or the queue refuses, the row is left exactly as it was:
+       the next heartbeat pass (or /offline) retries, and _ensure_capacity
+       has already been asked for more workers.
+    4. Only once the worker accepted the address: set status='taken-over',
+       last_taken_over, takeover_container, clear takeover_pending, bump the
+       worker's assigned_count, commit. The UPDATE is a compare-and-set on
+       the status read in step 1, so a row that another path changed while
+       the docker exec was in flight is not overwritten; the RECONCILE pass
+       DEL_ONIONs any extra service that leaves on the worker.
+    5. If all bootstrapped workers are at max_services and <2 are building,
+       spawn 2 more.
+    """
     row = conn.execute(
         "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
         (content_address, healthcheck_address)
@@ -725,19 +747,13 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
             f"{content_address} / {healthcheck_address}")
         return
 
-    if row["status"] != "online" and not force:
+    status_before = row["status"]
+    if status_before != "online" and not force:
         return
 
-    # Mark this row as taken-over
-    conn.execute(
-        "UPDATE registry SET status = 'taken-over', last_taken_over = ? "
-        "WHERE content_address = ? AND healthcheck_address = ?",
-        (now, content_address, healthcheck_address)
-    )
-    db_commit_with_retry(conn)
-    log(f"Marked {healthcheck_address} as taken-over for {content_address}")
-
     # Guards: should we actually start serving the onion service?
+    # Nothing below writes to the registry until a worker has accepted
+    # the address, so a guard that declines leaves no trace.
     already_serving = conn.execute(
         "SELECT COUNT(*) FROM registry "
         "WHERE content_address = ? AND healthcheck_address != ? AND status = 'taken-over'",
@@ -773,10 +789,11 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         log(f"Skipping takeover for {content_address} — last_healthy not yet stale")
         return
 
-    # All guards pass — execute takeover on a worker.
+    # All guards pass — queue the ADD_ONION on a worker.
     # Prefer the worker this address was previously on (stored in
     # takeover_container even after release) to avoid orphaned ADD_ONION
     # services when takeover/release cycles bounce between workers.
+    worker = None
     if is_farm_mode():
         preferred = row["takeover_container"] if row["takeover_container"] else None
         if preferred:
@@ -788,35 +805,65 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
             worker = preferred if ok else _pick_worker(conn)
         else:
             worker = _pick_worker(conn)
-        if worker:
-            success = _exec_takeover(worker, content_address)
-            if success:
-                conn.execute(
-                    "UPDATE registry SET takeover_container = ?, takeover_pending = NULL "
-                    "WHERE content_address = ? AND healthcheck_address = ?",
-                    (worker, content_address, healthcheck_address)
-                )
-                conn.execute(
-                    "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
-                    "WHERE container_name = ?",
-                    (worker,)
-                )
-                db_commit_with_retry(conn)
-            # Check if we need more capacity
-            _ensure_capacity(conn)
-            return
-        else:
-            # No bootstrapped workers — spawn 2 if not already building
+        if not worker:
+            # No bootstrapped workers — spawn 2 if not already building.
+            # The row stays as it was; the next pass retries.
             _ensure_capacity(conn)
             addr_log(content_address, f"Takeover deferred for {content_address} — no bootstrapped workers yet")
             return
-
-    # Legacy fallback — only safe inside takeover worker containers.
-    if os.environ.get("TAKEOVER_WORKER") == "1":
-        _takeover_local(content_address)
+        if not _exec_takeover(worker, content_address):
+            # ADD_ONION was not queued — do not record a takeover that never
+            # happened. The next pass retries; meanwhile check capacity, as
+            # a refused queue is often a full worker.
+            _ensure_capacity(conn)
+            return
+    elif os.environ.get("TAKEOVER_WORKER") == "1":
+        # Legacy fallback — only safe inside takeover worker containers.
+        if not _takeover_local(content_address):
+            return
     else:
         log(f"ERROR: takeover_function fell through to legacy mode for "
             f"{content_address} — not farm mode and not a takeover worker.")
+        return
+
+    # The service is queued — NOW record the transition. Compare-and-set on
+    # the status the decision was based on: if /online released the row or
+    # another takeover path got here first while the docker exec was in
+    # flight, leave their state alone rather than overwrite it.
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if worker:
+        cur = conn.execute(
+            "UPDATE registry SET status = 'taken-over', last_taken_over = ?, "
+            "takeover_container = ?, takeover_pending = NULL "
+            "WHERE content_address = ? AND healthcheck_address = ? AND status = ?",
+            (now, worker, content_address, healthcheck_address, status_before)
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE registry SET status = 'taken-over', last_taken_over = ? "
+            "WHERE content_address = ? AND healthcheck_address = ? AND status = ?",
+            (now, content_address, healthcheck_address, status_before)
+        )
+    recorded = cur.rowcount > 0
+    if recorded and worker:
+        conn.execute(
+            "UPDATE takeover_containers SET assigned_count = assigned_count + 1 "
+            "WHERE container_name = ?",
+            (worker,)
+        )
+    db_commit_with_retry(conn)
+
+    if recorded:
+        log(f"Marked {healthcheck_address} as taken-over for {content_address}"
+            + (f" on {worker}" if worker else ""))
+    else:
+        log(f"Takeover of {content_address} not recorded — row changed from "
+            f"'{status_before}' while queuing on {worker or 'local tor'}; "
+            f"RECONCILE will remove any extra service")
+
+    if worker:
+        # Check if we need more capacity
+        _ensure_capacity(conn)
 
 
 def _takeover_local(content_address):

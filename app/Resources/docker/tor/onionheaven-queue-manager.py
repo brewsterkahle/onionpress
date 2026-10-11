@@ -309,8 +309,8 @@ class QueueManager:
 
         If in-memory state says active/in_flight but Tor doesn't actually have
         the service (e.g. DEL_ONION'd via tor-manager out-of-band, or a
-        takeover_function race left the row marked taken-over without ADD_ONION
-        ever firing), the stale entry is evicted so the address re-queues.
+        pre-#232 takeover_function race left the row marked taken-over without
+        ADD_ONION ever firing), the stale entry is evicted so the address re-queues.
         """
         with self.lock:
             if content_address in self.active or content_address in self.in_flight:
