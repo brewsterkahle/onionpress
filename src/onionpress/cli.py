@@ -2,15 +2,17 @@
 
 Usage: python -m onionpress.cli <command> [args]
 
-Commands: start, stop, restart, status, address, logs, setup, backup, restore, reset
+Commands: start, stop, restart, status, address, logs, get, setup, backup, restore, reset
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
 from . import __version__
 from .platform import OS, detect_os, resolve_paths, detect_timezone
@@ -20,6 +22,46 @@ from .config import (
 )
 from .docker import Docker
 from .containers import ContainerManager
+
+
+# `onionpress get` (issue #70) runs curl inside this container, where Tor's
+# SOCKS port is local. The name is fixed: each user has their own VM, so the
+# multi-user port offset changes host port mappings only, never container names.
+TOR_CONTAINER = "onionpress-tor"
+TOR_SOCKS_IN_CONTAINER = "127.0.0.1:9050"
+GET_DEFAULT_MAX_TIME = 60  # seconds; onion rendezvous alone can take 10-30 s
+
+
+def normalize_get_url(url: str) -> str:
+    """Turn what the user typed into the URL curl gets, or raise ValueError.
+
+    Accepts a full http(s) URL or a bare host (`abc…xyz.onion`,
+    `example.com/path`), which gets `http://` prepended. The result is
+    validated as one printable-ASCII token with http/https and a host of
+    hostname characters only. The argv is a list, so the shell never sees
+    it; this check is so that what reaches `docker exec … curl` is always
+    a URL argument and never a curl option (`-K`, `--config`) or garbage.
+    """
+    s = (url or "").strip()
+    if not s:
+        raise ValueError("no URL given")
+    if any(not (0x21 <= ord(c) <= 0x7E) for c in s):
+        raise ValueError("URL must be printable ASCII without whitespace")
+    if "://" not in s:
+        s = "http://" + s
+    try:
+        parts = urlsplit(s)
+        parts.port  # raises on a non-numeric or out-of-range port
+    except ValueError as e:
+        raise ValueError(f"cannot parse URL: {e}") from None
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported URL scheme {parts.scheme!r} (use http or https)")
+    host = parts.hostname or ""
+    if not host:
+        raise ValueError("URL has no host")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host):
+        raise ValueError(f"URL host {host!r} contains characters that are not valid in a hostname")
+    return s
 
 
 def _make_log_func(log_file: str | None = None) -> Callable[[str], None]:
@@ -161,6 +203,49 @@ class OnionPressCLI:
             compose_files=[os.path.join(self.paths.docker_dir, "docker-compose.yml")] if self.paths.docker_dir else None,
             timeout=0,  # Will be killed by user
         )
+        return result.returncode
+
+    def cmd_get(self, url: str, headers: bool = False,
+                max_time: int = GET_DEFAULT_MAX_TIME) -> int:
+        """Fetch a URL over Tor and print the response body (issue #70).
+
+        For checking whether a .onion (yours, a friend's, the hub's
+        healthcheck address) is reachable right now. `curl --socks5-hostname`
+        on the host does not work through Colima's port forwarding
+        (CLAUDE.md, "Colima Networking Gotcha"), so curl runs with
+        `docker exec` inside the tor container, where the SOCKS port is
+        local; .onion names resolve inside Tor, and clearnet URLs leave via
+        a Tor exit. curl's exit code is passed through (7 = could not
+        connect, 28 = timed out, ...) so scripts can tell apart "unreachable"
+        from "reached, got a body". Nothing is logged to onionpress.log:
+        a debugging fetch is not an app event.
+        """
+        try:
+            target = normalize_get_url(url)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 2
+        if max_time <= 0:
+            print("ERROR: --max-time must be a positive number of seconds",
+                  file=sys.stderr)
+            return 2
+
+        cmd = ["curl", "-sS", "--max-time", str(max_time),
+               "--socks5-hostname", TOR_SOCKS_IN_CONTAINER]
+        if headers:
+            cmd.append("--include")
+        cmd.append(target)
+        # quiet=True: curl's own stderr (printed below) is the error report;
+        # the generic "docker exec ... FAILED" line would only repeat it.
+        result = self.docker.exec(TOR_CONTAINER, cmd,
+                                  timeout=max_time + 15, quiet=True)
+        if result.stdout:
+            sys.stdout.write(result.stdout)
+            sys.stdout.flush()
+        if result.stderr:
+            print(result.stderr.rstrip(), file=sys.stderr)
+        if result.timed_out:
+            return 124
         return result.returncode
 
     def cmd_backup(self, password: str, output_path: str = None, username: str = None) -> int:
@@ -594,6 +679,20 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("address", help="Print onion address")
     sub.add_parser("logs", help="Follow container logs")
 
+    p_get = sub.add_parser(
+        "get",
+        help="Fetch a URL over Tor (curl inside the tor container) and print the body",
+    )
+    p_get.add_argument(
+        "url",
+        help="http(s) URL, or a bare host such as abc...xyz.onion (http:// assumed)")
+    p_get.add_argument(
+        "-i", "--headers", action="store_true",
+        help="Include the response headers in the output (curl --include)")
+    p_get.add_argument(
+        "--max-time", type=int, default=GET_DEFAULT_MAX_TIME, metavar="SECONDS",
+        help=f"Give up after this many seconds (default {GET_DEFAULT_MAX_TIME})")
+
     p_backup = sub.add_parser("backup", help="Create a backup")
     p_backup.add_argument("password", help="WP admin password (also used to encrypt the zip)")
     p_backup.add_argument("output", nargs="?", help="Output path (default: ~/OnionPress/backups/)")
@@ -699,6 +798,8 @@ def main(argv: list[str] = None) -> int:
 
     if args.command in commands:
         return commands[args.command]()
+    elif args.command == "get":
+        return cli.cmd_get(args.url, headers=args.headers, max_time=args.max_time)
     elif args.command == "backup":
         return cli.cmd_backup(args.password, args.output, args.user)
     elif args.command == "restore":

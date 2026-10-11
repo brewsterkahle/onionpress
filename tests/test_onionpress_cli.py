@@ -1,5 +1,6 @@
 """Tests for src/onionpress/cli.py."""
 
+import io
 import json
 import os
 import shutil
@@ -10,7 +11,13 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from onionpress.cli import main, OnionPressCLI, _make_log_func
+from onionpress.cli import (
+    main, OnionPressCLI, _make_log_func, normalize_get_url,
+    GET_DEFAULT_MAX_TIME, TOR_CONTAINER,
+)
+from onionpress.docker import DockerResult
+
+ONION = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxyz234567.onion"
 
 
 class TestMakeLogFunc(unittest.TestCase):
@@ -131,6 +138,24 @@ class TestCLIArgParsing(unittest.TestCase):
             json_output=True, current="1.2.3")
 
     @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_get_command_defaults(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_get.return_value = 0
+        result = main(["get", ONION])
+        self.assertEqual(result, 0)
+        instance.cmd_get.assert_called_once_with(
+            ONION, headers=False, max_time=GET_DEFAULT_MAX_TIME)
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_get_command_flags(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_get.return_value = 7
+        result = main(["get", "-i", "--max-time", "5", f"http://{ONION}/x"])
+        self.assertEqual(result, 7)
+        instance.cmd_get.assert_called_once_with(
+            f"http://{ONION}/x", headers=True, max_time=5)
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
     def test_default_is_start(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_start.return_value = 0
@@ -199,6 +224,133 @@ class TestPIDLock(unittest.TestCase):
         # Should detect as stale and clean up
         self.assertFalse(cli._check_pid_lock())
         self.assertFalse(os.path.exists(pid_file))
+
+
+class TestNormalizeGetUrl(unittest.TestCase):
+    """`onionpress get` (issue #70) takes a bare .onion or a full URL. What
+    comes out must always be a URL argument for curl — never an option,
+    never something with whitespace or control characters in it."""
+
+    def test_bare_onion_host_gets_http(self):
+        self.assertEqual(normalize_get_url(ONION), f"http://{ONION}")
+
+    def test_bare_host_with_path_and_query(self):
+        self.assertEqual(normalize_get_url("example.com/a/b?c=1"),
+                         "http://example.com/a/b?c=1")
+
+    def test_full_url_passes_through(self):
+        for url in (f"http://{ONION}/", f"https://example.com:8443/x?y=1#z",
+                    "http://127.0.0.1:8080/wp-json/"):
+            self.assertEqual(normalize_get_url(url), url)
+
+    def test_surrounding_whitespace_is_stripped(self):
+        self.assertEqual(normalize_get_url(f"  {ONION}\n"), f"http://{ONION}")
+
+    def test_rejects_malformed(self):
+        bad = [
+            "", "   ",
+            "-K", "--config", "-o/tmp/x",          # would be curl options
+            "ftp://example.com/", "file:///etc/passwd", "gopher://x",
+            "http://", "https:///path",             # no host
+            "http://exa mple.com/", "http://a/b c",  # whitespace
+            "http://a\nb", "http://a\rb", "http://a\tb",
+            "http://exa\x7fmple.com/", "http://h\x01st/",
+            "http://[::1", "http://host:notaport/", "http://host:99999/",
+            "http://host;rm -rf x/", "http://$(id)/", "http://a|b/",
+            "http://-dash.onion/", "http://under_score.onion/",
+            "http://café.onion/",
+        ]
+        for url in bad:
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    normalize_get_url(url)
+
+
+class TestCmdGet(unittest.TestCase):
+    """cmd_get must run curl INSIDE the tor container over docker exec with
+    an argv list (CLAUDE.md: SOCKS from the host does not work through
+    Colima), and hand curl's exit code back unchanged."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _cli(self, result):
+        from onionpress.config import PortConfig, Secrets
+        with mock.patch("onionpress.cli.detect_port_offset",
+                        return_value=PortConfig(0, 8080, 9050, 9077)), \
+             mock.patch("onionpress.cli.ensure_secrets",
+                        return_value=Secrets("p1", "p2", "p3")), \
+             mock.patch("onionpress.cli.Docker") as MockDocker:
+            MockDocker.return_value = mock.Mock()
+            cli = OnionPressCLI(data_dir=self.tmpdir)
+        cli.docker = mock.Mock()
+        cli.docker.exec.return_value = result
+        return cli
+
+    def _run(self, cli, *args, **kwargs):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = cli.cmd_get(*args, **kwargs)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_bare_onion_host_argv(self):
+        cli = self._cli(DockerResult(0, "<html>hi</html>", ""))
+        rc, out, err = self._run(cli, ONION)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "<html>hi</html>")
+        self.assertEqual(err, "")
+        cli.docker.exec.assert_called_once_with(
+            TOR_CONTAINER,
+            ["curl", "-sS", "--max-time", str(GET_DEFAULT_MAX_TIME),
+             "--socks5-hostname", "127.0.0.1:9050", f"http://{ONION}"],
+            timeout=GET_DEFAULT_MAX_TIME + 15, quiet=True)
+        self.assertEqual(TOR_CONTAINER, "onionpress-tor")
+
+    def test_full_url_with_headers_and_max_time(self):
+        cli = self._cli(DockerResult(0, "HTTP/1.1 200 OK\r\n\r\nbody", ""))
+        rc, out, _ = self._run(cli, f"https://example.com/p?q=1",
+                               headers=True, max_time=5)
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("HTTP/1.1 200 OK"))
+        cli.docker.exec.assert_called_once_with(
+            TOR_CONTAINER,
+            ["curl", "-sS", "--max-time", "5",
+             "--socks5-hostname", "127.0.0.1:9050", "--include",
+             "https://example.com/p?q=1"],
+            timeout=20, quiet=True)
+
+    def test_curl_exit_code_and_stderr_pass_through(self):
+        cli = self._cli(DockerResult(7, "", "curl: (7) Can't complete SOCKS5 connection"))
+        rc, out, err = self._run(cli, ONION)
+        self.assertEqual(rc, 7)
+        self.assertEqual(out, "")
+        self.assertIn("curl: (7)", err)
+
+    def test_docker_timeout_is_124(self):
+        cli = self._cli(DockerResult(-1, "", "Command timed out after 75s", timed_out=True))
+        rc, _, err = self._run(cli, ONION)
+        self.assertEqual(rc, 124)
+        self.assertIn("timed out", err)
+
+    def test_malformed_url_never_reaches_docker(self):
+        cli = self._cli(DockerResult(0, "", ""))
+        for url in ("-K", "ftp://x/", "http://exa mple.com/", ""):
+            with self.subTest(url=url):
+                rc, out, err = self._run(cli, url)
+                self.assertEqual(rc, 2)
+                self.assertEqual(out, "")
+                self.assertIn("ERROR", err)
+        cli.docker.exec.assert_not_called()
+
+    def test_nonpositive_max_time_rejected(self):
+        cli = self._cli(DockerResult(0, "", ""))
+        rc, _, err = self._run(cli, ONION, max_time=0)
+        self.assertEqual(rc, 2)
+        self.assertIn("max-time", err)
+        cli.docker.exec.assert_not_called()
 
 
 if __name__ == "__main__":
