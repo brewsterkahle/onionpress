@@ -1444,6 +1444,22 @@ migrate_key_volume() {
     return 0
 }
 
+# Image derivatives (issue #257): backups carry original images only, so a
+# restore leaves the resized copies (-WxH sizes, -scaled) to be rebuilt. True
+# when that rebuild is still owed: the host marker the restore paths write,
+# or the marker a backup archive carries inside wp-content/uploads/ (which a
+# restore by an OnionPress version that predates the host marker still copies
+# into the container). start_containers then runs
+# `onionpress.cli regenerate-derivatives` detached in the background; it uses
+# `wp media regenerate --only-missing`, so an interrupted sweep resumes on the
+# next start, and it clears both markers only when it completes. Kept
+# identical in the macOS and Linux launchers; a test enforces that.
+regenerate_derivatives_pending() {
+    [ -f "$DATA_DIR/.regenerate-derivatives-pending" ] && return 0
+    docker exec onionpress-wordpress test -f \
+        /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives >/dev/null 2>&1
+}
+
 # Function to start containers
 start_containers() {
     log "Starting OnionPress containers..."
@@ -1780,6 +1796,15 @@ chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
         rm -rf "$_ifb_staging"
         rm -f "$_ifb_marker"
         log "Install-from-backup: complete (staging cleaned up)"
+    fi
+
+    # Image derivatives (#257): if a restore left resized images to rebuild,
+    # do it in the background — niced, detached from this script's job table
+    # (see the subshell note below), resumable across restarts. After
+    # provision-post-install so the image-fallback mu-plugin is in place.
+    if $wp_installed && regenerate_derivatives_pending; then
+        log "Image derivatives: rebuild pending — starting in the background"
+        ( bundled_python -m onionpress.cli regenerate-derivatives >> "$LOG_FILE" 2>&1 & )
     fi
 
     # Tor-routed archive.org login can take 30s — background it so the

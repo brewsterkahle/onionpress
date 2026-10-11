@@ -60,6 +60,11 @@ class Docker:
         self._docker_bin = self._find_docker(paths)
         self._env = self._build_env(paths, extra_env)
 
+    @property
+    def docker_bin(self) -> str:
+        """The resolved docker binary (bundled copy or PATH lookup)."""
+        return self._docker_bin
+
     @staticmethod
     def _find_docker(paths: OnionPressPaths) -> str:
         """Resolve the docker binary path."""

@@ -16,7 +16,7 @@ import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from onionpress import key_manager
+from onionpress import derivatives, key_manager
 from onionpress.config import DEFAULTS, read_config, read_value, write_value
 
 
@@ -395,6 +395,20 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             if docker_rc != 0 or host_tar.returncode != 0:
                 raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
 
+        # 3b. Drop WordPress's regenerable image derivatives (-WxH sizes and
+        #     -scaled copies) from the staged uploads — about half of a
+        #     media-heavy site's uploads (issue #257). Only files whose base
+        #     image sits beside them count; true originals, video, audio
+        #     and PDFs stay. The restore rebuilds the sizes in the
+        #     background (derivatives.regenerate_if_pending); the marker
+        #     written into uploads/ rides along in the archive so even an
+        #     older OnionPress restoring this backup leaves the signal
+        #     behind in the container.
+        with _phase_timer(log_func, 'BACKUP', 'prune_derivatives'):
+            derivatives.prune_image_derivatives(
+                os.path.join(wpcontent_dir, 'uploads'), log_func)
+            derivatives.write_archive_marker(wpcontent_dir)
+
         # 4. Backup OnionHeaven data if this is OnionHeaven instance
         #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
         is_onionheaven = False
@@ -466,6 +480,12 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # so restore can surface a useful "also copy your Documents"
             # reminder instead of silently producing an empty Creations page.
             'excludes_creations': True,
+            # wp-content/uploads holds originals only; the -WxH/-scaled
+            # copies were pruned and must be regenerated after a restore
+            # (issue #257). Restore paths write the host-side marker that
+            # the launchers act on; the archive's uploads/ marker covers
+            # restores by versions that don't know this flag.
+            'excludes_image_derivatives': True,
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
@@ -748,6 +768,9 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
     with open(marker, 'w') as f:
         f.write(staging + '\n')
     log_func(f"Install-from-backup: staged at {staging} (marker written)")
+    # The launcher start that imports this staging also kicks off the
+    # background rebuild of the image sizes the backup left out (#257).
+    derivatives.schedule_regeneration(_data_dir, log_func, metadata)
     return staging, metadata
 
 
@@ -919,6 +942,10 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         # install-from-backup path (restore_container_artifacts / apply_config_overrides).
         restore_container_artifacts(staging, metadata, log_func)
         apply_config_overrides(staging, log_func, data_dir=data_dir)
+
+        # Image sizes the backup left out are rebuilt in the background by
+        # the launcher's next start (the caller restarts after this) — #257.
+        derivatives.schedule_regeneration(_data_dir, log_func, metadata)
 
         log_func(f"RESTORE_PHASE: name=total elapsed_s={time.monotonic() - restore_start:.2f}")
         log_func("Restore: files restored successfully")

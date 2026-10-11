@@ -214,6 +214,9 @@ class TestMuPluginsList(unittest.TestCase):
             "onionpress-wayback-archive.php",
             "onionpress-onboarding.php",
             "onionpress-avatar.php",
+            # #257: without it a restored site shows broken images until
+            # the background regeneration finishes.
+            "onionpress-image-fallback.php",
         }
         missing = critical - set(multisite.MU_PLUGINS)
         self.assertFalse(

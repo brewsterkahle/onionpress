@@ -1153,6 +1153,22 @@ migrate_key_volume() {
     return 0
 }
 
+# Image derivatives (issue #257): backups carry original images only, so a
+# restore leaves the resized copies (-WxH sizes, -scaled) to be rebuilt. True
+# when that rebuild is still owed: the host marker the restore paths write,
+# or the marker a backup archive carries inside wp-content/uploads/ (which a
+# restore by an OnionPress version that predates the host marker still copies
+# into the container). start_containers then runs
+# `onionpress.cli regenerate-derivatives` detached in the background; it uses
+# `wp media regenerate --only-missing`, so an interrupted sweep resumes on the
+# next start, and it clears both markers only when it completes. Kept
+# identical in the macOS and Linux launchers; a test enforces that.
+regenerate_derivatives_pending() {
+    [ -f "$DATA_DIR/.regenerate-derivatives-pending" ] && return 0
+    docker exec onionpress-wordpress test -f \
+        /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives >/dev/null 2>&1
+}
+
 start_containers() {
     log "Starting OnionPress containers..."
 
@@ -1439,6 +1455,14 @@ start_containers() {
         --themes-dir "$THEMES_DIR" \
         --plugins-dir "$PLUGINS_DIR"
 
+    # Image derivatives (#257): if a restore left resized images to rebuild,
+    # do it in the background — niced, detached in a subshell so it is not
+    # in this script's job table, resumable across restarts. After
+    # provision-post-install so the image-fallback mu-plugin is in place.
+    if $wp_installed && regenerate_derivatives_pending; then
+        log "Image derivatives: rebuild pending — starting in the background"
+        ( op_py regenerate-derivatives >> "$LOG_FILE" 2>&1 & )
+    fi
 }
 
 stop_containers() {
@@ -1806,6 +1830,23 @@ create_backup() {
     log "Backup: copying wp-content (themes, plugins, uploads)..."
     docker cp onionpress-wordpress:/var/www/html/wp-content/. "$staging/wp-content" 2>>"$LOG_FILE"
 
+    # 3b. Drop the regenerable image derivatives (-WxH sizes, -scaled) —
+    #     about half of a media-heavy uploads/ (issue #257). The Python
+    #     helper holds the one classification both platforms use (a file is
+    #     a derivative only when its base image sits beside it). The marker
+    #     it leaves in uploads/ rides along in the archive so the restore
+    #     knows to rebuild the sizes. A helper failure keeps the full copy.
+    local pruned excludes_derivatives="false"
+    if pruned=$(op_py prune-image-derivatives --uploads-dir "$staging/wp-content/uploads" 2>>"$LOG_FILE"); then
+        log "Backup: pruned ${pruned% *} regenerable image derivative(s) — the restore rebuilds them"
+        mkdir -p "$staging/wp-content/uploads"
+        echo "OnionPress: this backup carries original images only; the resized copies (-WxH, -scaled) are rebuilt after a restore by wp media regenerate --only-missing. Removed on completion." \
+            > "$staging/wp-content/uploads/.onionpress-regenerate-derivatives"
+        excludes_derivatives="true"
+    else
+        log "WARNING: derivative pruning failed — backing up uploads in full"
+    fi
+
     # 4. Save config
     if [ -f "$DATA_DIR/config" ]; then
         log "Backup: saving config..."
@@ -1842,11 +1883,13 @@ metadata = {
     'backup_date': sys.argv[2],
     'onionpress_version': sys.argv[3],
     'platform': 'linux',
-    'has_onionheaven': sys.argv[4] == 'true'
+    'has_onionheaven': sys.argv[4] == 'true',
+    # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
+    'excludes_image_derivatives': sys.argv[6] == 'true'
 }
 with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json"
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives"
 
     # 7. Create password-protected zip
     log "Backup: creating encrypted zip archive..."
@@ -1975,6 +2018,11 @@ restore_backup() {
         docker cp "$wpcontent_dir/." onionpress-wordpress:/var/www/html/wp-content/ 2>>"$LOG_FILE"
         docker exec onionpress-wordpress chown -R www-data:www-data /var/www/html/wp-content/ 2>>"$LOG_FILE"
         log "Restore: wp-content restored"
+        # Resized images the backup left out (#257) are rebuilt in the
+        # background by the start that follows this restore; the marker
+        # survives interruptions until the rebuild completes.
+        date -u +%Y-%m-%dT%H:%M:%SZ > "$DATA_DIR/.regenerate-derivatives-pending"
+        log "Restore: scheduled rebuild of resized images"
     else
         log "WARNING: No wp-content in backup — skipping"
     fi

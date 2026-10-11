@@ -176,6 +176,30 @@
   daemon re-reads the config every cycle, so enabling needs no restart on
   either platform.
 
+## Backups Carry Original Images Only (issue #257)
+- `create_backup` prunes WordPress's regenerable derivatives (`-WxH` sizes,
+  `-scaled`) from the staged `wp-content/uploads` — about half of a media-heavy
+  site's uploads. The rule lives in `src/onionpress/derivatives.py` and is the
+  one WordPress uses: a file is a derivative only if its base image sits in the
+  same directory; a true original that merely ends in `-123x456.jpg` is kept.
+  Video, audio, PDFs and everything else are never touched. Linux's inline bash
+  `create_backup` calls `onionpress.cli prune-image-derivatives` so both
+  platforms share the classification.
+- **The two halves must ship together.** A restore writes
+  `~/.onionpress/.regenerate-derivatives-pending`; every launcher start
+  (`regenerate_derivatives_pending()` in both launchers, test-enforced
+  identical, and the CLI `start`/`restore` paths) then runs
+  `onionpress.cli regenerate-derivatives` detached in the background:
+  `nice`d `wp media regenerate --only-missing --yes` per site. `--only-missing`
+  makes it resumable, so the marker is cleared only when a sweep completes.
+- The archive also carries `wp-content/uploads/.onionpress-regenerate-derivatives`,
+  which a plain `docker cp` of wp-content delivers into the container: an older
+  OnionPress restoring a new backup still leaves the signal behind, and the
+  `onionpress-image-fallback.php` mu-plugin keys off that file to serve the
+  original for any size not yet on disk (heavier images, never broken ones).
+- `metadata.json` gains `excludes_image_derivatives: true`. Old backups restore
+  as before (the sweep finds nothing to do).
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

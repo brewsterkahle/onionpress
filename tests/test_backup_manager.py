@@ -279,9 +279,14 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             # New wp-content backup flow: stream a tar of fake wp-content
             # (matching what the old `docker cp` branch used to fabricate).
             f.write('    fakedir=$(mktemp -d)\n')
-            f.write('    mkdir -p "$fakedir/themes" "$fakedir/plugins" "$fakedir/uploads"\n')
+            f.write('    mkdir -p "$fakedir/themes" "$fakedir/plugins" "$fakedir/uploads/2024/01"\n')
             f.write('    echo "theme data" > "$fakedir/themes/flavor.css"\n')
             f.write('    echo "plugin data" > "$fakedir/plugins/hello.php"\n')
+            # An original with its regenerable sizes + -scaled copy, a true
+            # original that merely ends in -WxH, and a video (issue #257).
+            f.write('    for n in photo.jpg photo-300x200.jpg photo-scaled.jpg orphan-640x480.jpg clip.mp4; do\n')
+            f.write('        echo "$n" > "$fakedir/uploads/2024/01/$n"\n')
+            f.write('    done\n')
             f.write('    tar -cf - -C "$fakedir" .\n')
             f.write('    rm -rf "$fakedir"\n')
             f.write('    exit 0\n')
@@ -333,6 +338,37 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.assertTrue(any("database/wordpress.sql" in n for n in names_normalized))
         self.assertTrue(any("wp-content/themes/" in n for n in names_normalized))
         self.assertTrue(any("wp-content/plugins/" in n for n in names_normalized))
+
+    def test_uploads_carry_originals_only(self):
+        """Issue #257: the -WxH sizes and the -scaled copy of an image whose
+        original is in the backup are left out (the restore regenerates
+        them); a -WxH-named file with no base, video and the rest stay. The
+        archive carries the in-container regeneration marker and metadata
+        says so."""
+        backup_manager.create_backup(
+            onion_address=_FAKE_DERIVED_ADDR,
+            username="admin",
+            password="testpass",
+            output_path=self.output_zip,
+            version="2.5.2",
+            log_func=self.logs.append,
+            data_dir=self.data_dir,
+        )
+        with zipfile.ZipFile(self.output_zip, "r") as zf:
+            names = {n.lstrip("./") for n in zf.namelist()}
+            with zf.open("metadata.json", pwd=b"testpass") as f:
+                metadata = json.load(f)
+        uploads = {n[len("wp-content/uploads/"):] for n in names
+                   if n.startswith("wp-content/uploads/") and not n.endswith("/")}
+        self.assertEqual(uploads, {
+            "2024/01/photo.jpg",
+            "2024/01/orphan-640x480.jpg",
+            "2024/01/clip.mp4",
+            ".onionpress-regenerate-derivatives",
+        })
+        self.assertTrue(metadata.get("excludes_image_derivatives"))
+        self.assertTrue(any("pruned 2 regenerable" in m for m in self.logs), self.logs)
+        self.assertTrue(any("BACKUP_PHASE: name=prune_derivatives" in m for m in self.logs))
 
     def test_metadata_content(self):
         # Pass the address that actually derives from the fake key so the
@@ -547,6 +583,25 @@ class TestRestoreRoundTrip(unittest.TestCase):
         # No KEY-MISMATCH when backup metadata and key agree.
         self.assertFalse(any("KEY-MISMATCH" in m for m in self.logs),
                          f"unexpected KEY-MISMATCH log: {self.logs}")
+
+    def test_restore_schedules_derivative_regeneration(self):
+        """Issue #257: every restore leaves the host-side marker the
+        launchers act on at the next start (an older, complete backup gets
+        a no-op sweep)."""
+        zip_path = self._make_backup_zip()
+        marker = os.path.join(self.data_dir, ".regenerate-derivatives-pending")
+        self.assertFalse(os.path.exists(marker))
+        backup_manager.restore_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+        self.assertTrue(os.path.exists(marker))
+        self.assertTrue(any("resized images" in m for m in self.logs), self.logs)
+
+    def test_prepare_install_from_backup_schedules_derivative_regeneration(self):
+        zip_path = self._make_backup_zip()
+        marker = os.path.join(self.data_dir, ".regenerate-derivatives-pending")
+        backup_manager.prepare_install_from_backup(
+            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+        self.assertTrue(os.path.exists(marker))
 
     def test_restore_overrides_mismatched_metadata(self):
         # Simulates a corrupted backup created by a stale-cached source
