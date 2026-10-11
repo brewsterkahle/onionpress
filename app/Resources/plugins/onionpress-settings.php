@@ -1198,8 +1198,11 @@ function onionpress_settings_page() {
                 <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
                 <input type="text" name="onionpress_follow_address" id="onionpress-follow-input"
                        placeholder="Onionname, .onion address, or feed URL" class="regular-text" style="flex: 1;">
-                <button type="submit" class="button button-primary">Follow</button>
+                <button type="submit" class="button button-primary" id="onionpress-follow-submit">Follow</button>
             </form>
+            <p id="onionpress-follow-status" role="status" aria-live="polite" style="display: none; margin: 6px 0 0; color: #646970;">
+                <span class="spinner is-active" style="float: none; margin: 0 6px 0 0; vertical-align: middle;"></span><span id="onionpress-follow-status-text"></span>
+            </p>
             <?php foreach ( $following as $addr ) : ?>
             <input type="hidden" name="onionpress_following_existing[]" form="onionpress-unfollow-form" value="<?php echo esc_attr( $addr ); ?>">
             <?php endforeach; ?>
@@ -1231,6 +1234,41 @@ function onionpress_settings_page() {
                 if (match) {
                     input.value = match[1].toLowerCase();
                 }
+            });
+            // Follow button: the POST resolves an onionname through OnionHome
+            // over Tor (a few seconds, longer on a bad circuit), so show what is
+            // happening and block a double-submit until the page reloads with
+            // the result. Plain POST round trip — no AJAX.
+            var followForm = document.getElementById('onionpress-follow-form');
+            var followBtn = document.getElementById('onionpress-follow-submit');
+            var followStatus = document.getElementById('onionpress-follow-status');
+            var followStatusText = document.getElementById('onionpress-follow-status-text');
+            var followBusy = false;
+            function setFollowBusy(on, message) {
+                followBusy = on;
+                followBtn.disabled = on;
+                // readOnly, not disabled: a disabled field is dropped from the POST.
+                input.readOnly = on;
+                followStatusText.textContent = on ? message : '';
+                followStatus.style.display = on ? 'block' : 'none';
+            }
+            followForm.addEventListener('submit', function(e) {
+                if (followBusy) {
+                    e.preventDefault();
+                    return;
+                }
+                var val = input.value.trim();
+                if (!val) {
+                    return;
+                }
+                var isName = !/\.onion\b/i.test(val) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(val);
+                setFollowBusy(true, isName
+                    ? 'Looking up ' + val.replace(/^@/, '') + ' on OnionHome over Tor\u2026'
+                    : 'Checking the feed over Tor\u2026');
+            });
+            // Back/forward cache can restore the page with the busy state intact.
+            window.addEventListener('pageshow', function() {
+                setFollowBusy(false, '');
             });
             // Unfollow buttons
             document.querySelectorAll('.onionpress-unfollow').forEach(function(btn) {
