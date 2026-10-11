@@ -132,6 +132,28 @@
 - **Diffdisk cap is 20 GiB on new installs** (issue #230) via `--disk` to the first `colima start` in `app/MacOS/launcher.sh` and `src/onionpress/colima.py`. The cap is set at VM creation and is immutable — existing installs keep their original 100 GiB cap. Dangling Docker images auto-prune after each successful image pull (`update_docker_images()` in `src/menubar.py` and the bash launchers), keeping real usage well under 5 GiB in practice. The cap is configurable via `VM_DISK=N` in `~/.onionpress/config` *before* first launch; when the OnionHeaven hub vanity key is present at first start, the cap auto-bumps to 100 GiB for takeover-container headroom (hub is the edge case; normal nodes never need more than 20).
 - **Do not add additional `--mount` flags without considering security implications**
 
+## OnionHeaven Opt-In
+- **`REGISTER_WITH_ONIONHEAVEN` is tri-state and opt-in**: `yes` registers,
+  `no` never registers and never asks, unset/empty = undecided → no
+  registration, and the UI prompts at startup once the site is online
+  (Mac: `prompt_enable_onionheaven` in `src/menubar.py`; Linux tray:
+  `_maybe_prompt_onionheaven`). "Not Now" leaves it unset (asked again next
+  launch); "Don't Ask Again" writes `no`. Only an explicit `yes` may ever
+  register — the heartbeat ships the onion private key to the hub, so a
+  missing key or typo must never opt a user in. `onionheaven.registration_choice()`
+  is the one normalizer; all three launch paths and the Linux heartbeat daemon
+  use `== "yes"`, never `!= "no"`. `tests/test_onionheaven_opt_in.py` enforces it.
+- Installs whose config carries `REGISTER_WITH_ONIONHEAVEN=yes` keep
+  registering: Linux (`install.sh` wrote it) and Macs whose config was seeded
+  from `config-template.txt`. Mac configs without the line (older installs,
+  or ones the launcher's inline fallback created; Ivar's live install is one)
+  used to register via the `yes` default and are now treated as undecided,
+  so they get the startup prompt once at next launch. Verified 2026-10-11 on
+  the live install: the prompt appeared 1 s after "System fully operational".
+- Linux CLI: `onionpress onionheaven enable|disable|status`. The heartbeat
+  daemon re-reads the config every cycle, so enabling needs no restart on
+  either platform.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

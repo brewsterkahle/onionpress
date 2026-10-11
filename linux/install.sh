@@ -426,7 +426,9 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
-REGISTER_WITH_ONIONHEAVEN=yes
+# OnionHeaven is opt-in: unset = not decided (you will be asked), yes = on, no = off.
+# Enable with: onionpress onionheaven enable
+REGISTER_WITH_ONIONHEAVEN=
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
     echo "  Default config created"
@@ -551,9 +553,23 @@ if [ "$wp_ready" = "true" ]; then
     fi
     echo ""
     echo "  ──────────────────────────────────────────────────────────"
+    echo "  RECOMMENDED: keep your site online when this machine is off"
+    echo ""
+    echo "  OnionHeaven is not enabled yet. While it is off, visitors get an"
+    echo "  error whenever this machine is asleep or powered down. Enable it"
+    echo "  (one command, no restart needed):"
+    echo ""
+    echo "      onionpress onionheaven enable"
+    echo ""
+    echo "  What it does and what is shared:  onionpress onionheaven status"
+    echo "  (a copy of your onion private key goes to the hub, run by the"
+    echo "  Internet Archive, so it can serve your address while you're away)"
+    echo ""
+    echo "  ──────────────────────────────────────────────────────────"
     echo "  Useful commands:"
     echo "    onionpress status     - is it running?"
     echo "    onionpress address    - show .onion address"
+    echo "    onionpress onionheaven enable|disable|status"
     echo "    onionpress logs       - stream live container logs"
     echo "    systemctl --user restart onionpress   - restart"
     echo "    systemctl --user stop onionpress      - stop"

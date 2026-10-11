@@ -304,7 +304,9 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
-REGISTER_WITH_ONIONHEAVEN=yes
+# OnionHeaven is opt-in: unset = not decided (you will be asked), yes = on, no = off.
+# Enable with: onionpress onionheaven enable
+REGISTER_WITH_ONIONHEAVEN=
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 EOF
 fi
@@ -1468,6 +1470,70 @@ get_status() {
     docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
 }
 
+# ─── OnionHeaven opt-in ──────────────────────────────────────────────
+# Prints the explanation shown to the user wherever we ask them to enable
+# OnionHeaven (installer footer, `onionpress onionheaven`, tray prompt).
+onionheaven_explain() {
+    cat <<'EOF'
+  OnionHeaven keeps your .onion address reachable when this machine is
+  off, asleep, or disconnected. While OnionPress runs it sends a heartbeat
+  to the OnionHeaven hub. If the heartbeats stop, the hub takes over your
+  address and redirects visitors to the Wayback Machine's archived copy of
+  your site. When you come back online, your live site takes over again.
+
+  What is shared: a copy of your onion service private key is sent to the
+  hub (run by the Internet Archive) so it can publish your address while
+  you are away. It is used only to keep your site reachable.
+
+  We strongly recommend enabling it:
+
+      onionpress onionheaven enable
+
+  To opt out and stop being asked:  onionpress onionheaven disable
+EOF
+}
+
+# Write REGISTER_WITH_ONIONHEAVEN=<value> into the config (replace or append).
+set_onionheaven_choice() {
+    local value="$1"
+    [ -f "$DATA_DIR/config" ] || touch "$DATA_DIR/config"
+    if grep -q "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config"; then
+        sed -i "s/^REGISTER_WITH_ONIONHEAVEN=.*/REGISTER_WITH_ONIONHEAVEN=$value/" "$DATA_DIR/config"
+    else
+        echo "REGISTER_WITH_ONIONHEAVEN=$value" >> "$DATA_DIR/config"
+    fi
+}
+
+onionheaven_cmd() {
+    local sub="$1" current
+    current=$(grep "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    case "$sub" in
+        enable)
+            set_onionheaven_choice yes
+            log "OnionHeaven enabled by user (onionpress onionheaven enable)"
+            echo "OnionHeaven enabled. Your site will register with the hub within a minute"
+            echo "and stay reachable at your .onion address when this machine is off."
+            ;;
+        disable)
+            set_onionheaven_choice no
+            log "OnionHeaven disabled by user (onionpress onionheaven disable)"
+            echo "OnionHeaven disabled. Visitors will get an error whenever this machine is off."
+            echo "Re-enable at any time with: onionpress onionheaven enable"
+            ;;
+        status)
+            case "$current" in
+                yes) echo "OnionHeaven: enabled" ;;
+                no)  echo "OnionHeaven: disabled (enable with: onionpress onionheaven enable)" ;;
+                *)   echo "OnionHeaven: not enabled yet"; echo ""; onionheaven_explain ;;
+            esac
+            ;;
+        *)
+            echo "Usage: onionpress onionheaven {enable|disable|status}"
+            return 1
+            ;;
+    esac
+}
+
 get_onion_address() {
     cd "$DOCKER_DIR"
     ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
@@ -2111,7 +2177,9 @@ except: print('false')
         oh_config_enabled=$(grep "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
         oh_client_hub=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     fi
-    oh_config_enabled=${oh_config_enabled:-yes}
+    # Opt-in: only an explicit "yes" counts as enabled (unset = undecided).
+    oh_config_enabled=${oh_config_enabled:-no}
+    [ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no
     oh_client_hub=${oh_client_hub:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}
 
     # Check if this node is an OH server
@@ -2779,6 +2847,14 @@ sys.exit(0 if provision_interactive() else 1)
             apply_config_updates
             ;;
 
+        onionheaven)
+            # Opt in to / out of OnionHeaven. REGISTER_WITH_ONIONHEAVEN is
+            # tri-state: yes / no / unset (undecided — the tray asks). The
+            # heartbeat daemon re-reads the config every cycle, so this
+            # takes effect without a restart.
+            onionheaven_cmd "${2:-status}"
+            ;;
+
         handle-action)
             # Process action requests from the WordPress settings page
             local action
@@ -3280,7 +3356,7 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|setup|reset|reset-onionheaven|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|setup|onionheaven|reset|reset-onionheaven|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac

@@ -72,9 +72,16 @@ SETTINGS_HELP = {
         "  - Archives your own posts on every update"
     ),
     "REGISTER_WITH_ONIONHEAVEN": (
-        "Register with OnionHeaven\n\n"
-        "Registers your site with OnionHeaven so it can redirect page "
-        "requests to the Wayback Machine as a fallback when your Mac is offline."
+        "Keep Site Reachable via OnionHeaven (recommended)\n\n"
+        "Keeps your .onion address working while your Mac is off, asleep, "
+        "or disconnected. When your heartbeats stop, the OnionHeaven hub "
+        "takes over your address and sends visitors to the Wayback Machine's "
+        "archived copy of your site. Your live site takes over again when "
+        "you come back online.\n\n"
+        "What is shared: a copy of your onion service private key is sent "
+        "to the OnionHeaven hub, run by the Internet Archive, so it can "
+        "publish your address on your behalf. It is used only to keep your "
+        "site reachable."
     ),
     "SHARE_ANALYTICS_WITH_ONIONHOME": (
         "Share Analytics with OnionHome\n\n"
@@ -139,8 +146,8 @@ SETTINGS_CONSEQUENCES = {
         "no": "Internet Archive plugin will not be auto-installed.",
     },
     "REGISTER_WITH_ONIONHEAVEN": {
-        "yes": "Site will register with OnionHeaven.",
-        "no": "OnionHeaven registration disabled. Wayback fallback won't work.",
+        "yes": "Site will register with OnionHeaven and stay reachable when your Mac is off.",
+        "no": "OnionHeaven disabled. Visitors get an error whenever your Mac is off.",
     },
     "SHARE_ANALYTICS_WITH_ONIONHOME": {
         "yes": "Diagnostic logs will be shared with OnionHome.",
@@ -171,7 +178,7 @@ _LABELS = {
     "LAUNCH_ON_LOGIN": "Launch on Login",
     "UPDATE_ON_LAUNCH": "Update Docker on Launch",
     "INSTALL_IA_PLUGIN": "Install IA Plugin",
-    "REGISTER_WITH_ONIONHEAVEN": "Register with OnionHeaven",
+    "REGISTER_WITH_ONIONHEAVEN": "Keep Site Reachable via OnionHeaven",
     "ONIONHEAVEN_ADDRESS": "OnionHeaven Hub",
     "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Token",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "Share Analytics with OnionHome",
@@ -186,7 +193,7 @@ SETTINGS_KEYS = [
     ("LAUNCH_ON_LOGIN", "yes"),
     ("UPDATE_ON_LAUNCH", "yes"),
     ("INSTALL_IA_PLUGIN", "yes"),
-    ("REGISTER_WITH_ONIONHEAVEN", "yes"),
+    ("REGISTER_WITH_ONIONHEAVEN", "no"),  # opt-in; unset shows unchecked
     ("SHARE_ANALYTICS_WITH_ONIONHOME", "no"),
     ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
     ("CLOUDFLARE_TUNNEL_TOKEN", ""),
@@ -354,7 +361,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         y -= row_h
         add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
         y -= row_h
-        add_check_row(y, "Register with OnionHeaven (advanced)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
+        add_check_row(y, "Keep site reachable via OnionHeaven (recommended)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
         y -= row_h
         add_check_row(y, "Share diagnostic logs with OnionHome", "SHARE_ANALYTICS_WITH_ONIONHOME", form_values["SHARE_ANALYTICS_WITH_ONIONHOME"])
         y -= row_h

@@ -70,6 +70,26 @@ On Mac, OnionPress appears in your menu bar:
 - 🟡 **Yellow** = starting or reconnecting
 - ⚪ **Gray** = stopped
 
+### OnionHeaven (recommended)
+
+OnionHeaven keeps your `.onion` address reachable when your computer is
+off, asleep, or disconnected. While OnionPress runs it sends a heartbeat
+to the OnionHeaven hub. If the heartbeats stop, the hub takes over your
+address and redirects visitors to the Wayback Machine's archived copy of
+your site. When you come back online, your live site takes over again.
+
+It is **opt-in**, because enabling it sends a copy of your onion service
+private key to the hub (run by the Internet Archive) so it can publish
+your address while you are away. The key is used only to keep your site
+reachable. OnionPress asks you the first time your site comes online. We
+strongly recommend enabling it; without it, visitors get a connection
+error whenever your computer is off.
+
+- **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*
+- **Linux:** `onionpress onionheaven enable` (or `disable`, `status`)
+- **Config file:** `REGISTER_WITH_ONIONHEAVEN=yes|no` in `~/.onionpress/config`
+  (unset means "not decided yet", and OnionPress keeps asking at startup)
+
 ## Viewing Your Site
 
 Your site is viewable on any Tor-enabled browser:

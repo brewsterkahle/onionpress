@@ -118,13 +118,23 @@ VM_MEMORY=2
 CLOUDFLARE_TUNNEL_TOKEN=
 
 # Register with OnionHeaven
-# Default: "yes" (register this site with the OnionHeaven)
+# Default: unset (OnionPress asks you at startup; strongly recommended)
 #
-# When enabled, OnionPress will register your site with the OnionHeaven
-# so it can help redirect page requests to the Internet Archive's Wayback
-# Machine as a fallback when your Mac is offline. Set to "no" to opt out.
+# OnionHeaven keeps your .onion address reachable when your Mac is off,
+# asleep, or disconnected. While OnionPress runs it sends a heartbeat to
+# the OnionHeaven hub. If the heartbeats stop, the hub takes over your
+# address and redirects visitors to the Wayback Machine's archived copy of
+# your site. When you come back online, your live site takes over again.
 #
-REGISTER_WITH_ONIONHEAVEN=yes
+# What is shared: a copy of your onion service private key is sent to the
+# hub (run by the Internet Archive) so it can publish your address while
+# you are away. Nothing else is shared.
+#
+#   yes   - register and keep the site reachable (recommended)
+#   no    - never register, and stop asking
+#   unset - OnionPress asks you each time it starts, until you decide
+#
+REGISTER_WITH_ONIONHEAVEN=
 
 # Share Analytics with OnionHome
 # Default: "no" (opt-in only)
