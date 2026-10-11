@@ -667,10 +667,23 @@ class TestLinuxSleepHookWiring(unittest.TestCase):
         # so match with DOTALL and `.` allowed to span newlines.
         self.assertRegex(
             script,
-            r'install\s+-m\s+0755[\s\S]*?onionpress-sleep-hook[\s\S]*?'
+            r'install\s+(?:-D\s+)?-m\s+0755[\s\S]*?onionpress-sleep-hook[\s\S]*?'
             r'/usr/lib/systemd/system-sleep/onionpress',
             "install.sh must drop linux/onionpress-sleep-hook into "
             "/usr/lib/systemd/system-sleep/onionpress (mode 0755).",
+        )
+
+    def test_install_sh_creates_system_sleep_dir(self):
+        """Issue #264: /usr/lib/systemd/system-sleep/ does not exist on a
+        fresh Debian 13, so a plain `install -m 0755 … system-sleep/onionpress`
+        aborted the whole curl|bash install with "No such file or directory".
+        `install -D` creates the missing parent directories."""
+        script = _read("linux/install.sh")
+        self.assertRegex(
+            script,
+            r'install\s+-D\s+-m\s+0755\s+[^\n]*onionpress-sleep-hook',
+            "install.sh must use `install -D` for the sleep hook so the "
+            "system-sleep directory is created when it is missing.",
         )
 
     def test_deb_packages_sleep_hook(self):
@@ -722,6 +735,77 @@ class TestLinuxSleepHookWiring(unittest.TestCase):
             src, r'_pending_online\s*=\s*True',
             "USR2 handler should flip a flag for the same reason.",
         )
+
+
+class TestLinuxInstallRefusesPlainRoot(unittest.TestCase):
+    """Issue #265: on a fresh server where the only account is root, running
+    `curl … install.sh | bash` as root installed Docker and then died with
+    `[ERROR] Refusing to install rootless Docker as the root user` from
+    dockerd-rootless-setuptool.sh. REAL_USER falls back to `whoami` when
+    SUDO_USER is unset, so the rootless setup ran as root. The installer
+    must detect this before installing anything and tell the user how to
+    proceed (create a sudo user, switch to it, rerun). It cannot create the
+    user itself: the pipe makes the script non-interactive.
+    """
+
+    GUARD = 'if [ "$REAL_UID" -eq 0 ]; then'
+
+    def setUp(self):
+        self.script = _read("linux/install.sh")
+
+    def _guard_block(self):
+        start = self.script.find(self.GUARD)
+        self.assertGreaterEqual(
+            start, 0,
+            "install.sh must refuse to run when the resolved real user is "
+            "uid 0 (root without SUDO_USER).",
+        )
+        end = self.script.find("\nfi\n", start) + len("\nfi\n")
+        return start, self.script[start:end]
+
+    def test_root_guard_precedes_any_install_step(self):
+        start, block = self._guard_block()
+        first_apt = self.script.find("apt-get")
+        self.assertGreater(first_apt, 0)
+        self.assertLess(
+            start, first_apt,
+            "The root guard must come BEFORE the first apt-get — the bug "
+            "was that Docker got installed and only then did the rootless "
+            "setup tool refuse.",
+        )
+        # The guard must actually abort, not just warn.
+        self.assertIn("exit 1", block)
+
+    def test_root_guard_tells_the_user_what_to_do(self):
+        _, block = self._guard_block()
+        for needle in ("adduser", "usermod -aG sudo", "su - "):
+            self.assertIn(
+                needle, block,
+                f"The root-refusal message must show `{needle}` so a user "
+                "on a root-only server knows how to create a sudo account.",
+            )
+        self.assertIn(
+            "install.sh | bash", block,
+            "The message must show how to rerun the installer as that user.",
+        )
+
+    def test_root_guard_exits_for_uid_0_and_falls_through_otherwise(self):
+        """Run the extracted `if` block under bash: REAL_UID=0 must exit 1
+        and print the adduser hint; a normal uid must fall through silently."""
+        _, block = self._guard_block()
+        for uid, expected_rc in ((0, 1), (1000, 0)):
+            proc = subprocess.run(
+                ["bash", "-c", f"REAL_UID={uid}\n{block}"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(
+                proc.returncode, expected_rc,
+                f"REAL_UID={uid}: rc={proc.returncode}, out={proc.stdout!r}",
+            )
+            if uid == 0:
+                self.assertIn("adduser", proc.stdout)
+            else:
+                self.assertEqual(proc.stdout, "")
 
 
 class TestLinuxWaitThenOpenUsesWrapper(unittest.TestCase):
