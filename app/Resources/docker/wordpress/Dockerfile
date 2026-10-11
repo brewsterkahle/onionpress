@@ -40,7 +40,11 @@ RUN a2enmod remoteip rewrite headers
 COPY onionpress-proxy-protocol.conf /etc/apache2/conf-available/
 COPY onionpress-xmlrpc-block.conf /etc/apache2/conf-available/
 COPY onionpress-log-format.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format
+# Static reachability target for the app's Tor-network probe (issue #266):
+# served without PHP so WordPress latency can't masquerade as a Tor failure.
+COPY onionpress-health.conf /etc/apache2/conf-available/
+COPY onionpress-health.txt /usr/local/share/onionpress/health.txt
+RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-health
 
 # Multisite init script — runs on every container start to ensure
 # multisite is configured (safe to re-run, checks if already done)
