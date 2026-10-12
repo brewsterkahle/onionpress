@@ -14,6 +14,7 @@ a docker call could otherwise happen):
     the activation marker follows admission, never a registration;
   - the Linux client takes its claim from config, never the marker, and
     signs it under the label the hub checks;
+  - the menubar knows it is the hub as soon as it knows its address (#235);
   - the opt-in reaches both containers from every compose caller.
 The HTTP behaviour is covered in test_onionheaven_integration.py.
 """
@@ -394,6 +395,25 @@ class LinuxClientClaimTest(unittest.TestCase):
             payload = linux_hb._build_signed_payload(
                 "online", self.addr, HC, self.priv, self.pub, extra=extra)
             self.assertNotIn("onionheaven_peer_signature", payload)
+
+
+class MenubarHubFlagTest(unittest.TestCase):
+    """#235: is_onionheaven is identity, set with the address."""
+
+    SRC = _read("src/menubar.py")
+    ASSIGN = "self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)"
+
+    def test_set_from_the_cached_address_at_init(self):
+        init = self.SRC[self.SRC.index("cached_addr_file = "):]
+        self.assertIn(self.ASSIGN, init[:init.index("self._onionheaven_checked = False")])
+
+    def test_set_where_the_live_address_is_read(self):
+        self.assertRegex(
+            self.SRC,
+            r"self\.onion_address = addr\.strip\(\)\n\s+" + re.escape(self.ASSIGN))
+
+    def test_no_late_one_shot_flip(self):
+        self.assertNotIn("self.is_onionheaven = True", self.SRC)
 
 
 class OptInPlumbingTest(unittest.TestCase):

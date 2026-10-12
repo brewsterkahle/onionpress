@@ -441,7 +441,10 @@ class OnionPressApp(rumps.App):
         self.healthcheck_address = None    # Healthcheck .onion address
         self.onionheaven_messages = []          # Messages received from OnionHeaven
         self._onionheaven_alert_shown = False   # Whether we've shown OnionHeaven alert icon
-        self.is_onionheaven = False             # True if this instance is OnionHeaven
+        # True if this instance is the OnionHeaven hub. Identity, so it is
+        # known with the address (cached one here, live one in check_status)
+        # — before the registration gate at bootstrap 100% can fire (#235).
+        self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)
         self._onionheaven_checked = False       # Whether onionheaven mode has been checked
         self._onionheaven_registration_succeeded = False  # Whether registration succeeded
         self._onionheaven_heartbeat_succeeded = False     # Suppresses repeat heartbeat logs
@@ -1778,6 +1781,7 @@ class OnionPressApp(rumps.App):
                 addr = self.run_command("address")
                 if addr and addr != "Generating...":
                     self.onion_address = addr.strip()
+                    self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)
                     # Cache address locally for instant availability on next launch
                     try:
                         with open(os.path.join(self.app_support, "onion_address"), 'w') as f:
@@ -2035,11 +2039,11 @@ class OnionPressApp(rumps.App):
                 self.poll_config_updates()
                 self.poll_requested_actions()
 
-                # OnionHeaven: detect onionheaven mode (one-shot)
+                # OnionHeaven: announce hub mode and set up sleep (one-shot).
+                # is_onionheaven itself is set with the address, above.
                 if self.is_ready and not self._onionheaven_checked:
                     self._onionheaven_checked = True
-                    if onionheaven.is_onionheaven_instance(self.onion_address):
-                        self.is_onionheaven = True
+                    if self.is_onionheaven:
                         self.log("OnionHeaven mode activated (heartbeat monitor runs in onionheaven container)")
 
                     # Auto-set PREVENT_SLEEP=never for always-awake instances
