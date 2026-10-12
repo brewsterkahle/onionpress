@@ -16,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from onionpress import derivatives  # noqa: E402
+from onionpress import derivatives, wp_files  # noqa: E402
 
 
 class TestClassification(unittest.TestCase):
@@ -246,9 +246,12 @@ class TestRegenerateIfPending(unittest.TestCase):
         # Cleared on success: both markers, after a chown of the new files.
         self.assertFalse(derivatives.host_marker_present(self.data_dir))
         self.assertFalse(fake.container_marker)
-        joined = [" ".join(c) for c in fake.calls]
-        chown = next(i for i, c in enumerate(joined) if "chown -R www-data:www-data" in c)
-        rm = next(i for i, c in enumerate(joined) if "rm -f" in c)
+        # The chown follows no link www-data may have planted (wp_files.own);
+        # the marker goes as www-data.
+        chown = fake.calls.index(["docker"] + wp_files.own_args(
+            derivatives.CONTAINER_UPLOADS, recursive=True))
+        rm = fake.calls.index(["docker"] + wp_files.exec_args(
+            "rm", "-f", derivatives.CONTAINER_MARKER))
         self.assertLess(chown, rm)
         self.assertTrue(any("complete" in m for m in self.logs), self.logs)
 

@@ -468,6 +468,39 @@ class OnionPressCLI:
             log(f"Backup: could not check the staged files for links: {e}")
             return 1
 
+    @staticmethod
+    def cmd_stage_wp_content(dest: str) -> int:
+        """Copy wp-content out of the WordPress container into *dest*, read
+        there as www-data and unpacked as plain files and folders
+        (backup.stage_wp_content): the Linux launcher's create_backup.
+        Messages go to stderr."""
+        from .backup import stage_wp_content
+        log = _make_log_func()
+        try:
+            stage_wp_content(dest, log)
+            return 0
+        except Exception as e:
+            log(f"Backup: could not copy wp-content: {e}")
+            return 1
+
+    @staticmethod
+    def cmd_put_wp_tree(src: str, dest: str, merge: bool = False) -> int:
+        """Hand the host folder *src* to the WordPress container at *dest*,
+        written as www-data (wp_files.put_tree): the bash launchers' restore
+        and plugin installs. Messages go to stderr."""
+        from . import wp_files
+        log = _make_log_func()
+        try:
+            r = wp_files.put_tree(src, dest, merge=merge)
+        except Exception as e:
+            log(f"Could not copy {os.path.basename(src)} into WordPress: {e}")
+            return 1
+        if r.returncode != 0:
+            log(f"Could not copy {os.path.basename(src)} into WordPress: "
+                f"{r.stderr.strip()[-300:]}")
+            return 1
+        return 0
+
     def cmd_pack_backup(self, staging: str, output_path: str, password: str) -> int:
         """Zip and encrypt a staged backup tree into *output_path* (backup
         format 2). Used by the Linux launcher's bash create_backup so both
@@ -919,6 +952,20 @@ def main(argv: list[str] = None) -> int:
     p_scrub.add_argument(
         "--dir", required=True,
         help="Staged tree copied out of a container (e.g. wp-content)")
+    p_stage = sub.add_parser(
+        "stage-wp-content",
+        help="Copy wp-content out of the WordPress container, read as "
+             "www-data, as plain files and folders (backup helper)")
+    p_stage.add_argument("--dest", required=True, help="Folder to fill")
+    p_put = sub.add_parser(
+        "put-wp-tree",
+        help="Copy a host folder into the WordPress container, written as "
+             "www-data (restore and plugin-install helper)")
+    p_put.add_argument("--src", required=True, help="Host folder")
+    p_put.add_argument("--dest", required=True,
+                       help="Folder in the container (replaced whole unless --merge)")
+    p_put.add_argument("--merge", action="store_true",
+                       help="Unpack over what is at --dest instead of replacing it")
 
     p_open_login = sub.add_parser(
         "open-login",
@@ -1000,6 +1047,11 @@ def main(argv: list[str] = None) -> int:
     # Backup helper, run by the Linux launcher mid-backup: same.
     if args.command == "scrub-staging":
         return OnionPressCLI.cmd_scrub_staging(args.dir)
+    if args.command == "stage-wp-content":
+        return OnionPressCLI.cmd_stage_wp_content(args.dest)
+    # Restore and plugin-install helper for the bash launchers: same.
+    if args.command == "put-wp-tree":
+        return OnionPressCLI.cmd_put_wp_tree(args.src, args.dest, args.merge)
 
     if args.command == "safe-config":
         # Read-only, and run by the Linux launcher every 30 s: skip

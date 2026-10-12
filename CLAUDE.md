@@ -470,6 +470,31 @@
   the predictable name, and the chown handed any container file to
   www-data. `tests/test_settings_backup_handoff.py`.
 
+## Root Never Writes Through www-data's Names
+- www-data owns /var/lib/onionpress (onionpress-data, also mounted in the
+  tor container) and the web root, and can plant a link at any name there.
+  Root in a container follows it: `tee`/`cat >`, `docker cp` to the name or
+  through a linked folder, `chown` of a path, a trailing-slash `chown -R`.
+  So everything the host hands the WordPress container goes in as www-data
+  (`onionpress.wp_files`): `put_file_args`/`put_file` (temp file + rename,
+  so a planted link is replaced, never followed; status/results mode 600,
+  web-root files 644), `put_tree` (a tar of plain files unpacked by
+  www-data: theme, plugins, the restore's wp-content), `exec_args` for the
+  reads and removals of what the page writes. The bash launchers use
+  `wp_put` (the same script, test-enforced) and Linux `wp_exec`; their
+  restores and plugin installs go through `onionpress.cli put-wp-tree`.
+- Root's only remaining chown there is `wp_files.own_args`: `cd -P` into the
+  folder, check `pwd -P`, then `chown -h`/`-R` of a bare name. Never
+  `chown … /var/www/…`, never a trailing slash.
+- wp-content is read for a backup as www-data too (`backup.wp_content_tar_argv`,
+  Linux `onionpress.cli stage-wp-content`): root's `tar -C`/`docker cp`
+  followed a wp-content link to any folder into a backup the site gets back.
+- The onion address is read from the tor container and written by www-data,
+  never `cp`'d by root in the tor container (it followed a link to the key).
+- `tests/test_wordpress_writes_as_www_data.py` runs the scripts against a
+  sandbox and scans the sources for new root writes. The hub's onionheaven/
+  and onionhome/ folders in the shared volume are not covered yet.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

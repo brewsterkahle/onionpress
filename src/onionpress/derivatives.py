@@ -45,6 +45,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
+from . import wp_files
+
 # Host-side marker in the OnionPress data dir (~/.onionpress/).
 HOST_MARKER = ".regenerate-derivatives-pending"
 
@@ -290,13 +292,16 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
                 return False
             log(f"Image derivatives: {url or 'site'}: {tail[0][:200]}")
 
-        # wp-cli ran as root; hand the new files back to Apache's user.
+        # wp-cli ran as root; hand the new files back to Apache's user,
+        # following no link www-data may have planted (wp_files.own_args).
         subprocess.run(
-            [docker_bin, "exec", container, "chown", "-R", "www-data:www-data", CONTAINER_UPLOADS],
+            [docker_bin] + wp_files.own_args(CONTAINER_UPLOADS, recursive=True,
+                                             container=container),
             capture_output=True, timeout=600,
         )
         rm = subprocess.run(
-            [docker_bin, "exec", container, "rm", "-f", CONTAINER_MARKER],
+            [docker_bin] + wp_files.exec_args("rm", "-f", CONTAINER_MARKER,
+                                              container=container),
             capture_output=True, timeout=30,
         )
         if rm.returncode != 0:

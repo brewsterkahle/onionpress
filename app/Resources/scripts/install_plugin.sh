@@ -30,12 +30,21 @@ echo "URL: ${PLUGIN_URL}"
 # then immediately closed), so anything Tor-routed has to run in a container on
 # the compose network. The WordPress container is the one with curl.
 CONTAINER="${ONIONPRESS_WP_CONTAINER:-onionpress-wordpress}"
-REMOTE_ZIP="/tmp/onionpress-plugin-$$.zip"
 
 if ! docker exec "$CONTAINER" true 2>/dev/null; then
     echo "Error: container ${CONTAINER} is not running — cannot download over Tor"
     exit 1
 fi
+
+# The zip lands in a folder of root's own (mktemp -d: mode 700), not at a
+# guessable name in the container's /tmp, where www-data could put a link
+# for root's curl to write through or swap the file before it is copied out.
+REMOTE_DIR=$(docker exec "$CONTAINER" mktemp -d /tmp/onionpress-plugin-XXXXXX 2>/dev/null | tr -d '\r\n')
+case "$REMOTE_DIR" in
+    /tmp/onionpress-plugin-??????) ;;
+    *) echo "Error: could not make a download folder in ${CONTAINER}"; exit 1 ;;
+esac
+REMOTE_ZIP="${REMOTE_DIR}/plugin.zip"
 
 # onionheaven first: onionpress-tor is also publishing the user's onion
 # service, so bulk fetches belong on the other daemon. Never fall back to a
@@ -67,16 +76,16 @@ done
 
 if [ "$downloaded" -ne 1 ]; then
     echo "Error downloading plugin over Tor"
-    docker exec "$CONTAINER" rm -f "$REMOTE_ZIP" 2>/dev/null
+    docker exec "$CONTAINER" rm -rf "$REMOTE_DIR" 2>/dev/null
     exit 1
 fi
 
 if ! docker cp "${CONTAINER}:${REMOTE_ZIP}" "$ZIP_PATH" 2>&1; then
     echo "Error copying downloaded plugin out of ${CONTAINER}"
-    docker exec "$CONTAINER" rm -f "$REMOTE_ZIP" 2>/dev/null
+    docker exec "$CONTAINER" rm -rf "$REMOTE_DIR" 2>/dev/null
     exit 1
 fi
-docker exec "$CONTAINER" rm -f "$REMOTE_ZIP" 2>/dev/null
+docker exec "$CONTAINER" rm -rf "$REMOTE_DIR" 2>/dev/null
 
 # Get file size
 SIZE=$(stat -f%z "$ZIP_PATH" 2>/dev/null || stat -c%s "$ZIP_PATH" 2>/dev/null)

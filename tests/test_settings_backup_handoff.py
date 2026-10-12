@@ -58,11 +58,11 @@ create_backup() { printf 'backup bytes' > "$2"; }
 docker() {
     echo "docker $*" >> "$CALLS"
     case "$*" in
-        "exec onionpress-wordpress cat /var/lib/onionpress/backup-password") echo pw ;;
+        "exec -u www-data onionpress-wordpress cat /var/lib/onionpress/backup-password") echo pw ;;
         "exec -i -u www-data onionpress-wordpress sh -c "*)
-            # Run the script the launcher hands over, against a sandbox path.
-            shift 7; sh -c "$1" sh "$SANDBOX$3" ;;
-        "exec -i onionpress-wordpress sh -c "*) cat > "$RESULT" ;;
+            # Run the script the launcher hands over (the zip's, or
+            # wp_put's for the result), against a sandbox path.
+            shift 7; sh -c "$1" sh "$SANDBOX$3" ${4:+"$4"} ;;
         "exec onionpress-tor "*) echo "$ADDR" ;;
     esac
     return 0
@@ -75,6 +75,9 @@ docker() {
         text = mv._read("linux/onionpress")
         self.branch = _branch(text, "                create-backup)\n",
                               "\n                    ;;\n")
+        self.helpers = "".join(
+            f"{name}() {{\n" + _branch(text, f"\n{name}() {{\n", "\n}\n") + "\n}\n"
+            for name in ("wp_put", "wp_exec"))
 
     def test_written_as_www_data_never_chowned_by_root(self):
         code = "\n".join(line for line in self.branch.splitlines()
@@ -90,21 +93,23 @@ docker() {
         env = {
             "PATH": os.environ["PATH"], "HOME": os.path.join(self.tmp, "home"),
             "TMPDIR": self.tmp, "LOG_FILE": os.path.join(self.tmp, "log"),
-            "CALLS": calls, "RESULT": os.path.join(self.tmp, "result"),
-            "SANDBOX": sandbox, "ADDR": mv.ADDR,
+            "CALLS": calls, "SANDBOX": sandbox, "ADDR": mv.ADDR,
             "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
         }
-        script = self.PRELUDE + "run_branch() {\n" + self.branch + "\n}\nrun_branch\n"
+        script = (self.PRELUDE + self.helpers
+                  + "run_branch() {\n" + self.branch + "\n}\nrun_branch\n")
         r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                            timeout=60, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
-        landed = os.listdir(os.path.join(sandbox, "var", "lib", "onionpress"))
-        self.assertEqual(len(landed), 1, landed)
-        path = os.path.join(sandbox, "var", "lib", "onionpress", landed[0])
+        volume = os.path.join(sandbox, "var", "lib", "onionpress")
+        landed = [n for n in os.listdir(volume) if n.endswith(".zip")]
+        self.assertEqual(len(landed), 1, os.listdir(volume))
+        path = os.path.join(volume, landed[0])
         with open(path, "rb") as f:
             self.assertEqual(f.read(), b"backup bytes")
         self.assertEqual(os.stat(path).st_mode & 0o077, 0)
-        with open(os.path.join(self.tmp, "result")) as f:
+        self.assertEqual(sorted(os.listdir(volume)), sorted(landed + ["backup-result.json"]))
+        with open(os.path.join(volume, "backup-result.json")) as f:
             self.assertIn('"success":true', f.read())
         # Staged in a folder of its own under TMPDIR, and removed.
         self.assertFalse([n for n in os.listdir(self.tmp)

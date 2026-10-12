@@ -101,10 +101,11 @@ class TestLinuxWriteStatus(unittest.TestCase):
 
     DOCKER_STUB = r"""
 docker() {
-    # `docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/<f>'`
-    # lands in $OUT/<f>; every other docker call fails, as with no daemon.
-    if [ "$1" = exec ] && [ "$2" = -i ] && [ "$3" = onionpress-wordpress ] && [ "$4" = sh ]; then
-        cat > "$OUT/${6##*/}"
+    # wp_put's `docker exec -i -u www-data onionpress-wordpress sh -c <script>
+    # sh /var/lib/onionpress/<f> <mode>` lands in $OUT/<f>; every other
+    # docker call fails, as with no daemon.
+    if [ "$1 $2 $3 $4 $5 $6 $7" = "exec -i -u www-data onionpress-wordpress sh -c" ]; then
+        cat > "$OUT/${10##*/}"
         return 0
     fi
     return 1
@@ -143,7 +144,8 @@ wp_is_installed() { return 1; }
 
     def _write_status(self, extra=""):
         launcher = _read("linux/onionpress")
-        script = (_function(launcher, "op_py") + _function(launcher, "write_status")
+        script = (_function(launcher, "op_py") + _function(launcher, "wp_put")
+                  + _function(launcher, "write_status")
                   + _function(launcher, "write_recent_logs")
                   + self.DOCKER_STUB + extra + "\nwrite_status\n")
         result = subprocess.run(["bash", "-c", script], env=self.env,

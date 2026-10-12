@@ -123,51 +123,48 @@ class TestInstallOnionpressTheme(unittest.TestCase):
 
     def test_skips_when_wp_not_installed(self):
         with mock.patch.object(multisite, "wp_is_installed", return_value=False), \
-             mock.patch.object(multisite, "_docker_cp") as cp:
+             mock.patch.object(multisite, "_put_tree") as put:
             multisite.install_onionpress_theme(
                 themes_dir="/x", plugins_dir="/y",
                 log_func=lambda _: None)
-        cp.assert_not_called()
+        put.assert_not_called()
 
-    def test_pre_deletes_theme_dir_before_cp(self):
-        # docker cp into existing dir copies INTO it — must rm first.
-        # This is THE bug that bit before: the Linux version was missing
-        # the rm and ended up with /themes/onionpress/onionpress/.
+    def test_theme_and_plugins_are_replaced_whole_as_www_data(self):
+        # A copy into an existing dir lands INSIDE it — THE bug that bit
+        # before: the Linux version ended up with /themes/onionpress/onionpress/.
+        # _put_tree replaces the folder (wp_files.REPLACE_TREE_SCRIPT), as
+        # www-data: no root rm -rf / docker cp / chown -R, which followed
+        # links www-data can plant in wp-content.
         exec_calls = []
 
         def fake_exec(cmd, **kwargs):
             exec_calls.append(cmd)
             return _ok()
 
-        cp_calls = []
+        put_calls = []
 
-        def fake_cp(src, dest, **kwargs):
-            cp_calls.append((src, dest))
+        def fake_put(src, dest, **kwargs):
+            put_calls.append((src, dest))
             return _ok()
 
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_sh", side_effect=fake_exec), \
-             mock.patch.object(multisite, "_docker_cp", side_effect=fake_cp), \
+             mock.patch.object(multisite, "_put_tree", side_effect=fake_put), \
              mock.patch.object(multisite, "_wp", return_value=_ok()), \
              mock.patch("os.path.isdir", return_value=True):
             multisite.install_onionpress_theme(
                 themes_dir="/x/themes", plugins_dir="/x/plugins",
                 log_func=lambda _: None)
 
-        # Find the rm of the theme dir, and the cp of the theme dir.
-        # Order matters: rm must come before cp.
-        rm_idx = next(
-            (i for i, c in enumerate(exec_calls)
-             if "rm -rf" in c and "themes/onionpress" in c),
-            -1,
-        )
-        cp_idx = next(
-            (i for i, (_src, dest) in enumerate(cp_calls)
-             if "themes/onionpress" in dest),
-            -1,
-        )
-        self.assertGreaterEqual(rm_idx, 0, "must rm theme dir before cp")
-        self.assertGreaterEqual(cp_idx, 0, "must docker cp theme dir")
+        self.assertEqual(put_calls, [
+            ("/x/themes/onionpress", "/var/www/html/wp-content/themes/onionpress"),
+            ("/x/plugins/onionpress-hit-counter",
+             "/var/www/html/wp-content/plugins/onionpress-hit-counter"),
+            ("/x/plugins/onionpress-creations",
+             "/var/www/html/wp-content/plugins/onionpress-creations"),
+        ])
+        self.assertEqual([c for c in exec_calls if "rm -rf" in c or "chown" in c], [])
+        self.assertIn('rm -rf "$1" && mv -f "$n" "$1"', multisite.wp_files.REPLACE_TREE_SCRIPT)
 
     def test_does_not_override_user_chosen_non_default_theme(self):
         # If current theme is some custom thing, the activate should be skipped.
@@ -184,7 +181,7 @@ class TestInstallOnionpressTheme(unittest.TestCase):
 
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_exec_sh", return_value=_ok()), \
-             mock.patch.object(multisite, "_docker_cp", return_value=_ok()), \
+             mock.patch.object(multisite, "_put_tree", return_value=_ok()), \
              mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
              mock.patch("os.path.isdir", return_value=True):
             multisite.install_onionpress_theme(
@@ -404,7 +401,7 @@ def _extract_mac_launcher_htaccess():
     path = (pathlib.Path(__file__).resolve().parent.parent
             / "app" / "MacOS" / "onionpress")
     m = re.search(
-        r'cat > /var/www/html/\.htaccess << "HTEOF"\n(.*?)\nHTEOF\n',
+        r'wp_put /var/www/html/\.htaccess 644 [^\n]*<< "HTEOF"\n(.*?)\nHTEOF\n',
         path.read_text(encoding="utf-8"), re.S,
     )
     assert m, "could not find the .htaccess heredoc in app/MacOS/onionpress"

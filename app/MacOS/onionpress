@@ -66,6 +66,30 @@ vanity_key_dir() {
     return 1
 }
 
+# Hand a file to the WordPress container, written as www-data: stdin goes to
+# $1, mode ${2:-600} once in place (a temporary file beside it, renamed
+# over it). Never as root: www-data owns /var/lib/onionpress and the web
+# root, and root's `cat >` or docker cp followed a link planted at the name
+# to any file in the container. The script is
+# onionpress.wp_files.PUT_FILE_SCRIPT; a test keeps the copies equal.
+wp_put() {
+    docker exec -i -u www-data onionpress-wordpress \
+        sh -c 't=$(mktemp "$1.XXXXXX") || exit 1; if cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"; then exit 0; fi; rm -f "$t"; exit 1' \
+        sh "$1" "${2:-600}"
+}
+
+# Copy the tor hostname into the shared volume so WP code (theme,
+# mu-plugins, REST endpoints) can answer "what's my .onion?" without
+# parsing Host headers. Read from the tor container, written by www-data:
+# root's cp in the tor container followed a link www-data can plant at
+# onion_address to any file there (its key).
+write_shared_onion_address() {
+    local addr
+    addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+    is_onion_address "$addr" || return 1
+    printf '%s\n' "$addr" | wp_put /var/lib/onionpress/onion_address 644
+}
+
 mkdir -p "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
@@ -1057,9 +1081,10 @@ install_ia_plugin() {
     # Download and verify plugin using bash script with checksum verification
     if "$SCRIPTS_DIR/install_plugin.sh" "internet-archive-wayback-machine-link-fixer" "$temp_dir" >>"$LOG_FILE" 2>&1; then
         # Copy plugin to WordPress container
-        if docker cp "$temp_dir/internet-archive-wayback-machine-link-fixer" onionpress-wordpress:/var/www/html/wp-content/plugins/ 2>>"$LOG_FILE" && \
-            cd "$DOCKER_DIR" && \
-            docker compose exec -T wordpress chown -R www-data:www-data /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer 2>>"$LOG_FILE"; then
+        # Written as www-data, not docker cp + chown -R as root (both
+        # followed links www-data can plant in plugins/).
+        if bundled_python -m onionpress.cli put-wp-tree --src "$temp_dir/internet-archive-wayback-machine-link-fixer" \
+                --dest /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer 2>>"$LOG_FILE"; then
             log "✓ Internet Archive Wayback Machine Link Fixer plugin installed with verified checksum!"
 
             # Try to activate immediately if WordPress is configured
@@ -1123,9 +1148,10 @@ install_cache_enabler() {
     local temp_dir=$(mktemp -d)
 
     if "$SCRIPTS_DIR/install_plugin.sh" "cache-enabler" "$temp_dir" >>"$LOG_FILE" 2>&1; then
-        if docker cp "$temp_dir/cache-enabler" onionpress-wordpress:/var/www/html/wp-content/plugins/ 2>>"$LOG_FILE" && \
-            cd "$DOCKER_DIR" && \
-            docker compose exec -T wordpress chown -R www-data:www-data /var/www/html/wp-content/plugins/cache-enabler 2>>"$LOG_FILE"; then
+        # Written as www-data, not docker cp + chown -R as root (both
+        # followed links www-data can plant in plugins/).
+        if bundled_python -m onionpress.cli put-wp-tree --src "$temp_dir/cache-enabler" \
+                --dest /var/www/html/wp-content/plugins/cache-enabler 2>>"$LOG_FILE"; then
             log "✓ Cache Enabler plugin installed"
 
             if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
@@ -1937,7 +1963,8 @@ start_containers() {
         log "WordPress is installed"
         if ! docker exec onionpress-wordpress test -s /var/www/html/.htaccess 2>/dev/null; then
             log "Restoring .htaccess rewrite rules (missing or empty)"
-            docker exec onionpress-wordpress bash -c 'cat > /var/www/html/.htaccess << "HTEOF"
+            # Written as www-data, whose folder the web root is (wp_put).
+            if wp_put /var/www/html/.htaccess 644 2>>"$LOG_FILE" << "HTEOF"
 # Privacy: prevent onion address leaking in Referer headers
 <IfModule mod_headers.c>
 Header set Referrer-Policy "no-referrer"
@@ -1980,9 +2007,11 @@ RewriteRule ^([_0-9a-zA-Z.-]+/)?(.*\.php)$ $2 [L]
 RewriteRule . index.php [L]
 # END WordPress Multisite
 HTEOF
-chown www-data:www-data /var/www/html/.htaccess' >> "$LOG_FILE" 2>&1 && \
-                log "✓ .htaccess restored" || \
+            then
+                log "✓ .htaccess restored"
+            else
                 log "WARNING: Failed to restore .htaccess"
+            fi
         fi
     else
         log "WordPress not yet installed — will be configured by setup window"
@@ -2274,7 +2303,7 @@ wait_for_services() {
             fi
 
             # Write onion address to shared volume for WordPress plugins
-            docker exec onionpress-tor cp /var/lib/tor/hidden_service/wordpress/hostname /var/lib/onionpress/onion_address 2>>"$LOG_FILE" && \
+            write_shared_onion_address 2>>"$LOG_FILE" && \
                 log "✓ Onion address written to shared volume" || \
                 log "WARNING: Failed to write onion address to shared volume"
 
@@ -2639,8 +2668,14 @@ restore_backup() {
     local wpcontent_dir="$staging/wp-content"
     if [ -d "$wpcontent_dir" ]; then
         log "Restore: copying wp-content (themes, plugins, uploads)..."
-        docker cp "$wpcontent_dir/." onionpress-wordpress:/var/www/html/wp-content/ 2>>"$LOG_FILE"
-        docker exec onionpress-wordpress chown -R www-data:www-data /var/www/html/wp-content/ 2>>"$LOG_FILE"
+        # As www-data, not docker cp + chown -R as root: both followed
+        # links www-data can plant in wp-content (wp-content itself too).
+        if ! bundled_python -m onionpress.cli put-wp-tree --merge --src "$wpcontent_dir" \
+                --dest /var/www/html/wp-content 2>>"$LOG_FILE"; then
+            log "ERROR: could not copy wp-content into the WordPress container"
+            echo "ERROR: could not copy wp-content into the WordPress container" >&2
+            return 1
+        fi
         log "Restore: wp-content restored"
     else
         log "WARNING: No wp-content in backup — skipping"

@@ -99,7 +99,7 @@ docker() {
                 file) printf 'uploaded zip' > "$3" ;;
                 *) return 1 ;;
             esac ;;
-        exec) [ "$3" = cat ] && echo "$PW" ;;
+        exec) [ "$2 $3 $5" = "-u www-data cat" ] && echo "$PW" ;;
     esac
     return 0
 }
@@ -115,7 +115,8 @@ docker() {
         head = "                restore-backup)\n"
         start = text.index(head) + len(head)
         self.branch = text[start:text.index("\n                    ;;\n", start)]
-        self.is_onion = mv._bash_function(text, "is_onion_address")
+        self.is_onion = (mv._bash_function(text, "is_onion_address")
+                         + mv._bash_function(text, "wp_exec"))
 
     def _run(self, mode):
         tmpdir = os.path.join(self.tmp, f"t-{mode}")

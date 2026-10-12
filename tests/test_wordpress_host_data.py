@@ -248,11 +248,12 @@ class TestLinuxLauncher(unittest.TestCase):
 
     DOCKER_STUB = r"""
 docker() {
-    # `docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/<f>'`
-    # lands in $OUT/<f>; every other docker call fails, as with no daemon.
-    if [ "$1" = exec ] && [ "$2" = -i ] && [ "$3" = onionpress-wordpress ] && [ "$4" = sh ]; then
-        cat > "$OUT/${6##*/}"
-        return 0
+    # wp_put's `docker exec -i -u www-data onionpress-wordpress sh -c <script>
+    # sh /var/lib/onionpress/<f> <mode>` runs its script here against
+    # $OUT/<f>; every other docker call fails, as with no daemon.
+    if [ "$1 $2 $3 $4 $5 $6 $7" = "exec -i -u www-data onionpress-wordpress sh -c" ]; then
+        sh -c "$8" sh "$OUT/${10##*/}" "${11}"
+        return
     fi
     return 1
 }
@@ -295,7 +296,7 @@ wp_is_installed() { return 1; }
 
     def _run(self, call, extra=""):
         script = "".join(_bash_function(self.launcher, n)
-                         for n in ("op_py", "write_status", "write_recent_logs"))
+                         for n in ("op_py", "wp_put", "write_status", "write_recent_logs"))
         script += self.DOCKER_STUB + extra + "\n" + call + "\n"
         return subprocess.run(["bash", "-c", script], env=self.env,
                               capture_output=True, text=True, timeout=120)
@@ -319,6 +320,11 @@ wp_is_installed() { return 1; }
         self.assertNotIn("wp_admin_password_path", wp_status)
         self.assertLessEqual(set(wp_status), redact.WORDPRESS_STATUS_KEYS)
         self.assertEqual(wp_status["platform"], "linux")
+        # Written by wp_put: owner-only, and no temporary file left behind.
+        for name in ("status.json", "recent-logs.txt", "version", "config-current.json"):
+            self.assertEqual(os.stat(os.path.join(self.out, name)).st_mode & 0o777, 0o600, name)
+        self.assertEqual(sorted(os.listdir(self.out)),
+                         ["config-current.json", "recent-logs.txt", "status.json", "version"])
         # The tray's host copy keeps it.
         with open(os.path.join(self.data, "status.json")) as f:
             host_status = json.load(f)
@@ -373,7 +379,7 @@ class TestLinuxService(unittest.TestCase):
     def test_status_mirror_is_filtered(self):
         src = _read("linux/onionpress-service.py")
         body = _between(src, "def write_status(", "\n# ─── 4.")
-        mirror = body[body.index("cat > /var/lib/onionpress/status.json"):]
+        mirror = body[body.index('wp_files.put_file_args("/var/lib/onionpress/status.json")'):]
         self.assertIn("input=json.dumps(redact.status_for_wordpress(status), indent=2)", mirror)
         self.assertNotIn("input=payload", mirror)
 

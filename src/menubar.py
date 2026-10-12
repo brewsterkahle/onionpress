@@ -61,6 +61,7 @@ from onionpress import browser as op_browser
 from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
 from onionpress import redact
+from onionpress import wp_files
 from onionpress.power import CaffeineManager
 from onionpress import launcher_ops
 from onionpress import auto_login
@@ -1738,7 +1739,7 @@ class OnionPressApp(rumps.App):
                 # Check inside Docker volume — test -f && rm is atomic enough
                 r = self._docker.exec("onionpress-wordpress",
                     ["sh", "-c", "test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics"],
-                    timeout=5, quiet=True)
+                    timeout=5, quiet=True, user=wp_files.WP_USER)
                 if r.ok:
                     trigger_found = True
             if trigger_found:
@@ -5209,18 +5210,18 @@ License: AGPL v3"""
             # pages show (redact.WORDPRESS_STATUS_KEYS): PHP can read it.
             status_json = json.dumps(redact.status_for_wordpress(status), indent=2)
 
-            # Write status.json
+            # Write status.json. Every file here is written as www-data
+            # (wp_files): www-data owns the folder, and root's tee followed
+            # a link planted at the name to any file in the container.
             subprocess.run(
-                ["docker", "exec", "-i", "onionpress-wordpress",
-                 "tee", "/var/lib/onionpress/status.json"],
+                ["docker"] + wp_files.put_file_args("/var/lib/onionpress/status.json"),
                 input=status_json, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=5
             )
 
             # Write version file
             subprocess.run(
-                ["docker", "exec", "-i", "onionpress-wordpress",
-                 "tee", "/var/lib/onionpress/version"],
+                ["docker"] + wp_files.put_file_args("/var/lib/onionpress/version"),
                 input=self.version, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=5
             )
@@ -5230,8 +5231,7 @@ License: AGPL v3"""
             # container's filesystem.
             config_json = json.dumps(safe_config, indent=2)
             subprocess.run(
-                ["docker", "exec", "-i", "onionpress-wordpress",
-                 "tee", "/var/lib/onionpress/config-current.json"],
+                ["docker"] + wp_files.put_file_args("/var/lib/onionpress/config-current.json"),
                 input=config_json, capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=5
             )
@@ -5243,8 +5243,7 @@ License: AGPL v3"""
             try:
                 recent = redact.wordpress_log_excerpt(log_file, self.app_support)
                 subprocess.run(
-                    ["docker", "exec", "-i", "onionpress-wordpress",
-                     "tee", "/var/lib/onionpress/recent-logs.txt"],
+                    ["docker"] + wp_files.put_file_args("/var/lib/onionpress/recent-logs.txt"),
                     input=recent, capture_output=True, text=True,
                     encoding='utf-8', errors='replace', timeout=5
                 )
@@ -5268,6 +5267,7 @@ License: AGPL v3"""
                 ["cat", "/var/lib/onionpress/config-updates.json"],
                 timeout=5,
                 quiet=True,
+                user=wp_files.WP_USER,
             )
             if not result.ok or not result.output:
                 return
@@ -5289,6 +5289,7 @@ License: AGPL v3"""
                 "onionpress-wordpress",
                 ["rm", "-f", "/var/lib/onionpress/config-updates.json"],
                 timeout=5,
+                user=wp_files.WP_USER,
             )
 
             # Apply side effects for the accepted settings
@@ -5320,6 +5321,7 @@ License: AGPL v3"""
                 ["cat", "/var/lib/onionpress/requested-action"],
                 timeout=5,
                 quiet=True,
+                user=wp_files.WP_USER,
             )
             if not result.ok or not result.output:
                 return
@@ -5330,6 +5332,7 @@ License: AGPL v3"""
                 "onionpress-wordpress",
                 "rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json",
                 timeout=5,
+                user=wp_files.WP_USER,
             )
 
             if action == "refresh-status":
@@ -5355,13 +5358,15 @@ License: AGPL v3"""
             """Write a JSON result file to the WordPress shared volume.
 
             Error strings come from exceptions and launcher stderr and can
-            name host paths, so every string is scrubbed first.
+            name host paths, so every string is scrubbed first. Written as
+            www-data (wp_files): root's tee followed a link planted at the
+            name, and an error string can carry text of the planter's
+            choosing (a crafted zip member name, say).
             """
             try:
                 data = redact.scrub_json_for_wordpress(data, self.app_support)
                 self._docker.run(
-                    ["exec", "-i", "onionpress-wordpress",
-                     "tee", f"/var/lib/onionpress/{filename}"],
+                    wp_files.put_file_args(f"/var/lib/onionpress/{filename}"),
                     timeout=5, input=json.dumps(data),
                 )
             except Exception:
@@ -5373,6 +5378,7 @@ License: AGPL v3"""
                     "onionpress-wordpress",
                     "rm -f /var/lib/onionpress/service-pending",
                     timeout=5,
+                    user=wp_files.WP_USER,
                 )
             except Exception:
                 pass
@@ -5384,8 +5390,8 @@ License: AGPL v3"""
                 # Write pending marker
                 try:
                     subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "sh", "-c", f"echo {action} > /var/lib/onionpress/service-pending"],
+                        ["docker"] + wp_files.put_file_args("/var/lib/onionpress/service-pending"),
+                        input=f"{action}\n",
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
@@ -5521,15 +5527,15 @@ License: AGPL v3"""
                 self.log("Settings page: importing key...")
                 try:
                     r = subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "cat", "/var/lib/onionpress/import-key-data"],
+                        ["docker"] + wp_files.exec_args(
+                            "cat", "/var/lib/onionpress/import-key-data"),
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
                     key_data = r.stdout.strip() if r.returncode == 0 else ""
                     subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "rm", "-f", "/var/lib/onionpress/import-key-data"],
+                        ["docker"] + wp_files.exec_args(
+                            "rm", "-f", "/var/lib/onionpress/import-key-data"),
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
@@ -5581,15 +5587,15 @@ License: AGPL v3"""
                 self.log("Settings page: creating backup...")
                 try:
                     r = subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "cat", "/var/lib/onionpress/backup-password"],
+                        ["docker"] + wp_files.exec_args(
+                            "cat", "/var/lib/onionpress/backup-password"),
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
                     password = r.stdout.strip() if r.returncode == 0 else ""
                     subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "rm", "-f", "/var/lib/onionpress/backup-password"],
+                        ["docker"] + wp_files.exec_args(
+                            "rm", "-f", "/var/lib/onionpress/backup-password"),
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
@@ -5658,15 +5664,15 @@ License: AGPL v3"""
                 self.log("Settings page: restoring from backup...")
                 try:
                     r = subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "cat", "/var/lib/onionpress/restore-password"],
+                        ["docker"] + wp_files.exec_args(
+                            "cat", "/var/lib/onionpress/restore-password"),
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
                     password = r.stdout.strip() if r.returncode == 0 else ""
                     subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "rm", "-f", "/var/lib/onionpress/restore-password"],
+                        ["docker"] + wp_files.exec_args(
+                            "rm", "-f", "/var/lib/onionpress/restore-password"),
                         capture_output=True, text=True, encoding='utf-8', errors='replace',
                         timeout=5
                     )
@@ -5689,8 +5695,8 @@ License: AGPL v3"""
                             timeout=60
                         )
                         subprocess.run(
-                            ["docker", "exec", "onionpress-wordpress",
-                             "rm", "-f", "/var/lib/onionpress/restore-upload.zip"],
+                            ["docker"] + wp_files.exec_args(
+                                "rm", "-f", "/var/lib/onionpress/restore-upload.zip"),
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
                             timeout=5
                         )

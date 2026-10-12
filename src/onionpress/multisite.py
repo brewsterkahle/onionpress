@@ -17,6 +17,8 @@ import os
 import subprocess
 from typing import Callable, Optional
 
+from . import wp_files
+
 
 # Files installed into the WordPress container by install_multisite_domain_map.
 # Kept here (not in the launcher) so Mac and Linux see the same set.
@@ -157,19 +159,81 @@ def _exec_sh(
     )
 
 
-def _docker_cp(
+# Everything below is handed to the container as www-data (wp_files), never
+# by root's docker cp + chown: www-data owns the web root and wp-content, and
+# root followed a link planted at the destination (sunrise.php ->
+# /usr/local/bin/docker-entrypoint.sh) both to write the file and to chown
+# its target to www-data.
+
+def _put_data(
+    dest: str,
+    data,
+    *,
+    docker_bin: str = "docker",
+    timeout: int = 60,
+) -> subprocess.CompletedProcess:
+    """Write *data* (str or bytes) to *dest* in the WordPress container, as
+    www-data, mode 644 (Apache and PHP run as www-data). stderr is text."""
+    if isinstance(data, bytes):
+        data = data.decode("utf-8", errors="surrogateescape")
+    return subprocess.run(
+        [docker_bin] + wp_files.put_file_args(dest, "644"),
+        input=data, capture_output=True, text=True,
+        encoding="utf-8", errors="surrogateescape", timeout=timeout,
+    )
+
+
+def _put_file(
     src: str,
     dest: str,
     *,
     docker_bin: str = "docker",
     timeout: int = 60,
 ) -> subprocess.CompletedProcess:
-    """`docker cp <src> <container:dest>`. Caller's responsibility to rm
-    dest first if it's a directory — docker cp into an existing dir
-    copies INTO it (creates dest/src/), not over it.
-    """
+    """Write the host file *src* to *dest* in the WordPress container, as
+    www-data, mode 644."""
+    with open(src, "rb") as f:
+        data = f.read()
+    return _put_data(dest, data, docker_bin=docker_bin, timeout=timeout)
+
+
+def _own(
+    path: str,
+    *,
+    recursive: bool = False,
+    docker_bin: str = "docker",
+    timeout: int = 600,
+) -> subprocess.CompletedProcess:
+    """Give *path* (and, *recursive*, all below it) to www-data, as root,
+    following no link (wp_files.own_args)."""
     return subprocess.run(
-        [docker_bin, "cp", src, dest],
+        [docker_bin] + wp_files.own_args(path, recursive),
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+    )
+
+
+def _put_tree(
+    src: str,
+    dest: str,
+    *,
+    docker_bin: str = "docker",
+    timeout: int = 120,
+) -> subprocess.CompletedProcess:
+    """Replace the folder *dest* in the WordPress container with the host
+    folder *src*, as www-data."""
+    return wp_files.put_tree(src, dest, docker_bin=docker_bin, timeout=timeout)
+
+
+def _exec_www_data(
+    command: str,
+    *,
+    docker_bin: str = "docker",
+    timeout: int = 30,
+) -> subprocess.CompletedProcess:
+    """Run a shell command inside the WordPress container as www-data."""
+    return subprocess.run(
+        [docker_bin] + wp_files.exec_args("sh", "-c", command),
         capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=timeout,
     )
@@ -252,16 +316,12 @@ def install_multisite_domain_map(
     # 1. sunrise.php — must run before SUNRISE constant takes effect.
     sunrise_src = os.path.join(plugins_dir, "onionpress-sunrise.php")
     if os.path.isfile(sunrise_src):
-        cp = _docker_cp(
+        cp = _put_file(
             sunrise_src,
-            "onionpress-wordpress:/var/www/html/wp-content/sunrise.php",
+            "/var/www/html/wp-content/sunrise.php",
             docker_bin=docker_bin,
         )
         if cp.returncode == 0:
-            _exec_sh(
-                "chown www-data:www-data /var/www/html/wp-content/sunrise.php",
-                docker_bin=docker_bin,
-            )
             # Ensure SUNRISE constant is in wp-config.php (required for
             # sunrise.php to load).
             _wp(
@@ -273,24 +333,18 @@ def install_multisite_domain_map(
         else:
             log("WARNING: Failed to copy sunrise.php")
 
-    # 2. .htaccess. Write via a heredoc inside the container so we don't
-    # need a temp file on the host. Single-quoted heredoc delimiter so the
-    # shell doesn't interpret $1, %{...}, etc.
-    # Body is HTACCESS_BODY at module scope.
-    htaccess_cmd = (
-        "cat > /var/www/html/.htaccess <<'HTEOF'\n"
-        + HTACCESS_BODY
-        + "HTEOF\n"
-        "chown www-data:www-data /var/www/html/.htaccess"
-    )
-    r = _exec_sh(htaccess_cmd, docker_bin=docker_bin)
+    # 2. .htaccess (body: HTACCESS_BODY at module scope).
+    r = _put_data("/var/www/html/.htaccess", HTACCESS_BODY,
+                  docker_bin=docker_bin)
     if r.returncode == 0:
         log(".htaccess multisite rewrite rules installed")
     else:
         log(f"WARNING: Failed to write .htaccess: {r.stderr.strip()[:200]}")
 
-    # 3. mu-plugins directory + each plugin.
-    _exec_sh(
+    # 3. mu-plugins directory + each plugin. Root's mkdir made the folder
+    # root's in older versions, where www-data could not add a file.
+    _own("/var/www/html/wp-content/mu-plugins", docker_bin=docker_bin)
+    _exec_www_data(
         "mkdir -p /var/www/html/wp-content/mu-plugins",
         docker_bin=docker_bin,
     )
@@ -298,16 +352,12 @@ def install_multisite_domain_map(
         src = os.path.join(plugins_dir, plugin)
         if not os.path.isfile(src):
             continue
-        cp = _docker_cp(
+        cp = _put_file(
             src,
-            f"onionpress-wordpress:/var/www/html/wp-content/mu-plugins/{plugin}",
+            f"/var/www/html/wp-content/mu-plugins/{plugin}",
             docker_bin=docker_bin,
         )
         if cp.returncode == 0:
-            _exec_sh(
-                f"chown www-data:www-data /var/www/html/wp-content/mu-plugins/{plugin}",
-                docker_bin=docker_bin,
-            )
             log(f"{plugin} mu-plugin installed")
         else:
             log(f"WARNING: Failed to copy {plugin}")
@@ -318,16 +368,12 @@ def install_multisite_domain_map(
         src = os.path.join(plugins_dir, asset)
         if not os.path.isfile(src):
             continue
-        cp = _docker_cp(
+        cp = _put_file(
             src,
-            f"onionpress-wordpress:/var/www/html/wp-content/mu-plugins/{asset}",
+            f"/var/www/html/wp-content/mu-plugins/{asset}",
             docker_bin=docker_bin,
         )
         if cp.returncode == 0:
-            _exec_sh(
-                f"chown www-data:www-data /var/www/html/wp-content/mu-plugins/{asset}",
-                docker_bin=docker_bin,
-            )
             log(f"{asset} installed")
         else:
             log(f"WARNING: Failed to copy {asset}")
@@ -350,24 +396,16 @@ def install_onionpress_theme(
     if not wp_is_installed(docker_bin):
         return True
 
-    # 1. Theme. Pre-delete the destination — docker cp into an existing
-    # directory copies INTO it (creates dest/src/), not over it.
+    # 1. Theme. _put_tree replaces the folder whole (a copy into an
+    # existing folder would land inside it, as themes/onionpress/onionpress/).
     theme_src = os.path.join(themes_dir, "onionpress")
     if os.path.isdir(theme_src):
-        _exec_sh(
-            "rm -rf /var/www/html/wp-content/themes/onionpress",
-            docker_bin=docker_bin,
-        )
-        cp = _docker_cp(
+        cp = _put_tree(
             theme_src,
-            "onionpress-wordpress:/var/www/html/wp-content/themes/onionpress",
+            "/var/www/html/wp-content/themes/onionpress",
             docker_bin=docker_bin,
         )
         if cp.returncode == 0:
-            _exec_sh(
-                "chown -R www-data:www-data /var/www/html/wp-content/themes/onionpress",
-                docker_bin=docker_bin,
-            )
             log("OnionPress theme installed")
 
             current = _wp(
@@ -401,27 +439,19 @@ def install_onionpress_theme(
         else:
             log("WARNING: Failed to copy OnionPress theme")
 
-    # 2. Hit counter + creations plugins. Pre-delete same reason.
+    # 2. Hit counter + creations plugins, replaced whole the same way.
     for plugin in ("onionpress-hit-counter", "onionpress-creations"):
         src = os.path.join(plugins_dir, plugin)
         if not os.path.isdir(src):
             continue
-        _exec_sh(
-            f"rm -rf /var/www/html/wp-content/plugins/{plugin}",
-            docker_bin=docker_bin,
-        )
-        cp = _docker_cp(
+        cp = _put_tree(
             src,
-            f"onionpress-wordpress:/var/www/html/wp-content/plugins/{plugin}",
+            f"/var/www/html/wp-content/plugins/{plugin}",
             docker_bin=docker_bin,
         )
         if cp.returncode != 0:
             log(f"WARNING: Failed to copy {plugin}")
             continue
-        _exec_sh(
-            f"chown -R www-data:www-data /var/www/html/wp-content/plugins/{plugin}",
-            docker_bin=docker_bin,
-        )
         act = _wp("plugin", "activate", plugin, docker_bin=docker_bin)
         if act.returncode == 0:
             log(f"{plugin} plugin installed and activated")
@@ -439,6 +469,11 @@ def fix_onionpress_permissions(
     """Ensure the shared `/var/lib/onionpress/` volume is owned by www-data
     so the WordPress process can read state files written by the launcher.
     The `onionheaven/` subtree is excluded — it has its own owner.
+
+    Root here follows no link www-data may have planted: /var/lib/onionpress
+    is the volume's mount point (www-data cannot replace it), find names
+    each entry with no trailing slash, and chown -R never follows a link,
+    the named entry included.
     """
     log = log_func or _noop_log
     log("Fixing permissions for onionpress persistent data directory...")
@@ -465,14 +500,17 @@ def fix_wordpress_uploads_permissions(
     """Ensure `wp-content/uploads` is owned by www-data so the multisite
     per-blog subtree (`sites/<id>/<YYYY>/<MM>/`) can be created on demand.
     Fresh installs had it created root-owned, which broke media uploads
-    with "Unable to create directory" errors.
+    with "Unable to create directory" errors, and wp-cli (root) still adds
+    root's files. The chown follows no link (wp_files.own).
     """
     log = log_func or _noop_log
-    r = _exec_sh(
-        "mkdir -p /var/www/html/wp-content/uploads && "
-        "chown -R www-data:www-data /var/www/html/wp-content/uploads",
+    r = _exec_www_data(
+        "mkdir -p /var/www/html/wp-content/uploads",
         docker_bin=docker_bin,
     )
+    if r.returncode == 0:
+        r = _own("/var/www/html/wp-content/uploads", recursive=True,
+                 docker_bin=docker_bin)
     if r.returncode == 0:
         log("WordPress uploads directory permissions fixed")
         return True
@@ -490,14 +528,23 @@ def write_shared_onion_address(
     code (theme, mu-plugins, REST endpoints) can answer "what's my .onion?"
     without parsing Host headers — needed when the site is hit via
     localhost. Idempotent; safe to call from multiple places.
+
+    Read from the tor container, written by www-data in the WordPress
+    container. Not `cp` as root in the tor container: www-data can plant a
+    link at onion_address in the shared volume, and that cp followed it to
+    any file in the tor container (its onion service key, say).
     """
     log = log_func or _noop_log
     r = subprocess.run(
-        [docker_bin, "exec", "onionpress-tor", "sh", "-c",
-         "cp /var/lib/tor/hidden_service/wordpress/hostname "
-         "/var/lib/onionpress/onion_address"],
+        [docker_bin, "exec", "onionpress-tor", "cat", wp_files.TOR_HOSTNAME_FILE],
         capture_output=True, text=True, timeout=15,
     )
+    content = wp_files.shared_onion_address(r.stdout) if r.returncode == 0 else None
+    if content is None:
+        # Caller may not care — this can fail benignly when tor isn't up yet.
+        return False
+    r = _put_data(wp_files.ONION_ADDRESS_FILE, content,
+                  docker_bin=docker_bin, timeout=15)
     if r.returncode == 0:
         log("Onion address written to shared volume")
         return True

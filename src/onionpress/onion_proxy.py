@@ -16,12 +16,10 @@ Status endpoint: http://localhost:9077/status
 import os
 import re
 import secrets
-import shutil
 import socket
 import select
 import string
 import subprocess
-import tempfile
 import json
 import threading
 import time
@@ -321,8 +319,13 @@ class ProxyCache:
 
 def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
     """Copy the PHP proxy script into the WordPress container, with
-    PHP_PROXY_TOKEN written into it."""
-    staging = None
+    PHP_PROXY_TOKEN written into it.
+
+    Written as www-data (wp_files): www-data owns the web root, and root's
+    docker cp followed a link planted at __op_proxy.php to any file in the
+    container.
+    """
+    from onionpress import wp_files
     try:
         with open(php_script_path, encoding="utf-8") as f:
             script = f.read()
@@ -331,33 +334,23 @@ def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
                 log_func(f"Failed to install PHP proxy: {php_script_path} "
                          "has no single token placeholder")
             return False
-        # A private directory: the file itself has to be 0644, as docker cp
-        # keeps the mode and Apache reads it as www-data.
-        staging = tempfile.mkdtemp(prefix="onionpress-php-proxy-")
-        staged = os.path.join(staging, "__op_proxy.php")
-        with open(staged, "w", encoding="utf-8") as f:
-            f.write(script.replace(PHP_PROXY_TOKEN_PLACEHOLDER, PHP_PROXY_TOKEN))
-        os.chmod(staged, 0o644)
-        result = subprocess.run(
-            [docker_bin, "cp", staged,
-             "onionpress-wordpress:/var/www/html/__op_proxy.php"],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=docker_env
-        )
+        result = wp_files.put_file(
+            "/var/www/html/__op_proxy.php",
+            script.replace(PHP_PROXY_TOKEN_PLACEHOLDER, PHP_PROXY_TOKEN), "644",
+            docker_bin=docker_bin, env=docker_env, timeout=10)
         if result.returncode == 0:
             if log_func:
                 log_func("Installed PHP proxy in WordPress container")
             return True
         else:
             if log_func:
-                log_func(f"Failed to install PHP proxy: {result.stderr}")
+                log_func("Failed to install PHP proxy: "
+                         + result.stderr.decode("utf-8", "replace"))
             return False
     except Exception as e:
         if log_func:
             log_func(f"Failed to install PHP proxy: {e}")
         return False
-    finally:
-        if staging:
-            shutil.rmtree(staging, ignore_errors=True)
 
 
 def check_php_proxy(log_func=None):
@@ -936,17 +929,19 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         # Run wp core multisite-install (subdirectory mode)
         try:
+            from onionpress import wp_files
             docker = self.server.docker_bin
             denv = self.server.docker_env
             wp_exec = [docker, "exec", "onionpress-wordpress"]
 
             # sunrise.php is installed by provision-post-install before WordPress
             # exists. It queries wp_site on load, which fails during a fresh install
-            # because multisite tables don't exist yet. Move it aside for the install.
+            # because multisite tables don't exist yet. Move it aside for the install
+            # (as www-data, whose folder wp-content is).
             subprocess.run(
-                wp_exec + ["bash", "-c",
+                [docker] + wp_files.exec_args("bash", "-c",
                     "[ -f wp-content/sunrise.php ] && "
-                    "mv wp-content/sunrise.php wp-content/sunrise.php.bak || true"],
+                    "mv wp-content/sunrise.php wp-content/sunrise.php.bak || true"),
                 env=denv, capture_output=True, timeout=10
             )
 
@@ -969,9 +964,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             )
 
             subprocess.run(
-                wp_exec + ["bash", "-c",
+                [docker] + wp_files.exec_args("bash", "-c",
                     "[ -f wp-content/sunrise.php.bak ] && "
-                    "mv wp-content/sunrise.php.bak wp-content/sunrise.php || true"],
+                    "mv wp-content/sunrise.php.bak wp-content/sunrise.php || true"),
                 env=denv, capture_output=True, timeout=10
             )
 
@@ -1052,15 +1047,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     "RewriteRule . index.php [L]\n"
                     "# END WordPress Multisite\n"
                 )
-                subprocess.run(
-                    wp_exec + [
-                        "bash", "-c",
-                        "cat > /var/www/html/.htaccess && "
-                        "chown www-data:www-data /var/www/html/.htaccess"
-                    ],
-                    input=htaccess_content,
-                    env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
-                )
+                # As www-data (wp_files), whose folder the web root is.
+                wp_files.put_file("/var/www/html/.htaccess", htaccess_content,
+                                  "644", docker_bin=docker, env=denv, timeout=10)
 
                 if self.server.log_func:
                     self.server.log_func("Multisite constants and .htaccess configured")

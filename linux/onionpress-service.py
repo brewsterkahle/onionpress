@@ -59,7 +59,7 @@ try:
     from onionpress.config import (
         ensure_config, ensure_secrets, read_value, resolve_port_offset,
     )
-    from onionpress import launcher_ops, redact, system_metrics
+    from onionpress import launcher_ops, redact, system_metrics, wp_files
     from onionpress.power import SystemdInhibitor
 except ImportError as e:
     print(f"ERROR: onionpress package not found in {_LIB_DIR}: {e}", file=sys.stderr)
@@ -311,10 +311,10 @@ def write_status(
 
     # Mirror into the WordPress container for the status/settings page —
     # only the fields those pages show: PHP can read it, and
-    # wp_admin_password_path is a path under $HOME.
+    # wp_admin_password_path is a path under $HOME. Written as www-data
+    # (wp_files): root's `cat >` followed a link planted at the name.
     docker.run(
-        ["exec", "-i", "onionpress-wordpress",
-         "sh", "-c", "cat > /var/lib/onionpress/status.json"],
+        wp_files.put_file_args("/var/lib/onionpress/status.json"),
         input=json.dumps(redact.status_for_wordpress(status), indent=2),
         timeout=10, quiet=True,
     )
@@ -493,16 +493,22 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
                 onion_address = hr.onion_address
                 log(f"Onion address: {onion_address}")
 
+            # Read from the tor container, written by www-data: root's cp in
+            # the tor container followed a link www-data can plant at
+            # onion_address to any file there (its key).
             if onion_address and not _shared_volume_written:
                 r = docker.exec(
-                    "onionpress-tor",
-                    ["sh", "-c",
-                     "cp /var/lib/tor/hidden_service/wordpress/hostname "
-                     "/var/lib/onionpress/onion_address"],
+                    "onionpress-tor", ["cat", wp_files.TOR_HOSTNAME_FILE],
                     timeout=10, quiet=True,
                 )
-                if r.ok:
-                    _shared_volume_written = True
+                content = wp_files.shared_onion_address(r.output) if r.ok else None
+                if content is not None:
+                    r = docker.run(
+                        wp_files.put_file_args(wp_files.ONION_ADDRESS_FILE, "644"),
+                        input=content, timeout=10, quiet=True,
+                    )
+                    if r.ok:
+                        _shared_volume_written = True
 
             service_state = monitor.evaluate(hr, is_running=True)
 

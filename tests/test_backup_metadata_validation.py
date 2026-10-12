@@ -761,7 +761,9 @@ class TestRestoreResultJson(unittest.TestCase):
         out = tempfile.NamedTemporaryFile(delete=False)
         out.close()
         self.addCleanup(os.unlink, out.name)
-        func = _bash_function(_read("linux/onionpress"), "write_restore_result")
+        launcher = _read("linux/onionpress")
+        func = (_bash_function(launcher, "wp_put")
+                + _bash_function(launcher, "write_restore_result"))
         script = ('docker() { cat > "$OUT"; }\n'
                   'python3() { "$PY" "$@"; }\n' + func
                   + 'write_restore_result "$@"\n')

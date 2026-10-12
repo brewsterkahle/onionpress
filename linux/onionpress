@@ -49,6 +49,25 @@ vanity_key_dir() {
     return 1
 }
 
+# Hand a file to the WordPress container, written as www-data: stdin goes to
+# $1, mode ${2:-600} once in place (a temporary file beside it, renamed
+# over it). Never as root: www-data owns /var/lib/onionpress and the web
+# root, and root's `cat >` or docker cp followed a link planted at the name
+# to any file in the container. The script is
+# onionpress.wp_files.PUT_FILE_SCRIPT; a test keeps the copies equal.
+wp_put() {
+    docker exec -i -u www-data onionpress-wordpress \
+        sh -c 't=$(mktemp "$1.XXXXXX") || exit 1; if cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"; then exit 0; fi; rm -f "$t"; exit 1' \
+        sh "$1" "${2:-600}"
+}
+
+# Run a command in the WordPress container as www-data: what the launcher
+# reads from or removes in www-data's folders (a root `cat` would follow a
+# planted link to a file only root may read).
+wp_exec() {
+    docker exec -u www-data onionpress-wordpress "$@"
+}
+
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
@@ -776,9 +795,10 @@ install_ia_plugin() {
     local temp_dir=$(mktemp -d)
 
     if "$SCRIPTS_DIR/install_plugin.sh" "internet-archive-wayback-machine-link-fixer" "$temp_dir" >>"$LOG_FILE" 2>&1; then
-        if docker cp "$temp_dir/internet-archive-wayback-machine-link-fixer" onionpress-wordpress:/var/www/html/wp-content/plugins/ 2>>"$LOG_FILE" && \
-            cd "$DOCKER_DIR" && \
-            docker compose exec -T wordpress chown -R www-data:www-data /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer 2>>"$LOG_FILE"; then
+        # Written as www-data, not docker cp + chown -R as root (both
+        # followed links www-data can plant in plugins/).
+        if op_py put-wp-tree --src "$temp_dir/internet-archive-wayback-machine-link-fixer" \
+                --dest /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer 2>>"$LOG_FILE"; then
             log "Internet Archive Wayback Machine Link Fixer plugin installed"
 
             if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
@@ -1092,7 +1112,7 @@ setup_wordpress_interactive() {
     # It queries wp_site on load, which fails during a fresh install because the
     # multisite tables don't exist yet. Move it aside for the duration of the
     # install, then restore it.
-    docker exec onionpress-wordpress bash -c \
+    wp_exec bash -c \
         '[ -f wp-content/sunrise.php ] && mv wp-content/sunrise.php wp-content/sunrise.php.bak || true' \
         >> "$LOG_FILE" 2>&1
 
@@ -1110,7 +1130,7 @@ setup_wordpress_interactive() {
         _wp_install_ok=true
     fi
 
-    docker exec onionpress-wordpress bash -c \
+    wp_exec bash -c \
         '[ -f wp-content/sunrise.php.bak ] && mv wp-content/sunrise.php.bak wp-content/sunrise.php || true' \
         >> "$LOG_FILE" 2>&1
 
@@ -1820,12 +1840,14 @@ stop_container_log_capture() {
 # Copy the tor hostname into the shared volume so WP code (theme,
 # mu-plugins, REST endpoints) can answer "what's my .onion?" without
 # parsing Host headers — needed when the site is hit via localhost.
-# Idempotent; safe to call from multiple places.
+# Idempotent; safe to call from multiple places. Read from the tor
+# container, written by www-data: root's cp in the tor container followed a
+# link www-data can plant at onion_address to any file there (its key).
 write_shared_onion_address() {
-    docker exec onionpress-tor sh -c \
-        'cp /var/lib/tor/hidden_service/wordpress/hostname \
-            /var/lib/onionpress/onion_address 2>/dev/null' \
-        >/dev/null 2>&1
+    local addr
+    addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+    is_onion_address "$addr" || return 1
+    printf '%s\n' "$addr" | wp_put /var/lib/onionpress/onion_address 644 >/dev/null 2>&1
 }
 
 wait_for_services() {
@@ -2025,16 +2047,15 @@ create_backup() {
         return 1
     fi
 
-    # 3. Copy wp-content from container
+    # 3. Copy wp-content from container. Read there as www-data (root's
+    #    docker cp followed a wp-content link www-data can plant to any
+    #    folder in the container) and unpacked here as plain files and
+    #    folders: a link planted in the container would point at a host
+    #    path, where zip would store the host file and the pruning and
+    #    marker below would follow it (pack-backup sweeps the tree again).
     log "Backup: copying wp-content (themes, plugins, uploads)..."
-    docker cp onionpress-wordpress:/var/www/html/wp-content/. "$staging/wp-content" 2>>"$LOG_FILE"
-    # docker cp copies a symlink as a symlink, and one planted in the
-    # container (www-data can) points at a host path here: zip would store
-    # the host file and the pruning and marker below would follow it. Drop
-    # links and special files before anything reads the copy (pack-backup
-    # sweeps the whole tree again).
-    if ! op_py scrub-staging --dir "$staging/wp-content" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: could not check the copied wp-content for links"
+    if ! op_py stage-wp-content --dest "$staging/wp-content" >>"$LOG_FILE" 2>&1; then
+        log "ERROR: could not copy wp-content out of the container"
         return 1
     fi
 
@@ -2232,8 +2253,13 @@ restore_backup() {
     local wpcontent_dir="$staging/wp-content"
     if [ -d "$wpcontent_dir" ]; then
         log "Restore: copying wp-content (themes, plugins, uploads)..."
-        docker cp "$wpcontent_dir/." onionpress-wordpress:/var/www/html/wp-content/ 2>>"$LOG_FILE"
-        docker exec onionpress-wordpress chown -R www-data:www-data /var/www/html/wp-content/ 2>>"$LOG_FILE"
+        # As www-data, not docker cp + chown -R as root: both followed
+        # links www-data can plant in wp-content (wp-content itself too).
+        if ! op_py put-wp-tree --merge --src "$wpcontent_dir" \
+                --dest /var/www/html/wp-content 2>>"$LOG_FILE"; then
+            log "ERROR: could not copy wp-content into the WordPress container"
+            return 1
+        fi
         log "Restore: wp-content restored"
         # Resized images the backup left out (#257) are rebuilt in the
         # background by the start that follows this restore; the marker
@@ -2283,7 +2309,7 @@ result = {"success": ok, ("address" if ok else "error"): sys.argv[2],
           "restored_at": datetime.datetime.now(datetime.timezone.utc)
                          .strftime("%Y-%m-%dT%H:%M:%SZ")}
 print(json.dumps(result))
-' "$1" "$2" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+' "$1" "$2" | wp_put /var/lib/onionpress/restore-result.json 2>/dev/null
 }
 
 # ─── Write status (on-demand) ────────────────────────────────────────
@@ -2592,7 +2618,7 @@ print(json.dumps(status, indent=2))
     # than write the full status.
     local wp_status_json
     if wp_status_json=$(printf '%s' "$status_json" | op_py --data-dir "$DATA_DIR" wordpress-status 2>>"$LOG_FILE"); then
-        echo "$wp_status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
+        echo "$wp_status_json" | wp_put /var/lib/onionpress/status.json 2>>"$LOG_FILE"
     fi
     # Also write to the host data dir — the tray app reads this directly,
     # without going through docker exec on every poll.
@@ -2600,7 +2626,7 @@ print(json.dumps(status, indent=2))
         && mv -f "$DATA_DIR/status.json.tmp" "$DATA_DIR/status.json" 2>>"$LOG_FILE"
 
     # Write version file for the settings page update checker
-    echo "$ONIONPRESS_VERSION" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/version' 2>>"$LOG_FILE"
+    echo "$ONIONPRESS_VERSION" | wp_put /var/lib/onionpress/version 2>>"$LOG_FILE"
 
     # Build config-current.json from ~/.onionpress/config — allowlisted keys
     # only (SAFE_CONFIG_KEYS, shared with the Mac app): the file is readable
@@ -2610,7 +2636,7 @@ print(json.dumps(status, indent=2))
     local config_json
     config_json=$(op_py --data-dir "$DATA_DIR" safe-config 2>>"$LOG_FILE") || config_json="{}"
 
-    echo "$config_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/config-current.json' 2>>"$LOG_FILE"
+    echo "$config_json" | wp_put /var/lib/onionpress/config-current.json 2>>"$LOG_FILE"
 
     write_recent_logs
 }
@@ -2624,7 +2650,7 @@ write_recent_logs() {
     local logs
     logs=$(op_py --data-dir "$DATA_DIR" wordpress-logs --log-file "$LOG_FILE" 2>/dev/null) \
         || logs="(Recent logs unavailable: could not scrub $(basename "$LOG_FILE") for display.)"
-    printf '%s\n' "$logs" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/recent-logs.txt' 2>/dev/null
+    printf '%s\n' "$logs" | wp_put /var/lib/onionpress/recent-logs.txt 2>/dev/null
 }
 
 # ─── Config watcher (on-demand) ──────────────────────────────────────
@@ -2632,7 +2658,7 @@ write_recent_logs() {
 apply_config_updates() {
     # Check if settings page wrote config-updates.json
     local updates result changed rejected
-    updates=$(docker exec onionpress-wordpress cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
+    updates=$(wp_exec cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
 
     if [ -z "$updates" ] || [ "$updates" = "{}" ]; then
         return 0
@@ -2654,7 +2680,7 @@ apply_config_updates() {
     [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
 
     # Clear the updates file
-    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/config-updates.json' 2>>"$LOG_FILE"
+    wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
 
     # Handle START_ON_BOOT (re-applied whenever the page sends it)
     if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
@@ -3119,7 +3145,8 @@ sys.exit(0 if provision_interactive() else 1)
             # Deploy updated plugins to running container
             if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
                 for plugin in "$INSTALL_DIR/plugins/"*.php; do
-                    docker cp "$plugin" "onionpress-wordpress:/var/www/html/wp-content/mu-plugins/" 2>>"$LOG_FILE"
+                    wp_put "/var/www/html/wp-content/mu-plugins/$(basename "$plugin")" 644 \
+                        < "$plugin" 2>>"$LOG_FILE"
                 done
                 log "Updated plugins deployed to WordPress container"
             fi
@@ -3175,14 +3202,14 @@ sys.exit(0 if provision_interactive() else 1)
         handle-action)
             # Process action requests from the WordPress settings page
             local action
-            action=$(docker exec onionpress-wordpress cat /var/lib/onionpress/requested-action 2>/dev/null || echo "")
+            action=$(wp_exec cat /var/lib/onionpress/requested-action 2>/dev/null || echo "")
             if [ -z "$action" ]; then
                 # No action requested — just refresh logs (cheap)
                 # Full status is written on-demand when the status page detects stale data
                 write_recent_logs
                 exit 0
             fi
-            docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json' 2>/dev/null
+            wp_exec rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json 2>/dev/null
             if [ "$action" != "refresh-status" ]; then
                 log "Handling requested action: $action"
             fi
@@ -3190,20 +3217,20 @@ sys.exit(0 if provision_interactive() else 1)
                 start)
                     setup_db_passwords
                     apply_config_updates 2>/dev/null || true
-                    docker exec onionpress-wordpress sh -c 'echo start > /var/lib/onionpress/service-pending' 2>/dev/null
+                    echo start | wp_put /var/lib/onionpress/service-pending 2>/dev/null
                     start_containers
                     wait_for_services
                     write_status
                     local containers_info
                     containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
                     echo '{"success":true,"action":"start","message":"Started '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                        docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/service-result.json && rm -f /var/lib/onionpress/service-pending' 2>/dev/null
+                        wp_put /var/lib/onionpress/service-result.json \&\& wp_exec rm -f /var/lib/onionpress/service-pending 2>/dev/null
                     ;;
                 restart)
                     setup_db_passwords
                     apply_config_updates 2>/dev/null || true
                     # Write pending marker to shared volume before stopping (survives container restart)
-                    docker exec onionpress-wordpress sh -c 'echo restart > /var/lib/onionpress/service-pending' 2>/dev/null
+                    echo restart | wp_put /var/lib/onionpress/service-pending 2>/dev/null
                     stop_containers
                     start_containers
                     wait_for_services
@@ -3211,7 +3238,7 @@ sys.exit(0 if provision_interactive() else 1)
                     local containers_info
                     containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
                     echo '{"success":true,"action":"restart","message":"Restarted '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                        docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/service-result.json && rm -f /var/lib/onionpress/service-pending' 2>/dev/null
+                        wp_put /var/lib/onionpress/service-result.json \&\& wp_exec rm -f /var/lib/onionpress/service-pending 2>/dev/null
                     ;;
                 stop)
                     setup_db_passwords
@@ -3223,7 +3250,7 @@ sys.exit(0 if provision_interactive() else 1)
                     onion_addr_test=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
                     if [ -z "$onion_addr_test" ]; then
                         echo '{"reachable":false,"error":"No onion address found","tested_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/reachability-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/reachability-result.json 2>/dev/null
                         log "Reachability test: no onion address"
                     else
                         local http_code
@@ -3233,7 +3260,7 @@ sys.exit(0 if provision_interactive() else 1)
                             reachable=true
                         fi
                         echo '{"reachable":'"$reachable"',"http_code":'"$http_code"',"address":"'"$onion_addr_test"'","tested_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/reachability-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/reachability-result.json 2>/dev/null
                         log "Reachability test: $onion_addr_test -> HTTP $http_code (reachable=$reachable)"
                     fi
                     ;;
@@ -3246,7 +3273,7 @@ sys.exit(0 if provision_interactive() else 1)
                     local vanity_result_file="/tmp/onionpress-vanity-result.json"
                     if ! command -v mkp224o >/dev/null 2>&1; then
                         echo '{"success":false,"error":"mkp224o is not installed. Install it with: sudo apt install -y gcc libsodium-dev autoconf && cd /tmp && git clone https://github.com/cathugger/mkp224o && cd mkp224o && ./autogen.sh && ./configure && make && sudo cp mkp224o /usr/local/bin/","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
                         log "Vanity generation failed: mkp224o not installed"
                     else
                         local vanity_output_dir
@@ -3272,16 +3299,16 @@ sys.exit(0 if provision_interactive() else 1)
                                 wait_for_services
                                 write_status
                                 echo '{"success":true,"address":"'"$vanity_address"'","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                    docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                                    wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
                                 log "Vanity address generated and imported: $vanity_address"
                             else
                                 echo '{"success":false,"error":"mkp224o did not produce a key","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                    docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                                    wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
                                 log "Vanity generation failed: no key produced"
                             fi
                         else
                             echo '{"success":false,"error":"mkp224o failed","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/vanity-result.json' 2>/dev/null
+                                wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
                             log "Vanity generation failed: mkp224o error"
                         fi
                         rm -rf "$vanity_output_dir"
@@ -3291,11 +3318,11 @@ sys.exit(0 if provision_interactive() else 1)
                     log "Processing key file import from settings page..."
                     setup_db_passwords
                     local key_data
-                    key_data=$(docker exec onionpress-wordpress cat /var/lib/onionpress/import-key-data 2>/dev/null || echo "")
-                    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/import-key-data' 2>/dev/null
+                    key_data=$(wp_exec cat /var/lib/onionpress/import-key-data 2>/dev/null || echo "")
+                    wp_exec rm -f /var/lib/onionpress/import-key-data 2>/dev/null
                     if [ -z "$key_data" ]; then
                         echo '{"success":false,"error":"No key data found","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/import-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/import-result.json 2>/dev/null
                         log "Key import failed: no key data"
                     else
                         stop_containers 2>/dev/null || true
@@ -3309,11 +3336,11 @@ sys.exit(0 if provision_interactive() else 1)
                             local new_addr
                             new_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
                             echo '{"success":true,"address":"'"$new_addr"'","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/import-result.json' 2>/dev/null
+                                wp_put /var/lib/onionpress/import-result.json 2>/dev/null
                             log "Key imported successfully: $new_addr"
                         else
                             echo '{"success":false,"error":"Key import failed - invalid key data","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/import-result.json' 2>/dev/null
+                                wp_put /var/lib/onionpress/import-result.json 2>/dev/null
                             start_containers
                             wait_for_services
                             write_status
@@ -3325,11 +3352,11 @@ sys.exit(0 if provision_interactive() else 1)
                     log "Creating backup from settings page..."
                     setup_db_passwords
                     local bp_password
-                    bp_password=$(docker exec onionpress-wordpress cat /var/lib/onionpress/backup-password 2>/dev/null || echo "")
-                    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/backup-password' 2>/dev/null
+                    bp_password=$(wp_exec cat /var/lib/onionpress/backup-password 2>/dev/null || echo "")
+                    wp_exec rm -f /var/lib/onionpress/backup-password 2>/dev/null
                     if [ -z "$bp_password" ]; then
                         echo '{"success":false,"error":"No password provided","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
                         log "Backup failed: no password"
                     else
                         local bp_onion
@@ -3358,12 +3385,12 @@ sys.exit(0 if provision_interactive() else 1)
                                 < "$bp_path" 2>>"$LOG_FILE"
                             rm -rf "$bp_dir"
                             echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
+                                wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
                             log "Backup created: $bp_filename"
                         else
                             rm -rf "$bp_dir"
                             echo '{"success":false,"error":"Backup failed — check logs","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
+                                wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
                             log "Backup failed"
                         fi
                     fi
@@ -3372,8 +3399,8 @@ sys.exit(0 if provision_interactive() else 1)
                     log "Restoring from backup via settings page..."
                     setup_db_passwords
                     local rp_password
-                    rp_password=$(docker exec onionpress-wordpress cat /var/lib/onionpress/restore-password 2>/dev/null || echo "")
-                    docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/restore-password' 2>/dev/null
+                    rp_password=$(wp_exec cat /var/lib/onionpress/restore-password 2>/dev/null || echo "")
+                    wp_exec rm -f /var/lib/onionpress/restore-password 2>/dev/null
                     local rp_file="/var/lib/onionpress/restore-upload.zip"
                     # Copy the uploaded zip out of the container, into a
                     # folder of our own. docker cp copies a symbolic link as
@@ -3384,7 +3411,7 @@ sys.exit(0 if provision_interactive() else 1)
                     rp_dir=$(mktemp -d -t onionpress-restore-upload-XXXXXX) || rp_dir=""
                     rp_local="$rp_dir/restore-upload.zip"
                     [ -n "$rp_dir" ] && docker cp "onionpress-wordpress:$rp_file" "$rp_local" 2>>"$LOG_FILE"
-                    docker exec onionpress-wordpress rm -f "$rp_file" 2>/dev/null
+                    wp_exec rm -f "$rp_file" 2>/dev/null
                     if [ -z "$rp_password" ] || [ -z "$rp_dir" ] \
                             || { [ ! -e "$rp_local" ] && [ ! -L "$rp_local" ]; }; then
                         [ -n "$rp_dir" ] && rm -rf "$rp_dir"
@@ -3428,11 +3455,11 @@ sys.exit(0 if provision_interactive() else 1)
                         local updated_ver
                         updated_ver=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
                         echo '{"success":true,"version":"'"$updated_ver"'","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/update-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/update-result.json 2>/dev/null
                         log "Update complete: $updated_ver"
                     else
                         echo '{"success":false,"error":"Update failed — check logs","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/update-result.json' 2>/dev/null
+                            wp_put /var/lib/onionpress/update-result.json 2>/dev/null
                         log "Update failed"
                     fi
                     ;;

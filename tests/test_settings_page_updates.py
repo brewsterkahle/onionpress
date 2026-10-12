@@ -31,6 +31,7 @@ SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
 
 from onionpress import config as op_config  # noqa: E402
+from onionpress import wp_files  # noqa: E402
 from onionpress.redact import scrub_for_upload  # noqa: E402
 
 PHP = "app/Resources/plugins/onionpress-settings.php"
@@ -322,7 +323,7 @@ class TestMacPollConfigUpdates(unittest.TestCase):
         src = _read("src/menubar.py")
         node = next(n for n in ast.walk(ast.parse(src))
                     if isinstance(n, ast.FunctionDef) and n.name == "poll_config_updates")
-        ns = {"json": json, "op_config": op_config}
+        ns = {"json": json, "op_config": op_config, "wp_files": wp_files}
         exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
         self.poll = ns["poll_config_updates"]
 
@@ -366,6 +367,10 @@ class TestMacPollConfigUpdates(unittest.TestCase):
         self.assertTrue(app.cloudflare_tunnel_enabled)
         rm = [c for c in app._docker.exec.call_args_list if c.args[1][0] == "rm"]
         self.assertEqual(len(rm), 1)
+        # Read and removed as www-data, whose folder it is: root's cat or
+        # rm there could be led by a link it planted.
+        for call in app._docker.exec.call_args_list:
+            self.assertEqual(call.kwargs.get("user"), "www-data", call)
 
     def test_side_effects_follow_accepted_values(self):
         app = self._app(json.dumps({
@@ -391,17 +396,15 @@ class TestLinuxApplyConfigUpdates(unittest.TestCase):
 
     STUBS = r"""
 docker() {
-    # `docker exec onionpress-wordpress cat <file>` reads $OUT/<file>;
-    # `docker exec onionpress-wordpress sh -c 'rm -f ...'` removes it.
-    if [ "$1" = exec ] && [ "$2" = onionpress-wordpress ] && [ "$3" = cat ]; then
-        cat "$OUT/${4##*/}"
-        return
-    fi
-    if [ "$1" = exec ] && [ "$2" = onionpress-wordpress ] && [ "$3" = sh ]; then
-        rm -f "$OUT/config-updates.json"
-        return 0
-    fi
-    return 1
+    # `docker exec -u www-data onionpress-wordpress cat <file>` reads
+    # $OUT/<file>; `... rm -f <file>` removes it. Never as root: www-data
+    # writes that folder, and root's cat would follow a link planted there.
+    [ "$1 $2 $3 $4" = "exec -u www-data onionpress-wordpress" ] || return 1
+    case "$5" in
+        cat) cat "$OUT/${6##*/}" ;;
+        rm) rm -f "$OUT/${7##*/}" ;;
+        *) return 1 ;;
+    esac
 }
 systemctl() { echo "systemctl $*" >> "$OUT/calls"; }
 write_status() { echo write_status >> "$OUT/calls"; }
@@ -444,6 +447,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
             f.write(payload)
         launcher = _read("linux/onionpress")
         script = (self._function(launcher, "op_py")
+                  + self._function(launcher, "wp_exec")
                   + self._function(launcher, "apply_config_updates")
                   + self.STUBS + call)
         return subprocess.run(["bash", "-c", script], env=self.env,

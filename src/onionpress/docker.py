@@ -129,6 +129,7 @@ class Docker:
         timeout: int = 30,
         check: bool = False,
         quiet: bool = False,
+        user: str | None = None,
     ) -> DockerResult:
         """Run a command inside a container via docker exec.
 
@@ -138,11 +139,14 @@ class Docker:
             timeout: Timeout in seconds.
             check: If True, raise DockerError on non-zero exit.
             quiet: If True, suppress FAILED log on non-zero exit.
+            user: Run as this user (`docker exec -u`) instead of the
+                container's default, root.
         """
+        args = ["exec"] + (["-u", user] if user else []) + [container]
         if isinstance(command, str):
-            args = ["exec", container, "sh", "-c", command]
+            args += ["sh", "-c", command]
         else:
-            args = ["exec", container] + list(command)
+            args += list(command)
         return self.run(args, timeout=timeout, check=check, quiet=quiet)
 
     def compose(

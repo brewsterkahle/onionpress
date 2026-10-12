@@ -493,13 +493,28 @@ esac
             src = f.read()
         body = src[src.index("\ndef create_backup("):src.index("\n# Already-compressed")]
         self.assertNotRegex(body, r"\[\s*'tar',\s*'-x")
-        self.assertIn("_stage_container_tar(", body)
+        self.assertIn("stage_wp_content(", body)
+        stage = src[src.index("\ndef stage_wp_content("):src.index("\ndef put_wp_content(")]
+        self.assertLess(stage.index("_stage_container_tar("),
+                        stage.index("scrub_staged_tree("))
+
+    def test_the_container_reads_wp_content_as_www_data(self):
+        """Root's tar -C followed a wp-content link www-data can plant to
+        any folder in the container, into a backup the site gets back."""
+        backup.create_backup(mv.ADDR, "admin", PW, os.path.join(self.tmp, "b.zip"),
+                             "2.5.2", self.logs.append, data_dir=self.data_dir)
+        with open(self.calls) as f:
+            tar_calls = [line for line in f if "tar -cf -" in line]
+        self.assertTrue(tar_calls[0].startswith(
+            "exec -u www-data onionpress-wordpress tar -cf - "), tar_calls[0])
+        self.assertIn("--ignore-failed-read", tar_calls[0])
 
 
 class TestLinuxCreateBackup(_Base):
     """linux/onionpress create_backup, run for real with docker stubbed:
-    docker cp copies links as links, so the scrub-staging helper must run
-    before the derivative pruning and the marker, and pack-backup again."""
+    the wp-content copy is read in the container as www-data and unpacked
+    as plain files (stage-wp-content), before the derivative pruning and
+    the marker, and pack-backup sweeps again."""
 
     def _create_backup_function(self):
         text = mv._read("linux/onionpress")
@@ -507,13 +522,12 @@ class TestLinuxCreateBackup(_Base):
         # The function embeds a python3 -c snippet with a bare "}" line.
         return text[start:text.index("\nrestore_backup() {", start)]
 
-    def test_scrub_runs_before_anything_reads_the_copy(self):
+    def test_staging_comes_before_anything_reads_the_copy(self):
         body = self._create_backup_function()
-        cp = body.index("docker cp onionpress-wordpress:/var/www/html/wp-content/.")
-        scrub = body.index('op_py scrub-staging --dir "$staging/wp-content"')
-        self.assertLess(cp, scrub)
-        self.assertLess(scrub, body.index("prune-image-derivatives"))
-        self.assertLess(scrub, body.index(".onionpress-regenerate-derivatives"))
+        self.assertNotIn("docker cp onionpress-wordpress:", body)
+        stage = body.index('op_py stage-wp-content --dest "$staging/wp-content"')
+        self.assertLess(stage, body.index("prune-image-derivatives"))
+        self.assertLess(stage, body.index(".onionpress-regenerate-derivatives"))
 
     def test_planted_links_never_reach_the_backup(self):
         mv._cheap_kdf(self)
@@ -524,12 +538,22 @@ class TestLinuxCreateBackup(_Base):
         os.symlink(os.path.join(self.home, ".ssh", "id_ed25519"),
                    os.path.join(wp, "themes", "key.css"))
         os.symlink(os.path.join(self.home, "Pictures"), os.path.join(wp, "uploads"))
+        # The Python helper runs docker itself: a stub on PATH that streams
+        # $WP as the container's tar would.
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, "docker"), "w") as f:
+            f.write('#!/bin/bash\necho "docker $*" >> "$CALLS"\n'
+                    'case "$*" in\n'
+                    '  "exec -u www-data onionpress-wordpress tar -cf - "*)'
+                    ' COPYFILE_DISABLE=1 tar -cf - -C "$WP" . ;;\n'
+                    '  *) exit 1 ;;\nesac\n')
+        os.chmod(os.path.join(bin_dir, "docker"), 0o755)
         prelude = r'''
 log() { echo "[log] $1" >> "$LOG_FILE"; }
 docker() {
     echo "docker $*" >> "$CALLS"
     case "$1 $2" in
-        "cp onionpress-wordpress:/var/www/html/wp-content/.") cp -R "$WP/." "$3" ;;
         "exec onionpress-tor") echo "$ADDR" ;;
         *) return 1 ;;
     esac
@@ -543,8 +567,8 @@ _helper() {
 from onionpress.cli import OnionPressCLI as C
 cli = object.__new__(C)
 cmd, a = sys.argv[1], sys.argv[2:]
-if cmd == "scrub-staging":
-    sys.exit(C.cmd_scrub_staging(a[1]))
+if cmd == "stage-wp-content":
+    sys.exit(C.cmd_stage_wp_content(a[1]))
 if cmd == "prune-image-derivatives":
     cli.log = lambda m: print(m, file=sys.stderr)
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))
@@ -559,7 +583,8 @@ op_py() { _helper "$@"; }
         tmpdir = os.path.join(self.tmp, "t")
         os.makedirs(tmpdir)
         env = {
-            "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
+            "PATH": bin_dir + os.pathsep + os.environ["PATH"],
+            "HOME": home, "TMPDIR": tmpdir,
             "DATA_DIR": os.path.join(home, ".onionpress"),
             "LOG_FILE": os.path.join(self.tmp, "log"),
             "CALLS": os.path.join(self.tmp, "calls"),

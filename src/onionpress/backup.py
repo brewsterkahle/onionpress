@@ -22,7 +22,7 @@ import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from onionpress import backup_crypto, derivatives, key_manager
+from onionpress import backup_crypto, derivatives, key_manager, wp_files
 from onionpress.config import DEFAULTS, read_config, read_value, write_value
 
 
@@ -470,6 +470,45 @@ def scrub_staged_tree(root, log_func, where=None):
     return len(left_out)
 
 
+def wp_content_tar_argv(*excludes):
+    """`docker exec` argv that streams wp-content as a tar, read as www-data.
+
+    Not as root: www-data can replace wp-content (or a folder in it) with a
+    link, and root's tar -C followed it to any folder in the container,
+    which then went into a backup the Settings page hands back to the site.
+    --ignore-failed-read: a file www-data cannot read is left out, not the
+    whole backup. --hard-dereference: each name of a hard-linked file is
+    stored with its contents (unpack_plain_tar keeps no link entries).
+    """
+    return (['docker'] + wp_files.exec_args('tar', '-cf', '-')
+            + ['--hard-dereference', '--ignore-failed-read']
+            + [f'--exclude={e}' for e in excludes]
+            + ['-C', '/var/www/html/wp-content', '.'])
+
+
+def stage_wp_content(dest, log_func, *excludes):
+    """Copy wp-content out of the WordPress container into *dest* as plain
+    files and folders (wp_content_tar_argv, unpack_plain_tar), then
+    scrub_staged_tree. The Linux launcher's create_backup runs this through
+    `onionpress.cli stage-wp-content`."""
+    os.makedirs(dest, exist_ok=True)
+    _stage_container_tar(wp_content_tar_argv(*excludes), dest, log_func,
+                         'wp-content')
+    scrub_staged_tree(dest, log_func, 'wp-content')
+
+
+def put_wp_content(src, log_func, timeout=300):
+    """Unpack the staged *src* over wp-content in the WordPress container,
+    as www-data (wp_files.put_tree). Not docker cp + chown -R as root: the
+    copy followed links www-data can plant in wp-content (the destination's
+    own `wp-content/` too), and so did the trailing-slash chown."""
+    r = wp_files.put_tree(src, '/var/www/html/wp-content', merge=True,
+                          timeout=timeout)
+    if r.returncode != 0:
+        log_func(f"Restore: wp-content copy failed: {r.stderr.strip()[-300:]}")
+        raise Exception("Could not copy wp-content into the WordPress container")
+
+
 def _stage_container_tar(argv, dest, log_func, where):
     """Run *argv* (`docker exec … tar -cf - …`) and unpack its stdout into
     *dest* with unpack_plain_tar; raise if either side fails. The container
@@ -593,17 +632,8 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         with _phase_timer(log_func, 'BACKUP', 'wpcontent_tar'):
             log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
             wpcontent_dir = os.path.join(staging, 'wp-content')
-            os.makedirs(wpcontent_dir, exist_ok=True)
-            _stage_container_tar(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'tar', '-cf', '-',
-                 '--hard-dereference',
-                 '--exclude=./creations',
-                 '--exclude=.thumbs',
-                 '--exclude=.DS_Store',
-                 '-C', '/var/www/html/wp-content', '.'],
-                wpcontent_dir, log_func, 'wp-content')
-            scrub_staged_tree(wpcontent_dir, log_func, 'wp-content')
+            stage_wp_content(wpcontent_dir, log_func,
+                             './creations', '.thumbs', '.DS_Store')
 
         # 3b. Drop WordPress's regenerable image derivatives (-WxH sizes and
         #     -scaled copies) from the staged uploads — about half of a
@@ -1761,17 +1791,7 @@ def restore_container_artifacts(staging, metadata, log_func):
     if wpcontent_dir and os.path.isdir(wpcontent_dir):
         with _phase_timer(log_func, 'RESTORE', 'wpcontent_extract'):
             log_func("Restore: copying wp-content (themes, plugins, uploads)...")
-            subprocess.run(
-                ['docker', 'cp',
-                 wpcontent_dir + '/.',
-                 'onionpress-wordpress:/var/www/html/wp-content/'],
-                capture_output=True, timeout=300, check=True
-            )
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'chown', '-R', 'www-data:www-data', '/var/www/html/wp-content/'],
-                capture_output=True, timeout=60
-            )
+            put_wp_content(wpcontent_dir, log_func)
 
     # Surface Creations-exclusion reminder. The backup intentionally
     # skips wp-content/creations (it's the host-side bind mount of
