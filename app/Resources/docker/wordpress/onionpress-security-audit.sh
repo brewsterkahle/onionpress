@@ -49,7 +49,13 @@ REPORT=/var/lib/onionpress/security-report.txt
 # back, or swap the folder for a link to send root's mv anywhere.
 QUARANTINE=/var/lib/onionpress-quarantine
 WPROOT=/var/www/html
-WP="wp --allow-root --path=$WPROOT"
+# wp-cli runs as www-data (onionpress-wp), never as root: it loads WordPress,
+# whose plugins, themes and wp-config.php www-data can write, so as root a
+# plugin bug became root here at every start. What it prints is therefore
+# www-data's to choose; root only reads it, and acts on nothing it names
+# but the downloaded core zip, checked by name first. The audit's own root
+# work (the hash scan, quarantine, the report) is file operations only.
+WP="onionpress-wp --path=$WPROOT"
 HELPER=/usr/local/lib/onionpress-core-update.php
 
 log()  { echo "[security-audit] $*"; }
@@ -166,7 +172,7 @@ else
     done
 
     if [ "$status" != "ok" ]; then
-        record "UPDATE CHECK FAILED: could not reach WordPress.org over Tor after 3 attempts — core is still $current and may be missing a security release. Retry manually: docker exec onionpress-wordpress wp eval-file $HELPER check --allow-root"
+        record "UPDATE CHECK FAILED: could not reach WordPress.org over Tor after 3 attempts — core is still $current and may be missing a security release. Retry manually: docker exec -u www-data onionpress-wordpress wp eval-file $HELPER check"
     else
         target=$(field "$check_out" target)
         if [ -z "$target" ]; then
@@ -175,10 +181,14 @@ else
             package=$(field "$check_out" package)
             log "security update available: $current -> $target — downloading over Tor"
             dl_out=$(helper download "$package")
+            zip=$(field "$dl_out" path)
             if [ "$(field "$dl_out" status)" != "ok" ]; then
                 record "UPDATE DOWNLOAD FAILED: $current -> $target over Tor ($(field "$dl_out" error)). Core is still $current."
+            elif ! [[ "$zip" =~ ^/tmp/onionpress-wordpress-[0-9.]+(-[a-z-]+)?\.zip$ ]]; then
+                # The helper runs as www-data: a path it names is not root's
+                # to remove until it is the name the helper downloads to.
+                record "UPDATE DOWNLOAD FAILED: $current -> $target: the download helper named an unexpected file. Core is still $current."
             else
-                zip=$(field "$dl_out" path)
                 log "downloaded $(field "$dl_out" bytes) bytes — applying $target"
                 # Pass the local zip so wp-cli does not re-fetch it over
                 # clearnet; --version is what it uses to label the update.
@@ -201,8 +211,9 @@ else
                     current=$($WP core version 2>/dev/null || echo "$target")
                     log "core updated to $current and DB migrated"
                 else
-                    record "AUTO-UPDATE FAILED: still on $current, wanted $target. Update manually: docker exec onionpress-wordpress wp core update $zip --version=$target --allow-root"
+                    record "AUTO-UPDATE FAILED: still on $current, wanted $target. Update manually: docker exec -u www-data onionpress-wordpress wp core update $zip --version=$target"
                 fi
+                # rm -f removes a link at that name, never its target.
                 rm -f "$zip" 2>/dev/null || true
             fi
         fi
@@ -286,7 +297,7 @@ while IFS=$'\t' read -r ulogin uemail; do
     [ -z "${ulogin:-}" ] && continue
     if printf '%s' "$ulogin" | grep -qE '^(wpsvc_|wp2_|w2s_)[0-9a-f]+$' \
             || printf '%s' "${uemail:-}" | grep -qE '@(wp2shell|shellcode|wordpress-svc\.internal|wordpress-noreply\.net|x\.lol)'; then
-        record "ROGUE ADMIN ACCOUNT matching wp2shell naming: '$ulogin' <${uemail:-}> — remove with: wp user delete '$ulogin' --network --allow-root"
+        record "ROGUE ADMIN ACCOUNT matching wp2shell naming: '$ulogin' <${uemail:-}> — remove with: docker exec -u www-data onionpress-wordpress wp user delete '$ulogin' --network"
     fi
 done < <($WP user list --network --fields=user_login,user_email --format=tsv 2>/dev/null \
          || $WP user list --fields=user_login,user_email --format=tsv 2>/dev/null)

@@ -1,0 +1,20 @@
+#!/bin/sh
+# wp-cli for this image's root scripts (onionpress-multisite-init.sh,
+# onionpress-security-audit.sh), run as www-data.
+#
+# wp-cli loads WordPress: wp-config.php, the mu-plugins, plugins and themes,
+# every one of them a file www-data can write. Run as root (--allow-root),
+# any code execution in WordPress, a plugin bug say, became root in this
+# container at the next start, and root here reaches the shared volumes and,
+# under rootless Docker, the host user's files. So root never runs it:
+# runuser drops to www-data first, and wp-cli without --allow-root refuses
+# to run as root should that ever not happen. The host's calls do the same
+# with `docker exec -u www-data` (onionpress.wp_files.wp_cli_args).
+#
+# setsid: the WordPress code gets no controlling terminal shared with root's
+# session, so it cannot push input into one (TIOCSTI) when someone runs a
+# script here by hand under `docker exec -it`.
+if [ "$(id -u)" != 0 ]; then
+    exec env WP_CLI_CACHE_DIR=/tmp/wp-cli-cache wp "$@"
+fi
+exec setsid -w runuser -u www-data -- env WP_CLI_CACHE_DIR=/tmp/wp-cli-cache wp "$@"

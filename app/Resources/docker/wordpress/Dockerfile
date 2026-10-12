@@ -29,8 +29,7 @@ ARG WP_CLI_SHA256=ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d8
 RUN curl -fsSL -o /usr/local/bin/wp \
       "https://github.com/wp-cli/wp-cli/releases/download/v${WP_CLI_VERSION}/wp-cli-${WP_CLI_VERSION}.phar" \
     && echo "${WP_CLI_SHA256}  /usr/local/bin/wp" | sha256sum -c - \
-    && chmod +x /usr/local/bin/wp \
-    && wp --info --allow-root >/dev/null
+    && chmod +x /usr/local/bin/wp
 
 # Raise PHP upload limits for large Creations files (videos, HEIC, etc.)
 COPY onionpress-uploads.ini /usr/local/etc/php/conf.d/
@@ -70,6 +69,20 @@ RUN a2enconf onionpress-xmlrpc-block onionpress-log-format onionpress-health oni
 RUN apache2ctl configtest \
     && apache2ctl -M 2>/dev/null | grep -q ' php_module ' \
     && ! apache2ctl -M 2>/dev/null | grep -q ' remoteip_module '
+
+# wp-cli for the scripts below, run as www-data: root never loads
+# WordPress's PHP, which www-data can write. Checked here, so an image
+# where runuser cannot drop to www-data fails the build instead of every
+# wp-cli call at runtime.
+COPY onionpress-wp /usr/local/bin/
+RUN chmod +x /usr/local/bin/onionpress-wp \
+    && onionpress-wp --info >/dev/null \
+    && [ "$(runuser -u www-data -- id -un)" = www-data ]
+
+# Gives www-data back the files root's wp-cli left in the web root, at
+# every start, before the two scripts below.
+COPY onionpress-web-root-owner.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/onionpress-web-root-owner.sh
 
 # Multisite init script — runs on every container start to ensure
 # multisite is configured (safe to re-run, checks if already done)

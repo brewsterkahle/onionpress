@@ -8,6 +8,10 @@
 # Called from the Dockerfile entrypoint wrapper. Runs AFTER WordPress
 # and the database are ready.
 #
+# This script runs as root; wp-cli runs as www-data (onionpress-wp). wp-cli
+# loads WordPress, whose plugins, themes and wp-config.php www-data can
+# write, so as root a plugin bug became root here.
+#
 # Key detail: sunrise.php routes requests by querying wp_site WHERE
 # domain='localhost'. That means the network row MUST be created with
 # domain=localhost — regardless of what the site's own siteurl is
@@ -94,8 +98,8 @@ fi
 # watching.
 if ! grep -q "define( *'AUTOMATIC_UPDATER_DISABLED', *false *)" /var/www/html/wp-config.php 2>/dev/null \
         || ! grep -q "define( *'WP_AUTO_UPDATE_CORE', *'minor' *)" /var/www/html/wp-config.php 2>/dev/null; then
-    wp config set AUTOMATIC_UPDATER_DISABLED false --raw --type=constant --allow-root
-    wp config set WP_AUTO_UPDATE_CORE "'minor'" --raw --type=constant --allow-root
+    onionpress-wp config set AUTOMATIC_UPDATER_DISABLED false --raw --type=constant
+    onionpress-wp config set WP_AUTO_UPDATE_CORE "'minor'" --raw --type=constant
     log "auto-update policy applied: AUTOMATIC_UPDATER_DISABLED=false WP_AUTO_UPDATE_CORE='minor'"
 fi
 
@@ -111,13 +115,13 @@ if grep -q "^define( *'MULTISITE'" /var/www/html/wp-config.php 2>/dev/null \
     for name in MULTISITE SUBDOMAIN_INSTALL DOMAIN_CURRENT_SITE \
                 PATH_CURRENT_SITE SITE_ID_CURRENT_SITE BLOG_ID_CURRENT_SITE \
                 SUNRISE; do
-        wp config delete "$name" --type=constant --allow-root >/dev/null 2>&1 || true
+        onionpress-wp config delete "$name" --type=constant >/dev/null 2>&1 || true
     done
 fi
 
 # After any unwind, re-check: if multisite is now both wp-config-active
 # AND has a real wp_site row, we're done.
-if wp core is-installed --network --allow-root >/dev/null 2>&1 \
+if onionpress-wp core is-installed --network >/dev/null 2>&1 \
         && [ "$(db_q 'SELECT COUNT(*) FROM wp_site')" != "0" ]; then
     exit 0
 fi
@@ -151,7 +155,7 @@ trap restore_urls EXIT
 
 # Errors here MUST fail the script — silent failure is exactly what broke
 # previous builds.
-wp core multisite-convert --url=http://localhost --allow-root
+onionpress-wp core multisite-convert --url=http://localhost
 log "multisite-convert done"
 
 # Set constants in wp-config.php. Multisite constants must match the wp_site
@@ -169,7 +173,7 @@ for const_val in \
     "SUNRISE:true"; do
     name="${const_val%%:*}"
     value="${const_val#*:}"
-    wp config set "$name" "$value" --raw --type=constant --allow-root
+    onionpress-wp config set "$name" "$value" --raw --type=constant
 done
 
 log "Multisite conversion complete"

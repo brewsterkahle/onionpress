@@ -198,7 +198,7 @@ make images-multiarch REGISTRY=ghcr.io/you
 
 ```bash
 docker run --rm --entrypoint sh onionpress-tor:dev -c 'tor --version; docker --version; mkp224o -V'
-docker run --rm --entrypoint sh onionpress-wordpress:dev -c 'wp --info --allow-root | grep -i version; sha256sum /usr/local/bin/wp'
+docker run --rm --entrypoint sh onionpress-wordpress:dev -c 'onionpress-wp --info | grep -i version; sha256sum /usr/local/bin/wp'
 ```
 
 Expected (as pinned in the Dockerfiles): Tor 0.4.9.13 from the pinned Tor
