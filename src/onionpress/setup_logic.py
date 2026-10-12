@@ -9,6 +9,7 @@ so both platforms stay in sync without copy-paste.
 """
 
 import os
+import re
 import subprocess
 from typing import Callable, Optional
 
@@ -40,22 +41,61 @@ def suggest_onionname(lang: str = "en_US") -> Optional[str]:
         return None
 
 
+# The onionname charset/length rule, kept here as well as in
+# onionnames_client so it holds even when that module is missing or raises.
+# The name becomes a wp-cli argument, a URL path and a line in
+# ~/.onionpress/config, so nothing outside this set may get through.
+_ONIONNAME_MIN_LEN = 5
+_ONIONNAME_MAX_LEN = 40
+_ONIONNAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]")
+_ONIONNAME_ALL_NUMERIC_RE = re.compile(r"[0-9]+")
+
+
+def _local_onionname_rule(name) -> tuple[bool, str]:
+    if not isinstance(name, str) or not name:
+        return False, "empty"
+    if len(name) < _ONIONNAME_MIN_LEN:
+        return False, "too_short"
+    if len(name) > _ONIONNAME_MAX_LEN:
+        return False, "too_long"
+    if not _ONIONNAME_RE.fullmatch(name):
+        return False, "invalid_chars"
+    if _ONIONNAME_ALL_NUMERIC_RE.fullmatch(name):
+        return False, "all_numeric"
+    return True, ""
+
+
 def validate_onionname(name: str) -> tuple[bool, str]:
     """Validate an onionname.
 
     Returns (ok, reason). reason is "" on success, or one of:
       "too_short", "too_long", "invalid_chars", "all_numeric", "empty"
+
+    Fails closed: the local charset/length rule always applies, and the
+    onionnames_client check runs on top of it when that module is present.
     """
-    if not name:
-        return False, "empty"
-    if _onc is None:
-        # No validator available — accept anything non-empty
-        return True, ""
+    ok, reason = _local_onionname_rule(name)
+    if not ok or _onc is None:
+        return ok, reason
     try:
         ok, reason = _onc.validate_name(name)
         return ok, (reason or "")
     except Exception:
+        # The local rule above already passed.
         return True, ""
+
+
+def _refuse_invalid_onionname(onionname, log) -> bool:
+    """True (after logging why) when *onionname* must not be installed.
+
+    Every setup front end validates before it gets here; this keeps a
+    name that slipped past one of them out of WordPress and the config.
+    """
+    ok, reason = validate_onionname(onionname)
+    if not ok:
+        log(f"ERROR: onionname {onionname!r} is invalid ({reason}); "
+            "not installing")
+    return not ok
 
 
 def default_site_title() -> str:
@@ -287,10 +327,12 @@ def provision_primary_subsite(
         if log_func:
             log_func(msg)
 
-    def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
+    def wp(*args, timeout: int = 30,
+           stdin: str | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "--allow-root"] + list(args),
+            [docker_bin, "exec"] + (["-i"] if stdin is not None else [])
+            + ["onionpress-wordpress", "wp", "--allow-root"] + list(args),
+            input=stdin,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout,
@@ -332,8 +374,12 @@ def provision_primary_subsite(
 
     # 4. Resolve blog_id and point primary_blog at the subsite so that
     #    wp-admin's "+ New", "My Sites", and redirect defaults all go to
-    #    /<onionname>/wp-admin/ instead of the network root.
-    r = wp("eval", f'echo get_blog_id_from_url("localhost", "/{onionname}/");')
+    #    /<onionname>/wp-admin/ instead of the network root. The name
+    #    reaches PHP on stdin; the code itself never changes.
+    r = wp("eval",
+           "echo get_blog_id_from_url('localhost',"
+           " '/' . trim(file_get_contents('php://stdin')) . '/');",
+           stdin=onionname)
     lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
     blog_id = lines[-1] if lines else ""
     if blog_id.isdigit() and int(blog_id) > 0:
@@ -405,7 +451,8 @@ def install_fresh_wordpress(
 
     Returns True on success (best-effort — individual sub-steps may log
     warnings without failing the overall install), False when wp core
-    install or setting the admin password failed.
+    install or setting the admin password failed. An onionname that fails
+    validate_onionname() is refused up front with False.
     """
     def log(msg: str) -> None:
         if log_func:
@@ -413,6 +460,9 @@ def install_fresh_wordpress(
 
     def wp(*args, timeout: int = 60) -> subprocess.CompletedProcess:
         return _run_wp(docker_bin, args, timeout=timeout)
+
+    if _refuse_invalid_onionname(onionname, log):
+        return False
 
     log(f"Installing WordPress: title={site_title!r} onionname={onionname!r}")
 
@@ -569,7 +619,9 @@ def provision_existing_wordpress(
       7. Persist onionname to ~/.onionpress/config
 
     Returns True on success (best-effort — individual failures are
-    logged but do not cause False so the wizard is never stuck).
+    logged but do not cause False so the wizard is never stuck). An
+    onionname that fails validate_onionname() is refused up front with
+    False.
     """
     def log(msg: str) -> None:
         if log_func:
@@ -577,6 +629,9 @@ def provision_existing_wordpress(
 
     def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
         return _run_wp(docker_bin, args, timeout=timeout)
+
+    if _refuse_invalid_onionname(onionname, log):
+        return False
 
     log(f"Provisioning WordPress: title={site_title!r} onionname={onionname!r}")
 

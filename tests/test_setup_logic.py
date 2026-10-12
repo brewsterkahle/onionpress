@@ -113,11 +113,11 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
         ):
-            ok = self._run(onionname="bob")
+            ok = self._run(onionname="bobby")
         self.assertTrue(ok)
         with open(os.path.join(self.tmpdir, "config")) as f:
             contents = f.read()
-        self.assertIn("ONIONNAME=bob", contents)
+        self.assertIn("ONIONNAME=bobby", contents)
 
     def test_user_url_update_uses_per_user_path(self):
         # The "Website" link on the WP user profile should point to

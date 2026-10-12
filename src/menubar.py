@@ -3035,7 +3035,8 @@ class OnionPressApp(rumps.App):
         """Generate a one-time auto-login URL for the admin user.
 
         Creates a random token, stores it as a WordPress transient (2-min TTL)
-        via wp eval, and returns base_url with ?op_login=TOKEN appended.
+        via `wp transient set` (the token is an argument, never PHP code),
+        and returns base_url with ?op_login=TOKEN appended.
         Falls back to the plain URL if token generation fails.
         """
         try:
@@ -3044,8 +3045,7 @@ class OnionPressApp(rumps.App):
             docker_bin = os.path.join(self.bin_dir, "docker")
             result = subprocess.run(
                 [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "eval",
-                 f"set_transient('op_login_{token}', 1, 120);",
+                 "wp", "transient", "set", f"op_login_{token}", "1", "120",
                  "--allow-root"],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=10
@@ -3595,10 +3595,11 @@ class OnionPressApp(rumps.App):
                     break
                 ok, _ = validate_name(new_name)
                 if not ok:
-                    self.log(f"onionname: user-entered '{new_name}' invalid, "
+                    # Keep the current (valid) name and ask again: this name
+                    # goes on to the WordPress install and the config file.
+                    self.log(f"onionname: user-entered {new_name!r} invalid, "
                              "retrying with same prompt")
-                    # Loop back — server will 400 this but we'd rather send
-                    # and let the server be authoritative than hide details.
+                    continue
                 name = new_name
                 continue
 
