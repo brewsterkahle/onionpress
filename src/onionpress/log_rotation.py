@@ -81,7 +81,7 @@ def extract_log_type(filename):
     """
     if filename in ("launcher.log", "launcher.log.gz"):
         return "launcher"
-    m = _FILENAME_RE.match(filename)
+    m = _FILENAME_RE.fullmatch(filename)
     return m.group("type") if m else None
 
 

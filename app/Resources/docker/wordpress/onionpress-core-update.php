@@ -187,7 +187,7 @@ if ( 'download' === $mode ) {
     }
 
     $name = basename( parse_url( $url, PHP_URL_PATH ) );
-    if ( ! preg_match( '/^wordpress-[0-9.]+(-[a-z-]+)?\.zip$/', $name ) ) {
+    if ( ! preg_match( '/^wordpress-[0-9.]+(-[a-z-]+)?\.zip$/D', $name ) ) {
         op_out( 'status', 'error' );
         op_out( 'error', 'refusing to download unexpected package name: ' . $name );
         exit( 0 );

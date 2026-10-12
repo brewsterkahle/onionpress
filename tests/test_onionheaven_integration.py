@@ -393,6 +393,27 @@ class TestRegister(unittest.TestCase):
         })
         self.assertEqual(code, 403)
 
+    def test_register_address_with_trailing_newline_rejected(self):
+        # ONION_RE ends in `$`, which also matches before a final "\n";
+        # a correctly signed registration for "<hc>.onion\n" got in.
+        expanded, pub, addr = _make_test_keypair()
+        hc_addr = _make_test_keypair()[2]
+        pem = _make_arti_pem(expanded, pub)
+        for ca, ha in ((addr, hc_addr + "\n"), (addr + "\n", hc_addr)):
+            with self.subTest(content=ca, healthcheck=ha):
+                ts = onion_auth.make_timestamp()
+                sig = onion_auth.sign_payload(expanded, pub, "online", ca, ha, ts)
+                code, data = _post(f"{server.base_url}/online", {
+                    "content_address": ca,
+                    "healthcheck_address": ha,
+                    "arti_key_pem": base64.b64encode(pem).decode('ascii'),
+                    "timestamp": ts,
+                    "signature": sig,
+                })
+                self.assertEqual(code, 400, data)
+        code, _ = _get(f"{server.base_url}/status/{addr}")
+        self.assertEqual(code, 404)
+
 
 class TestFullLifecycle(unittest.TestCase):
     """Register, then unregister/online/offline with the same key."""

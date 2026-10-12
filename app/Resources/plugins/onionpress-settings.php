@@ -467,7 +467,7 @@ add_action( 'admin_init', function () {
     if ( ! empty( $_POST['onionpress_relookup_address'] ) ) {
         $orig  = sanitize_text_field( wp_unslash( $_POST['onionpress_relookup_address'] ) );
         $p     = onionpress_follow_parse( $orig );
-        $bare  = ( 'url' !== $p['type'] && ! preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] ) );
+        $bare  = ( 'url' !== $p['type'] && ! preg_match( '/^[a-z2-7]{56}\.onion$/D', $p['addr'] ) );
         $probe = array( 'label' => '@' . $orig, 'ok' => false, 'url' => '', 'verb' => 'Resolved' );
         $addr  = '';
         if ( $bare && in_array( $orig, $following, true ) && function_exists( 'onionpress_directory_lookup' ) ) {
@@ -475,7 +475,7 @@ add_action( 'admin_init', function () {
             $info = onionpress_directory_lookup( $name );
             $addr = $info ? strtolower( (string) ( $info['onionaddress'] ?? '' ) ) : '';
         }
-        if ( $addr && preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+        if ( $addr && preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ) {
             $key = onionpress_follow_key( $addr, $name );
             $following = array_values( array_unique( array_map( function ( $k ) use ( $orig, $key ) {
                 return $k === $orig ? $key : $k;
@@ -601,7 +601,7 @@ add_action( 'admin_init', function () {
             $probe_label = $resolved_name ? ( '@' . $resolved_name ) : $addr;
             $probe = array( 'label' => $probe_label, 'ok' => false, 'url' => '' );
             $probe_url = '';
-            if ( preg_match( '/^[a-z2-7]{56}\.onion$/', $addr )
+            if ( preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr )
                  && function_exists( 'onionpress_discover_feed_url' ) ) {
                 $probe_url = onionpress_discover_feed_url( $addr, $resolved_name, 8 );
             } elseif ( preg_match( '#^https?://#i', $addr ) ) {
@@ -700,7 +700,7 @@ add_action( 'admin_init', function () {
             if ( $val === '' || $val === (string) ( $old_values[ $config_key ] ?? '' ) ) {
                 continue;
             }
-            if ( ! preg_match( '/^[0-9]{1,6}$/', $val ) || (int) $val < $field['min'] || (int) $val > $field['max'] ) {
+            if ( ! preg_match( '/^[0-9]{1,6}$/D', $val ) || (int) $val < $field['min'] || (int) $val > $field['max'] ) {
                 $msg = sprintf( '%s must be a whole number from %d to %d. It was not changed.', $field['label'], $field['min'], $field['max'] );
                 add_action( 'admin_notices', function () use ( $msg ) {
                     echo '<div class="notice notice-error"><p>' . esc_html( $msg ) . '</p></div>';
@@ -717,7 +717,7 @@ add_action( 'admin_init', function () {
     // removing it takes the explicit checkbox.
     $cf_token = isset( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN'] ) ? trim( wp_unslash( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN'] ) ) : '';
     if ( $cf_token !== '' ) {
-        if ( preg_match( '#^[A-Za-z0-9+/_-]{32,2048}={0,2}$#', $cf_token ) ) {
+        if ( preg_match( '#^[A-Za-z0-9+/_-]{32,2048}={0,2}$#D', $cf_token ) ) {
             $updates['CLOUDFLARE_TUNNEL_TOKEN'] = $cf_token;
         } else {
             add_action( 'admin_notices', function () {
@@ -1706,11 +1706,11 @@ function onionpress_settings_render_following() {
                         $st           = isset( $following_stats[ $key ] ) ? $following_stats[ $key ] : array();
                         $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
                         $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
-                        $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] );
+                        $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/D', $p['addr'] );
                         // A bare onionname: stored when the add-time OnionHome
                         // lookup failed. Offered a re-lookup button below.
                         $is_bare_name = ( ! $well_formed
-                            && preg_match( '/^[a-z0-9][a-z0-9._-]*$/i', $p['addr'] ) );
+                            && preg_match( '/^[a-z0-9][a-z0-9._-]*$/iD', $p['addr'] ) );
                         if ( $last_success && ! $fail_count ) {
                             $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
                             $status_label = 'Feed fetched successfully — last update '

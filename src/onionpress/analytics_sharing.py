@@ -406,7 +406,7 @@ def _do_upload_cycle(app, include_active=False):
     from onionpress import onion_auth as _oa
 
     for name in wanted_names:
-        if not _LOG_NAME_RE.match(name):
+        if not _LOG_NAME_RE.fullmatch(name):
             continue
         path = file_map.get(name)
         if not path or not os.path.exists(path):

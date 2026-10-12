@@ -155,14 +155,14 @@ function onionpress_follow_get_own_address() {
         if ( strpos( $host, ':' ) !== false ) {
             $host = substr( $host, 0, strpos( $host, ':' ) );
         }
-        if ( preg_match( '/^[a-z2-7]{56}\.onion$/', $host ) ) {
+        if ( preg_match( '/^[a-z2-7]{56}\.onion$/D', $host ) ) {
             return $host;
         }
     }
     $addr_file = '/var/lib/onionpress/onion_address';
     if ( is_readable( $addr_file ) ) {
         $addr = trim( (string) @file_get_contents( $addr_file ) );
-        if ( preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+        if ( preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ) {
             return $addr;
         }
     }

@@ -115,7 +115,7 @@ function onionpress_send_onion_location_header() {
         return;
     }
     $addr = strtolower( trim( (string) @file_get_contents( $addr_file ) ) );
-    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ) {
         return;
     }
     $request_uri = $_SERVER['REQUEST_URI'] ?? '/';

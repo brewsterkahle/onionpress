@@ -365,7 +365,7 @@ function onionpress_bluesky_handle_save_handle_post() {
         $handle = strtolower( ltrim( $raw, '@' ) );
     }
 
-    if ( $did === '' && ! preg_match( '/^[a-z0-9]([a-z0-9\-]{0,62}\.)+[a-z]{2,}$/', $handle ) ) {
+    if ( $did === '' && ! preg_match( '/^[a-z0-9]([a-z0-9\-]{0,62}\.)+[a-z]{2,}$/D', $handle ) ) {
         return array( 'level' => 'error', 'message' => 'That doesn\'t look like a Bluesky handle. Try <code>you.bsky.social</code> or <code>brewster.archive.org</code>.' );
     }
 

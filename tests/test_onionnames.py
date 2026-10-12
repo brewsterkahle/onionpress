@@ -273,6 +273,16 @@ class TestRegistration(_FreshDBMixin, unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "invalid_address")
 
+    def test_register_rejects_address_with_trailing_newline(self):
+        # `$` alone would match before it, and the row would hold an
+        # address that is not the one checked.
+        ok, reason, _ = onionnames.register_name(
+            self.conn, "alice1", self.addr1 + "\n"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "invalid_address")
+        self.assertIsNone(onionnames.lookup_name(self.conn, "alice1"))
+
     def test_release_requires_owner_match(self):
         onionnames.register_name(self.conn, "alice1", self.addr1)
         ok, reason = onionnames.release_name(self.conn, "alice1", self.addr2)

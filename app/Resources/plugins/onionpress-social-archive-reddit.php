@@ -226,7 +226,7 @@ function onionpress_reddit_handle_save_handle_post() {
         return array( 'level' => 'success', 'message' => 'Username cleared.' );
     }
     // Reddit username rules: 3-20 chars, letters/digits/_/-.
-    if ( ! preg_match( '/^[A-Za-z0-9_\-]{3,20}$/', $handle ) ) {
+    if ( ! preg_match( '/^[A-Za-z0-9_\-]{3,20}$/D', $handle ) ) {
         return array(
             'level'   => 'error',
             'message' => 'That doesn&rsquo;t look like a Reddit username. Must be 3&ndash;20 letters, digits, underscores, or hyphens.',
@@ -656,7 +656,7 @@ function onionpress_reddit_markdown_to_html( $md ) {
         if ( $block === '' ) continue;
 
         // Fenced code block (```)
-        if ( preg_match( '/^```\s*\n(.*?)\n```$/s', $block, $m ) ) {
+        if ( preg_match( '/^```\s*\n(.*?)\n```$/sD', $block, $m ) ) {
             $out[] = '<pre><code>' . esc_html( $m[1] ) . '</code></pre>';
             continue;
         }

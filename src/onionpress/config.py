@@ -303,7 +303,7 @@ def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
     suggested = re.sub(
         f"[^{ADDRESS_PREFIX_CHARS}]", "", prefix.lower())[:ADDRESS_PREFIX_MAX]
 
-    if len(prefix) > ADDRESS_PREFIX_MAX and re.match(f"^[{ADDRESS_PREFIX_CHARS}]+$", prefix):
+    if len(prefix) > ADDRESS_PREFIX_MAX and re.fullmatch(f"[{ADDRESS_PREFIX_CHARS}]+", prefix):
         return (
             False,
             f'Address prefix "{prefix}" is too long and would take '
@@ -312,7 +312,7 @@ def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
             suggested,
         )
 
-    if not re.match(r"^[a-z2-7]+$", prefix):
+    if not re.fullmatch(r"[a-z2-7]+", prefix):
         has_upper = any(c.isupper() for c in prefix)
         has_digits_089 = any(c in "0189" for c in prefix)
 

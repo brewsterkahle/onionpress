@@ -14,14 +14,16 @@ class TestLogNameRegex(unittest.TestCase):
     to stop the server from inducing the client to open files outside
     the log directory. Naming conventions are policed server-side."""
 
+    # fullmatch, as upload_logs() uses it: `$` alone would also match
+    # before a trailing newline.
     def _assert_match(self, name):
         self.assertIsNotNone(
-            _LOG_NAME_RE.match(name), f"expected {name!r} to match"
+            _LOG_NAME_RE.fullmatch(name), f"expected {name!r} to match"
         )
 
     def _assert_no_match(self, name):
         self.assertIsNone(
-            _LOG_NAME_RE.match(name), f"expected {name!r} not to match"
+            _LOG_NAME_RE.fullmatch(name), f"expected {name!r} not to match"
         )
 
     def test_dated_log_accepted(self):
@@ -63,6 +65,9 @@ class TestLogNameRegex(unittest.TestCase):
 
     def test_oversized_rejected(self):
         self._assert_no_match("a" + "b" * 200 + ".log")
+
+    def test_trailing_newline_rejected(self):
+        self._assert_no_match("onionpress-2026-04-21-001.log\n")
 
     def test_future_naming_variants_accepted(self):
         # Previously these were rejected by the strict regex; we now

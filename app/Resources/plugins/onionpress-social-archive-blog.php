@@ -1163,7 +1163,7 @@ function onionpress_blog_featured_media_url( $post ) {
  */
 function onionpress_blog_sideload_url( $url, $post_id ) {
     $ext = strtolower( pathinfo( parse_url( $url, PHP_URL_PATH ) ?? '', PATHINFO_EXTENSION ) );
-    if ( ! preg_match( '/^[a-z0-9]{1,5}$/', $ext ) ) {
+    if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) ) {
         $ext = 'jpg';
     }
     $basename = 'blog-' . $post_id . '-' . wp_generate_password( 6, false ) . '.' . $ext;

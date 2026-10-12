@@ -266,7 +266,7 @@ class TorControl:
             if line == "." or line.startswith("250 ") or line.startswith("650 "):
                 continue
             # Lines between 250+onions/detached= and . are service IDs
-            if re.match(r'^[a-z2-7]{56}$', line):
+            if re.fullmatch(r'[a-z2-7]{56}', line):
                 services.append(line)
         return services
 

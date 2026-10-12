@@ -161,7 +161,7 @@ def read_tor_container_address():
     if result.returncode != 0:
         return None
     addr = result.stdout.strip()
-    return addr if _ONION_ADDRESS_RE.match(addr) else None
+    return addr if _ONION_ADDRESS_RE.fullmatch(addr) else None
 
 
 # ---------------------------------------------------------------------------

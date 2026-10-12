@@ -195,7 +195,7 @@ function onionpress_twitter_handle_save_handle_post() {
         return array( 'level' => 'success', 'message' => 'Handle cleared.' );
     }
     // Twitter handle rules: 1-15 chars, alphanumeric + underscore only.
-    if ( ! preg_match( '/^[A-Za-z0-9_]{1,15}$/', $handle ) ) {
+    if ( ! preg_match( '/^[A-Za-z0-9_]{1,15}$/D', $handle ) ) {
         return array(
             'level'   => 'error',
             'message' => 'That doesn&rsquo;t look like a Twitter handle. Must be 1&ndash;15 letters, digits, or underscores.',
@@ -377,7 +377,7 @@ function onionpress_twitter_find_data_dir( $root ) {
 function onionpress_twitter_find_tweets_files( $data_dir ) {
     $hits = array();
     foreach ( scandir( $data_dir ) as $f ) {
-        if ( preg_match( '/^tweets(-part\d+)?\.js$/', $f ) ) {
+        if ( preg_match( '/^tweets(-part\d+)?\.js$/D', $f ) ) {
             $hits[] = $data_dir . '/' . $f;
         }
     }
@@ -426,7 +426,7 @@ function onionpress_twitter_parse_tweets_file( $file ) {
     if ( $contents === false ) {
         return null;
     }
-    if ( preg_match( '/^\s*window\.YTD\.\w+\.\w+\s*=\s*(.*)$/s', $contents, $m ) ) {
+    if ( preg_match( '/^\s*window\.YTD\.\w+\.\w+\s*=\s*(.*)$/sD', $contents, $m ) ) {
         $contents = $m[1];
     }
     $data = json_decode( $contents, true );

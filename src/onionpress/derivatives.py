@@ -87,7 +87,7 @@ def derivative_base_candidates(filename: str) -> list[str]:
     `photo-scaled.jpg`  -> photo.jpg, photo.jpeg, …
     A name that does not look like a derivative returns [].
     """
-    m = _DERIVATIVE_RE.match(filename)
+    m = _DERIVATIVE_RE.fullmatch(filename)
     if not m:
         return []
     stem = m.group("stem")

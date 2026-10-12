@@ -125,7 +125,7 @@ function onionpress_directory_own_address() {
         return null;
     }
     $addr = strtolower( trim( (string) @file_get_contents( $addr_file ) ) );
-    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/', $addr ) ) {
+    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ) {
         return null;
     }
     return $addr;
@@ -250,8 +250,8 @@ function onionpress_directory_handle_name_lookup( $name, $suffix = '' ) {
     // segments. Mirrors the server's validate_name rules.
     if (
         strlen( $name ) < 5 || strlen( $name ) > 40
-        || ! preg_match( '/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/', $name )
-        || preg_match( '/^[0-9]+$/', $name )
+        || ! preg_match( '/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/D', $name )
+        || preg_match( '/^[0-9]+$/D', $name )
     ) {
         return;
     }

@@ -163,7 +163,7 @@ def _get_own_address():
         try:
             with open(_HOSTNAME_PATH) as f:
                 addr = f.read().strip()
-            if ONION_RE.match(addr):
+            if ONION_RE.fullmatch(addr):
                 OWN_ONION_ADDRESS = addr
                 log(f"Own onion address: {addr}")
         except OSError:
@@ -632,7 +632,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     # -- GET /status/<address> ------------------------------------------------
 
     def _handle_status_detail(self, address):
-        if not ONION_RE.match(address):
+        if not ONION_RE.fullmatch(address):
             self._send_json(400, {"error": "Invalid .onion address format"})
             return
 
@@ -849,7 +849,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         timestamp = data.get("timestamp", "")
         signature = data.get("signature", "")
 
-        if not onionaddress or not ONION_RE.match(onionaddress):
+        if not onionaddress or not ONION_RE.fullmatch(onionaddress):
             self._send_json(400, {"error": "Invalid or missing onionaddress"})
             return
         if not name:
@@ -916,7 +916,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         timestamp = data.get("timestamp", "")
         signature = data.get("signature", "")
 
-        if not onionaddress or not ONION_RE.match(onionaddress):
+        if not onionaddress or not ONION_RE.fullmatch(onionaddress):
             self._send_json(400, {"error": "Invalid or missing onionaddress"})
             return
         if not name:
@@ -1029,13 +1029,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         if not content_address:
             self._send_json(400, {"error": "Missing required field: content_address"})
             return
-        if not ONION_RE.match(content_address):
+        if not ONION_RE.fullmatch(content_address):
             self._send_json(400, {"error": "Invalid content_address format"})
             return
 
         # Optional: target a specific healthcheck row
         healthcheck_address = data.get("healthcheck_address", "")
-        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
@@ -1111,10 +1111,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         if not content_address:
             self._send_json(400, {"error": "Missing required field: content_address"})
             return
-        if not ONION_RE.match(content_address):
+        if not ONION_RE.fullmatch(content_address):
             self._send_json(400, {"error": "Invalid content_address format"})
             return
-        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
@@ -1317,10 +1317,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         if not content_address:
             self._send_json(400, {"error": "Missing required field: content_address"})
             return
-        if not ONION_RE.match(content_address):
+        if not ONION_RE.fullmatch(content_address):
             self._send_json(400, {"error": "Invalid content_address format"})
             return
-        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
@@ -1416,10 +1416,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         content_address = data.get("content_address", "")
         healthcheck_address = data.get("healthcheck_address", "")
-        if not content_address or not ONION_RE.match(content_address):
+        if not content_address or not ONION_RE.fullmatch(content_address):
             self._send_json(400, {"error": "Invalid content_address"})
             return
-        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address"})
             return
 
@@ -1484,7 +1484,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         superseded = []  # .log offered when .log.gz already stored
         for f in files:
             name = f.get("name", "")
-            if not ANALYTICS_LOG_NAME_RE.match(name):
+            if not ANALYTICS_LOG_NAME_RE.fullmatch(name):
                 rejected.append(name or "<empty>")
                 self.log_message(
                     "Analytics: rejected %s from %s (unsafe name)",
@@ -1536,13 +1536,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         healthcheck_address = data.get("healthcheck_address", "")
         file_name = data.get("file_name", "")
 
-        if not content_address or not ONION_RE.match(content_address):
+        if not content_address or not ONION_RE.fullmatch(content_address):
             self._send_json(400, {"error": "Invalid content_address"})
             return
-        if healthcheck_address and not ONION_RE.match(healthcheck_address):
+        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address"})
             return
-        if not ANALYTICS_LOG_NAME_RE.match(file_name):
+        if not ANALYTICS_LOG_NAME_RE.fullmatch(file_name):
             self._send_json(400, {"error": "Invalid file_name"})
             return
 

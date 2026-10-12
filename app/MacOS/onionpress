@@ -1771,12 +1771,17 @@ start_containers() {
         # validation at the point of entry (setup_window.py), because nobody
         # reads this log — a user who typed "elphin" got an op2… address and
         # the only evidence was here.
+        #
+        # The character check is [[ =~ ]], which tests the whole value. It
+        # was `echo | grep -qE`, which tests each line on its own: a config
+        # with two ADDRESS_PREFIX= lines reads as "ab<newline>cd" and passed.
         _prefix_problem=""
+        _prefix_re='^[a-z2-7]+$'
         if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
             _prefix_problem="too long (${#ADDRESS_PREFIX} chars, max 5)"
         elif [ ${#ADDRESS_PREFIX} -lt 2 ]; then
             _prefix_problem="too short (${#ADDRESS_PREFIX} chars, min 2)"
-        elif ! echo "$ADDRESS_PREFIX" | grep -qE '^[a-z2-7]+$'; then
+        elif ! [[ $ADDRESS_PREFIX =~ $_prefix_re ]]; then
             _prefix_problem="contains characters that are not base32 (only a-z and 2-7; 0, 1, 8 and 9 are not valid)"
         fi
 
@@ -1795,7 +1800,7 @@ start_containers() {
             ADDRESS_PREFIX="op2"
             unset _prefix_suggestion
         fi
-        unset _prefix_problem
+        unset _prefix_problem _prefix_re
 
         log "Using address prefix: '$ADDRESS_PREFIX'"
 

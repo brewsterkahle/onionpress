@@ -61,7 +61,7 @@ function onionpress_follow_parse( $key ) {
     if ( preg_match( '#^https?://#i', $key ) ) {
         return array( 'type' => 'url', 'addr' => '', 'name' => '', 'url' => $key );
     }
-    if ( preg_match( '#^([a-z2-7]{56}\.onion)(?:/([a-z0-9][a-z0-9._-]*))?$#i', $key, $m ) ) {
+    if ( preg_match( '#^([a-z2-7]{56}\.onion)(?:/([a-z0-9][a-z0-9._-]*))?$#iD', $key, $m ) ) {
         return array(
             'type' => 'onion',
             'addr' => strtolower( $m[1] ),

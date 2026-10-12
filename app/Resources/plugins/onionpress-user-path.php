@@ -60,8 +60,8 @@ add_action( 'parse_request', function ( $wp ) {
     // so we don't pound the DB for obviously-invalid segments.
     if (
         strlen( $segment ) < 5 || strlen( $segment ) > 40
-        || ! preg_match( '/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/', $segment )
-        || preg_match( '/^[0-9]+$/', $segment )
+        || ! preg_match( '/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/D', $segment )
+        || preg_match( '/^[0-9]+$/D', $segment )
     ) {
         return;
     }

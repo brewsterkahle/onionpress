@@ -388,10 +388,10 @@ function onionpress_mastodon_handle_save_handle_post() {
         $server = strtolower( trim( $server ) );
     }
 
-    if ( ! preg_match( '/^[A-Za-z0-9_]{1,30}$/', $username ) ) {
+    if ( ! preg_match( '/^[A-Za-z0-9_]{1,30}$/D', $username ) ) {
         return array( 'level' => 'error', 'message' => 'The username part must be letters, digits, or underscores (up to 30 chars).' );
     }
-    if ( ! preg_match( '/^[a-z0-9]([a-z0-9\-]{0,62}\.)+[a-z]{2,}$/', $server ) ) {
+    if ( ! preg_match( '/^[a-z0-9]([a-z0-9\-]{0,62}\.)+[a-z]{2,}$/D', $server ) ) {
         return array( 'level' => 'error', 'message' => 'The server must look like a domain, e.g. <code>mastodon.archive.org</code>.' );
     }
 
@@ -1397,7 +1397,7 @@ function onionpress_mastodon_sideload_media( $post_id, $status_id, $media ) {
         if ( $url === '' ) continue;
 
         $ext = strtolower( pathinfo( parse_url( $url, PHP_URL_PATH ) ?? '', PATHINFO_EXTENSION ) );
-        if ( ! preg_match( '/^[a-z0-9]{1,5}$/', $ext ) ) {
+        if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) ) {
             // Guess an extension from MIME type.
             $ext = ( $type === 'video' || $type === 'gifv' ) ? 'mp4'
                  : ( $type === 'audio' ? 'mp3' : 'jpg' );

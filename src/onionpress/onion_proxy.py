@@ -851,11 +851,11 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         import re
         _ctrl_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
         errors = []
-        if not re.match(r'^[a-zA-Z0-9_.\-]+$', username):
+        if not re.fullmatch(r'[a-zA-Z0-9_.\-]+', username):
             errors.append("Username may only contain letters, numbers, underscores, dots, and hyphens.")
         if _ctrl_re.search(password):
             errors.append("Password must not contain control characters.")
-        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
+        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
             errors.append("Please enter a valid email address.")
         if _ctrl_re.search(title) or title.startswith('-'):
             errors.append("Site title must not start with a dash or contain control characters.")

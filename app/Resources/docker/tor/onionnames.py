@@ -290,7 +290,7 @@ def register_name(conn, name, onionaddress):
     and `alternatives` is a list of 3 candidate names (only for 'taken'/
     'reserved').
     """
-    if not _ONION_RE.match(onionaddress or ""):
+    if not _ONION_RE.fullmatch(onionaddress or ""):
         return False, "invalid_address", None
 
     ok, reason = validate_name(name)

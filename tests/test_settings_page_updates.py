@@ -289,7 +289,7 @@ class TestSettingsPageMatchesAllowlist(unittest.TestCase):
         self.assertEqual(self.fields["CLOUDFLARE_TUNNEL_TOKEN"]["type"], "secret")
         # The page checks the host's pattern, and never writes the token
         # into the config-current.json it can read back.
-        self.assertIn(f"'#^{op_config.CLOUDFLARE_TOKEN_PATTERN}$#'", self.php)
+        self.assertIn(f"'#^{op_config.CLOUDFLARE_TOKEN_PATTERN}$#D'", self.php)
         self.assertIn("unset( $current['CLOUDFLARE_TUNNEL_TOKEN'] );", self.php)
         self.assertIn("op_CLOUDFLARE_TUNNEL_TOKEN_remove", self.php)
         render = self.php[self.php.index("$field['type'] === 'secret' ) : ?>"):]
