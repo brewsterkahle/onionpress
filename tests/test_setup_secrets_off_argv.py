@@ -410,7 +410,8 @@ class _LauncherHarness(unittest.TestCase):
     stub `docker` and `curl` on PATH. Each stub call appends {"tool",
     "argv", "stdin"} to $STUB_CALLS; stdin is read for `docker exec -i` and
     for curl with `@-`. `wp core multisite-install` prints a generated
-    password the way wp-cli does; `wp eval` exits $STUB_EVAL_RC."""
+    password the way wp-cli does; `wp eval` exits $STUB_EVAL_RC. A curl
+    run in a container (`docker exec -i <c> curl ...`) answers like curl."""
 
     STUB = r'''
 import json, os, sys
@@ -420,6 +421,8 @@ reads_stdin = (tool == "docker" and args[:2] == ["exec", "-i"]) or \
 data = sys.stdin.buffer.read().decode("utf-8") if reads_stdin else None
 with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"tool": tool, "argv": args, "stdin": data}) + "\n")
+if tool == "docker" and args[:2] == ["exec", "-i"] and args[3:4] == ["curl"]:
+    tool, args = "curl", args[4:]
 if tool == "docker":
     if "multisite-install" in args:
         print("Success: Network installed.")
@@ -583,11 +586,53 @@ class TestLinuxArchiveCookieFallback(_LauncherHarness):
         self.assertEqual(out.stdout.strip(), "AK S3-SECRET", out.stderr)
         login, page = made
         self.assertEqual(login["stdin"], "IA-SECRET")
-        self.assertEqual(page["argv"][page["argv"].index("-H", 2) + 1], "@-")
+        self.assertEqual(page["argv"][-3:-1], ["-H", "@-"])
         self.assertEqual(page["stdin"], "Cookie: logged-in-sig=SIG-SECRET; "
                                         "logged-in-user=someone@example.org\n")
         for secret in ("IA-SECRET", "SIG-SECRET"):
             self.assert_not_in_argv(made, secret)
+
+
+class TestLinuxArchiveLoginOverTor(_LauncherHarness):
+    """The Linux setup's archive.org login runs curl in the onionheaven
+    container through its Tor SOCKS port, to archive.org's onion, as the
+    Mac's does (multisite.ensure_archive_s3_keys): from the host it would
+    tie the publisher's IP address to their archive.org account."""
+
+    ONION = re.search(r"https://archive[a-z2-7]{49}\.onion",
+                      _read("src/onionpress/multisite.py")).group(0)
+
+    def test_no_curl_runs_on_the_host(self):
+        for stub_login in (LOGIN_WITH_KEYS, LOGIN_WITH_COOKIES):
+            with self.subTest(login=stub_login):
+                out, made, _ = self.run_bash(
+                    LINUX, ["fetch_archive_s3_keys"],
+                    'fetch_archive_s3_keys me@example.org "$PW"; '
+                    'echo "$ia_s3_access $ia_s3_secret"',
+                    {"PW": "IA-SECRET", "STUB_LOGIN": stub_login})
+                self.assertEqual(out.stdout.strip(), "AK S3-SECRET", out.stderr)
+                self.assertTrue(made)
+                for call in made:
+                    self.assertEqual(call["tool"], "docker", call)
+                    argv = call["argv"]
+                    self.assertEqual(argv[:6], ["exec", "-i", "onionheaven", "curl",
+                                                "-sk", "--socks5-hostname"])
+                    self.assertEqual(argv[6], "127.0.0.1:9050")
+                    self.assertTrue(argv[-1].startswith(self.ONION + "/"), argv[-1])
+
+    def test_function_names_no_clearnet_archive_org(self):
+        text = _read(LINUX)
+        body = _function(text, "fetch_archive_s3_keys")
+        self.assertNotIn("https://archive.org", body)
+        self.assertIn(self.ONION, body)
+
+    def test_unreachable_tor_fails_with_a_log_line(self):
+        out, _, logged = self.run_bash(
+            LINUX, ["fetch_archive_s3_keys"],
+            'rc=0; fetch_archive_s3_keys me@example.org pw || rc=$?; echo "rc=$rc"',
+            prelude='docker() { return 1; }\n')
+        self.assertEqual(out.stdout.strip(), "rc=1", out.stderr)
+        self.assertIn("could not reach archive.org's onion service through Tor", logged)
 
 
 if __name__ == "__main__":

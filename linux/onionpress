@@ -860,8 +860,17 @@ update_images() {
 
 # Convert Archive.org login (email/username + password) into S3 API keys.
 # Sets ia_s3_access and ia_s3_secret on success, empty on failure.
+#
+# Over Tor, like the Mac (onion_proxy._fetch_archive_s3_keys,
+# multisite.ensure_archive_s3_keys): curl runs in the onionheaven container
+# and goes through its Tor SOCKS port. From the host, the login would tie
+# the publisher's IP address to their archive.org account. The target is
+# archive.org's onion service, as in ensure_archive_s3_keys: clearnet
+# archive.org turns most Tor exits away. -k because that onion's
+# certificate is self-issued; the onion address itself authenticates it.
 fetch_archive_s3_keys() {
     local ia_email="$1" ia_pass="$2"
+    local onion="https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
     ia_s3_access=""
     ia_s3_secret=""
 
@@ -869,11 +878,15 @@ fetch_archive_s3_keys() {
     # stdin: neither is ever part of any code, so quotes and backslashes in
     # them arrive intact.
     local response
-    response=$(printf '%s' "$ia_pass" | curl -s -X POST \
+    response=$(printf '%s' "$ia_pass" | docker exec -i onionheaven \
+        curl -sk --socks5-hostname 127.0.0.1:9050 --max-time 60 -X POST \
         -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
         --data-urlencode "email=$ia_email" \
         --data-urlencode "password@-" \
-        "https://archive.org/services/xauthn/?op=login" 2>/dev/null) || return 1
+        "$onion/services/xauthn/?op=login" 2>/dev/null) || {
+        log "Archive.org login: could not reach archive.org's onion service through Tor (onionheaven container)"
+        return 1
+    }
 
     local success
     success=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',''))" 2>/dev/null)
@@ -901,10 +914,12 @@ fetch_archive_s3_keys() {
         # The session cookie is a credential too: curl reads that header
         # from stdin (-H @-), not from argv.
         local s3_response
-        s3_response=$(printf 'Cookie: logged-in-sig=%s; logged-in-user=%s\n' "$sig" "$user" | curl -s \
+        s3_response=$(printf 'Cookie: logged-in-sig=%s; logged-in-user=%s\n' "$sig" "$user" \
+            | docker exec -i onionheaven \
+            curl -sk --socks5-hostname 127.0.0.1:9050 --max-time 60 \
             -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
             -H @- \
-            "https://archive.org/account/s3.php?output_json=1" 2>/dev/null)
+            "$onion/account/s3.php?output_json=1" 2>/dev/null)
         ia_s3_access=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3accesskey',''))" 2>/dev/null)
         ia_s3_secret=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3secretkey',''))" 2>/dev/null)
         if [ -n "$ia_s3_access" ] && [ -n "$ia_s3_secret" ]; then
@@ -1103,7 +1118,7 @@ setup_wordpress_interactive() {
     # `wp option update <key>` reads the value from stdin: the secret key
     # stays out of argv.
     if [ -n "$ia_access" ] && [ -n "$ia_secret" ]; then
-        echo "  Logging in to Archive.org..."
+        echo "  Logging in to Archive.org (over Tor)..."
         local ia_s3_access="" ia_s3_secret=""
         if fetch_archive_s3_keys "$ia_access" "$ia_secret"; then
             printf '%s' "$ia_s3_access" | docker exec -i onionpress-wordpress wp option update onionpress_archive_s3_access --allow-root >> "$LOG_FILE" 2>&1

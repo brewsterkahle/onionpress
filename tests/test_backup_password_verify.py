@@ -98,7 +98,7 @@ class TestCreateBackupWiring(unittest.TestCase):
 
     def test_archive_login_password_goes_to_curl_on_stdin(self):
         body = _function(self.text, "fetch_archive_s3_keys")
-        self.assertIn("""printf '%s' "$ia_pass" | curl""", body)
+        self.assertIn("""printf '%s' "$ia_pass" | docker exec -i onionheaven""", body)
         self.assertIn('--data-urlencode "password@-"', body)
         self.assertIn('--data-urlencode "email=$ia_email"', body)
         self.assertEqual(body.count("$ia_pass"), 1, "used only to feed curl's stdin")
@@ -140,7 +140,9 @@ class _Harness(unittest.TestCase):
     Each stub appends {"tool", "argv", "stdin"} to $STUB_CALLS. The docker
     stub answers the verifier's `docker exec -i onionpress-wordpress wp eval`
     like WP-CLI would (an admin login and exit 0 when stdin equals
-    $STUB_ACCEPT, exit 1 otherwise) and fails every other command.
+    $STUB_ACCEPT, exit 1 otherwise), a curl run in a container
+    (`docker exec -i onionheaven curl ...`) like curl, and fails every
+    other command.
     """
 
     STUB = r'''
@@ -150,6 +152,8 @@ reads_stdin = "-i" in args[:2] or "password@-" in args
 data = sys.stdin.buffer.read().decode("utf-8") if reads_stdin else None
 with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"tool": tool, "argv": args, "stdin": data}) + "\n")
+if tool == "docker" and args[:2] == ["exec", "-i"] and args[3:4] == ["curl"]:
+    tool = "curl"
 if tool == "docker":
     if args[:5] == ["exec", "-i", "onionpress-wordpress", "wp", "eval"]:
         if data == os.environ.get("STUB_ACCEPT"):
@@ -266,7 +270,9 @@ class TestArchiveLoginHarness(_Harness):
                 out, made, _ = self.run_bash(
                     self.RUN, {"PW": pw, "IA_EMAIL": "o'brien@example.org"})
                 self.assertEqual(out.stdout.strip(), "rc=0 AK SK", out.stderr)
-                [call] = [c for c in made if c["tool"] == "curl"]
+                # Over Tor: curl runs in the onionheaven container.
+                [call] = [c for c in made if c["argv"][:4] ==
+                          ["exec", "-i", "onionheaven", "curl"]]
                 self.assertEqual(call["stdin"], pw)
                 self.assertIn("email=o'brien@example.org", call["argv"])
                 self.assertIn("password@-", call["argv"])
