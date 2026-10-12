@@ -304,10 +304,6 @@ class TestNoRootWritesIntoWwwDataFolders(unittest.TestCase):
           "src/onionpress/multisite.py", "src/onionpress/onion_proxy.py",
           "src/onionpress/derivatives.py", "src/onionpress/backup.py",
           "src/onionpress/wp_files.py", "src/onionpress/setup_logic.py")
-    # The hub's folders (onionheaven/, onionhome/) are being moved off the
-    # shared volume separately.
-    HUB = ("/var/lib/onionpress/onionheaven", "/var/lib/onionpress/onionhome")
-
     def _sources(self):
         return {p: _read(p) for p in self.PY + LAUNCHERS}
 
@@ -326,11 +322,11 @@ class TestNoRootWritesIntoWwwDataFolders(unittest.TestCase):
                     # bash: `docker cp <host path> onionpress-wordpress:…`
                     self.assertNotRegex(line, r"docker cp (?!\"?onionpress-wordpress:)\S+ \"?onionpress-wordpress:")
             # Python: a "onionpress-wordpress:<path>" argument is only ever a
-            # source (restore-upload.zip), or the hub's.
+            # source (restore-upload.zip).
             for m in re.finditer(r"""["']onionpress-wordpress:(/[^"']*)["']""", text):
                 with self.subTest(f"{path}: {m.group(1)}"):
-                    self.assertTrue(m.group(1) == "/var/lib/onionpress/restore-upload.zip"
-                                    or m.group(1).startswith(self.HUB), m.group(0))
+                    self.assertEqual(m.group(1), "/var/lib/onionpress/restore-upload.zip",
+                                     m.group(0))
 
     def test_no_root_chown_of_a_web_root_path(self):
         """Every chown there goes through wp_files.own_args (cd -P, a bare
@@ -364,7 +360,6 @@ class TestNoRootWritesIntoWwwDataFolders(unittest.TestCase):
                 names = [c.value for c in ast.walk(node)
                          if isinstance(c, ast.Constant) and isinstance(c.value, str)
                          and "/var/lib/onionpress/" in c.value
-                         and not any(h in c.value for h in self.HUB)
                          # docker cp's source: copied out as a link, if one
                          # (check_uploaded_backup refuses it).
                          and c.value != "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip"]

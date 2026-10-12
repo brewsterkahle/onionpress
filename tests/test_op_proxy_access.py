@@ -32,7 +32,7 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
-from onionpress import onion_proxy  # noqa: E402
+from onionpress import onion_proxy, wp_files  # noqa: E402
 
 PHP = shutil.which("php")
 FORWARDER = os.path.join(PROJECT_DIR, "src", "onion-forward.php")
@@ -156,38 +156,31 @@ class TestInstall(unittest.TestCase):
         seen = {}
 
         def fake_run(argv, **kw):
-            staged = argv[2]
             seen["argv"] = argv
-            seen["content"] = _read(staged)
-            seen["mode"] = os.stat(staged).st_mode & 0o777
-            seen["dir_mode"] = os.stat(os.path.dirname(staged)).st_mode & 0o777
-            seen["staged"] = staged
-            return subprocess.CompletedProcess(argv, returncode, "", "boom")
+            seen["content"] = kw.get("input", b"").decode("utf-8")
+            return subprocess.CompletedProcess(argv, returncode, b"", b"boom")
 
         logs = []
-        with mock.patch.object(onion_proxy.subprocess, "run", side_effect=fake_run) as run:
+        with mock.patch.object(wp_files.subprocess, "run", side_effect=fake_run) as run:
             ok = onion_proxy.install_php_proxy("/x/docker", {}, script_path, log_func=logs.append)
         return ok, seen, run, logs
 
     def test_installs_a_copy_with_this_runs_token(self):
+        """Written into the container as www-data (wp_files.put_file): the
+        token-bearing copy goes in on stdin and never lands on the Mac's
+        disk."""
         ok, seen, _, _ = self._install(FORWARDER)
         self.assertTrue(ok)
-        self.assertEqual(seen["argv"][:2], ["/x/docker", "cp"])
-        self.assertEqual(seen["argv"][3], "onionpress-wordpress:/var/www/html/__op_proxy.php")
-        self.assertNotEqual(seen["staged"], FORWARDER)
+        self.assertEqual(seen["argv"],
+                         ["/x/docker"] + wp_files.put_file_args("/var/www/html/__op_proxy.php", "644"))
         self.assertEqual(seen["content"],
                          _read(FORWARDER).replace(PLACEHOLDER, TOKEN))
         self.assertNotIn(PLACEHOLDER, seen["content"])
-        self.assertEqual(seen["mode"], 0o644, "Apache's www-data must read it")
-        self.assertEqual(seen["dir_mode"], 0o700, "but no other user on the Mac")
-        self.assertFalse(os.path.exists(os.path.dirname(seen["staged"])),
-                         "the staged copy is removed")
 
-    def test_a_failed_copy_is_reported_and_cleaned_up(self):
-        ok, seen, _, logs = self._install(FORWARDER, returncode=1)
+    def test_a_failed_copy_is_reported(self):
+        ok, _, _, logs = self._install(FORWARDER, returncode=1)
         self.assertFalse(ok)
         self.assertIn("Failed to install PHP proxy", logs[-1])
-        self.assertFalse(os.path.exists(os.path.dirname(seen["staged"])))
 
     def test_a_script_without_one_placeholder_is_not_installed(self):
         tmp = tempfile.mkdtemp()
