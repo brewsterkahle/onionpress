@@ -326,11 +326,28 @@ class TestUnzipTimeoutLog(unittest.TestCase):
 
     def test_timeout_log_has_no_password(self):
         logs = []
-        exc = subprocess.TimeoutExpired(["unzip", "-o", "-qq", "-P", SECRET, "/b.zip"], 900)
+        argv = ["unzip", "-o", "-qq", "-P", SECRET, "/b.zip"]
+
+        class _Stuck:
+            """An unzip that never finishes until killed."""
+            killed = False
+
+            def wait(self, timeout=None):
+                if self.killed:
+                    return -9
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+            def kill(self):
+                self.killed = True
+
         with mock.patch("shutil.which", return_value="/usr/bin/unzip"), \
-             mock.patch.object(backup.subprocess, "run", side_effect=exc):
-            self.assertFalse(backup._unzip_cli_extract("/b.zip", SECRET, "/tmp/x", logs.append))
-        self.assertTrue(logs)
+             mock.patch.object(backup.subprocess, "Popen", return_value=_Stuck()), \
+             mock.patch.object(backup, "_UNZIP_TIMEOUT_S", 0), \
+             mock.patch.object(backup, "_free_bytes", return_value=0):
+            self.assertFalse(backup._unzip_cli_extract(
+                "/b.zip", SECRET, "/tmp/x", logs.append,
+                max_file_bytes=1, max_total_bytes=1))
+        self.assertTrue(any("timed out" in line for line in logs), logs)
         for line in logs:
             self.assertNotIn(SECRET, line)
 

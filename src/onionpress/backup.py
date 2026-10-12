@@ -871,6 +871,13 @@ def _parse_metadata(data):
                          "is not valid JSON.") from e
 
 
+# metadata.json is a few hundred bytes. zipfile reads a member's whole listed
+# size into memory, and a crafted backup can list gigabytes for it.
+_MAX_METADATA_BYTES = 1 << 20
+METADATA_TOO_BIG_MSG = ("Not a valid OnionPress backup: its metadata.json is "
+                        "too large.")
+
+
 def read_staged_metadata(staging):
     """Read and validate metadata.json from an extracted backup."""
     metadata_path = os.path.join(staging, 'metadata.json')
@@ -879,7 +886,10 @@ def read_staged_metadata(staging):
     if not os.path.isfile(metadata_path):
         raise ValueError("Not a valid OnionPress backup (no metadata.json)")
     with open(metadata_path, 'rb') as f:
-        return _check_backup_format(_parse_metadata(f.read()))
+        data = f.read(_MAX_METADATA_BYTES + 1)
+    if len(data) > _MAX_METADATA_BYTES:
+        raise ValueError(METADATA_TOO_BIG_MSG)
+    return _check_backup_format(_parse_metadata(data))
 
 
 def staged_backup_address(staging, log_func):
@@ -931,6 +941,15 @@ def _wrong_password_as_valueerror(zf):
         raise
 
 
+def _read_metadata_member(zf, name, password):
+    """A format-1 backup's metadata.json member, read with *password*;
+    refused if it lists more than _MAX_METADATA_BYTES."""
+    if zf.getinfo(name).file_size > _MAX_METADATA_BYTES:
+        raise ValueError(METADATA_TOO_BIG_MSG)
+    with _wrong_password_as_valueerror(zf):
+        return zf.read(name, pwd=password.encode())
+
+
 def read_backup_metadata(zip_path, password):
     """Read metadata.json from a backup zip.
 
@@ -951,8 +970,7 @@ def read_backup_metadata(zip_path, password):
             if metadata_name is None:
                 raise ValueError("Not a valid OnionPress backup (no metadata.json found)")
 
-            with _wrong_password_as_valueerror(zf):
-                data = zf.read(metadata_name, pwd=password.encode())
+            data = _read_metadata_member(zf, metadata_name, password)
             return _check_backup_format(_parse_metadata(data))
     except zipfile.BadZipFile:
         raise ValueError("Not a valid zip file.")
@@ -1038,13 +1056,80 @@ def validate_archive_members(zf):
             name=_member_label(min(clash))))
 
 
+# ─── Zip bombs ──────────────────────────────────────────────────────────
+# An archive lists each member's size, but nothing makes the data match it:
+# Apple's `unzip` writes past a member's listed size (8 MiB for one that
+# listed 1 KiB, exit 0), and deflate expands up to ~1000x. So a backup may
+# list at most _MAX_ARCHIVE_MEMBERS members, whose sizes add up to at most
+# the larger of _MIN_UNPACK_BUDGET and _MAX_EXPANSION times the archive's
+# own size (a real backup is mostly already-compressed media, ~1-5x), and
+# what extraction writes is held to what the archive lists (extract_archive).
+_MAX_ARCHIVE_MEMBERS = 500_000
+_MIN_UNPACK_BUDGET = 8 << 30
+_MAX_EXPANSION = 50
+
+TOO_MANY_MEMBERS_MSG = ("Not a valid OnionPress backup: it holds more than "
+                        "{limit:,} files.")
+TOO_BIG_MSG = ("Not a valid OnionPress backup: it would unpack to {size}, more "
+               "than a backup file of {archive} can hold.")
+OVERSIZE_MSG = ("Not a valid OnionPress backup: it unpacks to more data than "
+                "it lists.")
+MISMATCH_MSG = ("Not a valid OnionPress backup: a file in it does not match "
+                "its listed size or checksum.")
+
+
+def _size_text(n):
+    """Bytes as '1.2 GB' or '340.0 MB', for a message."""
+    if n >= 1 << 30:
+        return f"{n / (1 << 30):.1f} GB"
+    return f"{n / (1 << 20):.1f} MB"
+
+
+def check_archive_size(zf, archive_bytes):
+    """Refuse (ValueError) an archive (an open ZipFile, *archive_bytes*
+    long) that lists too many members or would unpack to more than its size
+    allows; return (total listed size, largest member's listed size)."""
+    infos = zf.infolist()
+    if len(infos) > _MAX_ARCHIVE_MEMBERS:
+        raise ValueError(TOO_MANY_MEMBERS_MSG.format(limit=_MAX_ARCHIVE_MEMBERS))
+    total = sum(i.file_size for i in infos)
+    if total > max(_MIN_UNPACK_BUDGET, _MAX_EXPANSION * archive_bytes):
+        raise ValueError(TOO_BIG_MSG.format(size=_size_text(total),
+                                            archive=_size_text(archive_bytes)))
+    return total, max((i.file_size for i in infos), default=0)
+
+
 def _validate_archive_file(zip_path):
-    """validate_archive_members for the zip at *zip_path*."""
+    """validate_archive_members and check_archive_size for the zip at
+    *zip_path*; return (total listed size, largest listed size, members)."""
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             validate_archive_members(zf)
+            total, largest = check_archive_size(zf, os.path.getsize(zip_path))
+            return total, largest, len(zf.infolist())
     except zipfile.BadZipFile as e:
         raise ValueError("Not a valid zip file.") from e
+
+
+def _tree_bytes(root):
+    """The total size of the regular files under *root* (lstat: links count
+    as nothing)."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total
+
+
+def _free_bytes(path):
+    """Bytes free to this user on the filesystem holding *path*."""
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
 
 
 def check_staged_tree(root):
@@ -1079,41 +1164,80 @@ def check_staged_tree(root):
                 what=what, name=_member_label(os.path.relpath(path, root))))
 
 
-def _unzip_cli_extract(zip_path, password, dest, log_func):
-    """Fast-path extraction via the system `unzip` CLI — C code, ~30-50x faster
-    than zipfile's pure-Python ZipCrypto decryption (which runs ~2 MB/s on a
-    ~900 MB encrypted backup). Returns True on success, False if `unzip` is
-    absent or errors (caller falls back to zipfile). *password* is None for
-    the unencrypted inner zip of a format-2 backup. `unzip` recreates
-    symlink entries, so it is only ever handed an archive that passed
-    validate_archive_members.
+_UNZIP_TIMEOUT_S = 900
+_UNZIP_POLL_S = 0.25
 
-    Injection-safe: arguments are passed as a LIST to subprocess.run with NO
-    shell=True, so the password and paths are literal argv values that a shell
-    never parses — a password containing ; $() `` | spaces etc. cannot inject
-    commands. `-P` always consumes the next argv as the password value, so a
-    password starting with '-' is taken literally too. zip_path is passed as a
-    plain argv (callers use absolute paths, so it won't be mistaken for a flag).
+
+def _unzip_cli_extract(zip_path, password, dest, log_func, *,
+                       max_file_bytes, max_total_bytes):
+    """Fast-path extraction of a format-1 backup via the system `unzip` CLI —
+    C code, ~30-50x faster than zipfile's pure-Python ZipCrypto decryption
+    (which runs ~2 MB/s on a ~900 MB encrypted backup). Returns True on
+    success, False if `unzip` is absent, errors or times out (caller falls
+    back to zipfile). `unzip` recreates symlink entries, so it is only ever
+    handed an archive that passed validate_archive_members.
+
+    `unzip` does not hold a member to its listed size, so it runs under a
+    file-size limit (`ulimit -f`, from *max_file_bytes*: the largest member
+    the archive lists), and it is stopped, raising ValueError, once the disk
+    holding *dest* has lost more than *max_total_bytes* since it started.
+
+    Injection-safe: arguments are passed as a LIST with NO shell=True. The
+    `sh -c` wrapper's script is a constant; it gets the limit and the unzip
+    command as positional parameters and never parses them, so a password
+    containing ; $() `` | spaces etc. cannot inject commands. `-P` always
+    consumes the next argv as the password value, so a password starting
+    with '-' is taken literally too. zip_path is passed as a plain argv
+    (callers use absolute paths, so it won't be mistaken for a flag).
+    Nothing logged here shows the argv: it holds the password.
     """
     import shutil as _shutil
     if _shutil.which('unzip') is None:
         return False
-    pw_args = ['-P', password] if password is not None else []
-    try:
-        result = subprocess.run(
-            ['unzip', '-o', '-qq', *pw_args, zip_path, '-d', dest],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            encoding='utf-8', errors='replace', timeout=900,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        # Type only: str(TimeoutExpired) is the full argv, password included.
-        log_func(f"Restore: unzip CLI unavailable/timed out "
-                 f"({type(e).__name__}); using zipfile")
-        return False
-    if result.returncode != 0:
-        # Wrong password, AES archive, or corrupt zip — let zipfile try (and
-        # raise a clean error for the wrong-password case).
-        log_func(f"Restore: unzip CLI rc={result.returncode}; using zipfile")
+    # POSIX sh counts ulimit -f in 512-byte blocks; a shell that counts
+    # 1024-byte blocks (macOS's /bin/sh) allows twice as much, still bounded.
+    blocks = max_file_bytes // 512 + 2
+    argv = ['/bin/sh', '-c', 'ulimit -f "$1" || exit 125; shift; exec "$@"',
+            'sh', str(blocks),
+            'unzip', '-o', '-qq', '-P', password, zip_path, '-d', dest]
+    # Output goes to a file: nothing reads a pipe while this polls.
+    with tempfile.TemporaryFile() as out:
+        try:
+            free_at_start = _free_bytes(dest)
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=out)
+        except OSError as e:
+            log_func(f"Restore: unzip CLI unavailable ({type(e).__name__}); "
+                     f"using zipfile")
+            return False
+        deadline = time.monotonic() + _UNZIP_TIMEOUT_S
+        while True:
+            try:
+                rc = proc.wait(timeout=_UNZIP_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                # Never logged: str(TimeoutExpired) is the argv.
+                pass
+            try:
+                written = free_at_start - _free_bytes(dest)
+            except OSError:
+                written = 0
+            if written > max_total_bytes:
+                proc.kill()
+                proc.wait()
+                log_func(f"Restore: unzip had written {_size_text(written)}, "
+                         f"more than the backup lists; stopped it")
+                raise ValueError(OVERSIZE_MSG)
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.wait()
+                log_func("Restore: unzip CLI timed out; using zipfile")
+                return False
+    if rc != 0:
+        # Wrong password, AES archive, corrupt zip or a member past the size
+        # limit — let zipfile try (and raise a clean error for the
+        # wrong-password case).
+        log_func(f"Restore: unzip CLI rc={rc}; using zipfile")
         return False
     return True
 
@@ -1122,35 +1246,53 @@ def extract_archive(zip_path, password, dest, log_func):
     """Extract a backup of either format into *dest*.
 
     Format 2: decrypt the inner zip to a temp file (every record verified
-    first), then unzip it — no password, so `unzip` and zipfile are both
-    fast. Format 1: `unzip -P`, falling back to zipfile. Either way a wrong
-    password raises ValueError before anything lands in *dest*, and so does
-    an archive holding links, special files or unsafe names
-    (validate_archive_members; a format-1 zip's member list is readable
-    without the password). The extracted tree is checked again afterwards
-    (check_staged_tree).
+    first), then extract it with zipfile, which writes each member only up
+    to its listed size, checks its CRC and never creates a link (`unzip`
+    does none of these); the inner zip is not encrypted, so zipfile is fast.
+    Format 1: `unzip -P` under size limits (_unzip_cli_extract), falling
+    back to zipfile. Either way a wrong password raises ValueError before
+    anything lands in *dest*, and so does an archive holding links, special
+    files or unsafe names (validate_archive_members; a format-1 zip's member
+    list is readable without the password) or listing too many members or
+    too much data (check_archive_size). The extracted tree is checked again
+    afterwards (check_staged_tree) and may hold no more than the archive
+    lists.
     """
+    before = _tree_bytes(dest)
     if backup_crypto.is_encrypted_backup(zip_path):
         log_func("Restore: decrypting backup (format 2)...")
         fd, inner = tempfile.mkstemp(prefix='onionpress-restore-', suffix='.zip')
         os.close(fd)
         try:
             backup_crypto.decrypt_archive(zip_path, password, inner)
-            _validate_archive_file(inner)
-            if not _unzip_cli_extract(inner, None, dest, log_func):
+            listed, _, _ = _validate_archive_file(inner)
+            try:
                 with zipfile.ZipFile(inner, 'r') as zf:
                     zf.extractall(dest)
+            except (zipfile.BadZipFile, zlib.error, EOFError) as e:
+                # The inner zip passed authentication, so whoever made the
+                # backup made it this way.
+                raise ValueError(MISMATCH_MSG) from e
         finally:
             os.unlink(inner)
     else:
-        _validate_archive_file(zip_path)
-        if not _unzip_cli_extract(zip_path, password, dest, log_func):
+        listed, largest, members = _validate_archive_file(zip_path)
+        # On top of the listed sizes: a block per file, and 1 GiB for
+        # whatever else writes to the same disk meanwhile.
+        if not _unzip_cli_extract(
+                zip_path, password, dest, log_func,
+                max_file_bytes=largest,
+                max_total_bytes=listed + 4096 * members + (1 << 30)):
+            if _tree_bytes(dest) - before > listed:
+                raise ValueError(OVERSIZE_MSG)
             # Fallback: pure-Python zipfile — always available, but slow for
             # ZipCrypto. Also the path that surfaces a wrong-password error.
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 with _wrong_password_as_valueerror(zf):
                     zf.extractall(dest, pwd=password.encode())
     check_staged_tree(dest)
+    if _tree_bytes(dest) - before > listed:
+        raise ValueError(OVERSIZE_MSG)
 
 
 def check_uploaded_backup(path):
@@ -1214,8 +1356,7 @@ def peek_backup_metadata(zip_path, password):
             raise Exception("Not an OnionPress backup (no metadata.json)")
         # Read the member straight from the zip: its name is the archive
         # author's, and joined onto a directory it could point anywhere.
-        with _wrong_password_as_valueerror(zf):
-            data = zf.read(names[0], pwd=password.encode())
+        data = _read_metadata_member(zf, names[0], password)
         return _check_backup_format(_parse_metadata(data))
 
 

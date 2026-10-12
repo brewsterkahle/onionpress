@@ -454,6 +454,8 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
     def test_legit_backups_extract(self):
         for fmt, path in self._backups().items():
             for extractor, patch in self._extractors():
+                if fmt == "format 2" and extractor == "unzip":
+                    continue  # format 2 extracts with zipfile only
                 with self.subTest(fmt, extractor=extractor):
                     dest = tempfile.mkdtemp(dir=self.tmp)
                     with patch:

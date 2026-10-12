@@ -379,6 +379,16 @@
 - Real backups hold no links: `zip -r` without `-y` stores a link's target
   as a plain file. pack_backup must never store links (`zip -y`), or its
   backups stop restoring. `tests/test_backup_archive_members.py`.
+- Zip bombs: `check_archive_size` refuses, before extracting, an archive
+  listing more than 500,000 members or more data than the larger of 8 GiB
+  and 50x its own size. A listed size is not enforced by Apple's `unzip`
+  (it wrote 8 MiB for a member listing 1 KiB, exit 0), so format 2's inner
+  zip is extracted by zipfile only (holds each member to its listed size and
+  CRC, never makes a link; faster than unzip here). Format 1 keeps
+  `unzip -P` (zipfile's ZipCrypto is ~2 MB/s) under `ulimit -f` at the
+  largest listed member, with a watchdog on the disk's free space; the
+  extracted tree may hold no more than the archive lists. metadata.json
+  reads stop at 1 MiB. `tests/test_backup_extract_limits.py`.
 
 ## Backups Stage Plain Files Only
 - What create_backup copies out of a container (wp-content; a hub's
