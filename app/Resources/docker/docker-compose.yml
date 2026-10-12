@@ -129,6 +129,10 @@ services:
   # doesn't thrash; the actual decision to restart is governed by the
   # target container's healthcheck retries (conservative — see wordpress
   # service above for the ~15-minute sustained-failure threshold).
+  #
+  # autoheal never sees the Docker socket. It talks to autoheal-proxy below
+  # over a unix socket on a volume only these two services mount, and has
+  # no network at all (no WEBHOOK_URL/APPRISE_URL is configured).
   autoheal:
     image: willfarrell/autoheal:latest
     container_name: onionpress-autoheal
@@ -142,8 +146,48 @@ services:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
       - AUTOHEAL_INTERVAL=60
       - AUTOHEAL_START_PERIOD=0
+      - DOCKER_SOCK=/run/autoheal-proxy/docker.sock
     volumes:
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - autoheal-proxy:/run/autoheal-proxy
+    network_mode: none
+    depends_on:
+      - autoheal-proxy
+    restart: unless-stopped
+
+  # The only Docker API autoheal gets: the two calls its script makes —
+  # GET /containers/json (list unhealthy, labelled containers) and
+  # POST /containers/<id>/restart. Everything else is refused (403/405);
+  # refusals are logged at WARN, so `docker logs onionpress-autoheal-proxy`
+  # shows it if a future autoheal starts calling something new.
+  #
+  # Runs as root because the socket's owner is root in the Colima VM and
+  # the user (root in its namespace) under rootless Docker, with no group
+  # we could name portably — but with every capability dropped, a
+  # read-only filesystem and no network. Pinned by multi-arch index digest;
+  # bump with build/base-image-digest.sh (docs/BUILDING.md).
+  autoheal-proxy:
+    image: ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b
+    container_name: onionpress-autoheal-proxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command:
+      - -socketpath=/var/run/docker.sock
+      - -proxysocketendpoint=/run/autoheal-proxy/docker.sock
+      - '-allowGET=(/v1\.[0-9]+)?/containers/json'
+      - '-allowPOST=(/v1\.[0-9]+)?/containers/[a-zA-Z0-9][a-zA-Z0-9_.-]*/restart'
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - autoheal-proxy:/run/autoheal-proxy
     restart: unless-stopped
 
   onionheaven:
@@ -184,6 +228,9 @@ volumes:
     name: onionpress-db-data
   onionpress-data:
     name: onionpress-persistent-data
+  # Holds nothing but autoheal-proxy's listening socket.
+  autoheal-proxy:
+    name: onionpress-autoheal-proxy
 
 networks:
   onionpress-network:

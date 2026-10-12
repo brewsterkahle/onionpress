@@ -200,6 +200,15 @@ every Intel machine".
 pinned. We rely on their upstream registries shipping security patches
 without us tracking digests, and neither is built by this project.
 
+autoheal no longer holds the Docker socket. It reaches Docker only through
+`autoheal-proxy`, which **is** pinned, in `docker-compose.yml` itself
+(`ghcr.io/wollomatic/socket-proxy:<version>@sha256:…`), because it is the
+container that holds the socket. Bump it like a Dockerfile input:
+`build/base-image-digest.sh ghcr.io/wollomatic/socket-proxy:<version>`. The
+proxy passes only the two calls autoheal's script makes; if a new autoheal
+calls anything else, the proxy refuses it and logs a WARN line
+(`docker logs onionpress-autoheal-proxy`).
+
 Three more references are deliberately left as bare tags, and
 `tests/test_image_pins.py` asserts they stay that way — a blanket
 "pin everything" sweep breaks each of them quietly at build time and
