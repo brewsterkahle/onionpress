@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: OnionPress Auto-Login
- * Description: One-time magic login links for the OnionPress menubar app.
- * Version:     1.0
+ * Description: One-time magic login links for the OnionPress menubar app, tray and launcher.
+ * Version:     1.1
  * Network:     true
  */
 
@@ -11,27 +11,61 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
- * Handle ?op_login=TOKEN on any front-end request.
+ * Is this request one the token was minted for?
  *
- * The menubar app generates a random token, stores it as a WordPress transient
- * (2-minute TTL), and opens the URL with ?op_login=TOKEN.  This plugin
- * validates the token, logs the admin in, deletes the token (single-use),
- * and redirects to the clean URL.
+ * "local": the Host is localhost and the request did not come through Tor.
+ * The Host header is the client's to choose, so the second check is the one
+ * that matters: onion visitors reach WordPress from the tor container, local
+ * ones through the published port. A token that leaks (browser history, a
+ * pasted URL) can then not be redeemed by anyone on the Tor network.
+ * "onion": the Host is a v3 .onion (the menubar's and tray's "open my site
+ * in Tor Browser").
+ */
+function onionpress_auto_login_scope_ok( $scope ) {
+    $host = isset( $_SERVER['HTTP_HOST'] ) ? strtolower( (string) $_SERVER['HTTP_HOST'] ) : '';
+    $name = preg_replace( '/:\d+$/', '', $host );
+    if ( 'onion' === $scope ) {
+        return 1 === preg_match( '/^[a-z2-7]{56}\.onion$/', $name );
+    }
+    if ( 'local' !== $scope || ! in_array( $name, array( 'localhost', '127.0.0.1', '[::1]' ), true ) ) {
+        return false;
+    }
+    $remote = isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '';
+    $tor    = gethostbynamel( 'onionpress-tor' );
+    return ! ( $tor && in_array( $remote, $tor, true ) );
+}
+
+/**
+ * Handle ?op_login=TOKEN on any request.
+ *
+ * The menubar app, the Linux tray or `onionpress dashboard` stores a random
+ * token as a network-wide transient (auto_login.MINT_PHP: 2-minute TTL, the
+ * admin's user ID and a scope) and opens the site with ?op_login=TOKEN. This
+ * plugin deletes the token (single use: only the request whose delete
+ * removed it goes on), checks the request against the token's scope, logs
+ * the admin in and redirects to the clean URL.
  */
 add_action( 'init', function () {
-    if ( empty( $_GET['op_login'] ) ) {
+    if ( empty( $_GET['op_login'] ) || ! is_string( $_GET['op_login'] ) ) {
         return;
     }
 
-    $token  = sanitize_text_field( $_GET['op_login'] );
-    $stored = get_transient( 'op_login_' . $token );
-    if ( $stored === false ) {
+    $token = wp_unslash( $_GET['op_login'] );
+    if ( ! preg_match( '/^[A-Za-z0-9_-]{32,64}$/D', $token ) ) {
+        return;
+    }
+    $key    = 'op_login_' . $token;
+    $stored = get_site_transient( $key );
+    if ( false === $stored || ! delete_site_transient( $key ) ) {
         return;
     }
 
-    delete_transient( 'op_login_' . $token );
+    if ( ! is_array( $stored ) || empty( $stored['uid'] ) || ! isset( $stored['scope'] )
+        || ! onionpress_auto_login_scope_ok( $stored['scope'] ) ) {
+        return;
+    }
 
-    $user = get_user_by( 'id', (int) $stored );
+    $user = get_user_by( 'id', (int) $stored['uid'] );
     if ( ! $user ) {
         return;
     }

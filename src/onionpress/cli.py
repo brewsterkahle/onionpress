@@ -896,6 +896,12 @@ def main(argv: list[str] = None) -> int:
         "--uploads-dir", required=True,
         help="Path to the staged wp-content/uploads directory")
 
+    p_open_login = sub.add_parser(
+        "open-login",
+        help="Open a localhost or .onion URL of this site in the default "
+             "browser, logged in as the admin (one-time token, never in argv)")
+    p_open_login.add_argument("url", help="e.g. http://localhost:8080/wp-admin/")
+
     sub.add_parser(
         "safe-config",
         help="Print the allowlisted (non-secret) config keys as JSON — "
@@ -1017,6 +1023,16 @@ def main(argv: list[str] = None) -> int:
             print(f"{'changed' if key in changed else 'unchanged'} {key}")
         for key in applied.rejected:
             print(f"rejected {key}")
+        return 0
+
+    if args.command == "open-login":
+        # Needs only docker and a browser: skip OnionPressCLI's setup.
+        from .launcher_ops import open_login
+        try:
+            open_login(args.url)
+        except RuntimeError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
         return 0
 
     # Before OnionPressCLI: its Docker wrapper snapshots os.environ for every

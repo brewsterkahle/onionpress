@@ -2762,23 +2762,16 @@ main() {
 
         dashboard)
             # Open wp-admin in the default browser, auto-logged-in as the first
-            # admin user. Uses the onionpress-auto-login mu-plugin: we drop a
-            # one-shot token transient via WP-CLI and open the URL with it.
-            # Token TTL is 120s and it's deleted on use, so it never lingers.
+            # admin user, through the onionpress-auto-login mu-plugin: a
+            # one-shot token, 120 s TTL, deleted on use. The token is never
+            # on a command line (ps shows every user's): open-login hands it
+            # to WordPress on stdin and gives the browser a 0600 page that
+            # redirects to the login URL (onionpress.auto_login).
             if ! command -v xdg-open >/dev/null 2>&1; then
                 echo "xdg-open not found — open http://localhost:${ONIONPRESS_WP_PORT:-8080}/wp-admin manually."
                 exit 1
             fi
-            # First admin user (typically uid 1)
-            admin_uid=$(docker exec onionpress-wordpress wp user list --role=administrator --field=ID --allow-root 2>/dev/null | head -1)
-            url="http://localhost:${ONIONPRESS_WP_PORT:-8080}/wp-admin/"
-            if [ -n "$admin_uid" ]; then
-                token=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
-                if docker exec onionpress-wordpress wp transient set "op_login_$token" "$admin_uid" 120 --allow-root >/dev/null 2>&1; then
-                    url="http://localhost:${ONIONPRESS_WP_PORT:-8080}/?op_login=$token"
-                fi
-            fi
-            xdg-open "$url" >/dev/null 2>&1 &
+            op_py open-login "http://localhost:${ONIONPRESS_WP_PORT:-8080}/wp-admin/" >/dev/null
             ;;
 
         setup)

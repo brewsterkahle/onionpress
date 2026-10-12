@@ -89,6 +89,7 @@ OPTIONS = {
                  'onionpress.scrub',
                  'onionpress.mac_power',
                  'onionpress.redact',
+                 'onionpress.auto_login',
                  'onionpress.splash_tips'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon

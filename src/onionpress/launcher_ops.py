@@ -10,16 +10,20 @@ in callers.
 
 Operations:
 - open_in_browser(url, prefer_tor)         — launch via xdg-open / open / torbrowser-launcher
+- login_target(base_url) / open_login(...) — auto-login without the token in any argv
 - tor_image_has_mkp224o(image)             — verify the tor image bundles mkp224o
 - generate_vanity_in_container(...)        — docker run mkp224o, write to vanity-keys/
 - get_admin_password(data_dir)             — read ~/.onionpress/wp-admin-password
 """
 
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
 from typing import Optional
+
+from . import auto_login
 
 
 # Pinned to digest. The literal below is propagated from build/image-pins.env
@@ -133,8 +137,24 @@ def _tor_browser_running() -> Optional[str]:
     return None
 
 
+def _launch_default_web_browser(uri: str) -> bool:
+    """Open *uri* (a file:// page) in the default web browser via Gio, True
+    on success. xdg-open would pick the handler for text/html files, which
+    can be an editor; the web browser is the handler for http."""
+    try:
+        from gi.repository import Gio  # python3-gi: a tray dependency
+        app = Gio.AppInfo.get_default_for_uri_scheme("http")
+        return bool(app is not None and app.launch_uris([uri], None))
+    except Exception:
+        return False
+
+
 def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
-    """Spawn a browser at `url`. Detached — does not wait."""
+    """Spawn a browser at `url`. Detached — does not wait.
+
+    `url` lands in a command line, so it must never carry an auto-login
+    token: pass login_target()'s file:// URI instead.
+    """
     cmd: list[str]
     if prefer_tor:
         running = _tor_browser_running()
@@ -167,6 +187,9 @@ def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
     else:
         cmd = ["xdg-open", url]
 
+    if (cmd[0] == "xdg-open" and url.startswith("file://")
+            and _launch_default_web_browser(url)):
+        return
     try:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
@@ -281,47 +304,37 @@ def generate_vanity_in_container(
     return addr
 
 
-def mint_op_login_token(container: str = "onionpress-wordpress",
-                        ttl_seconds: int = 120) -> Optional[str]:
-    """Mint a one-shot magic-link token for auto-login.
+def login_url(base_url: str) -> str:
+    """*base_url* with a one-time auto-login token, or *base_url* when none
+    could be minted. Only for a URL that reaches the browser off any command
+    line (the tray's copy-and-paste dialog); see login_target otherwise."""
+    return auto_login.login_url(base_url) or base_url
 
-    Mirrors `onionpress dashboard` (linux/onionpress:2390) in Python so
-    both Mac and Linux clients can build any localhost-or-.onion URL with
-    `?op_login=<tok>` appended. The `onionpress-auto-login.php` mu-plugin
-    validates the token, sets the auth cookie, deletes the transient,
-    and redirects to the same URL minus the query param.
 
-    Returns the 32-char hex token, or None on any failure (caller should
-    fall back to opening the URL without auto-login).
+def login_target(base_url: str, *, page_dir: Optional[str] = None) -> str:
+    """What to put on a browser's command line to open *base_url* logged in.
+
+    A browser on Linux takes URLs only in its argv, which every local user
+    can read (/proc/<pid>/cmdline), and the token in an auto-login URL is a
+    one-time admin login. So the browser gets the file:// URI of a 0600 page
+    that redirects to the URL (auto_login.write_redirect_page), deleted once
+    the token has expired. *base_url* itself when no token could be minted.
     """
+    url = auto_login.login_url(base_url)
+    if not url:
+        return base_url
     try:
-        # Find the first admin user
-        proc = subprocess.run(
-            ["docker", "exec", container, "wp", "user", "list",
-             "--role=administrator", "--field=ID", "--allow-root"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if proc.returncode != 0:
-            return None
-        admin_uid = proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else ""
-        if not admin_uid.isdigit():
-            return None
-        token = secrets.token_hex(16)  # 32 hex chars
-        # Set transient
-        proc = subprocess.run(
-            ["docker", "exec", container, "wp", "transient", "set",
-             f"op_login_{token}", admin_uid, str(ttl_seconds), "--allow-root"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if proc.returncode != 0:
-            return None
-        return token
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
+        path = auto_login.write_redirect_page(
+            url, page_dir or auto_login.REDIRECT_DIR)
+    except OSError:
+        return base_url
+    auto_login.remove_later(path)
+    return pathlib.Path(path).as_uri()
 
 
-# Lazy import — only needed by mint_op_login_token
-import secrets  # noqa: E402
+def open_login(base_url: str) -> None:
+    """Open *base_url* logged in as the admin (`onionpress dashboard`)."""
+    open_in_browser(login_target(base_url))
 
 
 def signal_watchdog(docker, container: str, sig: str) -> bool:

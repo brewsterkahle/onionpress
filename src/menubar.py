@@ -63,6 +63,7 @@ from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress.power import CaffeineManager
 from onionpress import launcher_ops
+from onionpress import auto_login
 from onionpress import splash_tips
 
 
@@ -3034,42 +3035,24 @@ class OnionPressApp(rumps.App):
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
 
     def _generate_login_url(self, base_url):
-        """Generate a one-time auto-login URL for the admin user.
+        """Return base_url with a one-time auto-login token, or None.
 
-        Creates a random token, stores it as a WordPress transient (2-min TTL)
-        via `wp transient set` (the token is an argument, never PHP code),
-        and returns base_url with ?op_login=TOKEN appended.
-        Falls back to the plain URL if token generation fails.
+        The token reaches WordPress on stdin (auto_login.mint) and the URL
+        must reach the browser through op_browser.open_url, never through a
+        command line: ps shows every user's argv, and whoever redeems the
+        token first is the admin. Log base_url, never the result.
         """
-        try:
-            import secrets as _secrets
-            token = _secrets.token_urlsafe(32)
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            result = subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "transient", "set", f"op_login_{token}", "1", "120",
-                 "--allow-root"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10
-            )
-            if result.returncode == 0:
-                sep = '&' if '?' in base_url else '?'
-                url = f"{base_url}{sep}op_login={token}"
-                self.log("Generated auto-login URL")
-                return url
-            else:
-                self.log(f"Auto-login token failed: {result.stderr[-200:]}")
-        except Exception as e:
-            self.log(f"Auto-login token error: {e}")
-        return base_url
+        return auto_login.login_url(
+            base_url, docker_bin=os.path.join(self.bin_dir, "docker"),
+            log_func=self.log)
 
     def open_local_site(self, _):
         """Open the local WordPress site in the default browser"""
         name = self.read_config_value("ONIONNAME", "")
         local_base = f"{self.local_url}/{name}/" if name else self.local_url
-        url = self._generate_login_url(local_base)
-        subprocess.run(["open", url])
-        self.log(f"Opened local site: {url}")
+        op_browser.open_url(self._generate_login_url(local_base) or local_base,
+                            log_func=self.log)
+        self.log(f"Opened local site: {local_base}")
 
     def monitor_tor_browser_install(self):
         """Monitor for Tor Browser installation and offer to open site when detected."""
@@ -3077,7 +3060,9 @@ class OnionPressApp(rumps.App):
             "Tor Browser",
             op_browser.TOR_BROWSER_PATH,
             "Contents/MacOS/firefox",
-            lambda url: subprocess.run(["open", "-a", op_browser.TOR_BROWSER_PATH, url]),
+            lambda url: op_browser.open_url(
+                self._generate_login_url(url) or url, op_browser.TOR_BROWSER_PATH,
+                self.log),
         )
 
     def monitor_brave_install(self):
@@ -3086,6 +3071,8 @@ class OnionPressApp(rumps.App):
             "Brave Browser",
             op_browser.BRAVE_BROWSER_PATH,
             "Contents/MacOS/Brave Browser",
+            # No auto-login token: Brave's Tor window takes the URL only on
+            # its command line, which every local user can read.
             lambda url: subprocess.run([
                 os.path.join(op_browser.BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser"),
                 "--tor", url]),
@@ -3121,9 +3108,8 @@ class OnionPressApp(rumps.App):
                     style="informational"
                 )
                 if button_index == 0:
-                    login_url = self._generate_login_url(url)
-                    open_func(login_url)
-                    self.log(f"Opened site in {name}: {login_url}")
+                    open_func(url)
+                    self.log(f"Opened site in {name}: {url}")
             except Exception as e:
                 self.log(f"Error showing {name} ready dialog: {e}")
 
@@ -3144,8 +3130,8 @@ class OnionPressApp(rumps.App):
         """Open the onion address in the best available browser."""
         base = self._onion_url()
         if base:
-            url = self._generate_login_url(base)
-            if not op_browser.open_onion_url(url, self.app_support, self.log):
+            if not op_browser.open_onion_url(base, self.app_support, self.log,
+                                             add_login=self._generate_login_url):
                 self.show_browser_install_dialog()
         else:
             rumps.alert("Onion address not available yet. Please wait for the service to start.")
@@ -3206,12 +3192,14 @@ class OnionPressApp(rumps.App):
             self.log("WARNING: Onion service not reachable after 90s, opening browser anyway")
 
         if self.onion_address and self.onion_address not in ["Starting...", "Not running", "Generating address..."]:
-            base = self._onion_url() or f"http://{self.onion_address}/"
-            url = self._generate_login_url(base)
+            # The auto-login token goes only to browsers that get the URL
+            # through LaunchServices (op_browser.open_url); logs get url.
+            url = self._onion_url() or f"http://{self.onion_address}/"
 
             if op_browser.is_tor_browser_installed():
                 self.log(f"Auto-opening Tor Browser: {url}")
-                subprocess.run(["open", "-a", "Tor Browser", url])
+                op_browser.open_url(self._generate_login_url(url) or url,
+                                    op_browser.TOR_BROWSER_PATH, self.log)
             else:
                 # Wait for the onion proxy to start
                 for i in range(15):
@@ -3235,9 +3223,11 @@ class OnionPressApp(rumps.App):
                         self.log("Extension active, opening .onion URL")
                     else:
                         self.log("Extension did not poll within 30s, opening .onion URL anyway")
-                    subprocess.run(["open", "-a", ext_browser, url])
+                    op_browser.open_url(self._generate_login_url(url) or url,
+                                        ext_browser, self.log)
                     subprocess.run(["osascript", "-e", f'tell application "{ext_browser}" to activate'])
                 elif op_browser.is_brave_installed():
+                    # Without a token: see op_browser.open_onion_url.
                     self.log(f"Auto-opening Brave Browser (Tor mode): {url}")
                     brave_exe = os.path.join(op_browser.BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser")
                     subprocess.run([brave_exe, "--tor", url])

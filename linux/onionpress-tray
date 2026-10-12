@@ -1414,14 +1414,7 @@ class OnionPressTray:
         """
         def _on_done(success):
             if success:
-                url = self._build_login_url(f"http://localhost:{self.status.wp_port}/")
-                if launcher_ops is not None:
-                    launcher_ops.open_in_browser(url)
-                else:
-                    subprocess.Popen(
-                        ["xdg-open", url],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
+                self._open_logged_in(f"http://localhost:{self.status.wp_port}/")
             else:
                 # Mirror the Mac menubar: keep re-showing the dialog
                 # until setup succeeds. There's no "Setup…" menu item
@@ -1527,28 +1520,24 @@ class OnionPressTray:
             text=url,
         )
 
-    def _build_login_url(self, base_url: str) -> str:
-        """Append a freshly-minted op_login token to base_url for auto-login.
-        Falls back to plain base_url if token minting fails (e.g. wp_user
-        list takes too long, transient set errors)."""
-        if launcher_ops is None:
-            return base_url
-        tok = launcher_ops.mint_op_login_token()
-        if not tok:
-            return base_url
-        sep = "&" if "?" in base_url else "?"
-        return f"{base_url}{sep}op_login={tok}"
+    def _open_logged_in(self, base_url: str) -> None:
+        """Open base_url in the default browser, logged in as the admin.
 
-    def _on_open_settings(self, *_):
-        url = self._build_login_url(
-            f"http://localhost:{self.status.wp_port}/wp-admin/admin.php?page=onionpress-settings")
-        if launcher_ops is not None:
-            launcher_ops.open_in_browser(url)
-        else:
+        The browser's command line gets a file:// page that redirects to
+        base_url with a one-time token (launcher_ops.login_target), never
+        the token itself: /proc/<pid>/cmdline is readable by every local
+        user, and whoever redeems the token first is the admin."""
+        if launcher_ops is None:
             subprocess.Popen(
-                ["xdg-open", url],
+                ["xdg-open", base_url],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
+            return
+        launcher_ops.open_in_browser(launcher_ops.login_target(base_url))
+
+    def _on_open_settings(self, *_):
+        self._open_logged_in(
+            f"http://localhost:{self.status.wp_port}/wp-admin/admin.php?page=onionpress-settings")
 
     def _on_open_local(self, *_):
         # Include /<onionname>/ so localhost takes the user to their
@@ -1562,18 +1551,11 @@ class OnionPressTray:
         # No trailing slash on the subsite path — sunrise.php's subsite
         # router (preg_match '#^/([^/]+)/#') only matches with BOTH
         # leading and trailing slashes, so /<name> (no trailing slash)
-        # routes to blog_id=1 on first hit, where the op_login plugin
-        # can find the transient. Matches Mac's URL shape exactly.
+        # routes to blog_id=1 on first hit. (The op_login token is a
+        # network-wide transient now, found from any subsite.)
         base = (f"http://localhost:{self.status.wp_port}/{name}"
                 if name else f"http://localhost:{self.status.wp_port}/")
-        url = self._build_login_url(base)
-        if launcher_ops is not None:
-            launcher_ops.open_in_browser(url)
-        else:
-            subprocess.Popen(
-                ["xdg-open", url],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+        self._open_logged_in(base)
 
     def _on_open_onion(self, *_):
         addr = self.status.onion_address
@@ -1591,11 +1573,10 @@ class OnionPressTray:
             name = ""
         # See _on_open_local for the no-trailing-slash rationale.
         base = f"http://{addr}/{name}" if name else f"http://{addr}/"
-        url = self._build_login_url(base)
 
         if launcher_ops is None:
             subprocess.Popen(
-                ["xdg-open", url],
+                ["xdg-open", base],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return
@@ -1613,9 +1594,11 @@ class OnionPressTray:
         # window DOES own the clipboard, with the URL pre-selected and a
         # Copy button. The auto-login token in the URL is honoured by
         # the onionpress-auto-login.php mu-plugin once pasted.
+        # The dialog shows the token-bearing URL itself: it reaches Tor
+        # Browser by paste, on no command line.
         existing = launcher_ops._tor_browser_running()
         if existing:
-            self._show_url_copy_dialog(url)
+            self._show_url_copy_dialog(launcher_ops.login_url(base))
             return
 
         # Already mid-launch from a previous click? Don't kick off a
@@ -1654,8 +1637,9 @@ class OnionPressTray:
         # tab itself will reload after Tor finishes bootstrapping.
         import shutil as _sh
         if not _sh.which("torbrowser-launcher"):
-            # Fall back to whatever xdg-open routes the .onion to.
-            launcher_ops.open_in_browser(url, prefer_tor=False)
+            # Fall back to whatever the default browser makes of the .onion.
+            launcher_ops.open_in_browser(launcher_ops.login_target(base),
+                                         prefer_tor=False)
             return
 
         # Clean up stale lock files from a previous Tor Browser session
@@ -1697,13 +1681,16 @@ class OnionPressTray:
                         # native "already running" dialog. -new-tab via
                         # the wrapper takes effect even while Tor is
                         # still bootstrapping — the tab waits for the
-                        # circuit and then loads.
+                        # circuit and then loads. The tab gets the
+                        # login_target page, minted now so the token's two
+                        # minutes start when the browser is there to use it.
+                        target = launcher_ops.login_target(base)
                         wrapper = os.path.join(
                             os.path.dirname(fr), "start-tor-browser")
                         if os.path.exists(wrapper) and os.access(wrapper, os.X_OK):
-                            cmd = [wrapper, "-new-tab", url]
+                            cmd = [wrapper, "-new-tab", target]
                         else:
-                            cmd = [fr, "-new-tab", url]
+                            cmd = [fr, "-new-tab", target]
                         try:
                             subprocess.Popen(
                                 cmd,

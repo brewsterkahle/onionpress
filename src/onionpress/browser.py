@@ -85,25 +85,96 @@ def browser_menu_title(app_support):
     return "Open in Browser"
 
 
-def open_onion_url(url, app_support, log_func):
+# Bundle identifiers for browsers that are not at /Applications/<name>.app.
+_BUNDLE_IDS = {
+    "Tor Browser": "org.torproject.torbrowser",
+    "Firefox": "org.mozilla.firefox",
+    "Google Chrome": "com.google.Chrome",
+    "Brave Browser": "com.brave.Browser",
+    "Microsoft Edge": "com.microsoft.edgemac",
+    "Safari": "com.apple.Safari",
+}
+
+
+def _app_url(AppKit, app):
+    """NSURL of *app* (an .app path, or a name like "Tor Browser"), or None."""
+    if app.endswith(".app"):
+        candidates = [app]
+    else:
+        candidates = [os.path.join(d, f"{app}.app") for d in
+                      ("/Applications", os.path.expanduser("~/Applications"))]
+    for path in candidates:
+        if os.path.isdir(path):
+            return AppKit.NSURL.fileURLWithPath_(path)
+    bundle_id = _BUNDLE_IDS.get(app)
+    if bundle_id:
+        return AppKit.NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(bundle_id)
+    return None
+
+
+def open_url(url, app=None, log_func=None):
+    """Open *url* in *app* (an .app path or a name such as "Tor Browser"), or
+    in the default browser, the way `open [-a app] url` does: through
+    LaunchServices. But from this process: `open` would carry the URL in its
+    argv, which `ps` shows to every user of the Mac, and an auto-login URL
+    holds a one-time admin token (auto_login.py). LaunchServices hands the
+    URL to the browser as an Apple Event, never on a command line.
+
+    Runs on the main thread (dispatched there when called from another), so
+    it returns before the browser is asked; failures are logged.
+    """
+    import AppKit
+
+    def _open():
+        try:
+            ns_url = AppKit.NSURL.URLWithString_(url)
+            ws = AppKit.NSWorkspace.sharedWorkspace()
+            app_url = _app_url(AppKit, app) if app else None
+            if ns_url is None or (app and app_url is None):
+                ok = False
+            elif app_url is None:
+                ok = bool(ws.openURL_(ns_url))
+            else:
+                ws.openURLs_withApplicationAtURL_configuration_completionHandler_(
+                    [ns_url], app_url,
+                    AppKit.NSWorkspaceOpenConfiguration.configuration(), None)
+                ok = True
+        except Exception as e:  # never let it escape into the run loop
+            ok = False
+            if log_func:
+                log_func(f"Opening {app or 'the browser'} failed: {type(e).__name__}")
+            return
+        if not ok and log_func:
+            log_func(f"Could not open {app or 'the default browser'}")
+
+    if AppKit.NSThread.isMainThread():
+        _open()
+    else:
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_open)
+
+
+def open_onion_url(url, app_support, log_func, add_login=None):
     """Open a .onion URL in the best available browser.
+
+    *add_login(url)* returns *url* with a one-time auto-login token, or None.
+    It is called only for browsers that get the URL through LaunchServices
+    (open_url). Brave's Tor window is reachable only through Brave's command
+    line, where every local user could read the token, so Brave gets *url*
+    as it is: the site opens, not logged in. Logs never carry the token.
 
     Returns True if a browser was found and opened, False if no browser available.
     """
     btype, bname = detect_best_browser(app_support)
 
-    if btype == 'extension':
-        subprocess.run(["open", "-a", bname, url])
-        log_func(f"Opened {url} in {bname} (extension)")
-        return True
     if btype == 'brave':
         brave_exe = os.path.join(BRAVE_BROWSER_PATH, "Contents", "MacOS", "Brave Browser")
         subprocess.run([brave_exe, "--tor", url])
         log_func(f"Opened {url} in Brave Browser (Tor mode)")
         return True
-    if btype == 'tor_browser':
-        subprocess.run(["open", "-a", "Tor Browser", url])
-        log_func(f"Opened {url} in Tor Browser")
+    if btype in ('extension', 'tor_browser'):
+        app = TOR_BROWSER_PATH if btype == 'tor_browser' else bname
+        open_url((add_login(url) if add_login else None) or url, app, log_func)
+        log_func(f"Opened {url} in {bname}" + (" (extension)" if btype == 'extension' else ""))
         return True
 
     return False
