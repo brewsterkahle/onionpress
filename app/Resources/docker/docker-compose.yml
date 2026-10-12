@@ -1,3 +1,31 @@
+# Every service drops NET_RAW and runs with no-new-privileges, and so do the
+# takeover workers the onionheaven container starts (onionheaven_common's
+# _spawn_worker). tests/test_container_capabilities.py enforces both.
+#
+# NET_RAW: auto-login's "local" scope and /__op_proxy.php admit loopback and
+# the onionpress-network gateway by source address. With NET_RAW, root in
+# any container on the network (the onion-facing tor container, WordPress)
+# could ARP-spoof the gateway or forge its packets. Without it, and without
+# NET_ADMIN (Docker does not grant it and no service adds it), a container
+# sends from its own address only: IP_FREEBIND can name another source, but
+# the replies go to that address's real owner, so no TCP connection
+# completes from it. Nothing here needs raw sockets: no ping anywhere, and
+# tor, socat, nc, curl, Apache, MariaDB, cloudflared and autoheal speak TCP,
+# UDP and unix sockets.
+#
+# no-new-privileges: no setuid or file-capability binary raises a process
+# above what it started with. Every privilege drop here is root calling
+# setuid() itself, which it leaves alone: the tor image's entrypoint runs
+# `su` as root, MariaDB's entrypoint uses gosu (not setuid), Apache's root
+# parent drops its children to www-data. What it stops is a compromised
+# debian-tor, www-data or mysql process climbing back to root through su,
+# mount, passwd or any other setuid binary in an image.
+#
+# autoheal and cloudflared drop every capability; neither uses one (see
+# each). The others keep Docker's remaining defaults: as root, their
+# entrypoints chown volumes, traverse other users' 0700 directories, switch
+# users and signal other users' processes, and su runs PAM, which writes
+# audit records. A narrower set for them needs a live test first.
 services:
   tor:
     image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9}
@@ -38,6 +66,10 @@ services:
     depends_on:
       - wordpress
     restart: unless-stopped
+    cap_drop:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
     networks:
       - onionpress-network
     # Tor's SOCKS port is for this machine only, on every platform: it is
@@ -106,6 +138,10 @@ services:
     depends_on:
       - db
     restart: unless-stopped
+    cap_drop:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
     networks:
       - onionpress-network
     # No DNS outside Docker. Docker's resolver (127.0.0.11) still answers for
@@ -142,6 +178,10 @@ services:
     volumes:
       - db-data:/var/lib/mysql
     restart: unless-stopped
+    cap_drop:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
     networks:
       - onionpress-network
     # No DNS outside Docker, as for wordpress above: MariaDB has nothing to
@@ -176,6 +216,15 @@ services:
     volumes:
       - autoheal-proxy:/run/autoheal-proxy
     network_mode: none
+    # No capability at all: a shell script running curl and jq as root, with
+    # no network, writing no files and switching no user. Its one resource
+    # is autoheal-proxy's socket, which the proxy (also uid 0) creates mode
+    # 0600: the owner's own permission, not DAC_OVERRIDE. The image's
+    # HEALTHCHECK (pgrep) reads /proc, which needs none either.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       - autoheal-proxy
     restart: unless-stopped
@@ -248,6 +297,10 @@ services:
       - onionheaven-data:/var/lib/onionheaven
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     restart: unless-stopped
+    cap_drop:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
     networks:
       - onionpress-network
 

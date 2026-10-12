@@ -393,6 +393,9 @@ class ContainerManager:
             "--ulimit", "nofile=10000:10000",
             "--log-opt", "max-size=10m",
             "--log-opt", "max-file=3",
+            # The same hardening as _spawn_worker and every compose service.
+            "--cap-drop", "NET_RAW",
+            "--security-opt", "no-new-privileges:true",
             "-e", f"TZ={os.environ.get('TZ', 'UTC')}",
             "-e", "TAKEOVER_WORKER=1",
             "-e", f"CONTAINER_NAME={name}",

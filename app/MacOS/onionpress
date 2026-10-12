@@ -374,7 +374,9 @@ fi
 # via farm_scale_requests in the registry DB.
 ONIONHEAVEN_FARM_MONITOR_PID=""
 
-# Start a single takeover worker container
+# Start a single takeover worker container. Nothing calls this today (the
+# onionheaven container spawns workers, onionheaven_common._spawn_worker);
+# it keeps the same mount and hardening flags in case something does.
 _start_takeover_worker() {
     local idx="$1"
     local name="onionheaven-takeover-${idx}"
@@ -387,6 +389,8 @@ _start_takeover_worker() {
         --ulimit nofile=10000:10000 \
         --log-opt max-size=10m \
         --log-opt max-file=3 \
+        --cap-drop NET_RAW \
+        --security-opt no-new-privileges:true \
         -e TZ="${TZ:-UTC}" \
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \

@@ -472,6 +472,13 @@ def _spawn_worker(conn):
              "--name", name,
              "--network", "onionpress-network",
              "--ulimit", "nofile=10000:10000",
+             # As every compose service (docker-compose.yml's header): no
+             # raw packets on onionpress-network, where WordPress admits
+             # the gateway's address, and no setuid way back to root. The
+             # entrypoint drops to debian-tor with su as root, which
+             # no-new-privileges leaves alone.
+             "--cap-drop", "NET_RAW",
+             "--security-opt", "no-new-privileges:true",
              "-e", f"TZ={tz}",
              "-e", "TAKEOVER_WORKER=1",
              "-e", f"CONTAINER_NAME={name}",

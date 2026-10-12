@@ -291,6 +291,27 @@
   proxy or talk only to a container. `tests/test_no_clearnet_dns.py` (PHP
   harness with the lookup functions disabled; plugin census).
 
+## Containers Drop NET_RAW
+- Auto-login's "local" scope and `/__op_proxy.php` admit loopback and the
+  onionpress-network gateway by source address, so no container may forge
+  packets on that network: every compose service (both compose files) has
+  `cap_drop: [NET_RAW]` (or `ALL`) and `security_opt: [no-new-privileges:true]`,
+  and so does every takeover-worker `docker run` (`_spawn_worker` in
+  onionheaven_common.py, plus the unused `start_farm_worker` and the Mac
+  launcher's `_start_takeover_worker`). Write them block style;
+  `tests/test_container_capabilities.py` reads them line by line.
+- no-new-privileges blocks setuid binaries, not root calling setuid(): the
+  tor image starts as root and drops with `su` (from root only), MariaDB
+  uses gosu, Apache drops its own children. Never make a non-root process
+  call su or sudo in these images; the test keeps a census of su callers.
+- autoheal, autoheal-proxy and cloudflared drop ALL (none uses a
+  capability). tor, wordpress, db and onionheaven keep Docker's other
+  defaults: their root entrypoints chown, cross other users' 0700
+  directories, switch users and signal other users' processes, and su's PAM
+  writes audit records (AUDIT_WRITE). Narrow those only after a live test.
+- Nothing in the images uses raw sockets (no ping, arping, SOCK_RAW); a
+  healthcheck or tool that needs one has to get past the same test.
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

@@ -208,6 +208,10 @@ container that holds the socket. Bump it like a Dockerfile input:
 proxy passes only the two calls autoheal's script makes; if a new autoheal
 calls anything else, the proxy refuses it and logs a WARN line
 (`docker logs onionpress-autoheal-proxy`). See `docs/DOCKER-SOCKET.md`.
+autoheal also runs with every capability dropped: it reaches the proxy's
+0600 socket as its owner, uid 0. A new autoheal that ran as another user,
+or needed a capability, would fail to reach the proxy (see
+`docker logs onionpress-autoheal`).
 
 Two more references are deliberately left as bare tags, and one carries no
 image reference at all; `tests/test_image_pins.py` asserts they stay that
