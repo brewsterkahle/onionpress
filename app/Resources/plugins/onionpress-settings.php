@@ -1188,10 +1188,12 @@ function onionpress_settings_page() {
         <p style="margin-bottom: 16px; font-size: 14px;">
             <span class="onionpress-state-dot" style="background:<?php echo esc_attr( $state_color ); ?>"></span>
             <strong><?php echo esc_html( ucfirst( $state ) ); ?></strong>
-            <?php if ( $onion_address && strpos( $onion_address, '.onion' ) !== false ) : ?>
+            <?php if ( preg_match( '/^[a-z2-7]{56}\.onion$/D', (string) $onion_address ) ) : ?>
                 &mdash; <?php
+                    // The link is <address>/<onionname>/: both parts are
+                    // checked, so neither can turn it into another host.
                     $display_url = $onion_address;
-                    if ( $onionname ) {
+                    if ( $onionname && preg_match( '/^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/D', (string) $onionname ) ) {
                         $display_url .= '/' . $onionname;
                     }
                 ?><a href="http://<?php echo esc_attr( $display_url ); ?>/" style="font-size:12px;font-family:monospace;color:#8b5cf6;"><?php echo esc_html( $display_url ); ?></a>

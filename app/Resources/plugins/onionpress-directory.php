@@ -182,6 +182,13 @@ function onionpress_directory_lookup( $name ) {
     if ( ! is_array( $data ) || empty( $data['onionaddress'] ) ) {
         return null;
     }
+    // The address becomes a redirect target and a link (here and on the
+    // clearnet face): a whole v3 onion address, or no answer at all.
+    $addr = strtolower( (string) $data['onionaddress'] );
+    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ) {
+        return null;
+    }
+    $data['onionaddress'] = $addr;
     return $data;
 }
 

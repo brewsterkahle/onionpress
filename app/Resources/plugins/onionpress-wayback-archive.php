@@ -145,7 +145,10 @@ function onionpress_wayback_onion_addr() {
     if ( ! file_exists( $f ) ) {
         return '';
     }
-    return trim( (string) @file_get_contents( $f ) );
+    // The address is the host of every URL sent to the Save Page Now API:
+    // a whole v3 onion address or nothing.
+    $addr = strtolower( trim( (string) @file_get_contents( $f ) ) );
+    return preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ? $addr : '';
 }
 
 function onionpress_wayback_post_url( $post_id ) {

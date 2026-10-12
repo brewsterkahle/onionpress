@@ -14,7 +14,12 @@ if (function_exists('onionpress_follow_get_own_address')) {
     $onion_addr = onionpress_follow_get_own_address();
 }
 if (!$onion_addr) {
-    $onion_addr = isset($_GET['address']) ? sanitize_text_field($_GET['address']) : '';
+    // From the query string: shown, put in a QR code and linked, so only a
+    // whole v3 onion address, never a host of the visitor's choosing.
+    $onion_addr = isset($_GET['address']) ? strtolower(trim((string) wp_unslash($_GET['address']))) : '';
+    if (!preg_match('/^[a-z2-7]{56}\.onion$/D', $onion_addr)) {
+        $onion_addr = '';
+    }
 }
 
 $site_name = get_bloginfo('name');
