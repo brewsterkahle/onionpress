@@ -203,6 +203,12 @@
 - The OnionPress menu stays on every site for its administrators; a subsite
   administrator's page shows only Following, which lives in that site's
   options.
+- Same rule (`is_super_admin()`) for the other shared state: the onboarding
+  wizard (network-wide `onionpress_onboarded`), the Wayback page and its
+  actions (the sweep archives every site with the owner's archive.org
+  account), the blog importer's WXR snapshots and the My Creations upload
+  (both write into the owner's `~/OnionPress/Creations`; `upload_files` is
+  per-site too). The social importers stay per-site on `manage_options`.
 - `tests/test_settings_owner_only.py` enforces it, including a census: only
   the owner-gated settings and status plugins name host action files in
   `/var/lib/onionpress/`.

@@ -49,9 +49,18 @@ function onionpress_onboarding_maybe_redirect() {
 
 /**
  * Register the wizard as a hidden admin page (no parent → not in menu).
+ *
+ * The owner's only: it is the install's first run (the password step is
+ * about the install's generated admin password), and finishing or skipping
+ * it sets the network-wide onionpress_onboarded. A subsite administrator
+ * has manage_options on their own site, so the page is not registered for
+ * them at all.
  */
 add_action( 'admin_menu', 'onionpress_onboarding_register_page' );
 function onionpress_onboarding_register_page() {
+    if ( ! is_super_admin() ) {
+        return;
+    }
     add_submenu_page(
         '',                              // no parent — hidden
         'OnionPress Setup',
@@ -110,10 +119,16 @@ function onionpress_onboarding_finish() {
  * Wizard controller.
  */
 function onionpress_onboarding_render() {
+    if ( ! is_super_admin() ) {
+        wp_die( 'Only the owner of this OnionPress can run its setup.', 'Forbidden', array( 'response' => 403 ) );
+    }
+
     $step = max( 1, min( 4, (int) ( $_REQUEST['op_step'] ?? 1 ) ) );
 
-    // Skip-everything escape hatch
+    // Skip-everything escape hatch. A GET that changes network-wide state,
+    // so the link carries a nonce.
     if ( isset( $_GET['op_skip'] ) ) {
+        check_admin_referer( 'onionpress-onboarding-skip' );
         onionpress_onboarding_finish();
     }
 
@@ -180,7 +195,7 @@ function onionpress_onboarding_render() {
         .op-wiz .op-skip:hover { color:#6b7280; }
     </style>
     <div class="op-wiz">
-        <a class="op-skip" href="<?php echo esc_url( admin_url( 'admin.php?page=onionpress-onboarding&op_skip=1' ) ); ?>">skip setup</a>
+        <a class="op-skip" href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin.php?page=onionpress-onboarding&op_skip=1' ), 'onionpress-onboarding-skip' ) ); ?>">skip setup</a>
         <div class="op-steps">
             <?php
             $names = array( 'Welcome', 'Site', 'Password', 'Done' );

@@ -264,10 +264,14 @@ function onionpress_blog_import_page() {
             $notice = onionpress_blog_reset_cursors();
         } elseif ( isset( $_POST['onionpress_blog_upload_wxr'] ) ) {
             check_admin_referer( 'onionpress_blog_upload_wxr', 'onionpress_blog_wxr_nonce' );
-            $notice = onionpress_blog_handle_wxr_upload();
+            $notice = onionpress_blog_snapshots_allowed()
+                ? onionpress_blog_handle_wxr_upload()
+                : onionpress_blog_snapshots_refused();
         } elseif ( isset( $_POST['onionpress_blog_delete_wxr'] ) ) {
             check_admin_referer( 'onionpress_blog_delete_wxr', 'onionpress_blog_wxr_delete_nonce' );
-            $notice = onionpress_blog_handle_wxr_delete();
+            $notice = onionpress_blog_snapshots_allowed()
+                ? onionpress_blog_handle_wxr_delete()
+                : onionpress_blog_snapshots_refused();
         }
     }
 
@@ -422,6 +426,10 @@ function onionpress_blog_import_page() {
         <?php endif; ?>
 
         <h2 style="margin-top:2em;">Archival snapshot (WXR upload)</h2>
+        <?php if ( ! onionpress_blog_snapshots_allowed() ) : ?>
+        <p>Snapshots are kept in the My Creations folder of the owner of this
+           OnionPress, so only the owner can upload, download or delete them.</p>
+        <?php else : ?>
         <p>The REST import above produces a normalized <em>reading copy</em>.
            For lossless archival fidelity, export a full WXR from the source
            blog's <code>wp-admin → Tools → Export</code> and upload it here.
@@ -446,6 +454,7 @@ function onionpress_blog_import_page() {
         </form>
 
         <?php onionpress_blog_render_snapshots(); ?>
+        <?php endif; ?>
 
         <?php if ( $host ) : ?>
             <h2 style="margin-top:2em;">Recent imports</h2>
@@ -1250,6 +1259,23 @@ function onionpress_blog_run_edits_pass( $host, $deadline ) {
 const ONIONPRESS_BLOG_SNAPSHOTS_ROOT = '/var/www/html/wp-content/creations/blog-archives';
 
 /**
+ * Whether the current user may list, upload, download or delete snapshots.
+ *
+ * The snapshots dir is one folder for the whole network, inside the owner's
+ * ~/OnionPress/Creations on the host, whichever site a snapshot came from.
+ * A subsite administrator has manage_options on their own site only, so
+ * the snapshots are the network super admin's (the owner's). The REST
+ * import itself writes only the current site's posts and stays per-site.
+ */
+function onionpress_blog_snapshots_allowed() {
+    return is_super_admin();
+}
+
+function onionpress_blog_snapshots_refused() {
+    return array( 'level' => 'error', 'message' => 'Only the owner of this OnionPress can change the stored snapshots.' );
+}
+
+/**
  * Return the canonical (realpath-resolved) snapshots dir for a given
  * host, creating it if it doesn't exist. Returns '' if the root mount
  * isn't writable (i.e. the Creations bind-mount isn't in place).
@@ -1402,7 +1428,7 @@ function onionpress_blog_handle_wxr_delete() {
  * webroot — downloads always go through this handler.
  */
 function onionpress_blog_serve_wxr_download() {
-    if ( ! current_user_can( 'manage_options' ) ) {
+    if ( ! current_user_can( 'manage_options' ) || ! onionpress_blog_snapshots_allowed() ) {
         wp_die( 'Unauthorized', 'OnionPress', array( 'response' => 403 ) );
     }
     check_admin_referer( 'onionpress_blog_download_wxr' );
@@ -1434,6 +1460,9 @@ function onionpress_blog_serve_wxr_download() {
  * Render the list of existing snapshots, grouped by host.
  */
 function onionpress_blog_render_snapshots() {
+    if ( ! onionpress_blog_snapshots_allowed() ) {
+        return;
+    }
     $root = ONIONPRESS_BLOG_SNAPSHOTS_ROOT;
     if ( ! is_dir( $root ) ) {
         echo '<p><em>No snapshots yet.</em></p>';

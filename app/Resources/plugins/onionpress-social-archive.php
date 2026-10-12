@@ -356,7 +356,10 @@ function onionpress_social_archive_dashboard() {
                             <?php endif; ?>
                         </td>
                         <td>
-                            <a href="<?php echo esc_url( $wb_details ); ?>" class="button">Details</a>
+                            <?php // The Wayback page is the owner's (onionpress-wayback-archive.php). ?>
+                            <?php if ( is_super_admin() ) : ?>
+                                <a href="<?php echo esc_url( $wb_details ); ?>" class="button">Details</a>
+                            <?php endif; ?>
                         </td>
                     </tr>
                 <?php endif; ?>

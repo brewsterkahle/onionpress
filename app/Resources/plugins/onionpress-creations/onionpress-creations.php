@@ -92,15 +92,29 @@ class OnionPress_Creations {
     }
 
     /**
+     * Whether the current user may upload into My Creations.
+     *
+     * CREATIONS_DIR is one folder for the whole network: the owner's
+     * ~/OnionPress/Creations/My Creations on the host, published on every
+     * site and served from this origin. upload_files is a per-site
+     * capability that every subsite's authors and administrators hold, so
+     * it cannot decide who writes into the owner's folder; the network's
+     * super admin (the owner; on a single site, an administrator) can.
+     */
+    public static function can_upload() {
+        return is_user_logged_in() && is_super_admin();
+    }
+
+    /**
      * Handle file uploads from the My Creations page.
-     * Requires upload_files capability and a valid nonce. Skips dotfiles;
+     * Requires can_upload() and a valid nonce. Skips dotfiles;
      * refuses BLOCKED_EXT_RE types and tells the uploader which ones.
      */
     public function handle_upload() {
         if (empty($_FILES['creations_upload']) || empty($_POST['creations_upload_nonce'])) {
             return;
         }
-        if (!current_user_can('upload_files')) {
+        if (!self::can_upload()) {
             return;
         }
         if (!wp_verify_nonce($_POST['creations_upload_nonce'], 'creations_upload')) {

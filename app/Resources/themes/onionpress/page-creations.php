@@ -18,7 +18,7 @@ $page_url = get_permalink();
 <article class="post">
     <h1 class="post-title"><?php the_title(); ?></h1>
 
-    <?php if (current_user_can('upload_files')) : ?>
+    <?php if (class_exists('OnionPress_Creations') && OnionPress_Creations::can_upload()) : ?>
         <div class="creations-upload">
             <form method="post" enctype="multipart/form-data" id="creations-upload-form">
                 <?php wp_nonce_field('creations_upload', 'creations_upload_nonce'); ?>
@@ -72,7 +72,7 @@ $page_url = get_permalink();
     <?php if (empty($contents['folders']) && empty($contents['files'])) : ?>
         <div class="creations-empty">
             <p>No creations yet.</p>
-            <?php if (current_user_can('upload_files')) : ?>
+            <?php if (class_exists('OnionPress_Creations') && OnionPress_Creations::can_upload()) : ?>
                 <p>Upload files above or drop them into <code>~/OnionPress/Creations/My Creations/</code></p>
             <?php endif; ?>
         </div>

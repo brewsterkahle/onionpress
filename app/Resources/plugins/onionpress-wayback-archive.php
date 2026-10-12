@@ -1374,9 +1374,12 @@ add_action( 'init', function () {
  * surface it where the admin will actually see it. Only shown once the
  * site has published posts, so a fresh install whose background key
  * fetch is still in flight doesn't flash a false alarm.
+ *
+ * The credentials are the main site's and only the owner can set them, so
+ * only the owner is told.
  */
 add_action( 'admin_notices', function () {
-    if ( ! current_user_can( 'manage_options' ) ) {
+    if ( ! is_super_admin() ) {
         return;
     }
     $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
@@ -1398,8 +1401,16 @@ add_action( 'admin_notices', function () {
  * Register a Wayback admin submenu under the Social Archive top-level
  * menu. Uses late priority (20) so the Social Archive plugin has
  * registered the parent menu first.
+ *
+ * The owner's only: the sweep archives every site in the network with the
+ * owner's archive.org account, and the page's actions restart it and clear
+ * its back-off from Save Page Now. A subsite administrator, who has
+ * manage_options on their own site, does not get the page.
  */
 add_action( 'admin_menu', function () {
+    if ( ! is_super_admin() ) {
+        return;
+    }
     if ( ! defined( 'ONIONPRESS_SOCIAL_ADMIN_SLUG' ) ) {
         // Social Archive plugin not loaded — fall back to a top-level menu.
         add_menu_page(
@@ -1428,7 +1439,7 @@ add_action( 'admin_menu', function () {
  * Registered before admin_menu render so redirects fire cleanly.
  */
 add_action( 'admin_post_onionpress_wayback_action', function () {
-    if ( ! current_user_can( 'manage_options' ) ) {
+    if ( ! is_super_admin() ) {
         wp_die( 'Forbidden', 403 );
     }
     check_admin_referer( 'onionpress_wayback_action' );
@@ -1479,6 +1490,9 @@ add_action( 'admin_post_onionpress_wayback_action', function () {
 } );
 
 function onionpress_wayback_admin_page() {
+    if ( ! is_super_admin() ) {
+        wp_die( 'Forbidden', 403 );
+    }
     $totals        = onionpress_wayback_queue_totals();
     $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
     $backoff_secs  = max( 0, $backoff_until - time() );

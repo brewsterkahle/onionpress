@@ -17,6 +17,12 @@ admin; on a single site it means an administrator). A subsite administrator
 still gets the OnionPress menu, showing only the site's Following list,
 which lives in that site's own options.
 
+The same rule now covers the other places a subsite administrator or author
+reached shared state: the onboarding wizard (network-wide
+onionpress_onboarded), the Wayback page (the sweep archives every site with
+the owner's archive.org account), the blog importer's WXR snapshots and the
+My Creations upload (both write into the owner's ~/OnionPress/Creations).
+
 There is no PHP in the test environment, so these read the source.
 """
 
@@ -27,6 +33,12 @@ import unittest
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 SETTINGS = "app/Resources/plugins/onionpress-settings.php"
+ONBOARDING = "app/Resources/plugins/onionpress-onboarding.php"
+WAYBACK = "app/Resources/plugins/onionpress-wayback-archive.php"
+SOCIAL = "app/Resources/plugins/onionpress-social-archive.php"
+BLOG = "app/Resources/plugins/onionpress-social-archive-blog.php"
+CREATIONS = "app/Resources/plugins/onionpress-creations/onionpress-creations.php"
+THEME_CREATIONS = "app/Resources/themes/onionpress/page-creations.php"
 
 HOST = "/var/lib/onionpress/"
 OWNER_GATE = "if ( ! onionpress_settings_owner_allowed() )"
@@ -40,6 +52,15 @@ def _read(rel_path):
 def _between(text, start_marker, end_marker):
     start = text.index(start_marker)
     return text[start:text.index(end_marker, start + len(start_marker))]
+
+
+def _body(text, signature):
+    """A function's body: after *signature* (which ends with its opening
+    brace) up to the closing brace at the signature's own indentation."""
+    start = text.index(signature) + len(signature)
+    line_start = text.rindex("\n", 0, text.index(signature)) + 1
+    indent = text[line_start:text.index(signature)]
+    return text[start:text.index("\n" + indent + "}\n", start)]
 
 
 def _blocks(src):
@@ -204,6 +225,124 @@ class TestSettingsPageMenu(unittest.TestCase):
         # The Following form and its handler's nonce are what it carries.
         self.assertIn("wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' )", following)
         self.assertIn("get_option( 'onionpress_following'", following)
+
+
+class TestOnboardingIsTheOwners(unittest.TestCase):
+
+    def setUp(self):
+        self.php = _read(ONBOARDING)
+
+    def test_page_registered_only_for_the_super_admin(self):
+        fn = _between(self.php, "function onionpress_onboarding_register_page() {", "\n}\n")
+        self.assertLess(fn.index("if ( ! is_super_admin() )"), fn.index("add_submenu_page("))
+        self.assertIn("return;", fn[:fn.index("add_submenu_page(")])
+
+    def test_wizard_refuses_before_changing_anything(self):
+        fn = _between(self.php, "function onionpress_onboarding_render() {", "    // Render\n")
+        gate = fn.index("if ( ! is_super_admin() )")
+        self.assertIn("'response' => 403", fn[gate:gate + 200])
+        for change in ("onionpress_onboarding_finish()", "update_option(",
+                       "wp_set_password(", "wp_set_auth_cookie("):
+            with self.subTest(change=change):
+                self.assertLess(gate, fn.index(change))
+
+    def test_skip_link_carries_a_nonce(self):
+        fn = _between(self.php, "function onionpress_onboarding_render() {", "\n}\n")
+        skip = fn[fn.index("if ( isset( $_GET['op_skip'] ) )"):]
+        self.assertLess(skip.index("check_admin_referer( 'onionpress-onboarding-skip' )"),
+                        skip.index("onionpress_onboarding_finish()"))
+        self.assertIn("wp_nonce_url( admin_url( 'admin.php?page=onionpress-onboarding&op_skip=1' ), "
+                      "'onionpress-onboarding-skip' )", self.php)
+
+
+class TestWaybackIsTheOwners(unittest.TestCase):
+
+    def setUp(self):
+        self.php = _read(WAYBACK)
+
+    def test_no_manage_options_gate_left(self):
+        self.assertNotIn("current_user_can( 'manage_options' )", self.php)
+
+    def test_menu_registered_only_for_the_super_admin(self):
+        menu = _block(self.php, "'onionpress_wayback_admin_page'")
+        gate = menu.index("if ( ! is_super_admin() )")
+        self.assertLess(gate, menu.index("add_menu_page("))
+        self.assertLess(gate, menu.index("add_submenu_page("))
+
+    def test_actions_refuse_before_touching_the_sweep(self):
+        body = _block(self.php, "add_action( 'admin_post_onionpress_wayback_action'")
+        gate = body.index("if ( ! is_super_admin() )")
+        self.assertIn("wp_die( 'Forbidden', 403 );", body[gate:gate + 80])
+        for change in ("check_admin_referer(", "delete_option(", "wp_schedule_single_event(",
+                       "wp_remote_post("):
+            with self.subTest(change=change):
+                self.assertLess(gate, body.index(change))
+
+    def test_page_and_notice_are_the_owners(self):
+        page = _body(self.php, "function onionpress_wayback_admin_page() {")
+        self.assertTrue(page.lstrip().startswith("if ( ! is_super_admin() )"))
+        notice = _block(self.php, "Wayback archiving is not running.")
+        self.assertTrue(notice.split("{", 1)[1].lstrip().startswith("if ( ! is_super_admin() )"))
+
+    def test_social_dashboard_links_the_page_only_for_the_owner(self):
+        php = _read(SOCIAL)
+        link = php.index('<a href="<?php echo esc_url( $wb_details ); ?>"')
+        self.assertIn("<?php if ( is_super_admin() ) : ?>", php[link - 200:link])
+
+
+class TestBlogSnapshotsAreTheOwners(unittest.TestCase):
+
+    def setUp(self):
+        self.php = _read(BLOG)
+
+    def test_allowed_is_the_super_admin(self):
+        fn = _between(self.php, "function onionpress_blog_snapshots_allowed() {", "\n}\n")
+        self.assertIn("return is_super_admin();", fn)
+
+    def test_upload_and_delete_go_through_it(self):
+        page = _between(self.php, "function onionpress_blog_import_page() {", "\n    $url ")
+        for handler in ("onionpress_blog_handle_wxr_upload()", "onionpress_blog_handle_wxr_delete()"):
+            with self.subTest(handler=handler):
+                at = page.index(handler)
+                self.assertIn("$notice = onionpress_blog_snapshots_allowed()\n                ? ",
+                              page[at - 80:at])
+        self.assertEqual(self.php.count("onionpress_blog_handle_wxr_upload()"), 2)  # def + call
+        self.assertEqual(self.php.count("onionpress_blog_handle_wxr_delete()"), 2)
+
+    def test_download_and_listing_are_the_owners(self):
+        dl = _between(self.php, "function onionpress_blog_serve_wxr_download() {", "\n}\n")
+        self.assertLess(dl.index("! onionpress_blog_snapshots_allowed()"), dl.index("readfile("))
+        listing = _body(self.php, "function onionpress_blog_render_snapshots() {")
+        self.assertTrue(listing.lstrip().startswith("if ( ! onionpress_blog_snapshots_allowed() )"))
+
+    def test_snapshot_form_shown_only_to_the_owner(self):
+        page = _between(self.php, "function onionpress_blog_import_page() {", "\n}\n")
+        gate = page.index("<?php if ( ! onionpress_blog_snapshots_allowed() ) : ?>")
+        other = page.index("<?php else : ?>", gate)
+        self.assertLess(other, page.index("name=\"onionpress_blog_upload_wxr\""))
+        self.assertLess(other, page.index("<?php onionpress_blog_render_snapshots(); ?>"))
+
+
+class TestCreationsUploadIsTheOwners(unittest.TestCase):
+
+    def setUp(self):
+        self.php = _read(CREATIONS)
+
+    def test_can_upload_is_the_super_admin(self):
+        fn = _between(self.php, "public static function can_upload() {", "\n    }\n")
+        self.assertIn("return is_user_logged_in() && is_super_admin();", fn)
+
+    def test_upload_handler_checks_it_before_writing(self):
+        start = self.php.index("public function handle_upload()")
+        body = self.php[start:self.php.index("public function ", start + 1)]
+        self.assertNotIn("upload_files", body)
+        self.assertLess(body.index("if (!self::can_upload())"), body.index("move_uploaded_file("))
+
+    def test_theme_shows_the_form_only_to_the_owner(self):
+        tpl = _read(THEME_CREATIONS)
+        self.assertNotIn("upload_files", tpl)
+        form = tpl.index('id="creations-upload-form"')
+        self.assertIn("OnionPress_Creations::can_upload()", tpl[form - 300:form])
 
 
 class TestSharedVolumeCensus(unittest.TestCase):
