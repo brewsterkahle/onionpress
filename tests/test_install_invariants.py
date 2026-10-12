@@ -1684,7 +1684,10 @@ class TestStartRecoversWedgedLimaVM(unittest.TestCase):
 
     LAUNCHER = "app/MacOS/onionpress"
     FUNCTIONS = ("wait_for_docker", "lima_vm_running", "recover_lima_vm",
-                 "wait_for_docker_or_recover_vm")
+                 "wait_for_docker_or_recover_vm",
+                 # recover_lima_vm keeps the wedged boot's journal; with no
+                 # DATA_DIR here that step skips before touching limactl.
+                 "vm_shell_bounded", "save_previous_boot_journal")
     DOCKER_STUB = """#!/bin/sh
 printf 'docker %s\\n' "$*" >> "$STUB_CALLS"
 [ -e "$STUB_DIR/docker-up" ] && exit 0
@@ -1884,7 +1887,11 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
     # Without a limactl on PATH they report the VM as not Running, so the
     # Docker-down cases below still stop without any recovery attempt.
     OPTIONAL_FUNCTIONS = ("lima_vm_running", "recover_lima_vm",
-                          "wait_for_docker_or_recover_vm")
+                          "wait_for_docker_or_recover_vm",
+                          # start_containers then looks after the guest's
+                          # root fs; without a limactl that is a no-op too.
+                          "vm_shell_bounded", "ensure_vm_fsck_repair",
+                          "save_previous_boot_journal")
 
     STUB = """#!/bin/sh
 printf '%s\\n' "$*" >> "$STUB_CALLS"

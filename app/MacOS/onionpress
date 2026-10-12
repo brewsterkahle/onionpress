@@ -1363,6 +1363,7 @@ recover_lima_vm() {
         return 1
     fi
     log "$who: Lima VM restarted"
+    save_previous_boot_journal "$who"
     return 0
 }
 
@@ -1384,6 +1385,136 @@ wait_for_docker_or_recover_vm() {
     log "$who: Docker daemon not ready after ${limit}s while Lima reports the VM Running — recovering the wedged VM"
     recover_lima_vm "$who" || return 1
     wait_for_docker "$limit"
+}
+
+# Run a command inside the VM through `limactl shell`, bounded to $1
+# seconds. limactl shell hangs for good when the guest's sshd is wedged
+# (the state recover_lima_vm exists for) and macOS has no timeout(1).
+# Prints the command's stdout; its stderr goes to the log. Returns the
+# command's status, 124 on timeout, 127 when there is no bundled limactl
+# (Linux, or a test harness without one).
+vm_shell_bounded() {
+    local limit="$1"; shift
+    [ -x "$BIN_DIR/limactl" ] || return 127
+    local out pid rc=0 waited=0
+    out=$(mktemp "${TMPDIR:-/tmp}/onionpress-vm-shell.XXXXXX") || return 1
+    "$BIN_DIR/limactl" shell colima -- "$@" > "$out" 2>> "$LOG_FILE" &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$limit" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            rm -f "$out"
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$pid" || rc=$?
+    cat "$out"
+    rm -f "$out"
+    return "$rc"
+}
+
+# The guest's root filesystem must be able to repair itself at boot.
+#
+# Root cause of the "Lima reports the VM Running, sshd and Docker never
+# come up" wedge on the live install (found 2026-10-11 by reading the
+# guest's journal): its root ext4 had carried an inconsistency since
+# 2026-09-12 that the boot-time check (preen mode, `fsck -a`) refuses to
+# fix — "UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY", exit 4. That fails
+# systemd-fsck-root.service, whose OnFailure= starts emergency.target, and
+# whether sysinit/ssh/docker still come up is then a race: 3 of the 6
+# boots in that journal lost it. Nobody can answer that prompt in an
+# appliance VM, so give the kernel `fsck.repair=yes` — systemd-fsck then
+# runs `fsck -y`, which clears such damage at the next boot and keeps
+# emergency mode out of the picture. The guest boots without an initramfs
+# (GRUB_FORCE_PARTUUID), so systemd-fsck is the only checker and a grub
+# drop-in is the whole change. Idempotent: the drop-in is written once,
+# update-grub runs only then, and the flag takes effect at the next VM
+# boot. Also reports when this boot's root check failed, so the condition
+# shows in onionpress.log instead of only in the guest's journal. Best
+# effort: never fails the start.
+ensure_vm_fsck_repair() {
+    local script out rc=0 summary detail
+    script=$(cat <<'EOF'
+f=/etc/default/grub.d/60-onionpress-fsck.cfg
+flag=present
+if ! grep -qs "fsck.repair=yes" "$f"; then
+    {
+        echo "# OnionPress: repair the root filesystem automatically at boot. Without"
+        echo "# this, an inconsistency the preen-mode check cannot fix sends systemd into"
+        echo "# emergency mode, where sshd and Docker may never start, and no one can"
+        echo "# answer \"RUN fsck MANUALLY\" in an appliance VM. systemd-fsck reads it as -y."
+        echo "GRUB_CMDLINE_LINUX_DEFAULT=\"\$GRUB_CMDLINE_LINUX_DEFAULT fsck.repair=yes\""
+    } > "$f" && update-grub >/dev/null 2>&1 && flag=installed || flag=install-failed
+fi
+state=$(systemctl is-failed systemd-fsck-root.service 2>/dev/null || true)
+if grep -qw "fsck.repair=yes" /proc/cmdline; then cmdline=yes; else cmdline=no; fi
+echo "fsck-root=${state:-unknown} repair-flag=$flag cmdline=$cmdline"
+if [ "$state" = failed ]; then
+    journalctl -b 0 -u systemd-fsck-root.service --no-pager -o cat 2>/dev/null | grep -i "fsck\|inconsisten" | head -n 4
+fi
+EOF
+)
+    out=$(vm_shell_bounded 60 sudo sh -c "$script") || rc=$?
+    case "$rc" in
+        0) ;;
+        127) return 0 ;;  # no bundled limactl: no VM to look after
+        124) log "WARNING: VM root filesystem check skipped — limactl shell did not return within 60s (VM ssh wedged?)"; return 0 ;;
+        *) log "WARNING: VM root filesystem check failed (rc=$rc) — see $LOG_FILE"; return 0 ;;
+    esac
+    summary=$(printf '%s\n' "$out" | head -n 1)
+    detail=$(printf '%s\n' "$out" | tail -n +2)
+    case "$summary" in
+        *"repair-flag=installed"*)
+            log "VM: added fsck.repair=yes to the guest kernel command line (takes effect at the next VM boot)" ;;
+        *"repair-flag=install-failed"*)
+            log "WARNING: VM: could not install the fsck.repair=yes grub drop-in — see $LOG_FILE" ;;
+    esac
+    case "$summary" in
+        *"fsck-root=failed"*)
+            log "WARNING: VM: the root filesystem check failed on this boot — sshd and Docker only came up by luck until it is repaired ($summary)"
+            [ -n "$detail" ] && printf '%s\n' "$detail" >> "$LOG_FILE"
+            case "$summary" in
+                *"cmdline=yes"*)
+                    log "WARNING: VM: fsck.repair=yes was active and still could not repair it — the VM disk needs manual attention" ;;
+                *)
+                    log "VM: the next VM boot will repair it (fsck.repair=yes)" ;;
+            esac ;;
+    esac
+    return 0
+}
+
+# After recover_lima_vm has rebooted a wedged VM, keep the journal of the
+# boot that wedged. The guest's journal is persistent, so `journalctl -b -1`
+# is the only record of why sshd/Docker never came up — the 2026-10-11
+# root cause (see ensure_vm_fsck_repair) sat in it for a month, found only
+# by reading it by hand. One log line says what that boot did; the full
+# journal lands next to the other logs, named so log rotation treats it
+# like any other log type.
+save_previous_boot_journal() {
+    local who="$1" dir="$DATA_DIR/logs" day path n=1 rc=0
+    local fsck=ok emergency=no sysinit=no ssh=no
+    [ -n "$DATA_DIR" ] && mkdir -p "$dir" 2>/dev/null || return 0
+    day=$(date +%Y-%m-%d)
+    while [ -e "$dir/vm-wedged-boot-$day-$(printf '%03d' "$n").log" ] \
+          || [ -e "$dir/vm-wedged-boot-$day-$(printf '%03d' "$n").log.gz" ]; do
+        n=$((n + 1))
+    done
+    path="$dir/vm-wedged-boot-$day-$(printf '%03d' "$n").log"
+    vm_shell_bounded 60 sudo journalctl -b -1 --no-pager -o short-monotonic > "$path" || rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -s "$path" ]; then
+        rm -f "$path"
+        log "$who: could not read the previous boot's journal from the VM (rc=$rc)"
+        return 0
+    fi
+    grep -q "fsck failed with exit status" "$path" && fsck=failed
+    grep -q "Started emergency.service" "$path" && emergency=yes
+    grep -q "Reached target sysinit.target" "$path" && sysinit=yes
+    grep -qE "Listening on ssh.socket|Started ssh.service" "$path" && ssh=yes
+    log "$who: previous boot: fsck-root=$fsck emergency=$emergency sysinit=$sysinit ssh=$ssh — journal saved to $path"
+    return 0
 }
 
 # One-time migration of the onion service key volume from its historical
@@ -1481,6 +1612,12 @@ start_containers() {
         log "ERROR: Docker daemon not ready after 180s (one Lima VM recovery attempted if it was Running); not starting"
         return 1
     fi
+
+    # Docker answers, so the VM is up: make sure its next boot can repair
+    # its own root filesystem instead of parking in emergency mode, and
+    # say so when this boot's check failed (the wedge recover_lima_vm
+    # exists for; see ensure_vm_fsck_repair). Best effort, never blocks.
+    ensure_vm_fsck_repair
 
     # Handle pending key import (volume couldn't be removed when Docker wasn't running)
     if [ -f "$DATA_DIR/.import-key-pending" ]; then
