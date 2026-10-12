@@ -6,6 +6,7 @@ Commands: start, stop, restart, status, address, logs, get, setup, backup, resto
 """
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from .config import (
 )
 from .docker import Docker
 from .containers import ContainerManager
+from .launcher_ops import BACKUP_PASSWORD_ENV
 
 
 # `onionpress get` (issue #70) runs curl inside this container, where Tor's
@@ -62,6 +64,33 @@ def normalize_get_url(url: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host):
         raise ValueError(f"URL host {host!r} contains characters that are not valid in a hostname")
     return s
+
+
+def read_backup_password(positional: str | None = None) -> str:
+    """The password for `backup` / `restore`, or "" if none was given.
+
+    Taken from the first of: the old positional argument (with a warning:
+    argv is readable by every local user), $ONIONPRESS_BACKUP_PASSWORD (how
+    the launchers, menubar and tray pass it), a line on stdin when stdin is
+    not a terminal, or a no-echo prompt. The variable is removed from this
+    process's environment so the docker/zip/unzip children don't inherit it.
+    """
+    from_env = os.environ.pop(BACKUP_PASSWORD_ENV, "")
+    if positional:
+        print("WARNING: a password on the command line is visible to other "
+              "users of this computer. Leave it out to be prompted, or set "
+              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
+        return positional
+    if from_env:
+        return from_env
+    if sys.stdin is None:
+        return ""
+    try:
+        if not sys.stdin.isatty():
+            return sys.stdin.readline().rstrip("\n")
+        return getpass.getpass("Backup password: ")
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
 def _make_log_func(log_file: str | None = None) -> Callable[[str], None]:
@@ -693,13 +722,29 @@ def main(argv: list[str] = None) -> int:
         "--max-time", type=int, default=GET_DEFAULT_MAX_TIME, metavar="SECONDS",
         help=f"Give up after this many seconds (default {GET_DEFAULT_MAX_TIME})")
 
-    p_backup = sub.add_parser("backup", help="Create a backup")
-    p_backup.add_argument("password", help="WP admin password (also used to encrypt the zip)")
+    # The password is read by read_backup_password (environment, stdin or a
+    # prompt). The positional is the old interface, kept so existing scripts
+    # still work; it puts the password where other users can see it.
+    p_backup = sub.add_parser(
+        "backup", help="Create a backup",
+        epilog=f"The WP admin password (also used to encrypt the zip) is read "
+               f"from ${BACKUP_PASSWORD_ENV}, else stdin, else a prompt.")
+    p_backup.add_argument(
+        "password", nargs="?",
+        help="Deprecated: visible to other local users; leave it out")
     p_backup.add_argument("output", nargs="?", help="Output path (default: ~/OnionPress/backups/)")
+    p_backup.add_argument(
+        "-o", "--output", dest="output_opt", metavar="OUTPUT",
+        help="Output path, for use without the positional password")
     p_backup.add_argument("--user", help="WP admin username (default: auto-resolve)")
 
-    p_restore = sub.add_parser("restore", help="Restore from backup")
-    p_restore.add_argument("password", help="Backup encryption password")
+    p_restore = sub.add_parser(
+        "restore", help="Restore from backup",
+        epilog=f"The backup password is read from ${BACKUP_PASSWORD_ENV}, "
+               f"else stdin, else a prompt.")
+    p_restore.add_argument(
+        "password", nargs="?",
+        help="Deprecated: visible to other local users; leave it out")
     p_restore.add_argument("backup_file", help="Path to backup .zip file")
 
     p_reset = sub.add_parser("reset", help="Wipe all data and start fresh")
@@ -799,6 +844,15 @@ def main(argv: list[str] = None) -> int:
         print(json.dumps(redact_config(config), indent=2))
         return 0
 
+    # Before OnionPressCLI: its Docker wrapper snapshots os.environ for every
+    # docker child, and read_backup_password takes the password out of it.
+    password = None
+    if args.command in ("backup", "restore"):
+        password = read_backup_password(args.password)
+        if not password:
+            print("ERROR: a password is required.", file=sys.stderr)
+            return 1
+
     cli = OnionPressCLI(data_dir=args.data_dir)
 
     commands = {
@@ -815,9 +869,9 @@ def main(argv: list[str] = None) -> int:
     elif args.command == "get":
         return cli.cmd_get(args.url, headers=args.headers, max_time=args.max_time)
     elif args.command == "backup":
-        return cli.cmd_backup(args.password, args.output, args.user)
+        return cli.cmd_backup(password, args.output_opt or args.output, args.user)
     elif args.command == "restore":
-        return cli.cmd_restore(args.password, args.backup_file)
+        return cli.cmd_restore(password, args.backup_file)
     elif args.command == "import-backup-artifacts":
         return cli.cmd_import_backup_artifacts(args.staging)
     elif args.command == "regenerate-derivatives":

@@ -68,6 +68,7 @@ def _run(
     capture: bool = False,
     quiet: bool = False,
     timeout: Optional[int] = None,
+    env: Optional[dict] = None,
 ) -> subprocess.CompletedProcess:
     """Thin wrapper around subprocess.run that defaults to inheriting
     stdio so output streams through to the user. capture=True for
@@ -81,7 +82,16 @@ def _run(
         kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if timeout is not None:
         kwargs["timeout"] = timeout
+    if env is not None:
+        kwargs["env"] = env
     return subprocess.run(args, **kwargs)
+
+
+def _password_env(password: str) -> dict:
+    """Environment for a launcher backup/restore. The password goes in the
+    environment, not argv, which every local user can read."""
+    from .launcher_ops import BACKUP_PASSWORD_ENV
+    return {**os.environ, BACKUP_PASSWORD_ENV: password}
 
 
 def _confirm(prompt: str = "Continue? [y/N] ") -> bool:
@@ -266,7 +276,8 @@ def phase_backup(password: str, log: Callable[[str], None]) -> PreScrubState:
     state.backup_path = os.path.join(backups_dir, f"onionpress-scrub-{timestamp}.zip")
 
     # Backup is still a bash subcommand. Shell out to it.
-    r = _run([LAUNCHER_BIN, "backup", password, state.backup_path])
+    r = _run([LAUNCHER_BIN, "backup", "--output", state.backup_path],
+             env=_password_env(password))
     if r.returncode != 0 or not os.path.isfile(state.backup_path) \
             or os.path.getsize(state.backup_path) == 0:
         raise RuntimeError("Backup file missing or empty — aborting.")
@@ -331,7 +342,8 @@ def phase_restore(
     """
     log("")
     log("── Step 4/5: Restore ──")
-    r = subprocess.run([LAUNCHER_BIN, "restore", password, backup_path])
+    r = subprocess.run([LAUNCHER_BIN, "restore", backup_path],
+                       env=_password_env(password))
     if r.returncode != 0:
         raise RuntimeError(f"restore exited {r.returncode} — aborting scrub.")
     log("  Restore and restart complete.")

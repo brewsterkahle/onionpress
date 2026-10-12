@@ -33,6 +33,14 @@ DEFAULT_TOR_IMAGE = os.environ.get(
     "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9",
 )
 
+# How the menubar, the tray, scrub and the launchers hand a backup password
+# to `onionpress backup|restore` and `python -m onionpress.cli backup|restore`:
+# in the environment, never in argv. Other local users can read any
+# process's command line (ps, /proc/<pid>/cmdline), but not its environment.
+# The bash launchers and linux/onionpress-tray spell the name out; a test
+# keeps them in step.
+BACKUP_PASSWORD_ENV = "ONIONPRESS_BACKUP_PASSWORD"
+
 
 def _tor_browser_lock_paths() -> list:
     """Return the standard torbrowser-launcher lock-file paths under the

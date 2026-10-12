@@ -599,7 +599,9 @@ def _unzip_cli_extract(zip_path, password, dest, log_func):
             errors='replace', timeout=900,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
-        log_func(f"Restore: unzip CLI unavailable/timed out ({e}); using zipfile")
+        # Type only: str(TimeoutExpired) is the full argv, password included.
+        log_func(f"Restore: unzip CLI unavailable/timed out "
+                 f"({type(e).__name__}); using zipfile")
         return False
     if result.returncode != 0:
         # Wrong password, AES archive, or corrupt zip — let zipfile try (and

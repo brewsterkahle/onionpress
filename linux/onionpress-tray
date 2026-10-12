@@ -211,18 +211,46 @@ class Status:
 
 # ─── 3. Launcher wrapper ────────────────────────────────────────────────
 
+# The launcher reads a backup password from this variable (see
+# launcher_ops.BACKUP_PASSWORD_ENV). Argv would put it in every local
+# user's `ps` and in tray.log; the environment is readable by us only.
+BACKUP_PASSWORD_ENV = "ONIONPRESS_BACKUP_PASSWORD"
+
+# Launcher subcommands whose arguments can carry a secret (the old
+# `backup <password>` / `restore <password> <zip>` forms, setup --pass,
+# import-key). tray.log gets their name only.
+_UNLOGGED_ARGS = frozenset({"backup", "restore", "setup", "scrub", "import-key"})
+
+
+def _loggable(cmd: list) -> str:
+    """The launcher command line as tray.log may show it."""
+    if len(cmd) > 2 and cmd[1] in _UNLOGGED_ARGS:
+        return f"{cmd[0]} {cmd[1]} <{len(cmd) - 2} args not logged>"
+    return " ".join(cmd)
+
+
 class Launcher:
     """Subprocess wrapper around `/usr/local/bin/onionpress`."""
 
     @staticmethod
-    def run(*args, capture: bool = False, timeout: int = 60) -> subprocess.CompletedProcess:
+    def run(*args, capture: bool = False, timeout: int = 60,
+            password: Optional[str] = None) -> subprocess.CompletedProcess:
+        """password: handed to `backup`/`restore` in the environment."""
         cmd = [LAUNCHER, *args]
-        log(f"launcher: {' '.join(cmd)}")
+        log(f"launcher: {_loggable(cmd)}")
+        env = None
+        if password is not None:
+            env = {**os.environ, BACKUP_PASSWORD_ENV: password}
         try:
             return subprocess.run(
                 cmd, capture_output=capture, text=True, timeout=timeout,
+                env=env,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        except subprocess.TimeoutExpired:
+            # str(TimeoutExpired) is the whole argv.
+            log(f"launcher timed out after {timeout}s: {_loggable(cmd)}")
+            raise
+        except FileNotFoundError as e:
             log(f"launcher failed: {e}")
             raise
 
@@ -230,7 +258,7 @@ class Launcher:
     def run_async(*args) -> None:
         """Fire and forget — used for actions where we don't wait."""
         cmd = [LAUNCHER, *args]
-        log(f"launcher (async): {' '.join(cmd)}")
+        log(f"launcher (async): {_loggable(cmd)}")
         try:
             subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL,
@@ -585,7 +613,8 @@ def show_backup_dialog(parent=None):
 
     def _run():
         try:
-            r = Launcher.run("backup", password, capture=True, timeout=300)
+            r = Launcher.run("backup", capture=True, timeout=300,
+                             password=password)
             if r.returncode == 0:
                 Notify.Notification.new(
                     "Backup complete", r.stdout.strip() or "Saved.",
@@ -640,8 +669,8 @@ def show_restore_dialog(parent=None):
 
     def _run():
         try:
-            r = Launcher.run("restore", password, backup_path,
-                             capture=True, timeout=600)
+            r = Launcher.run("restore", backup_path,
+                             capture=True, timeout=600, password=password)
             if r.returncode == 0:
                 Notify.Notification.new(
                     "Restore complete",

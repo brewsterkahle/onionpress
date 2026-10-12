@@ -4373,8 +4373,12 @@ class OnionPressApp(rumps.App):
                 # backup (seeded key + imported DB/content) — no in-place
                 # overwrite and no .import-key-pending key-volume swap churn.
                 log_and_update("Rebuilding from backup (install-from-backup)…")
+                # The password goes in the environment: argv is readable by
+                # every local user (ps), the environment only by this one.
                 r = subprocess.run(
-                    [self.launcher_script, "restore", password, zip_path],
+                    [self.launcher_script, "restore", zip_path],
+                    env={**os.environ,
+                         launcher_ops.BACKUP_PASSWORD_ENV: password},
                     capture_output=True, text=True, encoding='utf-8',
                     errors='replace', timeout=1800)
                 if r.returncode != 0:

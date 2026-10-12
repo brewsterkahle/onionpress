@@ -430,6 +430,29 @@ prompt_and_validate_wp_password() {
     return 1
 }
 
+# Backup passwords are handed over in ONIONPRESS_BACKUP_PASSWORD, never on a
+# command line: other local users can read any process's argv (ps,
+# /proc/<pid>/cmdline) but not its environment. Sets BACKUP_PASS from the
+# first of: $1 (the old positional form; warns), the variable, a line on
+# stdin, a no-echo prompt. Unsets the variable so the commands this script
+# runs don't inherit it; pass it on as ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
+# Identical in app/MacOS/onionpress and linux/onionpress (test-enforced).
+read_backup_password() {
+    BACKUP_PASS="${ONIONPRESS_BACKUP_PASSWORD:-}"
+    unset ONIONPRESS_BACKUP_PASSWORD
+    if [ -n "${1:-}" ]; then
+        echo "WARNING: a password on the command line is visible to other users of this computer. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
+        BACKUP_PASS="$1"
+    elif [ -z "$BACKUP_PASS" ]; then
+        if [ -t 0 ]; then
+            read -r -s -p "Backup password: " BACKUP_PASS || true
+            echo "" >&2
+        else
+            IFS= read -r BACKUP_PASS || true
+        fi
+    fi
+}
+
 # ─── Secrets management ─────────────────────────────────────────────
 
 setup_db_passwords() {
@@ -2786,36 +2809,68 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         backup)
+            # backup [-o|--output <path>]; the password comes from
+            # read_backup_password. The old `backup <password> [output_path]`
+            # still works.
             setup_db_passwords
-            local backup_pass="${2:-}"
-            local backup_path="${3:-}"
-            if [ -z "$backup_pass" ]; then
-                echo "Usage: $0 backup <password> [output_path]"
+            shift
+            local backup_path=""
+            local -a backup_pos=()
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    -o|--output)
+                        backup_path="${2:-}"
+                        shift
+                        if [ $# -gt 0 ]; then shift; fi
+                        ;;
+                    *) backup_pos+=("$1"); shift ;;
+                esac
+            done
+            if [ -n "${backup_pos[1]:-}" ]; then
+                backup_path="${backup_pos[1]}"
+            fi
+            read_backup_password "${backup_pos[0]:-}"
+            if [ -z "$BACKUP_PASS" ]; then
+                echo "Usage: $0 backup [-o|--output <path>]"
                 echo "Creates a password-protected backup of your OnionPress site."
+                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
                 exit 1
             fi
             if [ -z "$backup_path" ]; then
                 mkdir -p "$HOME/OnionPress/backups"
                 backup_path="$HOME/OnionPress/backups/onionpress-$(date +%Y-%m-%d)-$$.zip"
             fi
-            create_backup "$backup_pass" "$backup_path"
+            create_backup "$BACKUP_PASS" "$backup_path"
             echo "Backup saved to: $backup_path"
             ;;
 
         restore)
+            # restore <backup_file.zip>; the password comes from
+            # read_backup_password and goes on to Python in the environment.
+            # The old `restore <password> <backup_file.zip>` still works.
             setup_db_passwords
-            local restore_pass="${2:-}"
-            local restore_path="${3:-}"
-            if [ -z "$restore_pass" ] || [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <password> <backup_file.zip>"
+            local restore_legacy_pass=""
+            local restore_path="${2:-}"
+            if [ -n "${3:-}" ]; then
+                restore_legacy_pass="$2"
+                restore_path="$3"
+            fi
+            if [ -z "$restore_path" ]; then
+                echo "Usage: $0 restore <backup_file.zip>"
                 echo "Restores from an OnionPress backup. Containers must be running."
+                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
+                exit 1
+            fi
+            read_backup_password "$restore_legacy_pass"
+            if [ -z "$BACKUP_PASS" ]; then
+                echo "ERROR: Password is required." >&2
                 exit 1
             fi
             # install-from-backup: the shared Python CLI tears the install down
             # and rebuilds it from the backup (seeded key + imported DB/content),
             # replacing the in-place overwrite + key-volume swap churn (no
             # .import-key-pending, no manual stop/start).
-            op_py restore "$restore_pass" "$restore_path"
+            ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path"
             echo "Done! OnionPress rebuilt from backup."
             ;;
 
@@ -3426,7 +3481,7 @@ sys.exit(0 if provision_interactive() else 1)
             if [ -n "${bp_path:-}" ] && [ -f "${bp_path:-}" ]; then
                 echo ""
                 echo "Your backup is at: $bp_path"
-                echo "Use it to restore: onionpress restore <password> $bp_path"
+                echo "Use it to restore: onionpress restore $bp_path"
             fi
             ;;
 
