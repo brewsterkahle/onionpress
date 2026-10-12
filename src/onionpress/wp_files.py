@@ -25,7 +25,7 @@ which can reach nothing it could not write anyway:
   chown the bare name, so no link in the path is followed; chown -h and
   chown -R never follow a link at the name itself.
 
-The bash launchers carry PUT_FILE_SCRIPT as WP_PUT_SCRIPT (wp_put);
+The bash launchers' wp_put carries PUT_FILE_SCRIPT inline;
 tests/test_wordpress_writes_as_www_data.py keeps the three copies equal.
 """
 
