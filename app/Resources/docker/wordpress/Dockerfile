@@ -32,12 +32,14 @@ RUN curl -fsSL -o /usr/local/bin/wp \
     && chmod +x /usr/local/bin/wp \
     && wp --info --allow-root >/dev/null
 
-# Enable mod_remoteip for PROXY protocol support and add port 81 listener
 # Raise PHP upload limits for large Creations files (videos, HEIC, etc.)
 COPY onionpress-uploads.ini /usr/local/etc/php/conf.d/
 
-RUN a2enmod remoteip rewrite headers
-COPY onionpress-proxy-protocol.conf /etc/apache2/conf-available/
+# Apache listens on :80 only; onion visitors arrive there too (Tor -> socat
+# in onionpress-tor -> wordpress:80). There is no PROXY-protocol listener:
+# the :81 one C Tor fed until the switch to socat let any container on
+# onionpress-network name its own REMOTE_ADDR (127.0.0.1, the gateway).
+RUN a2enmod rewrite headers
 COPY onionpress-xmlrpc-block.conf /etc/apache2/conf-available/
 COPY onionpress-log-format.conf /etc/apache2/conf-available/
 # Static reachability target for the app's Tor-network probe (issue #266):
@@ -48,7 +50,7 @@ COPY onionpress-health.txt /usr/local/share/onionpress/health.txt
 COPY onionpress-creations.conf /etc/apache2/conf-available/
 # The same for wp-content/uploads: media, never code.
 COPY onionpress-uploads.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations onionpress-uploads
+RUN a2enconf onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations onionpress-uploads
 # A conf Apache rejects would take every site down at the next image pull;
 # fail the build instead. The php_module check keeps the creations and
 # uploads confs' `php_admin_flag engine off` from being skipped silently by
