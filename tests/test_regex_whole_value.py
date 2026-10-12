@@ -13,7 +13,8 @@ that is not the value that was checked. Seen in:
     the onionnames registry's address check, the analytics name checks;
   - every name/address preg_match in the WordPress plugins and theme;
   - the macOS launcher's prefix check, `echo | grep -qE '^...$'`, which
-    tests each line on its own.
+    tests each line on its own, and both launchers' `validate-oh-address`
+    (62 characters with a line ending in ".onion").
 
 Python uses re.fullmatch; PHP uses the D modifier (PCRE_DOLLAR_ENDONLY);
 bash uses [[ =~ ]]. The scans below keep it that way. Denylists (a pattern
@@ -193,6 +194,49 @@ class TestAddressPrefix(unittest.TestCase):
         self.assertEqual(self._mac_launcher_check("ab\n"), "op2")
         self.assertEqual(self._mac_launcher_check("abc"), "abc")
         self.assertEqual(self._mac_launcher_check("ab0"), "op2")
+
+
+def _bash_function(text, name):
+    """Source of a top-level bash function, closing brace included."""
+    start = text.index(f"\n{name}() {{") + 1
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+class TestLauncherHubAddressCheck(unittest.TestCase):
+    """`validate-oh-address` (the menubar settings dialog's hub check) took
+    62 characters with a line ending in ".onion" and handed them to curl."""
+
+    VALID = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
+
+    def _run(self, launcher, addr):
+        import tempfile
+        body = _read(launcher)
+        script = (_bash_function(body, "is_onion_address")
+                  + _bash_function(body, "_validate_oh_address")
+                  + '_validate_oh_address "$1"\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, "docker")
+            with open(stub, "w") as f:
+                f.write("#!/bin/sh\nexit 1\n")
+            os.chmod(stub, 0o755)
+            env = {"PATH": f"{tmp}:/usr/bin:/bin", "DATA_DIR": tmp,
+                   "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"}
+            out = subprocess.run(["/bin/bash", "-c", script, "bash", addr],
+                                 capture_output=True, text=True, env=env, timeout=30)
+        return out.stdout
+
+    def test_only_a_whole_onion_address_gets_past_the_format_check(self):
+        bad = ("evil.example.com/" + "a" * 39 + ".onion",
+               "x" * 55 + "\n.onion",
+               "abc\n" + self.VALID[4:],
+               self.VALID.upper())
+        self.assertEqual(len(bad[0]), 62)
+        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
+            for addr in bad:
+                with self.subTest(launcher=launcher, addr=addr):
+                    self.assertIn('"status":"invalid_format"', self._run(launcher, addr))
+            with self.subTest(launcher=launcher, addr="valid"):
+                self.assertIn('"status":"unreachable"', self._run(launcher, self.VALID))
 
 
 class TestOtherNameChecks(unittest.TestCase):

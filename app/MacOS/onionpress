@@ -2278,8 +2278,11 @@ wait_for_services() {
 _validate_oh_address() {
     local addr="$1"
 
-    # Format check
-    if [ -z "$addr" ] || [ ${#addr} -ne 62 ] || ! echo "$addr" | grep -qE '\.onion$'; then
+    # Format check: the whole value, as is_onion_address does. This was a
+    # length of 62 and `echo | grep '\.onion$'`, which tests each line on
+    # its own and passed any 62 characters ending in ".onion" (a clearnet
+    # host and path included) on to curl.
+    if ! is_onion_address "$addr"; then
         echo '{"valid":false,"status":"invalid_format","message":"Address must be a valid 56-character .onion address."}'
         return 1
     fi
