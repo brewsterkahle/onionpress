@@ -1640,3 +1640,28 @@ def backup_filename(onion_address, username):
     addr_prefix = addr_short[:8]
     ts = datetime.now().strftime('%Y-%m-%d-%H-%M')
     return f"OnionPress-{addr_prefix}-{username}-{ts}.zip"
+
+
+# backup_filename()'s shape. The Settings page names its backups without a
+# username (OnionPress-<addr>-<ts>.zip), which this does not match.
+_BACKUP_FILENAME_RE = re.compile(
+    r"OnionPress-[^-]*-(?P<user>.+)-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}\.zip")
+
+
+def backup_filename_username(path):
+    """The username backup_filename() put in *path*'s name, or None.
+
+    For the restore password prompt's wording only. A file name is whatever
+    the file is called now, not something the backup vouches for: anyone
+    can hand over "OnionPress-x-<any text>-<ts>.zip" and have the text shown
+    in that dialog. So the name must look like a login (the rule metadata's
+    username is held to), or there is none: no newlines, bidi overrides or
+    paragraphs, at most 60 characters. Never use it in a path or a command.
+    """
+    if not isinstance(path, str):
+        return None
+    m = _BACKUP_FILENAME_RE.fullmatch(os.path.basename(path))
+    if not m:
+        return None
+    user = m.group('user').strip()
+    return user if _BACKUP_USERNAME_RE.fullmatch(user) else None

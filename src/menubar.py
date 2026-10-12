@@ -4277,15 +4277,10 @@ class OnionPressApp(rumps.App):
 
         zip_path = panel.URL().path()
 
-        # Try to extract username from backup filename
-        # Format: OnionPress-<addr>-<username>-<date>.zip
-        zip_name = os.path.basename(zip_path)
-        backup_user = None
-        if zip_name.startswith("OnionPress-") and zip_name.endswith(".zip"):
-            parts = zip_name[len("OnionPress-"):-len(".zip")].split("-")
-            if len(parts) >= 3:
-                # parts[0] = addr prefix, parts[1] = username, rest = date
-                backup_user = parts[1]
+        # The username backup_filename() put in the file's name, to word the
+        # prompt. The name is the file's, not the backup's: shown only if it
+        # looks like a login, and used for nothing else.
+        backup_user = backup_manager.backup_filename_username(zip_path)
 
         # Prompt for password
         alert = AppKit.NSAlert.alloc().init()
