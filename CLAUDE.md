@@ -273,6 +273,22 @@
 - OnionPress 2.5.2 and older cannot restore a format-2 backup (they report it
   as not a valid OnionPress backup); the README inside the zip says so.
 
+## Restores Extract Plain Files Only
+- A backup file is its maker's, password or not. `backup.extract_archive`
+  (every restore path; the launchers reach it through `extract-backup`) runs
+  `validate_archive_members` on the member list before either extractor
+  runs — format 1's outer zip (readable without the password), format 2's
+  decrypted inner zip — and refuses symlinks, device/FIFO/socket entries,
+  absolute or `..` names, NULs, empty names, duplicates and file/folder
+  clashes, header and Unicode-path-field names alike. `unzip` recreates
+  symlink entries, and `docker cp "$staging/wp-content/." …` resolves a link
+  in its source path: one `wp-content -> ~` member published the home folder.
+- `check_staged_tree` (lstat walk) re-checks the extracted tree, and
+  `restore_container_artifacts` runs it again before its first docker cp.
+- Real backups hold no links: `zip -r` without `-y` stores a link's target
+  as a plain file. pack_backup must never store links (`zip -y`), or its
+  backups stop restoring. `tests/test_backup_archive_members.py`.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

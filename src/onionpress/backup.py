@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -741,12 +742,135 @@ def read_backup_metadata(zip_path, password):
         raise ValueError("Not a valid zip file.")
 
 
+INVALID_ARCHIVE_MSG = "Not a valid OnionPress backup: it contains {what} ({name})."
+
+# The Unix file types a backup's archive may hold. zip keeps a member's
+# st_mode in the high 16 bits of external_attr; 0 means none was recorded
+# (zipfile's writestr), which both extractors write as a plain file.
+_PLAIN_MEMBER_TYPES = (0, stat.S_IFREG, stat.S_IFDIR)
+
+
+def _member_label(name):
+    """An archive member's name for an error message: the archive author
+    chose it, so printable characters only, cut to 80."""
+    text = ''.join(ch for ch in name if ch.isprintable())
+    return repr(text if len(text) <= 80 else text[:80] + '…')
+
+
+def _member_path(name):
+    """*name* as a normalised relative path ('a/b'), or None if it is not a
+    plain relative name: empty, absolute, with a '..' component or a NUL.
+    Backslashes count as separators too (unzip turns them into '/' in
+    archives made on Windows)."""
+    if not name or '\x00' in name or name[0] in '/\\':
+        return None
+    parts = [p for p in re.split(r'[/\\]', name) if p not in ('', '.')]
+    if not parts or '..' in parts:
+        return None
+    return '/'.join(parts)
+
+
+def validate_archive_members(zf):
+    """Refuse a backup archive (an open ZipFile) unless every member is a
+    plain file or directory under a plain relative name, all distinct;
+    raise ValueError before anything is extracted.
+
+    The archive is whoever made the backup file's (the password proves only
+    that it was made with it), and a restore copies what it extracts into
+    the WordPress container, the Tor key directory and ~/.onionpress. The
+    `unzip` fast path recreates symlink entries, so a member such as
+    `wp-content -> /Users/<name>` would make the restore's docker cp
+    publish the target's files through the onion service. OnionPress's own
+    backups never hold links or special files: `zip -r` stores what a link
+    points to, as a plain file.
+
+    Both the name in the zip header and the Unicode Path extra field's name
+    (which zipfile, and unzip builds with Unicode support, extract to) are
+    checked, so the two extractors cannot be steered apart.
+    """
+    seen = set()
+    files = set()
+    parents = set()
+    for info in zf.infolist():
+        file_type = stat.S_IFMT(info.external_attr >> 16)
+        if file_type == stat.S_IFLNK:
+            raise ValueError(INVALID_ARCHIVE_MSG.format(
+                what="a symbolic link", name=_member_label(info.filename)))
+        if file_type not in _PLAIN_MEMBER_TYPES:
+            raise ValueError(INVALID_ARCHIVE_MSG.format(
+                what="a special file", name=_member_label(info.filename)))
+        paths = set()
+        for name in (info.orig_filename, info.filename):
+            path = _member_path(name)
+            if path is None:
+                raise ValueError(INVALID_ARCHIVE_MSG.format(
+                    what="an unsafe file name", name=_member_label(name)))
+            paths.add(path)
+        for path in paths:
+            if path in seen:
+                raise ValueError(INVALID_ARCHIVE_MSG.format(
+                    what="a file name twice", name=_member_label(path)))
+            seen.add(path)
+            parts = path.split('/')
+            parents.update('/'.join(parts[:i]) for i in range(1, len(parts)))
+            if not info.is_dir():
+                files.add(path)
+    clash = files & parents
+    if clash:
+        raise ValueError(INVALID_ARCHIVE_MSG.format(
+            what="a file that is also a folder",
+            name=_member_label(min(clash))))
+
+
+def _validate_archive_file(zip_path):
+    """validate_archive_members for the zip at *zip_path*."""
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            validate_archive_members(zf)
+    except zipfile.BadZipFile as e:
+        raise ValueError("Not a valid zip file.") from e
+
+
+def check_staged_tree(root):
+    """Refuse an extracted backup at *root* that holds anything but plain
+    files and directories; raise ValueError.
+
+    validate_archive_members is the gate; this is the check after the fact,
+    should an extractor (another unzip build, say) create a link the member
+    list did not show. restore_container_artifacts runs it again before it
+    copies anything: install-from-backup's staging sits on disk across a
+    restart. Nothing is followed: links are found with lstat.
+    """
+    if os.path.islink(root) or not os.path.isdir(root):
+        raise ValueError("Not a valid OnionPress backup: the extracted "
+                         "backup is not a folder.")
+
+    def _unreadable(err):
+        raise ValueError("Not a valid OnionPress backup: could not read the "
+                         f"extracted files ({err.strerror or err}).") from err
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_unreadable):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            mode = os.lstat(path).st_mode
+            if stat.S_ISLNK(mode):
+                what = "a symbolic link"
+            elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                what = "a special file"
+            else:
+                continue
+            raise ValueError(INVALID_ARCHIVE_MSG.format(
+                what=what, name=_member_label(os.path.relpath(path, root))))
+
+
 def _unzip_cli_extract(zip_path, password, dest, log_func):
     """Fast-path extraction via the system `unzip` CLI — C code, ~30-50x faster
     than zipfile's pure-Python ZipCrypto decryption (which runs ~2 MB/s on a
     ~900 MB encrypted backup). Returns True on success, False if `unzip` is
     absent or errors (caller falls back to zipfile). *password* is None for
-    the unencrypted inner zip of a format-2 backup.
+    the unencrypted inner zip of a format-2 backup. `unzip` recreates
+    symlink entries, so it is only ever handed an archive that passed
+    validate_archive_members.
 
     Injection-safe: arguments are passed as a LIST to subprocess.run with NO
     shell=True, so the password and paths are literal argv values that a shell
@@ -784,7 +908,11 @@ def extract_archive(zip_path, password, dest, log_func):
     Format 2: decrypt the inner zip to a temp file (every record verified
     first), then unzip it — no password, so `unzip` and zipfile are both
     fast. Format 1: `unzip -P`, falling back to zipfile. Either way a wrong
-    password raises ValueError before anything lands in *dest*.
+    password raises ValueError before anything lands in *dest*, and so does
+    an archive holding links, special files or unsafe names
+    (validate_archive_members; a format-1 zip's member list is readable
+    without the password). The extracted tree is checked again afterwards
+    (check_staged_tree).
     """
     if backup_crypto.is_encrypted_backup(zip_path):
         log_func("Restore: decrypting backup (format 2)...")
@@ -792,18 +920,21 @@ def extract_archive(zip_path, password, dest, log_func):
         os.close(fd)
         try:
             backup_crypto.decrypt_archive(zip_path, password, inner)
+            _validate_archive_file(inner)
             if not _unzip_cli_extract(inner, None, dest, log_func):
                 with zipfile.ZipFile(inner, 'r') as zf:
                     zf.extractall(dest)
         finally:
             os.unlink(inner)
-        return
-    if not _unzip_cli_extract(zip_path, password, dest, log_func):
-        # Fallback: pure-Python zipfile — always available, but slow for
-        # ZipCrypto. Also the path that surfaces a wrong-password error.
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            with _wrong_password_as_valueerror(zf):
-                zf.extractall(dest, pwd=password.encode())
+    else:
+        _validate_archive_file(zip_path)
+        if not _unzip_cli_extract(zip_path, password, dest, log_func):
+            # Fallback: pure-Python zipfile — always available, but slow for
+            # ZipCrypto. Also the path that surfaces a wrong-password error.
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                with _wrong_password_as_valueerror(zf):
+                    zf.extractall(dest, pwd=password.encode())
+    check_staged_tree(dest)
 
 
 def extract_backup(zip_path, password, log_func, staging=None):
@@ -818,12 +949,20 @@ def extract_backup(zip_path, password, log_func, staging=None):
     Handles both backup formats (extract_archive); also the bash launchers'
     restore paths, via `onionpress.cli extract-backup`.
     """
-    if staging is None:
+    own_staging = staging is None
+    if own_staging:
         staging = tempfile.mkdtemp(prefix='onionpress-restore-')
-    with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
-        log_func("Restore: extracting backup archive...")
-        extract_archive(zip_path, password, staging, log_func)
-    return staging, read_staged_metadata(staging)
+    try:
+        with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
+            log_func("Restore: extracting backup archive...")
+            extract_archive(zip_path, password, staging, log_func)
+        return staging, read_staged_metadata(staging)
+    except BaseException:
+        # A refused backup leaves nothing behind in a dir made here; a
+        # caller's dir is the caller's to remove.
+        if own_staging:
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
 
 
 def peek_backup_metadata(zip_path, password):
@@ -1160,6 +1299,12 @@ def restore_container_artifacts(staging, metadata, log_func):
     and multisite constants. Shared by restore_from_backup (in-place) and the
     install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
     """
+    # docker cp follows a link in the source path (a `wp-content` link to
+    # the home folder would copy that folder into the web root) and copies
+    # links inside it as links, so nothing staged may be one. Extraction
+    # already refused them; install-from-backup's staging has since sat in
+    # ~/.onionpress across a restart.
+    check_staged_tree(staging)
     db_dir = _find_dir(staging, 'database')
     wpcontent_dir = _find_dir(staging, 'wp-content')
 
