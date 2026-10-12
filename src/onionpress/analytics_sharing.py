@@ -25,6 +25,8 @@ import subprocess
 import threading
 import time
 
+from onionpress import redact
+
 # Permissive "safe filename" check used when the server asks for a file
 # back. Log naming can evolve on the client side faster than both ends
 # can be redeployed in lockstep, so we only enforce that the name can't
@@ -283,8 +285,14 @@ def _do_upload_cycle(app, include_active=False):
             from datetime import datetime as _dt, timezone as _tz
             status_name = f"status-{_dt.now(_tz.utc).strftime('%Y-%m-%d')}.json.gz"
             status_path = os.path.join(logs_dir, status_name)
+            # Scrubbed like the logs: Linux's status.json carries paths
+            # under $HOME (wp_admin_password_path).
+            status_bytes = redact.scrub_for_upload(
+                json.dumps(status_payload, indent=2, ensure_ascii=False).encode("utf-8"),
+                app.app_support, status_name,
+            )
             with gzip.open(status_path, "wb") as _gz:
-                _gz.write(json.dumps(status_payload, indent=2).encode("utf-8"))
+                _gz.write(status_bytes)
             ssize = os.path.getsize(status_path)
             if ssize > 0 and not any(f["name"] == status_name for f in all_files):
                 all_files.append({"name": status_name, "size": ssize, "path": status_path})
@@ -300,6 +308,10 @@ def _do_upload_cycle(app, include_active=False):
     # snapshot — subsequent writes will ship in the next day's cycle when
     # the file has either rolled (on-disk .log.gz) or grown enough that
     # OnionHome re-requests the larger snapshot under the same name.
+    #
+    # Only a RotatingLog's rolled .log.gz has been scrubbed on disk; every
+    # other file (active logs, launcher logs, all of Linux's plain logs) is
+    # scrubbed here, before it can leave the machine, or not offered.
     compressed_bytes = {}  # advertised name -> gzipped bytes
     transformed = []
     for entry in all_files:
@@ -314,6 +326,11 @@ def _do_upload_cycle(app, include_active=False):
         except OSError:
             continue
         if not raw:
+            continue
+        try:
+            raw = redact.scrub_for_upload(raw, app.app_support, name)
+        except Exception as e:
+            app.log(f"Analytics sharing: not offering {name}, scrub failed: {e}")
             continue
         buf = io.BytesIO()
         with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6) as gz:

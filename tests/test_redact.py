@@ -146,5 +146,66 @@ class TestScrubFn(unittest.TestCase):
             self.assertIn(b"token=<redacted>", out)
 
 
+class TestScrubsIps(unittest.TestCase):
+    """One rule decides IP pseudonymization at rotation (by log type) and
+    at upload (by file name, which starts with the type)."""
+
+    def test_visitor_facing_types_and_their_files(self):
+        for name in (
+            "wordpress-access", "container-wordpress",
+            "wordpress-visitors-2026-10-12-001.log",
+            "container-wordpress-2026-10-12-001.log",
+            "container-wordpress.log",                 # Linux on-disk name
+            "container-wordpress-1a2b3c4d.log",        # Linux advertised name
+        ):
+            self.assertTrue(redact.scrubs_ips(name), name)
+
+    def test_destination_logs_keep_their_addresses(self):
+        for name in (
+            "onionpress", "container-tor", "clearnet",
+            "onionpress-2026-10-12-0a1b2c3d.log", "container-tor.log",
+            "launcher-2026-10-12-001.log", "status-2026-10-12.json.gz",
+            "container-onionheaven-takeover-3-2026-10-12-001.log",
+            "wordpress", "container-wordpressx.log",
+        ):
+            self.assertFalse(redact.scrubs_ips(name), name)
+
+
+class TestScrubForUpload(unittest.TestCase):
+    HOME = "/home/alice"
+
+    def test_visitor_log_is_fully_scrubbed(self):
+        raw = (b"192.168.1.23 - - [12/Oct/2026] \"GET /wp-login.php?action=rp&key=s3cr3tK3y "
+               b"HTTP/1.1\" 200 Cookie: wordpress_logged_in=xyz\n"
+               b"PHP Warning: in /home/alice/.onionpress/x.php\n")
+        with tempfile.TemporaryDirectory() as td:
+            out = redact.scrub_for_upload(raw, td, "container-wordpress.log", home=self.HOME)
+        self.assertNotIn(b"192.168.1.23", out)
+        self.assertNotIn(b"s3cr3tK3y", out)
+        self.assertNotIn(b"xyz", out)
+        self.assertNotIn(b"alice", out)
+        self.assertIn(b"key=<redacted>", out)
+        self.assertIn(b"Cookie: <redacted>", out)
+        self.assertIn(b"~/.onionpress/x.php", out)
+        self.assertRegex(out, rb"fd[0-9a-f]{2}:")  # the pseudonym
+
+    def test_destination_log_keeps_ips_but_loses_secrets(self):
+        raw = b"[2026-10-12] connect 203.0.113.9 /home/alice/x ?token=t0k\n"
+        with tempfile.TemporaryDirectory() as td:
+            out = redact.scrub_for_upload(raw, td, "onionpress-2026-10-12-0a1b2c3d.log",
+                                          home=self.HOME)
+            self.assertFalse(os.path.exists(os.path.join(td, redact.SALT_DIR)),
+                             "no salt is needed when IPs are kept")
+        self.assertIn(b"203.0.113.9", out)
+        self.assertIn(b"~/x", out)
+        self.assertIn(b"token=<redacted>", out)
+        self.assertNotIn(b"t0k", out)
+
+    def test_root_home_is_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = redact.scrub_for_upload(b"/var/lib/x\n", td, "onionpress.log", home="/")
+        self.assertEqual(out, b"/var/lib/x\n")
+
+
 if __name__ == "__main__":
     unittest.main()

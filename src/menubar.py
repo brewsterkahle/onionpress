@@ -153,19 +153,13 @@ class OnionPressApp(rumps.App):
         self.colima_home = os.path.join(self.app_support, "colima")
         self.info_plist = os.path.join(self.contents_dir, "Info.plist")
         logs_dir = os.path.join(self.app_support, "logs")
-        # Visitor-facing logs get IP pseudonymization on rotation;
-        # internal/outbound logs keep real addresses because those IPs
-        # are destinations, not humans, and scrubbing them destroys
-        # debugging value with no privacy benefit. All logs get URL
-        # query-param and credential-header scrubbing regardless.
-        _IP_SCRUB_TYPES = {
-            "wordpress-access", "wordpress-visitors", "container-wordpress",
-        }
-
+        # Visitor-facing logs get IP pseudonymization on rotation
+        # (redact.IP_SCRUB_TYPES, shared with the upload-time scrub).
+        # All logs get URL query-param and credential-header scrubbing.
         def _rotating(log_type):
             scrub = redact.make_scrub_fn(
                 self.app_support,
-                scrub_ips=(log_type in _IP_SCRUB_TYPES),
+                scrub_ips=redact.scrubs_ips(log_type),
             )
             return RotatingLog(logs_dir, log_type, scrub_fn=scrub)
 

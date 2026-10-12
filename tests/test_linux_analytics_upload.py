@@ -12,6 +12,8 @@ These tests load the daemon as a module under a throwaway HOME (it opens
 key extraction and the curl-over-Tor POST are stubbed at the
 analytics_sharing module boundary.
 """
+import base64
+import gzip
 import importlib.util
 import json
 import os
@@ -24,6 +26,7 @@ import threading
 import types
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(TESTS_DIR)
@@ -297,6 +300,94 @@ class TestUploadCycleOnLinux(unittest.TestCase):
         analytics_sharing._post_json = lambda app, url, payload: None
         result = analytics_sharing._do_upload_cycle(self.host, include_active=True)
         self.assertEqual(result["status"], "manifest_failed")
+
+
+class TestUploadIsScrubbedOnLinux(unittest.TestCase):
+    """Linux logs are plain files nothing scrubs on disk (the Mac scrubs at
+    rotation), so every byte must pass redact.scrub_for_upload on its way
+    out: home directory, auth parameters, credential headers, and visitor
+    IPs in visitor-facing logs."""
+
+    HOME = "/home/op-test-user"
+    LEAKS = ("op-test-user", "s3cr3tT0k", "n0nceV4l", "c00kieV4l", "192.168.1.77")
+
+    def setUp(self):
+        self.data = tempfile.mkdtemp(prefix="op-scrub-")
+        self.host = hb.AnalyticsHost(CONTENT, HC, data_dir=self.data)
+        self.logged = []
+        self.host.log = self.logged.append
+        self._config = hb.CONFIG_PATH
+        hb.CONFIG_PATH = os.path.join(self.data, "config")
+
+        _write(os.path.join(self.data, "onionpress.log"),
+               f"[2026-10-10 06:00:00] heartbeat client starting in {self.HOME}/.onionpress\n"
+               "[2026-10-10 06:00:01] GET http://x.onion/?token=s3cr3tT0k\n")
+        _write(os.path.join(self.data, "logs", "container-wordpress.log"),
+               '192.168.1.77 - - "GET /wp-admin/?_wpnonce=n0nceV4l HTTP/1.1" 200\n'
+               "Cookie: wordpress_logged_in_x=c00kieV4l\n")
+        _write(os.path.join(self.data, "logs", "container-tor.log.1"),
+               "Oct 01 06:00:00.000 [notice] Opening connection to 203.0.113.5\n")
+        _write(os.path.join(self.data, "status.json"), json.dumps({
+            "state": "running", "platform": "linux",
+            "wp_admin_password_path": f"{self.HOME}/.onionpress/wp-admin-password",
+        }))
+
+        self._orig_extract = key_manager.extract_keys
+        key_manager.extract_keys = lambda: (secrets.token_bytes(64), secrets.token_bytes(32))
+        self._orig_post = analytics_sharing._post_json
+        self.uploads = {}
+
+        def fake_post(app, url, payload):
+            if url.endswith("/logs/manifest"):
+                return {"wanted": [f["name"] for f in payload["files"]]}
+            self.uploads[payload["file_name"]] = gzip.decompress(
+                base64.b64decode(payload["file_content"])).decode("utf-8")
+            return {"stored": True}
+        analytics_sharing._post_json = fake_post
+
+    def tearDown(self):
+        key_manager.extract_keys = self._orig_extract
+        analytics_sharing._post_json = self._orig_post
+        hb.CONFIG_PATH = self._config
+        shutil.rmtree(self.data, ignore_errors=True)
+
+    def _cycle(self):
+        with mock.patch.dict(os.environ, {"HOME": self.HOME}):
+            return analytics_sharing._do_upload_cycle(self.host, include_active=True)
+
+    def test_nothing_sensitive_leaves_the_machine(self):
+        result = self._cycle()
+        self.assertEqual(result["status"], "ok", self.logged)
+        self.assertIn("container-wordpress.log.gz", self.uploads)
+        self.assertEqual(len(self.uploads), 4, sorted(self.uploads))
+        for name, body in self.uploads.items():
+            for leak in self.LEAKS:
+                self.assertNotIn(leak, body, f"{leak!r} shipped in {name}")
+
+        wp = self.uploads["container-wordpress.log.gz"]
+        self.assertIn("_wpnonce=<redacted>", wp)
+        self.assertIn("Cookie: <redacted>", wp)
+        self.assertRegex(wp, r"^fd[0-9a-f]{2}:", "visitor IP not pseudonymized")
+        tor = next(b for n, b in self.uploads.items() if n.startswith("container-tor-"))
+        self.assertIn("203.0.113.5", tor, "a destination log keeps its addresses")
+        status = next(b for n, b in self.uploads.items() if n.startswith("status-"))
+        self.assertEqual(json.loads(status)["wp_admin_password_path"],
+                         "~/.onionpress/wp-admin-password")
+
+    def test_a_file_that_cannot_be_scrubbed_is_not_offered(self):
+        real = analytics_sharing.redact.scrub_for_upload
+
+        def flaky(raw, app_support, log_name, home=None):
+            if log_name.startswith("container-wordpress"):
+                raise OSError("salt dir not writable")
+            return real(raw, app_support, log_name, home)
+        with mock.patch.object(analytics_sharing.redact, "scrub_for_upload", flaky):
+            result = self._cycle()
+        self.assertEqual(result["status"], "ok", self.logged)
+        self.assertNotIn("container-wordpress.log.gz", self.uploads)
+        self.assertEqual(len(self.uploads), 3, sorted(self.uploads))
+        self.assertTrue(any("not offering container-wordpress.log" in m for m in self.logged),
+                        self.logged)
 
 
 class TestPostJsonDockerRouting(unittest.TestCase):

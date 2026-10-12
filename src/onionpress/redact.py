@@ -6,6 +6,12 @@ gzip-compression, so the stored ``.log.gz`` on disk — and the bytes
 later offered to OnionHome — contain no visitor IPs and no sensitive
 URL parameters or request headers.
 
+Runs again at upload time (see ``analytics_sharing._do_upload_cycle``)
+for every file that leaves the machine without having been rolled by a
+RotatingLog: the Mac's active logs and launcher logs, and every Linux
+log, which are plain files nothing scrubs on disk. :func:`scrub_for_upload`
+applies the same rules in one pass.
+
 What gets scrubbed
 ==================
 * Query-string values for well-known auth/session parameters
@@ -77,6 +83,24 @@ _IPV6_RE = re.compile(
 SALT_DIR = "ip-salts"
 _SALT_SIZE = 32
 _SALT_MAX_AGE_DAYS = 30
+
+# Visitor-facing logs get IP pseudonymization; internal/outbound logs
+# keep real addresses because those IPs are destinations, not humans,
+# and scrubbing them destroys debugging value with no privacy benefit.
+# All logs get URL query-param and credential-header scrubbing regardless.
+IP_SCRUB_TYPES = frozenset({
+    "wordpress-access", "wordpress-visitors", "container-wordpress",
+})
+
+
+def scrubs_ips(log_name):
+    """True if *log_name* — a log type, or a file name that starts with
+    one (``container-wordpress-2026-10-12-001.log``,
+    ``container-wordpress.log``) — is a visitor-facing log."""
+    return any(
+        log_name == t or log_name.startswith((t + "-", t + "."))
+        for t in IP_SCRUB_TYPES
+    )
 
 
 def _salt_dir_path(app_support):
@@ -189,3 +213,21 @@ def make_scrub_fn(app_support, scrub_ips=True):
         salt = get_daily_salt(app_support) if scrub_ips else b""
         return redact_bytes(raw_bytes, salt, scrub_ips=scrub_ips)
     return _scrub
+
+
+def scrub_for_upload(raw, app_support, log_name, home=None):
+    """Scrub a log's bytes on their way to OnionHome.
+
+    Applies what a RotatingLog applies over a file's life — the home
+    directory becomes ``~`` (at write time there) and :func:`redact_bytes`
+    (at rotation there) — with IPs pseudonymized only for visitor-facing
+    logs (:func:`scrubs_ips` on *log_name*).
+    """
+    if home is None:
+        home = os.path.expanduser("~")
+    text = raw.decode("utf-8", errors="replace")
+    if home and home != os.sep:
+        text = text.replace(home, "~")
+    scrub_ips = scrubs_ips(log_name)
+    salt = get_daily_salt(app_support) if scrub_ips else b""
+    return redact_text(text, salt, scrub_ips=scrub_ips).encode("utf-8")
