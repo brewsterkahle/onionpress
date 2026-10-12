@@ -16,10 +16,12 @@ Status endpoint: http://localhost:9077/status
 import os
 import re
 import secrets
+import shutil
 import socket
 import select
 import string
 import subprocess
+import tempfile
 import json
 import threading
 import time
@@ -32,6 +34,13 @@ from urllib.parse import urlparse, parse_qs
 PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
 PHP_PROXY_PORT = int(os.environ.get("ONIONPRESS_WP_PORT", 8080))
 PHP_PROXY_PATH = "/__op_proxy.php"
+# /__op_proxy.php answers only requests that carry this token. Onion and
+# Cloudflare Tunnel visitors reach the same WordPress, so the forwarder
+# cannot tell this app from them by address alone (src/onion-forward.php).
+# install_php_proxy writes the token into the copy it installs, in place of
+# PHP_PROXY_TOKEN_PLACEHOLDER; new for each run of the app, kept in memory.
+PHP_PROXY_TOKEN = secrets.token_urlsafe(32)
+PHP_PROXY_TOKEN_PLACEHOLDER = "__ONIONPRESS_PROXY_TOKEN__"
 # A v3 onion host, optionally under subdomain labels (Tor serves
 # www.<address>.onion as <address>.onion). Matched with fullmatch against a
 # lowercased host without a trailing dot (see _onion_host).
@@ -311,10 +320,26 @@ class ProxyCache:
 
 
 def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
-    """Copy the PHP proxy script into the WordPress container."""
+    """Copy the PHP proxy script into the WordPress container, with
+    PHP_PROXY_TOKEN written into it."""
+    staging = None
     try:
+        with open(php_script_path, encoding="utf-8") as f:
+            script = f.read()
+        if script.count(PHP_PROXY_TOKEN_PLACEHOLDER) != 1:
+            if log_func:
+                log_func(f"Failed to install PHP proxy: {php_script_path} "
+                         "has no single token placeholder")
+            return False
+        # A private directory: the file itself has to be 0644, as docker cp
+        # keeps the mode and Apache reads it as www-data.
+        staging = tempfile.mkdtemp(prefix="onionpress-php-proxy-")
+        staged = os.path.join(staging, "__op_proxy.php")
+        with open(staged, "w", encoding="utf-8") as f:
+            f.write(script.replace(PHP_PROXY_TOKEN_PLACEHOLDER, PHP_PROXY_TOKEN))
+        os.chmod(staged, 0o644)
         result = subprocess.run(
-            [docker_bin, "cp", php_script_path,
+            [docker_bin, "cp", staged,
              "onionpress-wordpress:/var/www/html/__op_proxy.php"],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=docker_env
         )
@@ -330,6 +355,9 @@ def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
         if log_func:
             log_func(f"Failed to install PHP proxy: {e}")
         return False
+    finally:
+        if staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def check_php_proxy(log_func=None):
@@ -337,7 +365,8 @@ def check_php_proxy(log_func=None):
     try:
         conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=5)
         conn.request("GET", PHP_PROXY_PATH,
-                     headers={"X-OnionPress-Action": "status"})
+                     headers={"X-OnionPress-Action": "status",
+                              "X-OnionPress-Token": PHP_PROXY_TOKEN})
         resp = conn.getresponse()
         body = resp.read()
         conn.close()
@@ -585,7 +614,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
     def _fetch_via_php(self, url, post_data=None, content_type=None, head_only=False):
         """Fetch a .onion URL through the PHP proxy (via Tor SOCKS)."""
-        headers = {"X-OnionPress-URL": url}
+        headers = {"X-OnionPress-URL": url, "X-OnionPress-Token": PHP_PROXY_TOKEN}
         if content_type:
             headers["Content-Type"] = content_type
 

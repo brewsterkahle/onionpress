@@ -447,12 +447,20 @@ class TestPhpForwarder(unittest.TestCase):
         # to undefined function curl_init()", one it refuses in the 400
         # text, and nothing reaches the network or the disk. The old check
         # let the first three through, and PHP's curl reads a file:// URL
-        # whatever proxy is set.
+        # whatever proxy is set. The copy run is an installed one: the
+        # bundled file refuses every caller (tests/test_op_proxy_access.py).
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        installed = os.path.join(tmp, "__op_proxy.php")
+        with open(installed, "w") as f:
+            f.write(self.SRC.replace(onion_proxy.PHP_PROXY_TOKEN_PLACEHOLDER,
+                                     onion_proxy.PHP_PROXY_TOKEN))
+
         def run(url):
             r = subprocess.run(
-                [PHP, "-d", "disable_functions=curl_init",
-                 os.path.join(PROJECT_DIR, "src", "onion-forward.php")],
+                [PHP, "-d", "disable_functions=curl_init", installed],
                 env={"PATH": os.environ.get("PATH", ""), "REMOTE_ADDR": "127.0.0.1",
+                     "HTTP_X_ONIONPRESS_TOKEN": onion_proxy.PHP_PROXY_TOKEN,
                      "HTTP_X_ONIONPRESS_URL": url},
                 capture_output=True, text=True, timeout=30)
             return r.stdout + r.stderr

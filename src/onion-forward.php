@@ -7,13 +7,63 @@
  *
  * Usage from Mac: GET/POST http://localhost:8080/__op_proxy.php
  *   Header: X-OnionPress-URL: http://xyz.onion/path
+ *   Header: X-OnionPress-Token: the token below
  *
  * This eliminates the need for `docker exec` per request.
  */
 
-// Only allow requests from localhost
-$remote = $_SERVER['REMOTE_ADDR'] ?? '';
-if ($remote !== '127.0.0.1' && $remote !== '::1' && !str_starts_with($remote, '172.')) {
+// Who may use it. The one caller is the menubar app's onion proxy
+// (onion_proxy.py), on 127.0.0.1:<wp port> on the Mac. Lima carries that
+// to the VM's loopback, and Docker's published port hands it to this
+// container from the onionpress-network gateway (docker-proxy dials out
+// from it; without the userland proxy, NAT rewrites to it). Onion visitors
+// reach this same Apache too: Tor -> socat in onionpress-tor ->
+// wordpress:80, from the tor container's own address on that network, and
+// Cloudflare Tunnel visitors from cloudflared's. The "172." prefix this
+// used to admit let all of them in, so anyone on Tor could fetch other
+// onion services through the publisher's Tor.
+//
+// A request now needs the token onion_proxy.install_php_proxy writes into
+// the copy it installs (a new one each time the app starts; the bundled
+// file holds a placeholder that never matches), and has to come from
+// loopback or the gateway, an address no container on the network has.
+const OP_PROXY_TOKEN = '__ONIONPRESS_PROXY_TOKEN__';
+
+// This container's default gateway from the kernel's IPv4 routing table
+// (hex in host byte order, hence pack('L')): the Docker host's address on
+// onionpress-network. '' when there is none.
+function op_proxy_gateway() {
+    $rows = @file('/proc/net/route', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($rows ?: [] as $row) {
+        // Iface Destination Gateway Flags ...; RTF_UP | RTF_GATEWAY = 3
+        $f = preg_split('/\s+/', trim($row));
+        if (count($f) > 3 && $f[1] === '00000000' && $f[2] !== '00000000'
+            && preg_match('/^[0-9A-F]{8}$/Di', $f[2])
+            && preg_match('/^[0-9A-F]{1,4}$/Di', $f[3]) && (hexdec($f[3]) & 3) === 3) {
+            return inet_ntop(pack('L', hexdec($f[2])));
+        }
+    }
+    return '';
+}
+
+function op_proxy_caller_ok() {
+    $token = $_SERVER['HTTP_X_ONIONPRESS_TOKEN'] ?? '';
+    if (!preg_match('/^[A-Za-z0-9_-]{32,}$/D', OP_PROXY_TOKEN)
+        || !is_string($token) || !hash_equals(OP_PROXY_TOKEN, $token)) {
+        return false;
+    }
+    $remote = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+    if (str_starts_with($remote, '::ffff:')) {
+        $remote = substr($remote, 7);
+    }
+    if ($remote === '127.0.0.1' || $remote === '::1') {
+        return true;
+    }
+    $gateway = op_proxy_gateway();
+    return $gateway !== '' && $remote === $gateway;
+}
+
+if (!op_proxy_caller_ok()) {
     http_response_code(403);
     exit('Forbidden');
 }
