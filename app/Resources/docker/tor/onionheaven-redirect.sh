@@ -28,6 +28,22 @@ log_safe() {
     printf '%s' "$1" | LC_ALL=C tr -cd '\041-\176' | cut -c1-"$LOG_FIELD_MAX"
 }
 
+# Client-supplied text in the redirect URL: printable ASCII without spaces,
+# so it stays on the Location header's line, and the characters a URL may
+# not carry literally percent-encoded. '%' is left alone: browsers send the
+# path already encoded.
+url_safe() {
+    printf '%s' "$1" | LC_ALL=C tr -cd '\041-\176' | LC_ALL=C sed \
+        -e 's/"/%22/g' -e 's/</%3C/g' -e 's/>/%3E/g' -e 's/\\/%5C/g' \
+        -e 's/\^/%5E/g' -e 's/`/%60/g' -e 's/{/%7B/g' -e 's/|/%7C/g' -e 's/}/%7D/g'
+}
+
+# Text for the HTML page: &, <, >, " and ' as character references.
+html_escape() {
+    printf '%s' "$1" | LC_ALL=C sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&#39;/g"
+}
+
 # Handle a single HTTP request (called by socat via --handle-request)
 handle_request() {
     local request_line=""
@@ -64,13 +80,15 @@ handle_request() {
     fi
     log_path=$(log_safe "$path")
 
-    # Read headers to find Host
+    # Read headers to find Host. printf, not echo: dash's echo (Debian's
+    # sh) turns a "\n" the client sent into a real line feed, which then
+    # rode into the Location header.
     while read -r line; do
-        line=$(echo "$line" | tr -d '\r')
+        line=$(printf '%s\n' "$line" | tr -d '\r')
         [ -z "$line" ] && break
         case "$line" in
             Host:*|host:*)
-                host=$(echo "$line" | cut -d: -f2 | tr -d ' ')
+                host=$(printf '%s\n' "$line" | cut -d: -f2 | tr -d ' ')
                 ;;
         esac
     done
@@ -110,14 +128,21 @@ handle_request() {
     fi
 
     # Build Wayback Machine URL: http://<wayback-onion>/web/http://<host><path>
-    local wayback_url="http://${WAYBACK_ONION}/web/http://${host}${path}"
+    # Host and path are whatever the client sent, and not every client is a
+    # browser that percent-encodes: url_safe for the header, and on top of
+    # it html_escape for the page.
+    local wayback_url page_host page_url
+    wayback_url="http://${WAYBACK_ONION}/web/http://$(url_safe "$host")$(url_safe "$path")"
+    page_host=$(html_escape "$(url_safe "$host")")
+    page_url=$(html_escape "$wayback_url")
 
-    # Build HTML body for browsers that don't follow redirects automatically
+    # Build HTML body for browsers that don't follow redirects automatically.
+    # All ASCII, so ${#body} is its length in bytes in any shell and locale.
     local body="<html><head><title>Moved</title></head><body>"
     body="${body}<h1>This site has been archived</h1>"
-    body="${body}<p>The onion service at <code>${host}</code> is currently offline.</p>"
+    body="${body}<p>The onion service at <code>${page_host}</code> is currently offline.</p>"
     body="${body}<p>An archived copy is available at:<br>"
-    body="${body}<a href=\"${wayback_url}\">${wayback_url}</a></p>"
+    body="${body}<a href=\"${page_url}\">${page_url}</a></p>"
     body="${body}</body></html>"
     local len=${#body}
 
