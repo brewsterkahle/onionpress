@@ -780,10 +780,24 @@ def main(argv: list[str] = None) -> int:
         "--uploads-dir", required=True,
         help="Path to the staged wp-content/uploads directory")
 
+    sub.add_parser(
+        "safe-config",
+        help="Print the allowlisted (non-secret) config keys as JSON — "
+             "what the WordPress container may see")
+
     args = parser.parse_args(argv)
 
     if not args.command:
         args.command = "start"
+
+    if args.command == "safe-config":
+        # Read-only, and run by the Linux launcher every 30 s: skip
+        # OnionPressCLI's setup (config/secrets creation, port probing).
+        from .config import read_config, redact_config
+        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+        config = read_config(os.path.join(data_dir, "config"))
+        print(json.dumps(redact_config(config), indent=2))
+        return 0
 
     cli = OnionPressCLI(data_dir=args.data_dir)
 

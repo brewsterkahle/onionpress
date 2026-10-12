@@ -2401,23 +2401,13 @@ print(json.dumps(status, indent=2))
     # Write version file for the settings page update checker
     echo "$ONIONPRESS_VERSION" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/version' 2>>"$LOG_FILE"
 
-    # Build config-current.json from ~/.onionpress/config
-    local config_json="{}"
-    if [ -f "$DATA_DIR/config" ]; then
-        config_json=$(python3 -c "
-import json, sys
-config = {}
-with open(sys.argv[1]) as f:
-    for line in f:
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        if '=' in line:
-            key, val = line.split('=', 1)
-            config[key] = val
-print(json.dumps(config, indent=2))
-" "$DATA_DIR/config")
-    fi
+    # Build config-current.json from ~/.onionpress/config — allowlisted keys
+    # only (SAFE_CONFIG_KEYS, shared with the Mac app): the file is readable
+    # by WordPress/PHP and the config can hold secrets such as
+    # CLOUDFLARE_TUNNEL_TOKEN. On failure write {}, never the raw config,
+    # so an older full copy in the volume is still overwritten.
+    local config_json
+    config_json=$(op_py --data-dir "$DATA_DIR" safe-config 2>>"$LOG_FILE") || config_json="{}"
 
     echo "$config_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/config-current.json' 2>>"$LOG_FILE"
 

@@ -698,9 +698,12 @@ add_action( 'admin_init', function () {
         }
     }
 
-    // Check if a restart is actually needed (must read old values before writing updates)
+    // Check if a restart is actually needed (must read old values before writing updates).
+    // Only Linux shows the restart prompt. CLOUDFLARE_TUNNEL_TOKEN (a secret) and
+    // TOR_IMPL are not in config-current.json, so they could never compare equal
+    // and would ask for a restart on every save; neither takes effect on Linux.
     $needs_restart = false;
-    $restart_keys = array( 'ADDRESS_PREFIX', 'CLOUDFLARE_TUNNEL_TOKEN', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS', 'TOR_IMPL' );
+    $restart_keys = array( 'ADDRESS_PREFIX', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS' );
     if ( ! empty( $updates ) ) {
         $old_values = array();
         $config_file = '/var/lib/onionpress/config-current.json';

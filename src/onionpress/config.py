@@ -42,11 +42,16 @@ DEFAULTS = {
 # ALLOWLIST, not a denylist: any key not listed here is withheld, so a
 # future credential-bearing key can't leak by simply being added to config.
 # CLOUDFLARE_TUNNEL_TOKEN is the notable exclusion — it's a secret.
+# The settings page posts back every field it shows, so a field whose key
+# is withheld here is reset on save: START_ON_BOOT (Linux's LAUNCH_ON_LOGIN)
+# and the hub's takeover tunables are listed for that reason.
 SAFE_CONFIG_KEYS = frozenset({
     "ADDRESS_PREFIX",
     "VM_MEMORY", "VM_CPU", "VM_DISK",
-    "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "PREVENT_SLEEP",
+    "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "START_ON_BOOT",
+    "PREVENT_SLEEP",
     "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
+    "ONIONHEAVEN_PROPAGATION_DELAY", "ONIONHEAVEN_HUB_THRESHOLD",
     "SHARE_ANALYTICS_WITH_ONIONHOME", "ONIONHOME_ADDRESS",
     "ONIONNAME", "ONIONNAME_REGISTERED",
 })
