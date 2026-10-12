@@ -46,10 +46,13 @@ COPY onionpress-health.conf /etc/apache2/conf-available/
 COPY onionpress-health.txt /usr/local/share/onionpress/health.txt
 # My Creations is bind-mounted under DocumentRoot: serve it, never run it.
 COPY onionpress-creations.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations
+# The same for wp-content/uploads: media, never code.
+COPY onionpress-uploads.conf /etc/apache2/conf-available/
+RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations onionpress-uploads
 # A conf Apache rejects would take every site down at the next image pull;
-# fail the build instead. The php_module check keeps the creations conf's
-# `php_admin_flag engine off` from being skipped silently by its <IfModule>.
+# fail the build instead. The php_module check keeps the creations and
+# uploads confs' `php_admin_flag engine off` from being skipped silently by
+# their <IfModule>.
 RUN apache2ctl configtest \
     && apache2ctl -M 2>/dev/null | grep -q ' php_module '
 

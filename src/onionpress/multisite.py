@@ -77,6 +77,10 @@ MULTISITE_CONSTANTS = (
 # does. The extension list is shared with that conf and with the upload check
 # in onionpress-creations.php (tests/test_creations_no_php.py). A second rule
 # refuses hidden paths there (tests/test_creations_hidden_files.py).
+#
+# The uploads block refuses the same extensions under wp-content/uploads/
+# (every site's media), as the image's onionpress-uploads.conf does
+# (tests/test_uploads_no_php.py).
 HTACCESS_BODY = """\
 # Privacy: prevent onion address leaking in Referer headers
 <IfModule mod_headers.c>
@@ -90,6 +94,11 @@ RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]
 RewriteRule ^ - [F]
 # ...and never its hidden files and folders (.git/, .DS_Store, .thumbs/)
 RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\\. [NC]
+RewriteRule ^ - [F]
+
+# Uploads are media: serve them, never run them
+RewriteCond %{REQUEST_URI} /wp-content/uploads/ [NC]
+RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]
 RewriteRule ^ - [F]
 
 # BEGIN WordPress Multisite

@@ -1937,6 +1937,11 @@ RewriteRule ^ - [F]
 RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\. [NC]
 RewriteRule ^ - [F]
 
+# Uploads are media: serve them, never run them
+RewriteCond %{REQUEST_URI} /wp-content/uploads/ [NC]
+RewriteCond %{REQUEST_URI} \.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]
+RewriteRule ^ - [F]
+
 # BEGIN WordPress Multisite
 RewriteEngine On
 RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
