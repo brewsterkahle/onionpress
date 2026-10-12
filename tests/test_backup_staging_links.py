@@ -368,7 +368,7 @@ class TestPackBackupLeavesLinksOut(_Base):
 
     def setUp(self):
         super().setUp()
-        mv._cheap_scrypt(self)
+        mv._cheap_kdf(self)
         self.staging = mv._make_staging(self.tmp, mv._metadata())
         up = os.path.join(self.staging, "wp-content", "uploads")
         os.makedirs(up)
@@ -411,7 +411,7 @@ class TestCreateBackupWithPlantedLinks(_Base):
 
     def setUp(self):
         super().setUp()
-        mv._cheap_scrypt(self)
+        mv._cheap_kdf(self)
         home = self.home
         # wp-content as the container's tar would see it.
         wp = os.path.join(self.tmp, "container-wp-content")
@@ -515,7 +515,7 @@ class TestLinuxCreateBackup(_Base):
         self.assertLess(scrub, body.index(".onionpress-regenerate-derivatives"))
 
     def test_planted_links_never_reach_the_backup(self):
-        mv._cheap_scrypt(self)
+        mv._cheap_kdf(self)
         wp = os.path.join(self.tmp, "container-wp-content")
         os.makedirs(os.path.join(wp, "themes"))
         with open(os.path.join(wp, "themes", "flavor.css"), "w") as f:

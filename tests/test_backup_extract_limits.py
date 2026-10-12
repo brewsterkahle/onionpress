@@ -75,7 +75,7 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        mv._cheap_scrypt(self)
+        mv._cheap_kdf(self)
         self.logs = []
 
     def _dest(self):
