@@ -178,6 +178,7 @@ function onionpress_follow_refused() {
 function onionpress_follow_guarded( $fn ) {
     static $depth = 0;
     if ( 0 === $depth++ ) {
+        add_filter( 'http_request_args', 'onionpress_follow_guard_args', PHP_INT_MAX, 2 );
         add_filter( 'pre_http_request', 'onionpress_follow_guard_request', PHP_INT_MAX, 3 );
         add_action( 'requests-requests.before_request', 'onionpress_follow_guard_hops', 10, 5 );
     }
@@ -185,10 +186,28 @@ function onionpress_follow_guarded( $fn ) {
         return call_user_func( $fn );
     } finally {
         if ( 0 === --$depth ) {
+            remove_filter( 'http_request_args', 'onionpress_follow_guard_args', PHP_INT_MAX );
             remove_filter( 'pre_http_request', 'onionpress_follow_guard_request', PHP_INT_MAX );
             remove_action( 'requests-requests.before_request', 'onionpress_follow_guard_hops', 10 );
         }
     }
+}
+
+/**
+ * http_request_args inside onionpress_follow_guarded(): no
+ * wp_http_validate_url() for a URL the follow rule accepts. fetch_feed()
+ * asks for it (wp_safe_remote_request), and for a host that is not a .onion
+ * it calls gethostbyname() in the container: a DNS query outside Tor naming
+ * the followed site, sent when a visitor's page view refreshes the
+ * blogroll. The request itself goes through Tor, which resolves the name at
+ * the exit, and this guard holds the URL, every further request and every
+ * redirect to onionpress_follow_url_allowed() in place of that check.
+ */
+function onionpress_follow_guard_args( $args, $url ) {
+    if ( onionpress_follow_url_allowed( $url ) ) {
+        $args['reject_unsafe_urls'] = false;
+    }
+    return $args;
 }
 
 /** pre_http_request inside onionpress_follow_guarded(): refuse what a follow may not request. */

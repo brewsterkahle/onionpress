@@ -20,6 +20,11 @@ the first URL (onionpress_follow_url_allowed), on every request a fetch makes
 discovery runs only for a v3 .onion address, a follow stored before the rule
 is skipped and its title dropped, and the follow form refuses the rest.
 
+The same guard turns off WordPress's own safe-URL check for the URLs it
+accepts: fetch_feed() asks for that check, which resolves a non-.onion host
+with gethostbyname() inside the container, a DNS query outside Tor naming
+the followed site whenever a visitor's page view refreshes the blogroll.
+
 There is no PHP in the test environment, so these read the source, and run
 the host rule's regular expressions in Python.
 """
@@ -232,6 +237,8 @@ class TestEveryFollowRequestIsChecked(unittest.TestCase):
     def test_guard_checks_every_request_and_every_redirect(self):
         guarded = _function(self.blogroll, "onionpress_follow_guarded")
         for line in (
+            "add_filter( 'http_request_args', 'onionpress_follow_guard_args', PHP_INT_MAX, 2 );",
+            "remove_filter( 'http_request_args', 'onionpress_follow_guard_args', PHP_INT_MAX );",
             "add_filter( 'pre_http_request', 'onionpress_follow_guard_request', PHP_INT_MAX, 3 );",
             "add_action( 'requests-requests.before_request', 'onionpress_follow_guard_hops', 10, 5 );",
             "remove_filter( 'pre_http_request', 'onionpress_follow_guard_request', PHP_INT_MAX );",
@@ -249,6 +256,11 @@ class TestEveryFollowRequestIsChecked(unittest.TestCase):
         hops = _function(self.blogroll, "onionpress_follow_guard_hops")
         self.assertIn("$options['hooks']->register( 'requests.before_redirect', "
                       "'onionpress_follow_guard_redirect' );", hops)
+
+        args = _function(self.blogroll, "onionpress_follow_guard_args")
+        allowed = args.index("if ( onionpress_follow_url_allowed( $url ) ) {")
+        self.assertIn("$args['reject_unsafe_urls'] = false;", args[allowed:allowed + 100])
+        self.assertEqual(args.count("reject_unsafe_urls"), 1)
 
         redirect = _function(self.blogroll, "onionpress_follow_guard_redirect")
         self.assertIn("if ( onionpress_follow_url_allowed( $location ) )", redirect)

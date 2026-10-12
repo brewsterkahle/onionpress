@@ -250,7 +250,10 @@
   backslash, host = 2+ labels with an alphabetic TLD, not localhost or a
   local-network name, not local per the tor proxy; no DNS lookup), and
   `onionpress_follow_guarded()` holds every further request and redirect to
-  the same rule. Discovery runs only for a v3 `.onion`.
+  the same rule. Discovery runs only for a v3 `.onion`. The guard also sets
+  `reject_unsafe_urls` false for accepted URLs: WordPress's
+  `wp_http_validate_url()` (which `fetch_feed` asks for) resolves the host
+  with `gethostbyname()` in the container, a clearnet DNS query.
 - Never call `wp_remote_*`/`fetch_feed` directly for a follow;
   `tests/test_follow_requests.py` fails if one appears.
 
