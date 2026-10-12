@@ -39,7 +39,6 @@ import onionheaven_common as oc  # noqa: E402
 COMPOSE = "app/Resources/docker/docker-compose.yml"
 OTHER_COMPOSE_FILES = (
     "app/Resources/docker/docker-compose.cloudflare.yml",
-    "linux/docker-compose.pi.yml",
 )
 PROXY_SOCKET = "/run/autoheal-proxy/docker.sock"
 

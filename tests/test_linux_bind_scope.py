@@ -166,6 +166,22 @@ class TestComposeBindings(unittest.TestCase):
             with self.subTest(file=rel):
                 self.assertNotIn("0.0.0.0", _code(_read(rel)))
 
+    def test_every_compose_file_in_the_repo_is_a_shipped_one(self):
+        """linux/docker-compose.pi.yml was an unshipped override that bound
+        WordPress to 0.0.0.0 whatever ONIONPRESS_BIND_HOST said, and none
+        of the checks above read it. A compose file outside the shipped set
+        would be just as unchecked."""
+        found = set()
+        for dirpath, dirnames, filenames in os.walk(PROJECT_ROOT):
+            # Hidden dirs too: .claude/worktrees/ holds other checkouts.
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")
+                           and d not in ("node_modules", "OnionPress.app", "venv",
+                                         "py2app_build", "py2app_dist")]
+            for name in filenames:
+                if "compose" in name and name.endswith((".yml", ".yaml")):
+                    found.add(os.path.relpath(os.path.join(dirpath, name), PROJECT_ROOT))
+        self.assertEqual(sorted(found), SHIPPED_COMPOSE)
+
     def test_legacy_rewrites_find_nothing_to_widen(self):
         for rel in SHIPPED_COMPOSE:
             text = _code(_read(rel))
