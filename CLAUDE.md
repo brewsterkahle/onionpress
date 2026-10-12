@@ -411,6 +411,11 @@
   refuses anything but a regular file before reading it
   (`backup.check_uploaded_backup`; Linux: `[ -L ] || [ ! -f ]`).
   `tests/test_settings_restore_upload.py`.
+- The Settings page's finished backup is written into the container by
+  `docker exec -i -u www-data … sh -c 'umask 077; cat > "$1"'`, never by
+  root's `docker cp` + `chown`: both followed a link www-data can plant at
+  the predictable name, and the chown handed any container file to
+  www-data. `tests/test_settings_backup_handoff.py`.
 
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`

@@ -3304,17 +3304,26 @@ sys.exit(0 if provision_interactive() else 1)
                         local bp_onion
                         bp_onion=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' | sed 's/\.onion//' | cut -c1-8 || echo "site")
                         local bp_filename="OnionPress-${bp_onion}-$(date +%Y-%m-%d-%H-%M).zip"
-                        local bp_path="/tmp/$bp_filename"
+                        # A folder of our own, not a guessable name in /tmp.
+                        local bp_dir bp_path
+                        bp_dir=$(mktemp -d -t onionpress-settings-backup-XXXXXX) || bp_dir=/nonexistent
+                        bp_path="$bp_dir/$bp_filename"
                         if create_backup "$bp_password" "$bp_path" 2>>"$LOG_FILE"; then
-                            # Copy zip into the WordPress container for download
-                            docker cp "$bp_path" "onionpress-wordpress:/var/lib/onionpress/$bp_filename" 2>>"$LOG_FILE"
-                            docker exec onionpress-wordpress chown www-data:www-data "/var/lib/onionpress/$bp_filename" 2>/dev/null
-                            rm -f "$bp_path"
+                            # Hand the zip to the WordPress container for
+                            # download, written as www-data (the page's own
+                            # user). Not docker cp + chown as root: both
+                            # follow a link www-data can plant at this
+                            # predictable name, and the chown made any file
+                            # in the container its own.
+                            docker exec -i -u www-data onionpress-wordpress \
+                                sh -c 'umask 077; cat > "$1"' sh "/var/lib/onionpress/$bp_filename" \
+                                < "$bp_path" 2>>"$LOG_FILE"
+                            rm -rf "$bp_dir"
                             echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
                                 docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
                             log "Backup created: $bp_filename"
                         else
-                            rm -f "$bp_path"
+                            rm -rf "$bp_dir"
                             echo '{"success":false,"error":"Backup failed — check logs","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
                                 docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/backup-result.json' 2>/dev/null
                             log "Backup failed"

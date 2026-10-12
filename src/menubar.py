@@ -5618,23 +5618,29 @@ License: AGPL v3"""
                             tmp_path, self.version, self.log
                         )
 
-                        # Copy into WordPress container for download
-                        subprocess.run(
-                            ["docker", "cp", tmp_path,
-                             f"onionpress-wordpress:/var/lib/onionpress/{filename}"],
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=30
-                        )
-                        subprocess.run(
-                            ["docker", "exec", "onionpress-wordpress",
-                             "chown", "www-data:www-data", f"/var/lib/onionpress/{filename}"],
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=5
-                        )
+                        # Hand it to the WordPress container for download,
+                        # written as www-data (the page's own user). Not
+                        # docker cp + chown as root: both follow a link
+                        # www-data can plant at this predictable name, and
+                        # the chown made any file in the container its own.
                         try:
-                            os.remove(tmp_path)
-                        except OSError:
-                            pass
+                            with open(tmp_path, 'rb') as backup_file:
+                                r = subprocess.run(
+                                    ["docker", "exec", "-i", "-u", "www-data",
+                                     "onionpress-wordpress",
+                                     "sh", "-c", 'umask 077; cat > "$1"', "sh",
+                                     f"/var/lib/onionpress/{filename}"],
+                                    stdin=backup_file, capture_output=True,
+                                    timeout=300
+                                )
+                        finally:
+                            try:
+                                os.remove(tmp_path)
+                            except OSError:
+                                pass
+                        if r.returncode != 0:
+                            raise Exception("Could not hand the backup to the "
+                                            "Settings page")
                         _write_result("backup-result.json", {
                             "success": True, "filename": filename,
                             "created_at": now_iso
