@@ -258,11 +258,13 @@ if ! [[ "$ONIONPRESS_BIND_HOST" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
 fi
 export ONIONPRESS_BIND_HOST
 
-# Every OnionPress node is an OnionHeaven server (accepts registrations).
-# The API server runs inside the tor container (always on, ~15MB overhead).
-# The heartbeat monitor + takeover Tor container starts lazily on first
-# registration. Takeover workers spawn on demand when a registered site
-# goes offline. ONIONHEAVEN_HUB=1 enables 10 intro points (auto-detected).
+# Only the OnionHeaven hub accepts registrations: the canonical hub address,
+# or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes in the config (read below). The API
+# server runs inside the tor container on every node (~15MB overhead) and
+# refuses registrations elsewhere; the onionheaven container runs on every
+# node too, but its heartbeat monitor stays idle off the hub. On the hub,
+# takeover workers spawn on demand when a registered site goes offline.
+# ONIONHEAVEN_HUB=1 enables 10 intro points (auto-detected).
 # OnionHome analytics directory (bind-mounted into tor container)
 export ONIONPRESS_SHARED_DIR="$DATA_DIR/shared"
 mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
@@ -341,6 +343,15 @@ if [ -f "$DATA_DIR/config" ]; then
     _val=$(grep "^ONIONHEAVEN_HUB_THRESHOLD=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
 fi
+
+# Run as an OnionHeaven hub (config-file-only; only an exact "yes" counts,
+# checked in the containers). Kept in step with app/MacOS/onionpress and
+# onionpress.containers: compose hands it to tor and onionheaven.
+ONIONHEAVEN_ACCEPT_REGISTRATIONS=""
+if [ -f "$DATA_DIR/config" ]; then
+    ONIONHEAVEN_ACCEPT_REGISTRATIONS=$(grep "^ONIONHEAVEN_ACCEPT_REGISTRATIONS=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+fi
+export ONIONHEAVEN_ACCEPT_REGISTRATIONS
 
 # ─── Parse global flags ────────────────────────────────────────────
 # --yes / -y skips interactive confirmations (for scripted/automated use).
@@ -1073,6 +1084,10 @@ stop_onionheaven_farm() {
 }
 
 # ─── OnionHeaven lazy activation ──────────────────────────────────────
+#
+# The activation flag marks a hub. web-server.py writes it once it knows the
+# node is one (canonical hub address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes)
+# and removes it on every other node; registrations no longer write it.
 
 ONIONHEAVEN_WATCHER_PID=""
 
@@ -1081,7 +1096,7 @@ start_onionheaven_activation_watcher() {
         log "OnionHeaven container already running"
     fi
 
-    # If the activation flag already exists (previous registration), start immediately.
+    # If the activation flag already exists (this node is a hub), start immediately.
     local activate_flag
     activate_flag=$(docker exec onionpress-tor cat /var/lib/onionpress/onionheaven/activate 2>/dev/null) || true
     if [ -n "$activate_flag" ]; then
@@ -1090,11 +1105,11 @@ start_onionheaven_activation_watcher() {
     fi
 
     if [ -z "$activate_flag" ]; then
-        log "OnionHeaven API server running in tor container — waiting for first registration to activate heartbeat monitor"
+        log "OnionHeaven: no activation flag — not a hub (the heartbeat monitor stays idle)"
     fi
 
     # Start persistent watcher — monitors the activation flag and restarts
-    # the onionheaven container if it goes down while registrations exist.
+    # the onionheaven container if it goes down on a hub.
     _onionheaven_activation_watcher &
     ONIONHEAVEN_WATCHER_PID=$!
 }
@@ -1106,7 +1121,7 @@ _onionheaven_activation_watcher() {
     # Persistent loop: poll for the activation flag every 30s.
     # If the flag exists but the onionheaven container is not running,
     # restart it.  This handles the case where the container was stopped
-    # externally (e.g., by a test cleanup) and a new registration arrives.
+    # externally (e.g., by a test cleanup).
     while true; do
         sleep 30
         local flag
@@ -1515,8 +1530,8 @@ start_containers() {
     warn_if_socks_port_exposed
 
     # OnionHeaven: the API server runs inside the tor container (always on).
-    # The heartbeat monitor + takeover Tor container starts lazily when the
-    # first registration arrives (signaled by an activation flag file).
+    # On a hub, the watcher keeps the onionheaven container (heartbeat
+    # monitor + takeover Tor) running (signaled by an activation flag file).
     start_onionheaven_activation_watcher
 
     # install_ia_plugin stays bash for now — it shells out to two helper
@@ -2549,6 +2564,12 @@ _validate_oh_address() {
         "http://${addr}:8083/status" 2>/dev/null) || true
 
     if [ -n "$api_result" ] && echo "$api_result" | grep -q '"version"'; then
+        # Every node answers /status, but only a hub accepts registrations.
+        # Images from before that gate omit the field; they took them all.
+        if echo "$api_result" | grep -q '"accepting_registrations": *false'; then
+            echo '{"valid":true,"status":"site","message":"This address runs OnionPress but is not an OnionHeaven hub, so it will refuse registrations."}'
+            return 0
+        fi
         echo '{"valid":true,"status":"hub","message":"Valid OnionHeaven hub."}'
         return 0
     fi

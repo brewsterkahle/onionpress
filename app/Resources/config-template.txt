@@ -153,6 +153,16 @@ SHARE_ANALYTICS_WITH_ONIONHOME=no
 #
 # ONIONHOME_ADDRESS=op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion
 
+# Run an OnionHeaven Hub (advanced, config-file-only)
+# Default: unset (off)
+#
+# Only the OnionHeaven hub accepts registrations from other OnionPress sites,
+# stores their onion service keys and takes their addresses over when they go
+# offline. Set this to "yes" only if you run your own hub for sites that point
+# their ONIONHEAVEN_ADDRESS at you. Restart OnionPress after changing it.
+#
+# ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes
+
 # Locally Built Container Images (advanced, developer-only)
 #
 # Point OnionPress at container images you built yourself with

@@ -197,9 +197,9 @@ if ! kill -0 $SOCAT_PID 2>/dev/null; then
     echo "ERROR: socat (port 8080 forward) failed to start"
 fi
 
-# OnionHeaven API server — runs on EVERY node so any OnionPress instance
-# can accept registrations. The onionheaven container (heartbeat monitor +
-# takeover Tor) starts lazily when the first registration arrives.
+# OnionHeaven API server — runs on every node (status, OnionHome endpoints),
+# but only the OnionHeaven hub accepts registrations: the canonical hub
+# address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes (onionheaven_common.py).
 mkdir -p /var/lib/onionpress/onionheaven/keys
 python3 /web-server.py &
 ONIONHEAVEN_SERVER_PID=$!

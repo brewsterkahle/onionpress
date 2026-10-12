@@ -15,28 +15,35 @@ loopback source address proves nothing and is never trusted on its own.
 The only source-address trust is the Docker bridge range (172.x / 10.x):
 those requests can only come from a container on the compose network.
 
+/online, /offline, /unregister and /reset-onionheaven are hub-only: every
+other node answers them 403 without parsing the body (see "Hub admission"
+in onionheaven_common).
+
 Endpoints:
   POST /online       — Heartbeat / register (upserts registry entry, stores arti key).
                        Requires a valid ed25519 signature from the content
                        address's own key, from every source address.
+                       Hub only.
   POST /unregister   — Release takeover (DEL_ONION + decrement worker), mark
                        row status='unregistered', delete arti key file.
                        Row is NOT deleted — a subsequent /online from the same
                        (content_address, healthcheck_address) transitions
                        status back to 'online' (re-registration).
-                       Signature required, from every source address.
+                       Signature required, from every source address. Hub only.
   POST /offline      — Notify OnionHeaven that instance is going offline.
-                       Signature required, from every source address.
+                       Signature required, from every source address. Hub only.
   POST /reset-onionheaven — Clean stress tests + refresh workers with current
                        code. Docker-bridge sources only (the `onionpress
                        reset` CLI reaches it via docker exec from the
                        onionheaven container); Tor-origin callers get 403.
                        One run at a time — a concurrent call gets 409.
+                       Hub only.
   POST /logs/manifest — (OnionHome only) Accept log file manifests for analytics sharing
   POST /logs/upload   — (OnionHome only) Accept log file uploads for analytics sharing
   POST /api/name/register, /release — (OnionHome only) signature required
   POST /api/name/register-local, /release-local — Docker-bridge sources only
-  GET  /status       — Public status summary (no auth)
+  GET  /status       — Public status summary (no auth); accepting_registrations
+                       says whether this node is a hub
   GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
 """
 
@@ -59,7 +66,8 @@ from onion_auth import verify_payload, verify_name_payload
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function,
-    KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR,
+    is_registration_hub, registrations_opted_in,
+    KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR, OWN_HOSTNAME_PATH,
 )
 import onionnames
 
@@ -144,7 +152,7 @@ ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 
 # Read our own onion address so we can reject self-registration
 OWN_ONION_ADDRESS = None
-_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+_HOSTNAME_PATH = OWN_HOSTNAME_PATH
 
 
 def _get_own_address():
@@ -160,6 +168,51 @@ def _get_own_address():
         except OSError:
             pass  # file not written yet, or not readable (e.g. outside container)
     return OWN_ONION_ADDRESS
+
+
+def _accepts_registrations():
+    """True if this node is an OnionHeaven hub and may take registrations.
+
+    The canonical hub address (read from the Tor hostname file, like
+    _is_onionhome()) or the operator's ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes.
+    Not cached: until the hostname exists only the opt-in admits, and the
+    answer flips as soon as Tor writes it.
+    """
+    return is_registration_hub(_get_own_address())
+
+
+NOT_A_HUB_ERROR = ("This node is not an OnionHeaven hub and does not accept "
+                   "registrations")
+
+# Linux launcher hint (linux/onionpress): keep the onionheaven container up.
+ACTIVATE_MARKER = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
+
+
+def _sync_activate_marker(poll_seconds=5):
+    """Make the activation marker follow hub admission, once it is known.
+
+    Written on a hub and removed on every other node; a registration never
+    writes it (it used to, from /online). Waits for the own address first,
+    as an unknown address cannot tell the two apart.
+    """
+    import time as _time
+    while _get_own_address() is None and not registrations_opted_in():
+        _time.sleep(poll_seconds)
+    if _accepts_registrations():
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            with open(ACTIVATE_MARKER, "w") as f:
+                f.write(now + "\n")
+        except OSError as e:
+            log(f"WARNING: could not write activation flag: {e}")
+        return
+    try:
+        os.unlink(ACTIVATE_MARKER)
+        log("Removed the OnionHeaven activation flag — this node is not a hub")
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"WARNING: could not remove activation flag: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +426,29 @@ def _verify_signature(handler, data, endpoint):
     )
 
 
+# Endpoint label of the signature that backs an is_onionheaven claim on
+# /online (field onionheaven_peer_signature, same timestamp). Distinct from
+# every real endpoint, so neither signature can stand in for the other.
+# linux/onionpress-heartbeat.py signs with the same literal; a test checks.
+PEER_CLAIM_ENDPOINT = "onionheaven-peer"
+
+
+def _signed_peer_claim(data):
+    """True if /online carries an is_onionheaven claim its sender signed.
+
+    The claim earns ONIONHEAVEN_PEER_GRACE (30 min) before a takeover. The
+    field is outside the signed canonical string, so on its own it is not
+    trusted: it counts only with its own signature.
+    """
+    if not data.get("is_onionheaven"):
+        return False
+    ok, _ = verify_payload(
+        data.get("content_address", ""), PEER_CLAIM_ENDPOINT,
+        data.get("healthcheck_address", ""), data.get("timestamp", ""),
+        data.get("onionheaven_peer_signature", ""))
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
@@ -406,6 +482,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _refuse_unless_hub(self):
+        """Answer 403 and return True if this node is not an OnionHeaven hub.
+
+        Runs before the body is parsed, so nothing an outsider sends is
+        stored or acted on. The body is still drained (within the usual
+        size limit): closing a socket with unread data can turn into a
+        reset that loses the 403, and keep-alive needs it consumed.
+        """
+        if _accepts_registrations():
+            return False
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            length = -1
+        if 0 <= length <= MAX_REQUEST_BODY:
+            self.rfile.read(length)
+        else:
+            self.close_connection = True
+        self._send_json(403, {"error": NOT_A_HUB_ERROR})
+        return True
 
     def _read_json(self, max_size=None):
         if max_size is None:
@@ -513,6 +610,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
             self._send_json(200, {
                 "version": SERVER_VERSION,
+                "accepting_registrations": _accepts_registrations(),
                 "total": total,
                 "online": online,
                 "taken_over": taken_over,
@@ -579,6 +677,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     "wordpress_healthy": row["wordpress_healthy"],
                     "audit_result": row["audit_result"],
                     "audit_pending": row["audit_pending"],
+                    "is_onionheaven": bool(row["is_onionheaven"]),
                 }
 
                 # serving_status: registered, queued-to-activate, activating, active, failed
@@ -915,6 +1014,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     # -- POST /unregister ---------------------------------------------------
 
     def _handle_unregister(self):
+        if self._refuse_unless_hub():
+            return
         data = self._read_json()
         if data is False:
             return  # 413 already sent
@@ -991,8 +1092,10 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         Always upserts the registry entry. If arti_key_pem is provided,
         validates and stores it (needed for takeover). Heartbeats can omit
-        the key — only the first call needs it.
+        the key — only the first call needs it. Hub only.
         """
+        if self._refuse_unless_hub():
+            return
         data = self._read_json()
         if data is False:
             return  # 413 already sent
@@ -1102,9 +1205,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         # Accept optional fields
         wordpress_healthy = data.get("wordpress_healthy")
-        is_onionheaven = data.get("is_onionheaven")
         version = data.get("version", "unknown")
-        is_oh = 1 if is_onionheaven else 0
+        is_oh = 1 if _signed_peer_claim(data) else 0
 
         created = False
 
@@ -1184,16 +1286,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         conn.close()
 
-        # Write activation flag — signals the host to start the heartbeat
-        # monitor + takeover Tor container.  Written on every registration
-        # (not just the first) so the host watcher can restart the container
-        # if it was stopped externally.
-        activate_path = os.path.join(ONIONHEAVEN_DATA_DIR, "activate")
-        try:
-            with open(activate_path, "w") as f:
-                f.write(now + "\n")
-        except OSError as e:
-            log(f"WARNING: could not write activation flag: {e}")
+        # No activation flag here: a registration comes from outside, and
+        # the flag follows hub admission only (_sync_activate_marker).
 
         self._send_json(200, {
             "online": True,
@@ -1206,6 +1300,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     # -- POST /offline ------------------------------------------------------
 
     def _handle_offline(self):
+        if self._refuse_unless_hub():
+            return
         data = self._read_json()
         if data is False:
             return  # 413 already sent
@@ -1272,10 +1368,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         through the mounted socket, so it is restricted to Docker-bridge
         sources (same guard as the *-local name endpoints) — before #126 it
         had no gate at all and was callable by anyone over Tor. Serialized
-        by _RESET_LOCK: a second call while one is running gets 409.
+        by _RESET_LOCK: a second call while one is running gets 409. It
+        spawns takeover workers, so it is hub-only as well.
         """
         if not self._docker_network_src_ok():
             self._send_json(403, {"error": "local-only endpoint"})
+            return
+        if self._refuse_unless_hub():
             return
         if not _RESET_LOCK.acquire(blocking=False):
             self._send_json(409, {"error": "reset already in progress"})
@@ -1673,6 +1772,9 @@ def main():
     # handlers are not stack-heavy (no deep recursion).
     import threading
     threading.stack_size(256 * 1024)
+
+    threading.Thread(target=_sync_activate_marker, daemon=True,
+                     name="activate-marker").start()
 
     # ThreadingHTTPServer: the register-local forward path can block up to
     # 30s waiting on Tor. Single-threaded serving would stall every other

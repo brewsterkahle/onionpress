@@ -17,6 +17,10 @@ All operations are local:
   - SQLite via Python sqlite3 (shared volume)
   - Post-takeover audits via curl through the local Tor SOCKS port (127.0.0.1:9050)
   - Takeover/release via /onionheaven-tor-manager.sh (same container)
+
+Only on the OnionHeaven hub (see "Hub admission" in onionheaven_common).
+The onionheaven container runs on every node, so on any other node the
+monitor waits in wait_for_hub_admission and never reads the registry.
 """
 
 import os
@@ -32,6 +36,7 @@ from onionheaven_common import (
     check_worker_bootstrap, cleanup_dead_workers,
     _init_worker_index, _ensure_capacity, _pick_worker,
     _exec_takeover, _exec_release,
+    is_registration_hub, registrations_opted_in, read_tor_container_address,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE,
 )
 
@@ -48,6 +53,49 @@ def wall_sleep(seconds):
 
 # How often the monitor scans the DB (seconds)
 HEARTBEAT_INTERVAL = int(os.environ.get("ONIONHEAVEN_HEARTBEAT_INTERVAL", "15"))
+
+# Hub admission re-checks (seconds): fast while the tor container has not
+# written its hostname yet (first run, or it is still starting), slow once
+# the node is known not to be a hub. The idle monitor logs a line at least
+# every HUB_ADMISSION_LOG_EVERY so the entrypoint's watchdog, which restarts
+# it when heartbeat.log is quiet for 300 s, leaves it alone.
+HUB_ADMISSION_RETRY = 15
+HUB_ADMISSION_RECHECK = 120
+HUB_ADMISSION_LOG_EVERY = 240
+
+
+def wait_for_hub_admission(read_address=read_tor_container_address,
+                           sleep=None, clock=time.time):
+    """Return once this node may act as an OnionHeaven hub; idle until then.
+
+    A node that is not the hub never opens the registry, so nothing in it
+    is acted on: no takeover, no takeover worker. Returns the admitting
+    address (None when admitted by the opt-in before it is known).
+    """
+    sleep = sleep or wall_sleep
+    last_msg, last_logged = None, None
+    while True:
+        own = read_address()
+        if is_registration_hub(own):
+            if registrations_opted_in():
+                log("hub admission: opted in (ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes) "
+                    "— monitoring the registry")
+            else:
+                log(f"hub admission: this node is the OnionHeaven hub ({own}) "
+                    f"— monitoring the registry")
+            return own
+        if own:
+            msg = (f"hub admission: {own} is not an OnionHeaven hub — registry "
+                   f"monitoring and takeovers are off")
+        else:
+            msg = ("hub admission: own onion address unknown — registry "
+                   "monitoring and takeovers are off until it is known")
+        now = clock()
+        if (msg != last_msg or last_logged is None
+                or now - last_logged >= HUB_ADMISSION_LOG_EVERY):
+            log(msg)
+            last_msg, last_logged = msg, now
+        sleep(HUB_ADMISSION_RECHECK if own else HUB_ADMISSION_RETRY)
 
 
 def _get_tor_detached(container_name):
@@ -201,6 +249,11 @@ def startup_reconciliation(conn):
             log(f"  startup: unregistering duplicate online row for {ca} (hc: {stale[0]})")
             unregister_entry(conn, ca, stale[0], reason="superseded-by-new-healthcheck")
 
+    # Peer claims (is_onionheaven) are re-sent with every /online and only
+    # stored when signed. Drop any stored before that rule, so an unsigned
+    # claim cannot earn the peer grace.
+    conn.execute("UPDATE registry SET is_onionheaven = 0 WHERE is_onionheaven != 0")
+
     # Give online entries a fresh grace period
     conn.execute(
         "UPDATE registry SET last_healthy = ?, audit_result = NULL, audit_at = NULL "
@@ -234,6 +287,8 @@ def main():
     else:
         log("WARNING: data dir not found after 60s, creating it")
         os.makedirs("/var/lib/onionpress/onionheaven", exist_ok=True)
+
+    wait_for_hub_admission()
 
     conn = db_connect()
     db_ensure_schema(conn)

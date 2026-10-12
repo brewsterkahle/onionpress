@@ -12,6 +12,7 @@ Workers are just Tor instances — they receive commands, not requests.
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -88,6 +89,69 @@ def get_addr_logs(address):
     """Return recent log entries for an address."""
     with _addr_logs_lock:
         return list(_addr_logs.get(address, []))
+
+
+# ---------------------------------------------------------------------------
+# Hub admission
+# ---------------------------------------------------------------------------
+#
+# Port 8083 is published on every node's onion service, and every node runs
+# the onionheaven container (it is also the outside vantage point for the
+# app's reachability probe). Being a hub — accepting registrations, storing
+# onion keys, taking addresses over and spawning takeover workers — is for
+# the OnionHeaven hub only: the node whose own onion address is the
+# canonical hub address, or one whose operator set
+# ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes. Every other node refuses
+# registrations and its heartbeat monitor stays idle. Identity-based, like
+# web-server.py's _is_onionhome().
+
+ONIONHEAVEN_HUB_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+
+# The tor container's own onion hostname, written by Tor.
+OWN_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+
+_ONION_ADDRESS_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
+
+
+def registrations_opted_in():
+    """True if the operator opted this node in as an OnionHeaven hub.
+
+    Only an exact "yes" counts, as with REGISTER_WITH_ONIONHEAVEN: an unset
+    variable or a typo must never turn a node into a hub.
+    """
+    return os.environ.get("ONIONHEAVEN_ACCEPT_REGISTRATIONS", "").strip().lower() == "yes"
+
+
+def is_registration_hub(own_address):
+    """True if the node whose onion address is own_address acts as a hub.
+
+    own_address is None while Tor has not written the hostname yet; then
+    only the opt-in admits the node.
+    """
+    if registrations_opted_in():
+        return True
+    return own_address == ONIONHEAVEN_HUB_ADDRESS
+
+
+def read_tor_container_address():
+    """Return the onion address of this node's tor container, or None.
+
+    For the onionheaven container, which does not mount the tor state
+    volume: it reads the hostname through the Docker socket it already uses
+    for the takeover workers. Any failure reads as unknown, and an unknown
+    address never admits a node.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "onionpress-tor", "cat", OWN_HOSTNAME_PATH],
+            capture_output=True, text=True, timeout=15
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    addr = result.stdout.strip()
+    return addr if _ONION_ADDRESS_RE.match(addr) else None
 
 
 # ---------------------------------------------------------------------------

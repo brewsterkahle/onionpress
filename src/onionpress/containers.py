@@ -168,6 +168,12 @@ class ContainerManager:
         if cf_token:
             env["CLOUDFLARE_TUNNEL_TOKEN"] = cf_token
 
+        # Run as an OnionHeaven hub; only an exact "yes" counts, checked in
+        # the containers. Always set, as the launchers do, so a compose call
+        # from here never recreates tor/onionheaven with a different value.
+        env["ONIONHEAVEN_ACCEPT_REGISTRATIONS"] = read_value(
+            self.paths.config_file, "ONIONHEAVEN_ACCEPT_REGISTRATIONS", "")
+
         return env
 
     # -- Core lifecycle --

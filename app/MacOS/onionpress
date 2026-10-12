@@ -249,6 +249,16 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export CLOUDFLARE_TUNNEL_TOKEN
 
+# Run as an OnionHeaven hub (config-file-only). The containers accept
+# registrations and run takeovers only on the canonical hub address or with
+# an exact "yes" here; compose hands the value to the tor and onionheaven
+# containers. Kept in step with linux/onionpress and onionpress.containers.
+ONIONHEAVEN_ACCEPT_REGISTRATIONS=""
+if [ -f "$DATA_DIR/config" ]; then
+    ONIONHEAVEN_ACCEPT_REGISTRATIONS=$(grep "^ONIONHEAVEN_ACCEPT_REGISTRATIONS=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+fi
+export ONIONHEAVEN_ACCEPT_REGISTRATIONS
+
 # Locally built container images (development).
 #
 # build/build-images.sh builds the tor and wordpress images from this repo and
@@ -2259,6 +2269,12 @@ _validate_oh_address() {
         "http://${addr}:8083/status" 2>/dev/null) || true
 
     if [ -n "$api_result" ] && echo "$api_result" | grep -q '"version"'; then
+        # Every node answers /status, but only a hub accepts registrations.
+        # Images from before that gate omit the field; they took them all.
+        if echo "$api_result" | grep -q '"accepting_registrations": *false'; then
+            echo '{"valid":true,"status":"site","message":"This address runs OnionPress but is not an OnionHeaven hub, so it will refuse registrations."}'
+            return 0
+        fi
         echo '{"valid":true,"status":"hub","message":"Valid OnionHeaven hub."}'
         return 0
     fi

@@ -13,7 +13,9 @@
 #   7. Unregister
 #
 # Prerequisites:
-#   - OnionPress running locally (OnionHeaven API runs on every node)
+#   - OnionPress running locally as an OnionHeaven hub: only a hub accepts
+#     registrations, so set ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes in
+#     ~/.onionpress/config and restart (the canonical hub needs no setting)
 #   - Docker accessible
 #
 # Usage:

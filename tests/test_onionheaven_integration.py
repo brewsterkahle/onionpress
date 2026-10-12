@@ -102,10 +102,20 @@ def _find_free_port():
 class ServerProcess:
     """Manages a local web-server.py process for testing."""
 
-    def __init__(self, port=None, trust_loopback_as_bridge=False):
+    def __init__(self, port=None, trust_loopback_as_bridge=False,
+                 hub_opt_in=True, own_address=None, stale_marker=False):
         self.port = port or _find_free_port()
         self.proc = None
         self._tmpdir = None
+        self.data_dir = None
+        # Only a hub accepts registrations. The tests below exercise hub
+        # behaviour, so the default server opts in the way an operator
+        # would (ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes). own_address stands
+        # in for the Tor hostname file, which does not exist here.
+        self.hub_opt_in = hub_opt_in
+        self.own_address = own_address
+        # Leave an activation marker from an earlier registration behind.
+        self.stale_marker = stale_marker
         # Test clients can only connect from 127.0.0.1. The Docker-bridge
         # guard must reject that (it is how Tor-origin traffic arrives), so
         # the bridge-only endpoints can only be exercised past the guard by
@@ -118,6 +128,10 @@ class ServerProcess:
         data_dir = os.path.join(self._tmpdir, "onionheaven")
         keys_dir = os.path.join(data_dir, "keys")
         os.makedirs(keys_dir, exist_ok=True)
+        self.data_dir = data_dir
+        if self.stale_marker:
+            with open(os.path.join(data_dir, "activate"), "w") as f:
+                f.write("2026-01-01T00:00:00Z\n")
 
         env = os.environ.copy()
         env["PYTHONPATH"] = SERVER_DIR
@@ -127,6 +141,10 @@ class ServerProcess:
         # Signature verification is unconditional since the #126 fix — the
         # old ONIONHEAVEN_ENFORCE_AUTH switch (which this harness set to
         # defeat the loopback bypass) no longer exists.
+        if self.hub_opt_in:
+            env["ONIONHEAVEN_ACCEPT_REGISTRATIONS"] = "yes"
+        else:
+            env.pop("ONIONHEAVEN_ACCEPT_REGISTRATIONS", None)
 
         self.proc = subprocess.Popen(
             [sys.executable, "-c", f"""
@@ -175,6 +193,8 @@ spec.loader.exec_module(srv)
 
 srv.LISTEN_PORT = {self.port}
 srv.KEYS_DIR = {keys_dir!r}
+srv.OWN_ONION_ADDRESS = {self.own_address!r}
+srv._HOSTNAME_PATH = os.path.join({data_dir!r}, "no-such-hostname")
 if {self.trust_loopback_as_bridge!r}:
     srv.OnionHeavenHandler._docker_network_src_ok = lambda self: True
 srv.main()
@@ -707,6 +727,211 @@ class TestResetConcurrency(unittest.TestCase):
         code, data = self._reset()
         self.assertEqual(code, 200, data)
         self.assertTrue(data.get("reset"))
+
+
+
+# ---------------------------------------------------------------------------
+# Hub admission
+# ---------------------------------------------------------------------------
+
+HUB_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+
+
+def _signed(endpoint, expanded, pub, addr, hc_addr, **extra):
+    ts = onion_auth.make_timestamp()
+    data = {
+        "content_address": addr,
+        "healthcheck_address": hc_addr,
+        "timestamp": ts,
+        "signature": onion_auth.sign_payload(expanded, pub, endpoint, addr, hc_addr, ts),
+    }
+    if endpoint == "online":
+        data["arti_key_pem"] = base64.b64encode(_make_arti_pem(expanded, pub)).decode("ascii")
+    for key, value in extra.items():
+        data[key] = value(ts) if callable(value) else value
+    return data
+
+
+def _wait_for(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+class TestNotAHub(unittest.TestCase):
+    """A node that is not the hub refuses registrations and stores nothing.
+
+    Port 8083 is on every node's onion service, but only the hub (canonical
+    address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes) acts as one.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ServerProcess(hub_opt_in=False,
+                                   own_address=_make_test_keypair()[2],
+                                   stale_marker=True)
+        cls.server.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def setUp(self):
+        self.expanded, self.pub, self.addr = _make_test_keypair()
+        self.hc_addr = _make_test_keypair()[2]
+
+    def test_status_says_not_accepting(self):
+        code, data = _get(f"{self.server.base_url}/status")
+        self.assertEqual(code, 200)
+        self.assertIs(data["accepting_registrations"], False)
+
+    def test_signed_registration_refused_and_nothing_stored(self):
+        code, data = _post(f"{self.server.base_url}/online", _signed(
+            "online", self.expanded, self.pub, self.addr, self.hc_addr))
+        self.assertEqual(code, 403, data)
+        self.assertIn("not an OnionHeaven hub", data["error"])
+        code, _ = _get(f"{self.server.base_url}/status/{self.addr}")
+        self.assertEqual(code, 404)
+        self.assertEqual(os.listdir(os.path.join(self.server.data_dir, "keys")), [])
+        self.assertFalse(os.path.exists(os.path.join(self.server.data_dir, "activate")))
+
+    def test_signed_offline_and_unregister_refused(self):
+        for endpoint in ("offline", "unregister"):
+            code, data = _post(f"{self.server.base_url}/{endpoint}", _signed(
+                endpoint, self.expanded, self.pub, self.addr, self.hc_addr))
+            self.assertEqual(code, 403, f"{endpoint}: {data}")
+            self.assertIn("not an OnionHeaven hub", data["error"])
+
+    def test_keep_alive_connection_survives_a_refusal(self):
+        """The refused body is drained, so the next request on the same
+        HTTP/1.1 connection parses cleanly."""
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=10)
+        try:
+            body = json.dumps(_signed(
+                "online", self.expanded, self.pub, self.addr, self.hc_addr)).encode()
+            conn.request("POST", "/online", body=body,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 403)
+            resp.read()
+            sock = conn.sock
+            conn.request("GET", "/status")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertIn("accepting_registrations", json.loads(resp.read()))
+            self.assertIs(conn.sock, sock)
+        finally:
+            conn.close()
+
+    def test_stale_activation_marker_removed(self):
+        marker = os.path.join(self.server.data_dir, "activate")
+        self.assertTrue(_wait_for(lambda: not os.path.exists(marker)),
+                        "activation marker left on a node that is not a hub")
+
+
+class TestResetNotAHub(unittest.TestCase):
+    """/reset-onionheaven spawns takeover workers: hub-only even from the
+    Docker bridge (patched to accept this loopback client)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ServerProcess(trust_loopback_as_bridge=True, hub_opt_in=False,
+                                   own_address=_make_test_keypair()[2])
+        cls.server.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_reset_refused(self):
+        t0 = time.monotonic()
+        code, data = _post(f"{self.server.base_url}/reset-onionheaven", {})
+        self.assertEqual(code, 403, data)
+        self.assertIn("not an OnionHeaven hub", data["error"])
+        self.assertLess(time.monotonic() - t0, RESET_STUB_SECONDS)
+
+
+class TestAddressNotKnownYet(unittest.TestCase):
+    """Until Tor has written the hostname, only the opt-in admits."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ServerProcess(hub_opt_in=False, own_address=None)
+        cls.server.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_registration_refused(self):
+        expanded, pub, addr = _make_test_keypair()
+        code, data = _post(f"{self.server.base_url}/online", _signed(
+            "online", expanded, pub, addr, _make_test_keypair()[2]))
+        self.assertEqual(code, 403, data)
+
+
+class TestCanonicalHub(unittest.TestCase):
+    """The canonical hub address needs no opt-in."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ServerProcess(hub_opt_in=False, own_address=HUB_ADDRESS)
+        cls.server.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_accepts_registrations(self):
+        code, data = _get(f"{self.server.base_url}/status")
+        self.assertIs(data["accepting_registrations"], True)
+        expanded, pub, addr = _make_test_keypair()
+        code, data = _post(f"{self.server.base_url}/online", _signed(
+            "online", expanded, pub, addr, _make_test_keypair()[2]))
+        self.assertEqual(code, 200, data)
+        self.assertTrue(data.get("registered"))
+
+    def test_activation_marker_written_at_startup(self):
+        marker = os.path.join(self.server.data_dir, "activate")
+        self.assertTrue(_wait_for(lambda: os.path.exists(marker)))
+
+
+class TestPeerClaim(unittest.TestCase):
+    """is_onionheaven (30-min takeover grace) counts only when signed."""
+
+    def setUp(self):
+        self.expanded, self.pub, self.addr = _make_test_keypair()
+        self.hc_addr = _make_test_keypair()[2]
+
+    def _online(self, **extra):
+        code, data = _post(f"{server.base_url}/online", _signed(
+            "online", self.expanded, self.pub, self.addr, self.hc_addr, **extra))
+        self.assertEqual(code, 200, data)
+        code, data = _get(f"{server.base_url}/status/{self.addr}")
+        self.assertEqual(code, 200)
+        return data["entries"][0]["is_onionheaven"]
+
+    def _peer_sig(self, endpoint="onionheaven-peer"):
+        return lambda ts: onion_auth.sign_payload(
+            self.expanded, self.pub, endpoint, self.addr, self.hc_addr, ts)
+
+    def test_bare_claim_accepted_but_not_honoured(self):
+        self.assertIs(self._online(is_onionheaven=True), False)
+
+    def test_claim_signed_under_another_label_not_honoured(self):
+        self.assertIs(self._online(is_onionheaven=True,
+                                   onionheaven_peer_signature=self._peer_sig("online")),
+                      False)
+
+    def test_signed_claim_honoured_until_dropped(self):
+        self.assertIs(self._online(is_onionheaven=True,
+                                   onionheaven_peer_signature=self._peer_sig()),
+                      True)
+        self.assertIs(self._online(), False)
 
 
 if __name__ == "__main__":

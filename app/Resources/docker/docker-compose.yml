@@ -14,6 +14,9 @@ services:
     environment:
       - TZ=${TZ:-UTC}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
+      # Only the OnionHeaven hub accepts registrations; "yes" opts another
+      # node in (ONIONHEAVEN_ACCEPT_REGISTRATIONS in ~/.onionpress/config).
+      - ONIONHEAVEN_ACCEPT_REGISTRATIONS=${ONIONHEAVEN_ACCEPT_REGISTRATIONS:-}
     volumes:
       # onion-keys holds the site's identity: the launchers deliver the onion
       # service key here as a PEM (<name>/ks_hs_id.ed25519_expanded_private)
@@ -159,6 +162,7 @@ services:
       - TZ=${TZ:-UTC}
       - NO_ONION_SERVICE=1
       - ONIONHEAVEN=1
+      - ONIONHEAVEN_ACCEPT_REGISTRATIONS=${ONIONHEAVEN_ACCEPT_REGISTRATIONS:-}
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
       - ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD=${ONIONHEAVEN_MAX_SERVICES:-50}

@@ -447,6 +447,11 @@ class HubConnection:
                 self._close_locked()
 
 
+# Endpoint label the hub's web-server.py requires on the signature backing an
+# is_onionheaven claim (PEER_CLAIM_ENDPOINT there; a test keeps them equal).
+PEER_CLAIM_ENDPOINT = "onionheaven-peer"
+
+
 def _build_signed_payload(endpoint, content_addr, hc_addr, priv_key, pub_key, extra=None):
     timestamp = onion_auth.make_timestamp()
     signature = onion_auth.sign_payload(
@@ -461,6 +466,13 @@ def _build_signed_payload(endpoint, content_addr, hc_addr, priv_key, pub_key, ex
     }
     if extra:
         payload.update(extra)
+    # The hub ignores a bare is_onionheaven (it sits outside the signed
+    # string); the claim counts only with its own signature.
+    if payload.get("is_onionheaven"):
+        payload["onionheaven_peer_signature"] = onion_auth.sign_payload(
+            priv_key, pub_key,
+            PEER_CLAIM_ENDPOINT, content_addr, hc_addr, timestamp
+        )
     return payload
 
 
@@ -518,13 +530,15 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
 # ---------------------------------------------------------------------------
 
 def _is_onionheaven_server():
-    """Check if this node also runs an OnionHeaven server (API on port 8083)."""
-    ok, output = docker_exec(
-        "onionpress-tor",
-        ["test", "-f", "/var/lib/onionpress/onionheaven/activate"],
-        timeout=5,
-    )
-    return ok
+    """Check if the operator runs this node as an OnionHeaven hub too.
+
+    Read from ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes, the switch that makes
+    the tor container accept registrations — not from the activation
+    marker, which is only a launcher hint. The claim earns this node the
+    hub's 30-min peer grace before a takeover.
+    """
+    return read_config().get(
+        "ONIONHEAVEN_ACCEPT_REGISTRATIONS", "").strip().lower() == "yes"
 
 
 def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
