@@ -791,11 +791,14 @@ fetch_archive_s3_keys() {
     ia_s3_access=""
     ia_s3_secret=""
 
+    # curl URL-encodes both fields itself, and the password goes in on
+    # stdin: neither is ever part of any code, so quotes and backslashes in
+    # them arrive intact.
     local response
-    response=$(curl -s -X POST \
+    response=$(printf '%s' "$ia_pass" | curl -s -X POST \
         -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
-        -d "email=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$ia_email'))")" \
-        -d "password=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$ia_pass'))")" \
+        --data-urlencode "email=$ia_email" \
+        --data-urlencode "password@-" \
         "https://archive.org/services/xauthn/?op=login" 2>/dev/null) || return 1
 
     local success
@@ -1980,7 +1983,7 @@ restore_backup() {
     fi
 
     local onion_address
-    onion_address=$(python3 -c "import json; print(json.load(open('$metadata_file')).get('onion_address',''))" 2>/dev/null || echo "")
+    onion_address=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$metadata_file" 2>/dev/null || echo "")
     log "Restore: backup from $onion_address"
 
     # 1. Restore Tor keys — copy whatever formats the backup has to vanity-keys.
@@ -3039,7 +3042,7 @@ sys.exit(0 if provision_interactive() else 1)
                                 vanity_address=$(basename "$vanity_addr_dir")
                                 # Import the key using the existing import flow
                                 local vanity_b32_key
-                                vanity_b32_key=$(python3 -c "import base64; print(base64.b32encode(open('$vanity_addr_dir/hs_ed25519_secret_key','rb').read()).decode())")
+                                vanity_b32_key=$(python3 -c "import base64, sys; print(base64.b32encode(open(sys.argv[1],'rb').read()).decode())" "$vanity_addr_dir/hs_ed25519_secret_key")
                                 # Non-interactive import: skip confirmation, force replace
                                 stop_containers 2>/dev/null || true
                                 docker volume rm onionpress-onion-keys onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
@@ -3141,7 +3144,7 @@ sys.exit(0 if provision_interactive() else 1)
                     # Copy the uploaded zip out of the container
                     local rp_local="/tmp/onionpress-restore-$$.zip"
                     docker cp "onionpress-wordpress:$rp_file" "$rp_local" 2>>"$LOG_FILE"
-                    docker exec onionpress-wordpress sh -c "rm -f $rp_file" 2>/dev/null
+                    docker exec onionpress-wordpress rm -f "$rp_file" 2>/dev/null
                     if [ -z "$rp_password" ] || [ ! -f "$rp_local" ]; then
                         rm -f "$rp_local"
                         echo '{"success":false,"error":"Missing password or backup file","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
