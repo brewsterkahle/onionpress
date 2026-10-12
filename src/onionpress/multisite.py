@@ -75,7 +75,8 @@ MULTISITE_CONSTANTS = (
 # The WordPress image's onionpress-creations.conf does the same and more;
 # this copy reaches existing installs at their next start, before that image
 # does. The extension list is shared with that conf and with the upload check
-# in onionpress-creations.php (tests/test_creations_no_php.py).
+# in onionpress-creations.php (tests/test_creations_no_php.py). A second rule
+# refuses hidden paths there (tests/test_creations_hidden_files.py).
 HTACCESS_BODY = """\
 # Privacy: prevent onion address leaking in Referer headers
 <IfModule mod_headers.c>
@@ -86,6 +87,9 @@ Header set Referrer-Policy "no-referrer"
 RewriteEngine On
 RewriteCond %{REQUEST_URI} /wp-content/creations/ [NC]
 RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]
+RewriteRule ^ - [F]
+# ...and never its hidden files and folders (.git/, .DS_Store, .thumbs/)
+RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\\. [NC]
 RewriteRule ^ - [F]
 
 # BEGIN WordPress Multisite

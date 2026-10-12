@@ -10,12 +10,15 @@ publisher can keep a .git/ there (a static-site checkout), and Finder drops
   - get_files() descended into hidden folders, so .git/HEAD and friends
     showed up on the Creations page and the home page's recent creations;
   - `?folder=.git` browsed a hidden folder, and the upload form accepted
-    one as its target.
+    one as its target;
+  - Apache itself served /wp-content/creations/.git/config, since the
+    folder sits under DocumentRoot.
 
 Now no component of a served, browsed or upload path may start with '.',
 checked on the request and again on the realpath()ed result (a symlink
 cannot reach one either). The one exception is the generated thumbnail,
-`.thumbs/<listed path>.png`, which the pages link to themselves.
+`.thumbs/<listed path>.png`, which the pages link to themselves. The
+multisite .htaccess answers 403 for any hidden component of a direct URL.
 
 php is preinstalled on ubuntu-latest, so the PHP half runs in CI; locally
 it is skipped when php is missing.
@@ -147,6 +150,48 @@ class TestEveryEntryPointChecks(unittest.TestCase):
                            self.src)
         self.assertEqual(links, [".thumbs/", ".thumbs/"],
                          "thumbnail links moved; keep is_servable_path in step")
+
+
+class TestDirectUrlRefusesHiddenPaths(unittest.TestCase):
+    """The folder is also under DocumentRoot, so Apache would serve
+    /wp-content/creations/.git/config itself. The multisite .htaccess
+    (rewritten at every start; its copies are kept in sync by
+    test_multisite) answers 403 for any hidden component there."""
+
+    def setUp(self):
+        import sys
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+        from onionpress import multisite
+        self.body = multisite.HTACCESS_BODY
+        m = re.search(
+            r"^RewriteCond %\{REQUEST_URI\} (/wp-content/creations/\S+) \[NC\]\n"
+            r"RewriteRule \^ - \[F\]$", self.body, re.M)
+        self.assertIsNotNone(m, "hidden-path deny rule missing from HTACCESS_BODY")
+        self.cond = re.compile(m.group(1), re.I)
+        self.rule_at = m.start()
+
+    def test_denies_hidden_components(self):
+        for path in ("/wp-content/creations/.git/config",
+                     "/wp-content/creations/.git/logs/HEAD",
+                     "/wp-content/creations/.DS_Store",
+                     "/wp-content/creations/sub/.DS_Store",
+                     "/wp-content/creations/sub/.git/HEAD",
+                     "/wp-content/creations/.thumbs/a.png.png",
+                     "/alice/wp-content/creations/.git/config",
+                     "/WP-CONTENT/CREATIONS/.git/config"):
+            self.assertTrue(self.cond.search(path), path)
+
+    def test_spares_public_files_and_everything_else(self):
+        for path in ("/wp-content/creations/a.png",
+                     "/wp-content/creations/my.file.tar.gz",
+                     "/wp-content/creations/sub/x.y.pdf",
+                     "/alice/wp-content/creations/sub/a.png",
+                     "/.well-known/x", "/wp-content/uploads/.htaccess-free"):
+            self.assertFalse(self.cond.search(path), path)
+
+    def test_runs_before_the_existing_file_passthrough(self):
+        self.assertLess(self.rule_at,
+                        self.body.index("RewriteCond %{REQUEST_FILENAME} -f"))
 
 
 class TestThumbnailGeneratorSkipsHiddenFolders(unittest.TestCase):
