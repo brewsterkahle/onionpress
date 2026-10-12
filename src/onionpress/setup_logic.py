@@ -194,6 +194,66 @@ def install_welcome_post(
     return True
 
 
+# ─── Admin password ──────────────────────────────────────────────────────────
+
+# The admin password never rides a host command line: `ps` shows every
+# user's argv (several users can run OnionPress on one Mac), and a subprocess
+# error (TimeoutExpired, CalledProcessError) quotes the whole argv, so it
+# would reach the log too. WordPress is installed without --admin_password
+# (wp-cli then generates one, printed only on the stdout nobody keeps) and
+# the user's password is set by this fixed PHP, which reads
+# "<login>\n<password>" from stdin (`docker exec -i`).
+#
+# trim(), as wp_install() and wp_authenticate() do. wp_install() flags the
+# generated password with default_password_nag; the user chose this one.
+# A new password ends the user's sessions, which is fine at setup.
+#
+# No single quotes in it: the bash launchers' wp_set_user_password carries
+# the same code in single quotes (test-enforced). No "$" inside its PHP
+# double-quoted strings either, which would interpolate.
+WP_SET_PASSWORD_PHP = r'''
+$in = explode("\n", file_get_contents("php://stdin"), 2);
+$u = get_user_by("login", trim($in[0]));
+$pw = isset($in[1]) ? trim($in[1]) : "";
+if (!$u || $pw === "") { fwrite(STDERR, "Error: no such user, or an empty password\n"); exit(1); }
+wp_set_password($pw, $u->ID);
+delete_user_meta($u->ID, "default_password_nag");
+echo "Success: password set for ", $u->user_login, "\n";
+'''
+
+
+def _run_wp(docker_bin, args, *, input=None, env=None, timeout=60):
+    """Run wp-cli in onionpress-wordpress; with *input*, `docker exec -i`
+    and *input* on stdin.
+
+    A timeout comes back as a failed CompletedProcess (returncode 124) whose
+    stderr names the wp command, not the argv: a TimeoutExpired's message
+    quotes the whole command line, and callers log what they catch.
+    """
+    argv = ([docker_bin, "exec"] + (["-i"] if input is not None else [])
+            + ["onionpress-wordpress", "wp", "--allow-root"] + list(args))
+    try:
+        return subprocess.run(
+            argv, input=input, env=env,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        name = " ".join(a for a in list(args)[:2] if a.isalpha())
+        return subprocess.CompletedProcess(
+            argv, 124, "", f"wp {name} timed out after {timeout}s")
+
+
+def set_wp_user_password(login, password, *, docker_bin="docker", env=None,
+                         timeout=60):
+    """Set WordPress user *login*'s password. The password reaches PHP on
+    stdin only (WP_SET_PASSWORD_PHP); it is never part of any argv or code.
+    Returns the CompletedProcess; returncode 0 on success."""
+    return _run_wp(docker_bin, ["eval", WP_SET_PASSWORD_PHP],
+                   input=f"{login}\n{password}", env=env, timeout=timeout)
+
+
 # ─── Provisioning ────────────────────────────────────────────────────────────
 
 def provision_primary_subsite(
@@ -330,7 +390,8 @@ def install_fresh_wordpress(
     funnel through this single function with the user-typed creds.
 
     Steps:
-      1. wp core install (admin_user=onionname, admin_password=password)
+      1. wp core install (admin_user=onionname), then set the password on
+         stdin (set_wp_user_password) — never on the command line
       2. wp user update — set user_url to per-user subsite path
       3. Set blogname (site title) explicitly — wp core install accepts it
          but some hardened WP images sandbox the option write.
@@ -343,32 +404,28 @@ def install_fresh_wordpress(
       7. Mark onboarded; persist onionname to ~/.onionpress/config.
 
     Returns True on success (best-effort — individual sub-steps may log
-    warnings without failing the overall install).
+    warnings without failing the overall install), False when wp core
+    install or setting the admin password failed.
     """
     def log(msg: str) -> None:
         if log_func:
             log_func(msg)
 
-    def wp(*args, timeout: int = 60, **kwargs) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "--allow-root"] + list(args),
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout, **kwargs,
-        )
+    def wp(*args, timeout: int = 60) -> subprocess.CompletedProcess:
+        return _run_wp(docker_bin, args, timeout=timeout)
 
     log(f"Installing WordPress: title={site_title!r} onionname={onionname!r}")
 
     # 1. wp core install — fails if already installed, which is fine here
     # because callers (SetupDialog, CLI setup) branch on wp_installed
-    # before choosing this path.
+    # before choosing this path. No --admin_password: wp-cli generates one
+    # (and prints it on stdout, which is dropped), and the user's password
+    # goes in on stdin right after.
     r = wp(
         "core", "install",
         f"--url=http://{onion_addr}",
         f"--title={site_title}",
         f"--admin_user={onionname}",
-        f"--admin_password={password}",
         "--admin_email=admin@onionpress.local",
         "--skip-email",
     )
@@ -376,6 +433,18 @@ def install_fresh_wordpress(
         log(f"ERROR: wp core install failed: {r.stderr.strip()[:200]}")
         return False
     log("WordPress installed")
+
+    # The rest of setup still runs if this fails (the menubar's auto-login
+    # reaches wp-admin without a password), but the result is False so the
+    # caller reports it.
+    password_set = True
+    r = set_wp_user_password(onionname, password, docker_bin=docker_bin)
+    if r.returncode != 0:
+        password_set = False
+        log(f"ERROR: setting the admin password failed: "
+            f"{r.stderr.strip()[:200]}")
+    else:
+        log("Admin password set")
 
     # 2. Per-user subsite URL on the user's profile — matches Mac UX where
     # the "Website" link on profile.php points somewhere useful.
@@ -457,6 +526,9 @@ def install_fresh_wordpress(
             from . import multisite
             multisite.ensure_archive_s3_keys(
                 docker_bin=docker_bin, log_func=log_func)
+        except subprocess.SubprocessError as e:
+            # Not {e}: a subprocess error's message quotes the argv.
+            log(f"WARNING: archive.org S3 key fetch failed: {type(e).__name__}")
         except Exception as e:
             log(f"WARNING: archive.org S3 key fetch failed: {e}")
 
@@ -464,7 +536,7 @@ def install_fresh_wordpress(
     threading.Thread(target=_fetch_s3_keys, daemon=True).start()
     log("Archive.org S3 key fetch started in background")
 
-    return True
+    return password_set
 
 
 def provision_existing_wordpress(
@@ -504,13 +576,7 @@ def provision_existing_wordpress(
             log_func(msg)
 
     def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "--allow-root"] + list(args),
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return _run_wp(docker_bin, args, timeout=timeout)
 
     log(f"Provisioning WordPress: title={site_title!r} onionname={onionname!r}")
 
@@ -531,16 +597,12 @@ def provision_existing_wordpress(
     else:
         log(f"Username update: {r.stderr.strip()[:100]} (may already be set)")
 
-    # 3. Password
-    r = wp("user", "update", onionname,
-           f"--user_pass={password}",
-           "--skip-email")
+    # 3. Password — on stdin, never as --user_pass (see WP_SET_PASSWORD_PHP)
+    r = set_wp_user_password(onionname, password, docker_bin=docker_bin)
     if r.returncode == 0:
         log("Password updated")
     else:
-        r2 = wp("user", "update", "admin",
-                 f"--user_pass={password}",
-                 "--skip-email")
+        r2 = set_wp_user_password("admin", password, docker_bin=docker_bin)
         if r2.returncode == 0:
             log("Password updated (via admin fallback)")
         else:

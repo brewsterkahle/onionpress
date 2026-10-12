@@ -91,8 +91,9 @@ class Registrar:
         self.onionhome_port = onionhome_port
         self.timeout = timeout
         self.log = log or (lambda msg: None)
-        # `runner` is injected in tests — a callable(args, timeout) returning
-        # (rc, stdout_str). In prod we shell out to docker exec curl.
+        # `runner` is injected in tests — a callable(args, timeout, input=None)
+        # returning (rc, stdout_str); *input*, when given, is curl's stdin.
+        # In prod we shell out to docker exec curl.
         self._run = runner or self._default_runner
         # `key_source` is injected in tests — a callable returning
         # (expanded_key_64, public_key_32). In prod we read the live keystore.
@@ -101,11 +102,14 @@ class Registrar:
     def _url(self, path):
         return f"http://{self.onionhome_address}:{self.onionhome_port}{path}"
 
-    def _default_runner(self, curl_args, timeout):
-        """Run `docker exec <container> curl …`, return (rc, stdout str)."""
+    def _default_runner(self, curl_args, timeout, input=None):
+        """Run `docker exec <container> curl …`, return (rc, stdout str).
+        With *input*, `docker exec -i` and *input* on curl's stdin."""
         try:
             result = subprocess.run(
-                [self.docker_bin, "exec", self.container, "curl", *curl_args],
+                [self.docker_bin, "exec"] + (["-i"] if input is not None else [])
+                + [self.container, "curl", *curl_args],
+                input=input,
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=timeout,
             )
@@ -128,18 +132,20 @@ class Registrar:
         return self._parse_response(rc, out)
 
     def _post_json(self, path, payload):
+        # The signed body goes to curl on stdin (--data-binary @-), like the
+        # OnionHeaven heartbeat's: argv is visible to every local user (ps).
         body = json.dumps(payload)
         curl_args = [
             "-s", "-S", "-o", "-",
             "-X", "POST",
             "-H", "Content-Type: application/json",
-            "--data", body,
+            "--data-binary", "@-",
             "--max-time", str(self.timeout),
             "--socks5-hostname", "127.0.0.1:9050",
             "-w", "\n__HTTP_STATUS__:%{http_code}",
             self._url(path),
         ]
-        rc, out = self._run(curl_args, timeout=self.timeout + 5)
+        rc, out = self._run(curl_args, timeout=self.timeout + 5, input=body)
         return self._parse_response(rc, out)
 
     def _parse_response(self, rc, raw):

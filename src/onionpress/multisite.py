@@ -111,11 +111,14 @@ def _wp(
     *args,
     docker_bin: str = "docker",
     timeout: int = 60,
+    input: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
-    """Run wp-cli inside the onionpress-wordpress container."""
+    """Run wp-cli inside the onionpress-wordpress container. With *input*,
+    `docker exec -i` and *input* on wp-cli's stdin."""
     return subprocess.run(
-        [docker_bin, "exec", "onionpress-wordpress",
-         "wp", "--allow-root"] + list(args),
+        [docker_bin, "exec"] + (["-i"] if input is not None else [])
+        + ["onionpress-wordpress", "wp", "--allow-root"] + list(args),
+        input=input,
         capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=timeout,
     )
@@ -591,15 +594,25 @@ def ensure_archive_s3_keys(
     # The onion service (Onion-Location header advertised on archive.org
     # itself) routes around that block entirely. -k accepts the onion's
     # self-issued certificate.
-    login = subprocess.run(
-        [docker_bin, "exec", "onionheaven",
-         "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
-         "--max-time", "60", "-X", "POST",
-         "-d", f"email={_ARCHIVE_LOGIN_EMAIL}&password={_ARCHIVE_LOGIN_PASS}",
-         "https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=75,
-    )
+    #
+    # The login form goes to curl on stdin (docker exec -i, --data-binary
+    # @-), and the keys to wp-cli on stdin below: argv is visible to every
+    # local user (ps), and a TimeoutExpired's message quotes it.
+    try:
+        login = subprocess.run(
+            [docker_bin, "exec", "-i", "onionheaven",
+             "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
+             "--max-time", "60", "-X", "POST",
+             "--data-binary", "@-",
+             "https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login"],
+            input=f"email={_ARCHIVE_LOGIN_EMAIL}&password={_ARCHIVE_LOGIN_PASS}",
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=75,
+        )
+    except subprocess.TimeoutExpired:
+        log("WARNING: archive.org login timed out — "
+            "set the S3 keys manually in Settings if needed.")
+        return False
     if login.returncode != 0 or not login.stdout:
         log("WARNING: Could not reach archive.org onion to fetch S3 keys — "
             "set them manually in Settings if needed.")
@@ -619,10 +632,11 @@ def ensure_archive_s3_keys(
         log("WARNING: archive.org login succeeded but S3 keys were empty")
         return False
 
-    _wp("option", "update", "onionpress_archive_s3_access", access,
-        docker_bin=docker_bin)
-    _wp("option", "update", "onionpress_archive_s3_secret", secret,
-        docker_bin=docker_bin)
+    # `wp option update <key>` with no value reads it from stdin.
+    _wp("option", "update", "onionpress_archive_s3_access",
+        docker_bin=docker_bin, input=access)
+    _wp("option", "update", "onionpress_archive_s3_secret",
+        docker_bin=docker_bin, input=secret)
     log("Archive.org S3 keys configured for Wayback archiving")
     return True
 

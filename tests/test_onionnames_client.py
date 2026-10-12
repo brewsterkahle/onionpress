@@ -97,13 +97,16 @@ class _FakeRunner:
     """Records curl invocations; returns scripted responses.
 
     scripted: list of (rc, body_string, http_status) tuples consumed in order.
+    calls: (curl_args, timeout); inputs: what each call had on stdin.
     """
     def __init__(self, scripted):
         self.scripted = list(scripted)
         self.calls = []
+        self.inputs = []
 
-    def __call__(self, args, timeout):
+    def __call__(self, args, timeout, input=None):
         self.calls.append((list(args), timeout))
+        self.inputs.append(input)
         if not self.scripted:
             raise AssertionError("FakeRunner: exhausted scripted responses")
         rc, body, status = self.scripted.pop(0)
@@ -192,12 +195,17 @@ class TestRegistrarPOST(unittest.TestCase):
         result = reg.register("brewsterkahle", addr)
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.body["url"], url)
-        # Verify the request the runner saw carried a valid signature.
+        # Verify the request the runner saw carried a valid signature,
+        # on curl's stdin rather than in argv (ps shows argv to every user).
         args, _ = runner.calls[0]
         self.assertIn("-X", args)
         self.assertIn("POST", args)
-        data_idx = args.index("--data")
-        payload = json.loads(args[data_idx + 1])
+        data_idx = args.index("--data-binary")
+        self.assertEqual(args[data_idx + 1], "@-")
+        self.assertNotIn("--data", args)
+        payload = json.loads(runner.inputs[0])
+        for arg in args:
+            self.assertNotIn(payload["signature"], arg)
         self.assertEqual(payload["onionname"], "brewsterkahle")
         self.assertEqual(payload["onionaddress"], addr)
         self.assertIn("signature", payload)
@@ -258,8 +266,9 @@ class TestRegistrarPOST(unittest.TestCase):
         ])
         result = reg.release("foo", addr)
         self.assertEqual(result.status, "ok")
-        data_idx = runner.calls[0][0].index("--data")
-        payload = json.loads(runner.calls[0][0][data_idx + 1])
+        data_idx = runner.calls[0][0].index("--data-binary")
+        self.assertEqual(runner.calls[0][0][data_idx + 1], "@-")
+        payload = json.loads(runner.inputs[0])
         ok, _ = onion_auth.verify_name_payload(
             addr, "release", "foo",
             payload["timestamp"], payload["signature"],

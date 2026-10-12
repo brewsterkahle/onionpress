@@ -845,12 +845,15 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 env=denv, capture_output=True, timeout=10
             )
 
+            # No --admin_password: argv is visible to every local user (ps)
+            # and a subprocess error quotes it. wp-cli generates a password
+            # (printed on the stdout we drop) and the user's goes in on
+            # stdin once the install is done.
             cmd = wp_exec + [
                 "wp", "core", "multisite-install",
                 "--url=http://localhost",
                 f"--title={title}",
                 f"--admin_user={username}",
-                f"--admin_password={password}",
                 f"--admin_email={email}",
                 "--skip-email",
                 "--allow-root"
@@ -870,6 +873,16 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             if result.returncode == 0:
                 if self.server.log_func:
                     self.server.log_func("WordPress multisite installed via setup page")
+
+                from onionpress.setup_logic import set_wp_user_password
+                pw_result = set_wp_user_password(
+                    username, password, docker_bin=docker, env=denv)
+                password_set = pw_result.returncode == 0
+                if self.server.log_func:
+                    self.server.log_func(
+                        "Admin password set" if password_set else
+                        "ERROR: setting the admin password failed: "
+                        + pw_result.stderr.strip()[:200])
 
                 # Set multisite constants in wp-config.php
                 multisite_constants = [
@@ -933,20 +946,30 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 if self.server.log_func:
                     self.server.log_func("Multisite constants and .htaccess configured")
 
-                # Save archive.org S3 keys if credentials were validated earlier
+                # Save archive.org S3 keys if credentials were validated earlier.
+                # `wp option update <key>` reads the value from stdin, so the
+                # secret key stays out of argv.
                 if archive_s3_keys:
                     for key, val in [('onionpress_archive_s3_access', archive_s3_keys['access']),
                                      ('onionpress_archive_s3_secret', archive_s3_keys['secret'])]:
                         subprocess.run(
-                            wp_exec + ["wp", "option", "update", key, val,
-                                       "--allow-root"],
+                            [docker, "exec", "-i", "onionpress-wordpress",
+                             "wp", "option", "update", key, "--allow-root"],
+                            input=val,
                             env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
                         )
                     if self.server.log_func:
                         self.server.log_func("Archive.org S3 keys saved for Wayback archiving")
 
-                body = SETUP_SUCCESS_HTML.encode('utf-8')
-                self.send_response(200)
+                if password_set:
+                    body = SETUP_SUCCESS_HTML.encode('utf-8')
+                    self.send_response(200)
+                else:
+                    body = (b'<html><body><h1>Setup Incomplete</h1>'
+                            b'<p>WordPress was installed, but your admin password '
+                            b'could not be set. See the OnionPress log.</p>'
+                            b'</body></html>')
+                    self.send_response(500)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -963,9 +986,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
 
         except Exception as e:
+            # A subprocess error's message quotes its whole argv; name the
+            # error instead.
+            import html as html_mod
+            detail = (type(e).__name__ if isinstance(e, subprocess.SubprocessError)
+                      else str(e))
             if self.server.log_func:
-                self.server.log_func(f"Setup error: {e}")
-            body = f'<html><body><h1>Setup Error</h1><p>{e}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
+                self.server.log_func(f"Setup error: {detail}")
+            body = f'<html><body><h1>Setup Error</h1><p>{html_mod.escape(detail)}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
             self.send_response(500)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
@@ -977,7 +1005,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         Returns dict with 'access' and 'secret' on success, None on failure.
         Routes through the onionheaven container's Tor SOCKS proxy to avoid
-        clearnet requests from the host.
+        clearnet requests from the host. The login form and the session
+        cookie go to curl on stdin (docker exec -i), never in argv, which
+        `ps` shows to every local user.
         """
         import urllib.parse
 
@@ -990,11 +1020,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             })
 
             result = subprocess.run(
-                [docker, "exec", "onionheaven",
+                [docker, "exec", "-i", "onionheaven",
                  "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
                  "--max-time", "30",
-                 "-X", "POST", "-d", login_data,
+                 "-X", "POST", "--data-binary", "@-",
                  "https://archive.org/services/xauthn/?op=login"],
+                input=login_data,
                 capture_output=True, text=True, encoding='utf-8', errors='replace',
                 timeout=45, env=denv,
             )
@@ -1024,12 +1055,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             logged_in_user = cookies.get('logged-in-user', '')
 
             if logged_in_sig and logged_in_user:
+                # -H @- reads the header lines from stdin.
                 result2 = subprocess.run(
-                    [docker, "exec", "onionheaven",
+                    [docker, "exec", "-i", "onionheaven",
                      "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
                      "--max-time", "30",
-                     "-H", f"Cookie: logged-in-sig={logged_in_sig}; logged-in-user={logged_in_user}",
+                     "-H", "@-",
                      "https://archive.org/account/s3.php?output_json=1"],
+                    input=f"Cookie: logged-in-sig={logged_in_sig}; logged-in-user={logged_in_user}\n",
                     capture_output=True, text=True, encoding='utf-8', errors='replace',
                     timeout=45, env=denv,
                 )
@@ -1040,6 +1073,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     if access and secret:
                         return {'access': access, 'secret': secret}
 
+        except subprocess.SubprocessError as e:
+            # Not {e}: a subprocess error's message quotes the argv.
+            if self.server.log_func:
+                self.server.log_func(f"archive.org S3 key fetch failed: {type(e).__name__}")
         except Exception as e:
             if self.server.log_func:
                 self.server.log_func(f"archive.org S3 key fetch failed: {e}")

@@ -576,6 +576,24 @@ db_client() {
         sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
 }
 
+# Set a WordPress user's password: wp_set_user_password <login> <password>
+# Both reach a fixed `wp eval` PHP on stdin. As --admin_password or
+# --user_pass the password would sit in the process list, where ps shows
+# every user's command lines. Identical in app/MacOS/onionpress and
+# linux/onionpress, and the PHP is setup_logic.WP_SET_PASSWORD_PHP
+# (test-enforced).
+wp_set_user_password() {
+    printf '%s\n%s' "$1" "$2" | docker exec -i onionpress-wordpress wp eval '
+$in = explode("\n", file_get_contents("php://stdin"), 2);
+$u = get_user_by("login", trim($in[0]));
+$pw = isset($in[1]) ? trim($in[1]) : "";
+if (!$u || $pw === "") { fwrite(STDERR, "Error: no such user, or an empty password\n"); exit(1); }
+wp_set_password($pw, $u->ID);
+delete_user_meta($u->ID, "default_password_nag");
+echo "Success: password set for ", $u->user_login, "\n";
+' --allow-root
+}
+
 # Function to detect container runtime
 detect_container_runtime() {
     # Called as RUNTIME=$(detect_container_runtime): stdout IS the return
@@ -2424,21 +2442,28 @@ setup_wordpress_cli() {
     echo "  Installing WordPress (multisite)..."
     log "Running WP-CLI core multisite-install for first-time setup"
 
+    # No --admin_password: ps shows every user's command lines. wp-cli
+    # generates a password, printed on the stdout dropped here, and
+    # wp_set_user_password then sets the user's on stdin.
     if docker exec onionpress-wordpress wp core multisite-install \
         --url="http://localhost" \
         --title="$wp_title" \
         --admin_user="$wp_user" \
-        --admin_password="$wp_pass" \
         --admin_email="$wp_email" \
         --skip-email \
-        --allow-root >> "$LOG_FILE" 2>&1; then
+        --allow-root >/dev/null 2>>"$LOG_FILE"; then
         log "WordPress multisite installed successfully via WP-CLI"
-        echo "  WordPress installed successfully!"
     else
         log "ERROR: WP-CLI core multisite-install failed"
         echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
         return 1
     fi
+    if ! wp_set_user_password "$wp_user" "$wp_pass" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: setting the WordPress admin password failed"
+        echo "  ERROR: WordPress was installed, but the admin password could not be set. Check $LOG_FILE for details."
+        return 1
+    fi
+    echo "  WordPress installed successfully!"
 }
 
 restore_backup() {

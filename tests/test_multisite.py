@@ -309,7 +309,7 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
         wp_updates = []
         def fake_wp(*args, **kwargs):
             if "update" in args:
-                wp_updates.append(args)
+                wp_updates.append((args, kwargs.get("input")))
             return _ok()  # get returns empty stdout → keys not set
         login_response = (
             '{"success": true, "values": {"s3": '
@@ -318,15 +318,45 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
              mock.patch.object(multisite, "_wp", side_effect=fake_wp), \
              mock.patch("subprocess.run", return_value=subprocess.CompletedProcess(
-                 args=[], returncode=0, stdout=login_response, stderr="")):
+                 args=[], returncode=0, stdout=login_response, stderr="")) as srun:
             result = multisite.ensure_archive_s3_keys(log_func=lambda _: None)
         self.assertTrue(result)
-        access = [a for a in wp_updates
-                  if "onionpress_archive_s3_access" in a and "AKEY" in a]
-        secret = [a for a in wp_updates
-                  if "onionpress_archive_s3_secret" in a and "SKEY" in a]
+        # The keys reach `wp option update` on stdin, not in argv.
+        access = [a for a, i in wp_updates
+                  if "onionpress_archive_s3_access" in a and i == "AKEY"]
+        secret = [a for a, i in wp_updates
+                  if "onionpress_archive_s3_secret" in a and i == "SKEY"]
         self.assertTrue(access, "must update onionpress_archive_s3_access")
         self.assertTrue(secret, "must update onionpress_archive_s3_secret")
+        for args, _ in wp_updates:
+            self.assertNotIn("SKEY", args)
+        # The login form goes to curl on stdin too.
+        argv = srun.call_args.args[0]
+        self.assertEqual(argv[1:4], ["exec", "-i", "onionheaven"])
+        self.assertEqual(argv[argv.index("--data-binary") + 1], "@-")
+        self.assertIn(multisite._ARCHIVE_LOGIN_PASS, srun.call_args.kwargs["input"])
+        for arg in argv:
+            self.assertNotIn(multisite._ARCHIVE_LOGIN_PASS, arg)
+
+    def test_login_timeout_is_a_warning_not_an_exception(self):
+        logs = []
+        with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
+             mock.patch.object(multisite, "_wp", return_value=_ok()), \
+             mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+                 ["docker", "exec", "-i", "onionheaven", "curl"], 75)):
+            result = multisite.ensure_archive_s3_keys(log_func=logs.append)
+        self.assertFalse(result)
+        self.assertTrue(any("timed out" in s for s in logs), logs)
+
+    def test_wp_helper_adds_dash_i_only_with_input(self):
+        with mock.patch.object(multisite.subprocess, "run",
+                               return_value=_ok()) as srun:
+            multisite._wp("option", "get", "x")
+            multisite._wp("option", "update", "x", input="v")
+        plain, piped = (c.args[0] for c in srun.call_args_list)
+        self.assertEqual(plain[:3], ["docker", "exec", "onionpress-wordpress"])
+        self.assertEqual(piped[:4], ["docker", "exec", "-i", "onionpress-wordpress"])
+        self.assertEqual(srun.call_args_list[1].kwargs["input"], "v")
 
     def test_handles_tor_login_failure_gracefully(self):
         logs = []

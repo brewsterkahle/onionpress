@@ -59,12 +59,14 @@ class TestInstallFreshWordpress(unittest.TestCase):
         ) as mrun:
             ok = self._run()
         self.assertTrue(ok)
-        # First call must be `wp core install` with the user-typed creds.
+        # First call must be `wp core install` with the user-typed name;
+        # the password is set on stdin after it (test_secrets_off_argv_setup).
         first_call_args = mrun.call_args_list[0].args[0]
         self.assertIn("core", first_call_args)
         self.assertIn("install", first_call_args)
         self.assertIn("--admin_user=alice", first_call_args)
-        self.assertIn("--admin_password=hunter22", first_call_args)
+        self.assertFalse(any(a.startswith("--admin_password")
+                             for a in first_call_args))
         self.assertIn("--url=http://abc.onion", first_call_args)
         self.assertIn("--title=My Blog", first_call_args)
 

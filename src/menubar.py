@@ -3670,7 +3670,7 @@ class OnionPressApp(rumps.App):
             if sw:
                 sw.set_status("Configuring WordPress...")
                 sw.add_log(f"Installing WordPress as '{sw.admin_user}'...")
-            install_fresh_wordpress(
+            ok = install_fresh_wordpress(
                 site_title=sw.site_title,
                 onionname=sw.admin_user,
                 password=sw.admin_pass,
@@ -3681,7 +3681,11 @@ class OnionPressApp(rumps.App):
                 log_func=_log,
             )
             if sw:
-                sw.add_log("WordPress installed and configured")
+                sw.add_log("WordPress installed and configured" if ok else
+                           "WordPress setup did not complete (see above)")
+        except subprocess.SubprocessError as e:
+            # Not {e}: a subprocess error's message quotes the whole argv.
+            self.log(f"wp core install error: {type(e).__name__}")
         except Exception as e:
             self.log(f"wp core install error: {e}")
 

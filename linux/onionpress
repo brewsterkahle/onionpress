@@ -511,6 +511,24 @@ db_client() {
         sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
 }
 
+# Set a WordPress user's password: wp_set_user_password <login> <password>
+# Both reach a fixed `wp eval` PHP on stdin. As --admin_password or
+# --user_pass the password would sit in the process list, where ps shows
+# every user's command lines. Identical in app/MacOS/onionpress and
+# linux/onionpress, and the PHP is setup_logic.WP_SET_PASSWORD_PHP
+# (test-enforced).
+wp_set_user_password() {
+    printf '%s\n%s' "$1" "$2" | docker exec -i onionpress-wordpress wp eval '
+$in = explode("\n", file_get_contents("php://stdin"), 2);
+$u = get_user_by("login", trim($in[0]));
+$pw = isset($in[1]) ? trim($in[1]) : "";
+if (!$u || $pw === "") { fwrite(STDERR, "Error: no such user, or an empty password\n"); exit(1); }
+wp_set_password($pw, $u->ID);
+delete_user_meta($u->ID, "default_password_nag");
+echo "Success: password set for ", $u->user_login, "\n";
+' --allow-root
+}
+
 # ─── Key import ──────────────────────────────────────────────────────
 
 import_key() {
@@ -871,10 +889,12 @@ fetch_archive_s3_keys() {
     user=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-user',''))" 2>/dev/null)
 
     if [ -n "$sig" ] && [ -n "$user" ]; then
+        # The session cookie is a credential too: curl reads that header
+        # from stdin (-H @-), not from argv.
         local s3_response
-        s3_response=$(curl -s \
+        s3_response=$(printf 'Cookie: logged-in-sig=%s; logged-in-user=%s\n' "$sig" "$user" | curl -s \
             -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
-            -H "Cookie: logged-in-sig=$sig; logged-in-user=$user" \
+            -H @- \
             "https://archive.org/account/s3.php?output_json=1" 2>/dev/null)
         ia_s3_access=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3accesskey',''))" 2>/dev/null)
         ia_s3_secret=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3secretkey',''))" 2>/dev/null)
@@ -1026,15 +1046,17 @@ setup_wordpress_interactive() {
         '[ -f wp-content/sunrise.php ] && mv wp-content/sunrise.php wp-content/sunrise.php.bak || true' \
         >> "$LOG_FILE" 2>&1
 
+    # No --admin_password: ps shows every user's command lines. wp-cli
+    # generates a password, printed on the stdout dropped here, and
+    # wp_set_user_password then sets the user's on stdin.
     local _wp_install_ok=false
     if docker exec onionpress-wordpress wp core multisite-install \
         --url="http://localhost" \
         --title="$wp_title" \
         --admin_user="$wp_user" \
-        --admin_password="$wp_pass" \
         --admin_email="$wp_email" \
         --skip-email \
-        --allow-root >> "$LOG_FILE" 2>&1; then
+        --allow-root >/dev/null 2>>"$LOG_FILE"; then
         _wp_install_ok=true
     fi
 
@@ -1044,21 +1066,28 @@ setup_wordpress_interactive() {
 
     if $_wp_install_ok; then
         log "WordPress installed successfully via WP-CLI"
-        echo "  WordPress installed successfully!"
     else
         log "ERROR: WP-CLI core install failed"
         echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
         echo "  You can complete setup manually at http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
         return 1
     fi
+    if ! wp_set_user_password "$wp_user" "$wp_pass" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: setting the WordPress admin password failed"
+        echo "  ERROR: WordPress was installed, but the admin password could not be set. Check $LOG_FILE for details."
+        return 1
+    fi
+    echo "  WordPress installed successfully!"
 
-    # Convert Archive.org login to S3 API keys and save to wp_options
+    # Convert Archive.org login to S3 API keys and save to wp_options.
+    # `wp option update <key>` reads the value from stdin: the secret key
+    # stays out of argv.
     if [ -n "$ia_access" ] && [ -n "$ia_secret" ]; then
         echo "  Logging in to Archive.org..."
         local ia_s3_access="" ia_s3_secret=""
         if fetch_archive_s3_keys "$ia_access" "$ia_secret"; then
-            docker exec onionpress-wordpress wp option update onionpress_archive_s3_access "$ia_s3_access" --allow-root >> "$LOG_FILE" 2>&1
-            docker exec onionpress-wordpress wp option update onionpress_archive_s3_secret "$ia_s3_secret" --allow-root >> "$LOG_FILE" 2>&1
+            printf '%s' "$ia_s3_access" | docker exec -i onionpress-wordpress wp option update onionpress_archive_s3_access --allow-root >> "$LOG_FILE" 2>&1
+            printf '%s' "$ia_s3_secret" | docker exec -i onionpress-wordpress wp option update onionpress_archive_s3_secret --allow-root >> "$LOG_FILE" 2>&1
             log "Archive.org S3 keys saved (from login)"
             echo "  Archive.org credentials saved."
         else
