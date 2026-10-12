@@ -130,6 +130,10 @@ function onionpress_onboarding_render() {
             update_option( 'blogdescription', $tagline );
         }
         if ( $step === 3 ) {
+            // Deliberately left slashed, like WordPress's own profile and
+            // reset forms: wp_signon() checks the slashed $_POST['pwd'], so
+            // a password stored unslashed here would stop matching at
+            // wp-login.php once it contains ' " or \.
             $new     = $_POST['new_password']     ?? '';
             $confirm = $_POST['confirm_password'] ?? '';
             if ( $new !== '' && $new === $confirm ) {

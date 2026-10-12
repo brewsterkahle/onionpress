@@ -211,15 +211,29 @@ add_action( 'admin_init', function () {
 
     // Handle backup creation — verify WP password and use it to encrypt the zip
     if ( $action === 'create-backup' ) {
-        $bp_pass = $_POST['op_backup_password'] ?? '';
-        if ( empty( $bp_pass ) ) {
+        // $_POST is slashed (wp_magic_quotes). A password set through wp-cli
+        // (OnionPress setup) is hashed as typed, so check the unslashed
+        // value first; a ' " or \ in it used to make every backup from this
+        // page fail. WordPress's own forms store the slashed form
+        // (edit_user() and wp_signon() never unslash), so that is checked
+        // next. The host is handed whichever form matched: it is the one
+        // the Linux launcher re-verifies, and the backup is encrypted with.
+        $bp_raw   = isset( $_POST['op_backup_password'] ) && is_string( $_POST['op_backup_password'] )
+            ? $_POST['op_backup_password'] : '';
+        $bp_typed = wp_unslash( $bp_raw );
+        if ( $bp_typed === '' ) {
             add_action( 'admin_notices', function () {
                 echo '<div class="notice notice-error"><p>Please enter your password.</p></div>';
             } );
             return;
         }
         $current_user = wp_get_current_user();
-        if ( ! wp_check_password( $bp_pass, $current_user->user_pass, $current_user->ID ) ) {
+        if ( wp_check_password( $bp_typed, $current_user->user_pass, $current_user->ID ) ) {
+            $bp_pass = $bp_typed;
+        } elseif ( $bp_raw !== $bp_typed
+                && wp_check_password( $bp_raw, $current_user->user_pass, $current_user->ID ) ) {
+            $bp_pass = $bp_raw;
+        } else {
             add_action( 'admin_notices', function () {
                 echo '<div class="notice notice-error"><p>Incorrect password. Please enter the password for your WordPress account.</p></div>';
             } );
@@ -235,8 +249,11 @@ add_action( 'admin_init', function () {
 
     // Handle restore — write password and uploaded zip to shared volume
     if ( $action === 'restore-backup' ) {
-        $rp_pass = $_POST['op_restore_password'] ?? '';
-        if ( empty( $rp_pass ) ) {
+        // Exactly what was typed (unslashed), as the Mac and Linux restore
+        // prompts take it: the password the backup was encrypted with.
+        $rp_pass = isset( $_POST['op_restore_password'] ) && is_string( $_POST['op_restore_password'] )
+            ? wp_unslash( $_POST['op_restore_password'] ) : '';
+        if ( $rp_pass === '' ) {
             add_action( 'admin_notices', function () {
                 echo '<div class="notice notice-error"><p>Please enter the backup password.</p></div>';
             } );
