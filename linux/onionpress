@@ -2486,8 +2486,15 @@ print(json.dumps(status, indent=2))
   "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback" \
   "${ONIONPRESS_WP_PORT:-8080}")
 
-    # Write to shared volume (consumed by the WP settings/status page)
-    echo "$status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
+    # Write to shared volume (consumed by the WP settings/status page): only
+    # the fields those pages show (redact.WORDPRESS_STATUS_KEYS, shared with
+    # the Mac app) — PHP can read the file, and wp_admin_password_path is a
+    # path under $HOME. If the filter fails, leave the old copy alone rather
+    # than write the full status.
+    local wp_status_json
+    if wp_status_json=$(printf '%s' "$status_json" | op_py --data-dir "$DATA_DIR" wordpress-status 2>>"$LOG_FILE"); then
+        echo "$wp_status_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/status.json' 2>>"$LOG_FILE"
+    fi
     # Also write to the host data dir — the tray app reads this directly,
     # without going through docker exec on every poll.
     printf '%s\n' "$status_json" > "$DATA_DIR/status.json.tmp" 2>>"$LOG_FILE" \
@@ -2506,10 +2513,19 @@ print(json.dumps(status, indent=2))
 
     echo "$config_json" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/config-current.json' 2>>"$LOG_FILE"
 
-    # Write recent logs to shared volume
-    if [ -f "$LOG_FILE" ]; then
-        tail -100 "$LOG_FILE" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/recent-logs.txt' 2>/dev/null
-    fi
+    write_recent_logs
+}
+
+# The end of the log, for the status page's Recent Logs. PHP can read
+# recent-logs.txt, so it is scrubbed first (redact.scrub_for_wordpress:
+# no home path or user name, credentials or non-loopback IPs) and never
+# copied raw: if the scrub fails, a placeholder goes instead.
+write_recent_logs() {
+    [ -f "$LOG_FILE" ] || return 0
+    local logs
+    logs=$(op_py --data-dir "$DATA_DIR" wordpress-logs --log-file "$LOG_FILE" 2>/dev/null) \
+        || logs="(Recent logs unavailable: could not scrub $(basename "$LOG_FILE") for display.)"
+    printf '%s\n' "$logs" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/recent-logs.txt' 2>/dev/null
 }
 
 # ─── Config watcher (on-demand) ──────────────────────────────────────
@@ -3082,9 +3098,7 @@ sys.exit(0 if provision_interactive() else 1)
             if [ -z "$action" ]; then
                 # No action requested — just refresh logs (cheap)
                 # Full status is written on-demand when the status page detects stale data
-                if [ -f "$LOG_FILE" ]; then
-                    tail -100 "$LOG_FILE" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/recent-logs.txt' 2>/dev/null
-                fi
+                write_recent_logs
                 exit 0
             fi
             docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json' 2>/dev/null

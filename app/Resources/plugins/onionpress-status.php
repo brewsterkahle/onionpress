@@ -1,15 +1,28 @@
 <?php
 /**
  * Plugin Name: OnionPress Status Page
- * Description: Public system health status page at /onionpress-status.
- *              Reads status data from the shared volume and optionally
- *              displays WP Statistics traffic summary. Auto-refreshes via AJAX.
- * Version:     1.1
+ * Description: System health status page at /onionpress-status, for the
+ *              site owner only. Reads status data from the shared volume and
+ *              optionally displays WP Statistics traffic summary.
+ *              Auto-refreshes via AJAX.
+ * Version:     1.2
  * Network:     true
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
+}
+
+/**
+ * Whether the current visitor may see the status page and its JSON feed.
+ *
+ * They show the host's recent log lines, uptime, load and container states,
+ * which no site visitor may see: the onion service serves this WordPress to
+ * anyone. Only the network's super admin (on a single site, an administrator)
+ * may — the site owner, not a sub-site's administrator.
+ */
+function onionpress_status_viewer_allowed() {
+    return is_user_logged_in() && is_super_admin();
 }
 
 /**
@@ -20,6 +33,17 @@ add_action( 'parse_request', function () {
     $path = trim( parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH ), '/' );
     if ( $path !== 'onionpress-status-json' ) {
         return;
+    }
+
+    // Before anything is read or requested: a visitor may neither see the
+    // host's status nor queue an action in front of the owner's.
+    if ( ! onionpress_status_viewer_allowed() ) {
+        status_header( 403 );
+        header( 'Content-Type: application/json; charset=utf-8' );
+        header( 'Cache-Control: no-cache, no-store, must-revalidate' );
+        header( 'X-Robots-Tag: noindex' );
+        echo json_encode( array( 'error' => 'forbidden' ) );
+        exit;
     }
 
     // Request a status rewrite if data is stale (>30s) or explicitly requested
@@ -62,6 +86,18 @@ add_action( 'parse_request', function () {
     $path = trim( parse_url( $_SERVER['REQUEST_URI'], PHP_URL_PATH ), '/' );
     if ( $path !== 'onionpress-status' ) {
         return;
+    }
+
+    if ( ! onionpress_status_viewer_allowed() ) {
+        nocache_headers();
+        header( 'X-Robots-Tag: noindex' );
+        if ( ! is_user_logged_in() ) {
+            // Relative, so the login stays on the host in the address bar
+            // (localhost or the .onion); wp_login_url() would use siteurl.
+            wp_safe_redirect( '/wp-login.php?redirect_to=' . rawurlencode( '/onionpress-status' ) );
+            exit;
+        }
+        wp_die( 'Only the site owner can view the OnionPress status page.', 'Forbidden', array( 'response' => 403 ) );
     }
 
     // Read status.json from the shared volume

@@ -5199,7 +5199,9 @@ License: AGPL v3"""
             # to OnionHome alongside the logs (one file: stats + safe config).
             self._last_status_payload = status
 
-            status_json = json.dumps(status, indent=2)
+            # The WordPress copy carries only what the status and settings
+            # pages show (redact.WORDPRESS_STATUS_KEYS): PHP can read it.
+            status_json = json.dumps(redact.status_for_wordpress(status), indent=2)
 
             # Write status.json
             subprocess.run(
@@ -5228,12 +5230,12 @@ License: AGPL v3"""
                 encoding='utf-8', errors='replace', timeout=5
             )
 
-            # Write recent logs
+            # Write recent logs — the launcher's log, which nothing scrubs on
+            # disk, so it is scrubbed here (home path, user names,
+            # credentials, non-loopback IPs) before PHP can read it.
             log_file = os.path.join(self.app_support, "onionpress.log")
             try:
-                with open(log_file, encoding='utf-8', errors='replace') as f:
-                    lines = f.readlines()
-                recent = "".join(lines[-100:])
+                recent = redact.wordpress_log_excerpt(log_file, self.app_support)
                 subprocess.run(
                     ["docker", "exec", "-i", "onionpress-wordpress",
                      "tee", "/var/lib/onionpress/recent-logs.txt"],
@@ -5336,8 +5338,13 @@ License: AGPL v3"""
         import datetime
 
         def _write_result(filename, data):
-            """Write a JSON result file to the WordPress shared volume."""
+            """Write a JSON result file to the WordPress shared volume.
+
+            Error strings come from exceptions and launcher stderr and can
+            name host paths, so every string is scrubbed first.
+            """
             try:
+                data = redact.scrub_json_for_wordpress(data, self.app_support)
                 self._docker.run(
                     ["exec", "-i", "onionpress-wordpress",
                      "tee", f"/var/lib/onionpress/{filename}"],

@@ -59,7 +59,7 @@ try:
     from onionpress.config import (
         ensure_config, ensure_secrets, read_value, resolve_port_offset,
     )
-    from onionpress import launcher_ops, system_metrics
+    from onionpress import launcher_ops, redact, system_metrics
     from onionpress.power import SystemdInhibitor
 except ImportError as e:
     print(f"ERROR: onionpress package not found in {_LIB_DIR}: {e}", file=sys.stderr)
@@ -308,11 +308,13 @@ def write_status(
         f.write(payload)
     os.replace(tmp, STATUS_FILE)
 
-    # Mirror into the WordPress container for the status/settings page
+    # Mirror into the WordPress container for the status/settings page —
+    # only the fields those pages show: PHP can read it, and
+    # wp_admin_password_path is a path under $HOME.
     docker.run(
         ["exec", "-i", "onionpress-wordpress",
          "sh", "-c", "cat > /var/lib/onionpress/status.json"],
-        input=payload,
+        input=json.dumps(redact.status_for_wordpress(status), indent=2),
         timeout=10, quiet=True,
     )
 

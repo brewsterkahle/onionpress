@@ -856,6 +856,15 @@ def main(argv: list[str] = None) -> int:
         "safe-config",
         help="Print the allowlisted (non-secret) config keys as JSON — "
              "what the WordPress container may see")
+    p_wp_logs = sub.add_parser(
+        "wordpress-logs",
+        help="Print the end of a log, scrubbed for the WordPress container "
+             "(the status page's recent-logs.txt)")
+    p_wp_logs.add_argument("--log-file", required=True, help="Log to read")
+    sub.add_parser(
+        "wordpress-status",
+        help="Read status JSON on stdin and print the fields the WordPress "
+             "container may see")
 
     # Backup helpers for the bash launchers. The password comes on stdin,
     # never in argv.
@@ -889,6 +898,29 @@ def main(argv: list[str] = None) -> int:
         data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
         config = read_config(os.path.join(data_dir, "config"))
         print(json.dumps(redact_config(config), indent=2))
+        return 0
+
+    if args.command in ("wordpress-logs", "wordpress-status"):
+        # Run by the Linux launcher on every status write; read-only like
+        # safe-config, so it skips OnionPressCLI's setup too.
+        from . import redact
+        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+        if args.command == "wordpress-logs":
+            try:
+                sys.stdout.write(redact.wordpress_log_excerpt(args.log_file, data_dir))
+            except OSError as e:
+                print(f"ERROR: {e.strerror or e}", file=sys.stderr)
+                return 1
+            return 0
+        try:
+            status = json.load(sys.stdin)
+        except ValueError as e:
+            print(f"ERROR: status is not JSON: {e}", file=sys.stderr)
+            return 1
+        if not isinstance(status, dict):
+            print("ERROR: status is not a JSON object", file=sys.stderr)
+            return 1
+        print(json.dumps(redact.status_for_wordpress(status), indent=2))
         return 0
 
     # Before OnionPressCLI: its Docker wrapper snapshots os.environ for every

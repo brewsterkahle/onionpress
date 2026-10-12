@@ -144,6 +144,7 @@ wp_is_installed() { return 1; }
     def _write_status(self, extra=""):
         launcher = _read("linux/onionpress")
         script = (_function(launcher, "op_py") + _function(launcher, "write_status")
+                  + _function(launcher, "write_recent_logs")
                   + self.DOCKER_STUB + extra + "\nwrite_status\n")
         result = subprocess.run(["bash", "-c", script], env=self.env,
                                 capture_output=True, text=True, timeout=120)

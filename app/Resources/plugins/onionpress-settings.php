@@ -1105,7 +1105,12 @@ function onionpress_settings_page() {
                     }
                 ?><a href="http://<?php echo esc_attr( $display_url ); ?>/" style="font-size:12px;font-family:monospace;color:#8b5cf6;"><?php echo esc_html( $display_url ); ?></a>
             <?php endif; ?>
+            <?php
+            // Linked only for those onionpress-status.php lets in: the site owner.
+            if ( is_super_admin() ) :
+                ?>
             &mdash; <a href="/onionpress-status">View full status &amp; logs &rarr;</a>
+            <?php endif; ?>
         </p>
 
         <!-- Following Section -->

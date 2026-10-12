@@ -12,6 +12,11 @@ RotatingLog: the Mac's active logs and launcher logs, and every Linux
 log, which are plain files nothing scrubs on disk. :func:`scrub_for_upload`
 applies the same rules in one pass.
 
+Runs a third time, harder, on whatever the host copies into the WordPress
+container for the status and settings pages (:func:`scrub_for_wordpress`,
+:func:`wordpress_log_excerpt`, :func:`status_for_wordpress`, see the end of
+this module): every PHP plugin and theme can read those files.
+
 What gets scrubbed
 ==================
 * Query-string values for well-known auth/session parameters
@@ -231,3 +236,129 @@ def scrub_for_upload(raw, app_support, log_name, home=None):
     scrub_ips = scrubs_ips(log_name)
     salt = get_daily_salt(app_support) if scrub_ips else b""
     return redact_text(text, salt, scrub_ips=scrub_ips).encode("utf-8")
+
+
+# ── Host → WordPress container ──────────────────────────────────────────
+#
+# The host copies three kinds of data into the WordPress container's
+# /var/lib/onionpress/ for the status and settings pages: status.json, the
+# last lines of onionpress.log (recent-logs.txt) and the results of actions
+# the settings page asked for. PHP can read all of it — every plugin and
+# theme — so it is scrubbed harder than a log offered to OnionHome: no
+# user name in any path, no credentials, and no IP address other than
+# loopback.
+
+# A home directory under /Users or /home, whoever's it is: the process may
+# run with a HOME other than the data directory's owner's.
+_PATH_NAME_CHARS = r"[^/\s'\"`:;,()<>\[\]{}]"
+_USER_DIR_RE = re.compile(r"(/Users|/home)/" + _PATH_NAME_CHARS + "+")
+
+# Credential-named settings written out as KEY=value or "KEY: old → new":
+# the rest of the line is the value.
+_SECRET_ASSIGN_RE = re.compile(
+    r"\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY))"
+    r"(\s*[:=]\s*)[^\r\n]+"
+)
+# Base64-encoded JSON ('{"' encodes as 'eyJ'): JWTs and Cloudflare tunnel
+# tokens, wherever they turn up.
+_JSON_TOKEN_RE = re.compile(r"\beyJ[A-Za-z0-9_\-+/]{16,}={0,2}(?:\.[A-Za-z0-9_\-+/=]*)*")
+
+# The WordPress copy of status.json carries what the status and settings
+# pages show and nothing else. The full status — the Linux tray's, with
+# host paths such as wp_admin_password_path — stays on the host.
+WORDPRESS_STATUS_KEYS = frozenset({
+    "state", "version", "platform", "updated_at",
+    "onion_address", "onionname", "tor_impl",
+    "uptime_seconds", "bootstrap_pct", "onion_reachable", "onion_http_code",
+    "containers", "wayback_queue_count",
+    "load_avg", "host_uptime_seconds",
+    "onionheaven",
+})
+
+# recent-logs.txt: this many lines from the end of the log, read from at
+# most this many bytes so one runaway line can't stall the status tick.
+WORDPRESS_LOG_LINES = 100
+_WORDPRESS_LOG_MAX_BYTES = 256 * 1024
+_LOG_LINE_RE = re.compile(rb"[^\n]*\n|[^\n]+\Z")
+
+
+def _scrub_user_paths(text, home):
+    home = (home or "").rstrip("/")
+    if home:
+        text = re.sub(re.escape(home) + "(?!" + _PATH_NAME_CHARS + ")", "~", text)
+    return _USER_DIR_RE.sub(lambda m: m.group(1) + "/<user>", text)
+
+
+def _replace_non_loopback_ip(match, get_salt):
+    try:
+        ip = ipaddress.ip_address(match.group(1))
+    except ValueError:
+        return match.group(0)
+    if ip.is_loopback or ip.is_unspecified:
+        return match.group(0)
+    return pseudonymize_ip(match.group(1), get_salt())
+
+
+def scrub_for_wordpress(text, app_support, home=None):
+    """Scrub host text on its way into the WordPress container.
+
+    The home directory becomes ``~`` and any other ``/Users/<name>`` or
+    ``/home/<name>`` loses the name; credential URL parameters and headers
+    go (:func:`redact_text`), as do credential-named settings and
+    base64-JSON tokens; every IP address except loopback and unspecified
+    ones becomes its daily pseudonym (:func:`pseudonymize_ip`).
+    """
+    if home is None:
+        home = os.path.expanduser("~")
+    text = _scrub_user_paths(text, home)
+    text = _SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _JSON_TOKEN_RE.sub("<redacted>", text)
+    text = redact_text(text, b"", scrub_ips=False)
+    salt = []
+
+    def get_salt():  # read (or create) the salt file only if there is an IP
+        if not salt:
+            salt.append(get_daily_salt(app_support))
+        return salt[0]
+
+    text = _IPV4_RE.sub(lambda m: _replace_non_loopback_ip(m, get_salt), text)
+    text = _IPV6_RE.sub(lambda m: _replace_non_loopback_ip(m, get_salt), text)
+    return text
+
+
+def scrub_json_for_wordpress(value, app_support, home=None):
+    """:func:`scrub_for_wordpress` applied to every string in a JSON-able
+    value, such as an action result the settings page polls for."""
+    if isinstance(value, str):
+        return scrub_for_wordpress(value, app_support, home=home)
+    if isinstance(value, dict):
+        return {k: scrub_json_for_wordpress(v, app_support, home=home)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [scrub_json_for_wordpress(v, app_support, home=home) for v in value]
+    return value
+
+
+def wordpress_log_excerpt(path, app_support, lines=WORDPRESS_LOG_LINES, home=None):
+    """The last *lines* lines of the log at *path*, scrubbed for the
+    WordPress container: the status page's Recent Logs (recent-logs.txt).
+
+    Raises OSError if the log can't be read.
+    """
+    with open(path, "rb") as f:
+        pos = f.seek(0, os.SEEK_END)
+        data = b""
+        while (pos > 0 and data.count(b"\n") <= lines
+               and len(data) < _WORDPRESS_LOG_MAX_BYTES):
+            step = min(64 * 1024, pos)
+            pos -= step
+            f.seek(pos)
+            data = f.read(step) + data
+    # Lines end at \n only, as for tail(1): docker pull progress is \r-separated.
+    tail = b"".join(_LOG_LINE_RE.findall(data)[-lines:])
+    return scrub_for_wordpress(tail.decode("utf-8", errors="replace"), app_support, home=home)
+
+
+def status_for_wordpress(status):
+    """The WordPress copy of a status.json dict: WORDPRESS_STATUS_KEYS only."""
+    return {k: v for k, v in status.items() if k in WORDPRESS_STATUS_KEYS}
