@@ -12,6 +12,12 @@ published port.
     HiddenServiceExportCircuitID. Nothing has connected to :81 since onion
     traffic moved to socat -> wordpress:80, but any container on
     onionpress-network could, and its PROXY header named any source address.
+  - No X-Forwarded-For. The official wordpress image loads mod_remoteip with
+    `RemoteIPHeader X-Forwarded-For` and every private range as an internal
+    proxy (its remoteip.conf). Every peer WordPress has is in one, so any
+    onion visitor could send `X-Forwarded-For: 127.0.0.1` and be loopback.
+    The image turns the conf and the module off, and its build fails if the
+    module is loaded.
 
 These reach installs with the next WordPress image publish.
 """
@@ -92,6 +98,40 @@ class TestNoProxyProtocolListener(unittest.TestCase):
         self.assertGreater(seen, 50)
         self.assertRegex(_read(COMPOSE), r'(?m)^\s*- "\$\{ONIONPRESS_BIND_HOST:-127\.0\.0\.1\}:'
                                          r'\$\{ONIONPRESS_WP_PORT:-8080\}:80"$')
+
+
+class TestNoForwardedFor(unittest.TestCase):
+
+    DOCKERFILE = _read(DOCKERFILE)
+
+    def _runs(self):
+        """Each RUN instruction, continuation lines joined."""
+        joined = re.sub(r"\\\n\s*", " ", self.DOCKERFILE)
+        return [m.group(1) for m in re.finditer(r"(?m)^RUN (.+)$", joined)]
+
+    def test_the_base_images_remoteip_is_turned_off(self):
+        off = [r for r in self._runs() if "a2disconf remoteip" in r]
+        self.assertEqual(len(off), 1)
+        steps = [s.strip() for s in off[0].split("&&")]
+        # The conf before the module: its directives need the module.
+        self.assertLess(steps.index("a2disconf remoteip"), steps.index("a2dismod remoteip"))
+        configtest = self.DOCKERFILE.index("RUN apache2ctl configtest")
+        self.assertLess(self.DOCKERFILE.index("a2dismod remoteip"), configtest)
+
+    def test_nothing_turns_it_back_on(self):
+        for run in self._runs():
+            for cmd in re.findall(r"\ba2en(?:mod|conf)\b([^&;|]*)", run):
+                with self.subTest(run=run):
+                    self.assertNotIn("remoteip", cmd.split())
+
+    def test_the_build_fails_if_the_module_is_loaded(self):
+        check = [r for r in self._runs() if r.startswith("apache2ctl configtest")]
+        self.assertEqual(len(check), 1)
+        self.assertIn("&& ! apache2ctl -M 2>/dev/null | grep -q ' remoteip_module '", check[0])
+        # The php_module check comes first: it proves `apache2ctl -M` listed
+        # modules at all, so an empty listing cannot pass the negated grep.
+        self.assertLess(check[0].index("grep -q ' php_module '"),
+                        check[0].index("! apache2ctl -M"))
 
 
 if __name__ == "__main__":
