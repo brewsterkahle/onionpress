@@ -213,6 +213,26 @@
   the owner-gated settings and status plugins name host action files in
   `/var/lib/onionpress/`.
 
+## Blog Snapshots Stay Off the Web
+- My Creations is published, so nothing private may sit there under a name
+  that does not start with `.`. The blog importer's WXR snapshots (drafts,
+  private and password-protected posts, author emails) live in the hidden
+  `~/OnionPress/Creations/My Creations/.blog-archives/<host>/`: on the
+  owner's disk, downloaded through the importer page's owner-only
+  admin-post handler. Every publishing layer refuses hidden paths:
+  `OnionPress_Creations::is_public_path` (both listings, `?onionpress_creation=`,
+  the upload target), the multisite `.htaccess`, and the image's
+  `onionpress-creations.conf` (`<FilesMatch "^\.">` sees only a file's own
+  name, so a `<DirectoryMatch>` covers files inside hidden folders).
+- Through 2.5.2 they went to the published `blog-archives/`.
+  `onionpress_blog_snapshots_migrate()` moves it into `.blog-archives/` on
+  the owner's admin requests: one rename, else a merge that never
+  overwrites, never deletes a file and never descends a symlink. Until it
+  is gone, the top-level `blog-archives` is refused by the same layers
+  (`LEGACY_SNAPSHOTS_DIR`, its own `.htaccess` block, a second
+  `<DirectoryMatch>`), and the importer page says what could not be moved.
+  `tests/test_blog_snapshots_private.py`.
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

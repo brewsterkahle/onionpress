@@ -1937,6 +1937,12 @@ RewriteRule ^ - [F]
 RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\. [NC]
 RewriteRule ^ - [F]
 
+# Blog importer snapshots (drafts, private posts, author emails) went to
+# blog-archives/ through 2.5.2. They live in the hidden .blog-archives/ now;
+# until the importer has moved the old folder there, refuse it as well.
+RewriteCond %{REQUEST_URI} /wp-content/creations/blog-archives(/|$) [NC]
+RewriteRule ^ - [F]
+
 # Uploads are media: serve them, never run them
 RewriteCond %{REQUEST_URI} /wp-content/uploads/ [NC]
 RewriteCond %{REQUEST_URI} \.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]

@@ -17,7 +17,9 @@ if (!defined('ABSPATH')) {
 class OnionPress_Creations {
 
     const CREATIONS_DIR = '/var/www/html/wp-content/creations';
-    const FILES_CACHE_KEY = 'op_creations_files';
+    // Renamed when what get_files() leaves out changes, so a list cached by
+    // the previous version (blog-archives/ snapshots included) is not reused.
+    const FILES_CACHE_KEY = 'op_creations_files_v2';
     const FILES_CACHE_TTL = 60;  // seconds
     // File types a web server may run instead of serve. My Creations sits
     // under DocumentRoot, so these are refused at upload; the WordPress
@@ -26,20 +28,31 @@ class OnionPress_Creations {
     const BLOCKED_EXT_RE = '/\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)$/i';
     // Generated thumbnails: .thumbs/<path of a listed file>.png
     const THUMBS_PREFIX = '.thumbs/';
+    // The blog importer wrote its WXR snapshots (drafts, private posts,
+    // authors' emails) to this top-level folder through 2.5.2. It keeps them
+    // in the hidden .blog-archives/ now and moves this folder there
+    // (onionpress-social-archive-blog.php); until it has, this name is not
+    // published either. Compared without case: the Mac's disk ignores it.
+    const LEGACY_SNAPSHOTS_DIR = 'blog-archives';
 
     private static $instance = null;
 
     /**
      * Whether $rel, a path relative to CREATIONS_DIR, names something My
      * Creations publishes. Hidden files and folders (.git/, .DS_Store,
-     * .thumbs/ ...) are never listed, so they are never served or written
-     * to either: no component may be empty or start with '.'.
+     * .thumbs/, .blog-archives/ ...) are never listed, so they are never
+     * served or written to either: no component may be empty or start with
+     * '.'. Nor may the first be LEGACY_SNAPSHOTS_DIR.
      */
     public static function is_public_path($rel) {
         if (!is_string($rel) || $rel === '' || strpos($rel, "\0") !== false) {
             return false;
         }
-        foreach (explode('/', $rel) as $part) {
+        $parts = explode('/', $rel);
+        if (strcasecmp($parts[0], self::LEGACY_SNAPSHOTS_DIR) === 0) {
+            return false;
+        }
+        foreach ($parts as $part) {
             if ($part === '' || $part[0] === '.') {
                 return false;
             }
@@ -408,11 +421,11 @@ class OnionPress_Creations {
 
         $entries = scandir($real_browse);
         foreach ($entries as $entry) {
-            if ($entry[0] === '.') {
+            $rel_path = $subfolder ? $subfolder . '/' . $entry : $entry;
+            if (!self::is_public_path($rel_path)) {
                 continue;
             }
             $full_path = $real_browse . '/' . $entry;
-            $rel_path = $subfolder ? $subfolder . '/' . $entry : $entry;
 
             if (is_dir($full_path)) {
                 // Count items inside
@@ -483,14 +496,15 @@ class OnionPress_Creations {
             return $files;
         }
 
-        // Hidden folders (.git/, .thumbs/ ...) are neither listed nor
-        // descended into: not publications, and a .git can hold thousands
-        // of objects to stat across the mount.
+        // Hidden folders (.git/, .thumbs/ ...) and the legacy blog-archives/
+        // are neither listed nor descended into: not publications, and a
+        // .git can hold thousands of objects to stat across the mount.
         $iterator = new \RecursiveIteratorIterator(
             new \RecursiveCallbackFilterIterator(
                 new \RecursiveDirectoryIterator($creations_dir, \FilesystemIterator::SKIP_DOTS),
-                function ($file_info) {
-                    return $file_info->getFilename()[0] !== '.';
+                function ($file_info) use ($creations_dir) {
+                    return $file_info->getFilename()[0] !== '.'
+                        && self::is_public_path(substr($file_info->getPathname(), strlen($creations_dir) + 1));
                 }
             ),
             \RecursiveIteratorIterator::LEAVES_ONLY

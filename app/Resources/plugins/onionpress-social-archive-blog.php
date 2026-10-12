@@ -7,7 +7,8 @@
  *              to stay current — when source posts get edited, the local
  *              mirror updates too. Same admin page accepts a WXR upload
  *              as an archival-fidelity snapshot stored on disk under
- *              ~/OnionPress/Creations/My Creations/blog-archives/.
+ *              ~/OnionPress/Creations/My Creations/.blog-archives/, a
+ *              hidden folder My Creations never publishes.
  * Version:     0.1
  * Network:     true
  */
@@ -122,6 +123,15 @@ add_action( ONIONPRESS_BLOG_CRON_HOOK, 'onionpress_blog_run_sync_tick' );
 // Admin-authenticated streaming download endpoint for WXR snapshots.
 // Uses admin-post.php so it's gated by WP admin auth + nonce.
 add_action( 'admin_post_onionpress_blog_download_wxr', 'onionpress_blog_serve_wxr_download' );
+
+// Move snapshots out of the published blog-archives/ folder older versions
+// wrote them to (see ONIONPRESS_BLOG_SNAPSHOTS_LEGACY_ROOT). Owner admin
+// requests only: one stat once there is nothing left to move.
+add_action( 'admin_init', function () {
+    if ( onionpress_blog_snapshots_allowed() ) {
+        onionpress_blog_snapshots_migrate( false );
+    }
+} );
 
 // --- Owner-aware cursor accessors --------------------------------------
 
@@ -427,15 +437,20 @@ function onionpress_blog_import_page() {
 
         <h2 style="margin-top:2em;">Archival snapshot (WXR upload)</h2>
         <?php if ( ! onionpress_blog_snapshots_allowed() ) : ?>
-        <p>Snapshots are kept in the My Creations folder of the owner of this
-           OnionPress, so only the owner can upload, download or delete them.</p>
+        <p>Snapshots are kept in a private folder on the computer of the owner
+           of this OnionPress, so only the owner can upload, download or delete them.</p>
         <?php else : ?>
         <p>The REST import above produces a normalized <em>reading copy</em>.
            For lossless archival fidelity, export a full WXR from the source
            blog's <code>wp-admin → Tools → Export</code> and upload it here.
            Snapshots are stored on disk under
-           <code>~/OnionPress/Creations/My Creations/blog-archives/&lt;host&gt;/</code>
-           where they survive across reinstalls. <strong>Note:</strong> these files
+           <code>~/OnionPress/Creations/My Creations/.blog-archives/&lt;host&gt;/</code>
+           where they survive across reinstalls. It is a hidden folder, and
+           OnionPress never publishes it: a WXR export carries drafts, private
+           and password-protected posts, and authors' email addresses. Download
+           snapshots here, or show hidden files on your computer to see the folder
+           (in the Mac Finder, press <kbd>Cmd</kbd>-<kbd>Shift</kbd>-<kbd>.</kbd>).
+           <strong>Note:</strong> these files
            are <em>not</em> included in the OnionPress backup tarball — bring
            <code>~/OnionPress/</code> along when migrating machines.</p>
         <form method="post" enctype="multipart/form-data" style="margin-bottom:1.25em;">
@@ -1259,7 +1274,23 @@ function onionpress_blog_run_edits_pass( $host, $deadline ) {
 
 // --- WXR snapshot storage ----------------------------------------------
 
-const ONIONPRESS_BLOG_SNAPSHOTS_ROOT = '/var/www/html/wp-content/creations/blog-archives';
+// A WXR export carries drafts, private and password-protected posts and the
+// authors' email addresses. Snapshots live in a hidden folder of the
+// Creations mount, so they stay on the owner's computer
+// (~/OnionPress/Creations/My Creations/.blog-archives/) and off the web: My
+// Creations never lists or serves a hidden path
+// (OnionPress_Creations::is_public_path), and the multisite .htaccess and
+// the WordPress image's onionpress-creations.conf refuse one on the direct
+// /wp-content/creations/ URL.
+const ONIONPRESS_BLOG_SNAPSHOTS_ROOT = '/var/www/html/wp-content/creations/.blog-archives';
+
+// Through 2.5.2 snapshots went to blog-archives/, the published part of My
+// Creations: the Creations page listed them and served them, and so did
+// Apache. onionpress_blog_snapshots_migrate() moves that folder into
+// ONIONPRESS_BLOG_SNAPSHOTS_ROOT. Until it has, the old name is refused too
+// (OnionPress_Creations::LEGACY_SNAPSHOTS_DIR, the .htaccess, the image conf).
+const ONIONPRESS_BLOG_SNAPSHOTS_LEGACY_ROOT = '/var/www/html/wp-content/creations/blog-archives';
+const ONIONPRESS_BLOG_SNAPSHOTS_MOVE_FAILED = 'onionpress_blog_snapshots_move_failed'; // site transient
 
 /**
  * Whether the current user may list, upload, download or delete snapshots.
@@ -1279,6 +1310,123 @@ function onionpress_blog_snapshots_refused() {
 }
 
 /**
+ * Move the snapshots of older versions out of the published
+ * ONIONPRESS_BLOG_SNAPSHOTS_LEGACY_ROOT into ONIONPRESS_BLOG_SNAPSHOTS_ROOT.
+ * Returns true once nothing is left at the old path.
+ *
+ * $wait: wait for a move another request is making (the snapshot page and
+ * handlers, which then work on the result), or give up at once (admin_init,
+ * which also skips for an hour after a failed move, so a move that cannot
+ * succeed is not retried and logged on every request). Either way the old
+ * folder stays unpublished until it is gone.
+ */
+function onionpress_blog_snapshots_migrate( $wait ) {
+    static $done = false;
+    if ( $done ) {
+        return true;
+    }
+    $old = ONIONPRESS_BLOG_SNAPSHOTS_LEGACY_ROOT;
+    clearstatcache();
+    if ( ! file_exists( $old ) && ! is_link( $old ) ) {
+        return $done = true;
+    }
+    if ( ! $wait && get_site_transient( ONIONPRESS_BLOG_SNAPSHOTS_MOVE_FAILED ) ) {
+        return false;
+    }
+    // One mover at a time (Apache runs requests in parallel). The lock file
+    // is in the container's /tmp, not in the owner's folder.
+    $lock = @fopen( get_temp_dir() . 'onionpress-blog-snapshots-move.lock', 'c' );
+    if ( $lock && ! flock( $lock, $wait ? LOCK_EX : LOCK_EX | LOCK_NB ) ) {
+        fclose( $lock );
+        return false;
+    }
+    $left = onionpress_blog_snapshots_move_tree( $old, ONIONPRESS_BLOG_SNAPSHOTS_ROOT );
+    if ( $lock ) {
+        flock( $lock, LOCK_UN );
+        fclose( $lock );
+    }
+    if ( $left === '' ) {
+        delete_site_transient( ONIONPRESS_BLOG_SNAPSHOTS_MOVE_FAILED );
+        return $done = true;
+    }
+    set_site_transient( ONIONPRESS_BLOG_SNAPSHOTS_MOVE_FAILED, 1, HOUR_IN_SECONDS );
+    error_log( 'OnionPress blog importer: could not move ' . $left . ' into '
+        . ONIONPRESS_BLOG_SNAPSHOTS_ROOT . '; My Creations keeps it unpublished' );
+    return false;
+}
+
+/**
+ * Move $old (a folder, or whatever the owner put at that name) to $new.
+ * Returns '' once $old is gone, else the first path it could not move.
+ *
+ * Lossless and idempotent: one rename() when $new does not exist yet (the
+ * usual case), otherwise a merge, entry by entry, that never overwrites (a
+ * name $new already has gets a -N suffix) and never deletes anything but a
+ * folder it has emptied. It descends only real folders, never a symlink, so
+ * a link cannot steer it at files outside the Creations folder. No
+ * WordPress calls: tests run it on a scratch directory.
+ */
+function onionpress_blog_snapshots_move_tree( $old, $new ) {
+    clearstatcache();
+    if ( ! file_exists( $old ) && ! is_link( $old ) ) {
+        return '';
+    }
+    if ( ! file_exists( $new ) && ! is_link( $new ) && @rename( $old, $new ) ) {
+        return '';
+    }
+    clearstatcache();
+    if ( is_link( $old ) || ! is_dir( $old ) ) {
+        return $old;
+    }
+    if ( ! is_dir( $new ) && ! @mkdir( $new, 0755, true ) ) {
+        return $old;
+    }
+    $entries = @scandir( $old );
+    if ( $entries === false ) {
+        return $old;
+    }
+    $left = '';
+    foreach ( $entries as $e ) {
+        if ( $e === '.' || $e === '..' ) {
+            continue;
+        }
+        $from = $old . '/' . $e;
+        $to   = $new . '/' . $e;
+        if ( is_dir( $from ) && ! is_link( $from ) && is_dir( $to ) && ! is_link( $to ) ) {
+            $stuck = onionpress_blog_snapshots_move_tree( $from, $to );
+        } else {
+            $name  = onionpress_blog_snapshots_free_name( $new, $e );
+            $stuck = ( $name !== '' && @rename( $from, $new . '/' . $name ) ) ? '' : $from;
+        }
+        if ( $left === '' ) {
+            $left = $stuck;
+        }
+    }
+    clearstatcache();
+    if ( $left === '' && ! @rmdir( $old ) ) {
+        $left = $old;
+    }
+    return $left;
+}
+
+/**
+ * $name, or $name with -1, -2 ... before its extensions (2026-...Z-1.xml.gz)
+ * if $dir already has an entry by that name; '' when none of those is free.
+ */
+function onionpress_blog_snapshots_free_name( $dir, $name ) {
+    $dot  = strpos( $name, '.', 1 );
+    $stem = $dot === false ? $name : substr( $name, 0, $dot );
+    $ext  = $dot === false ? '' : substr( $name, $dot );
+    for ( $n = 0; $n < 1000; $n++ ) {
+        $try = $n === 0 ? $name : $stem . '-' . $n . $ext;
+        if ( ! file_exists( $dir . '/' . $try ) && ! is_link( $dir . '/' . $try ) ) {
+            return $try;
+        }
+    }
+    return '';
+}
+
+/**
  * Return the canonical (realpath-resolved) snapshots dir for a given
  * host, creating it if it doesn't exist. Returns '' if the root mount
  * isn't writable (i.e. the Creations bind-mount isn't in place).
@@ -1286,6 +1434,7 @@ function onionpress_blog_snapshots_refused() {
 function onionpress_blog_snapshots_dir_for_host( $host ) {
     $host = preg_replace( '/[^a-z0-9._-]/i', '', strtolower( $host ) );
     if ( $host === '' ) return '';
+    onionpress_blog_snapshots_migrate( true );
     $root = ONIONPRESS_BLOG_SNAPSHOTS_ROOT;
     if ( ! is_dir( $root ) ) {
         if ( ! @mkdir( $root, 0755, true ) ) return '';
@@ -1427,8 +1576,9 @@ function onionpress_blog_handle_wxr_delete() {
 
 /**
  * Stream a snapshot file to the browser, admin-authenticated via the
- * admin-post.php nonce. We do NOT publish the snapshots dir under the
- * webroot — downloads always go through this handler.
+ * admin-post.php nonce. The snapshots dir is a hidden folder that nothing
+ * publishes (see ONIONPRESS_BLOG_SNAPSHOTS_ROOT), so downloads always go
+ * through this handler.
  */
 function onionpress_blog_serve_wxr_download() {
     if ( ! current_user_can( 'manage_options' ) || ! onionpress_blog_snapshots_allowed() ) {
@@ -1465,6 +1615,13 @@ function onionpress_blog_serve_wxr_download() {
 function onionpress_blog_render_snapshots() {
     if ( ! onionpress_blog_snapshots_allowed() ) {
         return;
+    }
+    if ( ! onionpress_blog_snapshots_migrate( true ) ) {
+        echo '<div class="notice notice-warning inline"><p>Some older snapshots are still in '
+           . '<code>~/OnionPress/Creations/My Creations/blog-archives/</code>, and OnionPress '
+           . 'could not move them into the hidden <code>.blog-archives/</code> folder next to it. '
+           . 'OnionPress does not publish that folder, but please move what is in it into '
+           . '<code>.blog-archives/</code> yourself.</p></div>';
     }
     $root = ONIONPRESS_BLOG_SNAPSHOTS_ROOT;
     if ( ! is_dir( $root ) ) {
