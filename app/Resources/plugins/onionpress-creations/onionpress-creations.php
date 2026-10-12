@@ -24,8 +24,57 @@ class OnionPress_Creations {
     // image (onionpress-creations.conf) and the multisite .htaccess also
     // refuse to serve them from /wp-content/creations/.
     const BLOCKED_EXT_RE = '/\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)$/i';
+    // Generated thumbnails: .thumbs/<path of a listed file>.png
+    const THUMBS_PREFIX = '.thumbs/';
 
     private static $instance = null;
+
+    /**
+     * Whether $rel, a path relative to CREATIONS_DIR, names something My
+     * Creations publishes. Hidden files and folders (.git/, .DS_Store,
+     * .thumbs/ ...) are never listed, so they are never served or written
+     * to either: no component may be empty or start with '.'.
+     */
+    public static function is_public_path($rel) {
+        if (!is_string($rel) || $rel === '' || strpos($rel, "\0") !== false) {
+            return false;
+        }
+        foreach (explode('/', $rel) as $part) {
+            if ($part === '' || $part[0] === '.') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * is_public_path(), plus the generated thumbnail of a public file,
+     * which the Creations pages link to as THUMBS_PREFIX . <path> . '.png'.
+     */
+    public static function is_servable_path($rel) {
+        if (is_string($rel) && strpos($rel, self::THUMBS_PREFIX) === 0
+                && substr($rel, -4) === '.png') {
+            $rel = substr($rel, strlen(self::THUMBS_PREFIX));
+        }
+        return self::is_public_path($rel);
+    }
+
+    /**
+     * The path of $real (already realpath()ed) relative to the realpath()ed
+     * base, '' for the base itself, or null when it lies outside it.
+     */
+    private static function rel_inside($real, $real_base) {
+        if (!$real || !$real_base) {
+            return null;
+        }
+        if ($real === $real_base) {
+            return '';
+        }
+        if (strpos($real, $real_base . '/') !== 0) {
+            return null;
+        }
+        return substr($real, strlen($real_base) + 1);
+    }
 
     public static function get_instance() {
         if (null === self::$instance) {
@@ -61,11 +110,15 @@ class OnionPress_Creations {
         $creations_dir = self::CREATIONS_DIR;
         // Support uploading into a subfolder
         $subfolder = isset($_POST['creations_upload_folder']) ? sanitize_text_field($_POST['creations_upload_folder']) : '';
+        if ($subfolder && !self::is_public_path($subfolder)) {
+            return;
+        }
         $target_dir = $subfolder ? $creations_dir . '/' . $subfolder : $creations_dir;
-        // Security: ensure target is inside creations dir
+        // Security: ensure target is a listed folder inside creations dir
         $real_target = realpath($target_dir);
         $real_base = realpath($creations_dir);
-        if (!$real_target || !$real_base || ($real_target !== $real_base && strpos($real_target, $real_base . '/') !== 0)) {
+        $target_rel = self::rel_inside($real_target, $real_base);
+        if ($target_rel === null || ($target_rel !== '' && !self::is_public_path($target_rel))) {
             return;
         }
         if (!is_dir($real_target) || !is_writable($real_target)) {
@@ -159,26 +212,30 @@ class OnionPress_Creations {
     }
 
     /**
-     * Serve files from My Creations directory (supports subdirectories)
+     * Serve files from My Creations directory (supports subdirectories).
+     * Only what the Creations pages list, and their generated thumbnails:
+     * a hidden file or folder is a 404 whether it is named in the request
+     * or reached through a symlink.
      */
     public function serve_file() {
         if (!isset($_GET['onionpress_creation'])) {
             return;
         }
 
-        $requested = $_GET['onionpress_creation'];
+        $requested = wp_unslash($_GET['onionpress_creation']);
         $creations_dir = self::CREATIONS_DIR;
 
-        if (!is_dir($creations_dir)) {
+        if (!self::is_servable_path($requested) || !is_dir($creations_dir)) {
             status_header(404);
             exit;
         }
 
         $filepath = realpath($creations_dir . '/' . $requested);
 
-        // Security: ensure the resolved path is inside creations dir
+        // Security: ensure the resolved path is a servable file inside creations dir
         $real_base = realpath($creations_dir);
-        if (!$filepath || !$real_base || strpos($filepath, $real_base . '/') !== 0) {
+        $resolved_rel = self::rel_inside($filepath, $real_base);
+        if ($resolved_rel === null || !self::is_servable_path($resolved_rel)) {
             status_header(404);
             exit;
         }
@@ -320,10 +377,15 @@ class OnionPress_Creations {
 
         $result = array( 'folders' => array(), 'files' => array() );
 
-        // Security: ensure resolved path is inside creations dir
+        if ($subfolder && !self::is_public_path($subfolder)) {
+            return $result;
+        }
+
+        // Security: ensure resolved path is a listed folder inside creations dir
         $real_browse = realpath($browse_dir);
         $real_base = realpath($creations_dir);
-        if (!$real_browse || !$real_base || ($real_browse !== $real_base && strpos($real_browse, $real_base . '/') !== 0)) {
+        $browse_rel = self::rel_inside($real_browse, $real_base);
+        if ($browse_rel === null || ($browse_rel !== '' && !self::is_public_path($browse_rel))) {
             return $result;
         }
         if (!is_dir($real_browse)) {
@@ -407,8 +469,16 @@ class OnionPress_Creations {
             return $files;
         }
 
+        // Hidden folders (.git/, .thumbs/ ...) are neither listed nor
+        // descended into: not publications, and a .git can hold thousands
+        // of objects to stat across the mount.
         $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveDirectoryIterator($creations_dir, \FilesystemIterator::SKIP_DOTS),
+            new \RecursiveCallbackFilterIterator(
+                new \RecursiveDirectoryIterator($creations_dir, \FilesystemIterator::SKIP_DOTS),
+                function ($file_info) {
+                    return $file_info->getFilename()[0] !== '.';
+                }
+            ),
             \RecursiveIteratorIterator::LEAVES_ONLY
         );
 

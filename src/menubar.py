@@ -2939,7 +2939,9 @@ class OnionPressApp(rumps.App):
                         # Skip the .thumbs directory itself
                         if '.thumbs' in root:
                             continue
-                        dirs[:] = [d for d in dirs if d != '.thumbs']
+                        # ...and every hidden folder (.git/ ...): the
+                        # Creations page neither lists nor serves them.
+                        dirs[:] = [d for d in dirs if not d.startswith('.')]
                         for fname in files:
                             if fname.startswith('.'):
                                 continue
