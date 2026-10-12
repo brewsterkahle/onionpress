@@ -191,6 +191,22 @@
   `tests/test_settings_page_updates.py` locks the page's fields, choices,
   ranges and token pattern to the allowlist.
 
+## WordPress Host Controls Are the Owner's
+- OnionPress is a multisite: each additional user administers their own
+  subsite, so `manage_options` is a per-site capability anyone can hold.
+  Never gate on it anything that reaches the host (the request, config,
+  backup, restore and key files in `/var/lib/onionpress/`) or every site.
+  Use `onionpress_settings_owner_allowed()` (logged in + `is_super_admin()`:
+  the owner, whom multisite-install/-convert makes super admin; on a single
+  site, an administrator), checked in every handler, AJAX endpoint and REST
+  `permission_callback`, not just the menu.
+- The OnionPress menu stays on every site for its administrators; a subsite
+  administrator's page shows only Following, which lives in that site's
+  options.
+- `tests/test_settings_owner_only.py` enforces it, including a census: only
+  the owner-gated settings and status plugins name host action files in
+  `/var/lib/onionpress/`.
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

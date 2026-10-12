@@ -3,8 +3,10 @@
  * Plugin Name: OnionPress Settings
  * Description: Admin settings page for remote OnionPress configuration.
  *              Reads current config from the shared volume and writes
- *              updates for the menubar app to pick up.
- * Version:     1.0
+ *              updates for the menubar app to pick up. Everything that
+ *              reaches the host is the network super admin's (the owner);
+ *              a subsite administrator gets the site's Following list.
+ * Version:     1.1
  * Network:     true
  */
 
@@ -113,12 +115,33 @@ function onionpress_menu_icon_base64() {
 }
 
 /**
+ * Whether the current user may use OnionPress's node-wide controls: the
+ * config form, service control, reachability test, update, backup, restore,
+ * key import and analytics upload, and the requests and downloads behind
+ * them.
+ *
+ * Every site of the multisite runs this plugin, and each additional user
+ * administers their own subsite, which gives them manage_options there.
+ * These controls act on the host and on every site at once (a backup holds
+ * all sites' databases and the onion service key; a restore or key import
+ * replaces them), so only the network's super admin may use them: the
+ * owner, whom setup makes super admin (on a single site, an administrator).
+ * A subsite administrator keeps the page's per-site part, Following.
+ */
+function onionpress_settings_owner_allowed() {
+    return is_user_logged_in() && is_super_admin();
+}
+
+/**
  * Register the admin menu page.
+ *
+ * On every site, for its administrators: Following is per-site. What the
+ * page shows beyond it is decided by onionpress_settings_page().
  */
 add_action( 'admin_menu', function () {
     $icon = content_url( 'mu-plugins/onionpress-sidebar-icon.png' );
     add_menu_page(
-        'OnionPress Settings',
+        onionpress_settings_owner_allowed() ? 'OnionPress Settings' : 'OnionPress',
         'OnionPress',
         'manage_options',
         'onionpress-settings',
@@ -166,7 +189,7 @@ add_action( 'network_admin_menu', function () {
 add_action( 'rest_api_init', function () {
     register_rest_route( 'onionpress/v1', '/upload-analytics', array(
         'methods'             => 'POST',
-        'permission_callback' => function () { return current_user_can( 'manage_options' ); },
+        'permission_callback' => function () { return onionpress_settings_owner_allowed(); },
         'callback'            => function () {
             // Touch the trigger file the menubar watches. The menubar's
             // handler itself decides whether to run the upload now (if
@@ -195,7 +218,9 @@ add_action( 'admin_init', function () {
     if ( ! wp_verify_nonce( $_POST['onionpress_action_nonce'], 'onionpress_action' ) ) {
         return;
     }
-    if ( ! current_user_can( 'manage_options' ) ) {
+    // Every one of these acts on the host and on every site, not on the
+    // site whose dashboard sent it.
+    if ( ! onionpress_settings_owner_allowed() ) {
         return;
     }
     $action = sanitize_text_field( $_POST['onionpress_action'] ?? '' );
@@ -402,6 +427,8 @@ add_action( 'admin_init', function () {
     if ( ! wp_verify_nonce( $_POST['onionpress_follow_nonce'], 'onionpress_follow_save' ) ) {
         return;
     }
+    // Per-site: the follow list lives in this site's options, so this
+    // site's administrators manage it.
     if ( ! current_user_can( 'manage_options' ) ) {
         return;
     }
@@ -628,7 +655,8 @@ add_action( 'admin_init', function () {
         } );
         return;
     }
-    if ( ! current_user_can( 'manage_options' ) ) {
+    // The host's config, and the archive.org account.
+    if ( ! onionpress_settings_owner_allowed() ) {
         return;
     }
 
@@ -800,7 +828,8 @@ add_action( 'admin_init', function () {
  * Increase upload limit for backup restore on the settings page.
  */
 add_filter( 'upload_size_limit', function ( $size ) {
-    if ( isset( $_GET['page'] ) && $_GET['page'] === 'onionpress-settings' ) {
+    if ( isset( $_GET['page'] ) && $_GET['page'] === 'onionpress-settings'
+         && onionpress_settings_owner_allowed() ) {
         return 512 * 1024 * 1024; // 512 MB
     }
     return $size;
@@ -808,7 +837,8 @@ add_filter( 'upload_size_limit', function ( $size ) {
 
 // Set PHP limits when on the settings page (backup uploads can be large)
 add_action( 'admin_init', function () {
-    if ( isset( $_GET['page'] ) && $_GET['page'] === 'onionpress-settings' ) {
+    if ( isset( $_GET['page'] ) && $_GET['page'] === 'onionpress-settings'
+         && onionpress_settings_owner_allowed() ) {
         @ini_set( 'upload_max_filesize', '512M' );
         @ini_set( 'post_max_size', '512M' );
         @ini_set( 'max_execution_time', '600' );
@@ -819,8 +849,9 @@ add_action( 'admin_init', function () {
  * AJAX handler for downloading backup files.
  */
 add_action( 'wp_ajax_onionpress_download_backup', function () {
-    if ( ! current_user_can( 'manage_options' ) ) {
-        wp_die( 'Unauthorized' );
+    // A backup holds every site's database and the onion service key.
+    if ( ! onionpress_settings_owner_allowed() ) {
+        wp_die( 'Unauthorized', '', array( 'response' => 403 ) );
     }
     check_ajax_referer( 'onionpress_download_backup' );
 
@@ -849,8 +880,8 @@ add_action( 'wp_ajax_onionpress_download_backup', function () {
  * AJAX handler for polling action completion.
  */
 add_action( 'wp_ajax_onionpress_poll_action', function () {
-    if ( ! current_user_can( 'manage_options' ) ) {
-        wp_send_json_error( 'Unauthorized' );
+    if ( ! onionpress_settings_owner_allowed() ) {
+        wp_send_json_error( 'Unauthorized', 403 );
     }
 
     $action = sanitize_text_field( $_GET['op_action'] ?? '' );
@@ -894,8 +925,8 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
  * AJAX handler for checking latest version (cached 10 min).
  */
 add_action( 'wp_ajax_onionpress_check_update', function () {
-    if ( ! current_user_can( 'manage_options' ) ) {
-        wp_send_json_error( 'Unauthorized' );
+    if ( ! onionpress_settings_owner_allowed() ) {
+        wp_send_json_error( 'Unauthorized', 403 );
     }
 
     $current = trim( @file_get_contents( '/var/lib/onionpress/version' ) ?: 'unknown' );
@@ -1050,6 +1081,12 @@ function onionpress_settings_page() {
     if ( ! current_user_can( 'manage_options' ) ) {
         wp_die( 'Unauthorized' );
     }
+    // A subsite administrator gets this site's Following list, and nothing
+    // that reads or changes the host.
+    if ( ! onionpress_settings_owner_allowed() ) {
+        onionpress_settings_site_page();
+        return;
+    }
 
     // Read current config from the shared volume
     $current = array();
@@ -1137,188 +1174,7 @@ function onionpress_settings_page() {
             <?php endif; ?>
         </p>
 
-        <!-- Following Section -->
-        <?php
-        $following = get_option( 'onionpress_following', onionpress_default_follows() );
-        if ( ! is_array( $following ) ) {
-            $following = array();
-        }
-        // Feed titles learned from RSS fetches (keyed by the full follow key).
-        // The onionname now lives in the key itself, so there's no separate
-        // names map to read here — it's derived via onionpress_follow_parse().
-        $following_titles = get_option( 'onionpress_following_titles', array() );
-        if ( ! is_array( $following_titles ) ) { $following_titles = array(); }
-        // Per-follow stats — used to color-code the status indicator.
-        $following_stats = get_option( 'onionpress_following_stats', array() );
-        if ( ! is_array( $following_stats ) ) { $following_stats = array(); }
-        ?>
-        <div style="margin-bottom: 20px; border: 1px solid #c3c4c7; border-radius: 4px; padding: 12px 16px; background: #f9f9f9;">
-            <h2 style="margin-top: 0;">Following</h2>
-            <div id="onionpress-following-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
-                <?php if ( empty( $following ) ) : ?>
-                <p class="description" id="onionpress-following-empty">No onion services followed yet. Add one below.</p>
-                <?php endif; ?>
-                <?php foreach ( $following as $key ) :
-                    // $key is the canonical follow key: a URL, or <addr>.onion[/<name>].
-                    $p    = onionpress_follow_parse( $key );
-                    $name = $p['name'];
-                ?>
-                <div class="onionpress-following-entry" style="display: flex; align-items: center; margin-bottom: 4px;">
-                    <?php
-                        // Status glyph matches the menubar vocabulary:
-                        //   purple ✓ = fetched successfully (like menubar "running")
-                        //   yellow ⚠ = failing or malformed (like menubar "starting/stuck")
-                        //   blank    = never attempted yet (new follow, before first fetch)
-                        $st           = isset( $following_stats[ $key ] ) ? $following_stats[ $key ] : array();
-                        $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
-                        $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
-                        $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] );
-                        // A bare onionname: stored when the add-time OnionHome
-                        // lookup failed. Offered a re-lookup button below.
-                        $is_bare_name = ( ! $well_formed
-                            && preg_match( '/^[a-z0-9][a-z0-9._-]*$/i', $p['addr'] ) );
-                        if ( $last_success && ! $fail_count ) {
-                            $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
-                            $status_label = 'Feed fetched successfully — last update '
-                                . human_time_diff( $last_success ) . ' ago.';
-                        } elseif ( $is_bare_name ) {
-                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: unresolved name
-                            $status_label = 'Unresolved onionname — the OnionHome lookup has not succeeded for this name. Use the retry button to look it up again.';
-                        } elseif ( ! $well_formed ) {
-                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: malformed
-                            $status_label = 'Malformed address — this entry is not a valid .onion address or feed URL, so no feed can be fetched.';
-                        } elseif ( $fail_count ) {
-                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: failing
-                            $status_label = 'Feed not reachable yet (' . $fail_count . ' failed '
-                                . _n( 'attempt', 'attempts', $fail_count )
-                                . '). Onion feeds are fetched over Tor and can take a few minutes after you follow — it keeps retrying.';
-                        } else {
-                            $glyph = '';         $color = '';        // blank: untested
-                            $status_label = 'Not checked yet — waiting for the first feed fetch.';
-                        }
-                    ?>
-                    <span class="onionpress-following-status" title="<?php echo esc_attr( $status_label ); ?>" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block; cursor: help;"><?php echo $glyph; ?></span>
-                    <code style="flex: 1; font-size: 12px;"><?php
-                        $title    = isset( $following_titles[ $key ] ) ? $following_titles[ $key ] : '';
-                        $addr_disp = esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion'
-                                   . ( '' !== $name ? '/' . esc_html( $name ) : '' );
-                        if ( $title ) {
-                            // Title is primary; key (addr/name or URL) in gray.
-                            echo '<strong>' . esc_html( $title ) . '</strong>';
-                            echo ' <span style="color:#999;">'
-                                . ( 'url' === $p['type'] ? esc_html( $p['url'] ) : $addr_disp )
-                                . '</span>';
-                        } elseif ( 'url' === $p['type'] ) {
-                            echo esc_html( $p['url'] );
-                        } elseif ( '' !== $name ) {
-                            // Onionname is primary; truncated address in gray.
-                            echo '<strong>' . esc_html( $name ) . '</strong>';
-                            echo ' <span style="color:#999;">' . esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion</span>';
-                        } else {
-                            echo esc_html( $key );
-                        }
-                    ?></code>
-                    <a class="onionpress-following-open" href="<?php echo esc_url( onionpress_follow_site_url( $key ) ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none; display: inline-flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>
-                    <?php if ( $is_bare_name ) : ?>
-                    <button type="button" class="button-link onionpress-relookup" data-address="<?php echo esc_attr( $key ); ?>" title="Look up this onionname on OnionHome again" aria-label="Look up this onionname again" style="color: #6b46a8; margin-left: 8px;">&#8635;</button>
-                    <?php endif; ?>
-                    <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $key ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
-                </div>
-                <?php endforeach; ?>
-            </div>
-            <form method="post" id="onionpress-follow-form" style="display: flex; gap: 8px;">
-                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
-                <input type="text" name="onionpress_follow_address" id="onionpress-follow-input"
-                       placeholder="Onionname, .onion address, or feed URL" class="regular-text" style="flex: 1;">
-                <button type="submit" class="button button-primary" id="onionpress-follow-submit">Follow</button>
-            </form>
-            <p id="onionpress-follow-status" role="status" aria-live="polite" style="display: none; margin: 6px 0 0; color: #646970;">
-                <span class="spinner is-active" style="float: none; margin: 0 6px 0 0; vertical-align: middle;"></span><span id="onionpress-follow-status-text"></span>
-            </p>
-            <?php foreach ( $following as $addr ) : ?>
-            <input type="hidden" name="onionpress_following_existing[]" form="onionpress-unfollow-form" value="<?php echo esc_attr( $addr ); ?>">
-            <?php endforeach; ?>
-            <form method="post" id="onionpress-unfollow-form" style="display: none;">
-                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
-                <input type="hidden" name="onionpress_unfollow_address" id="onionpress-unfollow-address" value="">
-            </form>
-            <form method="post" id="onionpress-relookup-form" style="display: none;">
-                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
-                <input type="hidden" name="onionpress_relookup_address" id="onionpress-relookup-address" value="">
-            </form>
-        </div>
-        <script>
-        (function() {
-            // Extract .onion from pasted URLs
-            var input = document.getElementById('onionpress-follow-input');
-            input.addEventListener('paste', function(e) {
-                setTimeout(function() {
-                    var val = input.value.trim();
-                    var match = val.match(/([a-z2-7]{56}\.onion)/i);
-                    if (match) {
-                        input.value = match[1].toLowerCase();
-                    }
-                }, 0);
-            });
-            input.addEventListener('change', function() {
-                var val = input.value.trim();
-                var match = val.match(/([a-z2-7]{56}\.onion)/i);
-                if (match) {
-                    input.value = match[1].toLowerCase();
-                }
-            });
-            // Follow button: the POST resolves an onionname through OnionHome
-            // over Tor (a few seconds, longer on a bad circuit), so show what is
-            // happening and block a double-submit until the page reloads with
-            // the result. Plain POST round trip — no AJAX.
-            var followForm = document.getElementById('onionpress-follow-form');
-            var followBtn = document.getElementById('onionpress-follow-submit');
-            var followStatus = document.getElementById('onionpress-follow-status');
-            var followStatusText = document.getElementById('onionpress-follow-status-text');
-            var followBusy = false;
-            function setFollowBusy(on, message) {
-                followBusy = on;
-                followBtn.disabled = on;
-                // readOnly, not disabled: a disabled field is dropped from the POST.
-                input.readOnly = on;
-                followStatusText.textContent = on ? message : '';
-                followStatus.style.display = on ? 'block' : 'none';
-            }
-            followForm.addEventListener('submit', function(e) {
-                if (followBusy) {
-                    e.preventDefault();
-                    return;
-                }
-                var val = input.value.trim();
-                if (!val) {
-                    return;
-                }
-                var isName = !/\.onion\b/i.test(val) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(val);
-                setFollowBusy(true, isName
-                    ? 'Looking up ' + val.replace(/^@/, '') + ' on OnionHome over Tor\u2026'
-                    : 'Checking the feed over Tor\u2026');
-            });
-            // Back/forward cache can restore the page with the busy state intact.
-            window.addEventListener('pageshow', function() {
-                setFollowBusy(false, '');
-            });
-            // Unfollow buttons
-            document.querySelectorAll('.onionpress-unfollow').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    document.getElementById('onionpress-unfollow-address').value = btn.dataset.address;
-                    document.getElementById('onionpress-unfollow-form').submit();
-                });
-            });
-            document.querySelectorAll('.onionpress-relookup').forEach(function(btn) {
-                btn.addEventListener('click', function() {
-                    btn.disabled = true;
-                    btn.textContent = '…';
-                    document.getElementById('onionpress-relookup-address').value = btn.dataset.address;
-                    document.getElementById('onionpress-relookup-form').submit();
-                });
-            });
-        })();
-        </script>
+        <?php onionpress_settings_render_following(); ?>
 
         <hr style="border: none; border-top: 1px solid #c3c4c7; margin: 20px 0;">
 
@@ -1787,5 +1643,215 @@ function onionpress_settings_page() {
             render();
         })();
     </script>
+    <?php
+}
+
+/**
+ * The page a subsite administrator gets: this site's Following list. The
+ * rest of the Settings page acts on the host and on every site, so it is
+ * the owner's (onionpress_settings_owner_allowed()).
+ */
+function onionpress_settings_site_page() {
+    ?>
+    <div class="wrap">
+        <h1>OnionPress</h1>
+        <?php onionpress_settings_render_following(); ?>
+        <p class="description" style="margin-top: 16px;">
+            OnionPress's other settings &mdash; backups, service control and the
+            onion service itself &mdash; are managed by the owner of this OnionPress.
+        </p>
+    </div>
+    <?php
+}
+
+/**
+ * The Following section: the sites this site follows, kept in this site's
+ * own options, so every administrator of the site manages it. Reads and
+ * writes nothing outside WordPress.
+ */
+function onionpress_settings_render_following() {
+    ?>
+        <!-- Following Section -->
+        <?php
+        $following = get_option( 'onionpress_following', onionpress_default_follows() );
+        if ( ! is_array( $following ) ) {
+            $following = array();
+        }
+        // Feed titles learned from RSS fetches (keyed by the full follow key).
+        // The onionname now lives in the key itself, so there's no separate
+        // names map to read here — it's derived via onionpress_follow_parse().
+        $following_titles = get_option( 'onionpress_following_titles', array() );
+        if ( ! is_array( $following_titles ) ) { $following_titles = array(); }
+        // Per-follow stats — used to color-code the status indicator.
+        $following_stats = get_option( 'onionpress_following_stats', array() );
+        if ( ! is_array( $following_stats ) ) { $following_stats = array(); }
+        ?>
+        <div style="margin-bottom: 20px; border: 1px solid #c3c4c7; border-radius: 4px; padding: 12px 16px; background: #f9f9f9;">
+            <h2 style="margin-top: 0;">Following</h2>
+            <div id="onionpress-following-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 10px;">
+                <?php if ( empty( $following ) ) : ?>
+                <p class="description" id="onionpress-following-empty">No onion services followed yet. Add one below.</p>
+                <?php endif; ?>
+                <?php foreach ( $following as $key ) :
+                    // $key is the canonical follow key: a URL, or <addr>.onion[/<name>].
+                    $p    = onionpress_follow_parse( $key );
+                    $name = $p['name'];
+                ?>
+                <div class="onionpress-following-entry" style="display: flex; align-items: center; margin-bottom: 4px;">
+                    <?php
+                        // Status glyph matches the menubar vocabulary:
+                        //   purple ✓ = fetched successfully (like menubar "running")
+                        //   yellow ⚠ = failing or malformed (like menubar "starting/stuck")
+                        //   blank    = never attempted yet (new follow, before first fetch)
+                        $st           = isset( $following_stats[ $key ] ) ? $following_stats[ $key ] : array();
+                        $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
+                        $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
+                        $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/', $p['addr'] );
+                        // A bare onionname: stored when the add-time OnionHome
+                        // lookup failed. Offered a re-lookup button below.
+                        $is_bare_name = ( ! $well_formed
+                            && preg_match( '/^[a-z0-9][a-z0-9._-]*$/i', $p['addr'] ) );
+                        if ( $last_success && ! $fail_count ) {
+                            $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
+                            $status_label = 'Feed fetched successfully — last update '
+                                . human_time_diff( $last_success ) . ' ago.';
+                        } elseif ( $is_bare_name ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: unresolved name
+                            $status_label = 'Unresolved onionname — the OnionHome lookup has not succeeded for this name. Use the retry button to look it up again.';
+                        } elseif ( ! $well_formed ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: malformed
+                            $status_label = 'Malformed address — this entry is not a valid .onion address or feed URL, so no feed can be fetched.';
+                        } elseif ( $fail_count ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: failing
+                            $status_label = 'Feed not reachable yet (' . $fail_count . ' failed '
+                                . _n( 'attempt', 'attempts', $fail_count )
+                                . '). Onion feeds are fetched over Tor and can take a few minutes after you follow — it keeps retrying.';
+                        } else {
+                            $glyph = '';         $color = '';        // blank: untested
+                            $status_label = 'Not checked yet — waiting for the first feed fetch.';
+                        }
+                    ?>
+                    <span class="onionpress-following-status" title="<?php echo esc_attr( $status_label ); ?>" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block; cursor: help;"><?php echo $glyph; ?></span>
+                    <code style="flex: 1; font-size: 12px;"><?php
+                        $title    = isset( $following_titles[ $key ] ) ? $following_titles[ $key ] : '';
+                        $addr_disp = esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion'
+                                   . ( '' !== $name ? '/' . esc_html( $name ) : '' );
+                        if ( $title ) {
+                            // Title is primary; key (addr/name or URL) in gray.
+                            echo '<strong>' . esc_html( $title ) . '</strong>';
+                            echo ' <span style="color:#999;">'
+                                . ( 'url' === $p['type'] ? esc_html( $p['url'] ) : $addr_disp )
+                                . '</span>';
+                        } elseif ( 'url' === $p['type'] ) {
+                            echo esc_html( $p['url'] );
+                        } elseif ( '' !== $name ) {
+                            // Onionname is primary; truncated address in gray.
+                            echo '<strong>' . esc_html( $name ) . '</strong>';
+                            echo ' <span style="color:#999;">' . esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion</span>';
+                        } else {
+                            echo esc_html( $key );
+                        }
+                    ?></code>
+                    <a class="onionpress-following-open" href="<?php echo esc_url( onionpress_follow_site_url( $key ) ); ?>" target="_blank" rel="noopener noreferrer" title="Open this site (requires Tor Browser)" aria-label="Open this site" style="margin-left: 8px; color: #6b46a8; text-decoration: none; display: inline-flex; align-items: center;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></a>
+                    <?php if ( $is_bare_name ) : ?>
+                    <button type="button" class="button-link onionpress-relookup" data-address="<?php echo esc_attr( $key ); ?>" title="Look up this onionname on OnionHome again" aria-label="Look up this onionname again" style="color: #6b46a8; margin-left: 8px;">&#8635;</button>
+                    <?php endif; ?>
+                    <button type="button" class="button-link onionpress-unfollow" data-address="<?php echo esc_attr( $key ); ?>" style="color: #b32d2e; margin-left: 8px;">&times;</button>
+                </div>
+                <?php endforeach; ?>
+            </div>
+            <form method="post" id="onionpress-follow-form" style="display: flex; gap: 8px;">
+                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
+                <input type="text" name="onionpress_follow_address" id="onionpress-follow-input"
+                       placeholder="Onionname, .onion address, or feed URL" class="regular-text" style="flex: 1;">
+                <button type="submit" class="button button-primary" id="onionpress-follow-submit">Follow</button>
+            </form>
+            <p id="onionpress-follow-status" role="status" aria-live="polite" style="display: none; margin: 6px 0 0; color: #646970;">
+                <span class="spinner is-active" style="float: none; margin: 0 6px 0 0; vertical-align: middle;"></span><span id="onionpress-follow-status-text"></span>
+            </p>
+            <?php foreach ( $following as $addr ) : ?>
+            <input type="hidden" name="onionpress_following_existing[]" form="onionpress-unfollow-form" value="<?php echo esc_attr( $addr ); ?>">
+            <?php endforeach; ?>
+            <form method="post" id="onionpress-unfollow-form" style="display: none;">
+                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
+                <input type="hidden" name="onionpress_unfollow_address" id="onionpress-unfollow-address" value="">
+            </form>
+            <form method="post" id="onionpress-relookup-form" style="display: none;">
+                <?php wp_nonce_field( 'onionpress_follow_save', 'onionpress_follow_nonce' ); ?>
+                <input type="hidden" name="onionpress_relookup_address" id="onionpress-relookup-address" value="">
+            </form>
+        </div>
+        <script>
+        (function() {
+            // Extract .onion from pasted URLs
+            var input = document.getElementById('onionpress-follow-input');
+            input.addEventListener('paste', function(e) {
+                setTimeout(function() {
+                    var val = input.value.trim();
+                    var match = val.match(/([a-z2-7]{56}\.onion)/i);
+                    if (match) {
+                        input.value = match[1].toLowerCase();
+                    }
+                }, 0);
+            });
+            input.addEventListener('change', function() {
+                var val = input.value.trim();
+                var match = val.match(/([a-z2-7]{56}\.onion)/i);
+                if (match) {
+                    input.value = match[1].toLowerCase();
+                }
+            });
+            // Follow button: the POST resolves an onionname through OnionHome
+            // over Tor (a few seconds, longer on a bad circuit), so show what is
+            // happening and block a double-submit until the page reloads with
+            // the result. Plain POST round trip — no AJAX.
+            var followForm = document.getElementById('onionpress-follow-form');
+            var followBtn = document.getElementById('onionpress-follow-submit');
+            var followStatus = document.getElementById('onionpress-follow-status');
+            var followStatusText = document.getElementById('onionpress-follow-status-text');
+            var followBusy = false;
+            function setFollowBusy(on, message) {
+                followBusy = on;
+                followBtn.disabled = on;
+                // readOnly, not disabled: a disabled field is dropped from the POST.
+                input.readOnly = on;
+                followStatusText.textContent = on ? message : '';
+                followStatus.style.display = on ? 'block' : 'none';
+            }
+            followForm.addEventListener('submit', function(e) {
+                if (followBusy) {
+                    e.preventDefault();
+                    return;
+                }
+                var val = input.value.trim();
+                if (!val) {
+                    return;
+                }
+                var isName = !/\.onion\b/i.test(val) && !/^[a-z][a-z0-9+.-]*:\/\//i.test(val);
+                setFollowBusy(true, isName
+                    ? 'Looking up ' + val.replace(/^@/, '') + ' on OnionHome over Tor\u2026'
+                    : 'Checking the feed over Tor\u2026');
+            });
+            // Back/forward cache can restore the page with the busy state intact.
+            window.addEventListener('pageshow', function() {
+                setFollowBusy(false, '');
+            });
+            // Unfollow buttons
+            document.querySelectorAll('.onionpress-unfollow').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    document.getElementById('onionpress-unfollow-address').value = btn.dataset.address;
+                    document.getElementById('onionpress-unfollow-form').submit();
+                });
+            });
+            document.querySelectorAll('.onionpress-relookup').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    btn.disabled = true;
+                    btn.textContent = '…';
+                    document.getElementById('onionpress-relookup-address').value = btn.dataset.address;
+                    document.getElementById('onionpress-relookup-form').submit();
+                });
+            });
+        })();
+        </script>
     <?php
 }
