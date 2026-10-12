@@ -422,8 +422,9 @@ class TestCreateBackupWithPlantedLinks(_Base):
         os.symlink(os.path.join(home, ".ssh", "id_ed25519"),
                    os.path.join(wp, "plugins", "key.php"))
         os.symlink(os.path.join(home, "Pictures"), os.path.join(wp, "uploads"))
-        # A hub's /var/lib/onionpress/{onionheaven,onionhome} as docker cp
-        # hands them over: links copied as links.
+        # A hub's data as docker cp hands it over (links copied as links):
+        # the OnionHeaven volume from the onionheaven container, the
+        # OnionHome name registry from onionpress-wordpress.
         hub = os.path.join(self.tmp, "container-hub")
         for sub in ("onionheaven", "onionhome"):
             os.makedirs(os.path.join(hub, sub))
@@ -446,7 +447,7 @@ case "$*" in
   *mariadb-dump*) echo "CREATE TABLE wp_posts;" ;;
   *"test -f"*) exit 0 ;;
   *"tar -cf -"*) COPYFILE_DISABLE=1 tar -cf - -C {wp!r} . ;;
-  "cp onionpress-wordpress:/var/lib/onionpress/onionheaven/. "*)
+  "cp onionheaven:/var/lib/onionheaven/. "*)
       cp -R {os.path.join(hub, "onionheaven")!r} "$3" ;;
   "cp onionpress-wordpress:/var/lib/onionpress/onionhome/. "*)
       cp -R {os.path.join(hub, "onionhome")!r} "$3" ;;

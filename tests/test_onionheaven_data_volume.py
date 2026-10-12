@@ -142,8 +142,7 @@ class TestCompose(unittest.TestCase):
                     self.assertFalse(target.rstrip("/").startswith("/var/lib/onionpress/"))
 
     def test_other_compose_files_leave_it_alone(self):
-        for path in ("app/Resources/docker/docker-compose.cloudflare.yml",
-                     "linux/docker-compose.pi.yml"):
+        for path in ("app/Resources/docker/docker-compose.cloudflare.yml",):
             with self.subTest(path=path):
                 self.assertNotIn("onionheaven-data", _read(path))
                 self.assertNotIn(HUB_DIR, _read(path))
