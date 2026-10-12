@@ -394,9 +394,11 @@ wp_is_installed() {
 # Verify a WP admin password without making a backup. Used by scrub/
 # uninstall to pre-validate the password BEFORE any destructive work —
 # otherwise create_backup verifies mid-script and the user can end up
-# in a half-uninstalled state on a bad password.
+# in a half-uninstalled state on a bad password. create_backup's own
+# check calls it too.
 #
-# Stdin: the password.  Returns 0 if valid, non-zero otherwise.
+# Stdin: the password (never argv, never spliced into PHP).
+# Returns 0 if valid, non-zero otherwise.
 verify_wp_admin_password() {
     op_py verify-admin-password
 }
@@ -1774,20 +1776,11 @@ create_backup() {
     fi
 
     # Verify password matches a WordPress admin account before creating backup
-    # (backup contains Tor private keys — only WP admins should be able to export them)
+    # (backup contains Tor private keys — only WP admins should be able to export them).
+    # The password reaches the verifier on stdin and is never part of any PHP
+    # source, so no character in it can change the code that runs.
     log "Backup: verifying WordPress admin password..."
-    local pw_valid
-    pw_valid=$(docker exec onionpress-wordpress wp eval "
-        \$users = get_users(array('role' => 'administrator'));
-        foreach (\$users as \$u) {
-            if (wp_check_password('${password//\'/\\\'}', \$u->user_pass)) {
-                echo 'VALID';
-                exit;
-            }
-        }
-        echo 'INVALID';
-    " --allow-root 2>/dev/null | tr -d '\n')
-    if [ "$pw_valid" != "VALID" ]; then
+    if ! printf '%s' "$password" | verify_wp_admin_password; then
         log "ERROR: Password does not match any WordPress admin account"
         echo "ERROR: Password does not match any WordPress admin account" >&2
         return 1

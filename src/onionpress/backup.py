@@ -219,11 +219,13 @@ def verify_wp_admin_password_any(password):
 
     Returns (True, username) on success, or (False, error_message).
 
-    Mirrors the bash launcher's pre-flight check in create_backup
-    (linux/onionpress) so password-only UI flows (e.g. the Linux tray's
-    backup dialog) can give inline feedback without asking the user to
-    remember their admin username. Uses wp_check_password directly so
-    it bypasses login rate-limiting and session cookies.
+    The Linux launcher's create_backup and scrub/uninstall checks call
+    this through `onionpress.cli verify-admin-password`, and password-only
+    UI flows (e.g. the Linux tray's backup dialog) call it directly to give
+    inline feedback without asking the user to remember their admin
+    username. Uses wp_check_password directly so it bypasses login
+    rate-limiting and session cookies. The password reaches PHP on stdin
+    only; it is never part of the code or of any argv.
     """
     php_code = (
         "$pw = trim(file_get_contents('php://stdin'));"
