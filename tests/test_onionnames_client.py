@@ -60,6 +60,9 @@ class TestValidateName(unittest.TestCase):
             (".alice", "invalid_chars"),
             ("alice.", "invalid_chars"),
             ("12345", "all_numeric"),
+            # `$` alone would match before a trailing newline.
+            ("alice\n", "invalid_chars"),
+            ("12345\n", "invalid_chars"),
         ]
         for value, expected in cases:
             ok, reason = onionnames_client.validate_name(value)

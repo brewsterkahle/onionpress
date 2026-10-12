@@ -211,9 +211,9 @@ def validate_name(name):
         return False, "too_short"
     if len(name) > MAX_NAME_LEN:
         return False, "too_long"
-    if not _NAME_ALLOWED_RE.match(name):
+    if not _NAME_ALLOWED_RE.fullmatch(name):
         return False, "invalid_chars"
-    if _ALL_NUMERIC_RE.match(name):
+    if _ALL_NUMERIC_RE.fullmatch(name):
         return False, "all_numeric"
     return True, None
 

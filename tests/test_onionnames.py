@@ -115,6 +115,13 @@ class TestValidation(unittest.TestCase):
             onionnames.validate_name("12345"), (False, "all_numeric")
         )
 
+    def test_rejects_trailing_newline(self):
+        # `$` alone would match before it, so "alice\n" could register
+        # as a second, lookalike "alice".
+        for bad in ("alice\n", "12345\n"):
+            self.assertEqual(onionnames.validate_name(bad),
+                             (False, "invalid_chars"), repr(bad))
+
 
 # ---------------------------------------------------------------------------
 # Reserved names
