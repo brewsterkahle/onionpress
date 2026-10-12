@@ -2,7 +2,7 @@
 /**
  * Plugin Name: OnionPress Auto-Login
  * Description: One-time magic login links for the OnionPress menubar app, tray and launcher.
- * Version:     1.1
+ * Version:     1.2
  * Network:     true
  */
 
@@ -11,13 +11,40 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /**
+ * This container's default gateway from the kernel's IPv4 routing table
+ * (hex in host byte order, hence pack('L')): the Docker host's address on
+ * onionpress-network. '' when there is none. The same parser as
+ * op_proxy_gateway() in src/onion-forward.php (tests/test_auto_login_off_argv.py
+ * runs both on the same tables).
+ */
+function onionpress_auto_login_gateway() {
+    $rows = @file( '/proc/net/route', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES );
+    foreach ( $rows ?: array() as $row ) {
+        // Iface Destination Gateway Flags ...; RTF_UP | RTF_GATEWAY = 3
+        $f = preg_split( '/\s+/', trim( $row ) );
+        if ( count( $f ) > 3 && '00000000' === $f[1] && '00000000' !== $f[2]
+            && preg_match( '/^[0-9A-F]{8}$/Di', $f[2] )
+            && preg_match( '/^[0-9A-F]{1,4}$/Di', $f[3] ) && ( hexdec( $f[3] ) & 3 ) === 3 ) {
+            return inet_ntop( pack( 'L', hexdec( $f[2] ) ) );
+        }
+    }
+    return '';
+}
+
+/**
  * Is this request one the token was minted for?
  *
- * "local": the Host is localhost and the request did not come through Tor.
- * The Host header is the client's to choose, so the second check is the one
- * that matters: onion visitors reach WordPress from the tor container, local
- * ones through the published port. A token that leaks (browser history, a
- * pasted URL) can then not be redeemed by anyone on the Tor network.
+ * "local": the Host is localhost and the request came through the published
+ * port. The Host header is the client's to choose, so the second check is
+ * the one that matters. Docker's published port hands the publisher's
+ * browser to this container from the onionpress-network gateway, an address
+ * no container on the network has: docker-proxy dials out from it (in
+ * RootlessKit's namespace too, under rootless Docker on Linux), and without
+ * the userland proxy NAT rewrites loopback clients to it. Onion visitors
+ * arrive from the tor container, Cloudflare Tunnel visitors from cloudflared,
+ * so a token that leaks (browser history, a pasted URL) cannot be redeemed
+ * by either. This used to refuse the tor container's address only, which
+ * let every other container in. No gateway found: loopback only.
  * "onion": the Host is a v3 .onion (the menubar's and tray's "open my site
  * in Tor Browser").
  */
@@ -31,8 +58,14 @@ function onionpress_auto_login_scope_ok( $scope ) {
         return false;
     }
     $remote = isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '';
-    $tor    = gethostbynamel( 'onionpress-tor' );
-    return ! ( $tor && in_array( $remote, $tor, true ) );
+    if ( 0 === strpos( $remote, '::ffff:' ) ) {
+        $remote = substr( $remote, 7 );
+    }
+    if ( '127.0.0.1' === $remote || '::1' === $remote ) {
+        return true;
+    }
+    $gateway = onionpress_auto_login_gateway();
+    return '' !== $gateway && $remote === $gateway;
 }
 
 /**

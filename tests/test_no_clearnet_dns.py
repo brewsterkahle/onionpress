@@ -181,16 +181,15 @@ class TestPluginCensus(unittest.TestCase):
                     yield os.path.join(dirpath, name)
 
     def test_no_name_lookups(self):
-        """One lookup is allowed: auto-login resolves the onionpress-tor
-        container, which Docker's resolver answers."""
-        allowed = {("onionpress-auto-login.php", "gethostbynamel( 'onionpress-tor' )")}
+        """None at all. (Auto-login resolved onionpress-tor, which Docker's
+        resolver answers; it now reads the gateway from /proc/net/route.)"""
         found = set()
         for path in self._plugin_files():
             code = _code(_read(path))
             for fn in LOOKUPS:
                 for m in re.finditer(r"\b" + fn + r"\s*\(\s*[^)]*\)", code):
                     found.add((os.path.basename(path), m.group(0)))
-        self.assertEqual(found, allowed)
+        self.assertEqual(found, set())
 
     def test_sockets_only_to_the_tor_containers(self):
         for path in self._plugin_files():

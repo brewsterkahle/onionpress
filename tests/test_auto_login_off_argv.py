@@ -40,6 +40,16 @@ from onionpress import auto_login, browser, launcher_ops  # noqa: E402
 PLUGIN = "app/Resources/plugins/onionpress-auto-login.php"
 ONION = "a" * 52 + "qd2a.onion"
 
+# /proc/net/route as the WordPress container sees it on onionpress-network
+# (as in test_op_proxy_access.py): default route via 172.18.0.1, hex in
+# little-endian host order, and the bridge subnet itself.
+ROUTE_TABLE = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+    "eth0\t000012AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+)
+GATEWAY = "172.18.0.1"
+
 
 def _read(rel):
     with open(os.path.join(PROJECT_DIR, rel), encoding="utf-8") as f:
@@ -518,16 +528,19 @@ class TestPlugin(unittest.TestCase):
                         self.SRC.index("wp_set_current_user("))
         self.assertNotRegex(self.SRC, r"\bget_transient\(")
 
-    def test_local_scope_refuses_requests_through_tor(self):
+    def test_local_scope_admits_loopback_and_the_gateway_only(self):
+        """An allowlist, as /__op_proxy.php's: refusing the tor container's
+        address let cloudflared and every other container in."""
         fn = self.SRC[self.SRC.index("function onionpress_auto_login_scope_ok"):]
         fn = fn[:fn.index("\n}\n")]
         self.assertIn("array( 'localhost', '127.0.0.1', '[::1]' )", fn)
-        self.assertIn("gethostbynamel( 'onionpress-tor' )", fn)
         self.assertIn("$_SERVER['REMOTE_ADDR']", fn)
         self.assertIn("'/^[a-z2-7]{56}\\.onion$/D'", fn)
-        # The tor container's name is the compose container_name.
-        self.assertIn("container_name: onionpress-tor",
-                      _read("app/Resources/docker/docker-compose.yml"))
+        self.assertIn("if ( '127.0.0.1' === $remote || '::1' === $remote ) {", fn)
+        self.assertIn("$gateway = onionpress_auto_login_gateway();", fn)
+        self.assertTrue(fn.rstrip().endswith("return '' !== $gateway && $remote === $gateway;"))
+        self.assertNotIn("gethostbyname", self.SRC)
+        self.assertNotIn("172.", self.SRC)
 
     def test_open_redirect_fix_kept(self):
         """PR #273: sanitize redirect_to before validating it
@@ -569,8 +582,11 @@ function wp_redirect($u) { echo "REDIRECT ", $u, "\n"; }
 '''
         with tempfile.TemporaryDirectory() as tmp:
             plugin = os.path.join(tmp, "plugin.php")
-            src = self.SRC.replace("gethostbynamel( 'onionpress-tor' )",
-                                   "(getenv('TOR_IP') ? array(getenv('TOR_IP')) : false)")
+            routes = os.path.join(tmp, "route")
+            with open(routes, "w") as f:
+                f.write(ROUTE_TABLE)
+            self.assertEqual(self.SRC.count("'/proc/net/route'"), 1)
+            src = self.SRC.replace("'/proc/net/route'", "getenv('ROUTE')")
             src = src.replace("setcookie(", "op_test_setcookie(")  # a PHP builtin
             src = src.replace("    exit;\n} );", "    return;\n} );")
             self.assertEqual(src.count("op_test_setcookie("), 4)
@@ -586,26 +602,91 @@ function wp_redirect($u) { echo "REDIRECT ", $u, "\n"; }
                         "call_user_func($GLOBALS['init']);\n"
                         "call_user_func($GLOBALS['init']);\n")
 
-            def run(scope, host, remote="172.18.0.1", tor_ip="172.18.0.5", tok=token):
+            def run(scope, host, remote=GATEWAY, tok=token, route=routes):
                 import json
                 store = {f"op_login_{token}": {"uid": 7, "scope": scope}}
                 return subprocess.run(
                     ["php", runner], capture_output=True, text=True, timeout=30,
                     env={**os.environ, "STORE": json.dumps(store), "TOKEN": tok,
-                         "HOST": host, "REMOTE": remote, "TOR_IP": tor_ip}).stdout
+                         "HOST": host, "REMOTE": remote, "ROUTE": route}).stdout
 
             # Redeemed once: the second init call finds nothing.
-            self.assertEqual(run("local", "localhost:8080"), "LOGIN 7\nREDIRECT /clean\n")
-            self.assertEqual(run("local", "127.0.0.1:18080"), "LOGIN 7\nREDIRECT /clean\n")
-            self.assertEqual(run("onion", ONION), "LOGIN 7\nREDIRECT /clean\n")
+            ok = "LOGIN 7\nREDIRECT /clean\n"
+            self.assertEqual(run("local", "localhost:8080"), ok)
+            self.assertEqual(run("local", "127.0.0.1:18080"), ok)
+            self.assertEqual(run("onion", ONION), ok)
+            for remote in ("::ffff:" + GATEWAY, "127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                with self.subTest(remote=remote):
+                    self.assertEqual(run("local", "localhost:8080", remote), ok)
+            # The onion scope does not look at the address: Tor Browser's
+            # requests arrive from the tor container.
+            self.assertEqual(run("onion", ONION, "172.18.0.5"), ok)
             for scope, host, remote in (
                     ("local", "localhost:8080", "172.18.0.5"),   # through Tor
-                    ("local", ONION, "172.18.0.1"),
-                    ("onion", "localhost:8080", "172.18.0.1"),
-                    ("other", "localhost:8080", "172.18.0.1")):
+                    ("local", "localhost:8080", "172.18.0.4"),   # cloudflared
+                    ("local", "localhost:8080", "172.17.0.1"),   # another network's gateway
+                    ("local", "localhost:8080", "172.18.0.0"),
+                    ("local", "localhost:8080", "10.0.2.2"),
+                    ("local", "localhost:8080", "192.168.1.20"),
+                    ("local", "localhost:8080", ""),
+                    ("local", ONION, GATEWAY),
+                    ("onion", "localhost:8080", GATEWAY),
+                    ("other", "localhost:8080", GATEWAY)):
                 with self.subTest(scope=scope, host=host, remote=remote):
                     self.assertEqual(run(scope, host, remote), "")
             self.assertEqual(run("local", "localhost:8080", tok=token + "'"), "")
+            # No route table, or no default route in it: loopback only.
+            missing = os.path.join(tmp, "missing")
+            self.assertEqual(run("local", "localhost:8080", route=missing), "")
+            self.assertEqual(run("local", "localhost:8080", "127.0.0.1", route=missing), ok)
+            no_default = os.path.join(tmp, "no-default")
+            with open(no_default, "w") as f:
+                f.write(ROUTE_TABLE.splitlines(True)[0] + ROUTE_TABLE.splitlines(True)[2])
+            self.assertEqual(run("local", "localhost:8080", route=no_default), "")
+
+    @unittest.skipUnless(shutil.which("php"), "php not installed")
+    def test_gateway_parser_matches_op_proxy(self):
+        """The plugin and /__op_proxy.php (src/onion-forward.php) read the
+        gateway the same way: run each parser on the same route tables."""
+        forwarder = _read("src/onion-forward.php")
+        parsers = {
+            "onionpress_auto_login_gateway": self.SRC,
+            "op_proxy_gateway": forwarder,
+        }
+        tables = {
+            "docker": ROUTE_TABLE,
+            "no default": ROUTE_TABLE.splitlines(True)[0] + ROUTE_TABLE.splitlines(True)[2],
+            "default without gateway flag": ROUTE_TABLE.replace("\t0003\t", "\t0001\t", 1),
+            "default with zero gateway": ROUTE_TABLE.replace("010012AC", "00000000", 1),
+            "malformed gateway": ROUTE_TABLE.replace("010012AC", "010012AG", 1),
+            "second network first": (
+                ROUTE_TABLE.splitlines(True)[0]
+                + "eth1\t000013AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n"
+                + ROUTE_TABLE.splitlines(True)[1]),
+            "empty": "",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            results = {}
+            for fn, src in parsers.items():
+                m = re.search(r"\nfunction " + fn + r"\(\) \{\n.*?\n\}\n", src, re.S)
+                self.assertIsNotNone(m, fn)
+                body = m.group(0).replace("'/proc/net/route'", "getenv('ROUTE')")
+                self.assertIn("getenv('ROUTE')", body)
+                script = os.path.join(tmp, fn + ".php")
+                with open(script, "w") as f:
+                    f.write("<?php\n" + body + f"echo json_encode({fn}());\n")
+                for name, table in tables.items():
+                    route = os.path.join(tmp, "route")
+                    with open(route, "w") as f:
+                        f.write(table)
+                    out = subprocess.run(["php", script], capture_output=True, text=True,
+                                         timeout=30, env={**os.environ, "ROUTE": route})
+                    results.setdefault(name, {})[fn] = out.stdout
+            for name, by_fn in results.items():
+                with self.subTest(table=name):
+                    self.assertEqual(len(set(by_fn.values())), 1, by_fn)
+            self.assertEqual(results["docker"]["op_proxy_gateway"], f'"{GATEWAY}"')
+            self.assertEqual(results["no default"]["op_proxy_gateway"], '""')
 
 
 if __name__ == "__main__":
