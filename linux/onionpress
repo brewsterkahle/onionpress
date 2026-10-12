@@ -3328,18 +3328,29 @@ sys.exit(0 if provision_interactive() else 1)
                     rp_password=$(docker exec onionpress-wordpress cat /var/lib/onionpress/restore-password 2>/dev/null || echo "")
                     docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/restore-password' 2>/dev/null
                     local rp_file="/var/lib/onionpress/restore-upload.zip"
-                    # Copy the uploaded zip out of the container
-                    local rp_local="/tmp/onionpress-restore-$$.zip"
-                    docker cp "onionpress-wordpress:$rp_file" "$rp_local" 2>>"$LOG_FILE"
+                    # Copy the uploaded zip out of the container, into a
+                    # folder of our own. docker cp copies a symbolic link as
+                    # a link: one planted at restore-upload.zip (www-data
+                    # can) would point at a host file, so the copy must be a
+                    # regular file, not a link, before the restore reads it.
+                    local rp_dir rp_local
+                    rp_dir=$(mktemp -d -t onionpress-restore-upload-XXXXXX) || rp_dir=""
+                    rp_local="$rp_dir/restore-upload.zip"
+                    [ -n "$rp_dir" ] && docker cp "onionpress-wordpress:$rp_file" "$rp_local" 2>>"$LOG_FILE"
                     docker exec onionpress-wordpress rm -f "$rp_file" 2>/dev/null
-                    if [ -z "$rp_password" ] || [ ! -f "$rp_local" ]; then
-                        rm -f "$rp_local"
+                    if [ -z "$rp_password" ] || [ -z "$rp_dir" ] \
+                            || { [ ! -e "$rp_local" ] && [ ! -L "$rp_local" ]; }; then
+                        [ -n "$rp_dir" ] && rm -rf "$rp_dir"
                         write_restore_result false "Missing password or backup file"
                         log "Restore failed: missing password or file"
+                    elif [ -L "$rp_local" ] || [ ! -f "$rp_local" ]; then
+                        rm -rf "$rp_dir"
+                        write_restore_result false "The uploaded backup is not a regular file"
+                        log "Restore refused: the uploaded backup is not a regular file"
                     else
                         local rp_addr
                         if rp_addr=$(restore_backup "$rp_password" "$rp_local" 2>>"$LOG_FILE"); then
-                            rm -f "$rp_local"
+                            rm -rf "$rp_dir"
                             # restore_backup's stdout is its log lines, then
                             # the address (empty for a backup without a key).
                             local rp_nl=$'\n'
@@ -3353,7 +3364,7 @@ sys.exit(0 if provision_interactive() else 1)
                             write_restore_result true "$rp_addr"
                             log "Restore complete: $rp_addr"
                         else
-                            rm -f "$rp_local"
+                            rm -rf "$rp_dir"
                             write_restore_result false "Restore failed — wrong password or invalid backup"
                             log "Restore failed"
                         fi

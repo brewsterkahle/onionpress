@@ -5664,33 +5664,44 @@ License: AGPL v3"""
                         timeout=5
                     )
 
+                    import shutil
                     import tempfile
-                    local_zip = os.path.join(tempfile.gettempdir(), "onionpress-restore.zip")
-                    subprocess.run(
-                        ["docker", "cp",
-                         "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip",
-                         local_zip],
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=60
-                    )
-                    subprocess.run(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "rm", "-f", "/var/lib/onionpress/restore-upload.zip"],
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
+                    # A folder of our own, so nothing stale or planted sits
+                    # at the copy's path. docker cp copies a symbolic link
+                    # as a link: one planted at restore-upload.zip would
+                    # point at a host file, so the copy must be a regular
+                    # file (check_uploaded_backup) before it is read.
+                    upload_dir = tempfile.mkdtemp(prefix="onionpress-restore-upload-")
+                    local_zip = os.path.join(upload_dir, "restore-upload.zip")
+                    try:
+                        subprocess.run(
+                            ["docker", "cp",
+                             "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip",
+                             local_zip],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=60
+                        )
+                        subprocess.run(
+                            ["docker", "exec", "onionpress-wordpress",
+                             "rm", "-f", "/var/lib/onionpress/restore-upload.zip"],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=5
+                        )
+                        if password and os.path.lexists(local_zip):
+                            backup_manager.check_uploaded_backup(local_zip)
+                            backup_manager.restore_from_backup(local_zip, password, self.log)
+                            restored = True
+                        else:
+                            restored = False
+                    finally:
+                        shutil.rmtree(upload_dir, ignore_errors=True)
 
-                    if not password or not os.path.exists(local_zip):
+                    if not restored:
                         _write_result("restore-result.json", {
                             "success": False, "error": "Missing password or backup file",
                             "restored_at": now_iso
                         })
                     else:
-                        backup_manager.restore_from_backup(local_zip, password, self.log)
-                        try:
-                            os.remove(local_zip)
-                        except OSError:
-                            pass
                         # Restart to pick up restored keys
                         self.run_command("restart")
                         import time

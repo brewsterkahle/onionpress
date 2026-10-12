@@ -1153,6 +1153,23 @@ def extract_archive(zip_path, password, dest, log_func):
     check_staged_tree(dest)
 
 
+def check_uploaded_backup(path):
+    """Raise ValueError unless *path* is a regular file (lstat: a link is
+    not followed).
+
+    For the Settings page's restore, which docker-cp's the uploaded
+    restore-upload.zip out of the WordPress container: docker cp copies a
+    symbolic link as a link, so one planted there (www-data can) would have
+    the restore read a host file as the backup.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        raise ValueError("No backup file was uploaded.") from None
+    if not stat.S_ISREG(mode):
+        raise ValueError("The uploaded backup is not a regular file.")
+
+
 def extract_backup(zip_path, password, log_func, staging=None):
     """Extract a backup zip into a staging dir; return (staging, metadata).
 

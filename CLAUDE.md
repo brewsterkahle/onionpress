@@ -396,6 +396,11 @@
   Linux: `onionpress.cli scrub-staging` right after the wp-content docker cp.
   `pack_backup` scrubs the whole staging again before zip, on both
   platforms. `tests/test_backup_staging_links.py`.
+- The Settings page's restore docker-cp's `restore-upload.zip` out of the
+  container (a link stays a link) into a mkdtemp folder of its own and
+  refuses anything but a regular file before reading it
+  (`backup.check_uploaded_backup`; Linux: `[ -L ] || [ ! -f ]`).
+  `tests/test_settings_restore_upload.py`.
 
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
