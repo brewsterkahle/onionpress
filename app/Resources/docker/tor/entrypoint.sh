@@ -10,6 +10,22 @@
 # On macOS it is the only route by which the key reaches the container.
 KEYS_DIR="/var/lib/onionpress-keys"
 
+# /var/lib/onionheaven is the OnionHeaven hub data volume
+# (onionpress-onionheaven-data): the registry and every registrant's onion
+# service key. Only onionpress-tor, onionheaven and the takeover workers
+# mount it. It used to be onionheaven/ on onionpress-persistent-data, which
+# WordPress mounts too; move what an older version left there before
+# anything here opens the registry. The script waits for the other
+# container's run, removes nothing it has not copied and verified, and fails
+# only if the first move fails while registrants' keys are at stake. Then
+# this container must not start, and Docker's restart policy tries again.
+migrate_onionheaven_data() {
+    if ! python3 /onionheaven-data-migrate.py; then
+        echo "ERROR: the OnionHeaven data could not be moved to its own volume; not starting (nothing was removed)" >&2
+        exit 1
+    fi
+}
+
 # Write a minimal torrc for the SOCKS + control-port modes below.
 write_client_torrc() {
     mkdir -p /var/lib/tor
@@ -50,7 +66,7 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
     python3 /tor-watchdog.py &
 
     # Start queue manager daemon (rate-limited ADD_ONION pipeline)
-    LOG_FILE="/var/lib/onionpress/onionheaven/queue-manager-${CONTAINER_NAME}.log"
+    LOG_FILE="/var/lib/onionheaven/queue-manager-${CONTAINER_NAME}.log"
     CONTAINER_NAME="${CONTAINER_NAME}" python3 /onionheaven-queue-manager.py daemon 2>"$LOG_FILE" &
     QM_PID=$!
     sleep 1
@@ -59,7 +75,7 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
     fi
 
     # Start takeover worker (processes DB-mediated takeover/release/audit queues)
-    TW_LOG="/var/lib/onionpress/onionheaven/takeover-worker-${CONTAINER_NAME}.log"
+    TW_LOG="/var/lib/onionheaven/takeover-worker-${CONTAINER_NAME}.log"
     CONTAINER_NAME="${CONTAINER_NAME}" TAKEOVER_WORKER=1 python3 /onionheaven-takeover-worker.py 2>"$TW_LOG" &
     TW_PID=$!
     sleep 1
@@ -79,6 +95,7 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
         # heartbeat monitor + redirect. The API server runs in the main tor
         # container — this container only handles monitoring and takeover duties.
         echo "OnionHeaven mode: starting C Tor (SOCKS + control port), redirect service, and heartbeat monitor..."
+        migrate_onionheaven_data
 
         # Start OnionHeaven redirect service in background (port 8082)
         /onionheaven-redirect.sh &
@@ -99,8 +116,8 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
         # Start watchdog to monitor Tor health via control port
         python3 /tor-watchdog.py &
 
-        # Start onionheaven heartbeat monitor in background (log to shared volume)
-        HEARTBEAT_LOG="/var/lib/onionpress/onionheaven/heartbeat.log"
+        # Start onionheaven heartbeat monitor in background (log on the hub data volume)
+        HEARTBEAT_LOG="/var/lib/onionheaven/heartbeat.log"
         mkdir -p "$(dirname "$HEARTBEAT_LOG")"
         python3 /onionheaven-heartbeat.py 2>>"$HEARTBEAT_LOG" &
         HEARTBEAT_PID=$!
@@ -182,6 +199,8 @@ fi
 
 # ==================== Onion service mode (the main tor container) ====================
 
+migrate_onionheaven_data
+
 # Create compat directories for hostname files
 mkdir -p /var/lib/tor/hidden_service/wordpress
 mkdir -p /var/lib/tor/hidden_service/healthcheck
@@ -200,7 +219,7 @@ fi
 # OnionHeaven API server — runs on every node (status, OnionHome endpoints),
 # but only the OnionHeaven hub accepts registrations: the canonical hub
 # address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes (onionheaven_common.py).
-mkdir -p /var/lib/onionpress/onionheaven/keys
+mkdir -p /var/lib/onionheaven/keys
 python3 /web-server.py &
 ONIONHEAVEN_SERVER_PID=$!
 sleep 1

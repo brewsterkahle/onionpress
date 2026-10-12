@@ -768,7 +768,7 @@ except: print(0)
 
 # ── Metrics collection ────────────────────────────────────────────────────────
 
-ONIONHEAVEN_DB_PATH="/var/lib/onionpress/onionheaven/registry.db"
+ONIONHEAVEN_DB_PATH="/var/lib/onionheaven/registry.db"
 
 # Query OnionHeaven /status API — locally via docker exec, or remotely via Tor
 # Returns JSON: {"total":N,"healthy":N,"failing":N,"taken_over":N}
@@ -876,7 +876,7 @@ get_container_mem_mb() {
 
 get_last_pass_duration() {
     if [ "$IS_ONIONHEAVEN_HOST" = true ]; then
-        docker_cmd exec onionheaven sh -c 'grep "heartbeat pass complete" /var/lib/onionpress/onionheaven/heartbeat.log 2>/dev/null | tail -1 | sed "s/.*in //;s/s$//"' | tr -d ' \n\r' || echo "-"
+        docker_cmd exec onionheaven sh -c 'grep "heartbeat pass complete" /var/lib/onionheaven/heartbeat.log 2>/dev/null | tail -1 | sed "s/.*in //;s/s$//"' | tr -d ' \n\r' || echo "-"
     else
         echo "-"
     fi

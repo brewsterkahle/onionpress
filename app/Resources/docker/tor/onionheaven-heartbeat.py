@@ -16,7 +16,8 @@ which updates last_healthy timestamps. This monitor:
   3. Manages farm scaling for takeover workers
 
 All operations are local:
-  - SQLite via Python sqlite3 (shared volume)
+  - SQLite via Python sqlite3 (the hub data volume, shared with
+    onionpress-tor and the takeover workers only)
   - Post-takeover audits via curl through the local Tor SOCKS port (127.0.0.1:9050)
   - Takeover/release via /onionheaven-tor-manager.sh (same container)
 
@@ -40,7 +41,7 @@ from onionheaven_common import (
     _init_worker_index, _ensure_capacity, _pick_worker,
     _exec_takeover, _exec_release,
     is_registration_hub, registrations_opted_in, read_tor_container_address,
-    PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE,
+    PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, ONIONHEAVEN_DATA_DIR,
 )
 
 # How many drift repairs to attempt per worker per heartbeat pass.
@@ -284,12 +285,12 @@ def main():
 
     # Wait for the DB directory to exist
     for _ in range(30):
-        if os.path.isdir("/var/lib/onionpress/onionheaven"):
+        if os.path.isdir(ONIONHEAVEN_DATA_DIR):
             break
         time.sleep(2)
     else:
         log("WARNING: data dir not found after 60s, creating it")
-        os.makedirs("/var/lib/onionpress/onionheaven", exist_ok=True)
+        os.makedirs(ONIONHEAVEN_DATA_DIR, exist_ok=True)
 
     wait_for_hub_admission()
 

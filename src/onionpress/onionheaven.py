@@ -31,8 +31,9 @@ ONIONHEAVEN_API_PORT = 8083
 # Wayback Machine .onion address
 WAYBACK_ONION = "web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
 
-# Paths inside containers
-ONIONHEAVEN_DATA_DIR = "/var/lib/onionpress/onionheaven"
+# Paths inside containers: the hub data volume (onionpress-onionheaven-data),
+# which the WordPress container never mounts
+ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
 
 
 def _docker_env(app):

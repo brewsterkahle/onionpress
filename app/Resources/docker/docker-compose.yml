@@ -25,6 +25,8 @@ services:
       - onion-keys:/var/lib/onionpress-keys/
       - tor-state:/var/lib/tor/
       - onionpress-data:/var/lib/onionpress
+      # OnionHeaven registry and registrants' keys (see the volume below).
+      - onionheaven-data:/var/lib/onionheaven
       - ${ONIONPRESS_SHARED_DIR:-/tmp/onionpress-no-shared}/analytics:/var/lib/onionhome/analytics
     # No Docker socket here. This container serves the onion services and
     # the OnionHeaven API to anyone on Tor; the socket is root on the Docker
@@ -91,6 +93,8 @@ services:
       start_period: 300s
     labels:
       - autoheal=true
+    # Never onionheaven-data: WordPress is the code visitors reach, and that
+    # volume holds other people's onion service keys.
     volumes:
       - wordpress-data:/var/www/html
       - onionpress-data:/var/lib/onionpress
@@ -223,6 +227,7 @@ services:
     # behind a narrow orchestrator too — see docs/DOCKER-SOCKET.md.
     volumes:
       - onionpress-data:/var/lib/onionpress
+      - onionheaven-data:/var/lib/onionheaven
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     restart: unless-stopped
     networks:
@@ -239,6 +244,14 @@ volumes:
     name: onionpress-db-data
   onionpress-data:
     name: onionpress-persistent-data
+  # The OnionHeaven hub data: the registry and the onion service key of
+  # every site registered with this hub. Mounted at /var/lib/onionheaven by
+  # tor, onionheaven and the takeover workers (onionheaven_common starts
+  # them with it) and by nothing else, never wordpress. It used to be
+  # onionheaven/ on onionpress-data; the tor image's entrypoint moves it
+  # here (docs/DOCKER-SOCKET.md, "The OnionHeaven hub data").
+  onionheaven-data:
+    name: onionpress-onionheaven-data
   # Holds nothing but autoheal-proxy's listening socket.
   autoheal-proxy:
     name: onionpress-autoheal-proxy

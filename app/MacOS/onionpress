@@ -352,7 +352,7 @@ _start_takeover_worker() {
         -e TAKEOVER_WORKER=1 \
         -e CONTAINER_NAME="$name" \
         -e MAX_TAKEOVER_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-10}" \
-        -v "onionpress-persistent-data:/var/lib/onionpress" \
+        -v "onionpress-onionheaven-data:/var/lib/onionheaven" \
         --restart unless-stopped \
         "${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9}}" >> "$LOG_FILE" 2>&1; then
         log "OnionHeaven farm: started takeover worker $name"
@@ -389,7 +389,7 @@ _onionheaven_farm_monitor() {
     set +e
     # Tracks the next index to use for takeover workers
     local next_takeover=2
-    local db="/var/lib/onionpress/onionheaven/registry.db"
+    local db="/var/lib/onionheaven/registry.db"
 
     while true; do
         sleep 30
@@ -2640,10 +2640,10 @@ restore_backup() {
     if [ -d "$staging/onionheaven" ] && [ -s "$staging/onionheaven/registry.db" ]; then
         if docker inspect onionheaven >/dev/null 2>&1; then
             log "Restore: restoring OnionHeaven registry and keys..."
-            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionpress/onionheaven/registry.db 2>>"$LOG_FILE"
+            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionheaven/registry.db 2>>"$LOG_FILE"
             if [ -d "$staging/onionheaven/keys" ]; then
-                docker exec onionheaven mkdir -p /var/lib/onionpress/onionheaven/keys 2>>"$LOG_FILE"
-                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionpress/onionheaven/keys/ 2>>"$LOG_FILE"
+                docker exec onionheaven mkdir -p /var/lib/onionheaven/keys 2>>"$LOG_FILE"
+                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionheaven/keys/ 2>>"$LOG_FILE"
             fi
             log "Restore: OnionHeaven data restored"
         else

@@ -5126,7 +5126,7 @@ License: AGPL v3"""
                 try:
                     result = subprocess.run(
                         ["docker", "exec", "onionheaven", "sqlite3",
-                         "/var/lib/onionpress/onionheaven/registry.db",
+                         "/var/lib/onionheaven/registry.db",
                          "SELECT COUNT(*), SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
                          "SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) FROM registry"],
                         capture_output=True, text=True, encoding='utf-8', errors='replace',

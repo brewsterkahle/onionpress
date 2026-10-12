@@ -14,7 +14,7 @@
 
 CTOR_TORRC="/etc/tor/torrc"
 CTOR_HS_DIR="/var/lib/tor/hidden_service"
-ONIONHEAVEN_KEYS_DIR="/var/lib/onionpress/onionheaven/keys"
+ONIONHEAVEN_KEYS_DIR="/var/lib/onionheaven/keys"
 REDIRECT_PORT=8082
 
 

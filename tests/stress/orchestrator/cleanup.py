@@ -139,7 +139,7 @@ def run_cleanup_stale(
     logger: StressLogger,
 ):
     """Remove only stale stress tests (no activity in stale_hours)."""
-    db_path = "/var/lib/onionpress/onionheaven/registry.db"
+    db_path = "/var/lib/onionheaven/registry.db"
     logger.log(f"=== OnionHeaven Stale Stress Test Cleanup (>{config.stale_hours}h inactive) ===")
 
     if not docker.container_running("onionheaven"):

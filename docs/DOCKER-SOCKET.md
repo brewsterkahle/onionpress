@@ -22,8 +22,9 @@ node nobody registers with, none of it ever ran.
 ## How onionpress-tor works without it
 
 `onionheaven_common.docker_available()` is false there, and the shared code
-records the work in the registry (the shared `onionpress-persistent-data`
-volume) for a process that has Docker:
+records the work in the registry (on the `onionpress-onionheaven-data`
+volume, which both containers mount; see "The OnionHeaven hub data" below)
+for a process that has Docker:
 
 - **`/offline`** — `takeover_function` runs its guards, then sets
   `takeover_requested` instead of picking a worker. The heartbeat's next pass
@@ -55,6 +56,58 @@ built from the change and refresh the pins before releasing the app and the
 releases wait for RECONCILE (two per worker per pass), `/offline` waits for
 the 180 s staleness check, and `assigned_count` drifts upward.
 
+## The OnionHeaven hub data
+
+The hub's registry (`registry.db`) and the onion service key of every site
+registered with it (`keys/<address>/`) live on their own volume,
+`onionpress-onionheaven-data`, mounted at `/var/lib/onionheaven`:
+
+| Container | `onionpress-onionheaven-data` | `onionpress-persistent-data` |
+|---|---|---|
+| `onionpress-wordpress` | **no** | yes (status, settings-page actions) |
+| `onionpress-tor` | yes (registration API) | yes |
+| `onionheaven` | yes (heartbeat, takeovers) | yes |
+| `onionheaven-takeover-N` | yes (keys for `ADD_ONION`, registry) | **no** |
+
+Both used to be `onionheaven/` on `onionpress-persistent-data`, which the
+WordPress container mounts read-write, so file permissions inside that
+container were all that kept the site's PHP away from every registrant's key.
+The new mount point is outside `/var/lib/onionpress` on purpose: a volume
+mounted inside a directory WordPress can write is only as separate as that
+directory entry. Host-side code reaches the data through the `onionheaven`
+or `onionpress-tor` container, never `onionpress-wordpress`.
+`tests/test_onionheaven_data_volume.py` enforces all of this.
+
+**Moving existing data.** In `onionpress-tor` and `onionheaven` the
+entrypoint runs `onionheaven-data-migrate.py` before anything opens the
+registry, on every start; a lock on the volume makes the second container
+wait for the first. It copies the old directory, verifies the copy and that
+the source did not change meanwhile, puts it in place, writes
+`.migrated-from-persistent-data`, and only then removes each old file that
+still has the bytes it copied. What was already on the volume before that
+first move is kept in `.pre-migration-<time>/`; anything that turns up at the
+old location later is kept in `legacy-leftover-<time>/` and not used.
+Symlinks at the old location are never followed. Nothing moves unless
+`/var/lib/onionheaven` is a mount point. If the first move fails while
+registrants' keys are at stake, the container exits without removing
+anything and Docker restarts it; with no keys there, or once the data in use
+has moved, it starts anyway and tries again next time (WordPress can write
+to the old location, and must not be able to keep the hub from starting). Takeover workers started before the move mount the old volume;
+the heartbeat removes them (`cleanup_dead_workers`) and reassigns their
+addresses to workers it starts with the new one.
+
+**Release rule:** compose plus tor-image code again. Publish the tor image,
+refresh the pins, then release the app and the `.deb`. A new compose file with
+an old image moves nothing (the old image keeps using the old location), but
+the hub's status counts and the Linux backup's hub data come up empty until
+the image arrives. An old compose file with a new image must never ship: the
+data stays put, but the hub would run on an empty registry in the container's
+writable layer. On the hub itself, stop OnionPress completely (that also
+removes the takeover workers), update, start, and check the logs of
+`onionheaven` (or `onionpress-tor`, whichever started first) for the "moved
+the OnionHeaven data" line, and the registry count against the one from
+before.
+
 ## Next: the heartbeat's socket
 
 What remains is the `onionheaven` container. It hosts no onion service, but
@@ -79,7 +132,7 @@ such as the one in front of autoheal cannot inspect them.
    `onionheaven` loses the socket. Compose and image again ship together.
 2. **Workers without `docker exec`.** Optional, and better: give each worker's
    queue manager a control socket on a volume shared only with `onionheaven`
-   (not `onionpress-persistent-data`, which `wordpress` also mounts). Then the
+   (never `onionpress-persistent-data`, which `wordpress` also mounts). Then the
    controller only spawns, inspects and removes, and `exec` disappears.
 3. **Reset without `docker cp`.** `_patch_worker_code` and the heartbeat
    restart via `docker exec onionheaven` are development conveniences;

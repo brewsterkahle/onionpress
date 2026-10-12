@@ -122,7 +122,7 @@ def _onionheaven_stats(docker: Docker) -> dict:
     """Query the OnionHeaven container for hub stats. Best-effort."""
     result = docker.exec(
         "onionheaven",
-        ["sqlite3", "/var/lib/onionpress/onionheaven/registry.db",
+        ["sqlite3", "/var/lib/onionheaven/registry.db",
          "SELECT COUNT(*), SUM(status='online'), SUM(status='taken-over') "
          "FROM registry"],
         timeout=5, quiet=True,
@@ -147,12 +147,13 @@ def _onionheaven_stats(docker: Docker) -> dict:
             if n.strip().startswith("onionheaven-takeover-")
         )
 
-    # Is the client registered? Read from shared volume written by heartbeat.
+    # Is the client registered? client_registered on the OnionHeaven data
+    # volume, which the onionheaven container mounts and WordPress does not.
     client_registered = False
     reg_result = docker.exec(
-        "onionpress-wordpress",
+        "onionheaven",
         ["sh", "-c",
-         "cat /var/lib/onionpress/onionheaven/client_registered 2>/dev/null"],
+         "cat /var/lib/onionheaven/client_registered 2>/dev/null"],
         timeout=5, quiet=True,
     )
     if reg_result.ok and reg_result.output.strip() in ("1", "true", "yes"):

@@ -267,6 +267,25 @@
 - **Diffdisk cap is 20 GiB on new installs** (issue #230) via `--disk` to the first `colima start` in `app/MacOS/launcher.sh` and `src/onionpress/colima.py`. The cap is set at VM creation and is immutable — existing installs keep their original 100 GiB cap. Dangling Docker images auto-prune after each successful image pull (`update_docker_images()` in `src/menubar.py` and the bash launchers), keeping real usage well under 5 GiB in practice. The cap is configurable via `VM_DISK=N` in `~/.onionpress/config` *before* first launch; when the OnionHeaven hub vanity key is present at first start, the cap auto-bumps to 100 GiB for takeover-container headroom (hub is the edge case; normal nodes never need more than 20).
 - **Do not add additional `--mount` flags without considering security implications**
 
+## OnionHeaven Hub Data Volume
+- The hub's registry and every registrant's onion key live on
+  `onionpress-onionheaven-data` at `/var/lib/onionheaven`, mounted by
+  onionpress-tor, onionheaven and the takeover workers only — **never
+  wordpress**, and never under `/var/lib/onionpress` (that is
+  onionpress-persistent-data, which WordPress mounts read-write; a mount
+  point inside a directory WordPress can write is not a boundary). Workers
+  mount only this volume. Host code reaches it via `docker exec`/`cp` on
+  `onionheaven` or `onionpress-tor`. `tests/test_onionheaven_data_volume.py`.
+- It used to be `onionheaven/` on onionpress-persistent-data. The tor image's
+  entrypoint (`onionheaven-data-migrate.py`, onionpress-tor and onionheaven)
+  moves it on start: copy, verify, put in place, marker
+  `.migrated-from-persistent-data`, then remove each old file only if it is
+  unchanged. Never into a non-mount; later arrivals go to
+  `legacy-leftover-<time>/`. Fails closed only if the first move fails with
+  keys at stake (never after: WordPress can write the old location).
+- Compose and tor image ship together (see docs/DOCKER-SOCKET.md, "The
+  OnionHeaven hub data"); on the hub, stop fully before updating.
+
 ## OnionHeaven Opt-In
 - **`REGISTER_WITH_ONIONHEAVEN` is tri-state and opt-in**: `yes` registers,
   `no` never registers and never asks, unset/empty = undecided → no

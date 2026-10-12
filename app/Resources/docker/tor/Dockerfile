@@ -224,8 +224,13 @@ COPY key-convert.py /key-convert.py
 COPY torrc.template /etc/tor/torrc.template
 COPY tor-watchdog.py /tor-watchdog.py
 COPY onionnames.py /onionnames.py
+COPY onionheaven-data-migrate.py /onionheaven-data-migrate.py
 COPY wordlists /wordlists
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
+# Mount point of the OnionHeaven hub data volume (registry and registrants'
+# keys; onionpress-onionheaven-data). Root-only: a fresh volume takes this
+# directory's owner and mode when Docker first mounts it.
+RUN mkdir -m 700 /var/lib/onionheaven
 ENTRYPOINT ["/entrypoint.sh"]
 # A new ENTRYPOINT resets an inherited CMD, but say so: the base's CMD is a
 # list of tor flags (--RunAsDaemon 0 --HiddenServiceDir …) that would

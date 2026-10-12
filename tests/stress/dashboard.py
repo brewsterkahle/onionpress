@@ -53,7 +53,7 @@ def docker_run(args, timeout=10):
 # Local queries (docker exec + sqlite3)
 # ---------------------------------------------------------------------------
 
-DB = "/var/lib/onionpress/onionheaven/registry.db"
+DB = "/var/lib/onionheaven/registry.db"
 
 
 def query_registry():
@@ -172,7 +172,7 @@ def query_tor_detached(container_name):
 
 def get_heartbeat_info():
     out = docker_exec("onionheaven",
-                      "tail -1 /var/lib/onionpress/onionheaven/heartbeat.log")
+                      "tail -1 /var/lib/onionheaven/heartbeat.log")
     if not out:
         return "?", "?"
     try:

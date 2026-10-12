@@ -133,9 +133,7 @@ def _log_workload_stats(log_func, label, db_creds):
             'onionpress-wordpress', '/var/www/html/wp-content',
             excludes=('creations', '.thumbs', '.DS_Store'),
         )
-        onionheaven_bytes = _du_bytes(
-            'onionpress-wordpress', '/var/lib/onionpress/onionheaven',
-        )
+        onionheaven_bytes = _du_bytes('onionheaven', '/var/lib/onionheaven')
         kvs = [
             f"db_bytes={stats['db_bytes']}",
             f"wp_posts_rows={stats['wp_posts_rows']}",
@@ -623,10 +621,12 @@ def create_backup(onion_address, username, password, output_path, version, log_f
 
         # 4. Backup OnionHeaven data if this is OnionHeaven instance
         #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
+        #    It lives on its own volume, in the onionheaven container and not
+        #    in onionpress-wordpress (docs/DOCKER-SOCKET.md).
         is_onionheaven = False
         onionheaven_check = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'test', '-f', '/var/lib/onionpress/onionheaven/master-key.json'],
+            ['docker', 'exec', 'onionheaven',
+             'test', '-f', '/var/lib/onionheaven/master-key.json'],
             capture_output=True, timeout=10
         )
         if onionheaven_check.returncode == 0:
@@ -636,7 +636,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                 onionheaven_dir = os.path.join(staging, 'onionheaven')
                 subprocess.run(
                     ['docker', 'cp',
-                     'onionpress-wordpress:/var/lib/onionpress/onionheaven/.',
+                     'onionheaven:/var/lib/onionheaven/.',
                      onionheaven_dir],
                     capture_output=True, timeout=60, check=True
                 )
@@ -1793,29 +1793,20 @@ def restore_container_artifacts(staging, metadata, log_func):
             unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
             if os.path.exists(unlocked_file):
                 os.unlink(unlocked_file)
-            # Ensure OnionHeaven directory exists in container
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'mkdir', '-p', '/var/lib/onionpress/onionheaven'],
-                capture_output=True, timeout=10
-            )
+            # Onto the OnionHeaven data volume, through the onionheaven
+            # container: never into onionpress-wordpress, and root-owned (it
+            # holds registrants' onion service keys).
             subprocess.run(
                 ['docker', 'cp',
                  onionheaven_dir + '/.',
-                 'onionpress-wordpress:/var/lib/onionpress/onionheaven/'],
+                 'onionheaven:/var/lib/onionheaven/'],
                 capture_output=True, timeout=60, check=True
-            )
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'chown', '-R', 'www-data:www-data', '/var/lib/onionpress/onionheaven/'],
-                capture_output=True, timeout=30
             )
             log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
 
     # 4b. Restore OnionHome name registry if present in backup.
     #     Kept root-owned — the tor container reads/writes these files
-    #     as root, same as OnionHeaven's tor-container-root files
-    #     alongside the www-data restore target above.
+    #     as root, like the OnionHeaven data above.
     onionhome_dir = _find_dir(staging, 'onionhome')
     if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
         with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):

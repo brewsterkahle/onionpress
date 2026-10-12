@@ -208,11 +208,11 @@ fi
 # Clean up leftover state from previous test runs
 log "Cleaning up leftover OnionHeaven state..."
 # Clear test entries from registry DB
-docker exec "$TOR_CONTAINER" sh -c "sqlite3 /var/lib/onionpress/onionheaven/registry.db \"DELETE FROM registry WHERE version LIKE 'test-%' OR version LIKE 'stress-test-%'\" 2>/dev/null" || true
+docker exec "$TOR_CONTAINER" sh -c "sqlite3 /var/lib/onionheaven/registry.db \"DELETE FROM registry WHERE version LIKE 'test-%' OR version LIKE 'stress-test-%'\" 2>/dev/null" || true
 
 # Check if there are real (non-test) registrations — if so, the lazy watcher
 # will keep the onionheaven container alive and we cannot stop it cleanly.
-REAL_TOTAL=$(docker exec "$TOR_CONTAINER" sh -c "sqlite3 /var/lib/onionpress/onionheaven/registry.db \"SELECT COUNT(*) FROM registry WHERE status='online'\" 2>/dev/null" || echo "0")
+REAL_TOTAL=$(docker exec "$TOR_CONTAINER" sh -c "sqlite3 /var/lib/onionheaven/registry.db \"SELECT COUNT(*) FROM registry WHERE status='online'\" 2>/dev/null" || echo "0")
 if [ "${REAL_TOTAL:-0}" -gt 0 ]; then
     LIVE_OH_NODE=true
     log "Live OnionHeaven node with $REAL_TOTAL real registrations — skipping container teardown"
@@ -335,7 +335,7 @@ else
 fi
 
 # Check key stored on disk
-KEY_EXISTS=$(docker exec "$TOR_CONTAINER" test -f "/var/lib/onionpress/onionheaven/keys/${CONTENT_ADDR}/ks_hs_id.ed25519_expanded_private" && echo "yes" || echo "no")
+KEY_EXISTS=$(docker exec "$TOR_CONTAINER" test -f "/var/lib/onionheaven/keys/${CONTENT_ADDR}/ks_hs_id.ed25519_expanded_private" && echo "yes" || echo "no")
 if [ "$KEY_EXISTS" = "yes" ]; then
     pass "Arti key file exists in OnionHeaven keys directory"
 else
@@ -587,7 +587,7 @@ else
 fi
 
 # Verify key file was cleaned up
-KEY_GONE=$(docker exec "$TOR_CONTAINER" test -f "/var/lib/onionpress/onionheaven/keys/${CONTENT_ADDR}/ks_hs_id.ed25519_expanded_private" && echo "exists" || echo "gone")
+KEY_GONE=$(docker exec "$TOR_CONTAINER" test -f "/var/lib/onionheaven/keys/${CONTENT_ADDR}/ks_hs_id.ed25519_expanded_private" && echo "exists" || echo "gone")
 if [ "$KEY_GONE" = "gone" ]; then
     pass "Key file removed from OnionHeaven keys directory"
 else

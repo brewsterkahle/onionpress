@@ -30,7 +30,14 @@ from datetime import datetime, timezone
 # Constants
 # ---------------------------------------------------------------------------
 
-ONIONHEAVEN_DATA_DIR = "/var/lib/onionpress/onionheaven"
+# The registry and every registrant's onion service key live on their own
+# volume, mounted here in onionpress-tor, onionheaven and the takeover
+# workers only. Never under /var/lib/onionpress: that is
+# onionpress-persistent-data, which the wordpress container mounts too (the
+# entrypoint moves what older versions left there; see
+# onionheaven-data-migrate.py and docs/DOCKER-SOCKET.md).
+ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
+HUB_DATA_VOLUME = "onionpress-onionheaven-data"
 DB_PATH = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.db")
 KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
 TOR_MANAGER = "/onionheaven-tor-manager.sh"
@@ -469,7 +476,9 @@ def _spawn_worker(conn):
              "-e", "TAKEOVER_WORKER=1",
              "-e", f"CONTAINER_NAME={name}",
              "-e", f"MAX_TAKEOVER_SERVICES={MAX_SERVICES_PER_WORKER}",
-             "-v", "onionpress-persistent-data:/var/lib/onionpress",
+             # The hub data volume only: workers face Tor and need nothing
+             # from onionpress-persistent-data (WordPress's shared volume).
+             "-v", f"{HUB_DATA_VOLUME}:{ONIONHEAVEN_DATA_DIR}",
              "--restart", "unless-stopped",
              image],
             capture_output=True, text=True, timeout=30
@@ -596,8 +605,30 @@ def check_worker_bootstrap(conn):
                     pass
 
 
+def _mounts_hub_data(mounts_json):
+    """False only if a worker's `docker inspect` Mounts certainly lack the
+    hub data volume at ONIONHEAVEN_DATA_DIR. Anything unreadable is True:
+    a parsing doubt must never retire a working worker.
+    """
+    try:
+        mounts = json.loads(mounts_json)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(mounts, list):
+        return True
+    return any(isinstance(m, dict)
+               and m.get("Name") == HUB_DATA_VOLUME
+               and m.get("Destination") == ONIONHEAVEN_DATA_DIR
+               for m in mounts)
+
+
 def cleanup_dead_workers(conn):
     """Remove DB entries for workers whose containers no longer exist.
+
+    Also retires workers started before the hub data had its own volume
+    (they read keys and registry from onionpress-persistent-data, which no
+    longer holds them); the heartbeat reassigns their addresses to workers
+    it spawns with the volume.
 
     Called each heartbeat cycle.
     """
@@ -612,10 +643,24 @@ def cleanup_dead_workers(conn):
         name = row["container_name"]
         try:
             result = subprocess.run(
-                ["docker", "inspect", "--format", "{{.State.Running}}", name],
+                ["docker", "inspect", "--format",
+                 "{{.State.Running}} {{json .Mounts}}", name],
                 capture_output=True, text=True, timeout=10
             )
-            if result.returncode != 0 or "true" not in result.stdout.lower():
+            state, _, mounts = result.stdout.strip().partition(" ")
+            running = result.returncode == 0 and state.lower() == "true"
+            if running and not _mounts_hub_data(mounts):
+                log(f"Retiring takeover worker {name}: it does not mount "
+                    f"{HUB_DATA_VOLUME} at {ONIONHEAVEN_DATA_DIR} (started "
+                    f"by an older version)")
+                removed = subprocess.run(["docker", "rm", "-f", name],
+                                         capture_output=True, timeout=30)
+                if removed.returncode != 0:
+                    # Still serving its addresses: leave it registered, so
+                    # nothing adds them on a second worker; next pass retries.
+                    continue
+                running = False
+            if not running:
                 # Container dead — clear assignments and remove
                 conn.execute(
                     "UPDATE registry SET takeover_container = NULL "
@@ -1456,7 +1501,7 @@ def _rotate_logs():
     """Rotate OnionHeaven log files: rename current logs with a timestamp,
     delete logs older than 7 days.
 
-    Covers heartbeat.log and queue-manager-*.log on the shared volume.
+    Covers heartbeat.log and queue-manager-*.log on the hub data volume.
     """
     import glob as _glob
 
@@ -1542,7 +1587,7 @@ def reset_onionheaven(conn=None):
         subprocess.run(
             ["docker", "exec", "-d", "onionheaven", "sh", "-c",
              "python3 /onionheaven-heartbeat.py "
-             "2>>/var/lib/onionpress/onionheaven/heartbeat.log"],
+             f"2>>{ONIONHEAVEN_DATA_DIR}/heartbeat.log"],
             capture_output=True, timeout=10
         )
         log("reset_onionheaven: restarted heartbeat process")

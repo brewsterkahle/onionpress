@@ -392,7 +392,9 @@ class ContainerManager:
             "-e", "TAKEOVER_WORKER=1",
             "-e", f"CONTAINER_NAME={name}",
             "-e", f"MAX_TAKEOVER_SERVICES={max_services}",
-            "-v", "onionpress-persistent-data:/var/lib/onionpress",
+            # The OnionHeaven data volume only, as onionheaven_common's
+            # _spawn_worker does — never WordPress's shared volume.
+            "-v", "onionpress-onionheaven-data:/var/lib/onionheaven",
             "--restart", "unless-stopped",
             image,
         ], timeout=60)

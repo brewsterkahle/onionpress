@@ -97,7 +97,7 @@ handle_request() {
         if [ -z "$safe" ]; then
             case "$host" in
                 *.onion)
-                    status=$(sqlite3 /var/lib/onionpress/onionheaven/registry.db \
+                    status=$(sqlite3 /var/lib/onionheaven/registry.db \
                         "SELECT status FROM registry WHERE content_address='${host}' LIMIT 1" 2>/dev/null || echo "")
                     if [ "$status" = "online" ]; then
                         # Address has been released — drop connection (circuit breaker)
@@ -140,7 +140,7 @@ handle_request() {
         if [ -z "$safe" ]; then
             case "$host" in
                 *.onion)
-                    sqlite3 /var/lib/onionpress/onionheaven/registry.db \
+                    sqlite3 /var/lib/onionheaven/registry.db \
                         "UPDATE registry SET last_redirect=datetime('now') WHERE content_address='${host}'" 2>/dev/null || true
                     ;;
             esac

@@ -30,7 +30,8 @@ MAX_IN_FLIGHT = int(os.environ.get("ONIONHEAVEN_MAX_IN_FLIGHT", "5"))
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 9051
 COOKIE_PATH = "/var/lib/tor/control_auth_cookie"
-KEYS_DIR = "/var/lib/onionpress/onionheaven/keys"
+# onionheaven_common.KEYS_DIR, on the hub data volume (a test keeps them equal)
+KEYS_DIR = "/var/lib/onionheaven/keys"
 KEY_CONVERT = "/key-convert.py"
 REDIRECT_PORT = 8082
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")

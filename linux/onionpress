@@ -1175,7 +1175,7 @@ start_onionheaven_activation_watcher() {
 
     # If the activation flag already exists (this node is a hub), start immediately.
     local activate_flag
-    activate_flag=$(docker exec onionpress-tor cat /var/lib/onionpress/onionheaven/activate 2>/dev/null) || true
+    activate_flag=$(docker exec onionpress-tor cat /var/lib/onionheaven/activate 2>/dev/null) || true
     if [ -n "$activate_flag" ]; then
         log "OnionHeaven activation flag found — starting heartbeat container"
         _activate_onionheaven
@@ -1202,7 +1202,7 @@ _onionheaven_activation_watcher() {
     while true; do
         sleep 30
         local flag
-        flag=$(docker exec onionpress-tor cat /var/lib/onionpress/onionheaven/activate 2>/dev/null) || true
+        flag=$(docker exec onionpress-tor cat /var/lib/onionheaven/activate 2>/dev/null) || true
         if [ -n "$flag" ]; then
             if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
                 log "OnionHeaven activation flag detected — starting heartbeat container"
@@ -2035,11 +2035,11 @@ create_backup() {
     if docker inspect onionheaven >/dev/null 2>&1; then
         log "Backup: saving OnionHeaven registry and keys..."
         mkdir -p "$staging/onionheaven"
-        docker cp onionheaven:/var/lib/onionpress/onionheaven/registry.db "$staging/onionheaven/registry.db" 2>>"$LOG_FILE" || true
-        docker cp onionheaven:/var/lib/onionpress/onionheaven/keys/. "$staging/onionheaven/keys" 2>>"$LOG_FILE" || true
+        docker cp onionheaven:/var/lib/onionheaven/registry.db "$staging/onionheaven/registry.db" 2>>"$LOG_FILE" || true
+        docker cp onionheaven:/var/lib/onionheaven/keys/. "$staging/onionheaven/keys" 2>>"$LOG_FILE" || true
         if [ -s "$staging/onionheaven/registry.db" ]; then
             local oh_count
-            oh_count=$(docker exec onionheaven sqlite3 /var/lib/onionpress/onionheaven/registry.db "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL" 2>/dev/null || echo "?")
+            oh_count=$(docker exec onionheaven sqlite3 /var/lib/onionheaven/registry.db "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL" 2>/dev/null || echo "?")
             log "Backup: OnionHeaven registry saved ($oh_count active registrations)"
         else
             rm -rf "$staging/onionheaven"
@@ -2228,10 +2228,10 @@ restore_backup() {
     if [ -d "$staging/onionheaven" ] && [ -s "$staging/onionheaven/registry.db" ]; then
         if docker inspect onionheaven >/dev/null 2>&1; then
             log "Restore: restoring OnionHeaven registry and keys..."
-            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionpress/onionheaven/registry.db 2>>"$LOG_FILE"
+            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionheaven/registry.db 2>>"$LOG_FILE"
             if [ -d "$staging/onionheaven/keys" ]; then
-                docker exec onionheaven mkdir -p /var/lib/onionpress/onionheaven/keys 2>>"$LOG_FILE"
-                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionpress/onionheaven/keys/ 2>>"$LOG_FILE"
+                docker exec onionheaven mkdir -p /var/lib/onionheaven/keys 2>>"$LOG_FILE"
+                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionheaven/keys/ 2>>"$LOG_FILE"
             fi
             log "Restore: OnionHeaven data restored"
         else
@@ -2439,7 +2439,7 @@ except: print('false')
         oh_server_active="true"
         # Query OH server stats from registry DB
         local oh_stats
-        oh_stats=$(docker exec onionheaven sqlite3 /var/lib/onionpress/onionheaven/registry.db \
+        oh_stats=$(docker exec onionheaven sqlite3 /var/lib/onionheaven/registry.db \
             "SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN status='online' THEN 1 ELSE 0 END) AS online,

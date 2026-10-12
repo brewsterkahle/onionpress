@@ -268,7 +268,7 @@ def heartbeat(conn):
 
 
 def wait_for_db():
-    """Wait for the shared DB directory to exist."""
+    """Wait for the hub data directory (the registry's volume) to exist."""
     for _ in range(30):
         if os.path.isdir(ONIONHEAVEN_DATA_DIR):
             return True
