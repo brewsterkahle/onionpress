@@ -452,9 +452,10 @@ case "$*" in
   *"wp config get"*) echo wordpress ;;
   *mariadb-dump*) echo "CREATE TABLE wp_posts;" ;;
   *"test -f"*) exit 0 ;;
+  "exec onionheaven sh -c "*"echo hub"*) echo hub ;;
+  "exec onionheaven sh -c "*"tar -cf -"*)
+      COPYFILE_DISABLE=1 tar -cf - -C {os.path.join(hub, "onionheaven")!r} . ;;
   *"tar -cf -"*) COPYFILE_DISABLE=1 tar -cf - -C {wp!r} . ;;
-  "cp onionheaven:/var/lib/onionheaven/. "*)
-      cp -R {os.path.join(hub, "onionheaven")!r} "$3" ;;
   "cp onionpress-tor:/var/lib/onionnames/"*)
       cp -P {os.path.join(hub, "onionhome")!r}/"${{2##*/}}" "$3" ;;
   *) exit 1 ;;
@@ -490,7 +491,8 @@ esac
         backup.create_backup(mv.ADDR, "admin", PW, os.path.join(self.tmp, "b.zip"),
                              "2.5.2", self.logs.append, data_dir=self.data_dir)
         with open(self.calls) as f:
-            tar_calls = [line for line in f if "tar -cf -" in line]
+            tar_calls = [line for line in f
+                         if "tar -cf -" in line and "onionpress-wordpress" in line]
         self.assertEqual(len(tar_calls), 1)
         self.assertIn("--hard-dereference", tar_calls[0])
 
@@ -510,7 +512,8 @@ esac
         backup.create_backup(mv.ADDR, "admin", PW, os.path.join(self.tmp, "b.zip"),
                              "2.5.2", self.logs.append, data_dir=self.data_dir)
         with open(self.calls) as f:
-            tar_calls = [line for line in f if "tar -cf -" in line]
+            tar_calls = [line for line in f
+                         if "tar -cf -" in line and "onionpress-wordpress" in line]
         self.assertTrue(tar_calls[0].startswith(
             "exec -u www-data onionpress-wordpress tar -cf - "), tar_calls[0])
         self.assertIn("--ignore-failed-read", tar_calls[0])
@@ -575,6 +578,8 @@ cli = object.__new__(C)
 cmd, a = sys.argv[1], sys.argv[2:]
 if cmd == "stage-wp-content":
     sys.exit(C.cmd_stage_wp_content(a[1]))
+if cmd == "stage-hub-data":
+    sys.exit(C.cmd_stage_hub_data(a[1]))
 if cmd == "prune-image-derivatives":
     cli.log = lambda m: print(m, file=sys.stderr)
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))

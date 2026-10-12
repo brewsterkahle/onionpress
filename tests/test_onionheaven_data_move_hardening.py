@@ -847,5 +847,175 @@ class TestLaunchers(unittest.TestCase):
                           and e[1][0] == "inspect"])
 
 
+# ---------------------------------------------------------------------------
+# Backups hold a hub's data (adjacent: they never did on the Mac)
+# ---------------------------------------------------------------------------
+
+class TestHubBackups(unittest.TestCase):
+    """create_backup waited for a master-key.json nothing writes any more,
+    so no Mac (or `onionpress.cli backup`) backup held a hub's registry or
+    keys; Linux took any node with an onionheaven container and copied
+    registry.db without its write-ahead log. The container side here is
+    the real shell, run on a folder standing in for /var/lib/onionheaven."""
+
+    def setUp(self):
+        import test_backup_staging_links as bsl
+        self.bsl = bsl
+        bsl.mv._cheap_kdf(self)
+        self.tmp = tempfile.mkdtemp(prefix="op-hub-backup-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = os.path.join(self.tmp, "hub")
+        os.makedirs(os.path.join(self.hub, "keys"))
+        self.wp = os.path.join(self.tmp, "wp-content")
+        os.makedirs(os.path.join(self.wp, "themes"))
+        with open(os.path.join(self.wp, "themes", "a.css"), "w") as f:
+            f.write("css")
+        pem = os.path.join(self.tmp, "key.pem")
+        with open(pem, "wb") as f:
+            f.write(bsl.mv.key_manager.build_openssh_key(bsl.mv.PRIV, bsl.mv.PUB))
+        self.calls = os.path.join(self.tmp, "calls")
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, "docker"), "w") as f:
+            f.write(f"""#!/bin/bash
+echo "$*" >> {self.calls!r}
+if [ "$1 $2 $3 $4" = "exec onionheaven sh -c" ]; then
+    export COPYFILE_DISABLE=1       # macOS tar: no ._ files
+    exec sh -c "${{5//\\/var\\/lib\\/onionheaven/{self.hub}}}"
+fi
+case "$*" in
+  *ks_hs_id.ed25519_expanded_private*) cat {pem!r} ;;
+  *"wp config get DB_PASSWORD"*) echo pw ;;
+  *"wp config get"*) echo wordpress ;;
+  *mariadb-dump*) echo "CREATE TABLE wp_posts;" ;;
+  *"tar -cf -"*) COPYFILE_DISABLE=1 tar -cf - -C {self.wp!r} . ;;
+  *) exit 1 ;;
+esac
+""")
+        os.chmod(os.path.join(bin_dir, "docker"), 0o755)
+        patcher = mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep
+                                               + os.environ["PATH"]})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.data_dir = os.path.join(self.tmp, "data")
+        os.makedirs(self.data_dir)
+        self.logs = []
+
+    def _registry(self, rows, keep_open=False):
+        conn = sqlite3.connect(os.path.join(self.hub, "registry.db"))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE registry (content_address TEXT)")
+        conn.executemany("INSERT INTO registry VALUES (?)", [(f"r{i}",) for i in range(rows)])
+        conn.commit()
+        if keep_open:
+            self.addCleanup(conn.close)
+        else:
+            conn.close()
+
+    def _write(self, rel, data):
+        path = os.path.join(self.hub, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(data)
+
+    def _backup(self):
+        from onionpress import backup
+        out = os.path.join(self.tmp, "backup.zip")
+        backup.create_backup(self.bsl.mv.ADDR, "admin", self.bsl.PW, out, "2.5.2",
+                             self.logs.append, data_dir=self.data_dir)
+        return self.bsl._inner_names_and_bytes(out, self.bsl.PW)
+
+    def test_a_hub_backup_holds_its_registry_and_keys_and_nothing_else(self):
+        self._registry(rows=6, keep_open=True)      # the rows are in -wal only
+        self._write(f"keys/{A}/{KEY}", "KEY-A")
+        self._write("heartbeat.log", "log")
+        self._write(f"legacy-leftover-20261012T000000Z/keys/{B}/{KEY}", "KEY-B")
+        self._write(MARKER, "{}")
+        members = self._backup()
+        names = {n.rstrip("/") for n in members}
+        self.assertIn(f"onionheaven/keys/{A}/{KEY}", names)
+        self.assertEqual(members[f"onionheaven/keys/{A}/{KEY}"], b"KEY-A")
+        self.assertFalse([n for n in names if n.startswith("onionheaven/")
+                          and not n.startswith(("onionheaven/keys", "onionheaven/registry.db"))],
+                         names)
+        self.assertNotIn("onionheaven/registry.db-wal", names)
+        snapshot = os.path.join(self.tmp, "registry.db")
+        with open(snapshot, "wb") as f:
+            f.write(members["onionheaven/registry.db"])
+        self.assertEqual(hd._rows(snapshot), 6)
+        meta = json.loads(members["metadata.json"])
+        self.assertTrue(meta["is_onionheaven"])
+
+    def test_a_node_without_hub_data_backs_up_none(self):
+        self._registry(rows=0)          # a status query made the schema
+        members = self._backup()
+        self.assertFalse([n for n in members if n.startswith("onionheaven")])
+        self.assertFalse(json.loads(members["metadata.json"])["is_onionheaven"])
+
+    def test_asking_never_makes_a_registry(self):
+        from onionpress import backup
+        self.assertEqual(backup.hub_data_state(), "none")
+        self.assertFalse(os.path.exists(os.path.join(self.hub, "registry.db")))
+        self._write(f"keys/{A}/{KEY}", "KEY-A")
+        self.assertEqual(backup.hub_data_state(), "hub")
+
+    def test_the_linux_backup_helper_says_what_it_did(self):
+        """linux/onionpress create_backup runs `onionpress.cli
+        stage-hub-data`: 0 copied, 3 not a hub, 4 no answer, 1 failed."""
+        from onionpress.cli import OnionPressCLI
+        dest = os.path.join(self.tmp, "staged")
+        with mock.patch("onionpress.cli._make_log_func", return_value=self.logs.append):
+            self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest), 3)
+            self.assertFalse(os.path.exists(dest))
+            self._write(f"keys/{A}/{KEY}", "KEY-A")
+            self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest), 0)
+            with open(os.path.join(dest, "keys", A, KEY)) as f:
+                self.assertEqual(f.read(), "KEY-A")
+            with mock.patch("onionpress.backup.hub_data_state", return_value=None):
+                self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest + "2"), 4)
+            with mock.patch("onionpress.backup.stage_hub_data", side_effect=OSError("x")):
+                self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest + "3"), 1)
+        body = _bash_function(hd._read("linux/onionpress"), "create_backup")
+        self.assertIn('op_py stage-hub-data --dest "$staging/onionheaven"', body)
+        self.assertNotIn("docker cp onionheaven:", body)
+
+    def test_restore_goes_through_sqlite_and_takes_only_registry_and_keys(self):
+        from onionpress import backup
+        staging = os.path.join(self.tmp, "staging")
+        os.makedirs(os.path.join(staging, "database"))
+        with open(os.path.join(staging, "database", "wordpress.sql"), "w") as f:
+            f.write("SELECT 1;\n")
+        src = os.path.join(staging, "onionheaven")
+        for rel in ("registry.db", f"keys/{A}/{KEY}", "master-key.json",
+                    ".master-key-unlocked", "heartbeat.log"):
+            path = os.path.join(src, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(rel)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(list(argv))
+            out = "/tmp/tmp.Ab12Cd34\n" if argv[-1] == "mktemp" else (
+                "wordpress\n" if "get" in argv else "")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=out if kwargs.get("text") else out.encode(),
+                stderr="" if kwargs.get("text") else b"")
+
+        with mock.patch.object(backup.subprocess, "run", side_effect=run):
+            backup.restore_container_artifacts(staging, {}, lambda msg: None)
+        hub_calls = [c for c in calls if any("onionheaven" in a for a in c)]
+        self.assertEqual(hub_calls, [
+            ["docker", "exec", "onionheaven", "mkdir", "-p", "/var/lib/onionheaven/keys"],
+            ["docker", "cp", os.path.join(src, "keys") + "/.",
+             "onionheaven:/var/lib/onionheaven/keys/"],
+            ["docker", "exec", "onionheaven", "mktemp"],
+            ["docker", "cp", os.path.join(src, "registry.db"), "onionheaven:/tmp/tmp.Ab12Cd34"],
+            ["docker", "exec", "onionheaven", "sqlite3", "/var/lib/onionheaven/registry.db",
+             ".restore '/tmp/tmp.Ab12Cd34'"],
+            ["docker", "exec", "onionheaven", "rm", "-f", "/tmp/tmp.Ab12Cd34"],
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2749,16 +2749,18 @@ restore_backup() {
         --address "$onion_address" 2>>"$LOG_FILE" \
         || log "WARNING: could not restore settings from the backup"
 
-    # 5. Restore OnionHeaven registry + keys (if present in backup)
-    if [ -d "$staging/onionheaven" ] && [ -s "$staging/onionheaven/registry.db" ]; then
+    # 5. Restore OnionHeaven registry + keys (if present in backup), through
+    #    the onionheaven container: the registry by SQLite's .restore, never
+    #    a copy over the one in use, whose -wal SQLite would apply to it
+    #    (backup.restore_hub_data, shared with Linux).
+    if [ -d "$staging/onionheaven" ] && { [ -s "$staging/onionheaven/registry.db" ] || [ -d "$staging/onionheaven/keys" ]; }; then
         if docker inspect onionheaven >/dev/null 2>&1; then
             log "Restore: restoring OnionHeaven registry and keys..."
-            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionheaven/registry.db 2>>"$LOG_FILE"
-            if [ -d "$staging/onionheaven/keys" ]; then
-                docker exec onionheaven mkdir -p /var/lib/onionheaven/keys 2>>"$LOG_FILE"
-                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionheaven/keys/ 2>>"$LOG_FILE"
+            if bundled_python -m onionpress.cli restore-hub-data --src "$staging/onionheaven" >>"$LOG_FILE" 2>&1; then
+                log "Restore: OnionHeaven data restored"
+            else
+                log "WARNING: could not restore the OnionHeaven data (see above)"
             fi
-            log "Restore: OnionHeaven data restored"
         else
             log "WARNING: Backup contains OnionHeaven data but onionheaven container is not running — skipping"
             echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2

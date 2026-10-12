@@ -480,6 +480,43 @@ class OnionPressCLI:
             return 1
 
     @staticmethod
+    def cmd_stage_hub_data(dest: str) -> int:
+        """Copy a hub's OnionHeaven registry and registrants' keys out of
+        the onionheaven container into *dest* (backup.stage_hub_data): the
+        Linux launcher's create_backup. Exit 0 when copied, 3 when the
+        volume holds no hub data, 4 when the container did not answer, 1
+        when the copy failed. Messages go to stderr."""
+        from .backup import hub_data_state, stage_hub_data
+        log = _make_log_func()
+        state = hub_data_state()
+        if state is None:
+            log("Backup: the onionheaven container did not say whether it holds "
+                "OnionHeaven data")
+            return 4
+        if state != "hub":
+            return 3
+        try:
+            stage_hub_data(dest, log)
+            return 0
+        except Exception as e:
+            log(f"Backup: could not copy the OnionHeaven data: {e}")
+            return 1
+
+    @staticmethod
+    def cmd_restore_hub_data(src: str) -> int:
+        """Put a backup's onionheaven/ (*src*) onto the hub data volume
+        (backup.restore_hub_data): the bash launchers' restore_backup.
+        Messages go to stderr."""
+        from .backup import restore_hub_data
+        log = _make_log_func()
+        try:
+            restore_hub_data(src, log)
+            return 0
+        except Exception as e:
+            log(f"Restore: could not restore the OnionHeaven data: {e}")
+            return 1
+
+    @staticmethod
     def cmd_put_wp_tree(src: str, dest: str, merge: bool = False) -> int:
         """Hand the host folder *src* to the WordPress container at *dest*,
         written as www-data (wp_files.put_tree): the bash launchers' restore
@@ -953,6 +990,17 @@ def main(argv: list[str] = None) -> int:
         help="Copy wp-content out of the WordPress container, read as "
              "www-data, as plain files and folders (backup helper)")
     p_stage.add_argument("--dest", required=True, help="Folder to fill")
+    p_stage_hub = sub.add_parser(
+        "stage-hub-data",
+        help="Copy a hub's OnionHeaven registry and keys out of the "
+             "onionheaven container (backup helper; exit 3: not a hub)")
+    p_stage_hub.add_argument("--dest", required=True, help="Folder to fill")
+    p_restore_hub = sub.add_parser(
+        "restore-hub-data",
+        help="Put a backup's OnionHeaven registry and keys onto the hub "
+             "data volume (restore helper)")
+    p_restore_hub.add_argument("--src", required=True,
+                               help="The backup's onionheaven/ folder")
     p_put = sub.add_parser(
         "put-wp-tree",
         help="Copy a host folder into the WordPress container, written as "
@@ -1045,6 +1093,10 @@ def main(argv: list[str] = None) -> int:
         return OnionPressCLI.cmd_scrub_staging(args.dir)
     if args.command == "stage-wp-content":
         return OnionPressCLI.cmd_stage_wp_content(args.dest)
+    if args.command == "stage-hub-data":
+        return OnionPressCLI.cmd_stage_hub_data(args.dest)
+    if args.command == "restore-hub-data":
+        return OnionPressCLI.cmd_restore_hub_data(args.src)
     # Restore and plugin-install helper for the bash launchers: same.
     if args.command == "put-wp-tree":
         return OnionPressCLI.cmd_put_wp_tree(args.src, args.dest, args.merge)

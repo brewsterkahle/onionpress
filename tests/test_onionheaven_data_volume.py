@@ -246,15 +246,16 @@ class TestPaths(unittest.TestCase):
                             self.assertNotIn(HUB_DIR, f.read())
 
     def test_backup_and_restore_use_the_onionheaven_container(self):
+        from onionpress import backup as backup_module
+        self.assertEqual(backup_module.ONIONHEAVEN_DATA_DIR, HUB_DIR)
         backup = _read("src/onionpress/backup.py")
-        self.assertIn("'onionheaven:/var/lib/onionheaven/.'", backup)
-        self.assertIn("'onionheaven:/var/lib/onionheaven/'", backup)
+        self.assertIn("['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]", backup)
+        self.assertIn("f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'", backup)
         self.assertNotRegex(backup, r"www-data[^\n]*onionheaven")
         for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
             with self.subTest(launcher=launcher):
-                text = _read(launcher)
-                self.assertIn(f"onionheaven:{HUB_DIR}/registry.db", text)
-                self.assertIn(f'onionheaven:{HUB_DIR}/keys/', text)
+                self.assertIn('restore-hub-data --src "$staging/onionheaven"', _read(launcher))
+        self.assertIn('stage-hub-data --dest "$staging/onionheaven"', _read("linux/onionpress"))
 
 
 # ---------------------------------------------------------------------------

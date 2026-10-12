@@ -2134,21 +2134,22 @@ create_backup() {
         cp "$DATA_DIR/config" "$staging/config"
     fi
 
-    # 5. OnionHeaven registry + keys (if this instance is an OnionHeaven hub)
-    if docker inspect onionheaven >/dev/null 2>&1; then
-        log "Backup: saving OnionHeaven registry and keys..."
-        mkdir -p "$staging/onionheaven"
-        docker cp onionheaven:/var/lib/onionheaven/registry.db "$staging/onionheaven/registry.db" 2>>"$LOG_FILE" || true
-        docker cp onionheaven:/var/lib/onionheaven/keys/. "$staging/onionheaven/keys" 2>>"$LOG_FILE" || true
-        if [ -s "$staging/onionheaven/registry.db" ]; then
-            local oh_count
-            oh_count=$(docker exec onionheaven sqlite3 /var/lib/onionheaven/registry.db "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NULL" 2>/dev/null || echo "?")
-            log "Backup: OnionHeaven registry saved ($oh_count active registrations)"
-        else
-            rm -rf "$staging/onionheaven"
-            log "Backup: OnionHeaven container exists but no registry data"
-        fi
-    fi
+    # 5. OnionHeaven registry + keys, if this instance is an OnionHeaven hub
+    #    (its volume holds registrants' keys or a registry with a row): a
+    #    consistent copy of the registry and keys/, as plain files, nothing
+    #    else from there (backup.stage_hub_data, shared with the Mac). It
+    #    used to take every node with an onionheaven container, and copied
+    #    registry.db without its write-ahead log.
+    local hub_rc=0
+    op_py stage-hub-data --dest "$staging/onionheaven" >>"$LOG_FILE" 2>&1 || hub_rc=$?
+    case "$hub_rc" in
+        0) ;;
+        3) ;;   # not a hub
+        4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
+        *) log "ERROR: could not copy the OnionHeaven data out of the onionheaven container"
+           return 1 ;;
+    esac
+    [ "$hub_rc" -eq 0 ] || rm -rf "$staging/onionheaven"
 
     # 6. Write metadata (onion_addr was read and checked at the top)
     local has_onionheaven="false"
@@ -2330,16 +2331,18 @@ restore_backup() {
         --address "$onion_address" 2>>"$LOG_FILE" \
         || log "WARNING: could not restore settings from the backup"
 
-    # 5. Restore OnionHeaven registry + keys (if present in backup)
-    if [ -d "$staging/onionheaven" ] && [ -s "$staging/onionheaven/registry.db" ]; then
+    # 5. Restore OnionHeaven registry + keys (if present in backup), through
+    #    the onionheaven container: the registry by SQLite's .restore, never
+    #    a copy over the one in use, whose -wal SQLite would apply to it
+    #    (backup.restore_hub_data, shared with the Mac).
+    if [ -d "$staging/onionheaven" ] && { [ -s "$staging/onionheaven/registry.db" ] || [ -d "$staging/onionheaven/keys" ]; }; then
         if docker inspect onionheaven >/dev/null 2>&1; then
             log "Restore: restoring OnionHeaven registry and keys..."
-            docker cp "$staging/onionheaven/registry.db" onionheaven:/var/lib/onionheaven/registry.db 2>>"$LOG_FILE"
-            if [ -d "$staging/onionheaven/keys" ]; then
-                docker exec onionheaven mkdir -p /var/lib/onionheaven/keys 2>>"$LOG_FILE"
-                docker cp "$staging/onionheaven/keys/." onionheaven:/var/lib/onionheaven/keys/ 2>>"$LOG_FILE"
+            if op_py restore-hub-data --src "$staging/onionheaven" >>"$LOG_FILE" 2>&1; then
+                log "Restore: OnionHeaven data restored"
+            else
+                log "WARNING: could not restore the OnionHeaven data (see above)"
             fi
-            log "Restore: OnionHeaven data restored"
         else
             log "WARNING: Backup contains OnionHeaven data but onionheaven container is not running — skipping"
             echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2

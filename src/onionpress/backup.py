@@ -41,6 +41,42 @@ def _default_data_dir() -> str:
 ONIONHOME_REGISTRY_DIR = "/var/lib/onionnames"
 ONIONHOME_REGISTRY_FILES = ("onionnames.db", "onionnames.db-wal")
 
+# The OnionHeaven hub's data: its own volume, reached through the
+# onionheaven container (onionheaven_common.ONIONHEAVEN_DATA_DIR in the tor
+# image). A backup keeps the registry and the registrants' keys in
+# onionheaven/, and nothing else from there: not the logs, nor the copies
+# the move to the volume keeps aside (keys of addresses since unregistered).
+ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
+
+# Prints "hub" if the volume holds hub data (a key directory, or a row in
+# the registry), else "none". Never makes a registry.db (sqlite3 would).
+HUB_DATA_STATE_SH = f"""cd {ONIONHEAVEN_DATA_DIR} || exit 1
+if [ -n "$(ls -A keys 2>/dev/null)" ]; then echo hub; exit 0; fi
+if [ -s registry.db ] && [ -n "$(sqlite3 registry.db 'SELECT 1 FROM registry LIMIT 1' 2>/dev/null)" ]; then
+    echo hub; exit 0
+fi
+echo none
+"""
+
+# A tar of the registry, as sqlite3's .backup copies it (one consistent
+# state while the hub writes; a copy of the file could miss its -wal or catch
+# a checkpoint half done), and of keys/.
+HUB_DATA_TAR_SH = f"""set -e
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+cd {ONIONHEAVEN_DATA_DIR}
+set --
+if [ -s registry.db ]; then
+    sqlite3 registry.db ".backup '$d/registry.db'"
+    set -- -C "$d" registry.db
+fi
+if [ -d keys ]; then
+    set -- "$@" -C {ONIONHEAVEN_DATA_DIR} keys
+fi
+[ "$#" -gt 0 ]
+tar -cf - "$@"
+"""
+
 
 # ─── Instrumentation helpers (issue #214) ───────────────────────────────
 # Phase 1: log workload inputs and per-phase wall times so we can later
@@ -542,6 +578,74 @@ def _stage_container_tar(argv, dest, log_func, where):
         raise Exception(f"{where} tar failed: docker={rc}")
 
 
+def hub_data_state():
+    """"hub" if the OnionHeaven volume holds a hub's data (registrants'
+    keys, or a registry with a row), "none" if not, None if the onionheaven
+    container did not answer."""
+    try:
+        r = subprocess.run(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_STATE_SH],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    state = r.stdout.strip() if r.returncode == 0 else ""
+    return state if state in ("hub", "none") else None
+
+
+def stage_hub_data(dest, log_func):
+    """Copy the hub's registry (a consistent copy, HUB_DATA_TAR_SH) and
+    keys/ out of the onionheaven container into *dest*, as plain files and
+    folders (unpack_plain_tar), then scrub_staged_tree. The Linux
+    launcher's create_backup runs this through `onionpress.cli
+    stage-hub-data`."""
+    os.makedirs(dest, exist_ok=True)
+    _stage_container_tar(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
+                         dest, log_func, 'onionheaven')
+    scrub_staged_tree(dest, log_func, 'onionheaven')
+    keys = os.path.join(dest, 'keys')
+    count = len(os.listdir(keys)) if os.path.isdir(keys) else 0
+    log_func(f"Backup: OnionHeaven registry and {count} registrants' key directories copied")
+
+
+_CONTAINER_TMP_RE = re.compile(r"/tmp/tmp\.[A-Za-z0-9]+")
+
+
+def restore_hub_data(src, log_func):
+    """Put a backup's OnionHeaven registry and keys (*src*, its
+    onionheaven/ folder) onto the hub data volume, through the onionheaven
+    container.
+
+    The registry goes in through SQLite (.restore, under its locks): a copy
+    over the file in use would leave that one's -wal beside it, and SQLite
+    would apply it to the restored database. Keys go in as root's. Nothing
+    else from the archive goes there (an older backup's master-key files,
+    logs, the move's kept copies).
+    """
+    keys = os.path.join(src, 'keys')
+    if os.path.isdir(keys) and not os.path.islink(keys):
+        subprocess.run(['docker', 'exec', 'onionheaven', 'mkdir', '-p',
+                        f'{ONIONHEAVEN_DATA_DIR}/keys'],
+                       capture_output=True, timeout=30, check=True)
+        subprocess.run(['docker', 'cp', keys + '/.', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'],
+                       capture_output=True, timeout=120, check=True)
+    db = os.path.join(src, 'registry.db')
+    if os.path.isfile(db) and not os.path.islink(db):
+        tmp = subprocess.run(['docker', 'exec', 'onionheaven', 'mktemp'],
+                             capture_output=True, text=True, timeout=30,
+                             check=True).stdout.strip()
+        if not _CONTAINER_TMP_RE.fullmatch(tmp):
+            raise Exception(f"unexpected temporary file name from the container: {tmp!r}")
+        try:
+            subprocess.run(['docker', 'cp', db, f'onionheaven:{tmp}'],
+                           capture_output=True, timeout=120, check=True)
+            subprocess.run(['docker', 'exec', 'onionheaven', 'sqlite3',
+                            f'{ONIONHEAVEN_DATA_DIR}/registry.db', f".restore '{tmp}'"],
+                           capture_output=True, timeout=120, check=True)
+        finally:
+            subprocess.run(['docker', 'exec', 'onionheaven', 'rm', '-f', tmp],
+                           capture_output=True, timeout=30)
+    log_func("Restore: OnionHeaven registry and keys restored")
+
+
 def create_backup(onion_address, username, password, output_path, version, log_func, *, data_dir=None):
     """Create a full OnionPress backup zip.
 
@@ -654,33 +758,22 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                 os.path.join(wpcontent_dir, 'uploads'), log_func)
             derivatives.write_archive_marker(wpcontent_dir)
 
-        # 4. Backup OnionHeaven data if this is OnionHeaven instance
-        #    (encrypted keys, master-key.json, registry — NOT the ephemeral unlock file)
-        #    It lives on its own volume, in the onionheaven container and not
-        #    in onionpress-wordpress (docs/DOCKER-SOCKET.md).
+        # 4. Backup OnionHeaven data if this is an OnionHeaven hub: the
+        #    registry and the registrants' keys, when the volume holds any
+        #    (hub_data_state). It lives on its own volume, in the onionheaven
+        #    container and not in onionpress-wordpress (docs/DOCKER-SOCKET.md).
+        #    This used to wait for a master-key.json that nothing has written
+        #    for a long time, so no backup made here held a hub's data.
         is_onionheaven = False
-        onionheaven_check = subprocess.run(
-            ['docker', 'exec', 'onionheaven',
-             'test', '-f', '/var/lib/onionheaven/master-key.json'],
-            capture_output=True, timeout=10
-        )
-        if onionheaven_check.returncode == 0:
+        hub = hub_data_state()
+        if hub is None:
+            log_func("Backup: WARNING: the onionheaven container did not say whether "
+                     "it holds OnionHeaven data; this backup does not")
+        elif hub == "hub":
             with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
-                log_func("Backup: copying OnionHeaven data (encrypted keys, registry)...")
+                log_func("Backup: copying the OnionHeaven registry and registrants' keys...")
                 is_onionheaven = True
-                onionheaven_dir = os.path.join(staging, 'onionheaven')
-                subprocess.run(
-                    ['docker', 'cp',
-                     'onionheaven:/var/lib/onionheaven/.',
-                     onionheaven_dir],
-                    capture_output=True, timeout=60, check=True
-                )
-                # docker cp copies a link as a link.
-                scrub_staged_tree(onionheaven_dir, log_func, 'onionheaven')
-                # Remove the ephemeral unlock file if it was copied
-                unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
-                if os.path.exists(unlocked_file):
-                    os.unlink(unlocked_file)
+                stage_hub_data(os.path.join(staging, 'onionheaven'), log_func)
 
         # 4b. Backup OnionHome name registry if this is an OnionHome instance.
         #     The DB is tiny (KB) but losing it strands every inbound
@@ -1818,25 +1911,17 @@ def restore_container_artifacts(staging, metadata, log_func):
                  "They live in ~/OnionPress/Creations/ — if restoring "
                  "on a new machine, copy that folder across separately.")
 
-    # 4. Restore OnionHeaven data if present in backup
+    # 4. Restore OnionHeaven data if present in backup: its registry and
+    #    registrants' keys onto the OnionHeaven data volume, through the
+    #    onionheaven container (restore_hub_data): never into
+    #    onionpress-wordpress, root-owned, the registry through SQLite.
     onionheaven_dir = _find_dir(staging, 'onionheaven')
-    if os.path.isdir(onionheaven_dir) and os.path.exists(os.path.join(onionheaven_dir, 'master-key.json')):
+    if os.path.isdir(onionheaven_dir) and (
+            os.path.isfile(os.path.join(onionheaven_dir, 'registry.db'))
+            or os.path.isdir(os.path.join(onionheaven_dir, 'keys'))):
         with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
-            log_func("Restore: restoring OnionHeaven data (encrypted keys, registry)...")
-            # Remove ephemeral unlock file if it somehow exists in the backup
-            unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
-            if os.path.exists(unlocked_file):
-                os.unlink(unlocked_file)
-            # Onto the OnionHeaven data volume, through the onionheaven
-            # container: never into onionpress-wordpress, and root-owned (it
-            # holds registrants' onion service keys).
-            subprocess.run(
-                ['docker', 'cp',
-                 onionheaven_dir + '/.',
-                 'onionheaven:/var/lib/onionheaven/'],
-                capture_output=True, timeout=60, check=True
-            )
-            log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
+            log_func("Restore: restoring the OnionHeaven registry and registrants' keys...")
+            restore_hub_data(onionheaven_dir, log_func)
 
     # 4b. Restore OnionHome name registry if present in backup.
     #     Onto its own volume, through onionpress-tor (whose web-server.py

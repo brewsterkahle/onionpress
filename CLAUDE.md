@@ -361,6 +361,11 @@
   the volume (else the next start would shelve live data). Never after the
   marker: WordPress can write the old location.
   `tests/test_onionheaven_data_move_hardening.py`.
+- Backups hold hub data when the volume has a key dir or a registry row
+  (`backup.hub_data_state`, not the long-dead `master-key.json`): registry
+  via `sqlite3 .backup` + `keys/`, nothing else (`stage_hub_data`; Linux via
+  `onionpress.cli stage-hub-data`). Restores go through `restore_hub_data`
+  (SQLite `.restore`, never `docker cp` over the live db).
 - Compose and tor image ship together (see docs/DOCKER-SOCKET.md, "The
   OnionHeaven hub data"). **Never downgrade a hub across this release**;
   on the hub follow the procedure there (count, tar the old dir, stop

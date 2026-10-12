@@ -134,11 +134,22 @@ removes any it finds later (`cleanup_dead_workers`, whether the registry
 lists them or not) and reassigns their addresses to workers it starts with
 the new volume.
 
+**Backups.** A backup holds a hub's data when the volume has any (a key
+directory, or a row in the registry; `backup.hub_data_state`): the registry
+as `sqlite3 .backup` copies it, one consistent state while the hub writes,
+and `keys/`, read out of `onionheaven` as plain files, nothing else from the
+volume (`stage_hub_data`; Linux runs it as `onionpress.cli stage-hub-data`).
+A restore puts the registry back through SQLite's `.restore`, never as a
+copy over the database in use, whose `-wal` SQLite would apply to it, and
+the keys as root's (`restore_hub_data`, all three restore paths). Until this
+release Mac backups held no hub data at all (they waited for a
+`master-key.json` nothing writes any more).
+
 **Release rule:** compose plus tor-image code again. Publish the tor image,
 refresh the pins, then release the app and the `.deb`. A new compose file with
 an old image moves nothing (the old image keeps using the old location), but
-the hub's status counts and the Linux backup's hub data come up empty until
-the image arrives. An old compose file with a new image must never ship: the
+the hub's status counts and the backups' hub data come up empty until the
+image arrives. An old compose file with a new image must never ship: the
 data stays put, but the hub would run on an empty registry in the container's
 writable layer.
 
