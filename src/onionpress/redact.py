@@ -25,6 +25,9 @@ What gets scrubbed
 * HTTP request headers that commonly carry credentials
   (``Cookie``, ``Set-Cookie``, ``Authorization``, ``X-Auth-Token``,
   ``X-Api-Key``).  Replaced with ``<header>: <redacted>``.
+* The Cloudflare Tunnel token in the settings-change lines older
+  versions logged.  The key name is kept; the value becomes
+  ``<redacted>``.
 * IPv4 and IPv6 addresses.  Replaced with a deterministic
   IPv6-in-``fd00::/8`` (RFC 4193 ULA) pseudonym computed from a
   32-byte random salt that rotates daily.  Within a day the same
@@ -66,6 +69,17 @@ _HEADER_RE = re.compile(
     r"\b(Cookie|Set-Cookie|Authorization|Proxy-Authorization|"
     r"X-Auth-Token|X-Api-Key):\s*[^\r\n]*",
     re.IGNORECASE,
+)
+
+# The Cloudflare Tunnel token as older versions logged it on a settings
+# change: "CLOUDFLARE_TUNNEL_TOKEN: 'old' → 'new'" (the settings-page poll)
+# and "CLOUDFLARE_TUNNEL_TOKEN=<token>" (the Mac Settings dialog). Those
+# lines stay in logs that are uploaded later; current versions log only
+# set/replaced/removed (config.describe_change), which is left alone.
+_SECRET_CONFIG_RE = re.compile(
+    r"\b((?:CLOUDFLARE_)?TUNNEL_TOKEN)(\s*[:=]\s*)"
+    r"('[^'\r\n]*'(?:\s*→\s*'[^'\r\n]*')?"
+    r"|(?!(?:set|replaced|removed)\b|<)[^\s,'\"]+)"
 )
 
 # IPv4: four dotted octets, bounded so software version strings like
@@ -194,6 +208,7 @@ def redact_text(text, salt, scrub_ips=True):
     """
     text = _PARAM_RE.sub(r"\1\2=<redacted>", text)
     text = _HEADER_RE.sub(lambda m: f"{m.group(1)}: <redacted>", text)
+    text = _SECRET_CONFIG_RE.sub(r"\1\2<redacted>", text)
     if scrub_ips:
         text = _IPV4_RE.sub(lambda m: _replace_ip(m, salt), text)
         text = _IPV6_RE.sub(lambda m: _replace_ip(m, salt), text)

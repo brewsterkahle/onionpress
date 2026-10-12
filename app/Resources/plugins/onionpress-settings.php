@@ -632,10 +632,27 @@ add_action( 'admin_init', function () {
         return;
     }
 
+    // The host applies only the keys this page may change, with valid values
+    // (SETTINGS_PAGE_KEYS in src/onionpress/config.py) and drops the rest; the
+    // checks here mirror it so a bad value gets a notice instead of vanishing.
     $updates = array();
     $fields  = onionpress_settings_fields();
 
+    $old_values  = array();
+    $config_file = '/var/lib/onionpress/config-current.json';
+    if ( file_exists( $config_file ) ) {
+        $decoded = json_decode( file_get_contents( $config_file ), true );
+        if ( is_array( $decoded ) ) {
+            $old_values = $decoded;
+        }
+    }
+
     foreach ( $fields as $key => $field ) {
+        // Read-only fields are shown, never sent: the host does not take them
+        // from this page. The token field is handled below.
+        if ( ! empty( $field['readonly'] ) || $field['type'] === 'secret' ) {
+            continue;
+        }
         if ( ! isset( $_POST[ 'op_' . $key ] ) ) {
             continue;
         }
@@ -646,48 +663,41 @@ add_action( 'admin_init', function () {
             continue;
         }
 
-        $updates[ $key ] = $val;
-    }
+        // Write under the config key the host reads (LAUNCH_ON_LOGIN on macOS)
+        $config_key = ! empty( $field['config_key'] ) ? $field['config_key'] : $key;
 
-    // Validate OnionHeaven address if changed
-    if ( ! empty( $updates['ONIONHEAVEN_ADDRESS'] ) ) {
-        $oh_addr = $updates['ONIONHEAVEN_ADDRESS'];
-        // Find the onionpress script
-        $script = '/opt/onionpress/onionpress';
-        if ( ! is_executable( $script ) ) {
-            // macOS: not available from inside container, use docker exec from WordPress
-            // Fall back to basic format validation only
-            if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/', $oh_addr ) ) {
-                add_action( 'admin_notices', function () {
-                    echo '<div class="notice notice-error"><p>Invalid OnionHeaven address format. Must be a 56-character .onion address.</p></div>';
-                } );
-                unset( $updates['ONIONHEAVEN_ADDRESS'] );
+        // Whole numbers within the field's range. Blank or untouched leaves
+        // the value as it is, even one set out of range elsewhere.
+        if ( isset( $field['min'] ) ) {
+            if ( $val === '' || $val === (string) ( $old_values[ $config_key ] ?? '' ) ) {
+                continue;
             }
-        } else {
-            $output = shell_exec( escapeshellcmd( $script ) . ' validate-oh-address ' . escapeshellarg( $oh_addr ) . ' 2>/dev/null' );
-            $vr = json_decode( trim( $output ), true );
-            if ( is_array( $vr ) ) {
-                $status = $vr['status'] ?? '';
-                $message = $vr['message'] ?? 'Validation failed.';
-                if ( $status === 'invalid_format' || $status === 'self' ) {
-                    $msg = $message;
-                    add_action( 'admin_notices', function () use ( $msg ) {
-                        echo '<div class="notice notice-error"><p>' . esc_html( $msg ) . '</p></div>';
-                    } );
-                    unset( $updates['ONIONHEAVEN_ADDRESS'] );
-                } elseif ( $status === 'site' ) {
-                    $msg = $message;
-                    add_action( 'admin_notices', function () use ( $msg ) {
-                        echo '<div class="notice notice-warning"><p>' . esc_html( $msg ) . ' Address saved anyway.</p></div>';
-                    } );
-                } elseif ( $status === 'unreachable' ) {
-                    $msg = $message;
-                    add_action( 'admin_notices', function () use ( $msg ) {
-                        echo '<div class="notice notice-warning"><p>' . esc_html( $msg ) . ' Address saved anyway.</p></div>';
-                    } );
-                }
+            if ( ! preg_match( '/^[0-9]{1,6}$/', $val ) || (int) $val < $field['min'] || (int) $val > $field['max'] ) {
+                $msg = sprintf( '%s must be a whole number from %d to %d. It was not changed.', $field['label'], $field['min'], $field['max'] );
+                add_action( 'admin_notices', function () use ( $msg ) {
+                    echo '<div class="notice notice-error"><p>' . esc_html( $msg ) . '</p></div>';
+                } );
+                continue;
             }
         }
+
+        $updates[ $config_key ] = $val;
+    }
+
+    // Cloudflare Tunnel token: write-only. The token never reaches WordPress,
+    // so the field is always empty and blank means "keep the current token";
+    // removing it takes the explicit checkbox.
+    $cf_token = isset( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN'] ) ? trim( wp_unslash( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN'] ) ) : '';
+    if ( $cf_token !== '' ) {
+        if ( preg_match( '#^[A-Za-z0-9+/_-]{32,2048}={0,2}$#', $cf_token ) ) {
+            $updates['CLOUDFLARE_TUNNEL_TOKEN'] = $cf_token;
+        } else {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-error"><p>That does not look like a Cloudflare Tunnel token. Paste only the token itself: the long string at the end of the <code>cloudflared</code> command Cloudflare shows. The saved token was not changed.</p></div>';
+            } );
+        }
+    } elseif ( ! empty( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN_remove'] ) ) {
+        $updates['CLOUDFLARE_TUNNEL_TOKEN'] = '';
     }
 
     // Handle Archive.org credentials — convert account/password to S3 keys via xauthn API
@@ -715,21 +725,13 @@ add_action( 'admin_init', function () {
         }
     }
 
-    // Check if a restart is actually needed (must read old values before writing updates).
-    // Only Linux shows the restart prompt. CLOUDFLARE_TUNNEL_TOKEN (a secret) and
-    // TOR_IMPL are not in config-current.json, so they could never compare equal
-    // and would ask for a restart on every save; neither takes effect on Linux.
+    // Check if a restart is actually needed ($old_values was read before writing updates).
+    // Only Linux shows the restart prompt. CLOUDFLARE_TUNNEL_TOKEN (a secret) is
+    // not in config-current.json, so it could never compare equal, and it does
+    // not take effect on Linux.
     $needs_restart = false;
     $restart_keys = array( 'ADDRESS_PREFIX', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS' );
     if ( ! empty( $updates ) ) {
-        $old_values = array();
-        $config_file = '/var/lib/onionpress/config-current.json';
-        if ( file_exists( $config_file ) ) {
-            $decoded = json_decode( file_get_contents( $config_file ), true );
-            if ( is_array( $decoded ) ) {
-                $old_values = $decoded;
-            }
-        }
         $onion_address = '';
         $sf = '/var/lib/onionpress/status.json';
         if ( file_exists( $sf ) ) {
@@ -761,8 +763,10 @@ add_action( 'admin_init', function () {
             return;
         }
 
-        // Update config-current.json so the form reflects the saved values immediately
+        // Update config-current.json so the form reflects the saved values
+        // immediately — never with the token, which that file must not hold
         $current = array_merge( $old_values, $updates );
+        unset( $current['CLOUDFLARE_TUNNEL_TOKEN'] );
         @file_put_contents( $config_file, json_encode( $current, JSON_PRETTY_PRINT ) );
     }
 
@@ -981,18 +985,14 @@ function onionpress_settings_fields() {
             'type'        => 'text',
             'placeholder' => '1',
             'platform'    => 'macos',
-        ),
-        'TOR_IMPL' => array(
-            'label'       => 'Tor Implementation (advanced)',
-            'description' => 'Choose between Arti (default, Rust) or C Tor. C Tor has faster onion service releases. Requires restart.',
-            'type'        => 'select',
-            'options'     => array( 'arti' => 'Arti (default)', 'tor' => 'C Tor' ),
+            'min'         => 1,
+            'max'         => 64,
         ),
         'CLOUDFLARE_TUNNEL_TOKEN' => array(
             'label'       => 'Cloudflare Tunnel Token',
-            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared on your Mac — OnionPress runs it automatically inside Docker.',
-            'type'        => 'text',
-            'placeholder' => '',
+            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared on your Mac — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
+            'type'        => 'secret',
+            'placeholder' => 'Paste a new token, or leave blank',
         ),
         'REGISTER_WITH_ONIONHEAVEN' => array(
             'label'       => 'Keep site reachable via OnionHeaven (recommended)',
@@ -1008,8 +1008,9 @@ function onionpress_settings_fields() {
         ),
         'ONIONHEAVEN_ADDRESS' => array(
             'label'       => 'OnionHeaven Hub Address (advanced)',
-            'description' => 'The .onion address of the OnionHeaven hub to register with for Wayback Machine fallback.',
+            'description' => 'The .onion address of the OnionHeaven hub to register with for Wayback Machine fallback. Your onion service key is sent to this hub, so it cannot be changed from WordPress: on a Mac use Settings in the OnionPress menu, on Linux edit ~/.onionpress/config, then restart OnionPress.',
             'type'        => 'text',
+            'readonly'    => true,
             'placeholder' => 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion',
         ),
         'ONIONHEAVEN_MAX_SERVICES' => array(
@@ -1018,6 +1019,8 @@ function onionpress_settings_fields() {
             'type'        => 'text',
             'placeholder' => '50',
             'show_when'   => 'onionheaven_server',
+            'min'         => 1,
+            'max'         => 500,
         ),
         'ONIONHEAVEN_PROPAGATION_DELAY' => array(
             'label'       => 'Takeover Delay (seconds)',
@@ -1025,6 +1028,8 @@ function onionpress_settings_fields() {
             'type'        => 'text',
             'placeholder' => '180',
             'show_when'   => 'onionheaven_server',
+            'min'         => 60,
+            'max'         => 3600,
         ),
         'ONIONHEAVEN_HUB_THRESHOLD' => array(
             'label'       => 'Hub Auto-Promote Threshold',
@@ -1032,6 +1037,8 @@ function onionpress_settings_fields() {
             'type'        => 'text',
             'placeholder' => '5',
             'show_when'   => 'onionheaven_server',
+            'min'         => 1,
+            'max'         => 1000,
         ),
     );
 }
@@ -1345,6 +1352,19 @@ function onionpress_settings_page() {
                                 </option>
                                 <?php endforeach; ?>
                             </select>
+                        <?php elseif ( $field['type'] === 'secret' ) : ?>
+                            <?php // Write-only: the saved value is never sent to the browser. new-password keeps browsers from filling in a saved login. ?>
+                            <span class="op-password-wrap">
+                                <input type="password" name="op_<?php echo esc_attr( $key ); ?>" id="op_<?php echo esc_attr( $key ); ?>"
+                                       value="" autocomplete="new-password" spellcheck="false"
+                                       placeholder="<?php echo esc_attr( $field['placeholder'] ?? '' ); ?>"
+                                       class="regular-text">
+                                <button type="button" class="op-eye-toggle" aria-label="Show password">&#128065;</button>
+                            </span>
+                            <label style="display: block; margin-top: 6px;">
+                                <input type="checkbox" name="op_<?php echo esc_attr( $key ); ?>_remove" value="1">
+                                Remove the saved token (turns Cloudflare Tunnel off when OnionPress restarts)
+                            </label>
                         <?php else : ?>
                             <input type="text" name="op_<?php echo esc_attr( $key ); ?>" id="op_<?php echo esc_attr( $key ); ?>"
                                    value="<?php echo esc_attr( $val ); ?>"

@@ -68,6 +68,124 @@ def redact_config(config: dict) -> dict:
     return {k: v for k, v in config.items() if k in SAFE_CONFIG_KEYS}
 
 
+# -- Settings page updates --
+#
+# The WordPress Settings page (onionpress-settings.php) asks for config
+# changes by writing config-updates.json into the onionpress-data volume —
+# which anything running inside WordPress can write too, so the host treats
+# that file as untrusted input. Only the keys below are accepted, each value
+# must pass its check, and everything else is dropped and logged by name.
+#
+# Never add: the image overrides (ONIONPRESS_*_IMAGE run with Docker access
+# and the onion key), ONIONHEAVEN_ADDRESS (the hub the heartbeat sends the
+# onion private key to), ONIONHEAVEN_ACCEPT_REGISTRATIONS, ADDRESS_PREFIX
+# (read-only on the page), ports, paths, or secrets other than the tunnel
+# token. The page shows ADDRESS_PREFIX and ONIONHEAVEN_ADDRESS read-only.
+
+def _one_of(*allowed):
+    return lambda v: v in allowed
+
+
+def _int_between(low, high):
+    return lambda v: bool(re.fullmatch(r"[0-9]{1,6}", v)) and low <= int(v) <= high
+
+
+# A Cloudflare Tunnel token is base64 (of a small JSON object). The page
+# checks the same pattern before it asks for a change.
+CLOUDFLARE_TOKEN_PATTERN = r"[A-Za-z0-9+/_-]{32,2048}={0,2}"
+
+SETTINGS_PAGE_KEYS = {
+    "UPDATE_ON_LAUNCH": _one_of("yes", "no"),
+    "LAUNCH_ON_LOGIN": _one_of("yes", "no"),      # macOS
+    "START_ON_BOOT": _one_of("yes", "no"),        # Linux
+    "PREVENT_SLEEP": _one_of("normal", "on-battery", "never"),
+    "VM_MEMORY": _int_between(1, 64),
+    "REGISTER_WITH_ONIONHEAVEN": _one_of("", "yes", "no"),
+    "SHARE_ANALYTICS_WITH_ONIONHOME": _one_of("yes", "no"),
+    # Write-only on the page; "" is its explicit "remove token".
+    "CLOUDFLARE_TUNNEL_TOKEN":
+        lambda v: v == "" or bool(re.fullmatch(CLOUDFLARE_TOKEN_PATTERN, v)),
+    # Takeover tunables, shown only on an active OnionHeaven hub.
+    "ONIONHEAVEN_MAX_SERVICES": _int_between(1, 500),
+    "ONIONHEAVEN_PROPAGATION_DELAY": _int_between(60, 3600),
+    "ONIONHEAVEN_HUB_THRESHOLD": _int_between(1, 1000),
+}
+
+# Keys whose values never appear in a log.
+SECRET_CONFIG_KEYS = frozenset({"CLOUDFLARE_TUNNEL_TOKEN"})
+
+# Rejected key names are logged, and they come from WordPress: cap how many.
+_MAX_REJECTED_NAMES = 20
+
+
+def loggable_value(key: str, value: str) -> str:
+    """*value* as it may appear in a log: a secret becomes <set> or <empty>."""
+    if key in SECRET_CONFIG_KEYS:
+        return "<set>" if value else "<empty>"
+    return value
+
+
+def describe_change(key: str, old: str, new: str) -> str:
+    """One log line for a config change, without secret values."""
+    if key in SECRET_CONFIG_KEYS:
+        if not new:
+            return f"{key}: removed"
+        return f"{key}: {'replaced' if old else 'set'}"
+    return f"{key}: {old!r} → {new!r}"
+
+
+def _loggable_key(key) -> str:
+    """A WordPress-supplied key name, safe to put in a log line."""
+    if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", key):
+        return key
+    return re.sub(r"[^A-Za-z0-9_.-]", "?", str(key)[:64]) or "?"
+
+
+@dataclass
+class SettingsUpdate:
+    """What apply_settings_updates did with a config-updates.json payload."""
+    accepted: dict  # every allowed key/value, changed or not
+    changes: list   # (key, old, new) for each value it wrote
+    rejected: list  # log-safe names of the keys it dropped (capped)
+
+
+def filter_settings_updates(updates) -> tuple[dict, list]:
+    """Split a Settings page payload into (accepted, rejected key names).
+
+    A key is accepted only if it is in SETTINGS_PAGE_KEYS and its value is
+    a string with no control characters (a newline would add a config line)
+    that passes the key's check.
+    """
+    if not isinstance(updates, dict):
+        return {}, ["<payload is not an object>"]
+    accepted, rejected = {}, []
+    for key, value in updates.items():
+        check = SETTINGS_PAGE_KEYS.get(key)
+        if (check is None or not isinstance(value, str)
+                or re.search(r"[\x00-\x1f\x7f\x85\u2028\u2029]", value)
+                or not check(value)):
+            rejected.append(_loggable_key(key))
+            continue
+        accepted[key] = value
+    if len(rejected) > _MAX_REJECTED_NAMES:
+        extra = len(rejected) - _MAX_REJECTED_NAMES
+        rejected = rejected[:_MAX_REJECTED_NAMES] + [f"(+{extra} more)"]
+    return accepted, rejected
+
+
+def apply_settings_updates(path: str, updates) -> SettingsUpdate:
+    """Write the acceptable part of a Settings page payload to the config."""
+    accepted, rejected = filter_settings_updates(updates)
+    current = read_config(path)
+    result = SettingsUpdate(accepted=accepted, changes=[], rejected=rejected)
+    for key, value in accepted.items():
+        old = current.get(key, "")
+        if old != value:
+            write_value(path, key, value)
+            result.changes.append((key, old, value))
+    return result
+
+
 def read_config(path: str) -> dict:
     """Read all key=value pairs from a config file.
 

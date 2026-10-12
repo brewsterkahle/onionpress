@@ -594,7 +594,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     if sync_to_volume:
         sync_to_volume()
 
-    change_details = [f"{k}={new_values[k]}" for k in changes]
+    change_details = [f"{k}={op_config.loggable_value(k, new_values[k])}" for k in changes]
     log_func(f"Settings updated: {', '.join(change_details)}")
     saved = AppKit.NSAlert.alloc().init()
     saved.setMessageText_("Settings Saved")

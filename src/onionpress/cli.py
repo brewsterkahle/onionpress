@@ -865,6 +865,11 @@ def main(argv: list[str] = None) -> int:
         "wordpress-status",
         help="Read status JSON on stdin and print the fields the WordPress "
              "container may see")
+    sub.add_parser(
+        "apply-settings-updates",
+        help="Merge the settings page's config-updates.json (on stdin) into "
+             "the config — allowlisted keys with valid values only; prints "
+             "'changed|unchanged|rejected KEY' lines, never values")
 
     # Backup helpers for the bash launchers. The password comes on stdin,
     # never in argv.
@@ -921,6 +926,25 @@ def main(argv: list[str] = None) -> int:
             print("ERROR: status is not a JSON object", file=sys.stderr)
             return 1
         print(json.dumps(redact.status_for_wordpress(status), indent=2))
+        return 0
+
+    if args.command == "apply-settings-updates":
+        # The payload was written inside WordPress, so it is untrusted
+        # (config.SETTINGS_PAGE_KEYS). Same fast path as safe-config: only
+        # the config file is touched.
+        from .config import apply_settings_updates
+        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+        try:
+            updates = json.loads(sys.stdin.read())
+        except ValueError:
+            print("ERROR: config-updates.json is not valid JSON", file=sys.stderr)
+            return 1
+        applied = apply_settings_updates(os.path.join(data_dir, "config"), updates)
+        changed = {key for key, _old, _new in applied.changes}
+        for key in applied.accepted:
+            print(f"{'changed' if key in changed else 'unchanged'} {key}")
+        for key in applied.rejected:
+            print(f"rejected {key}")
         return 0
 
     # Before OnionPressCLI: its Docker wrapper snapshots os.environ for every

@@ -2532,7 +2532,7 @@ write_recent_logs() {
 
 apply_config_updates() {
     # Check if settings page wrote config-updates.json
-    local updates
+    local updates result changed rejected
     updates=$(docker exec onionpress-wordpress cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
 
     if [ -z "$updates" ] || [ "$updates" = "{}" ]; then
@@ -2541,45 +2541,24 @@ apply_config_updates() {
 
     log "Applying config updates from settings page..."
 
-    # Parse and apply each setting
-    python3 -c "
-import json, sys
-
-updates = json.loads(sys.argv[1])
-config_path = sys.argv[2]
-
-# Read current config
-config = {}
-try:
-    with open(config_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            if '=' in line:
-                key, val = line.split('=', 1)
-                config[key] = val
-except FileNotFoundError:
-    pass
-
-# Apply updates
-config.update(updates)
-
-# Write back
-with open(config_path, 'w') as f:
-    for key, val in config.items():
-        f.write(f'{key}={val}\n')
-
-# Print keys that changed for the shell script
-for key in updates:
-    print(key)
-" "$updates" "$DATA_DIR/config" 2>>"$LOG_FILE"
+    # Anything running in WordPress can write that file, so the shared
+    # allowlist (config.SETTINGS_PAGE_KEYS, as on the Mac) applies only the
+    # settings page's own keys with valid values. It reports key names,
+    # never values.
+    if ! result=$(printf '%s' "$updates" | op_py --data-dir "$DATA_DIR" apply-settings-updates 2>>"$LOG_FILE"); then
+        log "WARNING: Could not apply config updates from settings page"
+        return 1
+    fi
+    changed=$(printf '%s\n' "$result" | sed -n 's/^changed //p' | tr '\n' ' ')
+    rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
+    [ -z "$changed" ] || log "Settings page changed: ${changed% }"
+    [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
 
     # Clear the updates file
     docker exec onionpress-wordpress sh -c 'rm -f /var/lib/onionpress/config-updates.json' 2>>"$LOG_FILE"
 
-    # Handle START_ON_BOOT changes
-    if echo "$updates" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); sys.exit(0 if 'START_ON_BOOT' in d else 1)" 2>/dev/null; then
+    # Handle START_ON_BOOT (re-applied whenever the page sends it)
+    if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
         local boot_val
         boot_val=$(grep "^START_ON_BOOT=" "$DATA_DIR/config" | cut -d= -f2)
         if [ "$boot_val" = "yes" ]; then

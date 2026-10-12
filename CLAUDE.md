@@ -171,6 +171,26 @@
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
 - Do not commit or log database passwords.
 
+## Settings Page Config Writes Are Allowlisted
+- The WordPress Settings page asks for config changes through
+  `config-updates.json` in the onionpress-data volume, which anything running
+  in WordPress can write. Both hosts apply it only through
+  `config.apply_settings_updates` (Mac `poll_config_updates`; Linux
+  `apply_config_updates` → `onionpress.cli apply-settings-updates`): keys in
+  `SETTINGS_PAGE_KEYS`, each value checked (yes/no enums, integer ranges,
+  the token's base64 charset, no control characters). Everything else is
+  dropped and logged by key name only.
+- Never add image overrides, `ONIONHEAVEN_ADDRESS` (the heartbeat sends the
+  onion key to it), `ONIONHEAVEN_ACCEPT_REGISTRATIONS`, `ADDRESS_PREFIX`,
+  ports, paths or secrets other than `CLOUDFLARE_TUNNEL_TOKEN`. The page
+  shows the prefix and hub address read-only; the hub address changes in the
+  Mac Settings dialog or `~/.onionpress/config`.
+- The token field is write-only: blank keeps the saved token, a checkbox
+  removes it. Log config changes through `describe_change` /
+  `loggable_value` so `SECRET_CONFIG_KEYS` values never reach a log.
+  `tests/test_settings_page_updates.py` locks the page's fields, choices,
+  ranges and token pattern to the allowlist.
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

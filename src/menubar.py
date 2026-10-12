@@ -5252,7 +5252,13 @@ License: AGPL v3"""
             pass  # Container may not be running
 
     def poll_config_updates(self):
-        """Check for config changes written by the WordPress settings page."""
+        """Check for config changes written by the WordPress settings page.
+
+        Anything running in WordPress can write that file, so only the
+        Settings page's own keys with valid values are applied
+        (op_config.SETTINGS_PAGE_KEYS); the rest is dropped and logged by
+        name. Secret values are never logged.
+        """
         try:
             result = self._docker.exec(
                 "onionpress-wordpress",
@@ -5264,16 +5270,17 @@ License: AGPL v3"""
                 return
 
             updates = json.loads(result.output)
-            if not updates or not isinstance(updates, dict):
+            if not updates:
                 return
 
-            self.log(f"Settings page: applying {len(updates)} config update(s)")
-
-            for key, val in updates.items():
-                old_val = self._read_config_value(key)
-                if old_val != val:
-                    self.write_config_value(key, val)
-                    self.log(f"  {key}: {old_val!r} → {val!r}")
+            applied = op_config.apply_settings_updates(self.config_file, updates)
+            if applied.rejected:
+                self.log("Settings page: ignored (not a setting it may change, "
+                         f"or an invalid value): {', '.join(applied.rejected)}")
+            if applied.changes:
+                self.log(f"Settings page: applying {len(applied.changes)} config update(s)")
+            for key, old_val, val in applied.changes:
+                self.log(f"  {op_config.describe_change(key, old_val, val)}")
 
             self._docker.exec(
                 "onionpress-wordpress",
@@ -5281,16 +5288,17 @@ License: AGPL v3"""
                 timeout=5,
             )
 
-            # Apply side effects for changed settings
-            if "PREVENT_SLEEP" in updates:
+            # Apply side effects for the accepted settings
+            accepted = applied.accepted
+            if "PREVENT_SLEEP" in accepted:
                 self.caffeine.stop()
                 self.caffeine.start()
-            if "LAUNCH_ON_LOGIN" in updates:
-                if updates["LAUNCH_ON_LOGIN"] == "yes":
+            if "LAUNCH_ON_LOGIN" in accepted:
+                if accepted["LAUNCH_ON_LOGIN"] == "yes":
                     self.add_login_item()
                 else:
                     self.remove_login_item()
-            if updates.get("SHARE_ANALYTICS_WITH_ONIONHOME") == "yes":
+            if accepted.get("SHARE_ANALYTICS_WITH_ONIONHOME") == "yes":
                 from onionpress.analytics_sharing import trigger_upload
                 trigger_upload()
 
