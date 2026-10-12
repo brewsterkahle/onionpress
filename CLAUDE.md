@@ -297,18 +297,43 @@
 
 ## Backup Encryption (backup format 2)
 - New backups are an ordinary, unencrypted `.zip` holding `README.txt` and
-  `onionpress-backup.enc`: scrypt (N=2^17, r=8, p=1) → SHAKE256 keystream +
-  HMAC-SHA256 per 1 MiB record, wrapped around the same zip of the same
-  members. Python standard library only — no new dependency in the py2app
-  bundle or on Linux. The layout is in `src/onionpress/backup_crypto.py`'s
-  docstring, pinned by a known-answer vector and an independent decoder in
-  `tests/test_backup_manager.py`; changing the bytes means a new format.
+  `onionpress-backup.enc`: the same zip of the same members, encrypted with
+  **libsodium through PyNaCl, using its constructions as they are** —
+  Argon2id (`crypto_pwhash`, INTERACTIVE preset: opslimit 2, 64 MiB) for the
+  key, `crypto_secretstream_xchacha20poly1305` in 1 MiB messages with the
+  header as additional data. **Maintainer rule: crypto comes from
+  established libraries, never constructions of our own** (an earlier,
+  never-shipped format 2 built scrypt + SHAKE256 + HMAC from the standard
+  library and was replaced). The layout is in
+  `src/onionpress/backup_crypto.py`'s docstring; `tests/fixtures/backup-format-2.zip`
+  (sha256-pinned, never regenerate) and an independent decoder in
+  `tests/test_backup_manager.py` hold it in place. Changing the bytes means
+  a new format.
+- KDF parameters are INTERACTIVE because every backup must restore on a
+  1-GB Raspberry Pi beside the running site; a reader refuses (as "newer")
+  headers asking for more than opslimit 4 / memlimit 128 MiB before running
+  Argon2id. A first message that fails to decrypt is reported as a wrong
+  password (damage to the header or first message reads the same).
+- **PyNaCl is a dependency everywhere**: `src/requirements.txt` and setup.py
+  (`nacl` package, `_cffi_backend` include) on Mac; `python3-nacl (>= 1.5.0)`
+  in the .deb and `linux/install.sh`; `pip install pynacl` in CI (plus a
+  pass against 1.5.0, the Debian/Ubuntu version). `backup_crypto` imports it
+  guarded: without it, format 2 raises `SodiumUnavailableError` naming
+  python3-nacl, and format-1 restores and everything else still work.
+  `tests/test_backup_manager.py` checks all of this wiring.
+- **PyPI's macOS PyNaCl wheels carry an unoptimised libsodium** (~7x slower:
+  450 ms vs 67 ms per key derivation). `build/py2app-extensions.sh prepare`
+  rebuilds PyNaCl from source with `-O2` and lipo-merges cffi's per-arch
+  `_cffi_backend` for universal2 builds; `verify` runs the bundle's
+  interpreter (also as x86_64 under Rosetta) and prints the speed. Both build
+  scripts call it. Run the unit tests in a venv with PyNaCl (`make test-unit`
+  does this via uv); without it ~60 backup tests error.
 - **Format 1 (ZipCrypto zips from `zip -P`, everything through 2.5.2) must
   restore forever.** `backup.extract_archive` picks the decoder by whether
   the zip holds `onionpress-backup.enc`. Never write `zip -P` again; the
   tests fail if a launcher does.
 - `metadata.json` carries `backup_format: 2` (absent = 1); a higher number,
-  or unknown version/kdf/suite bytes in the container header, is refused as
+  or unknown version/kdf/cipher/reserved bytes in the container header, is refused as
   "made by a newer version of OnionPress".
 - The bash launchers go through `onionpress.cli pack-backup` / `extract-backup`
   (password on stdin); Linux's inline create_backup no longer zips itself.

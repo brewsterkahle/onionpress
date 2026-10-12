@@ -21,5 +21,17 @@ jobs:
         with:
           python-version: "3.14"
 
+      # PyNaCl (libsodium) encrypts backups (backup format 2): the Mac bundle
+      # ships the latest release, the Linux package depends on python3-nacl.
+      - name: Install test dependencies
+        run: python -m pip install "pynacl>=1.5.0"
+
       - name: Run all tests
         run: python -m unittest discover tests -p "test_*.py" -v
+
+      # 1.5.0 is the python3-nacl of Debian 12/13 and Ubuntu 22.04/24.04,
+      # what Linux installs run: the backup tests again against it.
+      - name: Backup tests against PyNaCl 1.5.0
+        run: |
+          python -m pip install "pynacl==1.5.0"
+          python -m unittest tests.test_backup_manager tests.test_backup_metadata_validation

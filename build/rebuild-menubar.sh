@@ -29,6 +29,8 @@ fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install --upgrade pip -q
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app -q
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" -q
+# PyNaCl (backup encryption) from source, optimised; cffi made universal2.
+"$PROJECT_DIR/build/py2app-extensions.sh" prepare "$MENUBAR_BUILD_DIR/venv"
 
 echo "=== Copying the onionpress package to site-packages..."
 SITE_PACKAGES=$("$MENUBAR_BUILD_DIR/venv/bin/python3" -c "import site; print(site.getsitepackages()[0])")
@@ -48,6 +50,15 @@ if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
         --bdist-base "$MENUBAR_BUILD_DIR/build" \
         2>&1 | tail -5
 fi
+
+# Refuse to install a MenubarApp that cannot encrypt or restore backups.
+for built in "$MENUBAR_BUILD_DIR/dist/OnionPress.app" "$MENUBAR_BUILD_DIR/dist/menubar.app"; do
+    if [ -d "$built" ]; then
+        echo "=== Checking backup encryption (PyNaCl) in the build..."
+        "$PROJECT_DIR/build/py2app-extensions.sh" verify "$built"
+        break
+    fi
+done
 
 echo "=== Installing into $MENUBAR_APP_DIR..."
 rm -rf "$MENUBAR_APP_DIR"

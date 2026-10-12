@@ -1,2 +1,5 @@
 rumps>=0.4.0
 pyobjc-framework-Cocoa>=9.0
+# Backup encryption (backup format 2): libsodium via PyNaCl. 1.5.0 is what
+# Debian 12/13 and Ubuntu 22.04/24.04 ship as python3-nacl (the Linux floor).
+PyNaCl>=1.5.0

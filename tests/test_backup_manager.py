@@ -8,7 +8,6 @@ with `zip -P` below are format 1 on purpose.
 """
 
 import hashlib
-import hmac
 import io
 import json
 import os
@@ -54,15 +53,18 @@ def _fake_arti_pem():
     return key_manager.build_openssh_key(_FAKE_PRIV, _FAKE_PUB)
 
 
-def _cheap_scrypt(test):
-    """Write format-2 backups with scrypt N=2^10 for the rest of *test*.
+def _cheap_kdf(test):
+    """Write format-2 backups with libsodium's minimum Argon2id cost
+    (opslimit 1, memlimit 8 KiB) for the rest of *test*.
 
-    Readers take N from the header, so this only makes the tests fast; the
-    shipped parameters are pinned by TestEncryptedBackupDefaults.
+    Readers take the parameters from the header, so this only makes the
+    tests fast; the shipped parameters are pinned by
+    TestEncryptedBackupDefaults and TestFormat2Fixture.
     """
-    patcher = mock.patch.object(backup_crypto, "SCRYPT_LOG2_N", 10)
-    patcher.start()
-    test.addCleanup(patcher.stop)
+    for name, value in (("OPSLIMIT", 1), ("MEMLIMIT", 8192)):
+        patcher = mock.patch.object(backup_crypto, name, value)
+        patcher.start()
+        test.addCleanup(patcher.stop)
 
 
 def _inner_zip(test, zip_path, password):
@@ -348,7 +350,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         # touches the real ~/.onionpress/.
         self.data_dir = os.path.join(self.tmpdir, "onionpress-data")
         os.makedirs(self.data_dir)
-        _cheap_scrypt(self)
+        _cheap_kdf(self)
 
     def tearDown(self):
         os.environ["PATH"] = self.orig_path
@@ -432,7 +434,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.assertEqual(data["onionpress_version"], "2.2.84")
         self.assertIn("backup_date", data)
         self.assertEqual(data["backup_format"], backup_crypto.BACKUP_FORMAT)
-        # The metadata record and the archive's metadata.json are one file.
+        # The metadata message and the archive's metadata.json are one file.
         inner = _inner_zip(self, self.output_zip, "testpass")
         self.assertEqual(json.loads(inner.read("metadata.json")), data)
         # No KEY-MISMATCH warning when caller and key agree.
@@ -502,7 +504,7 @@ class TestCreateBackupZipStructure(unittest.TestCase):
         self.assertEqual(data["onion_address"], _FAKE_DERIVED_ADDR)
 
     def test_failed_zip_leaves_no_backup_behind(self):
-        """If `zip` fails partway, the archive's last record is never written
+        """If `zip` fails partway, the archive's final message is never written
         and no file appears at the output path — not even a partial one."""
         fake_zip = os.path.join(self.fake_bin, "zip")
         with open(fake_zip, "w") as f:
@@ -939,7 +941,7 @@ class TestRestoreRoundTripFormat2(TestRestoreRoundTrip):
 
     def setUp(self):
         super().setUp()
-        _cheap_scrypt(self)
+        _cheap_kdf(self)
 
     def _make_backup_zip(self, password="testpw", metadata_address=None):
         staging = self._make_staging(metadata_address)
@@ -956,8 +958,8 @@ class TestRestoreRoundTripFormat2(TestRestoreRoundTrip):
 
     def test_garbage_plaintext_on_wrong_password_raises_valueerror(self):
         """Format 1's one-byte password check has no format-2 counterpart:
-        a wrong password fails the 256-bit header tag in every entry point,
-        before anything is extracted."""
+        a wrong password fails the first message's Poly1305 tag in every
+        entry point, before anything is extracted."""
         zip_path = self._make_backup_zip(password="rightpw")
         staging = os.path.join(self.tmpdir, "restore-staging")
         os.makedirs(staging)
@@ -983,7 +985,7 @@ class TestRestoreRoundTripFormat2(TestRestoreRoundTrip):
         zip_path = self._make_backup_zip()
         with zipfile.ZipFile(zip_path) as zf:
             payload = bytearray(zf.read(backup_crypto.PAYLOAD_NAME))
-        payload[-50] ^= 0x01  # inside the last archive record's ciphertext
+        payload[-50] ^= 0x01  # inside the final archive message's ciphertext
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr(backup_crypto.README_NAME, "readme")
             zf.writestr(backup_crypto.PAYLOAD_NAME, bytes(payload))
@@ -1035,68 +1037,65 @@ class TestRestoreRoundTripFormat2(TestRestoreRoundTrip):
 
 def _spec_decode(payload, password):
     """Decode onionpress-backup.enc from the layout written down in
-    backup_crypto's docstring, sharing no code with the module — so the
-    description stays true and a backup stays readable from it alone."""
-    header, header_tag = payload[:56], payload[56:88]
+    backup_crypto's docstring, calling libsodium directly and sharing no
+    code with the module — so the description stays true and a backup stays
+    readable from it alone."""
+    from nacl import bindings as sodium
+    header = payload[:72]
     assert header[:16] == b"OnionPressBackup"
-    version, kdf, log2_n, r, p, suite, log2_chunk, reserved = header[16:24]
-    assert (version, kdf, suite, reserved) == (1, 1, 1, 0)
-    salt, nonce = header[24:40], header[40:56]
-    key = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2 ** log2_n,
-                         r=r, p=p, maxmem=2 ** 30, dklen=64)
-    enc_key, mac_key = key[:32], key[32:]
-    assert hmac.compare_digest(
-        header_tag, hmac.new(mac_key, b"OPBK-header" + header, "sha256").digest())
-    streams, flags_seen, pos = {0: [], 1: []}, {0: [], 1: []}, 88
+    assert tuple(header[16:20]) == (1, 2, 1, 0)  # version, kdf, cipher, reserved
+    opslimit = int.from_bytes(header[20:24], "big")
+    memlimit = int.from_bytes(header[24:32], "big")
+    salt, stream_header = header[32:48], header[48:72]
+    key = sodium.crypto_pwhash_alg(32, password.encode("utf-8"), salt, opslimit,
+                                   memlimit, sodium.crypto_pwhash_ALG_ARGON2ID13)
+    state = sodium.crypto_secretstream_xchacha20poly1305_state()
+    sodium.crypto_secretstream_xchacha20poly1305_init_pull(state, stream_header, key)
+    messages, pos = [], 72
     while pos < len(payload):
-        stream, flags = payload[pos], payload[pos + 1]
-        length = int.from_bytes(payload[pos + 2:pos + 6], "big")
-        assert length <= 2 ** log2_chunk
-        ciphertext = payload[pos + 6:pos + 6 + length]
-        tag = payload[pos + 6 + length:pos + 6 + length + 32]
-        index = len(streams[stream]).to_bytes(8, "big")
-        assert hmac.compare_digest(tag, hmac.new(
-            mac_key, b"OPBK-record" + header_tag + payload[pos:pos + 6] + index
-            + ciphertext, "sha256").digest())
-        pad = hashlib.shake_256(enc_key + nonce + bytes([stream]) + index).digest(length)
-        streams[stream].append(bytes(a ^ b for a, b in zip(ciphertext, pad)))
-        flags_seen[stream].append(flags)
-        pos += 6 + length + 32
-    for stream in (0, 1):  # only each stream's last record carries the flag
-        assert flags_seen[stream] == [0] * (len(flags_seen[stream]) - 1) + [1]
-    assert len(streams[0]) == 1
-    return streams[0][0], b"".join(streams[1])
+        length = int.from_bytes(payload[pos:pos + 4], "big")
+        ciphertext = payload[pos + 4:pos + 4 + length]
+        assert len(ciphertext) == length
+        messages.append(sodium.crypto_secretstream_xchacha20poly1305_pull(
+            state, ciphertext, header))
+        pos += 4 + length
+    tags = [tag for _, tag in messages]
+    assert len(tags) >= 2
+    assert tags == ([sodium.crypto_secretstream_xchacha20poly1305_TAG_PUSH]
+                    + [sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE]
+                    * (len(tags) - 2)
+                    + [sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL])
+    return messages[0][0], b"".join(m for m, _ in messages[1:])
+
+
+def _header_with(payload, opslimit=None, memlimit=None, **byte_values):
+    """*payload* with header fields replaced: opslimit/memlimit as numbers,
+    or single bytes by offset (b16=99 sets byte 16)."""
+    b = bytearray(payload)
+    if opslimit is not None:
+        b[20:24] = opslimit.to_bytes(4, "big")
+    if memlimit is not None:
+        b[24:32] = memlimit.to_bytes(8, "big")
+    for name, value in byte_values.items():
+        b[int(name[1:])] = value
+    return bytes(b)
 
 
 class TestEncryptedContainer(unittest.TestCase):
-    """backup_crypto's container on its own: records, tags, and the ways a
-    file can be damaged or altered. 1 KiB records, so archives span several."""
+    """backup_crypto's container on its own: messages, tags, and the ways a
+    file can be damaged or altered. 1 KiB messages, so archives span several."""
 
     PW = "correct horse"
-
-    # Written with scrypt N=2^10, salt 00..0f, nonce 10..1f, password PW,
-    # metadata {"backup_format": 2} and archive b"OnionPress backup format 2
-    # test vector\n". Every later OnionPress must still read these bytes.
-    KNOWN_ANSWER = bytes.fromhex(
-        "4f6e696f6e50726573734261636b757001010a08010114000001020304050607"
-        "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f11db34fb92d3c3f2"
-        "65df6e6aef528cc694a8042d7e8df493e44d22fde148b33900010000001408c1"
-        "3a3be0ef5107b368945904620f6985e3e2ffb41280dfcc62f9e800154108d7b5"
-        "7e4315584493adcd2cd5430f93835e6b652101010000002718080518c4f5edfb"
-        "470c3f79a93256c8eb94f6f9f37d6c98bf14dab92e6d8e6d2bb5c938789de23b"
-        "b31f1db87f8202e7cdb9e31e4c923fe22fc28d207aeb45cca11158aa23ad1a")
-    KNOWN_METADATA = b'{"backup_format": 2}'
-    KNOWN_ARCHIVE = b"OnionPress backup format 2 test vector\n"
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmpdir, True)
-        _cheap_scrypt(self)
-        patcher = mock.patch.object(backup_crypto, "CHUNK_LOG2", 10)
+        _cheap_kdf(self)
+        patcher = mock.patch.object(backup_crypto, "CHUNK_SIZE", 1024)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.metadata = b'{"backup_format": 2, "onion_address": "x.onion"}'
-        self.archive = os.urandom(4 * 1024 + 300)  # five archive records
+        self.archive = os.urandom(4 * 1024 + 300)  # five archive messages
 
     def _write(self, archive=None, name="b.zip"):
         path = os.path.join(self.tmpdir, name)
@@ -1119,14 +1118,30 @@ class TestEncryptedContainer(unittest.TestCase):
         return path
 
     @staticmethod
-    def _records(payload):
-        """(header + header tag, [each record's bytes])"""
-        pos, records = 88, []
+    def _messages(payload):
+        """(header, [each message's bytes, its length field included])"""
+        pos, messages = 72, []
         while pos < len(payload):
-            end = pos + 6 + int.from_bytes(payload[pos + 2:pos + 6], "big") + 32
-            records.append(payload[pos:end])
+            end = pos + 4 + int.from_bytes(payload[pos:pos + 4], "big")
+            messages.append(payload[pos:end])
             pos = end
-        return payload[:88], records
+        return payload[:72], messages
+
+    def _stream(self, messages):
+        """A payload whose messages and tags are chosen here, encrypted with
+        libsodium directly under the cheap test parameters."""
+        from nacl import bindings as sodium
+        salt = os.urandom(16)
+        key = backup_crypto._derive_key(self.PW, salt, 1, 8192)
+        state = sodium.crypto_secretstream_xchacha20poly1305_state()
+        stream_header = sodium.crypto_secretstream_xchacha20poly1305_init_push(state, key)
+        header = (b"OnionPressBackup" + bytes([1, 2, 1, 0]) + (1).to_bytes(4, "big")
+                  + (8192).to_bytes(8, "big") + salt + stream_header)
+        out = header
+        for plaintext, tag in messages:
+            c = sodium.crypto_secretstream_xchacha20poly1305_push(state, plaintext, header, tag)
+            out += len(c).to_bytes(4, "big") + c
+        return out
 
     def _decrypt(self, path, password=PW):
         out = os.path.join(self.tmpdir, "inner.bin")
@@ -1134,18 +1149,23 @@ class TestEncryptedContainer(unittest.TestCase):
         with open(out, "rb") as f:
             return metadata, f.read()
 
-    def test_round_trip_spans_records(self):
+    def test_round_trip_spans_messages(self):
         path = self._write()
-        _, records = self._records(self._payload(path))
-        self.assertEqual(len(records), 1 + 5)  # metadata + five archive records
+        _, messages = self._messages(self._payload(path))
+        self.assertEqual(len(messages), 1 + 5)  # metadata + five archive messages
         self.assertEqual(self._decrypt(path), (self.metadata, self.archive))
         self.assertEqual(backup_crypto.read_metadata(path, self.PW), self.metadata)
 
-    def test_record_boundaries(self):
-        for size in (0, 1, 1023, 1024, 1025, 2048, 3072):
+    def test_message_boundaries(self):
+        # archive size -> archive messages (the last one may be empty)
+        for size, count in ((0, 1), (1, 1), (1023, 1), (1024, 1), (1025, 2),
+                            (2048, 2), (3072, 3)):
             with self.subTest(size=size):
                 data = os.urandom(size)
-                self.assertEqual(self._decrypt(self._write(data)), (self.metadata, data))
+                path = self._write(data)
+                self.assertEqual(self._decrypt(path), (self.metadata, data))
+                _, messages = self._messages(self._payload(path))
+                self.assertEqual(len(messages), 1 + count)
 
     def test_wrong_password_writes_nothing(self):
         path = self._write()
@@ -1159,51 +1179,89 @@ class TestEncryptedContainer(unittest.TestCase):
 
     def test_every_alteration_is_detected(self):
         path = self._write()
-        head, records = self._records(self._payload(path))
-        meta, arc = records[0], records[1:]
-        _, other_arc = self._records(self._payload(self._write(name="other.zip")))
+        head, messages = self._messages(self._payload(path))
+        meta, arc = messages[0], messages[1:]
+        _, other = self._messages(self._payload(self._write(name="other.zip")))
 
-        def flip(record, i):
-            b = bytearray(record)
+        def flip(message, i):
+            b = bytearray(message)
             b[i] ^= 0x01
             return bytes(b)
 
-        def flag_last(record):
-            b = bytearray(record)
-            b[1] |= backup_crypto.FLAG_LAST
-            return bytes(b)
+        def huge_length(message):
+            return b"\xff\xff\xff\xff" + message[4:]
 
         rest = b"".join(arc[2:])
         alterations = {
             "archive ciphertext bit": head + meta + arc[0] + flip(arc[1], 10) + rest,
-            "metadata ciphertext bit": head + flip(meta, 8) + b"".join(arc),
-            "record tag bit": head + meta + flip(arc[0], -1) + b"".join(arc[1:]),
-            "length field": head + meta + flip(arc[0], 5) + b"".join(arc[1:]),
-            "records swapped": head + meta + arc[1] + arc[0] + rest,
-            "middle record dropped": head + meta + arc[0] + rest,
-            "last record dropped": head + meta + b"".join(arc[:-1]),
-            "cut mid-record": head + meta + b"".join(arc)[:-40],
+            "authentication tag bit": head + meta + flip(arc[0], -1) + b"".join(arc[1:]),
+            "length field": head + meta + flip(arc[0], 3) + b"".join(arc[1:]),
+            "length beyond any message": head + meta + huge_length(arc[0]) + b"".join(arc[1:]),
+            "messages swapped": head + meta + arc[1] + arc[0] + rest,
+            "middle message dropped": head + meta + arc[0] + rest,
+            "final message dropped": head + meta + b"".join(arc[:-1]),
+            "cut mid-message": head + meta + b"".join(arc)[:-40],
+            "cut in a length field": head + meta + arc[0][:2],
+            "cut after the metadata": head + meta,
             "trailing bytes": head + meta + b"".join(arc) + b"\x00",
-            "early last flag": head + meta + flag_last(arc[0]) + b"".join(arc[1:]),
-            "metadata record missing": head + b"".join(arc),
-            # Same password, same contents — but another backup's keys.
-            "record from another backup": head + meta + other_arc[1] + b"".join(arc[1:]),
+            # Same password, same contents — but another backup's stream.
+            "message from another backup": head + meta + other[1] + b"".join(arc[1:]),
         }
         for label, payload in alterations.items():
             with self.subTest(label):
                 with self.assertRaises(backup_crypto.DamagedBackupError):
                     self._decrypt(self._with_payload(payload))
+        # The metadata message still verifies in all of them.
+        for label, payload in alterations.items():
+            with self.subTest(label, read="metadata"):
+                self.assertEqual(backup_crypto.read_metadata(
+                    self._with_payload(payload), self.PW), self.metadata)
 
-    def test_header_changes_fail_the_password_check(self):
-        """The header tag is the password check, so an altered salt, nonce or
-        tag reads as a wrong password — never as a working backup."""
+    def test_unexpected_tags_are_damage(self):
+        from nacl import bindings as sodium
+        push = sodium.crypto_secretstream_xchacha20poly1305_TAG_PUSH
+        message = sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+        final = sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL
+        # The layout as written decodes (so _stream is faithful)...
+        good = self._stream([(self.metadata, push), (b"a" * 10, message), (b"b", final)])
+        self.assertEqual(self._decrypt(self._with_payload(good)),
+                         (self.metadata, b"a" * 10 + b"b"))
+        # ...and every other arrangement of tags is refused.
+        streams = {
+            "metadata tagged MESSAGE": [(self.metadata, message), (b"x", final)],
+            "metadata tagged FINAL": [(self.metadata, final)],
+            "archive message tagged PUSH": [(self.metadata, push), (b"x", push), (b"y", final)],
+            "no final message": [(self.metadata, push), (b"x", message)],
+            "no archive at all": [(self.metadata, push)],
+        }
+        for label, messages in streams.items():
+            with self.subTest(label):
+                with self.assertRaises(backup_crypto.DamagedBackupError):
+                    self._decrypt(self._with_payload(self._stream(messages)))
+
+    def test_damage_before_the_first_message_reads_as_a_wrong_password(self):
+        """The first message's tag is the password check, so an altered salt,
+        stream header, KDF parameter or metadata message reads as a wrong
+        password — never as a working backup. The header is the additional
+        data of every message, so even a memlimit change libsodium would
+        round away (it counts whole KiB) is caught."""
         payload = self._payload(self._write())
-        for offset in (24, 40, 60):  # salt, nonce, header tag
-            b = bytearray(payload)
-            b[offset] ^= 0x01
-            with self.subTest(offset=offset):
+        head, messages = self._messages(payload)
+        meta, arc = messages[0], messages[1:]
+        b = bytearray(meta)
+        b[10] ^= 0x01
+        cases = {
+            "salt": _header_with(payload, b40=payload[40] ^ 0x01),
+            "stream header": _header_with(payload, b60=payload[60] ^ 0x01),
+            "opslimit": _header_with(payload, opslimit=3),
+            "memlimit within the same KiB": _header_with(payload, memlimit=8192 + 1),
+            "metadata ciphertext bit": head + bytes(b) + b"".join(arc),
+            "metadata message missing": head + b"".join(arc),
+        }
+        for label, altered in cases.items():
+            with self.subTest(label):
                 with self.assertRaises(backup_crypto.WrongPasswordError):
-                    self._decrypt(self._with_payload(bytes(b)))
+                    self._decrypt(self._with_payload(altered))
 
     def test_corrupted_backup_file_reports_damage(self):
         """Bytes flipped in the backup file itself (zipfile's CRC of the
@@ -1223,54 +1281,60 @@ class TestEncryptedContainer(unittest.TestCase):
         with self.assertRaises(backup_crypto.DamagedBackupError):
             self._decrypt(path)
 
+    def test_not_a_container_is_damage(self):
+        payload = self._payload(self._write())
+        for label, altered in (("magic", b"X" + payload[1:]),
+                               ("cut in the header", payload[:40]),
+                               ("empty", b"")):
+            with self.subTest(label):
+                with self.assertRaises(backup_crypto.DamagedBackupError):
+                    backup_crypto.read_metadata(self._with_payload(altered), self.PW)
+
     def test_unknown_format_ids_ask_for_a_newer_onionpress(self):
         payload = self._payload(self._write())
-        for offset, field in ((16, "version"), (17, "kdf"), (21, "suite"),
-                              (23, "reserved")):
-            b = bytearray(payload)
-            b[offset] = 99
+        for offset, field in ((16, "version"), (17, "kdf"), (18, "cipher"),
+                              (19, "reserved")):
             with self.subTest(field):
                 with self.assertRaises(backup_crypto.NewerBackupError):
-                    backup_crypto.read_metadata(self._with_payload(bytes(b)), self.PW)
+                    backup_crypto.read_metadata(
+                        self._with_payload(_header_with(payload, **{f"b{offset}": 99})),
+                        self.PW)
 
-    def test_header_cannot_demand_unbounded_scrypt(self):
-        """The KDF parameters are read before the password can be checked;
-        a header asking for absurd memory, time or record size is refused
-        without running scrypt at all."""
+    def test_header_cannot_demand_unbounded_argon2id(self):
+        """The KDF parameters are read before the password can be checked; a
+        header asking for more memory or passes than this version allows is
+        refused as newer, one below libsodium's minimums as damaged — in
+        both cases without running Argon2id at all."""
         payload = self._payload(self._write())
-        for offset, value, field in ((18, 30, "N=2^30"), (18, 0, "N=1"),
-                                     (19, 0, "r=0"), (20, 0, "p=0"),
-                                     (20, 200, "p=200"), (22, 5, "32-byte records"),
-                                     (22, 40, "1 TiB records")):
-            b = bytearray(payload)
-            b[offset] = value
-            with self.subTest(field):
-                with mock.patch.object(backup_crypto, "_derive_keys") as derive:
-                    with self.assertRaises(backup_crypto.DamagedBackupError):
-                        backup_crypto.read_metadata(self._with_payload(bytes(b)), self.PW)
+        cases = (
+            ("opslimit 5", dict(opslimit=5), backup_crypto.NewerBackupError),
+            ("memlimit 128 MiB + 1 KiB", dict(memlimit=(128 << 20) + 1024),
+             backup_crypto.NewerBackupError),
+            ("memlimit 1 GiB", dict(memlimit=1 << 30), backup_crypto.NewerBackupError),
+            ("everything at maximum", dict(opslimit=2 ** 32 - 1, memlimit=2 ** 64 - 1),
+             backup_crypto.NewerBackupError),
+            ("opslimit 0", dict(opslimit=0), backup_crypto.DamagedBackupError),
+            ("memlimit 4 KiB", dict(memlimit=4096), backup_crypto.DamagedBackupError),
+        )
+        for label, fields, error in cases:
+            with self.subTest(label):
+                with mock.patch.object(backup_crypto, "_derive_key") as derive:
+                    with self.assertRaises(error):
+                        backup_crypto.read_metadata(
+                            self._with_payload(_header_with(payload, **fields)), self.PW)
                 derive.assert_not_called()
-
-    def test_known_answer_vector(self):
-        """Pins the format in both directions: this version writes exactly
-        these bytes, and reads them back."""
-        randoms = iter([bytes(range(16)), bytes(range(16, 32))])
-        buf = io.BytesIO()
-        with mock.patch.object(backup_crypto, "CHUNK_LOG2", 20), \
-                mock.patch.object(backup_crypto, "_random_bytes",
-                                  side_effect=lambda n: next(randoms)):
-            writer = backup_crypto.EncryptedWriter(buf, self.PW, self.KNOWN_METADATA)
-            writer.write(self.KNOWN_ARCHIVE)
-            writer.close()
-        self.assertEqual(buf.getvalue(), self.KNOWN_ANSWER)
-        self.assertEqual(self._decrypt(self._with_payload(self.KNOWN_ANSWER)),
-                         (self.KNOWN_METADATA, self.KNOWN_ARCHIVE))
+        # The bounds themselves are allowed (and then the key is wrong).
+        with mock.patch.object(backup_crypto, "_derive_key",
+                               return_value=bytes(32)) as derive:
+            with self.assertRaises(backup_crypto.WrongPasswordError):
+                backup_crypto.read_metadata(self._with_payload(_header_with(
+                    payload, opslimit=4, memlimit=128 << 20)), self.PW)
+        self.assertEqual(derive.call_args.args[2:], (4, 128 << 20))
 
     def test_independent_decoder_reads_it(self):
         path = self._write()
         self.assertEqual(_spec_decode(self._payload(path), self.PW),
                          (self.metadata, self.archive))
-        self.assertEqual(_spec_decode(self.KNOWN_ANSWER, self.PW),
-                         (self.KNOWN_METADATA, self.KNOWN_ARCHIVE))
 
     def test_unfinished_backup_never_appears(self):
         path = os.path.join(self.tmpdir, "b.zip")
@@ -1294,22 +1358,166 @@ class TestEncryptedContainer(unittest.TestCase):
             os.path.join(self.tmpdir, "missing.zip")))
 
 
-class TestEncryptedBackupDefaults(unittest.TestCase):
-    """The parameters new backups ship with (every other test lowers scrypt's
-    cost for speed)."""
+class TestFormat2Fixture(unittest.TestCase):
+    """tests/fixtures/backup-format-2.zip: a backup written once by
+    backup_crypto.create with the shipped parameters (Argon2id opslimit 2,
+    memlimit 64 MiB), password "correct horse". Its archive is a zip of
+    metadata.json and wp-content/fixture.txt. Every later OnionPress must
+    still read these bytes; never regenerate the file."""
 
-    def test_new_backups_use_the_full_scrypt_cost(self):
+    PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "fixtures", "backup-format-2.zip")
+    SHA256 = "7f4ffe6698a81237b918455e2612a8c947af15e7989d95f01e3ee7ec8f0c8363"
+    PW = "correct horse"
+    METADATA = {
+        "backup_format": 2,
+        "backup_date": "2026-10-12T00:00:00Z",
+        "onionpress_version": "fixture",
+        "platform": "fixture",
+        "username": "admin",
+    }
+    FILE = b"OnionPress backup format 2 fixture\n"
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+    def test_the_fixture_is_unchanged(self):
+        with open(self.PATH, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), self.SHA256)
+
+    def test_header_carries_the_shipped_parameters(self):
+        with zipfile.ZipFile(self.PATH) as zf:
+            self.assertEqual(sorted(zf.namelist()),
+                             [backup_crypto.README_NAME, backup_crypto.PAYLOAD_NAME])
+            header = zf.read(backup_crypto.PAYLOAD_NAME)[:72]
+        self.assertEqual(header[:16], b"OnionPressBackup")
+        self.assertEqual(tuple(header[16:20]), (1, 2, 1, 0))
+        self.assertEqual(int.from_bytes(header[20:24], "big"), 2)
+        self.assertEqual(int.from_bytes(header[24:32], "big"), 64 << 20)
+
+    def test_it_restores(self):
+        staging = os.path.join(self.tmpdir, "staging")
+        os.makedirs(staging)
+        staging, metadata = backup_manager.extract_backup(
+            self.PATH, self.PW, lambda m: None, staging=staging)
+        self.assertEqual(metadata, self.METADATA)
+        with open(os.path.join(staging, "wp-content", "fixture.txt"), "rb") as f:
+            self.assertEqual(f.read(), self.FILE)
+        self.assertEqual(backup_manager.peek_backup_metadata(self.PATH, self.PW),
+                         self.METADATA)
+
+    def test_independent_decoder_reads_it(self):
+        with zipfile.ZipFile(self.PATH) as zf:
+            payload = zf.read(backup_crypto.PAYLOAD_NAME)
+        metadata, archive = _spec_decode(payload, self.PW)
+        self.assertEqual(json.loads(metadata), self.METADATA)
+        with zipfile.ZipFile(io.BytesIO(archive)) as inner:
+            self.assertEqual(inner.read("wp-content/fixture.txt"), self.FILE)
+            self.assertEqual(inner.read("metadata.json"), metadata)
+
+    def test_wrong_password(self):
+        with self.assertRaises(backup_crypto.WrongPasswordError):
+            backup_manager.read_backup_metadata(self.PATH, "correct horse ")
+
+
+class TestEncryptedBackupDefaults(unittest.TestCase):
+    """The parameters new backups ship with (every other test lowers
+    Argon2id's cost for speed), and the format's numbers against libsodium's."""
+
+    def test_new_backups_use_libsodiums_interactive_preset(self):
+        from nacl.pwhash import argon2id
+        self.assertEqual((backup_crypto.OPSLIMIT, backup_crypto.MEMLIMIT),
+                         (argon2id.OPSLIMIT_INTERACTIVE, argon2id.MEMLIMIT_INTERACTIVE))
         tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmpdir, True)
         path = os.path.join(tmpdir, "b.zip")
         with backup_crypto.create(path, "pw", b"{}", "readme") as w:
             w.write(b"x")
         with zipfile.ZipFile(path) as zf:
-            header = zf.read(backup_crypto.PAYLOAD_NAME)[:56]
+            header = zf.read(backup_crypto.PAYLOAD_NAME)[:72]
         self.assertEqual(header[:16], b"OnionPressBackup")
-        # version 1, scrypt, N=2^17, r=8, p=1 (128 MiB), suite 1, 1 MiB records
-        self.assertEqual(tuple(header[16:24]), (1, 1, 17, 8, 1, 1, 20, 0))
+        # version 1, Argon2id v1.3, secretstream, opslimit 2, memlimit 64 MiB
+        self.assertEqual(tuple(header[16:20]), (1, 2, 1, 0))
+        self.assertEqual(int.from_bytes(header[20:24], "big"), 2)
+        self.assertEqual(int.from_bytes(header[24:32], "big"), 64 << 20)
         self.assertEqual(backup_crypto.read_metadata(path, "pw"), b"{}")
+        self.assertEqual(backup_crypto.CHUNK_SIZE, 1 << 20)
+
+    def test_the_layout_matches_libsodium(self):
+        from nacl import bindings as sodium
+        from nacl.pwhash import argon2id
+        self.assertEqual(backup_crypto.KDF_ARGON2ID13, sodium.crypto_pwhash_ALG_ARGON2ID13)
+        self.assertEqual(argon2id.SALTBYTES, 16)
+        self.assertEqual(sodium.crypto_secretstream_xchacha20poly1305_HEADERBYTES, 24)
+        self.assertEqual(sodium.crypto_secretstream_xchacha20poly1305_KEYBYTES, 32)
+        self.assertEqual(sodium.crypto_secretstream_xchacha20poly1305_ABYTES, 17)
+        self.assertEqual((argon2id.OPSLIMIT_MIN, argon2id.MEMLIMIT_MIN), (1, 8192))
+        self.assertEqual(16 + 4 + 4 + 8 + 16 + 24, 72)  # the header, field by field
+
+    def test_readers_accept_what_writers_write(self):
+        self.assertLessEqual(backup_crypto.OPSLIMIT, backup_crypto._OPSLIMIT_MAX)
+        self.assertLessEqual(backup_crypto.MEMLIMIT, backup_crypto._MEMLIMIT_MAX)
+        self.assertLessEqual(backup_crypto.CHUNK_SIZE, backup_crypto._MESSAGE_MAX)
+
+
+class TestWithoutPyNaCl(unittest.TestCase):
+    """A Linux python3 without python3-nacl: format 2 says what is missing,
+    and everything else — format-1 restores included — still works."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+        for name, value in (("_sodium", None), ("_nacl_errors", None),
+                            ("_argon2id", None),
+                            ("_SODIUM_IMPORT_ERROR", ImportError("No module named 'nacl'"))):
+            patcher = mock.patch.object(backup_crypto, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_format_2_names_the_missing_package(self):
+        out = os.path.join(self.tmpdir, "b.zip")
+        calls = {
+            "create": lambda: backup_crypto.create(out, "pw", b"{}", "readme").__enter__(),
+            "read_backup_metadata": lambda: backup_manager.read_backup_metadata(
+                TestFormat2Fixture.PATH, "pw"),
+            "extract_backup": lambda: backup_manager.extract_backup(
+                TestFormat2Fixture.PATH, "pw", lambda m: None,
+                staging=os.path.join(self.tmpdir, "s")),
+        }
+        for label, call in calls.items():
+            with self.subTest(label):
+                with self.assertRaises(backup_crypto.SodiumUnavailableError) as ctx:
+                    call()
+                self.assertIn("python3-nacl", str(ctx.exception))
+                self.assertIn("No module named 'nacl'", str(ctx.exception))
+        self.assertEqual(os.listdir(self.tmpdir), [])
+
+    def test_format_1_still_restores(self):
+        staging = os.path.join(self.tmpdir, "staging")
+        os.makedirs(staging)
+        with open(os.path.join(staging, "metadata.json"), "w") as f:
+            json.dump({"username": "admin"}, f)
+        legacy = os.path.join(self.tmpdir, "legacy.zip")
+        subprocess.run(["zip", "-r", "-P", "pw", legacy, "."],
+                       cwd=staging, capture_output=True, check=True)
+        self.assertEqual(backup_manager.read_backup_metadata(legacy, "pw"),
+                         {"username": "admin"})
+        dest = os.path.join(self.tmpdir, "dest")
+        os.makedirs(dest)
+        _, metadata = backup_manager.extract_backup(legacy, "pw", lambda m: None,
+                                                    staging=dest)
+        self.assertEqual(metadata, {"username": "admin"})
+
+    def test_the_backup_module_imports_without_it(self):
+        code = ("import sys; sys.modules['nacl'] = None\n"
+                "from onionpress import backup, backup_crypto\n"
+                "assert backup_crypto._sodium is None\n"
+                "print(type(backup_crypto._SODIUM_IMPORT_ERROR).__name__)")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           env=dict(os.environ, PYTHONPATH=os.path.join(_REPO, "src")))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "ModuleNotFoundError")
 
 
 class TestBashBackupHelpers(unittest.TestCase):
@@ -1322,7 +1530,7 @@ class TestBashBackupHelpers(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmpdir, True)
-        _cheap_scrypt(self)
+        _cheap_kdf(self)
         from onionpress.cli import OnionPressCLI
         # The helpers use nothing set up by __init__ (config, ports, docker).
         self.cli = object.__new__(OnionPressCLI)
@@ -1405,6 +1613,60 @@ class TestBashBackupHelpers(unittest.TestCase):
 
     def test_py2app_bundles_the_module(self):
         self.assertIn("'onionpress.backup_crypto'", self._read("setup.py"))
+
+
+class TestPyNaClIsWiredEverywhere(unittest.TestCase):
+    """Format 2 needs PyNaCl wherever OnionPress runs Python: in the py2app
+    bundle (Mac app and the bash launcher's bundled_python), on the Linux
+    system python3, and in CI."""
+
+    @staticmethod
+    def _read(rel):
+        with open(os.path.join(_REPO, rel)) as f:
+            return f.read()
+
+    def test_mac_build_installs_bundles_and_checks_it(self):
+        self.assertRegex(self._read("src/requirements.txt"),
+                         r"(?m)^PyNaCl>=1\.5\.0$")
+        setup = self._read("setup.py")
+        packages = re.search(r"'packages': \[([^\]]*)\]", setup).group(1)
+        includes = re.search(r"'includes': \[([^\]]*)\]", setup).group(1)
+        self.assertIn("'nacl'", packages)
+        # nacl/_sodium.abi3.so imports it from C, where py2app cannot see.
+        self.assertIn("'_cffi_backend'", includes)
+        for script in ("build/build-dmg-simple.sh", "build/rebuild-menubar.sh"):
+            text = self._read(script)
+            with self.subTest(script):
+                pip = text.index('install -r "$SCRIPTS_DIR/requirements.txt"')
+                prepare = text.index("py2app-extensions.sh\" prepare")
+                py2app = text.index("setup.py py2app")
+                verify = text.index("py2app-extensions.sh\" verify")
+                self.assertLess(pip, prepare)
+                self.assertLess(prepare, py2app)
+                self.assertLess(py2app, verify)
+        self.assertTrue(os.access(os.path.join(_REPO, "build", "py2app-extensions.sh"),
+                                  os.X_OK))
+        # PyPI's macOS PyNaCl wheels carry a libsodium built without -O
+        # (~7x slower): the bundle gets one built from source, optimised,
+        # never a cached wheel built with other flags.
+        helper = self._read("build/py2app-extensions.sh")
+        self.assertIn('CFLAGS="-O2 $archflags"', helper)
+        self.assertIn("--no-cache-dir --force-reinstall", helper)
+        self.assertIn('--no-binary PyNaCl "PyNaCl==$version"', helper)
+
+    def test_linux_package_and_installer_bring_it(self):
+        control = self._read("build/build-linux.sh")
+        depends = control[control.index("Depends:"):control.index("Recommends:")]
+        self.assertIn("python3-nacl (>= 1.5.0)", depends)
+        self.assertRegex(self._read("linux/install.sh"),
+                         r"apt-get install -y -qq python3-nacl\b")
+
+    def test_ci_installs_it_before_the_tests(self):
+        workflow = self._read(".github/workflows/test.yml")
+        install = workflow.index('pip install "pynacl>=1.5.0"')
+        self.assertLess(install, workflow.index("unittest discover"))
+        self.assertIn('pip install "pynacl==1.5.0"', workflow)
+        self.assertIn("--with 'pynacl>=1.5.0'", self._read("Makefile"))
 
 
 class TestEnsureMultisiteConstants(unittest.TestCase):

@@ -50,7 +50,7 @@ make doctor        # which build tools you have, and what each missing one costs
 | Linux package (`.deb`) | `make deb` | any | — |
 | browser extensions | `make extension` | any | — |
 | app icons | `make icons` | **macOS** | — |
-| unit tests | `make test-unit` | any | — |
+| unit tests | `make test-unit` | any | PyPI (PyNaCl, via uv) |
 | integration tests | see [Integration tests](#integration-tests) | any — **never a machine that runs OnionPress** | — |
 | source layout + pin check | `make test` | any | — |
 
@@ -560,6 +560,31 @@ slower than the donna backend the container build uses. Changing which
 ed25519 implementation mints macOS addresses is a larger decision than
 restoring an optimisation flag, and it cannot be validated for the x86_64
 half of the universal binary from an Apple Silicon host.
+
+### PyNaCl in the MenubarApp: the same trap, upstream
+
+Backups are encrypted with PyNaCl (libsodium; `src/onionpress/backup_crypto.py`).
+PyNaCl's macOS wheels on PyPI are built with `CFLAGS="-arch arm64 -arch
+x86_64"` and no `-O`, and libsodium's `configure` likewise adds an
+optimisation level only when `CFLAGS` arrives unset. On an Apple Silicon Mac,
+PyNaCl 1.5.0 and 1.6.2 wheels against the same release built with `-O2`:
+
+| | PyPI wheel | built with `-O2` |
+|---|---|---|
+| Argon2id, the backup's parameters (64 MiB) | 450 ms | 67 ms |
+| XChaCha20-Poly1305 secretstream | 50 MiB/s | 470 MiB/s |
+| backup / restore of a 514 MB tree | 12.7 s / 12.3 s | 4.9 s / 4.6 s |
+
+`build/py2app-extensions.sh prepare` therefore rebuilds PyNaCl from source in
+the py2app venv (`-O2`, both `-arch` flags under a universal2 interpreter,
+`--no-cache-dir` because pip's wheel cache is not keyed by `CFLAGS`; the
+build runs libsodium's own test suite). It also lipo-merges cffi's
+`_cffi_backend`, which PyNaCl loads and which cffi publishes as per-arch
+wheels only — without that a universal2 bundle would fail to make or restore
+a backup on an Intel Mac. `verify` then has the bundled interpreter derive a
+key and encrypt with it, natively and as x86_64 under Rosetta, and prints the
+speed. On Linux, Debian's and Ubuntu's `python3-nacl` link the system
+`libsodium23`.
 
 ### The two supply-chain fixes
 

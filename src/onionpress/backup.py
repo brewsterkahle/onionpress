@@ -3,8 +3,8 @@ Backup and Restore for OnionPress
 
 Creates password-protected backups containing Tor keys, WordPress database,
 and wp-content (themes, plugins, uploads). New backups are format 2 (a zip
-inside scrypt + SHAKE256/HMAC-SHA256 encryption, see backup_crypto); format 1
-backups (ZipCrypto zips from `zip -P`) still restore.
+inside libsodium Argon2id + XChaCha20-Poly1305 secretstream encryption, see
+backup_crypto); format 1 backups (ZipCrypto zips from `zip -P`) still restore.
 """
 
 import json

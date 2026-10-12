@@ -479,6 +479,11 @@ fi
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install --upgrade pip
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app
 "$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt"
+# PyNaCl (backup encryption): rebuild it from source with an optimised
+# libsodium (PyPI's macOS wheels carry an unoptimised one), and give cffi's
+# _cffi_backend, which it loads and which ships per-arch wheels only, both
+# slices under a universal2 interpreter. Downloads from PyPI.
+"$BUILD_DIR/py2app-extensions.sh" prepare "$MENUBAR_BUILD_DIR/venv"
 
 # Copy the `onionpress` package into the build venv's site-packages so
 # py2app can resolve the `onionpress.*` entries in setup.py's `includes`.
@@ -575,6 +580,14 @@ codesign -f -s - "$MENUBAR_APP_DIR" 2>/dev/null || true
 # Sign the outer OnionPress.app bundle
 codesign -f -s - --deep "$APP_PATH"
 echo "Application bundle signed"
+
+# Backups are encrypted with PyNaCl: the signed bundle's interpreter must load
+# it and encrypt with it, on every architecture the bundle claims. (-B inside:
+# it writes nothing into the bundle, so the signature stays valid.)
+if ! "$BUILD_DIR/py2app-extensions.sh" verify "$MENUBAR_APP_DIR"; then
+    echo "ERROR: the MenubarApp cannot encrypt or restore backups (PyNaCl)." >&2
+    exit 1
+fi
 
 # Clean up old builds
 echo "Cleaning up old builds..."

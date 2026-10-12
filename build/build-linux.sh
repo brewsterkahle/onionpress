@@ -164,6 +164,10 @@ if [ -f "$PROJECT_DIR/app/Resources/app-icon.png" ]; then
 fi
 
 # DEBIAN control
+# python3-nacl (PyNaCl) encrypts backups (backup format 2,
+# src/onionpress/backup_crypto.py). 1.5.0 is what Debian 12 and 13, Ubuntu
+# 22.04 and 24.04 and Raspberry Pi OS Bookworm ship, and what CI tests
+# against besides the latest; the bindings used exist since PyNaCl 1.3.0.
 mkdir -p "$DEB_ROOT/DEBIAN"
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: onionpress
@@ -173,7 +177,7 @@ Priority: optional
 Architecture: $DEB_ARCH
 Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose,
  uidmap, dbus-user-session, fuse-overlayfs, slirp4netns,
- jq, python3, zip, unzip,
+ jq, python3, python3-nacl (>= 1.5.0), zip, unzip,
  python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
 Recommends: torbrowser-launcher
 Maintainer: Brewster Kahle <brewster@archive.org>

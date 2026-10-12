@@ -106,16 +106,18 @@ test-unit:
 	@# in src/onionpress/ use `X | None` syntax that fails to import on
 	@# stock /usr/bin/python3 (3.9) on macOS — uv fetches an isolated
 	@# 3.14 into ~/.local/share/uv/ without touching system Python.
+	@# PyNaCl (backup encryption) comes from PyPI the same way.
 	@if ! command -v uv >/dev/null 2>&1; then \
 		echo "ERROR: 'uv' is not installed."; \
 		echo "Install with:  curl -LsSf https://astral.sh/uv/install.sh | sh"; \
 		echo "          or:  brew install uv"; \
 		echo ""; \
-		echo "Or run directly against any Python 3.10+:"; \
-		echo "  python3 -m unittest discover tests -p 'test_*.py'"; \
+		echo "Or run directly against any Python 3.10+, in a venv with PyNaCl:"; \
+		echo "  python3 -m venv .venv && .venv/bin/pip install 'pynacl>=1.5.0'"; \
+		echo "  .venv/bin/python -m unittest discover tests -p 'test_*.py'"; \
 		exit 1; \
 	fi
-	uv run --python 3.14 python -m unittest discover tests -p 'test_*.py'
+	uv run --python 3.14 --with 'pynacl>=1.5.0' python -m unittest discover tests -p 'test_*.py'
 
 # ─── Housekeeping ───────────────────────────────────────────────────────
 

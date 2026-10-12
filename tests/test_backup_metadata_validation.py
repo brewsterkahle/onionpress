@@ -109,10 +109,11 @@ def _bash_function(text, name):
     return text[start:end + 3]
 
 
-def _cheap_scrypt(test):
-    patcher = mock.patch.object(backup_crypto, "SCRYPT_LOG2_N", 10)
-    patcher.start()
-    test.addCleanup(patcher.stop)
+def _cheap_kdf(test):
+    for name, value in (("OPSLIMIT", 1), ("MEMLIMIT", 8192)):
+        patcher = mock.patch.object(backup_crypto, name, value)
+        patcher.start()
+        test.addCleanup(patcher.stop)
 
 
 def _metadata(**fields):
@@ -314,7 +315,7 @@ class TestPythonRestorePaths(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        _cheap_scrypt(self)
+        _cheap_kdf(self)
         self.data_dir = os.path.join(self.tmp, "home", ".onionpress")
         old_dir = os.path.join(self.data_dir, "shared", "vanity-keys", OLD_ADDR)
         os.makedirs(old_dir)
@@ -577,7 +578,7 @@ class TestLauncherRestorePaths(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        _cheap_scrypt(self)
+        _cheap_kdf(self)
 
     def _fresh_data_dir(self):
         data = os.path.join(self.tmp, "home", ".onionpress")

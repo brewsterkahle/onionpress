@@ -1,0 +1,221 @@
+#!/bin/bash
+# Compiled Python extensions in the py2app MenubarApp. Used by
+# build/build-dmg-simple.sh and build/rebuild-menubar.sh:
+#
+#   py2app-extensions.sh prepare <venv>       before py2app
+#   py2app-extensions.sh verify <MenubarApp>  after py2app
+#
+# prepare, step 1: rebuild PyNaCl, which encrypts backups (backup format 2),
+# from source with an optimised libsodium. PyNaCl's macOS wheels on PyPI are
+# built with CFLAGS="-arch arm64 -arch x86_64" and no -O, and libsodium's
+# configure adds an optimisation level only when CFLAGS arrives unset — the
+# trap build-dmg-simple.sh's MKP_OPT describes for mkp224o. Measured on an
+# Apple Silicon Mac, PyNaCl 1.5.0 and 1.6.2 wheels against the same version
+# built here: Argon2id at the backup's parameters 450 ms instead of 67 ms,
+# XChaCha20-Poly1305 50 instead of 470 MiB/s, so a backup or restore took
+# about twice as long as it needed to. The build runs libsodium's own test
+# suite. --no-cache-dir: pip's wheel cache is not keyed by CFLAGS, and a
+# wheel built for one architecture must never stand in for a universal one.
+#
+# prepare, step 2: under a universal2 interpreter (python.org's 3.14, the
+# release build), give every extension module in the build venv both slices,
+# arm64 and x86_64. A universal2 app is only as universal as the least
+# universal extension it bundles, and pip, running natively, installs the
+# arm64-only wheel of any package that publishes per-arch wheels and no
+# universal2 one. cffi does exactly that, and PyNaCl loads cffi's
+# _cffi_backend: without this, an Intel Mac could neither make nor restore a
+# backup. For each such extension, prepare downloads the missing slice's
+# wheel of the same version from PyPI and lipo-merges it, then fails if
+# anything single-arch is left. Under a single-arch interpreter (the uv dev
+# build) there is nothing to merge.
+#
+# verify: run the bundled interpreter the way the launcher does
+# (bundled_python in app/MacOS/onionpress) and have it derive a key and
+# encrypt and decrypt a message with PyNaCl — natively and, for a universal
+# bundle on a Mac with Rosetta, as x86_64 too — and print how fast it did. A
+# universal bundle must also carry no single-arch extension. Fails the build
+# otherwise.
+
+set -euo pipefail
+
+usage() {
+    echo "usage: $0 prepare <venv> | verify <MenubarApp.app>" >&2
+    exit 2
+}
+
+[ $# -eq 2 ] || usage
+
+# The app's minimum macOS (LSMinimumSystemVersion in app/Info.plist).
+MIN_MACOS=13.0
+
+WORK=""
+trap '[ -z "$WORK" ] || rm -rf "$WORK"' EXIT
+
+# Print every .so under $1 that lacks the arm64 or the x86_64 slice.
+single_arch_extensions() {
+    local so archs
+    while IFS= read -r -d '' so; do
+        archs=" $(lipo -archs "$so" 2>/dev/null || true) "
+        if [[ "$archs" != *" arm64 "* || "$archs" != *" x86_64 "* ]]; then
+            printf '%s\n' "$so"
+        fi
+    done < <(find "$1" -name '*.so' -print0)
+}
+
+is_universal() {
+    local archs
+    archs=" $(lipo -archs "$1" 2>/dev/null || true) "
+    [[ "$archs" == *" arm64 "* && "$archs" == *" x86_64 "* ]]
+}
+
+build_pynacl() {
+    local venv="$1" archflags="$2" version
+    version=$("$venv/bin/python3" -c 'import importlib.metadata as m; print(m.version("PyNaCl"))')
+    echo "  building PyNaCl $version from source (optimised libsodium${archflags:+, $archflags})..."
+    (
+        # ARCHFLAGS replaces the interpreter's -arch flags for the extension;
+        # an empty one would strip them, so set it only when needed.
+        [ -z "$archflags" ] || export ARCHFLAGS="$archflags"
+        CFLAGS="-O2 $archflags" MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS" \
+            LIBSODIUM_MAKE_ARGS="-j$(sysctl -n hw.ncpu)" \
+            "$venv/bin/pip" install --quiet --no-cache-dir --force-reinstall \
+            --no-deps --no-binary PyNaCl "PyNaCl==$version"
+    )
+}
+
+make_universal() {
+    local venv="$1" py="$1/bin/python3" site todo
+    site=$("$py" -c 'import sysconfig; print(sysconfig.get_paths()["platlib"])')
+    WORK=$(mktemp -d)
+
+    # "<distribution> <version> <path relative to site-packages>" for each
+    # single-arch extension, from the installed packages' RECORD files.
+    todo=$(single_arch_extensions "$site" | "$py" -c '
+import importlib.metadata as md, os, sys
+site = sys.argv[1]
+owner = {}
+for dist in md.distributions():
+    for f in dist.files or ():
+        owner[os.path.normpath(str(f))] = (dist.metadata["Name"], dist.version)
+for line in sys.stdin:
+    rel = os.path.relpath(line.rstrip("\n"), site)
+    name, version = owner.get(os.path.normpath(rel), ("?", "?"))
+    print(name, version, rel)
+' "$site")
+
+    local dist version rel so arch dir wheels slice slices
+    while read -r dist version rel; do
+        [ -n "$dist" ] || continue
+        if [ "$dist" = "?" ]; then
+            echo "ERROR: single-arch $rel belongs to no installed package" >&2
+            return 1
+        fi
+        so="$site/$rel"
+        slices=("$so")
+        for arch in arm64 x86_64; do
+            [[ " $(lipo -archs "$so") " == *" $arch "* ]] && continue
+            echo "  $rel: adding the $arch slice from $dist $version"
+            dir="$WORK/$dist-$arch"
+            mkdir -p "$dir"
+            "$venv/bin/pip" download --quiet --no-deps --only-binary=:all: \
+                --platform "macosx_11_0_$arch" -d "$dir" "$dist==$version"
+            wheels=("$dir"/*.whl)
+            "$py" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2], sys.argv[3])' \
+                "${wheels[0]}" "$rel" "$dir/x"
+            slice="$dir/$arch.so"
+            if [ "$(lipo -archs "$dir/x/$rel")" = "$arch" ]; then
+                cp "$dir/x/$rel" "$slice"
+            else
+                lipo "$dir/x/$rel" -thin "$arch" -output "$slice"
+            fi
+            slices+=("$slice")
+        done
+        lipo -create "${slices[@]}" -output "$WORK/merged.so"
+        mv "$WORK/merged.so" "$so"
+        echo "  $rel: now $(lipo -archs "$so")"
+    done <<< "$todo"
+
+    todo=$(single_arch_extensions "$site")
+    if [ -n "$todo" ]; then
+        echo "ERROR: extensions still missing a slice; the app would not run on every Mac:" >&2
+        printf '  %s\n' "$todo" >&2
+        return 1
+    fi
+    echo "  every extension in the build venv is universal2"
+}
+
+prepare() {
+    local venv="$1" platform
+    platform=$("$venv/bin/python3" -c 'import sysconfig; print(sysconfig.get_platform())')
+    case "$platform" in
+        *-universal2)
+            build_pynacl "$venv" "-arch arm64 -arch x86_64"
+            make_universal "$venv"
+            ;;
+        *)
+            build_pynacl "$venv" ""
+            echo "  $platform interpreter: extensions keep its one architecture"
+            ;;
+    esac
+}
+
+verify() {
+    local app="$1"
+    local python="$app/Contents/MacOS/python" home="$app/Contents/Resources"
+    local check bad
+    # No assert: the check must not depend on optimisation flags.
+    check='
+import platform, time, nacl
+from nacl import bindings as s
+from onionpress import backup_crypto as c
+if c._sodium is None:
+    raise SystemExit("PyNaCl does not load: %s" % c._SODIUM_IMPORT_ERROR)
+t = time.perf_counter()
+key = c._derive_key("pw", bytes(16), c.OPSLIMIT, c.MEMLIMIT)
+kdf_ms = (time.perf_counter() - t) * 1000
+push = s.crypto_secretstream_xchacha20poly1305_state()
+header = s.crypto_secretstream_xchacha20poly1305_init_push(push, key)
+message, boxes = bytes(1 << 20), []
+t = time.perf_counter()
+for _ in range(32):
+    boxes.append(s.crypto_secretstream_xchacha20poly1305_push(push, message, None, 0))
+mib_s = 32 / (time.perf_counter() - t)
+boxes.append(s.crypto_secretstream_xchacha20poly1305_push(
+    push, b"ok", None, s.crypto_secretstream_xchacha20poly1305_TAG_FINAL))
+pull = s.crypto_secretstream_xchacha20poly1305_state()
+s.crypto_secretstream_xchacha20poly1305_init_pull(pull, header, key)
+out = [s.crypto_secretstream_xchacha20poly1305_pull(pull, b, None)[0] for b in boxes]
+if out[-1] != b"ok" or any(m != message for m in out[:-1]):
+    raise SystemExit("secretstream round trip failed")
+print("  backup encryption works in the bundle (%s, PyNaCl %s): Argon2id %d ms, "
+      "XChaCha20-Poly1305 %d MiB/s" % (platform.machine(), nacl.__version__, kdf_ms, mib_s))
+if mib_s < 150:
+    # Optimised: ~470 MiB/s on Apple Silicon, ~340 as x86_64 under Rosetta;
+    # PyPI wheel (no -O): ~50.
+    print("  WARNING: libsodium looks unoptimised; was PyNaCl built by prepare?")
+'
+    # -B: write no __pycache__ into the bundle. -s and no PYTHONPATH: only
+    # what the bundle itself carries can satisfy the imports.
+    env -u PYTHONPATH PYTHONHOME="$home" "$python" -B -s -c "$check"
+
+    is_universal "$python" || return 0
+    bad=$(single_arch_extensions "$app/Contents")
+    if [ -n "$bad" ]; then
+        echo "ERROR: the universal bundle carries single-arch extensions:" >&2
+        printf '  %s\n' "$bad" >&2
+        return 1
+    fi
+    if [ "$(uname -m)" != arm64 ]; then
+        echo "  (arm64 slice not exercised: this is an Intel Mac)"
+    elif arch -x86_64 /usr/bin/true 2>/dev/null; then
+        env -u PYTHONPATH PYTHONHOME="$home" arch -x86_64 "$python" -B -s -c "$check"
+    else
+        echo "  (x86_64 slice not exercised: Rosetta is not installed)"
+    fi
+}
+
+case "$1" in
+    prepare) prepare "$2" ;;
+    verify) verify "$2" ;;
+    *) usage ;;
+esac

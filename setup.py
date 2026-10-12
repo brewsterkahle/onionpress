@@ -63,12 +63,19 @@ OPTIONS = {
         'NSLocalNetworkUsageDescription': 'OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.',
         'NSDocumentsFolderUsageDescription': 'OnionPress is migrating existing files from ~/Documents/OnionPress/ to ~/OnionPress/. After the one-time move, OnionPress no longer accesses your Documents folder.',
     },
-    'packages': ['rumps', 'objc', 'AppKit'],
+    # nacl: PyNaCl (libsodium), which encrypts backups (backup format 2,
+    # onionpress.backup_crypto). Its compiled half, nacl/_sodium.abi3.so,
+    # loads cffi's _cffi_backend extension at import time — an import
+    # py2app cannot see inside a binary — so _cffi_backend is listed in
+    # includes. build/py2app-extensions.sh makes it universal2 and checks
+    # the built bundle can encrypt.
+    'packages': ['rumps', 'objc', 'AppKit', 'nacl'],
     # Local modules that menubar.py imports at runtime. py2app cannot
     # auto-detect these because it runs menubar.py via exec(), not import.
     # All shared code now lives in the `onionpress` package — adding a new
     # submodule means one new line here and nothing in the build scripts.
     'includes': ['subprocess', 'threading', 'os', 'time', 'json',
+                 '_cffi_backend',
                  'onionpress', 'onionpress.backup', 'onionpress.backup_crypto',
                  'onionpress.key_manager',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',

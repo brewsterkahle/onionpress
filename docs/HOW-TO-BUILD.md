@@ -108,7 +108,7 @@ what you fetch is what the published build fetched. Details in
 | `.deb` | `python3` | `dpkg-deb` (used when present) |
 | Extensions | `zip`, `python3` | |
 | Icons | `sips`, `iconutil` (ship with macOS) | ImageMagick — needed only for the three menubar PNGs |
-| Tests | `python3` ≥ 3.10 | `uv` — `make test-unit` uses it to pin 3.14 |
+| Tests | `python3` ≥ 3.10 with PyNaCl ≥ 1.5.0 | `uv` — `make test-unit` uses it to pin 3.14 and to supply PyNaCl |
 | Release | `gh`, authenticated | |
 
 `build/build-dmg-simple.sh` installs `libsodium`, `autoconf` and `automake`
@@ -157,7 +157,7 @@ The `.dmg` and icons cannot be built on Linux.
 git clone https://github.com/brewsterkahle/onionpress.git
 cd onionpress
 make doctor                 # what is missing, and what each missing tool costs you
-make test-unit              # or: python3 -m unittest discover tests -p 'test_*.py'
+make test-unit              # or, in a venv with pynacl: python -m unittest discover tests -p 'test_*.py'
 make deb                    # → build/onionpress.deb          (seconds, no network)
 make extension              # → build/dist/*.xpi, *.zip       (seconds, no network)
 make images                 # → onionpress-tor:dev, onionpress-wordpress:dev

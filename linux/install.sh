@@ -171,6 +171,14 @@ if ! command -v python3 >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq python3
 fi
 
+# PyNaCl (libsodium) encrypts and decrypts backups (backup format 2). The
+# .deb depends on python3-nacl; a source install needs it just the same.
+if ! python3 -c "from nacl.bindings import crypto_secretstream_xchacha20poly1305_init_push; import nacl.pwhash.argon2id" >/dev/null 2>&1; then
+    echo "  Installing python3-nacl (backup encryption)..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq python3-nacl
+fi
+
 # Heartbeat daemon takes a systemd-logind delay inhibitor so /offline lands
 # before suspend (NetworkManager tears down WiFi before any system-sleep
 # hook can fire — only the DBus PrepareForSleep path beats it). Requires

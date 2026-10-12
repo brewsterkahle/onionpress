@@ -5,67 +5,89 @@ Backups up to format 1 were zip files encrypted with `zip -P`, the legacy
 PKWARE cipher ("ZipCrypto"). ZipCrypto has a long-published known-plaintext
 attack, which matters here: a backup holds the onion service private key
 and the WordPress database, and backups are made to leave the machine. Format
-2 keeps the same zip of the same members, unencrypted, and wraps it in
-password-based authenticated encryption built only from the Python standard
-library, so neither the py2app bundle nor the Linux system python3 needs a
-new dependency:
+2 keeps the same zip of the same members, unencrypted, and encrypts it with
+libsodium (through PyNaCl), using the library's own password hashing and
+file-encryption constructions as they are, with nothing composed here:
 
-  - key derivation: scrypt (RFC 7914) of the UTF-8 password with a fresh
-    16-byte random salt, N=2^17, r=8, p=1 (128 MiB, ~0.3 s), split into a
-    32-byte encryption key and a 32-byte MAC key;
-  - encryption: XOR with a SHAKE256 (FIPS 202) keystream, a fresh one per
-    record: SHAKE256(enc_key || nonce || stream || index). SHAKE256 with a
-    fixed-length secret key prefix is a PRF; ML-KEM (FIPS 203) uses it as
-    its PRF the same way;
-  - authentication: HMAC-SHA256 over every record (encrypt-then-MAC), with
-    the record's stream, index and last-record flag inside the MAC, so
-    reordered, dropped, truncated or spliced records all fail (the STREAM
-    construction). A record's plaintext is released only after its tag
-    verifies.
+  - key: Argon2id v1.3 (libsodium crypto_pwhash, ALG_ARGON2ID13) of the
+    UTF-8 password and a fresh 16-byte random salt, 32 bytes. New backups
+    use libsodium's INTERACTIVE preset, opslimit 2 and memlimit 64 MiB,
+    because every backup, from any platform, must restore on a Raspberry
+    Pi: 64 MiB fits beside the running site on a 1-GB device, where
+    MODERATE's 256 MiB would compete with MariaDB, and Argon2 runs there
+    without SIMD (libsodium has SIMD code for x86 only). Measured on Apple
+    Silicon with an optimised libsodium: ~70 ms for INTERACTIVE, ~450 ms
+    for MODERATE.
+  - encryption: crypto_secretstream_xchacha20poly1305, libsodium's
+    construction for encrypting a file as a sequence of messages. Every
+    message is authenticated (Poly1305) under one key and an evolving
+    nonce, so a message that was altered, dropped, reordered or taken from
+    another backup does not decrypt, and the last message carries
+    TAG_FINAL, so a file cut short is detected as well. A message's
+    plaintext is released only after its tag verifies.
 
 The backup file is still an ordinary, unencrypted .zip, so file pickers,
 browsers and Archive Utility handle it as before. It holds README.txt (what
 the file is, which OnionPress made it) and onionpress-backup.enc:
 
-  header       56 bytes
-      magic        16  b"OnionPressBackup"
-      version       1  1
-      kdf           1  1 = scrypt
-      log2(N)       1  scrypt cost
-      r             1  scrypt block size
-      p             1  scrypt parallelism
-      suite         1  1 = SHAKE256 keystream + HMAC-SHA256
-      log2(chunk)   1  record size; 20 = 1 MiB
-      reserved      1  0
-      salt         16
-      nonce        16
-  header tag   32 bytes  HMAC-SHA256(mac_key, "OPBK-header" || header)
-  records, each:
-      stream        1  0 = metadata.json, 1 = archive
-      flags         1  bit 0 = last record of its stream
-      length        4  big-endian, at most the chunk size
-      ciphertext    length bytes: plaintext XOR the first `length` bytes of
-                      SHAKE256(enc_key || nonce || stream || index)
-      tag          32  HMAC-SHA256(mac_key, "OPBK-record" || header tag ||
-                         stream || flags || length || index || ciphertext)
-  index is the record's 0-based position within its stream, as 8 bytes
-  big-endian. Stream 0 is a single record holding the backup's
-  metadata.json, so a restore dialog can check the password and show what
-  the backup holds without decrypting the archive. Stream 1 is the zip of
-  the backup's members (the same tree format 1 zipped) in chunk-size
-  records; the file ends right after its last record.
+  header       72 bytes
+      magic         16  b"OnionPressBackup"
+      version        1  1
+      kdf            1  2 = Argon2id v1.3 (crypto_pwhash_ALG_ARGON2ID13)
+      cipher         1  1 = crypto_secretstream_xchacha20poly1305
+      reserved       1  0
+      opslimit       4  Argon2id opslimit, big-endian
+      memlimit       8  Argon2id memlimit in bytes, big-endian
+      salt          16  crypto_pwhash_SALTBYTES
+      stream header 24  from crypto_secretstream_xchacha20poly1305_init_push
+  messages, each:
+      length         4  big-endian, the length of the ciphertext that
+                          follows: its plaintext plus 17 (ABYTES)
+      ciphertext        crypto_secretstream_xchacha20poly1305_push(plaintext,
+                          additional data = the 72 header bytes, tag)
 
-A header tag that does not verify means a wrong password (a 256-bit tag lets
-no wrong password through, where ZipCrypto checks a single byte); a record
-tag that does not verify after that means the file was damaged or altered.
+  key = crypto_pwhash(32, password, salt, opslimit, memlimit,
+                      crypto_pwhash_ALG_ARGON2ID13)
+
+Message 0 is the backup's metadata.json, tagged TAG_PUSH (the end of the
+metadata), so a restore dialog can check the password and show what the
+backup holds after a single message. Messages 1 to n are the zip of the
+backup's members (the same tree format 1 zipped) in 1 MiB pieces, each
+tagged TAG_MESSAGE except the last, which is tagged TAG_FINAL and may be
+empty; the file ends right after it. Readers accept messages of up to
+16 MiB of plaintext.
+
+Message 0 failing to decrypt means a wrong password (a 128-bit Poly1305 tag
+lets no wrong password through, where ZipCrypto checks a single byte); a
+damaged header or first message reads the same way, as the two cannot be
+told apart. After that, a message that does not decrypt, an unexpected tag,
+a missing final message or bytes after it mean the file was damaged or
+altered.
+
+The Argon2id parameters are read before the password can be checked, so a
+reader bounds them before running it: opslimit at most 4 and memlimit at
+most 128 MiB (twice the shipped values each), so a crafted file can neither
+exhaust a 1-GB device's memory nor stall a restore for long. A header asking
+for more is refused as coming from a newer OnionPress; one asking for less
+than libsodium's minimum is damaged.
 """
 
-import hashlib
-import hmac
 import os
 import tempfile
 import zipfile
 from contextlib import contextmanager
+
+try:
+    from nacl import bindings as _sodium
+    from nacl import exceptions as _nacl_errors
+    from nacl.pwhash import argon2id as _argon2id
+    _SODIUM_IMPORT_ERROR = None
+except ImportError as e:
+    # The Linux system python3 without python3-nacl, or a broken bundle.
+    # Everything else in OnionPress (format-1 restores included) works
+    # without it; format-2 backups say what is missing.
+    _sodium = _nacl_errors = _argon2id = None
+    _SODIUM_IMPORT_ERROR = e.with_traceback(None)
 
 
 # metadata.json's 'backup_format'. Format 1 (the ZipCrypto zip) predates the
@@ -77,41 +99,39 @@ README_NAME = 'README.txt'
 
 MAGIC = b'OnionPressBackup'
 VERSION = 1
-KDF_SCRYPT = 1
-SUITE_SHAKE256_HMAC_SHA256 = 1
-STREAM_METADATA = 0
-STREAM_ARCHIVE = 1
-FLAG_LAST = 0x01
+KDF_ARGON2ID13 = 2          # libsodium's crypto_pwhash_ALG_ARGON2ID13
+CIPHER_SECRETSTREAM = 1     # crypto_secretstream_xchacha20poly1305
 
-# What new backups are written with. A reader takes the values from the
-# header, so these can be raised later without touching old backups.
-SCRYPT_LOG2_N = 17
-SCRYPT_R = 8
-SCRYPT_P = 1
-CHUNK_LOG2 = 20
+# What new backups are written with: libsodium's Argon2id INTERACTIVE
+# preset (crypto_pwhash_argon2id_OPSLIMIT/MEMLIMIT_INTERACTIVE), and 1 MiB
+# messages. A reader takes the KDF parameters from the header.
+OPSLIMIT = 2
+MEMLIMIT = 64 * 1024 * 1024
+CHUNK_SIZE = 1 << 20
 
-# The header is only trusted once its tag verifies, and the tag can only be
-# checked after scrypt has run on the header's parameters — so bound what a
-# header may ask for (memory, time, record size) before running it.
-_MAX_SCRYPT_BYTES = 1 << 30
-_MAX_SCRYPT_P = 16
-_MIN_CHUNK_LOG2 = 10
-_MAX_CHUNK_LOG2 = 24
+# Bounds on what a header may ask for (see the docstring). The minimums are
+# libsodium's own for Argon2id.
+_OPSLIMIT_MIN = 1
+_MEMLIMIT_MIN = 8 * 1024
+_OPSLIMIT_MAX = 4
+_MEMLIMIT_MAX = 128 * 1024 * 1024
+_MESSAGE_MAX = 16 * 1024 * 1024
 
-_HEADER_LEN = 56
-_TAG_LEN = 32
-_RECORD_HEAD_LEN = 6
-_HEADER_LABEL = b'OPBK-header'
-_RECORD_LABEL = b'OPBK-record'
+_HEADER_LEN = 72
+_SALT_LEN = 16
+_KEY_LEN = 32
+_ABYTES = 17
+_LENGTH_LEN = 4
 
 WRONG_PASSWORD_MSG = "Incorrect password for this backup."
 DAMAGED_MSG = ("This backup file is damaged or was changed after it was "
                "made, so it cannot be restored.")
 NEWER_MSG = ("This backup was made by a newer version of OnionPress. "
              "Update OnionPress to restore it.")
-
-# Salt and nonce source; tests pin it to produce a known-answer vector.
-_random_bytes = os.urandom
+SODIUM_MISSING_MSG = (
+    "Encrypted backups need PyNaCl (libsodium for Python), which this "
+    "OnionPress cannot load ({error}). On Debian, Ubuntu or Raspberry Pi "
+    "OS, install it with: sudo apt install python3-nacl")
 
 
 class WrongPasswordError(ValueError):
@@ -126,96 +146,75 @@ class NewerBackupError(ValueError):
     """The backup uses a format this OnionPress does not know."""
 
 
-def _derive_keys(password, salt, log2_n, r, p):
-    """scrypt the password into (enc_key, mac_key)."""
-    if not hasattr(hashlib, 'scrypt'):
-        # hashlib.scrypt needs OpenSSL 1.1+; every Python OnionPress ships
-        # with or supports has it, but say so plainly if one doesn't.
-        raise RuntimeError("This Python has no hashlib.scrypt (OpenSSL 1.1 "
-                           "or newer is needed for encrypted backups)")
-    n = 1 << log2_n
-    # OpenSSL refuses to run unless maxmem covers its V and B arrays,
-    # 128*r*(N+2) + 128*r*p bytes; the 1 MiB is slack.
-    key = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=n, r=r, p=p,
-                         maxmem=128 * r * (n + 2 + p) + (1 << 20), dklen=64)
-    return key[:32], key[32:]
+class SodiumUnavailableError(RuntimeError):
+    """PyNaCl (libsodium) cannot be imported, so format 2 is unavailable."""
 
 
-def _crypt(enc_key, nonce, stream, index, data):
-    """XOR *data* with its record's keystream (encrypts and decrypts)."""
-    if not data:
-        return b''
-    pad = hashlib.shake_256(
-        enc_key + nonce + bytes([stream]) + index.to_bytes(8, 'big')
-    ).digest(len(data))
-    # Whole-buffer XOR through int: C speed, no per-byte Python loop.
-    return (int.from_bytes(data, 'little') ^ int.from_bytes(pad, 'little')
-            ).to_bytes(len(data), 'little')
+def _require_sodium():
+    if _sodium is None:
+        raise SodiumUnavailableError(
+            SODIUM_MISSING_MSG.format(error=_SODIUM_IMPORT_ERROR))
+    return _sodium
 
 
-def _record_tag(mac_key, header_tag, head, index, ciphertext):
-    h = hmac.new(mac_key, _RECORD_LABEL, hashlib.sha256)
-    h.update(header_tag)
-    h.update(head)
-    h.update(index.to_bytes(8, 'big'))
-    h.update(ciphertext)
-    return h.digest()
+def _derive_key(password, salt, opslimit, memlimit):
+    """Argon2id the password into the 32-byte secretstream key."""
+    return _argon2id.kdf(_KEY_LEN, password.encode('utf-8'), salt,
+                         opslimit=opslimit, memlimit=memlimit)
 
 
 class EncryptedWriter:
     """Write onionpress-backup.enc to the binary stream *dst*.
 
-    The header and the metadata record go out at construction; archive bytes
-    passed to write() go out in chunk-size records. close() writes the last
-    record, so a writer abandoned before close() (say, because `zip` failed)
-    never leaves a file that would pass as complete.
+    The header and the metadata message go out at construction; archive
+    bytes passed to write() go out in CHUNK_SIZE messages. close() writes the
+    final message, so a writer abandoned before close() (say, because `zip`
+    failed) never leaves a file that would pass as complete.
     """
 
     def __init__(self, dst, password, metadata_bytes):
+        sodium = _require_sodium()
+        if len(metadata_bytes) > CHUNK_SIZE:
+            raise ValueError("metadata.json is larger than one message")
+        opslimit, memlimit = OPSLIMIT, MEMLIMIT
+        salt = os.urandom(_SALT_LEN)
+        key = _derive_key(password, salt, opslimit, memlimit)
+        self._state = sodium.crypto_secretstream_xchacha20poly1305_state()
+        stream_header = sodium.crypto_secretstream_xchacha20poly1305_init_push(
+            self._state, key)
+        self._header = (MAGIC
+                        + bytes([VERSION, KDF_ARGON2ID13, CIPHER_SECRETSTREAM, 0])
+                        + opslimit.to_bytes(4, 'big')
+                        + memlimit.to_bytes(8, 'big')
+                        + salt + stream_header)
         self._dst = dst
-        self._chunk = 1 << CHUNK_LOG2
-        if len(metadata_bytes) > self._chunk:
-            raise ValueError("metadata.json is larger than one record")
-        salt = _random_bytes(16)
-        self._nonce = _random_bytes(16)
-        header = (MAGIC
-                  + bytes([VERSION, KDF_SCRYPT, SCRYPT_LOG2_N, SCRYPT_R,
-                           SCRYPT_P, SUITE_SHAKE256_HMAC_SHA256, CHUNK_LOG2, 0])
-                  + salt + self._nonce)
-        self._enc_key, self._mac_key = _derive_keys(
-            password, salt, SCRYPT_LOG2_N, SCRYPT_R, SCRYPT_P)
-        self._header_tag = hmac.new(
-            self._mac_key, _HEADER_LABEL + header, hashlib.sha256).digest()
-        dst.write(header + self._header_tag)
-        self._emit(STREAM_METADATA, 0, metadata_bytes, last=True)
+        dst.write(self._header)
+        self._push(metadata_bytes,
+                   sodium.crypto_secretstream_xchacha20poly1305_TAG_PUSH)
         self._buf = bytearray()
-        self._index = 0
 
     def write(self, data):
         self._buf += data
-        # Keep at least one byte back: the final record must be written by
+        # Keep at least one byte back: the final message must be written by
         # close(), even when the archive is an exact multiple of the chunk.
-        while len(self._buf) > self._chunk:
-            self._emit(STREAM_ARCHIVE, self._index,
-                       bytes(self._buf[:self._chunk]), last=False)
-            del self._buf[:self._chunk]
-            self._index += 1
+        while len(self._buf) > CHUNK_SIZE:
+            self._push(bytes(self._buf[:CHUNK_SIZE]),
+                       _sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE)
+            del self._buf[:CHUNK_SIZE]
         return len(data)
 
     def close(self):
         if self._buf is None:
             return
-        self._emit(STREAM_ARCHIVE, self._index, bytes(self._buf), last=True)
+        self._push(bytes(self._buf),
+                   _sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL)
         self._buf = None
 
-    def _emit(self, stream, index, plaintext, last):
-        ciphertext = _crypt(self._enc_key, self._nonce, stream, index, plaintext)
-        head = (bytes([stream, FLAG_LAST if last else 0])
-                + len(ciphertext).to_bytes(4, 'big'))
-        self._dst.write(head)
+    def _push(self, plaintext, tag):
+        ciphertext = _sodium.crypto_secretstream_xchacha20poly1305_push(
+            self._state, plaintext, self._header, tag)
+        self._dst.write(len(ciphertext).to_bytes(_LENGTH_LEN, 'big'))
         self._dst.write(ciphertext)
-        self._dst.write(_record_tag(self._mac_key, self._header_tag, head,
-                                    index, ciphertext))
 
 
 def _read_exact(src, n):
@@ -231,57 +230,57 @@ def _read_exact(src, n):
 
 
 class _Reader:
-    """Verify the header of an onionpress-backup.enc stream, then hand out
-    its records in order, each checked before its plaintext is returned."""
+    """Check the header of an onionpress-backup.enc stream and derive its
+    key, then hand out its messages in order, each verified by libsodium
+    before its plaintext is returned."""
 
     def __init__(self, src, password):
-        self._src = src
+        sodium = _require_sodium()
         header = _read_exact(src, _HEADER_LEN)
         if len(header) < _HEADER_LEN or header[:16] != MAGIC:
             raise DamagedBackupError(DAMAGED_MSG)
-        version, kdf, log2_n, r, p, suite, chunk_log2, reserved = header[16:24]
-        if (version != VERSION or kdf != KDF_SCRYPT
-                or suite != SUITE_SHAKE256_HMAC_SHA256 or reserved != 0):
+        if tuple(header[16:20]) != (VERSION, KDF_ARGON2ID13,
+                                    CIPHER_SECRETSTREAM, 0):
             raise NewerBackupError(NEWER_MSG)
-        if not (1 <= log2_n and 1 <= r and 1 <= p <= _MAX_SCRYPT_P
-                and 128 * r * (1 << log2_n) <= _MAX_SCRYPT_BYTES
-                and _MIN_CHUNK_LOG2 <= chunk_log2 <= _MAX_CHUNK_LOG2):
+        opslimit = int.from_bytes(header[20:24], 'big')
+        memlimit = int.from_bytes(header[24:32], 'big')
+        if opslimit < _OPSLIMIT_MIN or memlimit < _MEMLIMIT_MIN:
             raise DamagedBackupError(DAMAGED_MSG)
-        salt, self._nonce = header[24:40], header[40:56]
-        self._chunk = 1 << chunk_log2
-        tag = _read_exact(src, _TAG_LEN)
-        if len(tag) < _TAG_LEN:
-            raise DamagedBackupError(DAMAGED_MSG)
-        self._enc_key, self._mac_key = _derive_keys(password, salt, log2_n, r, p)
-        expected = hmac.new(self._mac_key, _HEADER_LABEL + header,
-                            hashlib.sha256).digest()
-        if not hmac.compare_digest(tag, expected):
-            raise WrongPasswordError(WRONG_PASSWORD_MSG)
-        self._header_tag = tag
+        if opslimit > _OPSLIMIT_MAX or memlimit > _MEMLIMIT_MAX:
+            raise NewerBackupError(NEWER_MSG)
+        salt, stream_header = header[32:48], header[48:72]
+        key = _derive_key(password, salt, opslimit, memlimit)
+        self._state = sodium.crypto_secretstream_xchacha20poly1305_state()
+        sodium.crypto_secretstream_xchacha20poly1305_init_pull(
+            self._state, stream_header, key)
+        self._src = src
+        self._header = header
+        self._first = True
 
-    def read_record(self, stream, index):
-        """Return (plaintext, is_last) of the next record, which must be
-        record *index* of *stream*."""
-        head = _read_exact(self._src, _RECORD_HEAD_LEN)
-        if len(head) < _RECORD_HEAD_LEN:
+    def read_message(self):
+        """Return (plaintext, tag) of the next message."""
+        length = _read_exact(self._src, _LENGTH_LEN)
+        if len(length) < _LENGTH_LEN:
             raise DamagedBackupError(DAMAGED_MSG)
-        length = int.from_bytes(head[2:6], 'big')
-        if head[0] != stream or head[1] & ~FLAG_LAST or length > self._chunk:
+        length = int.from_bytes(length, 'big')
+        if not _ABYTES <= length <= _MESSAGE_MAX + _ABYTES:
             raise DamagedBackupError(DAMAGED_MSG)
-        body = _read_exact(self._src, length + _TAG_LEN)
-        if len(body) < length + _TAG_LEN:
+        ciphertext = _read_exact(self._src, length)
+        if len(ciphertext) < length:
             raise DamagedBackupError(DAMAGED_MSG)
-        ciphertext, tag = body[:length], body[length:]
-        expected = _record_tag(self._mac_key, self._header_tag, head, index,
-                               ciphertext)
-        if not hmac.compare_digest(tag, expected):
-            raise DamagedBackupError(DAMAGED_MSG)
-        plaintext = _crypt(self._enc_key, self._nonce, stream, index, ciphertext)
-        return plaintext, bool(head[1] & FLAG_LAST)
+        try:
+            plaintext, tag = _sodium.crypto_secretstream_xchacha20poly1305_pull(
+                self._state, ciphertext, self._header)
+        except _nacl_errors.CryptoError:
+            if self._first:
+                raise WrongPasswordError(WRONG_PASSWORD_MSG) from None
+            raise DamagedBackupError(DAMAGED_MSG) from None
+        self._first = False
+        return plaintext, tag
 
     def read_metadata(self):
-        data, last = self.read_record(STREAM_METADATA, 0)
-        if not last:
+        data, tag = self.read_message()
+        if tag != _sodium.crypto_secretstream_xchacha20poly1305_TAG_PUSH:
             raise DamagedBackupError(DAMAGED_MSG)
         return data
 
@@ -298,7 +297,7 @@ def is_encrypted_backup(zip_path):
 
 def read_metadata(zip_path, password):
     """Check the password and return the backup's metadata.json bytes,
-    reading only the header and the metadata record."""
+    reading only the header and the first message."""
     try:
         with zipfile.ZipFile(zip_path) as zf, zf.open(PAYLOAD_NAME) as payload:
             return _Reader(payload, password).read_metadata()
@@ -309,26 +308,30 @@ def read_metadata(zip_path, password):
 def decrypt_archive(zip_path, password, out_path):
     """Decrypt the backup's archive (the inner zip) into *out_path*; return
     the metadata.json bytes. Raises WrongPasswordError before writing
-    anything, and DamagedBackupError if any record fails its check — out_path
-    then holds only a verified prefix, and the caller must discard it."""
+    anything, and DamagedBackupError if any message fails its check or the
+    final one is missing — out_path then holds only a verified prefix, and
+    the caller must discard it."""
+    sodium = _require_sodium()
+    tag_message = sodium.crypto_secretstream_xchacha20poly1305_TAG_MESSAGE
+    tag_final = sodium.crypto_secretstream_xchacha20poly1305_TAG_FINAL
     try:
         with zipfile.ZipFile(zip_path) as zf, zf.open(PAYLOAD_NAME) as payload:
             reader = _Reader(payload, password)
             metadata = reader.read_metadata()
             with open(out_path, 'wb') as out:
-                index = 0
                 while True:
-                    data, last = reader.read_record(STREAM_ARCHIVE, index)
+                    data, tag = reader.read_message()
+                    if tag not in (tag_message, tag_final):
+                        raise DamagedBackupError(DAMAGED_MSG)
                     out.write(data)
-                    if last:
+                    if tag == tag_final:
                         break
-                    index += 1
             if payload.read(1):
                 raise DamagedBackupError(DAMAGED_MSG)
             return metadata
     except zipfile.BadZipFile as e:
-        # zipfile's own CRC check on the payload member; the record tags
-        # normally catch the damage first.
+        # zipfile's own CRC check on the payload member; libsodium normally
+        # catches the damage first.
         raise DamagedBackupError(DAMAGED_MSG) from e
 
 
@@ -342,6 +345,7 @@ def create(output_path, password, metadata_bytes, readme):
     completes; if it raises, the partial file is removed and nothing
     appears at *output_path*.
     """
+    _require_sodium()
     out_dir = os.path.dirname(os.path.abspath(output_path))
     fd, tmp_path = tempfile.mkstemp(dir=out_dir, prefix='.onionpress-backup-',
                                     suffix='.partial')
@@ -382,8 +386,9 @@ def readme_text(onionpress_version):
         f"backup format {BACKUP_FORMAT} cannot read it and call it not a "
         "valid backup.\n"
         "\n"
-        f"Format: OnionPress backup format {BACKUP_FORMAT} (scrypt, SHAKE256, "
-        "HMAC-SHA256),\n"
-        "specified in src/onionpress/backup_crypto.py at\n"
+        f"Format: OnionPress backup format {BACKUP_FORMAT} (libsodium: "
+        "Argon2id,\n"
+        "XChaCha20-Poly1305 secretstream), specified in\n"
+        "src/onionpress/backup_crypto.py at\n"
         "https://github.com/brewsterkahle/onionpress\n"
     )
