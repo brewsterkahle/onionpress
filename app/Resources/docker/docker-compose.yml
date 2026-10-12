@@ -1,6 +1,6 @@
 services:
   tor:
-    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43}
+    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9}
     container_name: onionpress-tor
     logging:
       driver: json-file
@@ -33,7 +33,7 @@ services:
       - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_SOCKS_PORT:-9050}:9050"
 
   wordpress:
-    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:b6724d1ac4f6c93595ae231a7d222ea7de29f697287fbde79cf779cb5c060290}
+    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:0e55cfbe0712a95cb50573f4576be298a14fe82a0e190bcee6d2ce6347332eee}
     container_name: onionpress-wordpress
     logging:
       driver: json-file
@@ -132,7 +132,7 @@ services:
     restart: unless-stopped
 
   onionheaven:
-    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43}}
+    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9}}
     container_name: onionheaven
     logging:
       driver: json-file

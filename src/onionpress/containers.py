@@ -69,7 +69,7 @@ ALL_SERVICES = ["wordpress", "db", "tor", "onionheaven", "autoheal"]
 # menubar path and the compose path always agree: the service-specific
 # ONIONHEAVEN_IMAGE wins, then the stack-wide ONIONPRESS_TOR_IMAGE (what
 # build/build-images.sh exports for a locally built stack), then the pin.
-ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43"
+ONIONHEAVEN_IMAGE_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9"
 
 
 def onionheaven_image(config_file: str | None = None) -> str:

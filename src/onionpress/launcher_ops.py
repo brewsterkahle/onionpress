@@ -30,7 +30,7 @@ from typing import Optional
 # same image the rest of a locally built stack uses.
 DEFAULT_TOR_IMAGE = os.environ.get(
     "ONIONPRESS_TOR_IMAGE",
-    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:46a9da851f5a39ba9efcb9c139956d7339c81fe85f8fa32376983046e4728f43",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9",
 )
 
 
