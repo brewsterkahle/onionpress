@@ -353,6 +353,14 @@ def check_php_proxy(log_func=None):
         return False
 
 
+def _script_json(value):
+    """*value* as a JavaScript literal safe inside an inline <script>:
+    json.dumps leaves '<', '>' and '&' alone, so a "</script>" in the value
+    would end the script element."""
+    return (json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e')
+            .replace('&', '\\u0026'))
+
+
 class OnionProxyHandler(BaseHTTPRequestHandler):
     """HTTP forward proxy: .onion via Tor, clearnet direct."""
 
@@ -719,7 +727,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         chars = string.ascii_letters + string.digits + '!@#$%^&*'
         generated_password = ''.join(secrets.choice(chars) for _ in range(24))
 
-        html = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', generated_password)
+        # The alphabet includes '&': escape it for the value="..." attribute.
+        import html as html_mod
+        html = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}',
+                                       html_mod.escape(generated_password))
         html = html.replace('{{ERROR_BANNER}}', '')
         body = html.encode('utf-8')
         self.send_response(200)
@@ -738,24 +749,25 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             + '</div>'
         )
 
-        # Preserve previously entered values
-        admin_password = params.get('admin_password', [''])[0]
+        # Preserve previously entered values. The password goes into a
+        # value="..." attribute: escape it.
+        admin_password = html_mod.escape(params.get('admin_password', [''])[0])
 
         page = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', admin_password)
         page = page.replace('{{ERROR_BANNER}}', banner)
 
         # Also preserve other field values via JavaScript
-        blog_title = html_mod.escape(params.get('blog_title', ['My OnionPress Site'])[0])
-        user_name = html_mod.escape(params.get('user_name', ['admin'])[0])
+        blog_title = params.get('blog_title', ['My OnionPress Site'])[0]
+        user_name = params.get('user_name', ['admin'])[0]
         theme = params.get('theme_choice', ['blog'])[0]
 
         # Inject script to restore form values
         restore_script = (
             '<script>'
-            f'document.getElementById("blog_title").value={json.dumps(blog_title)};'
-            f'document.getElementById("user_name").value={json.dumps(user_name)};'
+            f'document.getElementById("blog_title").value={_script_json(blog_title)};'
+            f'document.getElementById("user_name").value={_script_json(user_name)};'
             f'var radios=document.querySelectorAll("input[name=theme_choice]");'
-            f'radios.forEach(function(r){{r.checked=r.value==={json.dumps(theme)}}});'
+            f'radios.forEach(function(r){{r.checked=r.value==={_script_json(theme)}}});'
             '</script>'
         )
         page = page.replace('</body>', restore_script + '</body>')
@@ -810,7 +822,8 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         if len(title) > 200 or len(username) > 60 or len(email) > 254:
             errors.append("One or more fields are too long.")
         if errors:
-            msg = '<br>'.join(errors)
+            import html as html_mod
+            msg = '<br>'.join(html_mod.escape(e) for e in errors)
             body = f'<html><body><h1>Error</h1><p>{msg}</p><p><a href="/setup">Go back</a></p></body></html>'.encode()
             self.send_response(400)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -980,7 +993,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             else:
                 if self.server.log_func:
                     self.server.log_func(f"wp core multisite-install failed: {result.stderr}")
-                error_msg = result.stderr.strip() or "Unknown error"
+                # wp-cli's stderr quotes the submitted title, user name and
+                # email back: escape it, or the form is a script injection.
+                import html as html_mod
+                error_msg = html_mod.escape(result.stderr.strip() or "Unknown error")
                 body = f'<html><body><h1>Setup Failed</h1><p>{error_msg}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
                 self.send_response(500)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
