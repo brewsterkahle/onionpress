@@ -10,15 +10,46 @@ fi
 PLUGIN_SLUG="$1"
 DEST_DIR="$2"
 
+# The plugin releases OnionPress installs: "<version> <sha256 of its zip>".
+# The zip is checked against this before anything is unpacked, and a slug
+# with no pin, or a zip that does not match, installs nothing. HTTPS
+# protects the download in transit; the pin is what ties it to the release
+# that was looked at, so a changed zip (a plugin account taken over, a
+# release nobody read) never reaches the web root, where its PHP runs.
+#
+# To move a plugin to a new release, read its changelog, then run
+# build/pin-wp-plugin.sh <slug> <version> and paste the line it prints
+# here (docs/BUILDING.md, "Bumping a pinned input").
+plugin_pin() {
+    case "$1" in
+        cache-enabler)
+            echo "1.8.17 " ;;
+        internet-archive-wayback-machine-link-fixer)
+            echo "1.4.2 " ;;
+        *) return 1 ;;
+    esac
+}
+
 if [ ! -d "$DEST_DIR" ]; then
     echo "Error: Destination directory does not exist: $DEST_DIR"
     exit 1
 fi
 
-PLUGIN_URL="https://downloads.wordpress.org/plugin/${PLUGIN_SLUG}.zip"
+if ! PIN=$(plugin_pin "$PLUGIN_SLUG"); then
+    echo "Error: ${PLUGIN_SLUG} is not a plugin OnionPress installs (no pinned release)"
+    exit 1
+fi
+PIN_VERSION=${PIN%% *}
+PIN_SHA256=${PIN#* }
+if ! [[ "$PIN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Error: no SHA256 pinned for ${PLUGIN_SLUG} ${PIN_VERSION} — refusing to install it unchecked (build/pin-wp-plugin.sh)"
+    exit 1
+fi
+
+PLUGIN_URL="https://downloads.wordpress.org/plugin/${PLUGIN_SLUG}.${PIN_VERSION}.zip"
 ZIP_PATH="${DEST_DIR}/${PLUGIN_SLUG}.zip"
 
-echo "Downloading ${PLUGIN_SLUG} from WordPress.org over Tor..."
+echo "Downloading ${PLUGIN_SLUG} ${PIN_VERSION} from WordPress.org over Tor..."
 echo "URL: ${PLUGIN_URL}"
 
 # The download runs INSIDE the WordPress container, through Tor's SOCKS proxy.
@@ -91,9 +122,19 @@ docker exec "$CONTAINER" rm -rf "$REMOTE_DIR" 2>/dev/null
 SIZE=$(stat -f%z "$ZIP_PATH" 2>/dev/null || stat -c%s "$ZIP_PATH" 2>/dev/null)
 echo "Downloaded ${SIZE} bytes"
 
-# Calculate SHA256 checksum
-SHA256=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')
+# Check the zip against the pinned release before unpacking anything.
+if command -v shasum >/dev/null 2>&1; then
+    SHA256=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')
+else
+    SHA256=$(sha256sum "$ZIP_PATH" | awk '{print $1}')
+fi
 echo "SHA256: ${SHA256}"
+if [ "$SHA256" != "$PIN_SHA256" ]; then
+    echo "Error: ${PLUGIN_SLUG} ${PIN_VERSION} does not match its pinned SHA256 (expected ${PIN_SHA256}) — not installed"
+    rm -f "$ZIP_PATH"
+    exit 1
+fi
+echo "Verified against the pinned SHA256 for ${PLUGIN_SLUG} ${PIN_VERSION}"
 
 # Extract plugin
 echo "Extracting to ${DEST_DIR}..."

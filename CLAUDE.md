@@ -570,6 +570,10 @@
   or nothing is changed.
 - App and WordPress image ship together: an old image's scripts still run
   wp-cli as root, an old app's calls too.
+- install_plugin.sh installs pinned releases only (`plugin_pin`: version +
+  the zip's SHA256; versioned URL, still over Tor); no pin, no install.
+  `build/pin-wp-plugin.sh <slug> <version>` prints a pin.
+  `tests/test_plugin_pins.py`.
 
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`

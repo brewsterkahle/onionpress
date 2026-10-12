@@ -655,6 +655,25 @@ Two coupling rules:
   actually landed in the generated `GNUmakefile`, so a change upstream fails
   the build loudly instead of quietly shipping an unoptimised miner.
 
+#### WordPress.org plugins (Cache Enabler, IA Link Fixer)
+
+`app/Resources/scripts/install_plugin.sh` installs one release of each
+plugin it knows (`plugin_pin()`: version and the SHA256 of that release's
+zip) and unpacks nothing whose zip does not match. A slug with no pin, or a
+pin with no SHA256, installs nothing. To move a plugin to a new release,
+read its changelog, then:
+
+```bash
+build/pin-wp-plugin.sh cache-enabler 1.8.17
+```
+
+and paste the line it prints into `plugin_pin()`. The script fetches the
+same versioned URL the launcher fetches over Tor
+(`downloads.wordpress.org/plugin/<slug>.<version>.zip`). WordPress.org
+builds those zips itself; if it ever rebuilds one, the install refuses it
+until the pin is renewed (`tests/test_plugin_pins.py` checks the pins'
+form and runs the check).
+
 ---
 
 ## Running the stack you just built
