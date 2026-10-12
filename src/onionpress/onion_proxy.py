@@ -32,7 +32,10 @@ from urllib.parse import urlparse, parse_qs
 PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
 PHP_PROXY_PORT = int(os.environ.get("ONIONPRESS_WP_PORT", 8080))
 PHP_PROXY_PATH = "/__op_proxy.php"
-ONION_PATTERN = re.compile(r'^[a-z0-9.-]+\.onion$')
+# A v3 onion host, optionally under subdomain labels (Tor serves
+# www.<address>.onion as <address>.onion). Matched with fullmatch against a
+# lowercased host without a trailing dot (see _onion_host).
+ONION_HOST_RE = re.compile(r'(?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion')
 # Match https .onion URLs in HTML for downgrading to http
 HTTPS_ONION_RE = re.compile(
     r'https://((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)',
@@ -361,6 +364,22 @@ def _script_json(value):
             .replace('&', '\\u0026'))
 
 
+def _onion_host(host):
+    """Classify a request's target host: (host, is_onion, ok).
+
+    *host* comes back lowercased and without a trailing dot, which names the
+    same host: "<address>.onion." must not pass for a clearnet name and go
+    out through the system resolver. Everything in the .onion TLD is onion
+    traffic; it is *ok* only as a v3 address (ONION_HOST_RE), and anything
+    else there is refused rather than fetched, neither through Tor (a
+    "/proxy/evil.example?.onion" target) nor directly.
+    """
+    host = (host or "").lower().rstrip(".")
+    is_onion = host == "onion" or host.endswith(".onion")
+    ok = not is_onion or ONION_HOST_RE.fullmatch(host) is not None
+    return host, is_onion, ok
+
+
 class OnionProxyHandler(BaseHTTPRequestHandler):
     """HTTP forward proxy: .onion via Tor, clearnet direct."""
 
@@ -406,7 +425,8 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             return
 
         # .onion HTTPS should be downgraded to HTTP by the extension
-        if host.endswith('.onion'):
+        host, is_onion, _ = _onion_host(host)
+        if is_onion:
             self.send_error(502, "Use http:// for .onion sites")
             return
 
@@ -476,7 +496,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Use /proxy/{host}/{path} or /status")
             return
 
-        is_onion = target_host.endswith('.onion')
+        target_host, is_onion, onion_ok = _onion_host(target_host)
+        if not onion_ok:
+            self.send_error(400, "Not a valid v3 .onion address")
+            return
 
         # For /proxy/ format, only allow .onion
         if not is_forward_proxy and not is_onion:

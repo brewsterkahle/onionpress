@@ -30,14 +30,27 @@ if (!$url) {
     exit('Missing X-OnionPress-URL header');
 }
 
-// Only allow .onion URLs
-if (!preg_match('/\.onion(\/|$|:)/', $url)) {
+// Only an http(s) URL whose host is a v3 .onion address (under subdomain
+// labels too, as onion_proxy.py's ONION_HOST_RE). This was a ".onion"
+// followed by "/", ":" or the end anywhere in the URL, which any URL that
+// merely mentioned one passed, http://example.com/?.onion/ and
+// file:///...#.onion/ (not a network request, so no proxy) alike.
+$parts  = parse_url($url);
+$scheme = is_array($parts) && isset($parts['scheme']) ? strtolower($parts['scheme']) : '';
+$host   = is_array($parts) && isset($parts['host']) ? rtrim(strtolower($parts['host']), '.') : '';
+if (!in_array($scheme, ['http', 'https'], true)
+    || isset($parts['user']) || isset($parts['pass'])
+    || !preg_match('/^(?:[a-z0-9-]+\.)*[a-z2-7]{56}\.onion$/D', $host)) {
     http_response_code(400);
     exit('Only .onion URLs allowed');
 }
 
 $ch = curl_init($url);
 curl_setopt_array($ch, [
+    // curl parses the URL again; whatever it makes of it, and of every
+    // redirect, it may only speak HTTP(S), always through Tor.
+    CURLOPT_PROTOCOLS       => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+    CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
     CURLOPT_PROXY           => 'socks5h://onionpress-tor:9050',
     CURLOPT_RETURNTRANSFER  => true,
     CURLOPT_HEADER          => true,

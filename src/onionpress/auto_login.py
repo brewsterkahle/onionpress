@@ -29,6 +29,8 @@ import time
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
+from . import key_manager
+
 # The mu-plugin honours a token this many seconds after it is minted. MINT_PHP
 # spells the number out (it is fixed code); a test keeps the two equal.
 TOKEN_TTL = 120
@@ -57,14 +59,16 @@ echo "Success: login token stored\n";
 
 def scope_for(url: str) -> Optional[str]:
     """The scope a token for *url* gets: "local" for a localhost URL, "onion"
-    for a .onion one, None for anything else (no token is minted)."""
+    for one whose host is a v3 onion address, None for anything else (no
+    token is minted). The mu-plugin redeems an "onion" token only on such a
+    host, so a looser test here would only mint tokens no one can use."""
     try:
         host = (urlsplit(url).hostname or "").lower()
     except ValueError:
         return None
     if host in LOCAL_HOSTS:
         return "local"
-    if host.endswith(".onion"):
+    if key_manager.is_valid_onion_address(host):
         return "onion"
     return None
 
