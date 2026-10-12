@@ -327,7 +327,7 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        mv._cheap_scrypt(self)
+        mv._cheap_kdf(self)
         # Reuse the metadata tests' sandboxed install, docker ban and
         # key-write ban; its assert_untouched checks the install.
         self.install = mv.TestPythonRestorePaths("test_format_1_backups_are_checked_too")
@@ -427,7 +427,7 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        mv._cheap_scrypt(self)
+        mv._cheap_kdf(self)
         self.staging = mv._make_staging(self.tmp, mv._metadata())
         uploads = os.path.join(self.staging, "wp-content", "uploads", "été")
         os.makedirs(uploads)
