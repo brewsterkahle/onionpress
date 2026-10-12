@@ -439,13 +439,16 @@ def _put_in_place(dest, staging, stamp):
     """Move the staged data into the volume root; keep what was there."""
     aside = _unique(os.path.join(dest, PRE_MIGRATION_PREFIX + stamp))
 
+    def keep(path, name):
+        os.makedirs(aside, mode=0o700, exist_ok=True)
+        os.rename(path, _unique(os.path.join(aside, name)))
+
     def set_aside(name):
         path = os.path.join(dest, name)
         if _is_empty(path):
             _remove_path(path)
             return
-        os.makedirs(aside, mode=0o700, exist_ok=True)
-        os.rename(path, os.path.join(aside, name))
+        keep(path, name)
         log(f"kept {name}, which was already on the volume, in "
             f"{os.path.basename(aside)}/")
 
@@ -453,18 +456,24 @@ def _put_in_place(dest, staging, stamp):
         if not _ours(name):
             set_aside(name)
     for name in sorted(os.listdir(staging)):
+        source = os.path.join(staging, name)
+        if _ours(name):
+            # A name this script uses for itself: kept, never in the root.
+            keep(source, name)
+            continue
         target = os.path.join(dest, name)
         for _ in range(3):
+            # Something may have created it meanwhile (a status query's
+            # sqlite3, a restore): keep that too, never replace it.
+            if os.path.lexists(target):
+                set_aside(name)
             try:
-                os.rename(os.path.join(staging, name), target)
+                os.rename(source, target)
                 break
             except OSError as e:
-                # Something created it meanwhile (a status query's sqlite3,
-                # a restore's mkdir): keep that too, then try again.
                 if e.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.EISDIR,
                                    errno.ENOTDIR):
                     raise
-                set_aside(name)
         else:
             raise RuntimeError(f"could not put {name} in place")
     os.rmdir(staging)

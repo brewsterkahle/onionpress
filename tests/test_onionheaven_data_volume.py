@@ -616,6 +616,21 @@ class TestMigration(MigrationCase):
         self.assertFalse(os.path.exists(os.path.join(self.dest, "empty.db")))
         self.assertEqual(_rows(os.path.join(self.dest, "registry.db")), 5)
 
+    def test_old_entries_cannot_take_this_scripts_names(self):
+        self.make_registry()
+        self.add_registrant()
+        self.write(".migrated-from-persistent-data", '{"forged": true}')
+        self.write(".migrate.lock", "forged")
+        rc, err = self.run_script()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.marker()["key_dirs"], 1)
+        with open(os.path.join(self.dest, ".migrate.lock")) as f:
+            self.assertEqual(f.read(), "")
+        aside = [n for n in os.listdir(self.dest) if n.startswith(".pre-migration-")]
+        self.assertEqual(len(aside), 1)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.dest, aside[0]))),
+                         [".migrate.lock", ".migrated-from-persistent-data"])
+
     def test_symlinks_are_never_followed(self):
         self.add_registrant()
         self.write("registry.db", "OLD")
