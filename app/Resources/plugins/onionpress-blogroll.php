@@ -99,6 +99,162 @@ function onionpress_follow_site_url( $key ) {
 }
 
 /**
+ * Whether the Following feature may send a request to $host.
+ *
+ * Every site administrator has a Following list (it is per-site), and what
+ * they type is fetched from inside the WordPress container.
+ * onionpress-tor-proxy sends each request through Tor except to the hosts
+ * onionpress_is_local_host() names (the containers, localhost), which it
+ * connects to directly: following http://onionpress-tor:8083/... would have
+ * WordPress call the hub API, the healthcheck service or MariaDB's port and
+ * report what came back. So a follow names a .onion or a public DNS name,
+ * both of which Tor resolves at its end:
+ *
+ *   - at least two labels of letters, digits and inner hyphens, the last
+ *     one alphabetic (or an xn-- IDN TLD). That refuses every IP literal,
+ *     dotted, IPv6 or in the integer, octal and hex spellings curl and
+ *     inet_aton() accept (none ends in an alphabetic label), every single-
+ *     label name (all the container names), trailing dots and userinfo;
+ *   - not localhost or another name reserved for a local network;
+ *   - not a host onionpress_is_local_host() would connect to directly, and
+ *     nothing at all when that function (the Tor routing) is not loaded.
+ *
+ * There is no DNS lookup here: it would send the name outside Tor.
+ */
+function onionpress_follow_host_allowed( $host ) {
+    if ( ! is_string( $host ) || '' === $host || strlen( $host ) > 253 ) {
+        return false;
+    }
+    $host = strtolower( $host );
+    if ( ! preg_match( '/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/D', $host ) ) {
+        return false;
+    }
+    if ( preg_match( '/(?:^|\.)(?:localhost|localdomain|local|internal|home\.arpa)$/D', $host ) ) {
+        return false;
+    }
+    return function_exists( 'onionpress_is_local_host' ) && ! onionpress_is_local_host( $host );
+}
+
+/**
+ * Whether the Following feature may request $url: http(s), no userinfo, no
+ * whitespace, control characters or backslashes (URL parsers disagree about
+ * those), and a host onionpress_follow_host_allowed() accepts. The host is
+ * read with the same parse_url() onionpress-tor-proxy uses to choose between
+ * Tor and a direct connection.
+ */
+function onionpress_follow_url_allowed( $url ) {
+    if ( ! is_string( $url ) || strlen( $url ) > 2048 ) {
+        return false;
+    }
+    if ( preg_match( '/[\x00-\x20\x7f\\\\]/', $url ) || ! preg_match( '#^https?://#i', $url ) ) {
+        return false;
+    }
+    $parts = wp_parse_url( $url );
+    if ( ! is_array( $parts ) || empty( $parts['host'] )
+         || isset( $parts['user'] ) || isset( $parts['pass'] ) ) {
+        return false;
+    }
+    return onionpress_follow_host_allowed( $parts['host'] );
+}
+
+/** What a follow request onionpress_follow_url_allowed() refuses returns. */
+function onionpress_follow_refused() {
+    return new WP_Error( 'onionpress_follow_refused',
+        'OnionPress: a follow may request only .onion and public addresses' );
+}
+
+/**
+ * Run $fn (a follow probe or feed fetch) with every HTTP request it makes,
+ * and every redirect those follow, held to onionpress_follow_url_allowed().
+ *
+ * The first URL is checked by the caller; this covers the rest. fetch_feed()
+ * can request URLs it was never given (SimplePie follows a page's
+ * <link rel="alternate"> to find the feed), and a redirect is a new URL
+ * the caller never saw. onionpress-tor-proxy picks Tor or direct from a
+ * request's first URL and keeps it for every hop, so today a redirect from
+ * an allowed host stays on Tor; checking each hop as well does not depend on
+ * that.
+ */
+function onionpress_follow_guarded( $fn ) {
+    static $depth = 0;
+    if ( 0 === $depth++ ) {
+        add_filter( 'pre_http_request', 'onionpress_follow_guard_request', PHP_INT_MAX, 3 );
+        add_action( 'requests-requests.before_request', 'onionpress_follow_guard_hops', 10, 5 );
+    }
+    try {
+        return call_user_func( $fn );
+    } finally {
+        if ( 0 === --$depth ) {
+            remove_filter( 'pre_http_request', 'onionpress_follow_guard_request', PHP_INT_MAX );
+            remove_action( 'requests-requests.before_request', 'onionpress_follow_guard_hops', 10 );
+        }
+    }
+}
+
+/** pre_http_request inside onionpress_follow_guarded(): refuse what a follow may not request. */
+function onionpress_follow_guard_request( $pre, $args, $url ) {
+    if ( onionpress_follow_url_allowed( $url ) ) {
+        return $pre;
+    }
+    return onionpress_follow_refused();
+}
+
+/**
+ * requests.before_request inside onionpress_follow_guarded(): check each
+ * redirect on the request's own Requests hooks, where WordPress checks its
+ * own (WP_Http::validate_redirects) and a refusal becomes a WP_Error.
+ */
+function onionpress_follow_guard_hops( $url, $headers = array(), $data = array(), $type = '', $options = array() ) {
+    if ( isset( $options['hooks'] ) && is_object( $options['hooks'] )
+         && method_exists( $options['hooks'], 'register' ) ) {
+        $options['hooks']->register( 'requests.before_redirect', 'onionpress_follow_guard_redirect' );
+    }
+}
+
+/** Requests' before_redirect hook: refuse a redirect a follow may not take. */
+function onionpress_follow_guard_redirect( $location ) {
+    if ( onionpress_follow_url_allowed( $location ) ) {
+        return;
+    }
+    $exception = class_exists( 'WpOrg\Requests\Exception' ) ? 'WpOrg\Requests\Exception' : 'Requests_Exception';
+    throw new $exception( 'OnionPress: a follow may be redirected only to .onion and public addresses',
+        'onionpress_follow_refused' );
+}
+
+/**
+ * wp_remote_get()/wp_remote_head() for the Following feature: refuses a URL
+ * onionpress_follow_url_allowed() does not accept, and runs the request
+ * under onionpress_follow_guarded().
+ */
+function onionpress_follow_remote_get( $url, $args = array() ) {
+    if ( ! onionpress_follow_url_allowed( $url ) ) {
+        return onionpress_follow_refused();
+    }
+    return onionpress_follow_guarded( function () use ( $url, $args ) {
+        return wp_remote_get( $url, $args );
+    } );
+}
+
+function onionpress_follow_remote_head( $url, $args = array() ) {
+    if ( ! onionpress_follow_url_allowed( $url ) ) {
+        return onionpress_follow_refused();
+    }
+    return onionpress_follow_guarded( function () use ( $url, $args ) {
+        return wp_remote_head( $url, $args );
+    } );
+}
+
+/** fetch_feed() for the Following feature, held to the same rules. */
+function onionpress_follow_fetch_feed( $url ) {
+    if ( ! onionpress_follow_url_allowed( $url ) ) {
+        return onionpress_follow_refused();
+    }
+    return onionpress_follow_guarded( function () use ( $url ) {
+        return fetch_feed( $url );
+    } );
+}
+
+/**
  * One-time, per-blog migration from bare-.onion follow keys to the canonical
  * "<addr>.onion/<onionname>" form. Folds the old side `_names` map (and the
  * well-known default names) into the key, then re-keys all related options
@@ -157,12 +313,23 @@ add_action( 'init', 'onionpress_follow_migrate' );
  * For OnionPress multisite: http://<addr>/<onionname>/feed/
  * Fallback:                 http://<addr>/feed/
  *
+ * Only a v3 .onion address is probed. A bare onionname waiting for its
+ * OnionHome re-lookup, or any other key that is not an address, used to
+ * become http://<key>/feed/ — with a key like "onionpress-tor:8083/api"
+ * that was a request into the container network.
+ *
  * @param string $addr      56-char .onion address
  * @param string $onionname Optional onionname (path prefix)
  * @param int    $timeout   Per-candidate HEAD timeout in seconds.
  * @return string Feed URL or empty string on failure
  */
 function onionpress_discover_feed_url( $addr, $onionname = '', $timeout = 15 ) {
+    $addr      = strtolower( (string) $addr );
+    $onionname = strtolower( (string) $onionname );
+    if ( ! preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr )
+         || ( '' !== $onionname && ! preg_match( '/^[a-z0-9][a-z0-9._-]*$/D', $onionname ) ) ) {
+        return '';
+    }
     $candidates = array();
     if ( $onionname ) {
         $candidates[] = 'http://' . $addr . '/' . $onionname . '/feed/';
@@ -170,7 +337,7 @@ function onionpress_discover_feed_url( $addr, $onionname = '', $timeout = 15 ) {
     $candidates[] = 'http://' . $addr . '/feed/';
 
     foreach ( $candidates as $url ) {
-        $response = wp_remote_head( $url, array( 'timeout' => $timeout ) );
+        $response = onionpress_follow_remote_head( $url, array( 'timeout' => $timeout ) );
         if ( ! is_wp_error( $response ) ) {
             $code = wp_remote_retrieve_response_code( $response );
             if ( $code >= 200 && $code < 400 ) {
@@ -221,6 +388,22 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
             break;
         }
 
+        // A URL follow onionpress_follow_url_allowed() refuses (stored before
+        // it existed) is never fetched. Its feed URL goes, and so does the
+        // title an earlier fetch of it stored, which the sidebar shows.
+        $p = onionpress_follow_parse( $addr );
+        if ( 'url' === $p['type'] && ! onionpress_follow_url_allowed( $p['url'] ) ) {
+            if ( isset( $feeds_map[ $addr ] ) ) {
+                unset( $feeds_map[ $addr ] );
+                $feeds_changed = true;
+            }
+            if ( isset( $titles_map[ $addr ] ) ) {
+                unset( $titles_map[ $addr ] );
+                $titles_changed = true;
+            }
+            continue;
+        }
+
         // Back off on repeated failures: skip if not enough time has passed.
         // 0 failures = always try, 1 = 1h, 2 = 2h, 3 = 4h, ... max 24h
         $st = isset( $stats_map[ $addr ] ) ? $stats_map[ $addr ] : array();
@@ -239,7 +422,6 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
         // Auto-discover feed URL if we don't have one yet.
         if ( ! $feed_url ) {
             // $addr is the follow key: a direct URL, or <onion>/<onionname>.
-            $p = onionpress_follow_parse( $addr );
             if ( 'url' === $p['type'] ) {
                 $feed_url = $p['url'];
             } else {
@@ -258,7 +440,9 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
             }
         }
 
-        $feed = fetch_feed( $feed_url );
+        // Held to the same rules: the stored feed URL, what SimplePie
+        // discovers from it, and every redirect.
+        $feed = onionpress_follow_fetch_feed( $feed_url );
         if ( is_wp_error( $feed ) ) {
             $st['fail_count'] = $fail_count + 1;
             if ( ! $last_success ) { $st['last_success'] = $now; }

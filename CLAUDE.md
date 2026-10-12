@@ -233,6 +233,20 @@
   `<DirectoryMatch>`), and the importer page says what could not be moved.
   `tests/test_blog_snapshots_private.py`.
 
+## Follow Requests Stay Off the Container Network
+- Every site administrator types follow targets, and onionpress-tor-proxy
+  connects to `onionpress_is_local_host()` names (containers, localhost)
+  directly instead of through Tor. So every Following request (probe,
+  discovery, `fetch_feed`) goes through `onionpress_follow_remote_get/
+  _head/_fetch_feed` in onionpress-blogroll.php: the URL must pass
+  `onionpress_follow_url_allowed()` (http(s), no userinfo/whitespace/
+  backslash, host = 2+ labels with an alphabetic TLD, not localhost or a
+  local-network name, not local per the tor proxy; no DNS lookup), and
+  `onionpress_follow_guarded()` holds every further request and redirect to
+  the same rule. Discovery runs only for a v3 `.onion`.
+- Never call `wp_remote_*`/`fetch_feed` directly for a follow;
+  `tests/test_follow_requests.py` fails if one appears.
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

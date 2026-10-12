@@ -399,7 +399,13 @@ add_action( 'admin_notices', function () {
     delete_transient( $key );
     $label = isset( $probe['label'] ) ? $probe['label'] : 'follow';
     $verb  = isset( $probe['verb'] ) ? $probe['verb'] : 'Added';
-    if ( ! empty( $probe['error'] ) ) {
+    if ( ! empty( $probe['refused'] ) ) {
+        echo '<div class="notice notice-error is-dismissible"><p>'
+            . 'Not followed: <strong>' . esc_html( $label ) . '</strong> &mdash; '
+            . 'follow a .onion address, an onionname, or a feed URL on a .onion or public web address. '
+            . 'Addresses inside this computer or its local network cannot be followed.'
+            . '</p></div>';
+    } elseif ( ! empty( $probe['error'] ) ) {
         echo '<div class="notice notice-warning is-dismissible"><p>'
             . 'Could not resolve <strong>' . esc_html( $label ) . '</strong> &mdash; '
             . 'that onionname is not registered with OnionHome. '
@@ -498,7 +504,7 @@ add_action( 'admin_init', function () {
             if ( function_exists( 'onionpress_discover_feed_url' ) ) {
                 $probe_url = onionpress_discover_feed_url( $addr, $name, 8 );
                 if ( $probe_url ) {
-                    $resp = wp_remote_get( $probe_url, array(
+                    $resp = onionpress_follow_remote_get( $probe_url, array(
                         'timeout' => 8,
                         'headers' => array( 'Accept' => 'application/rss+xml, application/atom+xml, application/xml, text/xml' ),
                     ) );
@@ -548,20 +554,34 @@ add_action( 'admin_init', function () {
             }
         } elseif ( preg_match( '#^https?://#i', $raw ) ) {
             // Direct feed or clearnet URL — store the URL itself as the key.
-            $addr = $raw;
-            $feed_url = $raw;
+            // Its host must be a .onion or a public name: WordPress fetches
+            // it, and onionpress-tor-proxy connects to the container names
+            // and localhost directly instead of through Tor.
+            $addr = onionpress_follow_url_allowed( $raw ) ? $raw : '';
+            $feed_url = $addr;
         } elseif ( function_exists( 'onionpress_directory_lookup' ) ) {
             // Treat as onionname — resolve to .onion via local registry
             $raw_lower = strtolower( $raw );
             $info = onionpress_directory_lookup( $raw_lower );
-            $addr = $info ? ( $info['onionaddress'] ?? '' ) : '';
-            if ( $addr ) {
+            $addr = $info ? strtolower( (string) ( $info['onionaddress'] ?? '' ) ) : '';
+            if ( preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr ) ) {
                 $resolved_name = $raw_lower;
             } else {
                 $addr = $raw_lower;
             }
         } else {
             $addr = strtolower( $raw );
+        }
+        // Anything else is kept only as a bare onionname, for a later
+        // OnionHome re-lookup; it is never fetched as it stands.
+        if ( $addr && ! $feed_url && '' === $resolved_name
+             && ! preg_match( '/^[a-z2-7]{56}\.onion$/D', $addr )
+             && ! preg_match( '/^[a-z0-9][a-z0-9._-]*$/D', $addr ) ) {
+            $addr = '';
+        }
+        if ( ! $addr && '' !== $raw ) {
+            set_transient( 'onionpress_follow_probe_' . get_current_user_id(),
+                array( 'label' => $raw, 'refused' => true ), 60 );
         }
         if ( $addr ) {
             // Canonical follow key: the URL itself for feed follows, otherwise
@@ -608,7 +628,7 @@ add_action( 'admin_init', function () {
                 $probe_url = $addr;
             }
             if ( $probe_url ) {
-                $resp = wp_remote_get( $probe_url, array(
+                $resp = onionpress_follow_remote_get( $probe_url, array(
                     'timeout' => 8,
                     'headers' => array( 'Accept' => 'application/rss+xml, application/atom+xml, application/xml, text/xml' ),
                 ) );
@@ -1706,12 +1726,18 @@ function onionpress_settings_render_following() {
                         $st           = isset( $following_stats[ $key ] ) ? $following_stats[ $key ] : array();
                         $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
                         $fail_count   = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
-                        $well_formed  = ( 'url' === $p['type'] ) || preg_match( '/^[a-z2-7]{56}\.onion$/D', $p['addr'] );
+                        // A feed URL onionpress_follow_url_allowed() refuses,
+                        // stored before it existed: the fetcher skips it.
+                        $refused_url  = ( 'url' === $p['type'] && ! onionpress_follow_url_allowed( $p['url'] ) );
+                        $well_formed  = ( 'url' === $p['type'] && ! $refused_url ) || preg_match( '/^[a-z2-7]{56}\.onion$/D', $p['addr'] );
                         // A bare onionname: stored when the add-time OnionHome
                         // lookup failed. Offered a re-lookup button below.
                         $is_bare_name = ( ! $well_formed
                             && preg_match( '/^[a-z0-9][a-z0-9._-]*$/iD', $p['addr'] ) );
-                        if ( $last_success && ! $fail_count ) {
+                        if ( $refused_url ) {
+                            $glyph = '&#9888;';  $color = '#dba617'; // yellow triangle: not fetched
+                            $status_label = 'Not fetched — OnionPress fetches feeds only from .onion and public web addresses, and this URL is neither. Unfollow it.';
+                        } elseif ( $last_success && ! $fail_count ) {
                             $glyph = '&#10003;'; $color = '#6b46a8'; // purple: verified
                             $status_label = 'Feed fetched successfully — last update '
                                 . human_time_diff( $last_success ) . ' ago.';
@@ -1733,7 +1759,7 @@ function onionpress_settings_render_following() {
                     ?>
                     <span class="onionpress-following-status" title="<?php echo esc_attr( $status_label ); ?>" style="margin-right: 6px; color: <?php echo esc_attr( $color ); ?>; min-width: 14px; display: inline-block; cursor: help;"><?php echo $glyph; ?></span>
                     <code style="flex: 1; font-size: 12px;"><?php
-                        $title    = isset( $following_titles[ $key ] ) ? $following_titles[ $key ] : '';
+                        $title    = ( ! $refused_url && isset( $following_titles[ $key ] ) ) ? $following_titles[ $key ] : '';
                         $addr_disp = esc_html( substr( $p['addr'], 0, 12 ) ) . '&hellip;.onion'
                                    . ( '' !== $name ? '/' . esc_html( $name ) : '' );
                         if ( $title ) {
