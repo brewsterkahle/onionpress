@@ -339,43 +339,55 @@ def _scan(legacy_fd):
                     tree.dirs.append(path)
                     pending.append((path, kind))
                 elif isinstance(kind, str) and stat.S_ISREG(st.st_mode):
+                    # What it takes on disk, which is what its copy takes:
+                    # holes stay holes (_copy_out).
+                    used = min(st.st_size, st.st_blocks * 512)
                     if kind == "shm":
                         tree.shm.append(path)
                     elif kind == "db":
-                        tree.registry[name] = (st.st_size, st.st_mtime)
+                        tree.registry[name] = (st.st_size, st.st_mtime, used)
                     else:
-                        tree.files.append((path, kind, st.st_size))
+                        tree.files.append((path, kind, st.st_size, used))
                 else:
                     tree.others.append(path)
         finally:
             os.close(dir_fd)
     if DB not in tree.registry:
         # A log or journal without its database is no registry.
-        tree.files += [(name, "db", size) for name, (size, _) in
+        tree.files += [(name, "db", size, used) for name, (size, _, used) in
                        sorted(tree.registry.items())]
         tree.registry = {}
     return tree
 
 
+_ZEROS = bytes(1 << 16)
+
+
 def _copy_out(src, target, limit):
     """Copy the open file src into target (new, root's, 0600), at most limit
-    bytes. Returns (bytes, sha256)."""
+    bytes. Returns (bytes, sha256). Runs of zeros become holes in the copy:
+    a sparse file never takes more room on the volume than it did where it
+    was."""
     st = os.fstat(src)
     out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC,
                   0o600)
     h, n = hashlib.sha256(), 0
     try:
         while True:
-            chunk = os.read(src, 1 << 20)
+            chunk = os.read(src, 1 << 16)
             if not chunk:
                 break
             n += len(chunk)
             if n > limit:
                 raise Rejected(f"grew past {limit} bytes while being copied")
             h.update(chunk)
+            if chunk == _ZEROS[:len(chunk)]:
+                os.lseek(out, len(chunk), os.SEEK_CUR)
+                continue
             view = memoryview(chunk)
             while view:
                 view = view[os.write(out, view):]
+        os.ftruncate(out, n)
         _own(out, 0o600)
         os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
     except BaseException:
@@ -390,7 +402,8 @@ def _version(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def _copy_file(dir_fd, name, target, limit, settle=True, empty_ok=True):
+def _copy_file(dir_fd, name, target, limit, settle=True, empty_ok=True,
+               holes_ok=False):
     """Copy the regular file name in dir_fd to target.
 
     Returns the (bytes, sha256) copied, or None if name is gone or no longer
@@ -399,7 +412,9 @@ def _copy_file(dir_fd, name, target, limit, settle=True, empty_ok=True):
     FILE_ATTEMPTS tries, then Unstable. A key is rewritten in place
     (truncated, then written), so a copy can catch it empty or half
     written; without empty_ok an empty copy never counts either.
-    Raises Rejected for a file over limit or with holes in it.
+    Raises Rejected for a file over limit, or, without holes_ok, with holes
+    in it. (A database may have some: a compressing filesystem such as ZFS
+    keeps all-zero blocks as holes. Its copy keeps them too.)
     """
     for attempt in range(FILE_ATTEMPTS):
         src = _open_regular(dir_fd, name)
@@ -409,7 +424,7 @@ def _copy_file(dir_fd, name, target, limit, settle=True, empty_ok=True):
             st = os.fstat(src)
             if st.st_size > limit:
                 raise Rejected(f"larger than {limit} bytes")
-            if _has_holes(src, st.st_size):
+            if not holes_ok and _has_holes(src, st.st_size):
                 raise Rejected("sparse")
             got = _copy_out(src, target, limit)
         finally:
@@ -496,7 +511,7 @@ def _copy_registry(legacy_fd, private, with_journal):
     # would roll it back into the database: never next to the copy.
     for name in REGISTRY if with_journal or not wal_mode else (DB, WAL):
         got = _copy_file(legacy_fd, name, os.path.join(private, name),
-                         LIMITS["db"], settle=False)
+                         LIMITS["db"], settle=False, holes_ok=True)
         if got is not None:
             copied[name] = got
     if _registry_state(legacy_fd, wal_mode) != before or DB not in copied:
@@ -611,8 +626,9 @@ def _registry_unchanged(legacy_fd, copied):
 # Copying the tree
 # ---------------------------------------------------------------------------
 
-def _stage(legacy_fd, staging, tree, first):
-    """Copy what tree lists into staging, the registry first.
+def _stage(legacy_fd, staging, tree, first, margin):
+    """Copy what tree lists into staging, the registry first, logs only
+    while margin bytes stay free beside them.
 
     Returns (copied, registry, staged, left, rejected): {old path: (bytes,
     sha256)} of files copied, the same for the registry's files, {staged
@@ -631,10 +647,15 @@ def _stage(legacy_fd, staging, tree, first):
         except Rejected as e:
             left.append((DB, str(e)))
             rejected += sorted(tree.registry)
-    for path, kind, _ in sorted(tree.files, key=lambda f: (CLASS_ORDER.index(f[1]), f[0])):
+    for path, kind, size, _ in sorted(tree.files,
+                                      key=lambda f: (CLASS_ORDER.index(f[1]), f[0])):
         if first and kind == "db":
             # SQLite would apply a log to whatever database is created beside it.
             left.append((path, "a write-ahead log or journal without its database"))
+            continue
+        if kind == "log" and size + margin > _free_bytes(staging):
+            # Logs only while there is room; any number of them can be there.
+            left.append((path, "no room for it on the volume"))
             continue
         parent, _, name = path.rpartition("/")
         target_dir = staging
@@ -654,7 +675,7 @@ def _stage(legacy_fd, staging, tree, first):
         try:
             got = _copy_file(dir_fd, name, os.path.join(target_dir, name),
                              LIMITS[kind], settle=(kind != "log"),
-                             empty_ok=(kind != "key"))
+                             empty_ok=(kind != "key"), holes_ok=(kind == "db"))
         except Rejected as e:
             left.append((path, str(e)))
             rejected.append(path)
@@ -770,11 +791,18 @@ def _remove_tree(pfd, name):
     if not stat.S_ISDIR(st.st_mode):
         os.unlink(name, dir_fd=pfd)
         return True
+    def opened(parent, child):
+        fd = os.open(child, DIR_FLAGS, dir_fd=parent)
+        try:
+            return (fd, child, sorted(os.listdir(fd)))
+        except BaseException:
+            os.close(fd)
+            raise
+
     complete = True
     stack = []                  # (fd, its name in the folder above, names left)
     try:
-        fd = os.open(name, DIR_FLAGS, dir_fd=pfd)
-        stack.append((fd, name, sorted(os.listdir(fd))))
+        stack.append(opened(pfd, name))
         while stack:
             fd, dname, names = stack[-1]
             if not names:
@@ -802,11 +830,9 @@ def _remove_tree(pfd, name):
                 complete = False
                 continue
             try:
-                cfd = os.open(child, DIR_FLAGS, dir_fd=fd)
+                stack.append(opened(fd, child))
             except OSError:
                 complete = False
-                continue
-            stack.append((cfd, child, sorted(os.listdir(cfd))))
     finally:
         for fd, _, _ in stack:
             os.close(fd)
@@ -1096,15 +1122,28 @@ def _report(tree, left, kept, later):
             f"removed on a later start")
 
 
+def _room_needed(tree, registry_copies):
+    """Bytes the registry, keys and flag files take on the volume (what
+    is over its limit is never copied; logs are copied only while there is
+    room, _stage). The registry is copied as read, and on the first move
+    SQLite also writes it out whole: holes and all."""
+    need = sum(used for _, kind, size, used in tree.files
+               if kind in ("key", "small") and size <= LIMITS[kind])
+    for size, _, used in tree.registry.values():
+        if size <= LIMITS["db"]:
+            need += used + (size if registry_copies > 1 else 0)
+    return need
+
+
 def _first_move(parent_fd, legacy_fd, dest, staging, tree, stamp):
-    need = (sum(size for _, _, size in tree.files)
-            + 2 * sum(size for size, _ in tree.registry.values()))
+    need = _room_needed(tree, registry_copies=2)
     free = _free_bytes(dest)
     if need + FIRST_MOVE_MARGIN > free:
         raise OSError(errno.ENOSPC, f"the OnionHeaven data needs {need} bytes and "
                       f"{FIRST_MOVE_MARGIN} to spare on {dest}; {free} are free")
     _mkdir(staging)
-    copied, registry, staged, left, _ = _stage(legacy_fd, staging, tree, first=True)
+    copied, registry, staged, left, _ = _stage(legacy_fd, staging, tree, True,
+                                               FIRST_MOVE_MARGIN)
     _prune_empty_dirs(staging)
     _verify(staging, staged)
     if not staged:
@@ -1128,8 +1167,7 @@ def _first_move(parent_fd, legacy_fd, dest, staging, tree, stamp):
 
 def _keep_later_arrivals(parent_fd, legacy_fd, dest, staging, tree, stamp):
     copied, registry, left, rejected = {}, {}, [], []
-    need = (sum(size for _, _, size in tree.files)
-            + sum(size for size, _ in tree.registry.values()))
+    need = _room_needed(tree, registry_copies=1)
     reserve = max(LEFTOVER_RESERVE, int(_total_bytes(dest) * LEFTOVER_RESERVE_SHARE))
     if (tree.files or tree.registry) and need + reserve > _free_bytes(dest):
         log(f"WARNING: {len(tree.files) + len(tree.registry)} files ({need} bytes) "
@@ -1141,7 +1179,7 @@ def _keep_later_arrivals(parent_fd, legacy_fd, dest, staging, tree, stamp):
     if tree.files or tree.registry:
         _mkdir(staging)
         copied, registry, staged, left, rejected = _stage(legacy_fd, staging, tree,
-                                                          first=False)
+                                                          False, reserve)
         _verify(staging, staged)
         same = _drop_duplicate_keys(staging, dest)
         _prune_empty_dirs(staging)
@@ -1155,7 +1193,7 @@ def _keep_later_arrivals(parent_fd, legacy_fd, dest, staging, tree, stamp):
                 f"{os.path.basename(leftover)}/ on the volume, not used. Was an "
                 f"older OnionPress container still running?")
             moved = _moved_at(dest)
-            written = max((mtime for _, mtime in tree.registry.values()), default=None)
+            written = max((mtime for _, mtime, _ in tree.registry.values()), default=None)
             if registry and moved and written and written > moved.timestamp():
                 when = datetime.fromtimestamp(written, timezone.utc)
                 log(f"WARNING: the OnionHeaven registry at the old location was "

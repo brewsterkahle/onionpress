@@ -362,6 +362,57 @@ class TestPlanted(Case):
         self.assertFalse(self.leftovers())
         self.assertFalse(os.path.lexists(self.legacy))
 
+    def _registry_with_a_hole(self, rows, hole):
+        """A sound registry whose file ends in a hole (SQLite reads only
+        the pages its header counts): what ZFS with compression makes of a
+        database's all-zero blocks."""
+        self.make_registry(rows=rows)
+        db = os.path.join(self.legacy, "registry.db")
+        os.truncate(db, os.path.getsize(db) + hole)
+        fd = os.open(db, os.O_RDONLY)
+        try:
+            if not hasattr(os, "SEEK_HOLE") or os.lseek(fd, 0, os.SEEK_HOLE) >= os.fstat(fd).st_size:
+                self.skipTest("this filesystem makes no sparse files")
+        finally:
+            os.close(fd)
+        return db
+
+    def test_a_registry_with_holes_still_moves(self):
+        self._registry_with_a_hole(rows=9, hole=1 << 20)
+        self.add_registrant()
+        rc, err = self.run_script()
+        self.assertEqual(rc, 0, err)
+        self.assertNotIn("sparse", err)
+        self.assertEqual(hd._rows(os.path.join(self.dest, "registry.db")), 9)
+        self.assertFalse(os.path.lexists(self.legacy))
+
+    def test_a_sparse_later_registry_takes_no_more_room_on_the_volume(self):
+        self.make_registry()
+        self.add_registrant()
+        self.assertEqual(self.run_script()[0], 0)
+        self._registry_with_a_hole(rows=2, hole=1 << 30)
+        rc, err = self.run_script()
+        self.assertEqual(rc, 0, err)
+        kept = os.path.join(self.leftovers()[0], "registry.db")
+        st = os.stat(kept)
+        self.assertGreater(st.st_size, 1 << 30)
+        self.assertLess(st.st_blocks * 512, 16 << 20)
+
+    def test_logs_never_stop_the_first_move_for_room(self):
+        """Any number of files can carry a log's name; the registry and the
+        keys are what must fit."""
+        self.make_registry()
+        self.add_registrant()
+        for i in range(3):
+            self.write(f"heartbeat.{i}.log", "x" * (3 << 20))
+        with mock.patch.object(self.mod, "FIRST_MOVE_MARGIN", 0), \
+                mock.patch.object(self.mod, "_free_bytes", return_value=2 << 20):
+            self.migrate()
+        self.assertEqual(self.marker()["key_dirs"], 1)
+        self.assertTrue(self.logged("no room for it on the volume"))
+        self.assertFalse([n for n in os.listdir(self.dest) if n.endswith(".log")])
+        self.assertTrue(os.path.exists(os.path.join(self.legacy, "heartbeat.0.log")))
+
     def test_later_arrivals_keep_only_what_the_hub_wrote(self):
         self.make_registry()
         self.add_registrant()
