@@ -120,12 +120,13 @@ def prune_image_derivatives(uploads_dir: str, log_func: Optional[Callable[[str],
 
     Returns (files_removed, bytes_removed). Never follows symlinks and
     never touches anything outside `uploads_dir`. A missing uploads dir
-    is a no-op (fresh sites have no media).
+    is a no-op (fresh sites have no media), and so is one that is a link:
+    the staged copy came out of the container, and os.walk would follow it.
     """
     log = log_func or (lambda _m: None)
     removed = 0
     freed = 0
-    if not os.path.isdir(uploads_dir):
+    if os.path.islink(uploads_dir) or not os.path.isdir(uploads_dir):
         return 0, 0
     for dirpath, _dirnames, filenames in os.walk(uploads_dir):
         names = set(filenames)
@@ -150,10 +151,19 @@ def prune_image_derivatives(uploads_dir: str, log_func: Optional[Callable[[str],
 
 def write_archive_marker(wpcontent_dir: str) -> str:
     """Write the in-container marker into a backup's staged wp-content/.
-    Returns the path written."""
+    Returns the path written.
+
+    The staged wp-content came out of the container: a link at uploads/ or
+    at the marker's own path is refused (OSError) rather than written
+    through.
+    """
     path = os.path.join(wpcontent_dir, ARCHIVE_MARKER_RELPATH)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    uploads = os.path.dirname(path)
+    os.makedirs(uploads, exist_ok=True)
+    if os.path.islink(uploads):
+        raise OSError(f"staged uploads folder is a link: {uploads}")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "w") as f:
         f.write("OnionPress: this backup carries original images only; the "
                 "resized copies (-WxH, -scaled) are rebuilt after a restore "
                 "by `wp media regenerate --only-missing`. Removed on completion.\n")

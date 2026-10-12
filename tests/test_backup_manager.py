@@ -327,7 +327,9 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             f.write('    for n in photo.jpg photo-300x200.jpg photo-scaled.jpg orphan-640x480.jpg clip.mp4; do\n')
             f.write('        echo "$n" > "$fakedir/uploads/2024/01/$n"\n')
             f.write('    done\n')
-            f.write('    tar -cf - -C "$fakedir" .\n')
+            # The container's GNU tar writes no AppleDouble (._*) entries;
+            # COPYFILE_DISABLE keeps a Mac's bsdtar from adding them.
+            f.write('    COPYFILE_DISABLE=1 tar -cf - -C "$fakedir" .\n')
             f.write('    rm -rf "$fakedir"\n')
             f.write('    exit 0\n')
             f.write('elif [[ "$1" == "cp" ]]; then\n')

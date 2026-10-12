@@ -1998,6 +1998,15 @@ create_backup() {
     # 3. Copy wp-content from container
     log "Backup: copying wp-content (themes, plugins, uploads)..."
     docker cp onionpress-wordpress:/var/www/html/wp-content/. "$staging/wp-content" 2>>"$LOG_FILE"
+    # docker cp copies a symlink as a symlink, and one planted in the
+    # container (www-data can) points at a host path here: zip would store
+    # the host file and the pruning and marker below would follow it. Drop
+    # links and special files before anything reads the copy (pack-backup
+    # sweeps the whole tree again).
+    if ! op_py scrub-staging --dir "$staging/wp-content" >>"$LOG_FILE" 2>&1; then
+        log "ERROR: could not check the copied wp-content for links"
+        return 1
+    fi
 
     # 3b. Drop the regenerable image derivatives (-WxH sizes, -scaled) —
     #     about half of a media-heavy uploads/ (issue #257). The Python

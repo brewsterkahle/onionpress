@@ -451,6 +451,23 @@ class OnionPressCLI:
         print(f"{removed} {freed}")
         return 0
 
+    @staticmethod
+    def cmd_scrub_staging(path: str) -> int:
+        """Remove links and special files from a tree the Linux launcher's
+        bash create_backup just docker-cp'd out of a container (docker cp
+        copies a link as a link, and zip would store the host file it points
+        to). Messages go to stderr. A missing tree is nothing to do."""
+        from .backup import scrub_staged_tree
+        log = _make_log_func()
+        if not os.path.lexists(path):
+            return 0
+        try:
+            scrub_staged_tree(path, log)
+            return 0
+        except Exception as e:
+            log(f"Backup: could not check the staged files for links: {e}")
+            return 1
+
     def cmd_pack_backup(self, staging: str, output_path: str, password: str) -> int:
         """Zip and encrypt a staged backup tree into *output_path* (backup
         format 2). Used by the Linux launcher's bash create_backup so both
@@ -895,6 +912,13 @@ def main(argv: list[str] = None) -> int:
     p_prune.add_argument(
         "--uploads-dir", required=True,
         help="Path to the staged wp-content/uploads directory")
+    p_scrub = sub.add_parser(
+        "scrub-staging",
+        help="Remove symbolic links, hard links to outside files and "
+             "special files from a staged backup tree (backup helper)")
+    p_scrub.add_argument(
+        "--dir", required=True,
+        help="Staged tree copied out of a container (e.g. wp-content)")
 
     p_open_login = sub.add_parser(
         "open-login",
@@ -973,6 +997,9 @@ def main(argv: list[str] = None) -> int:
     if args.command == "restore-config":
         return OnionPressCLI.cmd_restore_config(
             args.staging, args.config, args.address)
+    # Backup helper, run by the Linux launcher mid-backup: same.
+    if args.command == "scrub-staging":
+        return OnionPressCLI.cmd_scrub_staging(args.dir)
 
     if args.command == "safe-config":
         # Read-only, and run by the Linux launcher every 30 s: skip

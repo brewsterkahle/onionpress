@@ -380,6 +380,23 @@
   as a plain file. pack_backup must never store links (`zip -y`), or its
   backups stop restoring. `tests/test_backup_archive_members.py`.
 
+## Backups Stage Plain Files Only
+- What create_backup copies out of a container (wp-content; a hub's
+  onionheaven/ and onionhome/) may hold links planted as www-data, and
+  `zip -r` stores the file a link points to: `uploads/x -> ~/.ssh/id_ed25519`
+  went into a backup whose password the Settings page lets the site choose.
+  The derivative pruning walked a linked uploads/ and the marker was written
+  through one.
+- Mac: the container's `tar -cf - --hard-dereference` stream is unpacked by
+  `backup.unpack_plain_tar` (regular files and folders only, O_NOFOLLOW) —
+  never a host `tar -x`. Each staged tree (and docker cp'd onionheaven/,
+  onionhome/) then goes through `scrub_staged_tree` (lstat walk: removes
+  symlinks, devices/FIFOs/sockets and hard links to files outside the tree,
+  logs each by printable name) before pruning or the marker touch it.
+  Linux: `onionpress.cli scrub-staging` right after the wp-content docker cp.
+  `pack_backup` scrubs the whole staging again before zip, on both
+  platforms. `tests/test_backup_staging_links.py`.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

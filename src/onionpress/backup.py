@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -290,6 +291,215 @@ def get_admin_username(data_dir=None):
     return "admin"
 
 
+# ─── Staging what the containers hand over ──────────────────────────────
+# create_backup copies wp-content (and a hub's onionheaven/ and onionhome/)
+# out of the WordPress container, where code running as www-data can plant
+# anything. A symbolic link staged on the host points at a host path:
+# `zip -r` (no -y) would store the file it points to, so a link to
+# ~/.ssh/id_ed25519 would put that key in a backup whose password the
+# Settings page lets the site choose; prune_image_derivatives would walk
+# into a linked uploads/ and write_archive_marker would write through one.
+# So the container's tar stream is unpacked as plain files and folders only
+# (unpack_plain_tar), and every staged tree is swept (scrub_staged_tree)
+# before anything else reads it, and again by pack_backup before zip runs.
+
+# tarfile's stream reader copies its whole buffer on every header read, so
+# a larger buffer is slower: 64 KiB unpacks as fast as bsdtar here.
+_STAGE_BUFSIZE = 64 << 10
+_STAGE_COPY_TIMEOUT_S = 300
+# Entries left out are logged by name up to this many per tree, then counted.
+_STAGE_LOG_LIMIT = 20
+
+
+def _staged_name(name):
+    """A tar member's name as a path relative to the staging folder ('' for
+    the root entry, '.' or './'), or None unless it is a plain relative
+    name: absolute, with a '..' component or a NUL. A backslash is an
+    ordinary character here (the names come from a Linux filesystem); the
+    restore checks the names again as zip members."""
+    if '\x00' in name or name.startswith('/'):
+        return None
+    parts = [p for p in name.split('/') if p not in ('', '.')]
+    if '..' in parts:
+        return None
+    return '/'.join(parts)
+
+
+def _log_left_out(log_func, where, left_out):
+    """Log what staging *where* left out of the backup: (relative name,
+    what it was) pairs, the first _STAGE_LOG_LIMIT by printable cut name,
+    then a count. The names are the container's, so never raw."""
+    for rel, kind in left_out[:_STAGE_LOG_LIMIT]:
+        log_func(f"Backup: left {_member_label(rel)} in {where} out of the "
+                 f"backup ({kind})")
+    if len(left_out) > _STAGE_LOG_LIMIT:
+        log_func(f"Backup: left {len(left_out) - _STAGE_LOG_LIMIT} more "
+                 f"entries in {where} out of the backup")
+
+
+def _tar_member_kind(member):
+    if member.issym():
+        return "a symbolic link"
+    if member.islnk():
+        return "a hard link"
+    if member.isdev():
+        return "a device or FIFO"
+    return "not a plain file"
+
+
+def _make_staged_dirs(dest, rel, made):
+    """Create the folders of *rel* under *dest*, one component at a time.
+    Return False if one exists as anything but a folder (lstat; nothing is
+    followed). *made* is the set of folders (relative) already known to be
+    folders here: unpack_plain_tar creates nothing else, so they stay so."""
+    if not rel or rel in made:
+        return True
+    parts = rel.split('/')
+    for i in range(1, len(parts) + 1):
+        sub = '/'.join(parts[:i])
+        if sub in made:
+            continue
+        path = os.path.join(dest, sub)
+        try:
+            os.mkdir(path, 0o755)
+        except FileExistsError:
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                return False
+        made.add(sub)
+    return True
+
+
+def unpack_plain_tar(stream, dest, log_func, where):
+    """Unpack the tar stream *stream* (`tar -cf -` run in a container) into
+    the folder *dest*, writing regular files and folders only; return how
+    many entries were left out.
+
+    Symbolic and hard links, devices, FIFOs, absolute or '..' names and
+    entries that clash with one already unpacked are left out and logged.
+    Nothing written here is a link and files are opened with O_NOFOLLOW, so
+    no entry reaches outside *dest*. Files keep their times and owner
+    read/write; set-id, sticky and group/other write bits are dropped.
+    """
+    left_out = []
+    made = set()
+    with tarfile.open(fileobj=stream, mode='r|', bufsize=_STAGE_BUFSIZE) as tf:
+        for member in tf:
+            rel = _staged_name(member.name)
+            if rel is None or (member.isreg() and not rel):
+                left_out.append((member.name, "an unsafe name"))
+                continue
+            if member.isdir():
+                if not _make_staged_dirs(dest, rel, made):
+                    left_out.append((rel, "a folder where a file is"))
+                continue
+            if not member.isreg():
+                left_out.append((rel, _tar_member_kind(member)))
+                continue
+            if not _make_staged_dirs(dest, rel.rpartition('/')[0], made):
+                left_out.append((rel, "a file inside a file"))
+                continue
+            try:
+                fd = os.open(os.path.join(dest, rel),
+                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                             | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             (member.mode & 0o755) | 0o600)
+            except (IsADirectoryError, NotADirectoryError):
+                left_out.append((rel, "a file where a folder is"))
+                continue
+            with os.fdopen(fd, 'wb') as out:
+                shutil.copyfileobj(tf.extractfile(member), out, _STAGE_BUFSIZE)
+                out.flush()
+                try:
+                    os.utime(out.fileno(), (member.mtime, member.mtime))
+                except (OSError, OverflowError, ValueError):
+                    pass
+    _log_left_out(log_func, where, left_out)
+    return len(left_out)
+
+
+def scrub_staged_tree(root, log_func, where=None):
+    """Remove from the staged tree *root* everything `zip -r` must not
+    read; return how many entries were removed.
+
+    Removed: symbolic links (zip stores the file a link points to, wherever
+    it is), devices, FIFOs and sockets, and regular files with another name
+    outside *root* (a hard link to a host file). Each is logged by name
+    (_log_left_out). Folders and files the owner cannot read are made
+    readable, so that this walk, and zip, see all of it. Nothing is
+    followed (lstat), and a folder that cannot be listed raises rather than
+    being skipped: what was not looked at is not zipped.
+    """
+    where = where or os.path.basename(os.path.normpath(root))
+    if os.path.islink(root) or not os.path.isdir(root):
+        raise ValueError(f"Backup: the staged {where} is not a folder")
+
+    def _fail(err):
+        raise err
+
+    left_out = []
+    linked = {}  # (st_dev, st_ino) -> [st_nlink, [paths]]
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_fail):
+        removed = set()
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            st = os.lstat(path)
+            mode = st.st_mode
+            if stat.S_ISDIR(mode):
+                if mode & 0o700 != 0o700:
+                    os.chmod(path, stat.S_IMODE(mode) | 0o700)
+                continue
+            if stat.S_ISREG(mode):
+                if not mode & stat.S_IRUSR:
+                    os.chmod(path, stat.S_IMODE(mode) | stat.S_IRUSR)
+                if st.st_nlink > 1:
+                    linked.setdefault((st.st_dev, st.st_ino),
+                                      [st.st_nlink, []])[1].append(path)
+                continue
+            os.unlink(path)
+            removed.add(name)
+            left_out.append((os.path.relpath(path, root),
+                             "a symbolic link" if stat.S_ISLNK(mode)
+                             else "a device, FIFO or socket"))
+        # os.walk would try to descend into a removed link to a folder.
+        dirnames[:] = [d for d in dirnames if d not in removed]
+    for nlink, paths in linked.values():
+        if len(paths) < nlink:
+            for path in paths:
+                os.unlink(path)
+                left_out.append((os.path.relpath(path, root),
+                                 "a hard link to a file outside it"))
+    _log_left_out(log_func, where, left_out)
+    return len(left_out)
+
+
+def _stage_container_tar(argv, dest, log_func, where):
+    """Run *argv* (`docker exec … tar -cf - …`) and unpack its stdout into
+    *dest* with unpack_plain_tar; raise if either side fails. The container
+    gets _STAGE_COPY_TIMEOUT_S to finish."""
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE)
+    killer = threading.Timer(_STAGE_COPY_TIMEOUT_S, proc.kill)
+    killer.daemon = True
+    killer.start()
+    try:
+        unpack_plain_tar(proc.stdout, dest, log_func, where)
+        # Drain the tar's end padding so the container side never blocks
+        # on a full pipe.
+        while proc.stdout.read(_STAGE_BUFSIZE):
+            pass
+    except BaseException as e:
+        proc.kill()
+        if isinstance(e, tarfile.TarError):
+            raise Exception(f"{where} tar failed: {e}") from e
+        raise
+    finally:
+        proc.stdout.close()
+        rc = proc.wait()
+        killer.cancel()
+    if rc != 0:
+        raise Exception(f"{where} tar failed: docker={rc}")
+
+
 def create_backup(onion_address, username, password, output_path, version, log_func, *, data_dir=None):
     """Create a full OnionPress backup zip.
 
@@ -375,30 +585,27 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #      on demand.
         #    - .DS_Store: Finder cruft.
         #
-        #    Stream via `docker exec tar -cf - | tar -xf -` instead of
-        #    docker cp so the excludes apply at read time (no wasted IO
-        #    pulling Creations across the VM boundary).
+        #    Stream via `docker exec tar -cf -` instead of docker cp so the
+        #    excludes apply at read time (no wasted IO pulling Creations
+        #    across the VM boundary). The stream is unpacked here as plain
+        #    files and folders only (unpack_plain_tar: links planted in the
+        #    container are left out). --hard-dereference has the container's
+        #    GNU tar store each name of a hard-linked file with its contents,
+        #    not as a link entry, which would be left out too.
         with _phase_timer(log_func, 'BACKUP', 'wpcontent_tar'):
             log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
             wpcontent_dir = os.path.join(staging, 'wp-content')
             os.makedirs(wpcontent_dir, exist_ok=True)
-            docker_tar = subprocess.Popen(
+            _stage_container_tar(
                 ['docker', 'exec', 'onionpress-wordpress',
                  'tar', '-cf', '-',
+                 '--hard-dereference',
                  '--exclude=./creations',
                  '--exclude=.thumbs',
                  '--exclude=.DS_Store',
                  '-C', '/var/www/html/wp-content', '.'],
-                stdout=subprocess.PIPE
-            )
-            host_tar = subprocess.run(
-                ['tar', '-xf', '-', '-C', wpcontent_dir],
-                stdin=docker_tar.stdout, timeout=300
-            )
-            docker_tar.stdout.close()
-            docker_rc = docker_tar.wait(timeout=10)
-            if docker_rc != 0 or host_tar.returncode != 0:
-                raise Exception(f"wp-content tar failed: docker={docker_rc} host={host_tar.returncode}")
+                wpcontent_dir, log_func, 'wp-content')
+            scrub_staged_tree(wpcontent_dir, log_func, 'wp-content')
 
         # 3b. Drop WordPress's regenerable image derivatives (-WxH sizes and
         #     -scaled copies) from the staged uploads — about half of a
@@ -433,6 +640,8 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                      onionheaven_dir],
                     capture_output=True, timeout=60, check=True
                 )
+                # docker cp copies a link as a link.
+                scrub_staged_tree(onionheaven_dir, log_func, 'onionheaven')
                 # Remove the ephemeral unlock file if it was copied
                 unlocked_file = os.path.join(onionheaven_dir, '.master-key-unlocked')
                 if os.path.exists(unlocked_file):
@@ -459,6 +668,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                      onionhome_dir],
                     capture_output=True, timeout=60, check=True
                 )
+                scrub_staged_tree(onionhome_dir, log_func, 'onionhome')
 
         # 5. Save non-default config values
         _data_dir = data_dir if data_dir is not None else _default_data_dir()
@@ -531,7 +741,13 @@ def pack_backup(staging, output_path, password, log_func):
     backup_format and also stored as the container's metadata record, which
     is what restore dialogs read. The file appears at *output_path* only
     once complete.
+
+    `zip -r` without -y stores the file a symbolic link points to, so the
+    staged tree is first swept of links and special files
+    (scrub_staged_tree): parts of it came out of a container. Never pass
+    -y instead: restores refuse archives holding links.
     """
+    scrub_staged_tree(staging, log_func, 'the staged backup')
     meta_path = os.path.join(staging, 'metadata.json')
     with open(meta_path) as f:
         metadata = json.load(f)
