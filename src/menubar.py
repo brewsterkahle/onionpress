@@ -4342,11 +4342,13 @@ class OnionPressApp(rumps.App):
                         message=f"Could not read backup: {e}")
             return
 
-        # Show confirmation with backup details
-        addr = metadata.get('onion_address', 'unknown')
-        date = metadata.get('backup_date', 'unknown')
-        user = metadata.get('username', 'unknown')
-        ver = metadata.get('onionpress_version', 'unknown')
+        # Show confirmation with backup details. read_backup_metadata has
+        # validated the address and username; the other fields are only
+        # shown, so they go through metadata_text (printable, short).
+        addr = metadata.get('onion_address') or 'unknown'
+        date = backup_manager.metadata_text(metadata, 'backup_date')
+        user = backup_manager.metadata_text(metadata, 'username')
+        ver = backup_manager.metadata_text(metadata, 'onionpress_version')
 
         button_index = self.show_native_alert(
             title="Confirm Restore",
@@ -4395,13 +4397,28 @@ class OnionPressApp(rumps.App):
                 if r.returncode != 0:
                     self.log(f"Restore: launcher restore rc={r.returncode}: "
                              f"{(r.stderr or r.stdout or '')[:300]}")
+                    _main_thread(lambda: pw.finish(
+                        "Restore failed — the backup was refused or could "
+                        "not be restored. Check the log for details."))
+                    return
 
-                restored_addr = metadata.get('onion_address', addr)
-                # Refresh the in-memory address so the heartbeat ships the
-                # matching content_address (the restore also writes the on-disk
-                # cache).
-                if restored_addr and restored_addr.endswith('.onion'):
+                # The address the restore derived from the backup's key, from
+                # the on-disk cache it wrote — not metadata.onion_address,
+                # which is the backup author's to fill in.
+                restored_addr = None
+                try:
+                    with open(os.path.join(self.app_support,
+                                           "onion_address")) as f:
+                        restored_addr = f.read().strip()
+                except OSError:
+                    pass
+                if key_manager.is_valid_onion_address(restored_addr):
+                    # Refresh the in-memory address so the heartbeat ships
+                    # the matching content_address.
                     self.onion_address = restored_addr
+                else:
+                    # Shown only; update_status picks the address up from Tor.
+                    restored_addr = addr
                 self.log(f"Restore complete (install-from-backup): {restored_addr}")
 
                 # Build summary of what was restored and what will happen

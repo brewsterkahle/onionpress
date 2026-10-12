@@ -9,6 +9,7 @@ backups (ZipCrypto zips from `zip -P`) still restore.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -578,11 +579,111 @@ _WRONG_PASSWORD_MSG = backup_crypto.WRONG_PASSWORD_MSG
 
 def _check_backup_format(metadata):
     """Refuse a backup from a newer OnionPress whose format this one doesn't
-    know (format 1 backups carry no backup_format)."""
-    fmt = metadata.get('backup_format', 1)
-    if not isinstance(fmt, int) or fmt > backup_crypto.BACKUP_FORMAT:
-        raise backup_crypto.NewerBackupError(backup_crypto.NEWER_MSG)
+    know (format 1 backups carry no backup_format), then validate the rest
+    (validate_backup_metadata): every metadata reader goes through here."""
+    if isinstance(metadata, dict):
+        fmt = metadata.get('backup_format', 1)
+        if not isinstance(fmt, int) or fmt > backup_crypto.BACKUP_FORMAT:
+            raise backup_crypto.NewerBackupError(backup_crypto.NEWER_MSG)
+    return validate_backup_metadata(metadata)
+
+
+# A WordPress login: wp_insert_user keeps only these characters
+# (sanitize_user, strict) and at most 60 of them. An onionname
+# ([A-Za-z0-9._-], 5-40) fits too.
+_BACKUP_USERNAME_RE = re.compile(r"[A-Za-z0-9 _.@-]{1,60}")
+
+INVALID_METADATA_MSG = ("Not a valid OnionPress backup: its metadata.json "
+                        "has an invalid {field}.")
+
+
+def validate_backup_metadata(metadata):
+    """Return *metadata* if the fields a restore uses are well formed; raise
+    ValueError otherwise, before anything has been restored.
+
+    metadata.json comes out of the backup file, so it is as trustworthy as
+    whoever handed the file over: the password proves only that the archive
+    was made with it, and anyone can make one. Fields that reach a path, a
+    config line, a command or a dialog are checked here:
+
+    - onion_address, if present, must be a well-formed v3 address. A
+      restore still takes the address from the key (key_pair_onion_address
+      / staged_key_address); a value like "../../x" or one with a newline
+      is refused outright rather than logged or shown.
+    - username, if present, must be a WordPress login. A restore writes it
+      to config as ONIONNAME, a line per key, and later backups put it in
+      their file name.
+    """
+    if not isinstance(metadata, dict):
+        raise ValueError("Not a valid OnionPress backup: its metadata.json "
+                         "is not an object.")
+    address = metadata.get('onion_address')
+    if address not in (None, '') and not key_manager.is_valid_onion_address(address):
+        raise ValueError(INVALID_METADATA_MSG.format(field="onion address"))
+    username = metadata.get('username')
+    if username not in (None, ''):
+        if (not isinstance(username, str)
+                or (username.strip()
+                    and not _BACKUP_USERNAME_RE.fullmatch(username.strip()))):
+            raise ValueError(INVALID_METADATA_MSG.format(field="username"))
     return metadata
+
+
+def metadata_text(metadata, field, default='unknown', limit=64):
+    """A metadata field for a dialog: *default* unless it is a non-empty
+    string, control and other non-printable characters (newlines, bidi
+    overrides) dropped, cut to *limit* characters. For fields shown but not
+    otherwise used (backup_date, onionpress_version), which a crafted backup
+    could otherwise fill with text that rewrites the confirmation it sits in.
+    """
+    value = metadata.get(field) if isinstance(metadata, dict) else None
+    if not isinstance(value, str):
+        return default
+    text = ''.join(ch for ch in value if ch.isprintable()).strip()
+    if not text:
+        return default
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
+def _parse_metadata(data):
+    """json.loads for metadata.json bytes, with one message for bad JSON."""
+    try:
+        return json.loads(data)
+    except ValueError as e:
+        raise ValueError("Not a valid OnionPress backup: its metadata.json "
+                         "is not valid JSON.") from e
+
+
+def read_staged_metadata(staging):
+    """Read and validate metadata.json from an extracted backup."""
+    metadata_path = os.path.join(staging, 'metadata.json')
+    if not os.path.exists(metadata_path):
+        metadata_path = os.path.join(staging, '.', 'metadata.json')
+    if not os.path.isfile(metadata_path):
+        raise ValueError("Not a valid OnionPress backup (no metadata.json)")
+    with open(metadata_path, 'rb') as f:
+        return _check_backup_format(_parse_metadata(f.read()))
+
+
+def staged_backup_address(staging, log_func):
+    """Validate an extracted backup and return the onion address its key
+    belongs to ('' if it carries no key).
+
+    For the bash launchers' restore_backup and `setup --from-backup`, which
+    name a directory after the address and write its prefix into config:
+    they take the address from here, never from metadata.json. A metadata
+    address that is well formed but differs from the key's is logged, as
+    the Python restore paths do (older clients left it stale). Raises
+    ValueError on invalid metadata or key files; nothing is touched.
+    """
+    metadata = read_staged_metadata(staging)
+    address = key_manager.staged_key_address(_find_dir(staging, 'tor-keys'))
+    metadata_address = metadata.get('onion_address', '')
+    if address and metadata_address and metadata_address != address:
+        log_func(f"Restore: KEY-MISMATCH — backup metadata.onion_address="
+                 f"{metadata_address} != key_derives_to={address}; "
+                 f"using DERIVED address for all persisted state.")
+    return address
 
 
 @contextmanager
@@ -622,7 +723,7 @@ def read_backup_metadata(zip_path, password):
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             if backup_crypto.PAYLOAD_NAME in zf.namelist():
-                return _check_backup_format(json.loads(
+                return _check_backup_format(_parse_metadata(
                     backup_crypto.read_metadata(zip_path, password)))
             # Format 1. Try to find metadata.json (may be at root or ./metadata.json)
             metadata_name = None
@@ -635,7 +736,7 @@ def read_backup_metadata(zip_path, password):
 
             with _wrong_password_as_valueerror(zf):
                 data = zf.read(metadata_name, pwd=password.encode())
-            return json.loads(data)
+            return _check_backup_format(_parse_metadata(data))
     except zipfile.BadZipFile:
         raise ValueError("Not a valid zip file.")
 
@@ -722,12 +823,7 @@ def extract_backup(zip_path, password, log_func, staging=None):
     with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
         log_func("Restore: extracting backup archive...")
         extract_archive(zip_path, password, staging, log_func)
-    metadata_path = os.path.join(staging, 'metadata.json')
-    if not os.path.exists(metadata_path):
-        metadata_path = os.path.join(staging, '.', 'metadata.json')
-    with open(metadata_path) as f:
-        metadata = json.load(f)
-    return staging, _check_backup_format(metadata)
+    return staging, read_staged_metadata(staging)
 
 
 def peek_backup_metadata(zip_path, password):
@@ -737,18 +833,18 @@ def peek_backup_metadata(zip_path, password):
     Raises ValueError on a wrong password; raises on an invalid backup.
     """
     if backup_crypto.is_encrypted_backup(zip_path):
-        return _check_backup_format(json.loads(
+        return _check_backup_format(_parse_metadata(
             backup_crypto.read_metadata(zip_path, password)))
-    with tempfile.TemporaryDirectory(prefix='onionpress-peek-') as tmp:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            names = [n for n in zf.namelist()
-                     if n.rstrip('/').endswith('metadata.json')]
-            if not names:
-                raise Exception("Not an OnionPress backup (no metadata.json)")
-            with _wrong_password_as_valueerror(zf):
-                zf.extract(names[0], tmp, pwd=password.encode())
-            with open(os.path.join(tmp, names[0])) as f:
-                return json.load(f)
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        names = [n for n in zf.namelist()
+                 if n.rstrip('/').endswith('metadata.json')]
+        if not names:
+            raise Exception("Not an OnionPress backup (no metadata.json)")
+        # Read the member straight from the zip: its name is the archive
+        # author's, and joined onto a directory it could point anywhere.
+        with _wrong_password_as_valueerror(zf):
+            data = zf.read(names[0], pwd=password.encode())
+        return _check_backup_format(_parse_metadata(data))
 
 
 def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
@@ -763,6 +859,7 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
     and converted to C Tor's key files by the tor entrypoint.
     """
     _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    validate_backup_metadata(metadata)
     tor_dir = _find_dir(staging, 'tor-keys')
     key_path = os.path.join(tor_dir, 'ks_hs_id.ed25519_expanded_private')
     if not os.path.exists(key_path):
@@ -773,8 +870,10 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
     priv, pub = key_manager.parse_openssh_key(pem_data)
 
     # Address is fully determined by the key; trust the derived value over
-    # metadata.onion_address (older clients sometimes left it stale).
-    onion_address = key_manager.derive_onion_address(pub)
+    # metadata.onion_address (older clients sometimes left it stale). The
+    # key's public half must belong to its private half, or the address
+    # would be whatever the backup's author wrote into the file.
+    onion_address = key_manager.key_pair_onion_address(priv, pub)
     metadata_address = metadata.get('onion_address', '')
     if metadata_address and metadata_address != onion_address:
         log_func(f"Restore: KEY-MISMATCH — backup metadata.onion_address="
@@ -857,8 +956,15 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
         os.chmod(staging, 0o700)
     except OSError:
         pass
-    _, metadata = extract_backup(zip_path, password, log_func, staging=staging)
-    seed_onion_key_for_install(staging, metadata, log_func, data_dir=_data_dir)
+    try:
+        _, metadata = extract_backup(zip_path, password, log_func, staging=staging)
+        seed_onion_key_for_install(staging, metadata, log_func, data_dir=_data_dir)
+    except Exception:
+        # Refused (invalid metadata or key) or failed before any marker
+        # exists: nothing will import this staging, so don't leave the
+        # decrypted backup behind.
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     apply_config_overrides(staging, log_func, data_dir=_data_dir)
     marker = os.path.join(_data_dir, INSTALL_FROM_BACKUP_MARKER)
     with open(marker, 'w') as f:
@@ -893,12 +999,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
             log_func("Restore: extracting backup archive...")
             extract_archive(zip_path, password, staging, log_func)
 
-        # Normalize paths -- zip may have ./ prefix
-        metadata_path = os.path.join(staging, 'metadata.json')
-        if not os.path.exists(metadata_path):
-            metadata_path = os.path.join(staging, '.', 'metadata.json')
-        with open(metadata_path) as f:
-            metadata = _check_backup_format(json.load(f))
+        # Validated before anything is restored (validate_backup_metadata).
+        metadata = read_staged_metadata(staging)
 
         # Find extracted content directories
         tor_dir = _find_dir(staging, 'tor-keys')
@@ -929,7 +1031,6 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
             with open(key_path, 'rb') as f:
                 pem_data = f.read()
             priv, pub = key_manager.parse_openssh_key(pem_data)
-            key_manager.write_private_key(priv, pub)
 
             # Address is fully determined by the key — derive it here and
             # use the derived value for every address-keyed write that
@@ -938,8 +1039,10 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
             # propagated corruption when older clients produced backups
             # with metadata.onion_address pointing at the previous address
             # while tor-keys/ already held the new key. The metadata value
-            # is recorded only as a diagnostic check.
-            derived_address = key_manager.derive_onion_address(pub)
+            # is recorded only as a diagnostic check. Derived (and the key
+            # checked for consistency) before the key is written anywhere.
+            derived_address = key_manager.key_pair_onion_address(priv, pub)
+            key_manager.write_private_key(priv, pub)
             metadata_address = metadata.get('onion_address', '')
             if metadata_address and metadata_address != derived_address:
                 log_func(f"Restore: KEY-MISMATCH — backup "

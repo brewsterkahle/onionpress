@@ -25,6 +25,15 @@ op_py() {
     PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -m onionpress.cli "$@"
 }
 
+# True only for a well-formed v3 onion address: 56 lowercase base32
+# characters, then ".onion", and nothing else (no newline, no "/"). The
+# rule of key_manager.is_valid_onion_address; a test keeps the two
+# together. The letters are spelled out because a range like a-z can take
+# in other characters in some locales.
+is_onion_address() {
+    [[ "$1" =~ ^[abcdefghijklmnopqrstuvwxyz234567]{56}\.onion$ ]]
+}
+
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
@@ -945,7 +954,18 @@ setup_wordpress_interactive() {
         staging=$(mktemp -d -t onionpress-setup-XXXXXX)
         trap "rm -rf '$staging'" RETURN
         if ! printf '%s' "$from_backup_pass" | op_py extract-backup --archive "$from_backup_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-            echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
+            echo "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)" >&2
+            return 1
+        fi
+        # metadata.json and the key files are whoever made the backup file's
+        # (a password proves nothing about that). backup-address checks
+        # them and prints the address the key belongs to, or nothing if the
+        # backup has no key; that address names a directory below, so it is
+        # never read from metadata.json. Refused before anything is copied.
+        local onion_address
+        if ! onion_address=$(op_py backup-address --staging "$staging" 2>>"$LOG_FILE") \
+            || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
+            echo "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)" >&2
             return 1
         fi
         # Restore config if present
@@ -956,8 +976,6 @@ setup_wordpress_interactive() {
         fi
         # Restore vanity keys if present (accept either C Tor or Arti format)
         if { [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] || [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; } && [ -f "$staging/metadata.json" ]; then
-            local onion_address
-            onion_address=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
             if [ -n "$onion_address" ]; then
                 rm -rf "$DATA_DIR/shared/vanity-keys/"
                 local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
@@ -2063,7 +2081,7 @@ restore_backup() {
     # format 1 ZipCrypto zips still go through unzip inside it).
     log "Restore: extracting backup archive..."
     if ! printf '%s' "$password" | op_py extract-backup --archive "$zip_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: Failed to extract backup (wrong password or corrupt zip)"
+        log "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)"
         return 1
     fi
 
@@ -2077,9 +2095,18 @@ restore_backup() {
         return 1
     fi
 
+    # metadata.json and the key files are whoever made the backup file's (a
+    # password proves nothing about that). backup-address checks them and
+    # prints the address the key belongs to, or nothing if the backup has no
+    # key; that address names a directory and goes into config below, so it
+    # is never read from metadata.json. Refused before anything is touched.
     local onion_address
-    onion_address=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$metadata_file" 2>/dev/null || echo "")
-    log "Restore: backup from $onion_address"
+    if ! onion_address=$(op_py backup-address --staging "$staging" 2>>"$LOG_FILE") \
+        || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
+        log "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)"
+        return 1
+    fi
+    log "Restore: backup from ${onion_address:-a backup without a key}"
 
     # 1. Restore Tor keys — copy whatever formats the backup has to vanity-keys.
     #    start_containers() will derive C Tor keys from the PEM if needed.
@@ -2188,6 +2215,20 @@ restore_backup() {
 
     log "Restore: complete (from $onion_address)"
     echo "$onion_address"
+}
+
+# Write the Settings page's restore-result.json. Built with a JSON encoder,
+# not by pasting strings together: the address comes out of a backup file.
+# Usage: write_restore_result true <address> | write_restore_result false <error>
+write_restore_result() {
+    python3 -c '
+import datetime, json, sys
+ok = sys.argv[1] == "true"
+result = {"success": ok, ("address" if ok else "error"): sys.argv[2],
+          "restored_at": datetime.datetime.now(datetime.timezone.utc)
+                         .strftime("%Y-%m-%dT%H:%M:%SZ")}
+print(json.dumps(result))
+' "$1" "$2" | docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
 }
 
 # ─── Write status (on-demand) ────────────────────────────────────────
@@ -2756,7 +2797,9 @@ main() {
             for arg in "$@"; do
                 [ "$arg" = "--from-backup" ] && has_from_backup=1 && break
             done
-            setup_wordpress_interactive "$@"
+            # A failed setup — for --from-backup, a backup refused before
+            # anything was restored — must not go on to flag a key reimport.
+            setup_wordpress_interactive "$@" || exit 1
             if [ -n "$has_from_backup" ]; then
                 # --from-backup restored keys to vanity-keys/ — need to reinstall
                 # into the key volume so Tor uses the restored address.
@@ -2943,7 +2986,12 @@ sys.exit(0 if provision_interactive() else 1)
             # and rebuilds it from the backup (seeded key + imported DB/content),
             # replacing the in-place overwrite + key-volume swap churn (no
             # .import-key-pending, no manual stop/start).
-            ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path"
+            # The exit status is the caller's only sign of a refused or
+            # failed restore (the tray and the menubar check it).
+            if ! ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path"; then
+                echo "ERROR: Restore failed — see $LOG_FILE" >&2
+                exit 1
+            fi
             echo "Done! OnionPress rebuilt from backup."
             ;;
 
@@ -3263,25 +3311,27 @@ sys.exit(0 if provision_interactive() else 1)
                     docker exec onionpress-wordpress rm -f "$rp_file" 2>/dev/null
                     if [ -z "$rp_password" ] || [ ! -f "$rp_local" ]; then
                         rm -f "$rp_local"
-                        echo '{"success":false,"error":"Missing password or backup file","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+                        write_restore_result false "Missing password or backup file"
                         log "Restore failed: missing password or file"
                     else
                         local rp_addr
                         if rp_addr=$(restore_backup "$rp_password" "$rp_local" 2>>"$LOG_FILE"); then
                             rm -f "$rp_local"
+                            # restore_backup's stdout is its log lines, then
+                            # the address (empty for a backup without a key).
+                            local rp_nl=$'\n'
+                            rp_addr="${rp_addr##*$rp_nl}"
+                            is_onion_address "$rp_addr" || rp_addr=""
                             # Restart to pick up restored keys
                             stop_containers 2>/dev/null || true
                             start_containers
                             wait_for_services
                             write_status
-                            echo '{"success":true,"address":"'"$rp_addr"'","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+                            write_restore_result true "$rp_addr"
                             log "Restore complete: $rp_addr"
                         else
                             rm -f "$rp_local"
-                            echo '{"success":false,"error":"Restore failed — wrong password or corrupt backup","restored_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                docker exec -i onionpress-wordpress sh -c 'cat > /var/lib/onionpress/restore-result.json' 2>/dev/null
+                            write_restore_result false "Restore failed — wrong password or invalid backup"
                             log "Restore failed"
                         fi
                     fi

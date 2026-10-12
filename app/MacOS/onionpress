@@ -42,6 +42,15 @@ _BUNDLED_PYTHON_BIN="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
 _BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
 bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"; }
 
+# True only for a well-formed v3 onion address: 56 lowercase base32
+# characters, then ".onion", and nothing else (no newline, no "/"). The
+# rule of key_manager.is_valid_onion_address; a test keeps the two
+# together. The letters are spelled out because a range like a-z can take
+# in other characters in some locales.
+is_onion_address() {
+    [[ "$1" =~ ^[abcdefghijklmnopqrstuvwxyz234567]{56}\.onion$ ]]
+}
+
 mkdir -p "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
@@ -2353,7 +2362,18 @@ setup_wordpress_cli() {
         # Either backup format; format 2 needs the Python decoder (plain
         # unzip can't read it). The password goes over stdin, not argv.
         if ! printf '%s' "$from_backup_pass" | bundled_python -m onionpress.cli extract-backup --archive "$from_backup_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-            echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
+            echo "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)" >&2
+            return 1
+        fi
+        # metadata.json and the key files are whoever made the backup file's
+        # (a password proves nothing about that). backup-address checks
+        # them and prints the address the key belongs to, or nothing if the
+        # backup has no key; that address names a directory below, so it is
+        # never read from metadata.json. Refused before anything is copied.
+        local onion_address
+        if ! onion_address=$(bundled_python -m onionpress.cli backup-address --staging "$staging" 2>>"$LOG_FILE") \
+            || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
+            echo "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)" >&2
             return 1
         fi
         # Restore config if present
@@ -2364,8 +2384,6 @@ setup_wordpress_cli() {
         fi
         # Restore vanity keys if present (accept either C Tor or Arti format)
         if { [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] || [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; } && [ -f "$staging/metadata.json" ]; then
-            local onion_address
-            onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
             if [ -n "$onion_address" ]; then
                 rm -rf "$DATA_DIR/shared/vanity-keys/"
                 local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
@@ -2491,8 +2509,8 @@ restore_backup() {
     # Extract zip
     log "Restore: extracting backup archive..."
     if ! printf '%s' "$password" | bundled_python -m onionpress.cli extract-backup --archive "$zip_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-        log "ERROR: Failed to extract backup (wrong password or corrupt zip)"
-        echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
+        log "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)"
+        echo "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)" >&2
         return 1
     fi
 
@@ -2503,9 +2521,19 @@ restore_backup() {
         return 1
     fi
 
+    # metadata.json and the key files are whoever made the backup file's (a
+    # password proves nothing about that). backup-address checks them and
+    # prints the address the key belongs to, or nothing if the backup has no
+    # key; that address names a directory and goes into config below, so it
+    # is never read from metadata.json. Refused before anything is touched.
     local onion_address
-    onion_address=$(bundled_python -c "import json, sys; print(json.load(open(sys.argv[1])).get('onion_address',''))" "$staging/metadata.json" 2>/dev/null || echo "")
-    log "Restore: backup from $onion_address"
+    if ! onion_address=$(bundled_python -m onionpress.cli backup-address --staging "$staging" 2>>"$LOG_FILE") \
+        || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
+        log "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)"
+        echo "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)" >&2
+        return 1
+    fi
+    log "Restore: backup from ${onion_address:-a backup without a key}"
 
     # 1. Restore Tor keys — accept either C Tor or PEM format.
     #    The container takes the PEM; if the backup has only C Tor keys, derive it.
@@ -2912,7 +2940,9 @@ main() {
             for arg in "$@"; do
                 [ "$arg" = "--from-backup" ] && has_from_backup=1 && break
             done
-            setup_wordpress_cli "$@"
+            # A failed setup — for --from-backup, a backup refused before
+            # anything was restored — must not go on to flag a key reimport.
+            setup_wordpress_cli "$@" || exit 1
             if [ -n "$has_from_backup" ]; then
                 # --from-backup restored keys to vanity-keys/ — need to reinstall
                 # into the key volume so Tor uses the restored address.
@@ -2970,7 +3000,12 @@ main() {
             # rebuilds it from the backup (seeded key + imported DB/content),
             # replacing the old in-place overwrite + key-volume swap churn
             # (no .import-key-pending, no manual multisite/Tor dance).
-            ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path"
+            # The exit status is the caller's only sign of a refused or
+            # failed restore (the tray and the menubar check it).
+            if ! ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path"; then
+                echo "ERROR: Restore failed — see $LOG_FILE" >&2
+                exit 1
+            fi
             echo "Done! OnionPress rebuilt from backup."
             ;;
 

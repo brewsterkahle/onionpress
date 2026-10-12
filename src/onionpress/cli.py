@@ -316,8 +316,15 @@ class OnionPressCLI:
         import shutil
         try:
             from .backup import prepare_install_from_backup
+            from .key_manager import is_valid_onion_address
             staging, meta = prepare_install_from_backup(
                 backup_path, password, self.log, data_dir=self.paths.data_dir)
+            addr = meta.get("onion_address", "")
+            # Derived from the backup's key by the seed step; checked again,
+            # before the teardown, because it names the directory
+            # bind-mounted below.
+            if not is_valid_onion_address(addr):
+                raise ValueError("the restored onion address is not valid")
         except Exception as e:
             self.log(f"Restore failed during extract/seed: {e}")
             return 1
@@ -342,7 +349,6 @@ class OnionPressCLI:
             # first-run key install. Bind-mount the host vanity-keys dir, which
             # seed_onion_key_for_install wrote under shared/ (inside the Colima
             # mount, so the bind works on macOS as well as Linux).
-            addr = meta.get("onion_address", "")
             vanity_addr_dir = os.path.join(
                 self.paths.data_dir, "shared", "vanity-keys", addr)
             seed = self.docker.run([
@@ -396,14 +402,15 @@ class OnionPressCLI:
         dir, so no password is needed here.
         """
         try:
-            from .backup import restore_container_artifacts
+            from .backup import (restore_container_artifacts,
+                                 validate_backup_metadata)
             meta_path = os.path.join(staging, "metadata.json")
             if not os.path.exists(meta_path):
                 meta_path = os.path.join(staging, ".", "metadata.json")
             metadata = {}
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
-                    metadata = json.load(f)
+                    metadata = validate_backup_metadata(json.load(f))
             restore_container_artifacts(staging, metadata, self.log)
             # Migrate DB schema for cross-version backups (non-fatal).
             res = self.docker.run(
@@ -470,6 +477,24 @@ class OnionPressCLI:
         except Exception as e:
             log(f"Restore: could not extract the backup: {e}")
             return 1
+
+    @staticmethod
+    def cmd_backup_address(staging: str) -> int:
+        """Print the onion address an extracted backup's key belongs to
+        (nothing if it has no key); exit 1, printing nothing, on invalid
+        metadata or key files. Used by the bash launchers' restore and
+        `setup --from-backup` paths, which name a directory after the
+        address: they never read it from metadata.json themselves."""
+        from .backup import staged_backup_address
+        log = _make_log_func()
+        try:
+            address = staged_backup_address(staging, log)
+        except Exception as e:
+            log(f"Restore: refusing the backup: {str(e)[:300]}")
+            return 1
+        if address:
+            print(address)
+        return 0
 
     def cmd_smoke_test_wayback(self) -> int:
         """End-to-end smoke test of the Wayback archiving pipeline.
@@ -891,10 +916,22 @@ def main(argv: list[str] = None) -> int:
     p_extract.add_argument(
         "--dest", required=True, help="Directory to extract into")
 
+    p_baddr = sub.add_parser(
+        "backup-address",
+        help="Validate an extracted backup and print the onion address its "
+             "key belongs to (restore helper; exit 1 if invalid)")
+    p_baddr.add_argument(
+        "--staging", required=True,
+        help="Directory the backup was extracted into")
+
     args = parser.parse_args(argv)
 
     if not args.command:
         args.command = "start"
+
+    if args.command == "backup-address":
+        # Read-only, run by the launchers mid-restore: no OnionPressCLI setup.
+        return OnionPressCLI.cmd_backup_address(args.staging)
 
     if args.command == "safe-config":
         # Read-only, and run by the Linux launcher every 30 s: skip

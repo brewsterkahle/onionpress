@@ -32,8 +32,10 @@ from onionpress import key_manager
 _REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 
 
-_FAKE_PUB = b"\x02" * 32
 _FAKE_PRIV = b"\x01" * 64
+# Restores check that a key's public half belongs to its private half
+# (key_manager.key_pair_onion_address), so the pair must be consistent.
+_FAKE_PUB = key_manager.derive_public_key(_FAKE_PRIV)
 # The .onion address that derives from _FAKE_PUB. create_backup and
 # restore_from_backup both treat the key as authoritative and write this
 # derived value into metadata regardless of any address the caller (or an
@@ -45,8 +47,9 @@ _FAKE_DERIVED_ADDR = key_manager.derive_onion_address(_FAKE_PUB)
 def _fake_arti_pem():
     """A deterministic, parseable OpenSSH PEM for test fixtures.
 
-    The key bytes are arbitrary (not a real ed25519 pair) — build/parse is
-    byte-level, not crypto. Tests round-trip these through backup+restore.
+    The private key bytes are arbitrary and the public key is derived from
+    them, since a restore refuses a key whose halves disagree. Tests
+    round-trip these through backup+restore.
     """
     return key_manager.build_openssh_key(_FAKE_PRIV, _FAKE_PUB)
 
@@ -132,19 +135,19 @@ class TestReadBackupMetadata(unittest.TestCase):
 
     def test_valid_backup(self):
         metadata = {
-            "onion_address": "abc123.onion",
+            "onion_address": _FAKE_DERIVED_ADDR,
             "backup_date": "2026-01-15T10:30:00Z",
             "onionpress_version": "2.2.84",
             "username": "admin",
         }
         zip_path = self._make_zip(metadata, "secret123")
         result = backup_manager.read_backup_metadata(zip_path, "secret123")
-        self.assertEqual(result["onion_address"], "abc123.onion")
+        self.assertEqual(result["onion_address"], _FAKE_DERIVED_ADDR)
         self.assertEqual(result["username"], "admin")
         self.assertEqual(result["onionpress_version"], "2.2.84")
 
     def test_wrong_password(self):
-        metadata = {"onion_address": "test.onion"}
+        metadata = {"onion_address": _FAKE_DERIVED_ADDR}
         zip_path = self._make_zip(metadata, "correct")
         with self.assertRaises(ValueError) as ctx:
             backup_manager.read_backup_metadata(zip_path, "wrong")
@@ -158,7 +161,7 @@ class TestReadBackupMetadata(unittest.TestCase):
 
     def test_wrong_password_slipping_past_header_check(self):
         """End to end: a real wrong password that passes the one-byte check."""
-        zip_path = self._make_zip({"onion_address": "test.onion"}, "correct")
+        zip_path = self._make_zip({"onion_address": _FAKE_DERIVED_ADDR}, "correct")
         wrong = self._wrong_password_passing_header_check(zip_path)
         with self.assertRaises(ValueError) as ctx:
             backup_manager.read_backup_metadata(zip_path, wrong)
@@ -187,7 +190,7 @@ class TestReadBackupMetadata(unittest.TestCase):
 
     def test_garbage_plaintext_errors_mean_wrong_password(self):
         """Deterministic: zlib.error or a CRC mismatch from the encrypted read."""
-        zip_path = self._make_zip({"onion_address": "test.onion"}, "correct")
+        zip_path = self._make_zip({"onion_address": _FAKE_DERIVED_ADDR}, "correct")
         garbage_errors = [
             zlib.error("Error -3 while decompressing data: invalid code lengths set"),
             zipfile.BadZipFile("Bad CRC-32 for file 'metadata.json'"),
@@ -204,7 +207,7 @@ class TestReadBackupMetadata(unittest.TestCase):
         unencrypted zip keeps its original error."""
         zip_path = os.path.join(self.tmpdir, "plain.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("metadata.json", json.dumps({"onion_address": "x.onion"}))
+            zf.writestr("metadata.json", json.dumps({"onion_address": _FAKE_DERIVED_ADDR}))
         with mock.patch.object(zipfile.ZipFile, "read",
                                side_effect=zlib.error("Error -3 while decompressing data")):
             with self.assertRaises(zlib.error):
@@ -238,7 +241,7 @@ class TestReadBackupMetadata(unittest.TestCase):
 
     def test_dot_slash_prefix(self):
         """Metadata at ./metadata.json (as produced by `zip -r ... .`) should be found."""
-        metadata = {"onion_address": "dotslash.onion", "username": "admin"}
+        metadata = {"onion_address": _FAKE_DERIVED_ADDR, "username": "admin"}
         zip_path = self._make_zip(metadata, "pw")
         # Verify it actually has ./ prefix (system zip does this)
         with zipfile.ZipFile(zip_path) as zf:
@@ -249,7 +252,7 @@ class TestReadBackupMetadata(unittest.TestCase):
                         f"Expected metadata.json in zip, got: {names}")
         # Either way, read_backup_metadata should find it
         result = backup_manager.read_backup_metadata(zip_path, "pw")
-        self.assertEqual(result["onion_address"], "dotslash.onion")
+        self.assertEqual(result["onion_address"], _FAKE_DERIVED_ADDR)
 
 
 class TestFindDir(unittest.TestCase):
@@ -698,7 +701,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
         # detect the mismatch, prefer the key-derived address everywhere
         # it persists state, and log loudly so the analytics pipeline
         # surfaces the source instance.
-        stale_metadata_addr = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"
+        stale_metadata_addr = "stalemdz" * 7 + ".onion"
         zip_path = self._make_backup_zip(metadata_address=stale_metadata_addr)
         metadata = backup_manager.restore_from_backup(
             zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
@@ -863,7 +866,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
                 self.assertIn("password", str(ctx.exception).lower())
 
     def test_seed_onion_key_mismatch_guard(self):
-        stale = "stalemd1stalemd1stalemd1stalemd1stalemd1stalemd1stale12.onion"
+        stale = "stalemdz" * 7 + ".onion"
         zip_path = self._make_backup_zip(metadata_address=stale)
         staging, metadata = backup_manager.extract_backup(
             zip_path, "testpw", self.logs.append)
@@ -1331,7 +1334,7 @@ class TestBashBackupHelpers(unittest.TestCase):
         self.staging = os.path.join(self.tmpdir, "staging")
         os.makedirs(os.path.join(self.staging, "tor-keys"))
         with open(os.path.join(self.staging, "metadata.json"), "w") as f:
-            json.dump({"onion_address": "x.onion", "onionpress_version": "2.5.2",
+            json.dump({"onion_address": _FAKE_DERIVED_ADDR, "onionpress_version": "2.5.2",
                        "platform": "linux"}, f)
         self.pem = _fake_arti_pem()
         with open(os.path.join(self.staging, "tor-keys",

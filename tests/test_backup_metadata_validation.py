@@ -1,0 +1,674 @@
+#!/usr/bin/env python3
+"""A backup's metadata.json is never trusted in a path, config, a command or
+JSON.
+
+metadata.json travels inside the backup file, and the password proves only
+that whoever made the file chose it: anyone can make one and hand it over.
+Its onion_address used to name a directory under
+~/.onionpress/shared/vanity-keys/ in both launchers (so "../../x" escaped
+it), feed an ADDRESS_PREFIX sed expression, and be pasted into the Settings
+page's restore-result.json; its username became a config line. These tests
+feed crafted metadata, and crafted keys, to every restore path.
+
+No docker: the Python paths fail the test on any docker call, and the bash
+paths run the extracted launcher functions with docker stubbed out, HOME and
+TMPDIR pointed at a scratch directory.
+"""
+
+import contextlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+SRC = os.path.join(PROJECT_ROOT, "src")
+sys.path.insert(0, SRC)
+
+from onionpress import backup, backup_crypto, cli, key_manager  # noqa: E402
+
+LAUNCHERS = ["app/MacOS/onionpress", "linux/onionpress"]
+PW = "backup-pw"
+
+PRIV = b"\x05" * 64
+PUB = key_manager.derive_public_key(PRIV)
+ADDR = key_manager.derive_onion_address(PUB)
+# The identity already installed when a restore starts.
+OLD_PRIV = b"\x07" * 64
+OLD_ADDR = key_manager.derive_onion_address(key_manager.derive_public_key(OLD_PRIV))
+
+CRAFTED_ADDRESSES = [
+    "../../../../escaped.onion",
+    "../" + ADDR,
+    ADDR + "/../../escaped",
+    ADDR + "\n../../escaped",
+    ADDR + "\n",
+    " " + ADDR,
+    ADDR.upper(),
+    ADDR[:-6] + "1.onion",          # "1" is not base32
+    "a" * 55 + ".onion",
+    "a" * 57 + ".onion",
+    "x.onion",
+    "evil.onion\"}, \"success\": false, \"x\": {\"a\": \"",
+]
+CRAFTED_USERNAMES = [
+    "admin\nREGISTER_WITH_ONIONHEAVEN=yes",
+    "admin\rCLOUDFLARE_TUNNEL_TOKEN=x",
+    "../../../escaped",
+    "a/b",
+    "admin=1",
+    "admin\u202e",
+    "x" * 61,
+]
+
+
+def _read(rel):
+    with open(os.path.join(PROJECT_ROOT, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+def _bash_function(text, name):
+    start = text.index(f"\n{name}() {{")
+    end = text.index("\n}\n", start)
+    return text[start:end + 3]
+
+
+def _cheap_scrypt(test):
+    patcher = mock.patch.object(backup_crypto, "SCRYPT_LOG2_N", 10)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
+def _metadata(**fields):
+    meta = {"onion_address": ADDR, "backup_date": "2026-10-01T12:00:00Z",
+            "onionpress_version": "2.5.2", "username": "admin"}
+    meta.update(fields)
+    return meta
+
+
+def _make_staging(root, metadata, *, pem=(PRIV, PUB), ctor_secret=None,
+                  ctor_public=None, config=None, name="staging"):
+    staging = os.path.join(root, name)
+    tor_dir = os.path.join(staging, "tor-keys")
+    os.makedirs(tor_dir)
+    with open(os.path.join(staging, "metadata.json"), "w") as f:
+        json.dump(metadata, f)
+    if pem:
+        with open(os.path.join(tor_dir, "ks_hs_id.ed25519_expanded_private"), "wb") as f:
+            f.write(key_manager.build_openssh_key(*pem))
+    if ctor_secret:
+        with open(os.path.join(tor_dir, "hs_ed25519_secret_key"), "wb") as f:
+            f.write(key_manager.CTOR_SECRET_HEADER + ctor_secret)
+    if ctor_public:
+        with open(os.path.join(tor_dir, "hs_ed25519_public_key"), "wb") as f:
+            f.write(key_manager.CTOR_PUBLIC_HEADER + ctor_public)
+    if config is not None:
+        with open(os.path.join(staging, "config"), "w") as f:
+            f.write(config)
+    return staging
+
+
+def _make_backup(root, metadata, name="backup.zip", **kw):
+    """A format-2 backup file (as anyone can make one) with *metadata*."""
+    staging = _make_staging(root, metadata, name=name + ".staging", **kw)
+    out = os.path.join(root, name)
+    backup.pack_backup(staging, out, PW, lambda m: None)
+    shutil.rmtree(staging)
+    return out
+
+
+def _make_format1_backup(root, metadata, name="legacy.zip"):
+    staging = _make_staging(root, metadata, name=name + ".staging")
+    out = os.path.join(root, name)
+    subprocess.run(["zip", "-r", "-P", PW, out, "."], cwd=staging,
+                   capture_output=True, check=True)
+    shutil.rmtree(staging)
+    return out
+
+
+class TestOnionAddressRule(unittest.TestCase):
+
+    def test_accepts_derived_addresses(self):
+        for priv in (PRIV, OLD_PRIV, b"\x11" * 64):
+            addr = key_manager.derive_onion_address(key_manager.derive_public_key(priv))
+            self.assertTrue(key_manager.is_valid_onion_address(addr), addr)
+
+    def test_rejects_crafted_values(self):
+        for value in CRAFTED_ADDRESSES + ["", None, 123, [ADDR], {"a": ADDR}]:
+            with self.subTest(value=value):
+                self.assertFalse(key_manager.is_valid_onion_address(value))
+
+    def test_bash_rule_is_identical_in_both_launchers(self):
+        bodies = [_bash_function(_read(p), "is_onion_address") for p in LAUNCHERS]
+        self.assertEqual(bodies[0], bodies[1],
+                         "is_onion_address() must be identical in both launchers")
+
+    def test_bash_rule_agrees_with_python(self):
+        values = [ADDR, OLD_ADDR] + CRAFTED_ADDRESSES + [""]
+        script = (_bash_function(_read("linux/onionpress"), "is_onion_address")
+                  + 'for v in "$@"; do if is_onion_address "$v"; then echo 1; '
+                    'else echo 0; fi; done\n')
+        r = subprocess.run(["bash", "-c", script, "bash", *values],
+                           capture_output=True, text=True, timeout=10,
+                           env={**os.environ, "LC_ALL": "en_US.UTF-8"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = r.stdout.split()
+        want = ["1" if key_manager.is_valid_onion_address(v) else "0" for v in values]
+        self.assertEqual(got, want)
+        self.assertEqual(want[:2], ["1", "1"])
+
+
+class TestKeyConsistency(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_key_pair_address(self):
+        self.assertEqual(key_manager.key_pair_onion_address(PRIV, PUB), ADDR)
+
+    def test_a_public_half_that_is_not_the_private_halfs_is_refused(self):
+        # The address of the stored public half alone is whatever the key
+        # file's author wrote: here, the installed identity's address.
+        other_pub = key_manager.derive_public_key(OLD_PRIV)
+        with self.assertRaises(ValueError):
+            key_manager.key_pair_onion_address(PRIV, other_pub)
+
+    def _tor_dir(self, **kw):
+        return os.path.join(_make_staging(self.tmp, {}, **kw), "tor-keys")
+
+    def test_staged_key_address_for_each_format(self):
+        cases = {
+            "pem": dict(),
+            "ctor secret": dict(pem=None, ctor_secret=PRIV),
+            "ctor pair": dict(pem=None, ctor_secret=PRIV, ctor_public=PUB),
+            "all three": dict(ctor_secret=PRIV, ctor_public=PUB),
+        }
+        for label, kw in cases.items():
+            with self.subTest(label):
+                shutil.rmtree(os.path.join(self.tmp, "staging"), True)
+                self.assertEqual(key_manager.staged_key_address(self._tor_dir(**kw)), ADDR)
+
+    def test_no_key_is_an_empty_address(self):
+        self.assertEqual(key_manager.staged_key_address(self._tor_dir(pem=None)), "")
+
+    def test_disagreeing_or_broken_key_files_are_refused(self):
+        old_pub = key_manager.derive_public_key(OLD_PRIV)
+        cases = {
+            "pem public half": dict(pem=(PRIV, old_pub)),
+            "pem vs ctor": dict(ctor_secret=OLD_PRIV),
+            "ctor public": dict(pem=None, ctor_secret=PRIV, ctor_public=old_pub),
+            "short ctor secret": dict(pem=None, ctor_secret=PRIV[:40]),
+        }
+        for label, kw in cases.items():
+            with self.subTest(label):
+                shutil.rmtree(os.path.join(self.tmp, "staging"), True)
+                with self.assertRaises(ValueError):
+                    key_manager.staged_key_address(self._tor_dir(**kw))
+
+    def test_garbage_pem_is_a_value_error(self):
+        tor_dir = self._tor_dir(pem=None)
+        with open(os.path.join(tor_dir, "ks_hs_id.ed25519_expanded_private"), "wb") as f:
+            f.write(b"-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END\n")
+        with self.assertRaises(ValueError):
+            key_manager.staged_key_address(tor_dir)
+
+
+class TestValidateBackupMetadata(unittest.TestCase):
+
+    def test_valid_and_missing_fields_pass(self):
+        for meta in (_metadata(), {}, {"onion_address": "", "username": ""},
+                     {"onion_address": None, "username": None},
+                     _metadata(username="John Doe"), _metadata(username="a.b-c_d@e")):
+            with self.subTest(meta=meta):
+                self.assertIs(backup.validate_backup_metadata(meta), meta)
+
+    def test_crafted_addresses_are_refused(self):
+        for value in CRAFTED_ADDRESSES + [123, [ADDR]]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    backup.validate_backup_metadata(_metadata(onion_address=value))
+                self.assertNotIn("escaped", str(ctx.exception))
+
+    def test_crafted_usernames_are_refused(self):
+        for value in CRAFTED_USERNAMES + [["admin"], 7]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError) as ctx:
+                    backup.validate_backup_metadata(_metadata(username=value))
+                self.assertNotIn("REGISTER", str(ctx.exception))
+
+    def test_metadata_that_is_not_an_object_is_refused(self):
+        for value in ([], "x", 1, None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    backup.validate_backup_metadata(value)
+
+    def test_a_newer_format_still_says_so(self):
+        with self.assertRaises(backup_crypto.NewerBackupError):
+            backup._check_backup_format({"backup_format": 99})
+
+    def test_metadata_text_for_dialogs(self):
+        meta = {"backup_date": "2026-10-01\n\nThis backup is verified \u202e",
+                "onionpress_version": "v" * 200, "n": 5}
+        self.assertEqual(backup.metadata_text(meta, "backup_date"),
+                         "2026-10-01This backup is verified")
+        self.assertEqual(len(backup.metadata_text(meta, "onionpress_version")), 65)
+        self.assertEqual(backup.metadata_text(meta, "n"), "unknown")
+        self.assertEqual(backup.metadata_text(meta, "missing"), "unknown")
+        self.assertEqual(backup.metadata_text(None, "x", default="?"), "?")
+
+
+class _NoDocker:
+    """Delegate subprocess.run, failing the test on any docker command."""
+
+    def __init__(self, test):
+        self.test = test
+        self.real = subprocess.run
+
+    def __call__(self, args, *a, **kw):
+        if args and os.path.basename(str(args[0])) == "docker":
+            self.test.fail(f"docker called: {args}")
+        return self.real(args, *a, **kw)
+
+
+class TestPythonRestorePaths(unittest.TestCase):
+    """read/peek, restore_from_backup and prepare_install_from_backup refuse
+    crafted metadata and keys before touching the install."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        _cheap_scrypt(self)
+        self.data_dir = os.path.join(self.tmp, "home", ".onionpress")
+        old_dir = os.path.join(self.data_dir, "shared", "vanity-keys", OLD_ADDR)
+        os.makedirs(old_dir)
+        with open(os.path.join(old_dir, "hostname"), "w") as f:
+            f.write(OLD_ADDR + "\n")
+        self.config = "ADDRESS_PREFIX=abc\nONIONNAME=me\n"
+        with open(os.path.join(self.data_dir, "config"), "w") as f:
+            f.write(self.config)
+        with open(os.path.join(self.data_dir, "onion_address"), "w") as f:
+            f.write(OLD_ADDR + "\n")
+        self.logs = []
+        for target in ("onionpress.backup.subprocess.run",):
+            p = mock.patch(target, _NoDocker(self))
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(key_manager, "write_private_key",
+                              side_effect=AssertionError("key written"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def assert_untouched(self):
+        vanity = os.path.join(self.data_dir, "shared", "vanity-keys")
+        self.assertEqual(os.listdir(vanity), [OLD_ADDR])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.data_dir, "shared"))),
+                         ["vanity-keys"])
+        with open(os.path.join(self.data_dir, "config")) as f:
+            self.assertEqual(f.read(), self.config)
+        with open(os.path.join(self.data_dir, "onion_address")) as f:
+            self.assertEqual(f.read(), OLD_ADDR + "\n")
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, "restore-staging")))
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, ".install-from-backup")))
+        for dirpath, _, files in os.walk(self.tmp):
+            for name in files + [os.path.basename(dirpath)]:
+                self.assertNotIn("escaped", name, dirpath)
+
+    def _crafted_backups(self):
+        cases = [(f"onion_address={v!r}", _metadata(onion_address=v), {})
+                 for v in CRAFTED_ADDRESSES]
+        cases += [(f"username={v!r}", _metadata(username=v), {})
+                  for v in CRAFTED_USERNAMES]
+        cases.append(("inconsistent key", _metadata(onion_address=OLD_ADDR),
+                      {"pem": (PRIV, key_manager.derive_public_key(OLD_PRIV))}))
+        for i, (label, meta, kw) in enumerate(cases):
+            yield label, _make_backup(self.tmp, meta, name=f"crafted{i}.zip", **kw)
+
+    def test_read_and_peek_refuse_crafted_metadata(self):
+        for label, path in list(self._crafted_backups())[:-1]:
+            for reader in (backup.read_backup_metadata, backup.peek_backup_metadata):
+                with self.subTest(label, reader=reader.__name__):
+                    with self.assertRaises(ValueError):
+                        reader(path, PW)
+
+    def test_format_1_backups_are_checked_too(self):
+        path = _make_format1_backup(self.tmp, _metadata(onion_address="../../escaped"))
+        for reader in (backup.read_backup_metadata, backup.peek_backup_metadata):
+            with self.subTest(reader.__name__):
+                with self.assertRaises(ValueError):
+                    reader(path, PW)
+
+    def test_peek_does_not_follow_a_member_name_out_of_its_temp_dir(self):
+        # A format-1 zip whose only metadata.json member sits under "../".
+        outside = os.path.join(self.tmp, "metadata.json")
+        with open(outside, "w") as f:
+            json.dump(_metadata(username="from-outside"), f)
+        path = os.path.join(self.tmp, "odd.zip")
+        import zipfile
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("../../../../../../../../../../../../../../.." + outside,
+                        json.dumps(_metadata()))
+        meta = backup.peek_backup_metadata(path, PW)
+        self.assertEqual(meta["username"], "admin")
+
+    def test_restore_from_backup_refuses_before_touching_anything(self):
+        for label, path in self._crafted_backups():
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    backup.restore_from_backup(path, PW, self.logs.append,
+                                               data_dir=self.data_dir)
+                self.assert_untouched()
+
+    def test_install_from_backup_refuses_before_touching_anything(self):
+        for label, path in self._crafted_backups():
+            with self.subTest(label):
+                with self.assertRaises(ValueError):
+                    backup.prepare_install_from_backup(path, PW, self.logs.append,
+                                                       data_dir=self.data_dir)
+                self.assert_untouched()
+
+    def test_seed_refuses_crafted_metadata_handed_in_directly(self):
+        staging = _make_staging(self.tmp, {})
+        for meta in ([_metadata(onion_address=v) for v in CRAFTED_ADDRESSES]
+                     + [_metadata(username=v) for v in CRAFTED_USERNAMES]):
+            with self.subTest(meta=meta):
+                with self.assertRaises(ValueError):
+                    backup.seed_onion_key_for_install(
+                        staging, meta, self.logs.append, data_dir=self.data_dir)
+                self.assert_untouched()
+
+    def test_a_valid_backup_still_seeds_the_key_derived_address(self):
+        path = _make_backup(self.tmp, _metadata())
+        _, meta = backup.prepare_install_from_backup(
+            path, PW, self.logs.append, data_dir=self.data_dir)
+        self.assertEqual(meta["onion_address"], ADDR)
+        self.assertEqual(os.listdir(os.path.join(self.data_dir, "shared", "vanity-keys")),
+                         [ADDR])
+        with open(os.path.join(self.data_dir, "config")) as f:
+            self.assertIn("ONIONNAME=admin\n", f.read())
+
+
+class TestBackupAddressCli(unittest.TestCase):
+    """`onionpress.cli backup-address`, the launchers' gate."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # The helper must not build OnionPressCLI (config, secrets, ports
+        # under ~/.onionpress): it runs mid-restore.
+        p = mock.patch.object(cli.OnionPressCLI, "__init__",
+                              side_effect=AssertionError("OnionPressCLI built"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _run(self, staging):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(["backup-address", "--staging", staging])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_prints_the_key_derived_address(self):
+        rc, out, _ = self._run(_make_staging(self.tmp, _metadata()))
+        self.assertEqual((rc, out), (0, ADDR + "\n"))
+
+    def test_a_stale_but_well_formed_metadata_address_is_logged_not_used(self):
+        rc, out, err = self._run(_make_staging(self.tmp, _metadata(onion_address=OLD_ADDR)))
+        self.assertEqual((rc, out), (0, ADDR + "\n"))
+        self.assertIn("KEY-MISMATCH", err)
+
+    def test_no_key_prints_nothing(self):
+        rc, out, _ = self._run(_make_staging(self.tmp, _metadata(), pem=None))
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_refuses_crafted_metadata_and_keys(self):
+        cases = [_metadata(onion_address=v) for v in CRAFTED_ADDRESSES]
+        cases += [_metadata(username=v) for v in CRAFTED_USERNAMES]
+        cases += [[], "x"]
+        for i, meta in enumerate(cases):
+            with self.subTest(meta=meta):
+                rc, out, _ = self._run(_make_staging(self.tmp, meta, name=f"s{i}"))
+                self.assertEqual((rc, out), (1, ""))
+        bad_key = _make_staging(self.tmp, _metadata(), name="badkey",
+                                pem=(PRIV, key_manager.derive_public_key(OLD_PRIV)))
+        self.assertEqual(self._run(bad_key)[:2], (1, ""))
+        no_meta = _make_staging(self.tmp, _metadata(), name="nometa")
+        os.remove(os.path.join(no_meta, "metadata.json"))
+        self.assertEqual(self._run(no_meta)[:2], (1, ""))
+
+
+class TestLauncherRestorePaths(unittest.TestCase):
+    """The bash restore_backup and setup --from-backup functions of both
+    launchers, run for real against crafted backup files."""
+
+    SETUP = {"linux/onionpress": "setup_wordpress_interactive",
+             "app/MacOS/onionpress": "setup_wordpress_cli"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        _cheap_scrypt(self)
+
+    def _fresh_data_dir(self):
+        data = os.path.join(self.tmp, "home", ".onionpress")
+        shutil.rmtree(os.path.join(self.tmp, "home"), True)
+        old_dir = os.path.join(data, "shared", "vanity-keys", OLD_ADDR)
+        os.makedirs(old_dir)
+        with open(os.path.join(old_dir, "hostname"), "w") as f:
+            f.write(OLD_ADDR + "\n")
+        with open(os.path.join(data, "config"), "w") as f:
+            f.write("ONIONNAME=me\n")
+        return data
+
+    def _run(self, launcher, call):
+        text = _read(launcher)
+        funcs = "".join(_bash_function(text, name) for name in
+                        ("is_onion_address", "restore_backup", self.SETUP[launcher]))
+        # Stubs. extract-backup goes straight to the Python helper (the CLI
+        # entry builds OnionPressCLI, which sets up ~/.onionpress);
+        # backup-address is the real CLI. docker only records the call.
+        prelude = r'''
+log() { echo "[log] $1" | tee -a "$LOG_FILE"; }
+docker() { echo "docker $*" >> "$CALLS"; return 1; }
+db_client() { echo "db_client $*" >> "$CALLS"; return 1; }
+setup_db_passwords() { :; }
+ensure_key_formats() { :; }
+wp_access_host() { echo localhost; }
+python3() { "$PY" "$@"; }
+_cli() {
+    if [ "$1" = extract-backup ]; then
+        PYTHONPATH="$SRC" "$PY" -c 'import sys
+from onionpress import cli
+sys.exit(cli.OnionPressCLI.cmd_extract_backup(
+    None, sys.argv[2], sys.argv[4], sys.stdin.read().rstrip("\n")))' "${@:2}"
+    else
+        PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"
+    fi
+}
+op_py() { _cli "$@"; }
+bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$SRC" "$PY" "$@"; fi; }
+'''
+        home = os.path.join(self.tmp, "home")
+        tmpdir = os.path.join(self.tmp, "t")
+        os.makedirs(tmpdir, exist_ok=True)
+        env = {
+            "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
+            "DATA_DIR": os.path.join(home, ".onionpress"),
+            "LOG_FILE": os.path.join(self.tmp, "log"),
+            "CALLS": os.path.join(self.tmp, "calls"),
+            "SRC": SRC, "PY": sys.executable, "PW": PW,
+            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
+        }
+        r = subprocess.run(["bash", "-c", prelude + funcs + call + '\necho "rc=$?"'],
+                           capture_output=True, text=True, timeout=120, env=env)
+        self.assertIn("rc=", r.stdout, r.stderr)
+        rc = int(r.stdout.rsplit("rc=", 1)[1].strip())
+        return rc, r.stdout.rsplit("rc=", 1)[0], r.stderr
+
+    def _assert_untouched(self, data):
+        self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")), [OLD_ADDR])
+        self.assertEqual(sorted(os.listdir(os.path.join(data, "shared"))), ["vanity-keys"])
+        with open(os.path.join(data, "config")) as f:
+            self.assertEqual(f.read(), "ONIONNAME=me\n")
+        self.assertFalse(os.path.exists(os.path.join(data, ".import-key-pending")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "calls")))
+        for dirpath, dirs, files in os.walk(self.tmp):
+            for name in dirs + files:
+                self.assertNotIn("escaped", name, dirpath)
+
+    def _crafted(self):
+        evil_config = "REGISTER_WITH_ONIONHEAVEN=yes\n"
+        yield "address traversal", _make_backup(
+            self.tmp, _metadata(onion_address="../../../../escaped.onion"),
+            name="a.zip", config=evil_config)
+        yield "address with newline", _make_backup(
+            self.tmp, _metadata(onion_address=ADDR + "\n../escaped"),
+            name="b.zip", config=evil_config)
+        yield "username with newline", _make_backup(
+            self.tmp, _metadata(username="admin\nREGISTER_WITH_ONIONHEAVEN=yes"),
+            name="c.zip", config=evil_config)
+        yield "inconsistent key", _make_backup(
+            self.tmp, _metadata(onion_address=OLD_ADDR), name="d.zip",
+            config=evil_config, pem=(PRIV, key_manager.derive_public_key(OLD_PRIV)))
+        yield "C Tor key for another address", _make_backup(
+            self.tmp, _metadata(), name="e.zip", config=evil_config,
+            ctor_secret=OLD_PRIV)
+
+    def test_restore_backup_refuses_crafted_backups(self):
+        backups = list(self._crafted())
+        for launcher in LAUNCHERS:
+            for label, path in backups:
+                with self.subTest(launcher=launcher, case=label):
+                    data = self._fresh_data_dir()
+                    rc, out, _ = self._run(launcher, f'restore_backup "$PW" {path!r}')
+                    self.assertNotEqual(rc, 0)
+                    self._assert_untouched(data)
+
+    def test_setup_from_backup_refuses_crafted_backups(self):
+        backups = list(self._crafted())
+        for launcher, func in self.SETUP.items():
+            for label, path in backups:
+                with self.subTest(launcher=launcher, case=label):
+                    data = self._fresh_data_dir()
+                    rc, _, err = self._run(launcher, f'{func} --from-backup "$PW" {path!r}')
+                    self.assertNotEqual(rc, 0)
+                    # Refused by extract-backup (metadata) or the
+                    # backup-address gate (keys); either way, before
+                    # anything is copied out of the backup.
+                    self.assertIn("valid OnionPress backup", err)
+                    self._assert_untouched(data)
+
+    def test_a_valid_backup_restores_under_the_key_derived_address(self):
+        # A stale (but well-formed) metadata address, as older clients wrote.
+        path = _make_backup(self.tmp, _metadata(onion_address=OLD_ADDR))
+        for launcher in LAUNCHERS:
+            with self.subTest(launcher):
+                data = self._fresh_data_dir()
+                rc, out, _ = self._run(launcher, f'restore_backup "$PW" {path!r}')
+                self.assertEqual(rc, 0, out)
+                vanity = os.path.join(data, "shared", "vanity-keys")
+                self.assertEqual(os.listdir(vanity), [ADDR])
+                with open(os.path.join(vanity, ADDR, "hostname")) as f:
+                    self.assertEqual(f.read(), ADDR + "\n")
+                if launcher == "linux/onionpress":
+                    # The Settings page takes the address from the last line.
+                    self.assertEqual(out.rstrip("\n").rsplit("\n", 1)[-1], ADDR)
+        for launcher, func in self.SETUP.items():
+            with self.subTest(launcher, func=func):
+                data = self._fresh_data_dir()
+                self._run(launcher, f'{func} --from-backup "$PW" {path!r}')
+                self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")),
+                                 [ADDR])
+
+    def test_launchers_never_read_the_address_from_metadata(self):
+        for launcher in LAUNCHERS:
+            code = _read(launcher)
+            with self.subTest(launcher):
+                self.assertNotIn("get('onion_address'", code)
+                for func in ("restore_backup", self.SETUP[launcher]):
+                    body = _bash_function(code, func)
+                    gate = body.index("backup-address --staging \"$staging\"")
+                    self.assertLess(gate, body.index("vanity-keys"), func)
+                    if 'cp "$staging/config"' in body:
+                        self.assertLess(gate, body.index('cp "$staging/config"'), func)
+
+    def test_failed_setup_and_restore_stop_the_launcher(self):
+        for launcher, func in self.SETUP.items():
+            code = _read(launcher)
+            with self.subTest(launcher):
+                self.assertIn(f'{func} "$@" || exit 1', code)
+                self.assertRegex(
+                    code, r'if ! ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '
+                          r'(?:op_py|bundled_python -m onionpress\.cli) restore '
+                          r'"\$restore_path"; then\n[^\n]*\n\s*exit 1')
+
+
+class TestRestoreResultJson(unittest.TestCase):
+    """linux/onionpress builds restore-result.json with a JSON encoder."""
+
+    def _write(self, *args):
+        out = tempfile.NamedTemporaryFile(delete=False)
+        out.close()
+        self.addCleanup(os.unlink, out.name)
+        func = _bash_function(_read("linux/onionpress"), "write_restore_result")
+        script = ('docker() { cat > "$OUT"; }\n'
+                  'python3() { "$PY" "$@"; }\n' + func
+                  + 'write_restore_result "$@"\n')
+        r = subprocess.run(["bash", "-c", script, "bash", *args],
+                           capture_output=True, text=True, timeout=20,
+                           env={**os.environ, "OUT": out.name, "PY": sys.executable,
+                                "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(out.name) as f:
+            return json.load(f)
+
+    def test_hostile_text_stays_a_string(self):
+        hostile = 'x","success":false,"error":"<b>pwned</b>\n'
+        doc = self._write("true", hostile)
+        self.assertEqual(doc["success"], True)
+        self.assertEqual(doc["address"], hostile)
+        self.assertEqual(sorted(doc), ["address", "restored_at", "success"])
+
+    def test_failure_shape(self):
+        doc = self._write("false", "Restore failed")
+        self.assertEqual((doc["success"], doc["error"]), (False, "Restore failed"))
+        self.assertRegex(doc["restored_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+
+    def test_no_string_built_result_json_remains(self):
+        code = _read("linux/onionpress")
+        self.assertNotIn('"address":"\'"$rp_addr"', code)
+        settings = code[code.index("                restore-backup)"):]
+        settings = settings[:settings.index("                refresh-status)")]
+        self.assertNotIn("restore-result.json", settings)
+        self.assertIn('write_restore_result true "$rp_addr"', settings)
+        self.assertIn('is_onion_address "$rp_addr" || rp_addr=""', settings)
+
+
+class TestMenubarRestoreDialog(unittest.TestCase):
+    """src/menubar.py's Restore... (AppKit, so checked as source)."""
+
+    def setUp(self):
+        src = _read("src/menubar.py")
+        start = src.index("    def restore(self, _):")
+        self.body = src[start:src.index("\n    @rumps.clicked", start + 1)]
+
+    def test_shown_fields_are_sanitized(self):
+        for field in ("backup_date", "username", "onionpress_version"):
+            self.assertIn(f"backup_manager.metadata_text(metadata, '{field}')", self.body)
+
+    def test_a_failed_launcher_restore_is_reported_as_a_failure(self):
+        failed = self.body[self.body.index("if r.returncode != 0:"):]
+        failed = failed[:failed.index("return\n") + 7]
+        self.assertIn("Restore failed", failed)
+
+    def test_the_restored_address_is_not_taken_from_metadata(self):
+        self.assertNotIn("metadata.get('onion_address', addr)", self.body)
+        self.assertIn("key_manager.is_valid_onion_address(restored_addr)", self.body)
+
+
+if __name__ == "__main__":
+    unittest.main()

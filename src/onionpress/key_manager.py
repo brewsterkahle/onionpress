@@ -8,6 +8,7 @@ onionpress-onion-keys volume; C Tor's own key files are what Tor runs on.
 """
 
 import base64
+import re
 import struct
 import subprocess
 
@@ -535,6 +536,83 @@ def derive_onion_address(public_key):
     import hashlib
     checksum = hashlib.sha3_256(b'.onion checksum' + public_key + b'\x03').digest()[:2]
     return base64.b32encode(public_key + checksum + b'\x03').decode().lower() + '.onion'
+
+
+# A v3 onion address as derive_onion_address writes it: 56 lowercase base32
+# characters, then ".onion". The launchers' is_onion_address() applies the
+# same rule in bash (tests/test_backup_metadata_validation.py keeps them
+# together).
+ONION_ADDRESS_RE = re.compile(r"[a-z2-7]{56}\.onion")
+
+
+def is_valid_onion_address(address):
+    """True only for a well-formed v3 onion address and nothing around it:
+    no newline, no "/", no "..", no upper case.
+
+    The check for an address that comes from outside OnionPress — a
+    backup's metadata.json above all — before it may name a directory, go
+    into config or a command, or be shown to the user.
+    """
+    return (isinstance(address, str)
+            and ONION_ADDRESS_RE.fullmatch(address) is not None)
+
+
+def key_pair_onion_address(private_key, public_key):
+    """The .onion address of an expanded ed25519 key pair, after checking
+    that *public_key* belongs to *private_key*.
+
+    A key file stores both halves, and the address of the stored public
+    half alone is whatever the file's author wrote there; Tor serves the
+    address of the private half. A key read from a backup goes through
+    this, so the restored address is the one Tor will actually serve.
+    Raises ValueError on a mismatch.
+    """
+    if len(private_key) != 64 or len(public_key) != 32:
+        raise ValueError("Onion service key has the wrong size")
+    if derive_public_key(private_key) != public_key:
+        raise ValueError("Onion service key is inconsistent: its public key "
+                         "does not belong to its private key")
+    return derive_onion_address(public_key)
+
+
+def staged_key_address(key_dir):
+    """The onion address of the key files in *key_dir* — a backup's
+    tor-keys/ — or '' when it holds none.
+
+    Every key file present must parse and they must all agree: the OpenSSH
+    PEM, C Tor's hs_ed25519_secret_key and, if there, its
+    hs_ed25519_public_key. A restore copies all of them, so one that
+    disagrees would leave the restored identity ambiguous. Raises
+    ValueError otherwise.
+    """
+    import os
+    pem_path = os.path.join(key_dir, 'ks_hs_id.ed25519_expanded_private')
+    secret_path = os.path.join(key_dir, 'hs_ed25519_secret_key')
+    public_path = os.path.join(key_dir, 'hs_ed25519_public_key')
+    addresses = set()
+    try:
+        if os.path.isfile(pem_path):
+            with open(pem_path, 'rb') as f:
+                addresses.add(key_pair_onion_address(*parse_openssh_key(f.read())))
+        if os.path.isfile(secret_path):
+            with open(secret_path, 'rb') as f:
+                private_key = _parse_ctor_secret(f.read())
+            public_key = derive_public_key(private_key)
+            if os.path.isfile(public_path):
+                with open(public_path, 'rb') as f:
+                    if _parse_ctor_public(f.read()) != public_key:
+                        raise ValueError("hs_ed25519_public_key does not belong "
+                                         "to hs_ed25519_secret_key")
+            addresses.add(derive_onion_address(public_key))
+    except ValueError:
+        raise
+    except Exception as e:
+        # _parse_ctor_* raise bare Exception; struct/base64 errors too.
+        raise ValueError(f"Unreadable onion service key: {e}") from e
+    if len(addresses) > 1:
+        raise ValueError("The backup's key files belong to different onion "
+                         "addresses")
+    return addresses.pop() if addresses else ''
 
 
 def import_key_b32(key_b32, output_dir):
