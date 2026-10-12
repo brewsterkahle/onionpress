@@ -112,6 +112,32 @@ _analytics_host = None  # AnalyticsHost once the upload loop has been started.
 # Config
 # ---------------------------------------------------------------------------
 
+_bad_hub_value_logged = None
+
+
+def _hub_address(config):
+    """The hub to talk to: ONIONHEAVEN_ADDRESS from *config*, or DEFAULT_HUB
+    when it is unset or not a whole, well-formed onion address.
+
+    As onionheaven.configured_hub_address on the Mac: /online carries the
+    onion private key and the address goes into its URL, so "ends in
+    .onion" is not enough ("evil.example/" + 39 characters + ".onion"
+    passes that). A malformed value is logged by key name, once per value,
+    and the default hub is used, the one the opt-in names.
+    """
+    global _bad_hub_value_logged
+    value = (config.get("ONIONHEAVEN_ADDRESS") or "").strip()
+    if not value:
+        return DEFAULT_HUB
+    if key_manager.is_valid_onion_address(value):
+        return value
+    if value != _bad_hub_value_logged:
+        _bad_hub_value_logged = value
+        log.warning("ONIONHEAVEN_ADDRESS in the config is not a valid onion "
+                    "address; using the default hub")
+    return DEFAULT_HUB
+
+
 def read_config():
     """Parse KEY=VALUE config file. Returns dict."""
     config = {}
@@ -170,7 +196,7 @@ def wait_for_ready():
             ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
             timeout=10,
         )
-        if not ok or not content.endswith(".onion"):
+        if not ok or not key_manager.is_valid_onion_address(content):
             log.info("Waiting for content address...")
             time.sleep(backoff)
             backoff = min(backoff * 1.5, 30)
@@ -182,7 +208,7 @@ def wait_for_ready():
             ["cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
             timeout=10,
         )
-        if not ok or not hc.endswith(".onion"):
+        if not ok or not key_manager.is_valid_onion_address(hc):
             log.info("Waiting for healthcheck address...")
             time.sleep(backoff)
             backoff = min(backoff * 1.5, 30)
@@ -488,6 +514,10 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
     max_time / docker_timeout only apply to the docker-exec fallback —
     the persistent path uses its own (tighter) socket timeout.
     """
+    if not key_manager.is_valid_onion_address(hub_addr):
+        log.warning("POST /%s: hub address is not a valid onion address, not sent",
+                    endpoint)
+        return False, None
     payload = _build_signed_payload(endpoint, content_addr, hc_addr,
                                     priv_key, pub_key, extra)
 
@@ -1187,7 +1217,7 @@ def main():
     # Opt-in: only an explicit "yes" registers. Unset means the user has
     # not decided yet (the tray / `onionpress onionheaven` ask them).
     enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() == "yes"
-    _current_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
+    _current_hub = _hub_address(config)
 
     # Opt-in analytics upload to OnionHome. Started for every node, hub
     # included (OnionHome is a different hub than OnionHeaven), before the
@@ -1266,7 +1296,7 @@ def main():
         # Re-read config each cycle
         config = read_config()
         new_enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() == "yes"
-        new_hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
+        new_hub = _hub_address(config)
         analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
 
         # Handle hub address change
@@ -1384,10 +1414,10 @@ def offline_once():
     config = read_config()
     if config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() != "yes":
         return 0
-    hub = config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)
+    hub = _hub_address(config)
 
     content = _cached_content_address()
-    if not content.endswith(".onion"):
+    if not key_manager.is_valid_onion_address(content):
         # Fall back to container hostname file with a generous timeout —
         # docker exec on rootless docker can take a few seconds when the
         # box is preparing to suspend.
@@ -1397,21 +1427,21 @@ def offline_once():
             timeout=5,
         )
         content = content.strip() if ok else ""
-        if not content.endswith(".onion"):
+        if not key_manager.is_valid_onion_address(content):
             log.warning("offline-once: content address unavailable, skipping /offline")
             return 1
     if content == hub:
         return 0  # We ARE the hub — nothing to notify.
 
     hc = _cached_hc_address()
-    if not hc.endswith(".onion"):
+    if not key_manager.is_valid_onion_address(hc):
         ok, hc = docker_exec(
             "onionpress-tor",
             ["cat", "/var/lib/tor/hidden_service/healthcheck/hostname"],
             timeout=5,
         )
         hc = hc.strip() if ok else ""
-        if not hc.endswith(".onion"):
+        if not key_manager.is_valid_onion_address(hc):
             log.warning("offline-once: healthcheck address unavailable, skipping /offline")
             return 1
 

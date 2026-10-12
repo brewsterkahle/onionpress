@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress import setup_logic  # noqa: E402
 
+ONION = "abc" + "d" * 53 + ".onion"
+
 
 def _ok(stdout=""):
     return subprocess.CompletedProcess(
@@ -46,7 +48,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
             site_title="My Blog",
             onionname="alice",
             password="hunter22",
-            onion_addr="abc.onion",
+            onion_addr=ONION,
             launcher_bin="/usr/local/bin/onionpress",
             data_dir=self.tmpdir,
         )
@@ -67,7 +69,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         self.assertIn("--admin_user=alice", first_call_args)
         self.assertFalse(any(a.startswith("--admin_password")
                              for a in first_call_args))
-        self.assertIn("--url=http://abc.onion", first_call_args)
+        self.assertIn(f"--url=http://{ONION}", first_call_args)
         self.assertIn("--title=My Blog", first_call_args)
 
     def test_failure_at_wp_core_install_returns_false(self):
@@ -125,7 +127,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         with mock.patch(
             "onionpress.setup_logic.subprocess.run", return_value=_ok(),
         ) as mrun:
-            self._run(onionname="alice", onion_addr="abc.onion")
+            self._run(onionname="alice", onion_addr=ONION)
         user_url_calls = [
             c for c in mrun.call_args_list
             if c.args and isinstance(c.args[0], list)
@@ -134,7 +136,7 @@ class TestInstallFreshWordpress(unittest.TestCase):
         ]
         self.assertTrue(user_url_calls)
         argv = user_url_calls[0].args[0]
-        self.assertIn("--user_url=http://abc.onion/alice/", argv)
+        self.assertIn(f"--user_url=http://{ONION}/alice/", argv)
 
 
 class TestProvisionInteractiveRouting(unittest.TestCase):

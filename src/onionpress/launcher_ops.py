@@ -23,7 +23,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from . import auto_login
+from . import auto_login, key_manager
 
 
 # Pinned to digest. The literal below is propagated from build/image-pins.env
@@ -287,10 +287,12 @@ def generate_vanity_in_container(
             log_func(f"mkp224o failed (exit {proc.returncode}): {proc.stderr.strip()}")
         return None
 
-    # mkp224o writes <addr>.onion/ directory under /out
+    # mkp224o writes <addr>.onion/ directory under /out. Only a directory
+    # named by a whole, well-formed address counts: the name is returned
+    # as the new address.
     candidates = [
         d for d in os.listdir(vanity_dir)
-        if d.startswith(prefix) and d.endswith(".onion")
+        if d.startswith(prefix) and key_manager.is_valid_onion_address(d)
         and os.path.isdir(os.path.join(vanity_dir, d))
         and os.path.exists(os.path.join(vanity_dir, d, "hs_ed25519_secret_key"))
     ]

@@ -15,6 +15,8 @@ from onionpress.config import PortConfig
 from onionpress.docker import Docker, DockerResult
 from onionpress.containers import ContainerManager, ContainerStatus, CORE_SERVICES
 
+ONION = "op2" + "x" * 53 + ".onion"
+
 
 def _make_paths(tmpdir):
     data_dir = os.path.join(tmpdir, "data")
@@ -250,9 +252,19 @@ class TestGetOnionAddress(unittest.TestCase):
 
     def test_has_address(self):
         docker = mock.Mock(spec=Docker)
-        docker.exec.return_value = _ok("op2xyz.onion\n")
+        docker.exec.return_value = _ok(ONION + "\n")
         cm = ContainerManager(docker, self.paths, self.port_config)
-        self.assertEqual(cm.get_onion_address(), "op2xyz.onion")
+        self.assertEqual(cm.get_onion_address(), ONION)
+
+    def test_malformed_address_reads_as_none(self):
+        # It names the backup file and goes into backup metadata.
+        for content in ("op2xyz.onion", "../../" + "a" * 50 + ".onion",
+                        ONION + "\nevil"):
+            with self.subTest(content=content):
+                docker = mock.Mock(spec=Docker)
+                docker.exec.return_value = _ok(content + "\n")
+                cm = ContainerManager(docker, self.paths, self.port_config)
+                self.assertEqual(cm.get_onion_address(), "")
 
     def test_no_address(self):
         docker = mock.Mock(spec=Docker)
@@ -331,14 +343,14 @@ class TestGetStatus(unittest.TestCase):
             {"Name": "onionpress-tor", "State": "running"},
             {"Name": "onionpress-wordpress", "State": "running"},
         ]
-        docker.exec.return_value = _ok("op2abc.onion\n")
+        docker.exec.return_value = _ok(ONION + "\n")
         docker.container_running.return_value = True
         docker.compose.return_value = _ok("Bootstrapped 100%")
 
         cm = ContainerManager(docker, self.paths, self.port_config)
         status = cm.get_status()
         self.assertEqual(len(status.services), 2)
-        self.assertEqual(status.onion_address, "op2abc.onion")
+        self.assertEqual(status.onion_address, ONION)
         self.assertTrue(status.wp_ready)
         self.assertTrue(status.tor_bootstrapped)
 

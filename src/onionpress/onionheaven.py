@@ -22,8 +22,15 @@ import threading
 import time
 from datetime import datetime, timezone
 
-# OnionHeaven hub address — updated from config at startup
-ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+from onionpress import key_manager
+
+# The hub the opt-in prompt names (run by the Internet Archive): the
+# default, and what a malformed ONIONHEAVEN_ADDRESS falls back to.
+DEFAULT_ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+
+# OnionHeaven hub address — updated from config at startup, through
+# configured_hub_address()
+ONIONHEAVEN_ADDRESS = DEFAULT_ONIONHEAVEN_ADDRESS
 
 # Registration API port (served by web-server.py in the onionheaven container)
 ONIONHEAVEN_API_PORT = 8083
@@ -34,6 +41,42 @@ WAYBACK_ONION = "web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.on
 # Paths inside containers: the hub data volume (onionpress-onionheaven-data),
 # which the WordPress container never mounts
 ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
+
+
+def configured_hub_address(value, log_func=None):
+    """The hub to register with, for ONIONHEAVEN_ADDRESS=*value*.
+
+    Empty means the default hub. Anything else must be a whole, well-formed
+    v3 onion address (key_manager.is_valid_onion_address), not merely end
+    in ".onion": the address goes into the URL every /online is POSTed to,
+    and /online carries the site's onion private key, so a value such as
+    "evil.example/" + 39 characters + ".onion" would send the key to a
+    clearnet host through a Tor exit. A malformed value is logged by key
+    name only and the default hub is used, the one the opt-in prompt names,
+    so the key never goes anywhere the user did not agree to.
+    """
+    value = (value or "").strip()
+    if not value:
+        return DEFAULT_ONIONHEAVEN_ADDRESS
+    if key_manager.is_valid_onion_address(value):
+        return value
+    if log_func:
+        log_func("OnionHeaven: ONIONHEAVEN_ADDRESS in the config is not a valid "
+                 "onion address; using the default hub")
+    return DEFAULT_ONIONHEAVEN_ADDRESS
+
+
+def _hub_url(path):
+    """http://<hub>:<port>/<path>, or None when ONIONHEAVEN_ADDRESS is not a
+    well-formed onion address.
+
+    Every request to the hub is built here. ONIONHEAVEN_ADDRESS is a module
+    global that callers assign, so it is checked where it is used, not only
+    where the config is read.
+    """
+    if not key_manager.is_valid_onion_address(ONIONHEAVEN_ADDRESS):
+        return None
+    return f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/{path}"
 
 
 def _docker_env(app):
@@ -211,11 +254,11 @@ def register_with_onionheaven(app):
     content_addr = app.onion_address
     hc_addr = app.healthcheck_address
 
-    if not content_addr or not content_addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(content_addr):
         app.log("OnionHeaven: no content address available, skipping registration")
         app._onionheaven_registration_in_flight = False
         return
-    if not hc_addr or not hc_addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(hc_addr):
         app.log("OnionHeaven: no healthcheck address available, skipping registration")
         app._onionheaven_registration_in_flight = False
         return
@@ -377,13 +420,17 @@ def _heartbeat_landed(app, content_addr, freshness_seconds=180):
     there" so the log doesn't scream FAILED for transient Tor ACK
     losses. See issue #208.
     """
+    if not key_manager.is_valid_onion_address(content_addr):
+        return False
+    url = _hub_url("status/" + content_addr)
+    if url is None:
+        return False
     try:
         args = [
             "exec", "onionpress-tor",
             "curl", "-s", "--max-time", "30",
             "--socks5-hostname", "127.0.0.1:9050",
-            "http://" + ONIONHEAVEN_ADDRESS + ":" + str(ONIONHEAVEN_API_PORT)
-            + "/status/" + content_addr,
+            url,
         ]
         rc, output = _run_docker_rc(app, args, timeout=45)
         if rc != 0 or not output:
@@ -426,13 +473,17 @@ def _send_heartbeat(app, wordpress_healthy=True):
     content_addr = getattr(app, 'onion_address', None)
     hc_addr = getattr(app, 'healthcheck_address', None)
 
-    if not content_addr or not content_addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(content_addr):
         return False
-    if not hc_addr or not hc_addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(hc_addr):
+        return False
+    online_url = _hub_url("online")
+    if online_url is None:
+        app.log("OnionHeaven: hub address is not a valid onion address, "
+                "not sending /online")
         return False
 
     try:
-        from onionpress import key_manager
         from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         # Guard: the keystore key and app.onion_address must agree. They can
@@ -487,7 +538,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
         "-H", "Content-Type: application/json",
         "--data-binary", "@-",
         "--max-time", "30",
-        f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
+        online_url
     ]
 
     had_success = getattr(app, '_onionheaven_heartbeat_succeeded', False)
@@ -586,15 +637,19 @@ def unregister_from_onionheaven(app, content_address=None):
         return
 
     addr = content_address or status.get("content_address") or getattr(app, 'onion_address', None)
-    if not addr or not addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(addr):
         app.log("OnionHeaven: no content address for unregister")
+        return
+    unregister_url = _hub_url("unregister")
+    if unregister_url is None:
+        app.log("OnionHeaven: hub address is not a valid onion address, "
+                "not sending /unregister")
         return
 
     app.log(f"Unregistering {addr} from OnionHeaven...")
 
     # Sign the unregister request with ed25519
     try:
-        from onionpress import key_manager
         from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
     except Exception as e:
@@ -616,7 +671,7 @@ def unregister_from_onionheaven(app, content_address=None):
         return
 
     hc_addr = getattr(app, 'healthcheck_address', None)
-    hc_addr_val = hc_addr if (hc_addr and hc_addr.endswith('.onion')) else ""
+    hc_addr_val = hc_addr if key_manager.is_valid_onion_address(hc_addr) else ""
 
     timestamp = onion_auth.make_timestamp()
     signature = onion_auth.sign_payload(
@@ -648,7 +703,7 @@ def unregister_from_onionheaven(app, content_address=None):
             "-H", "Content-Type: application/json",
             "--data-binary", "@-",
             "--max-time", "60",
-            f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/unregister"
+            unregister_url
         ], timeout=75, input=payload)
         last_output = output
 
@@ -703,14 +758,18 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     content_addr = getattr(app, 'onion_address', None)
     hc_addr = getattr(app, 'healthcheck_address', None)
 
-    if not content_addr or not content_addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(content_addr):
         return False
-    if not hc_addr or not hc_addr.endswith('.onion'):
+    if not key_manager.is_valid_onion_address(hc_addr):
+        return False
+    url = _hub_url(endpoint)
+    if url is None:
+        app.log(f"OnionHeaven: hub address is not a valid onion address, "
+                f"not sending /{endpoint}")
         return False
 
     # Sign with ed25519
     try:
-        from onionpress import key_manager
         from onionpress import onion_auth
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
         # See _send_heartbeat for context — same staleness guard applies to
@@ -762,7 +821,7 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
             "-H", "Content-Type: application/json",
             "--data-binary", "@-",
             "--max-time", str(max_time),
-            f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/{endpoint}"
+            url
         ], timeout=max_time + 15, input=payload)
         last_output = output
 

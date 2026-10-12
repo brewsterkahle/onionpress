@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import key_manager
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, Secrets, ensure_secrets, load_secrets, read_value,
@@ -311,14 +312,18 @@ class ContainerManager:
         return False
 
     def get_onion_address(self) -> str:
-        """Fetch the current onion address from the Tor container."""
+        """Fetch the current onion address from the Tor container, or ""
+        when there is none or the file holds anything but a well-formed v3
+        address (it names a backup file and goes into backup metadata)."""
         result = self.docker.exec(
             "onionpress-tor",
             ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
             timeout=10,
         )
         if result.ok:
-            return result.output.strip()
+            addr = result.output.strip()
+            if key_manager.is_valid_onion_address(addr):
+                return addr
         return ""
 
     def get_status(self) -> ContainerStatus:

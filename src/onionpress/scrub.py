@@ -224,7 +224,8 @@ def _get_onion_address() -> str:
     if r.returncode != 0:
         return ""
     addr = (r.stdout or "").strip()
-    return addr if addr and addr.endswith(".onion") else ""
+    from . import key_manager
+    return addr if key_manager.is_valid_onion_address(addr) else ""
 
 
 def _find_repo_dir() -> str:

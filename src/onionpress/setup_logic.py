@@ -13,6 +13,8 @@ import re
 import subprocess
 from typing import Callable, Optional
 
+from onionpress import key_manager
+
 try:
     from onionpress import onionnames_client as _onc
 except ImportError:
@@ -27,6 +29,22 @@ _BRANDED_ONIONS: frozenset[str] = frozenset({
     "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",  # onionpress.org
     "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",  # OnionHeaven
 })
+
+
+def _site_address(onion_addr, log) -> str:
+    """*onion_addr* if it is a whole, well-formed onion address, else
+    "localhost" (what callers pass when Tor has not written one yet).
+
+    The address becomes WordPress's site URL (wp core install --url) and
+    the admin's user_url, and callers read it raw from Tor's hostname file
+    or from status.json.
+    """
+    if onion_addr == "localhost" or key_manager.is_valid_onion_address(onion_addr):
+        return onion_addr
+    if onion_addr:
+        log("WARNING: the onion address is not a well-formed v3 address; "
+            "using localhost for the site URL")
+    return "localhost"
 
 
 # ─── Name utilities ──────────────────────────────────────────────────────────
@@ -338,6 +356,8 @@ def provision_primary_subsite(
             timeout=timeout,
         )
 
+    onion_addr = _site_address(onion_addr, log)
+
     # Branded installs (OnionHeaven hub, onionpress.org) keep blog_id=1
     # as the canonical public surface — no personal subsite.
     if onion_addr in _BRANDED_ONIONS:
@@ -463,6 +483,7 @@ def install_fresh_wordpress(
 
     if _refuse_invalid_onionname(onionname, log):
         return False
+    onion_addr = _site_address(onion_addr, log)
 
     log(f"Installing WordPress: title={site_title!r} onionname={onionname!r}")
 
@@ -810,7 +831,8 @@ def _read_onion_address() -> str:
              "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
             capture_output=True, text=True, timeout=10,
         )
-        return r.stdout.strip()
+        addr = r.stdout.strip()
+        return addr if key_manager.is_valid_onion_address(addr) else ""
     except Exception:
         return ""
 

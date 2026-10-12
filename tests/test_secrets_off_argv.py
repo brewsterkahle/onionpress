@@ -225,7 +225,7 @@ class TestLinuxHeartbeatPayloadOnStdin(unittest.TestCase):
         with mock.patch.object(self.hb, "_hub_conn", None), \
                 mock.patch.object(self.hb.subprocess, "run", rec):
             ok, resp = self.hb.sign_and_post(
-                "online", "hub.onion", addr, HC, priv, pub,
+                "online", self.hb.DEFAULT_HUB, addr, HC, priv, pub,
                 extra={"arti_key_pem": pem_b64})
         self.assertTrue(ok)
         self.assertEqual(resp, {"online": True})

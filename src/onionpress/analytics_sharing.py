@@ -184,7 +184,8 @@ def _do_upload_cycle(app, include_active=False):
     the offered size is larger than what it already has.
 
     Returns a dict with "status" (one of: "no_files", "no_onion",
-    "sign_error", "manifest_failed", "none_wanted", "ok") plus "wanted"
+    "bad_onionhome_address", "sign_error", "manifest_failed",
+    "none_wanted", "ok") plus "wanted"
     and "uploaded" counts when "ok". Callers decide how to surface the
     outcome — this function only logs per-file events, not the verdict.
     """
@@ -346,9 +347,12 @@ def _do_upload_cycle(app, include_active=False):
     if not all_files:
         return {"status": "no_files"}
 
+    from onionpress import key_manager
+
     content_addr = getattr(app, "onion_address", None)
     hc_addr = getattr(app, "healthcheck_address", None)
-    if not content_addr or not hc_addr:
+    if not (key_manager.is_valid_onion_address(content_addr)
+            and key_manager.is_valid_onion_address(hc_addr)):
         return {"status": "no_onion"}
 
     # Read OnionHome address from config
@@ -358,10 +362,16 @@ def _do_upload_cycle(app, include_active=False):
     )
     if not onionhome_addr:
         return {"status": "no_onion"}
+    # It is the host of the upload URLs: a value that merely ends in
+    # ".onion" could send the logs to a clearnet host through a Tor exit.
+    # Refused rather than replaced by the default: the upload is optional.
+    if not key_manager.is_valid_onion_address(onionhome_addr):
+        app.log("Analytics sharing: ONIONHOME_ADDRESS in the config is not a "
+                "valid onion address; not uploading")
+        return {"status": "bad_onionhome_address"}
 
     # Sign the manifest
     try:
-        from onionpress import key_manager
         from onionpress import onion_auth
 
         secret_key_bytes, public_key_raw = key_manager.extract_keys()

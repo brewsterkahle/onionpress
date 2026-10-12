@@ -191,21 +191,39 @@ class TestCheckTorBootstrap(unittest.TestCase):
         self.assertEqual(pct, 100)
 
 
+HOSTNAME = "op2" + "a" * 53 + ".onion"
+
+
 class TestCheckTorHostname(unittest.TestCase):
     def test_returns_address(self):
         docker = mock.Mock()
-        docker.exec.return_value = _ok("op2abc.onion\n")
+        docker.exec.return_value = _ok(HOSTNAME + "\n")
         hc = HealthChecker(docker)
-        self.assertEqual(hc.check_tor_hostname(), "op2abc.onion")
+        self.assertEqual(hc.check_tor_hostname(), HOSTNAME)
 
     def test_mismatch_logs_warning(self):
         docker = mock.Mock()
-        docker.exec.return_value = _ok("different.onion\n")
+        different = "dif" + "b" * 53 + ".onion"
+        docker.exec.return_value = _ok(different + "\n")
         logs = []
         hc = HealthChecker(docker, log_func=logs.append)
-        addr = hc.check_tor_hostname(expected_address="expected.onion")
-        self.assertEqual(addr, "different.onion")
+        addr = hc.check_tor_hostname(expected_address=HOSTNAME)
+        self.assertEqual(addr, different)
         self.assertTrue(any("mismatch" in l for l in logs))
+
+    def test_anything_but_a_whole_address_reads_as_none(self):
+        # The address goes into probe URLs and control-port commands.
+        for content in ("evil.example/" + "a" * 39 + ".onion",
+                        "op2abc.onion",
+                        HOSTNAME.upper(),
+                        "x\r\nSIGNAL HALT\r\n" + HOSTNAME):
+            with self.subTest(content=content):
+                docker = mock.Mock()
+                docker.exec.return_value = _ok(content + "\n")
+                logs = []
+                hc = HealthChecker(docker, log_func=logs.append)
+                self.assertEqual(hc.check_tor_hostname(), "")
+                self.assertTrue(any("valid onion address" in l for l in logs))
 
 
 class TestCheckInternalConnectivity(unittest.TestCase):
@@ -730,7 +748,7 @@ class TestFullCheck(unittest.TestCase):
         docker.exec.side_effect = [
             _ok("<html>"),           # check_wordpress_local
             _fail(),                 # check_tor_bootstrap control-port probe → falls back to docker.run
-            _ok("op2abc.onion\n"),   # check_tor_hostname
+            _ok(HOSTNAME + "\n"),   # check_tor_hostname
             _ok(),                   # check_internal_connectivity
             _ok("200"),              # check_external_reachability
         ]
@@ -742,14 +760,14 @@ class TestFullCheck(unittest.TestCase):
         self.assertTrue(hr.tor_bootstrapped)
         self.assertTrue(hr.tor_internally_ready)
         self.assertTrue(hr.tor_externally_reachable)
-        self.assertEqual(hr.onion_address, "op2abc.onion")
+        self.assertEqual(hr.onion_address, HOSTNAME)
 
     def test_wp_down_skips_later_checks(self):
         docker = mock.Mock()
         docker.exec.side_effect = [
             _fail(),               # check_wordpress_local
             _fail(),               # check_tor_bootstrap control-port probe
-            _ok("op2abc.onion\n"), # check_tor_hostname
+            _ok(HOSTNAME + "\n"), # check_tor_hostname
         ]
         docker.run.return_value = _ok("Bootstrapped 100%")
         hc = HealthChecker(docker)

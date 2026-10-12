@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
+from . import key_manager
 from .docker import Docker
 
 
@@ -346,7 +347,9 @@ class HealthChecker:
     def check_tor_hostname(self, expected_address: str = "") -> str:
         """Read the onion hostname from the Tor container.
 
-        Returns the address, or "" if not available.
+        Returns the address, or "" if not available or not a well-formed v3
+        address: the address goes into the probe URLs and into control-port
+        commands (classify_wedge), and on Linux into status.json.
         """
         result = self.docker.exec(
             "onionpress-tor",
@@ -354,6 +357,9 @@ class HealthChecker:
             timeout=10,
         )
         addr = result.output.strip() if result.ok else ""
+        if addr and not key_manager.is_valid_onion_address(addr):
+            self._log("WARNING: the hostname file does not hold a valid onion address")
+            return ""
         if expected_address and addr and addr != expected_address:
             self._log(f"WARNING: hostname mismatch: expected={expected_address}, got={addr}")
         return addr

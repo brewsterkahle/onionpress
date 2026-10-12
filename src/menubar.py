@@ -306,12 +306,10 @@ class OnionPressApp(rumps.App):
         onion_proxy.PROXY_PORT = self.proxy_port
         onion_proxy.PHP_PROXY_PORT = self.wp_port
 
-        # Update OnionHeaven hub address from config
-        oh_addr = self._read_config_value(
-            "ONIONHEAVEN_ADDRESS",
-            "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
-        if oh_addr:
-            onionheaven.ONIONHEAVEN_ADDRESS = oh_addr
+        # Update OnionHeaven hub address from config. Only a well-formed
+        # onion address is used: the heartbeat POSTs the onion key to it.
+        onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
+            self._read_config_value("ONIONHEAVEN_ADDRESS", ""), self.log)
 
         # Do slow I/O operations in background after icon appears
         def background_init():
@@ -397,7 +395,7 @@ class OnionPressApp(rumps.App):
         try:
             with open(cached_addr_file) as f:
                 cached = f.read().strip()
-            if cached and cached.endswith('.onion'):
+            if key_manager.is_valid_onion_address(cached):
                 self.onion_address = cached
                 self._had_cached_address = True
             else:
@@ -921,7 +919,7 @@ class OnionPressApp(rumps.App):
             cached_addr_file = os.path.join(self.app_support, "onion_address")
             with open(cached_addr_file) as f:
                 cached = f.read().strip()
-            if cached and cached.endswith('.onion'):
+            if key_manager.is_valid_onion_address(cached):
                 self.log(f"Onion address: {cached}")
         except (OSError, IOError):
             pass
@@ -1780,7 +1778,9 @@ class OnionPressApp(rumps.App):
             # Get onion address if running
             if self.is_running:
                 addr = self.run_command("address")
-                if addr and addr != "Generating...":
+                # The whole value must be an onion address: it is cached,
+                # put into URLs and sent to OnionHeaven and OnionHome.
+                if addr and key_manager.is_valid_onion_address(addr.strip()):
                     self.onion_address = addr.strip()
                     self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)
                     # Cache address locally for instant availability on next launch
@@ -2365,7 +2365,7 @@ class OnionPressApp(rumps.App):
             if os.path.exists(hc_file):
                 with open(hc_file) as f:
                     addr = f.read().strip()
-                if addr and addr.endswith('.onion'):
+                if key_manager.is_valid_onion_address(addr):
                     self.healthcheck_address = addr
                     self.log(f"Healthcheck address: {addr}")
                     return
@@ -2382,7 +2382,7 @@ class OnionPressApp(rumps.App):
             )
             if result.returncode == 0:
                 addr = result.stdout.strip()
-                if addr and addr.endswith('.onion'):
+                if key_manager.is_valid_onion_address(addr):
                     self.healthcheck_address = addr
                     # Cache for next time
                     try:
@@ -3380,7 +3380,7 @@ class OnionPressApp(rumps.App):
                 errors='replace', timeout=10,
             )
             addr = result.stdout.strip()
-            if addr.endswith('.onion'):
+            if key_manager.is_valid_onion_address(addr):
                 return addr
         except Exception as e:
             self.log(f"onionname: can't read onion address: {e}")
@@ -3847,7 +3847,7 @@ class OnionPressApp(rumps.App):
                         errors='replace', timeout=10
                     )
                     addr = result.stdout.strip()
-                    if addr and '.onion' in addr:
+                    if key_manager.is_valid_onion_address(addr):
                         step3_done = True
                         if sw:
                             sw.complete_step(3)
@@ -5153,10 +5153,11 @@ License: AGPL v3"""
                 except Exception:
                     pass
             oh_stats['client_enabled'] = onionheaven.get_registration_choice(self) == "yes"
-            oh_stats['client_hub'] = self._read_config_value(
-                "ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
+            # The hub the heartbeat actually uses (a malformed config
+            # value falls back to the default; see configured_hub_address).
+            oh_stats['client_hub'] = onionheaven.ONIONHEAVEN_ADDRESS
 
-            onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
+            onion_addr = self.onion_address if key_manager.is_valid_onion_address(self.onion_address) else ""
 
             # System load averages and host uptime
             load_avg = list(os.getloadavg())
@@ -5473,7 +5474,7 @@ License: AGPL v3"""
 
             elif action == "check-reachability":
                 self.log("Settings page: running reachability test...")
-                onion_addr = self.onion_address if self.onion_address and ".onion" in str(self.onion_address) else ""
+                onion_addr = self.onion_address if key_manager.is_valid_onion_address(self.onion_address) else ""
                 if not onion_addr:
                     _write_result("reachability-result.json", {
                         "reachable": False, "error": "No onion address found",
@@ -5553,7 +5554,7 @@ License: AGPL v3"""
                             import time
                             for _ in range(60):
                                 time.sleep(2)
-                                if self.is_running and self.onion_address and ".onion" in str(self.onion_address):
+                                if self.is_running and key_manager.is_valid_onion_address(self.onion_address):
                                     break
                             self.write_status_to_volume()
                             new_addr = self.onion_address or ""

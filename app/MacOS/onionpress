@@ -51,6 +51,21 @@ is_onion_address() {
     [[ "$1" =~ ^[abcdefghijklmnopqrstuvwxyz234567]{56}\.onion$ ]]
 }
 
+# The imported or generated key's directory under vanity-keys/: the first
+# one whose name is a whole onion address (is_onion_address), not merely
+# "*.onion". Its name is taken for the address and the directory is
+# bind-mounted into a container. Prints nothing and fails if there is none.
+vanity_key_dir() {
+    local d
+    for d in "$DATA_DIR/shared/vanity-keys"/*.onion; do
+        if [ -d "$d" ] && [ ! -L "$d" ] && is_onion_address "$(basename "$d")"; then
+            echo "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
 mkdir -p "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
@@ -1807,7 +1822,7 @@ start_containers() {
         # Check for pre-existing imported key before generating a new one
         VANITY_DIR=""
         if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-            VANITY_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
+            VANITY_DIR=$(vanity_key_dir || true)
             if [ -n "$VANITY_DIR" ]; then
                 log "Using pre-imported key: $(basename "$VANITY_DIR")"
             fi
@@ -2179,7 +2194,9 @@ get_status() {
 get_onion_address() {
     cd "$DOCKER_DIR"
     ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    if [ ! -z "$ONION_ADDR" ]; then
+    # The whole value must be an onion address: callers cache it and put it
+    # into URLs. Anything else reads as not generated yet.
+    if is_onion_address "$ONION_ADDR"; then
         echo "$ONION_ADDR"
         return 0
     fi
@@ -2192,7 +2209,7 @@ get_healthcheck_address() {
     cd "$DOCKER_DIR"
     local addr
     addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/healthcheck/hostname 2>/dev/null || echo "")
-    if [ ! -z "$addr" ]; then
+    if is_onion_address "$addr"; then
         echo "$addr"
         # Save to data dir for menubar app to read
         echo "$addr" > "$DATA_DIR/healthcheck-address"
@@ -2299,11 +2316,12 @@ _validate_oh_address() {
     fi
 
     # Self check — compare against our own address
-    local our_address=""
-    if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-        our_address=$(basename "$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)" 2>/dev/null)
+    local our_address="" our_key_dir=""
+    our_key_dir=$(vanity_key_dir || true)
+    if [ -n "$our_key_dir" ]; then
+        our_address=$(basename "$our_key_dir")
     fi
-    if [ -z "$our_address" ] || [ "$our_address" = "." ]; then
+    if [ -z "$our_address" ]; then
         our_address=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
     fi
     if [ -n "$our_address" ] && [ "$addr" = "$our_address" ]; then

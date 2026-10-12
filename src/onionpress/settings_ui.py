@@ -13,6 +13,7 @@ import AppKit
 import rumps
 
 from . import config as op_config
+from . import key_manager
 from .ui_helpers import HelpButtonTarget
 
 
@@ -452,6 +453,16 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         # -- Validate OnionHeaven address --
         oh_addr = new_values.get("ONIONHEAVEN_ADDRESS", "").strip()
         if oh_addr and oh_addr != old_values.get("ONIONHEAVEN_ADDRESS", ""):
+            # The format is checked here as well as by the launcher, so a
+            # malformed address is refused even when the launcher check
+            # below cannot run (its exception path saves the value).
+            if not key_manager.is_valid_onion_address(oh_addr):
+                _icon_alert("Invalid OnionHeaven Address",
+                            "Address must be a valid 56-character .onion address.",
+                            icon_path)
+                form_values = new_values
+                form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
+                continue
             log_func(f"Validating OnionHeaven address: {oh_addr}")
             try:
                 result = subprocess.run(

@@ -34,6 +34,21 @@ is_onion_address() {
     [[ "$1" =~ ^[abcdefghijklmnopqrstuvwxyz234567]{56}\.onion$ ]]
 }
 
+# The imported or generated key's directory under vanity-keys/: the first
+# one whose name is a whole onion address (is_onion_address), not merely
+# "*.onion". Its name is taken for the address and the directory is
+# bind-mounted into a container. Prints nothing and fails if there is none.
+vanity_key_dir() {
+    local d
+    for d in "$DATA_DIR/shared/vanity-keys"/*.onion; do
+        if [ -d "$d" ] && [ ! -L "$d" ] && is_onion_address "$(basename "$d")"; then
+            echo "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
@@ -1439,7 +1454,7 @@ start_containers() {
     # later once the next-published tor image bundles mkp224o.
     if $FIRST_RUN && [ -n "$ADDRESS_PREFIX" ] \
        && [ ${#ADDRESS_PREFIX} -ge 2 ] && [ ${#ADDRESS_PREFIX} -le 6 ] \
-       && ! find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" 2>/dev/null | grep -q .; then
+       && ! vanity_key_dir >/dev/null; then
         log "First run with ADDRESS_PREFIX=$ADDRESS_PREFIX -- checking tor image for mkp224o..."
         if op_py generate-vanity >> "$LOG_FILE" 2>&1; then
             log "Vanity address generated; will be installed below"
@@ -1451,7 +1466,7 @@ start_containers() {
     # Check for pre-existing imported key (or one we just generated)
     VANITY_DIR=""
     if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-        VANITY_DIR=$(find "$DATA_DIR/shared/vanity-keys" -maxdepth 1 -type d -name "*.onion" | head -1)
+        VANITY_DIR=$(vanity_key_dir || true)
         if [ -n "$VANITY_DIR" ]; then
             log "Using pre-imported key: $(basename "$VANITY_DIR")"
         fi
@@ -1739,7 +1754,9 @@ onionheaven_cmd() {
 get_onion_address() {
     cd "$DOCKER_DIR"
     ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    if [ ! -z "$ONION_ADDR" ]; then
+    # The whole value must be an onion address: callers cache it and put it
+    # into URLs. Anything else reads as not generated yet.
+    if is_onion_address "$ONION_ADDR"; then
         echo "$ONION_ADDR"
         return 0
     fi
@@ -1752,7 +1769,7 @@ get_healthcheck_address() {
     cd "$DOCKER_DIR"
     local addr
     addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/healthcheck/hostname 2>/dev/null || echo "")
-    if [ ! -z "$addr" ]; then
+    if is_onion_address "$addr"; then
         echo "$addr"
         echo "$addr" > "$DATA_DIR/healthcheck-address"
         return 0
@@ -2291,6 +2308,9 @@ print(json.dumps(containers))
     local onion_addr
     onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
     onion_addr=$(echo "$onion_addr" | tr -d '\n\r ')
+    # status.json's address becomes the tray's URLs and the WordPress
+    # status page's link: a whole onion address or nothing.
+    is_onion_address "$onion_addr" || onion_addr=""
 
     # Get bootstrap percentage (use docker logs directly — compose logs needs env vars
     # and tail 50 may miss the bootstrap message in verbose logs)
