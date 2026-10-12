@@ -234,12 +234,28 @@ export ONIONPRESS_WP_PORT=$((8080 + ONIONPRESS_PORT_OFFSET))
 export ONIONPRESS_SOCKS_PORT=$((9050 + ONIONPRESS_PORT_OFFSET))
 export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
 
-# Bind host. Linux is typically headless (Pi accessed from a phone or
-# laptop on the LAN), so we bind to all interfaces by default. Desktop
-# users who want localhost-only can set ONIONPRESS_BIND_HOST=127.0.0.1
-# in ~/.onionpress/config before launch. Mac (Colima) doesn't run this
-# launcher and gets the safer 127.0.0.1 default from the compose file.
-: "${ONIONPRESS_BIND_HOST:=0.0.0.0}"
+# Bind host for WordPress's published port. Only WordPress: Tor's SOCKS
+# port is fixed to 127.0.0.1 in the compose file. Linux is typically
+# headless (a Pi set up from a phone or laptop on the LAN), so WordPress
+# listens on all interfaces by default. ONIONPRESS_BIND_HOST=127.0.0.1 in
+# ~/.onionpress/config keeps it on this machine; the environment wins over
+# the config. Mac (Colima) doesn't run this launcher and gets 127.0.0.1
+# from the compose file. Anything but an IPv4 address would fail `docker
+# compose up` and take the site down, so it falls back to 127.0.0.1, the
+# narrower choice, with a warning. Same grep | cut idiom as below, so a
+# missing key doesn't kill the script under `set -e`.
+if [ -z "${ONIONPRESS_BIND_HOST:-}" ] && [ -f "$DATA_DIR/config" ]; then
+    ONIONPRESS_BIND_HOST=$(grep "^ONIONPRESS_BIND_HOST=" "$DATA_DIR/config" | head -1 | cut -d= -f2- | tr -d "[:space:]\"'")
+fi
+case "${ONIONPRESS_BIND_HOST:-}" in
+    "") ONIONPRESS_BIND_HOST=0.0.0.0 ;;
+    localhost) ONIONPRESS_BIND_HOST=127.0.0.1 ;;
+esac
+if ! [[ "$ONIONPRESS_BIND_HOST" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: ONIONPRESS_BIND_HOST=$ONIONPRESS_BIND_HOST is not an IPv4 address; using 127.0.0.1" \
+        | tee -a "$LOG_FILE" >&2
+    ONIONPRESS_BIND_HOST=127.0.0.1
+fi
 export ONIONPRESS_BIND_HOST
 
 # Every OnionPress node is an OnionHeaven server (accepts registrations).
@@ -308,6 +324,11 @@ START_ON_BOOT=yes
 # Enable with: onionpress onionheaven enable
 REGISTER_WITH_ONIONHEAVEN=
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+# WordPress's local web port (normally 8080) is open to other devices on
+# your network, so a headless machine can be set up from a phone or laptop.
+# Uncomment to keep it on this machine only. Tor's SOCKS port is always
+# this machine only.
+#ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
 fi
 
@@ -349,6 +370,16 @@ confirm_or_skip() {
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Host part of the WordPress URLs we print. On every interface that's the
+# LAN address; on loopback a LAN URL would not open, so it's localhost.
+wp_access_host() {
+    case "$ONIONPRESS_BIND_HOST" in
+        0.0.0.0) hostname -I 2>/dev/null | awk '{print $1}' | grep . || echo localhost ;;
+        127.*) echo localhost ;;
+        *) echo "$ONIONPRESS_BIND_HOST" ;;
+    esac
 }
 
 command_exists() {
@@ -965,7 +996,7 @@ setup_wordpress_interactive() {
     else
         log "ERROR: WP-CLI core install failed"
         echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
-        echo "  You can complete setup manually at http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
+        echo "  You can complete setup manually at http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
         return 1
     fi
 
@@ -1167,6 +1198,19 @@ regenerate_derivatives_pending() {
     [ -f "$DATA_DIR/.regenerate-derivatives-pending" ] && return 0
     docker exec onionpress-wordpress test -f \
         /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives >/dev/null 2>&1
+}
+
+# Tor's SOCKS port must be published on 127.0.0.1 only (docker-compose.yml).
+# A compose file from before that, which re-running install.sh leaves in
+# place (it copies the new one into docker/docker), still publishes it on
+# ONIONPRESS_BIND_HOST. Docker's own mapping is the authority, so ask it
+# and say so on every start; the site itself is unaffected.
+warn_if_socks_port_exposed() {
+    local exposed
+    exposed=$(docker port onionpress-tor 9050/tcp 2>/dev/null | grep -v '^127\.0\.0\.1:' | tr '\n' ' ' || true)
+    if [ -n "$exposed" ]; then
+        log "WARNING: Tor's SOCKS port is published beyond this machine (${exposed% }): $DOCKER_DIR/docker-compose.yml is out of date. Install the current OnionPress .deb to replace it."
+    fi
 }
 
 start_containers() {
@@ -1427,6 +1471,7 @@ start_containers() {
         log "WordPress not installed -- run 'onionpress setup' or open the OnionPress tray's Setup dialog to configure"
     fi
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
+    warn_if_socks_port_exposed
 
     # OnionHeaven: the API server runs inside the tor container (always on).
     # The heartbeat monitor + takeover Tor container starts lazily when the
@@ -2533,13 +2578,13 @@ main() {
 
             log "OnionPress is running!"
             log "Onion address: $ONION_ADDR"
-            log "Local access: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
+            log "Local access: http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
 
             echo ""
             echo "OnionPress is running!"
             echo "  Onion address: $ONION_ADDR"
-            echo "  Local access:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}"
-            echo "  Status page:   http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/onionpress-status"
+            echo "  Local access:  http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
+            echo "  Status page:   http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status"
             echo "  Logs:          $LOG_FILE"
 
             # Keep main process alive so systemd (KillMode=control-group)
@@ -2660,8 +2705,8 @@ main() {
             write_status
             echo ""
             echo "  Setup complete! Your site is now running."
-            echo "  Admin panel: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/wp-admin"
-            echo "  Status page: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo localhost):${ONIONPRESS_WP_PORT}/onionpress-status"
+            echo "  Admin panel: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/wp-admin"
+            echo "  Status page: http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status"
             ;;
 
         provision)
@@ -2850,9 +2895,9 @@ sys.exit(0 if provision_interactive() else 1)
             sudo cp "$repo_dir/src/onion_auth.py" "$INSTALL_DIR/scripts/"
             sudo cp "$repo_dir/src/key_manager.py" "$INSTALL_DIR/scripts/"
             sudo cp "$repo_dir/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
-            # Fix docker-compose port bindings for LAN access
-            sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_WP_PORT/0.0.0.0:${ONIONPRESS_WP_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
-            sudo sed -i 's/127\.0\.0\.1:\${ONIONPRESS_SOCKS_PORT/0.0.0.0:${ONIONPRESS_SOCKS_PORT/' "$INSTALL_DIR/docker/docker-compose.yml"
+            # No port-binding rewrite: WordPress's reach comes from
+            # ONIONPRESS_BIND_HOST at compose-up time, and Tor's SOCKS port
+            # must stay on 127.0.0.1 (a test keeps sed off the compose file).
             echo "$new_version" | sudo tee "$INSTALL_DIR/VERSION" > /dev/null
 
             # Deploy updated plugins to running container

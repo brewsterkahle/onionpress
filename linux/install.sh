@@ -351,11 +351,11 @@ $SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" "$INSTALL_DIR/"
 $SUDO install -D -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
     /usr/lib/systemd/system-sleep/onionpress
 
-# LAN bind: the compose file defaults to 127.0.0.1, but the Linux launcher
-# exports ONIONPRESS_BIND_HOST=0.0.0.0 (linux/onionpress) so a headless
-# Pi can be reached from another device on the LAN. The compose template
-# interpolates ${ONIONPRESS_BIND_HOST:-127.0.0.1}, so no sed rewrite is
-# needed — the env var handles it at compose-up time.
+# LAN bind: the compose file publishes WordPress on
+# ${ONIONPRESS_BIND_HOST:-127.0.0.1}, and the Linux launcher exports 0.0.0.0
+# unless ~/.onionpress/config sets ONIONPRESS_BIND_HOST, so a headless Pi
+# can be reached from another device on the LAN. Tor's SOCKS port is fixed
+# to 127.0.0.1. No sed rewrite of the compose file, here or anywhere.
 
 # Write version file (VERSION file is the single source of truth)
 VERSION="unknown"
@@ -430,6 +430,11 @@ START_ON_BOOT=yes
 # Enable with: onionpress onionheaven enable
 REGISTER_WITH_ONIONHEAVEN=
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+# WordPress's local web port (normally 8080) is open to other devices on
+# your network, so a headless machine can be set up from a phone or laptop.
+# Uncomment to keep it on this machine only. Tor's SOCKS port is always
+# this machine only.
+#ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
     echo "  Default config created"
 fi

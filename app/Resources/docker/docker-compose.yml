@@ -29,8 +29,17 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+    # Tor's SOCKS port is for this machine only, on every platform: it is
+    # deliberately not ONIONPRESS_BIND_HOST (which only decides WordPress's
+    # reach), and not configurable. Long syntax on purpose: older Linux
+    # launchers' `onionpress update` carries a sed that rewrites
+    # "127.0.0.1:${ONIONPRESS_SOCKS_PORT" to 0.0.0.0, and this form gives it
+    # nothing to match.
     ports:
-      - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_SOCKS_PORT:-9050}:9050"
+      - target: 9050
+        published: "${ONIONPRESS_SOCKS_PORT:-9050}"
+        host_ip: 127.0.0.1
+        protocol: tcp
 
   wordpress:
     image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:0e55cfbe0712a95cb50573f4576be298a14fe82a0e190bcee6d2ce6347332eee}
@@ -84,6 +93,9 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+    # macOS never sets ONIONPRESS_BIND_HOST. The Linux launcher does: 0.0.0.0
+    # by default so a headless Pi can be set up from another device on the
+    # LAN, or 127.0.0.1 when ~/.onionpress/config says so.
     ports:
       - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_WP_PORT:-8080}:80"
 

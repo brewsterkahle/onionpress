@@ -263,6 +263,11 @@ UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
 REGISTER_WITH_ONIONHEAVEN=yes
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
+# WordPress's local web port (normally 8080) is open to other devices on
+# your network, so a headless machine can be set up from a phone or laptop.
+# Uncomment to keep it on this machine only. Tor's SOCKS port is always
+# this machine only.
+#ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
     fi
 fi

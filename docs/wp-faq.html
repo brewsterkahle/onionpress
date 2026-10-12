@@ -232,6 +232,8 @@
             <span style="background:#eee;border:1px solid #ccc;padding:2px 6px;font-family:'Courier New',monospace;font-size:13px;">onionpress logs</span> -- stream container logs<br>
             <span style="background:#eee;border:1px solid #ccc;padding:2px 6px;font-family:'Courier New',monospace;font-size:13px;">systemctl --user restart onionpress</span> -- restart<br>
             <br>
+            WordPress at <code>http://&lt;this computer&gt;:8080</code> is open to other devices on your local network, so you can set up a headless Raspberry Pi from your phone or laptop. To keep it on this computer only, add <code>ONIONPRESS_BIND_HOST=127.0.0.1</code> to <code>~/.onionpress/config</code> and restart.<br>
+            <br>
             <strong>Prefer a .deb package?</strong> Download from <a href="https://github.com/brewsterkahle/onionpress/releases/latest">GitHub Releases</a>, then open a terminal in your Downloads folder and run:
             <div style="background:#1a1a2e; border:2px solid #333; padding:15px 20px; margin:15px 0; font-family:'Courier New',monospace; font-size:14px; color:#43e97b; border-radius:4px; word-break:break-all; cursor:pointer;" onclick="navigator.clipboard.writeText(this.innerText.trim());this.style.borderColor='#43e97b'">sudo apt install ./onionpress_*.deb</div>
         </div>

@@ -58,6 +58,13 @@ sudo systemctl start onionpress
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
 To check that a site is reachable over Tor: `onionpress get http://<address>.onion/` (fetches through the tor container and prints the page).
 
+On Linux, WordPress (`http://<this machine>:8080`) is open to other devices on
+your local network, so a headless machine such as a Raspberry Pi can be set up
+from a phone or laptop. To keep it on this machine only, add
+`ONIONPRESS_BIND_HOST=127.0.0.1` to `~/.onionpress/config` and run
+`systemctl --user restart onionpress`. Tor's SOCKS port is only ever reachable
+from the machine itself. On a Mac, both stay on the Mac.
+
 ### macOS Security Warning
 
 On first launch, macOS will show a security warning (normal for open-source software). Go to **System Settings → Privacy & Security**, scroll down, and click **"Open Anyway"**.
