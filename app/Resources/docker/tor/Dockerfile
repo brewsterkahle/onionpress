@@ -153,8 +153,10 @@ RUN git clone --depth 1 --branch "${MKP224O_VERSION}" \
     && strip mkp224o
 
 # The docker CLI, as a named stage so it is pinned in one place with the rest.
-# It is effectively privileged: this container has /var/run/docker.sock mounted
-# and uses this binary to create OnionHeaven takeover containers.
+# It is effectively privileged where /var/run/docker.sock is mounted: the
+# onionheaven container, whose heartbeat uses it to create and drive the
+# OnionHeaven takeover containers. onionpress-tor and the takeover workers run
+# this image without the socket (docs/DOCKER-SOCKET.md).
 FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 
 # Stage 2: Runtime — the Tor Project's C Tor image for Debian trixie.

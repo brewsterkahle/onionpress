@@ -9,7 +9,9 @@ Unlike the old poller, this does NOT actively ping OnionPress instances.
 Instead, OnionPress instances send periodic /online heartbeats to the server,
 which updates last_healthy timestamps. This monitor:
 
-  1. Scans the DB for stale heartbeats (missed 3+ beats = 180s) → takeover
+  1. Scans the DB for stale heartbeats (missed 3+ beats = 180s) → takeover,
+     and for /offline requests the API server recorded → takeover now
+     (web-server.py has no Docker socket; this container does)
   2. Audits recent takeovers by pinging the healthcheck address → detect false positives
   3. Manages farm scaling for takeover workers
 
@@ -33,7 +35,8 @@ from datetime import datetime, timedelta, timezone
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, unregister_entry,
-    check_worker_bootstrap, cleanup_dead_workers,
+    check_worker_bootstrap, cleanup_dead_workers, fix_assigned_count_drift,
+    takeover_requested_now, clear_takeover_request,
     _init_worker_index, _ensure_capacity, _pick_worker,
     _exec_takeover, _exec_release,
     is_registration_hub, registrations_opted_in, read_tor_container_address,
@@ -317,20 +320,13 @@ def main():
             except sqlite3.OperationalError:
                 pass
 
-            # Check for assigned_count drift
+            # Correct assigned_count drift (releases handed to a worker by
+            # the API server are not counted down — see release_function)
             try:
                 workers = conn.execute(
                     "SELECT container_name, assigned_count FROM takeover_containers"
                 ).fetchall()
-                for w in workers:
-                    actual = conn.execute(
-                        "SELECT COUNT(*) FROM registry WHERE status='taken-over' "
-                        "AND takeover_container = ? AND unregistered_at IS NULL",
-                        (w["container_name"],)
-                    ).fetchone()[0]
-                    if actual != w["assigned_count"]:
-                        log(f"WARNING: assigned_count drift on {w['container_name']}: "
-                            f"DB says {w['assigned_count']}, actual {actual}")
+                fix_assigned_count_drift(conn, workers)
             except sqlite3.OperationalError:
                 pass
 
@@ -428,7 +424,16 @@ def main():
                     continue  # entry was unregistered or removed since we fetched keys
                 entry = dict(entry)
 
-                if entry["status"] == "online":
+                if entry["status"] == "online" and takeover_requested_now(entry):
+                    # An /offline that the API server (onionpress-tor, no
+                    # Docker socket) recorded instead of acting on. Take
+                    # over now, as it would have: force, no peer grace.
+                    stale_count += 1
+                    log(f"/offline from {ha} (content: {ca}) — triggering takeover")
+                    takeover_function(conn, ca, ha, force=True)
+                    clear_takeover_request(conn, ca, ha, entry["takeover_requested"])
+
+                elif entry["status"] == "online":
                     # Check if heartbeat is stale
                     last_healthy_stale = True
                     if entry["last_healthy"]:

@@ -8,6 +8,12 @@ Takeover/release engine: the heartbeat is the single orchestrator. It picks a
 bootstrapped worker container with the fewest addresses and executes takeover/
 release directly via `docker exec`. No polling loops, no DB-mediated IPC.
 Workers are just Tor instances — they receive commands, not requests.
+
+Only the onionheaven container (the heartbeat) has the Docker socket. The
+registration API in onionpress-tor does not, so when it handles /offline or
+/online it records the request in the registry instead: takeover_requested
+for the heartbeat, release_pending for the worker holding the address (see
+docker_available() and docs/DOCKER-SOCKET.md).
 """
 
 import json
@@ -28,6 +34,10 @@ ONIONHEAVEN_DATA_DIR = "/var/lib/onionpress/onionheaven"
 DB_PATH = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.db")
 KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
 TOR_MANAGER = "/onionheaven-tor-manager.sh"
+
+# Where docker-compose.yml mounts the Docker socket — into the onionheaven
+# service only. onionpress-tor runs this same code without it.
+DOCKER_SOCKET = "/var/run/docker.sock"
 
 # How long to wait after the last successful healthcheck before considering
 # a node stale enough for takeover. Override via env for testing.
@@ -225,6 +235,7 @@ def db_ensure_schema(conn):
             takeover_container  TEXT,
             takeover_pending    TEXT,
             release_pending     TEXT,
+            takeover_requested  TEXT,
             consecutive_fails   INTEGER DEFAULT 0,
             wordpress_healthy   INTEGER,
             wordpress_checked_at TEXT,
@@ -242,6 +253,7 @@ def db_ensure_schema(conn):
             "last_checked", "last_healthy", "last_released",
             "last_taken_over", "last_redirect",
             "takeover_container", "takeover_pending", "release_pending",
+            "takeover_requested",
             "wordpress_checked_at", "audit_result", "audit_at", "audit_pending",
         ]:
             if col not in cols:
@@ -306,15 +318,27 @@ MAX_SERVICES_PER_WORKER = int(os.environ.get("ONIONHEAVEN_MAX_SERVICES", "50"))
 _next_worker_index = 0
 
 
+def docker_available():
+    """True if this container has the Docker socket.
+
+    The onionheaven container does; onionpress-tor, which runs web-server.py
+    and faces Tor, does not (it did until the compose file stopped mounting
+    it there). Code that both containers run checks this before reaching for
+    `docker`, and without it leaves the work to a process that can.
+    """
+    return os.path.exists(DOCKER_SOCKET)
+
+
 def is_farm_mode():
     """True if we can manage takeover containers.
 
     True when ONIONHEAVEN=1 (heartbeat container) or when the docker
-    socket is available (onionpress-tor server container).
+    socket is available (onionpress-tor, if run from an older compose file
+    that still mounted it there).
     """
     if os.environ.get("ONIONHEAVEN") == "1":
         return True
-    return os.path.exists("/var/run/docker.sock")
+    return docker_available()
 
 
 def _init_worker_index(conn):
@@ -573,6 +597,38 @@ def cleanup_dead_workers(conn):
             pass
 
 
+def fix_assigned_count_drift(conn, workers):
+    """Set each worker's assigned_count to what the registry says it holds.
+
+    `workers` are takeover_containers rows (container_name, assigned_count).
+    assigned_count only steers _pick_worker and _ensure_capacity; the
+    registry is the truth. A release handed to the worker by the API server
+    (release_function without the Docker socket) is not counted down, so the
+    heartbeat corrects drift each pass instead of only reporting it.
+    Compare-and-set on the value read, so a concurrent change wins and is
+    looked at again next pass.
+    """
+    changed = False
+    for w in workers:
+        name = w["container_name"]
+        actual = conn.execute(
+            "SELECT COUNT(*) FROM registry WHERE status='taken-over' "
+            "AND takeover_container = ? AND unregistered_at IS NULL",
+            (name,)
+        ).fetchone()[0]
+        if actual != w["assigned_count"]:
+            log(f"assigned_count drift on {name}: DB says "
+                f"{w['assigned_count']}, actual {actual} — corrected")
+            conn.execute(
+                "UPDATE takeover_containers SET assigned_count = ? "
+                "WHERE container_name = ? AND assigned_count = ?",
+                (actual, name, w["assigned_count"])
+            )
+            changed = True
+    if changed:
+        db_commit_with_retry(conn)
+
+
 def _exec_takeover(container_name, content_address):
     """Queue takeover on a worker via the queue manager.
 
@@ -706,7 +762,11 @@ def get_queue_status(container_name):
     """Get queue status from a worker's queue manager.
 
     Returns dict with queued/in_flight/active counts, or None on error.
+    None without the Docker socket, without trying: /status is public, and
+    each call would otherwise spawn a `docker` that can only fail.
     """
+    if not docker_available():
+        return None
     try:
         result = subprocess.run(
             ["docker", "exec", container_name,
@@ -743,6 +803,9 @@ def get_addr_serving_status(conn, content_address):
     container = row["takeover_container"]
     if not container:
         return "queued-to-activate"  # taken-over but no worker assigned yet
+
+    if not docker_available():
+        return "activating"  # same fallback as an unreachable worker, below
 
     # Ask the worker's queue manager
     try:
@@ -792,8 +855,13 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
        bootstrapped or the queue refuses, the row is left exactly as it was:
        the next heartbeat pass (or /offline) retries, and _ensure_capacity
        has already been asked for more workers.
+       Without the Docker socket (web-server.py in onionpress-tor, handling
+       /offline) there is no worker to queue on: record takeover_requested
+       and stop. The heartbeat monitor sees it on its next pass
+       (takeover_requested_now) and calls this function itself.
     4. Only once the worker accepted the address: set status='taken-over',
-       last_taken_over, takeover_container, clear takeover_pending, bump the
+       last_taken_over, takeover_container, clear takeover_pending,
+       takeover_requested and release_pending, bump the
        worker's assigned_count, commit. The UPDATE is a compare-and-set on
        the status read in step 1, so a row that another path changed while
        the docker exec was in flight is not overwritten; the RECONCILE pass
@@ -886,19 +954,25 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
         if not _takeover_local(content_address):
             return
     else:
-        log(f"ERROR: takeover_function fell through to legacy mode for "
-            f"{content_address} — not farm mode and not a takeover worker.")
+        # The registration API in onionpress-tor, which has no Docker
+        # socket. Its only call here is /offline (force=True): record it,
+        # and the heartbeat monitor takes the address over next pass.
+        if status_before == "online":
+            request_takeover(conn, content_address, healthcheck_address)
         return
 
     # The service is queued — NOW record the transition. Compare-and-set on
     # the status the decision was based on: if /online released the row or
     # another takeover path got here first while the docker exec was in
     # flight, leave their state alone rather than overwrite it.
+    # release_pending is cleared too: a release the API server handed to
+    # this worker moments ago must not DEL_ONION the takeover just queued.
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if worker:
         cur = conn.execute(
             "UPDATE registry SET status = 'taken-over', last_taken_over = ?, "
-            "takeover_container = ?, takeover_pending = NULL "
+            "takeover_container = ?, takeover_pending = NULL, "
+            "takeover_requested = NULL, release_pending = NULL "
             "WHERE content_address = ? AND healthcheck_address = ? AND status = ?",
             (now, worker, content_address, healthcheck_address, status_before)
         )
@@ -928,6 +1002,59 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     if worker:
         # Check if we need more capacity
         _ensure_capacity(conn)
+
+
+def request_takeover(conn, content_address, healthcheck_address):
+    """Record an /offline for the heartbeat monitor to act on.
+
+    Used by takeover_function when it runs without the Docker socket. The
+    status is untouched — nothing is taken over until a worker has the
+    address — and the request only counts while no heartbeat is newer
+    (takeover_requested_now), so a publisher who comes straight back is
+    never taken over by a stale request.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "UPDATE registry SET takeover_requested = ? "
+        "WHERE content_address = ? AND healthcheck_address = ? AND status = 'online'",
+        (now, content_address, healthcheck_address)
+    )
+    db_commit_with_retry(conn)
+    addr_log(content_address,
+             f"Takeover of {content_address} requested — the heartbeat "
+             f"monitor queues it on its next pass")
+
+
+def takeover_requested_now(entry):
+    """True if an /offline recorded by request_takeover is still current.
+
+    `entry` is a registry row as a dict. Current means no /online has been
+    received since: last_healthy is older than the request (timestamps share
+    one format, so they compare as strings). The same second counts as
+    "since" — taking over a site that may be up is the worse mistake, and a
+    site that really went away is still taken over by the staleness check.
+    """
+    requested = entry.get("takeover_requested")
+    if not requested:
+        return False
+    last_healthy = entry.get("last_healthy")
+    return not last_healthy or last_healthy < requested
+
+
+def clear_takeover_request(conn, content_address, healthcheck_address, requested):
+    """Drop a takeover request once the heartbeat has acted on it.
+
+    One attempt per /offline, as when web-server.py ran the takeover itself:
+    if no worker was ready, the staleness check takes the address over once
+    one is. Compare-and-set on the value, so a newer /offline is kept.
+    """
+    conn.execute(
+        "UPDATE registry SET takeover_requested = NULL "
+        "WHERE content_address = ? AND healthcheck_address = ? "
+        "AND takeover_requested = ?",
+        (content_address, healthcheck_address, requested)
+    )
+    db_commit_with_retry(conn)
 
 
 def _takeover_local(content_address):
@@ -962,6 +1089,14 @@ def release_function(conn, content_address, healthcheck_address):
     Owns the status change: checks if taken-over, marks online, does DEL_ONION,
     decrements assigned_count. If already online, returns early — prevents
     double-release and double-decrement.
+
+    Without the Docker socket (web-server.py in onionpress-tor, handling
+    /online and /unregister) it cannot reach the worker. It then sets
+    release_pending in the same UPDATE that marks the row online, and the
+    worker's own takeover-worker.py loop runs the DEL_ONION within seconds
+    (process_releases). The heartbeat covers the rest: RECONCILE removes the
+    address from any other worker and fix_assigned_count_drift settles the
+    count this path does not decrement.
     """
     row = conn.execute(
         "SELECT * FROM registry WHERE content_address = ? AND healthcheck_address = ?",
@@ -976,19 +1111,26 @@ def release_function(conn, content_address, healthcheck_address):
 
     takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    have_docker = docker_available()
+    hand_to_worker = bool(takeover_container) and not have_docker
 
     # Mark this row as online — release_function owns this status change.
     # Keep takeover_container so the next takeover reuses the same worker,
     # preventing orphaned ADD_ONION services on other workers.
     conn.execute(
         "UPDATE registry SET status = 'online', last_released = ?, "
-        "takeover_pending = NULL, release_pending = NULL, "
+        "takeover_pending = NULL, release_pending = ?, "
         "audit_pending = NULL, audit_result = NULL, audit_at = NULL "
         "WHERE content_address = ? AND healthcheck_address = ?",
-        (now, content_address, healthcheck_address)
+        (now, now if hand_to_worker else None, content_address, healthcheck_address)
     )
     db_commit_with_retry(conn)
     addr_log(content_address, f"Released {content_address} (was on {takeover_container or 'none'})")
+
+    if hand_to_worker:
+        addr_log(content_address,
+                 f"DEL_ONION of {content_address} handed to {takeover_container}")
+        return
 
     # Execute DEL_ONION on the tracked worker and decrement assigned_count
     if takeover_container:
@@ -1005,10 +1147,11 @@ def release_function(conn, content_address, healthcheck_address):
     # A takeover can be queued on multiple workers (e.g. during rapid
     # takeover/release cycles), but the DB only tracks one takeover_container.
     # Without this sweep, orphaned services on other workers keep publishing
-    # stale descriptors indefinitely.
+    # stale descriptors indefinitely. Without the Docker socket it cannot
+    # run here, and the heartbeat's RECONCILE pass does it instead.
     all_workers = conn.execute(
         "SELECT container_name FROM takeover_containers"
-    ).fetchall()
+    ).fetchall() if have_docker else []
     sweep_problems = []
     for w in all_workers:
         wname = w["container_name"] if isinstance(w, dict) else w[0]

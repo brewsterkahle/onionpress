@@ -26,7 +26,11 @@ services:
       - tor-state:/var/lib/tor/
       - onionpress-data:/var/lib/onionpress
       - ${ONIONPRESS_SHARED_DIR:-/tmp/onionpress-no-shared}/analytics:/var/lib/onionhome/analytics
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+    # No Docker socket here. This container serves the onion services and
+    # the OnionHeaven API to anyone on Tor; the socket is root on the Docker
+    # host (the user's own daemon under rootless Docker). Its OnionHeaven
+    # code hands everything that needs Docker to the onionheaven service
+    # through the registry (see docs/DOCKER-SOCKET.md).
     depends_on:
       - wordpress
     restart: unless-stopped
@@ -210,6 +214,10 @@ services:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
       - ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD=${ONIONHEAVEN_MAX_SERVICES:-50}
+    # The one Tor-side container that keeps the Docker socket: its heartbeat
+    # monitor creates, inspects, execs into and removes the takeover worker
+    # containers. It hosts no onion service. Next step is to put this
+    # behind a narrow orchestrator too — see docs/DOCKER-SOCKET.md.
     volumes:
       - onionpress-data:/var/lib/onionpress
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock

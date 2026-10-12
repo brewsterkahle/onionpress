@@ -33,11 +33,12 @@ Endpoints:
   POST /offline      — Notify OnionHeaven that instance is going offline.
                        Signature required, from every source address. Hub only.
   POST /reset-onionheaven — Clean stress tests + refresh workers with current
-                       code. Docker-bridge sources only (the `onionpress
-                       reset` CLI reaches it via docker exec from the
-                       onionheaven container); Tor-origin callers get 403.
-                       One run at a time — a concurrent call gets 409.
-                       Hub only.
+                       code. Docker-bridge sources only; Tor-origin callers
+                       get 403. One run at a time — a concurrent call gets
+                       409. Hub only. Needs the Docker socket, which this
+                       container no longer has: 503, and the `onionpress
+                       reset-onionheaven` CLI runs the reset in the
+                       onionheaven container instead.
   POST /logs/manifest — (OnionHome only) Accept log file manifests for analytics sharing
   POST /logs/upload   — (OnionHome only) Accept log file uploads for analytics sharing
   POST /api/name/register, /release — (OnionHome only) signature required
@@ -945,7 +946,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     #
     # /api/name/{register,release}-local are called by the WordPress
     # mu-plugin on user create/delete; /reset-onionheaven by the
-    # `onionpress reset` CLI via docker exec. None of them are meant to be
+    # `onionpress reset` CLI via docker exec until onionpress-tor lost the
+    # Docker socket (it now answers 503). None of them are meant to be
     # reachable from outside the Docker network; we enforce that by
     # rejecting any source IP that isn't on the Docker bridge range.
     # Tor-proxied traffic arrives at 127.0.0.1 (Tor forwards onion service
@@ -1370,11 +1372,22 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         had no gate at all and was callable by anyone over Tor. Serialized
         by _RESET_LOCK: a second call while one is running gets 409. It
         spawns takeover workers, so it is hub-only as well.
+
+        This container no longer has the socket, so the reset now runs in the
+        onionheaven container (`onionpress reset-onionheaven`), and here it
+        answers 503 rather than half-run without Docker.
         """
         if not self._docker_network_src_ok():
             self._send_json(403, {"error": "local-only endpoint"})
             return
         if self._refuse_unless_hub():
+            return
+        from onionheaven_common import docker_available
+        if not docker_available():
+            self._send_json(503, {
+                "error": "no Docker socket in this container; run "
+                         "reset_onionheaven in the onionheaven container "
+                         "(onionpress reset-onionheaven)"})
             return
         if not _RESET_LOCK.acquire(blocking=False):
             self._send_json(409, {"error": "reset already in progress"})

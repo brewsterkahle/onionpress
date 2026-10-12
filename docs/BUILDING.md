@@ -207,7 +207,7 @@ container that holds the socket. Bump it like a Dockerfile input:
 `build/base-image-digest.sh ghcr.io/wollomatic/socket-proxy:<version>`. The
 proxy passes only the two calls autoheal's script makes; if a new autoheal
 calls anything else, the proxy refuses it and logs a WARN line
-(`docker logs onionpress-autoheal-proxy`).
+(`docker logs onionpress-autoheal-proxy`). See `docs/DOCKER-SOCKET.md`.
 
 Three more references are deliberately left as bare tags, and
 `tests/test_image_pins.py` asserts they stay that way — a blanket

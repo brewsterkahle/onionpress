@@ -1083,6 +1083,19 @@ stop_onionheaven_farm() {
     done
 }
 
+# Clean stress-test entries and refresh takeover workers with current code.
+# reset_onionheaven() drives Docker, and only the onionheaven container has
+# the socket — onionpress-tor's /reset-onionheaven answers 503 — so run it
+# there. Prints the JSON stats; its log lines go to $LOG_FILE.
+reset_onionheaven_in_container() {
+    docker exec onionheaven python3 -c '
+import json, sys
+sys.path.insert(0, "/")
+from onionheaven_common import reset_onionheaven
+print(json.dumps({"reset": True, **reset_onionheaven()}))
+' 2>>"$LOG_FILE"
+}
+
 # ─── OnionHeaven lazy activation ──────────────────────────────────────
 #
 # The activation flag marks a hub. web-server.py writes it once it knows the
@@ -3328,10 +3341,7 @@ sys.exit(0 if provision_interactive() else 1)
             # Clean OnionHeaven state in the shared persistent volume
             if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
                 log "Resetting OnionHeaven..."
-                # The API server runs in onionpress-tor, not in the onionheaven
-                # container, so address it by name across the compose network;
-                # it only accepts /reset-onionheaven from Docker-bridge sources.
-                docker exec onionheaven curl -s -X POST http://onionpress-tor:8083/reset-onionheaven >> "$LOG_FILE" 2>&1 || true
+                reset_onionheaven_in_container >> "$LOG_FILE" || true
             fi
 
             log "OnionPress reset and restarted"
@@ -3531,10 +3541,8 @@ sys.exit(0 if provision_interactive() else 1)
                 exit 1
             fi
 
-            # web-server.py listens in onionpress-tor; curl it from the
-            # onionheaven container so the request arrives from a Docker-bridge
-            # address (the only sources the endpoint accepts).
-            result=$(docker exec onionheaven curl -s -X POST http://onionpress-tor:8083/reset-onionheaven 2>&1)
+            result=$(reset_onionheaven_in_container) \
+                || { echo "ERROR: OnionHeaven reset failed — see $LOG_FILE"; exit 1; }
             echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
             log "OnionHeaven reset complete"
             ;;

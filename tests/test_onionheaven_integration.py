@@ -103,7 +103,8 @@ class ServerProcess:
     """Manages a local web-server.py process for testing."""
 
     def __init__(self, port=None, trust_loopback_as_bridge=False,
-                 hub_opt_in=True, own_address=None, stale_marker=False):
+                 hub_opt_in=True, own_address=None, stale_marker=False,
+                 docker_available=True):
         self.port = port or _find_free_port()
         self.proc = None
         self._tmpdir = None
@@ -122,6 +123,10 @@ class ServerProcess:
         # patching it in the server process. Off by default so the default
         # server still proves the guard rejects loopback.
         self.trust_loopback_as_bridge = trust_loopback_as_bridge
+        # Whether the server process believes it has the Docker socket.
+        # Fixed here rather than read from the machine: CI runners have
+        # /var/run/docker.sock, a developer's Mac usually does not.
+        self.docker_available = docker_available
 
     def start(self):
         self._tmpdir = tempfile.mkdtemp(prefix="onionheaven-test-")
@@ -182,6 +187,7 @@ def _stub_reset(conn=None):
     return {{"stress_cleaned": 0, "real_migrated": 0, "old_workers_removed": 0,
              "new_workers_spawned": 0, "duplicate_heartbeats_killed": 0}}
 onionheaven_common.reset_onionheaven = _stub_reset
+onionheaven_common.docker_available = lambda: {self.docker_available!r}
 
 # Import web-server.py (dash in filename, can't use normal import)
 spec = importlib.util.spec_from_file_location(
@@ -932,6 +938,32 @@ class TestPeerClaim(unittest.TestCase):
                                    onionheaven_peer_signature=self._peer_sig()),
                       True)
         self.assertIs(self._online(), False)
+
+
+class TestResetWithoutDockerSocket(unittest.TestCase):
+    """onionpress-tor no longer has the Docker socket, and reset_onionheaven
+    drives Docker. The endpoint must say so (503) before taking the lock or
+    starting a reset that could only half-run; the CLI runs the reset in the
+    onionheaven container instead.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ServerProcess(trust_loopback_as_bridge=True,
+                                   docker_available=False)
+        cls.server.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.stop()
+
+    def test_reset_refused_with_503(self):
+        t0 = time.monotonic()
+        code, data = _post(f"{self.server.base_url}/reset-onionheaven", {})
+        self.assertEqual(code, 503, data)
+        self.assertIn("onionheaven container", data.get("error", ""))
+        self.assertLess(time.monotonic() - t0, RESET_STUB_SECONDS,
+                        "the stubbed reset must not have run")
 
 
 if __name__ == "__main__":

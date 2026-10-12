@@ -196,8 +196,8 @@ class TestBaseImagesArePinned(unittest.TestCase):
     def test_docker_cli_is_a_named_pinned_stage(self):
         """`COPY --from=docker:cli` was a base-image dependency hiding outside
         any FROM line, easy to miss when enumerating inputs. The binary is
-        effectively privileged: this container has the docker socket mounted
-        and uses it to create takeover containers.
+        effectively privileged where the docker socket is mounted (the
+        onionheaven container), which uses it to create takeover containers.
         """
         text = _read(TOR_DOCKERFILE)
         self.assertNotRegex(
