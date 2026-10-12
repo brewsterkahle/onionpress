@@ -25,7 +25,7 @@ function onionpress_auto_login_scope_ok( $scope ) {
     $host = isset( $_SERVER['HTTP_HOST'] ) ? strtolower( (string) $_SERVER['HTTP_HOST'] ) : '';
     $name = preg_replace( '/:\d+$/', '', $host );
     if ( 'onion' === $scope ) {
-        return 1 === preg_match( '/^[a-z2-7]{56}\.onion$/', $name );
+        return 1 === preg_match( '/^[a-z2-7]{56}\.onion$/D', $name );
     }
     if ( 'local' !== $scope || ! in_array( $name, array( 'localhost', '127.0.0.1', '[::1]' ), true ) ) {
         return false;

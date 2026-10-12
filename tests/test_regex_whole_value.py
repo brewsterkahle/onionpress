@@ -267,6 +267,9 @@ class TestOtherNameChecks(unittest.TestCase):
             h.send_header = lambda *a: None
             h.end_headers = lambda: None
             h.send_error = lambda *a: sent.append(a)
+            # The first-run gate (`wp core is-installed`) runs before the form
+            # is read; report "not installed" so the name checks are reached.
+            h._wp_installed = lambda: False
             with mock.patch.object(onion_proxy.subprocess, "run") as run:
                 h._handle_setup_post()
             return sent, run, h.wfile.getvalue().decode()

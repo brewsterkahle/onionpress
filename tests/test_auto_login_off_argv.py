@@ -524,7 +524,7 @@ class TestPlugin(unittest.TestCase):
         self.assertIn("array( 'localhost', '127.0.0.1', '[::1]' )", fn)
         self.assertIn("gethostbynamel( 'onionpress-tor' )", fn)
         self.assertIn("$_SERVER['REMOTE_ADDR']", fn)
-        self.assertIn("'/^[a-z2-7]{56}\\.onion$/'", fn)
+        self.assertIn("'/^[a-z2-7]{56}\\.onion$/D'", fn)
         # The tor container's name is the compose container_name.
         self.assertIn("container_name: onionpress-tor",
                       _read("app/Resources/docker/docker-compose.yml"))
