@@ -44,7 +44,14 @@ COPY onionpress-log-format.conf /etc/apache2/conf-available/
 # served without PHP so WordPress latency can't masquerade as a Tor failure.
 COPY onionpress-health.conf /etc/apache2/conf-available/
 COPY onionpress-health.txt /usr/local/share/onionpress/health.txt
-RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-health
+# My Creations is bind-mounted under DocumentRoot: serve it, never run it.
+COPY onionpress-creations.conf /etc/apache2/conf-available/
+RUN a2enconf onionpress-proxy-protocol onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations
+# A conf Apache rejects would take every site down at the next image pull;
+# fail the build instead. The php_module check keeps the creations conf's
+# `php_admin_flag engine off` from being skipped silently by its <IfModule>.
+RUN apache2ctl configtest \
+    && apache2ctl -M 2>/dev/null | grep -q ' php_module '
 
 # Multisite init script — runs on every container start to ensure
 # multisite is configured (safe to re-run, checks if already done)

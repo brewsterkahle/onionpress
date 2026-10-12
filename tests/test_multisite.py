@@ -367,6 +367,20 @@ def _extract_onion_proxy_htaccess():
     raise AssertionError("could not find htaccess_content assignment in onion_proxy.py")
 
 
+def _extract_mac_launcher_htaccess():
+    """Pull the heredoc the Mac launcher writes when .htaccess is missing
+    or empty (app/MacOS/onionpress, before provision-post-install runs).
+    """
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "app" / "MacOS" / "onionpress")
+    m = re.search(
+        r'cat > /var/www/html/\.htaccess << "HTEOF"\n(.*?)\nHTEOF\n',
+        path.read_text(encoding="utf-8"), re.S,
+    )
+    assert m, "could not find the .htaccess heredoc in app/MacOS/onionpress"
+    return m.group(1)
+
+
 class TestHtaccessMatchesOnionnameCharset(unittest.TestCase):
     """Regression test: the .htaccess strip rule's character class must
     cover every character onionnames_client._NAME_ALLOWED_RE allows.
@@ -405,10 +419,10 @@ class TestHtaccessMatchesOnionnameCharset(unittest.TestCase):
 
 class TestHtaccessDuplicatesStayInSync(unittest.TestCase):
     """The .htaccess rewrite rules are hand-duplicated in multisite.py
-    (Linux / generic-static path) and onion_proxy.py (Mac setup-wizard
-    path). Nothing else enforces the two copies match, so a fix applied
-    to one and not the other silently reintroduces the bug on the other
-    platform.
+    (Linux / generic-static path), onion_proxy.py (Mac setup-wizard
+    path) and the Mac launcher's missing-.htaccess fallback. Nothing
+    else enforces the copies match, so a fix applied to one and not the
+    others silently reintroduces the bug on the other platform.
     """
 
     def test_onion_proxy_htaccess_matches_multisite(self):
@@ -417,6 +431,14 @@ class TestHtaccessDuplicatesStayInSync(unittest.TestCase):
             multisite.HTACCESS_BODY.strip(),
             onion_proxy_content.strip(),
             "onion_proxy.py's htaccess_content has drifted from "
+            "multisite.HTACCESS_BODY - keep the two in sync"
+        )
+
+    def test_mac_launcher_htaccess_matches_multisite(self):
+        self.assertEqual(
+            multisite.HTACCESS_BODY.strip(),
+            _extract_mac_launcher_htaccess().strip(),
+            "app/MacOS/onionpress's .htaccess heredoc has drifted from "
             "multisite.HTACCESS_BODY - keep the two in sync"
         )
 

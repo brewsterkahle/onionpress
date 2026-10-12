@@ -897,6 +897,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     'Header set Referrer-Policy "no-referrer"\n'
                     "</IfModule>\n"
                     "\n"
+                    "# My Creations is a publishing folder: serve its files, never run them\n"
+                    "RewriteEngine On\n"
+                    "RewriteCond %{REQUEST_URI} /wp-content/creations/ [NC]\n"
+                    "RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]\n"
+                    "RewriteRule ^ - [F]\n"
+                    "\n"
                     "# BEGIN WordPress Multisite\n"
                     "RewriteEngine On\n"
                     "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"

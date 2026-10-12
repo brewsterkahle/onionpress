@@ -19,6 +19,11 @@ class OnionPress_Creations {
     const CREATIONS_DIR = '/var/www/html/wp-content/creations';
     const FILES_CACHE_KEY = 'op_creations_files';
     const FILES_CACHE_TTL = 60;  // seconds
+    // File types a web server may run instead of serve. My Creations sits
+    // under DocumentRoot, so these are refused at upload; the WordPress
+    // image (onionpress-creations.conf) and the multisite .htaccess also
+    // refuse to serve them from /wp-content/creations/.
+    const BLOCKED_EXT_RE = '/\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)$/i';
 
     private static $instance = null;
 
@@ -39,7 +44,8 @@ class OnionPress_Creations {
 
     /**
      * Handle file uploads from the My Creations page.
-     * Requires upload_files capability and a valid nonce.
+     * Requires upload_files capability and a valid nonce. Skips dotfiles;
+     * refuses BLOCKED_EXT_RE types and tells the uploader which ones.
      */
     public function handle_upload() {
         if (empty($_FILES['creations_upload']) || empty($_POST['creations_upload_nonce'])) {
@@ -78,12 +84,17 @@ class OnionPress_Creations {
             );
         }
 
+        $refused = array();
         for ($i = 0; $i < $count; $i++) {
             if ($files['error'][$i] !== UPLOAD_ERR_OK) {
                 continue;
             }
             $name = sanitize_file_name($files['name'][$i]);
             if (empty($name) || $name[0] === '.') {
+                continue;
+            }
+            if (preg_match(self::BLOCKED_EXT_RE, $name)) {
+                $refused[] = $name;
                 continue;
             }
             $dest = $real_target . '/' . $name;
@@ -101,6 +112,16 @@ class OnionPress_Creations {
         }
 
         delete_transient(self::FILES_CACHE_KEY);
+
+        if ($refused) {
+            error_log('OnionPress Creations: refused upload of ' . implode(', ', $refused) . ' (server-executable file type)');
+            wp_die(
+                '<p>Not uploaded: ' . esc_html(implode(', ', $refused)) . '</p>'
+                . '<p>My Creations publishes files as they are, so it does not accept files a web server could run as a program (.php and similar). Other files in this upload were not affected.</p>',
+                'File type not allowed',
+                array('response' => 415, 'back_link' => true)
+            );
+        }
 
         // Redirect back to avoid form resubmission
         wp_redirect(wp_get_referer() ? wp_get_referer() : home_url('/'));
