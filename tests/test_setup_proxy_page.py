@@ -91,6 +91,60 @@ class TestSetupFailurePage(unittest.TestCase):
         self.assertIn("Username may only contain", page)
 
 
+class TestSetupPostOnlyOnFirstRun(unittest.TestCase):
+    """POST /setup on an installed site would reach the password step (wp-cli
+    exits 0 when there is nothing to install) and set the password of the
+    user the form names. Any local user, or any web page through the
+    browser, can reach 127.0.0.1."""
+
+    FIELDS = {"blog_title": "T", "user_name": "alice", "admin_password": "attacker-pw",
+              "admin_email": "alice@example.org"}
+
+    def _post(self, run, origin=None, port=9077):
+        body = urlencode(self.FIELDS).encode()
+        h, logs, sent = _handler(body)
+        h.server.server_port = port
+        if origin is not None:
+            h.headers["Origin"] = origin
+        calls = []
+
+        def record(argv, **kwargs):
+            calls.append(list(argv))
+            return run(argv, **kwargs)
+        with mock.patch.object(onion_proxy.subprocess, "run", record):
+            h._handle_setup_post()
+        return sent, calls, logs
+
+    def test_installed_site_is_refused_before_anything_runs(self):
+        sent, calls, logs = self._post(_run(installed=True))
+        self.assertEqual(sent, [(409, "WordPress is already configured")])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("is-installed", calls[0])
+        self.assertIn("Setup form refused: WordPress is already installed", logs)
+
+    def test_unknown_install_state_is_refused(self):
+        def run(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 10)
+        sent, calls, _ = self._post(run)
+        self.assertEqual(sent[0][0], 503)
+        self.assertEqual(len(calls), 1)
+
+    def test_cross_origin_post_is_refused(self):
+        for origin in ("https://evil.example", "null", "http://127.0.0.1:8080",
+                       "http://localhost.evil.example:9077"):
+            with self.subTest(origin=origin):
+                sent, calls, _ = self._post(_run(), origin=origin)
+                self.assertEqual(sent, [(403, "Cross-origin setup request refused")])
+                self.assertEqual(calls, [])
+
+    def test_own_page_and_non_browser_clients_proceed(self):
+        for origin in (None, "http://127.0.0.1:9077", "http://localhost:9077"):
+            with self.subTest(origin=origin):
+                sent, calls, _ = self._post(_run(), origin=origin)
+                self.assertEqual(sent, [200])
+                self.assertTrue(any("multisite-install" in c for c in calls))
+
+
 class TestSetupFormPages(unittest.TestCase):
 
     def test_form_with_error_escapes_every_echoed_field(self):

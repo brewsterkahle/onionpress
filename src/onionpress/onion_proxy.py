@@ -779,8 +779,48 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _setup_post_same_origin(self):
+        """False for a POST a browser sent from any page but this proxy's
+        own: browsers send Origin with every cross-origin POST, so any web
+        page could otherwise submit the setup form to 127.0.0.1. A client
+        that sends no Origin is not a browser."""
+        origin = self.headers.get('Origin')
+        if origin is None:
+            return True
+        port = getattr(self.server, 'server_port', None)
+        return origin in (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+
+    def _wp_installed(self):
+        """True if WordPress is installed, None if that can't be told."""
+        try:
+            result = subprocess.run(
+                [self.server.docker_bin, "exec", "onionpress-wordpress",
+                 "wp", "core", "is-installed", "--allow-root"],
+                env=self.server.docker_env, capture_output=True, timeout=10)
+        except (subprocess.SubprocessError, OSError):
+            return None
+        return result.returncode == 0
+
     def _handle_setup_post(self):
         """Process the WordPress setup form submission."""
+        if not self._setup_post_same_origin():
+            self.send_error(403, "Cross-origin setup request refused")
+            return
+        # First run only. On an installed site `wp core multisite-install`
+        # changes nothing and exits 0, and the password step below would
+        # then set the password of whichever existing user the form names.
+        installed = self._wp_installed()
+        if installed is not False:
+            if self.server.log_func:
+                self.server.log_func(
+                    "Setup form refused: WordPress is already installed"
+                    if installed else
+                    "Setup form refused: could not check whether WordPress is installed")
+            self.send_error(409 if installed else 503,
+                            "WordPress is already configured" if installed
+                            else "Could not check whether WordPress is installed")
+            return
+
         # Read POST body
         content_length = int(self.headers.get('Content-Length', 0))
         if content_length == 0:

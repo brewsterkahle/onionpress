@@ -323,6 +323,8 @@ class TestOnionProxySetupPost(unittest.TestCase):
                           "admin_email": "alice@example.org"}).encode()
         logs, sent = [], []
         h = _handler(logs)
+        # Not installed yet: the form is refused on an installed site.
+        h._wp_installed = lambda: False
         h.headers = {"Content-Length": str(len(body))}
         h.rfile = io.BytesIO(body)
         h.wfile = io.BytesIO()
