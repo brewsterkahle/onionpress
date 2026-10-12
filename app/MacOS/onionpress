@@ -2376,11 +2376,13 @@ setup_wordpress_cli() {
             echo "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)" >&2
             return 1
         fi
-        # Restore config if present
-        if [ -f "$staging/config" ]; then
-            cp "$staging/config" "$DATA_DIR/config"
-            log "Setup: restored config from backup"
-            echo "  Config restored from backup."
+        # Restore the backup's user preferences. The backup's config is
+        # its author's: every other key keeps this install's value
+        # (backup.RESTORABLE_CONFIG), never a straight copy.
+        if bundled_python -m onionpress.cli restore-config --staging "$staging" --config "$DATA_DIR/config" \
+            --address "$onion_address" 2>>"$LOG_FILE"; then
+            log "Setup: restored settings from backup"
+            echo "  Settings restored from backup."
         fi
         # Restore vanity keys if present (accept either C Tor or Arti format)
         if { [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] || [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; } && [ -f "$staging/metadata.json" ]; then
@@ -2607,12 +2609,13 @@ restore_backup() {
         log "WARNING: No wp-content in backup — skipping"
     fi
 
-    # 4. Restore config
-    if [ -f "$staging/config" ]; then
-        log "Restore: restoring config..."
-        cp "$staging/config" "$DATA_DIR/config"
-        log "Restore: config restored"
-    fi
+    # 4. Restore the backup's user preferences. The backup's config is its
+    #    author's: every other key keeps this install's value
+    #    (backup.RESTORABLE_CONFIG), never a straight copy.
+    log "Restore: restoring settings..."
+    bundled_python -m onionpress.cli restore-config --staging "$staging" --config "$DATA_DIR/config" \
+        --address "$onion_address" 2>>"$LOG_FILE" \
+        || log "WARNING: could not restore settings from the backup"
 
     # 5. Restore OnionHeaven registry + keys (if present in backup)
     if [ -d "$staging/onionheaven" ] && [ -s "$staging/onionheaven/registry.db" ]; then

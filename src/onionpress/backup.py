@@ -965,7 +965,8 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
         # decrypted backup behind.
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    apply_config_overrides(staging, log_func, data_dir=_data_dir)
+    apply_config_overrides(staging, log_func, data_dir=_data_dir,
+                           onion_address=metadata.get('onion_address', ''))
     marker = os.path.join(_data_dir, INSTALL_FROM_BACKUP_MARKER)
     with open(marker, 'w') as f:
         f.write(staging + '\n')
@@ -1138,7 +1139,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         # 2-6. Container-side artifacts + config overrides — shared with the
         # install-from-backup path (restore_container_artifacts / apply_config_overrides).
         restore_container_artifacts(staging, metadata, log_func)
-        apply_config_overrides(staging, log_func, data_dir=data_dir)
+        apply_config_overrides(staging, log_func, data_dir=data_dir,
+                               onion_address=metadata.get('onion_address', ''))
 
         # Image sizes the backup left out are rebuilt in the background by
         # the launcher's next start (the caller restarts after this) — #257.
@@ -1320,22 +1322,95 @@ def restore_container_artifacts(staging, metadata, log_func):
         _ensure_multisite_constants(log_func)
 
 
-def apply_config_overrides(staging, log_func, *, data_dir=None):
-    """Apply a backup's non-default config overrides to ~/.onionpress/config."""
-    _data_dir = data_dir if data_dir is not None else _default_data_dir()
-    # 6. Restore config overrides (non-default user preferences)
+def _one_of(*allowed):
+    return lambda value, address: value in allowed
+
+
+def _whole_number(lo, hi):
+    return lambda value, address: (re.fullmatch(r"[0-9]{1,3}", value) is not None
+                                   and lo <= int(value) <= hi)
+
+
+def _prefix_of_restored_address(value, address):
+    return (re.fullmatch(r"[a-z2-7]{2,5}", value) is not None
+            and bool(address) and address.startswith(value))
+
+
+# The config a restore takes from a backup: user preferences, each with the
+# values it can hold. The backup's config file and config-overrides.json are
+# the backup author's, like metadata.json, so nothing else is restored:
+# not what runs (image overrides), where it listens (ports, bind host),
+# where data goes (paths), what leaves the machine (CLOUDFLARE_TUNNEL_TOKEN,
+# SHARE_ANALYTICS_WITH_ONIONHOME), the OnionHeaven hub and admission
+# (REGISTER_WITH_ONIONHEAVEN, ONIONHEAVEN_*), or updates (UPDATE_ON_LAUNCH).
+# Those keep this install's values; the user sets them again. ONIONNAME
+# comes from the validated metadata username, and ADDRESS_PREFIX only when
+# the restored address starts with it.
+RESTORABLE_CONFIG = {
+    "INSTALL_IA_PLUGIN": _one_of("yes", "no"),
+    "LAUNCH_ON_LOGIN": _one_of("yes", "no"),
+    "PREVENT_SLEEP": _one_of("normal", "on-battery", "never"),
+    "VM_MEMORY": _whole_number(1, 64),
+    "VM_CPU": _whole_number(1, 64),
+    "ADDRESS_PREFIX": _prefix_of_restored_address,
+}
+
+
+def restore_backup_config(staging, config_path, log_func, onion_address=''):
+    """Merge the restorable preferences (RESTORABLE_CONFIG) of a backup into
+    *config_path*; every other key keeps this install's value.
+
+    Reads the backup's config file (Linux backups carry the whole file) and
+    its config-overrides.json (Python-made backups: the non-default
+    values), the latter winning. *onion_address* is the restored address,
+    derived from the key. Returns the keys written.
+    """
+    values = {}
+    config_file = os.path.join(staging, 'config')
+    if not os.path.isfile(config_file):
+        config_file = os.path.join(staging, '.', 'config')
+    if os.path.isfile(config_file):
+        values.update(read_config(config_file))
     overrides_path = os.path.join(staging, 'config-overrides.json')
     if not os.path.exists(overrides_path):
         overrides_path = os.path.join(staging, '.', 'config-overrides.json')
-    if os.path.exists(overrides_path):
-        with _phase_timer(log_func, 'RESTORE', 'config_overrides'):
-            with open(overrides_path, 'r') as f:
-                overrides = json.load(f)
-            config_path = os.path.join(_data_dir, 'config')
-            for key, value in overrides.items():
-                write_value(config_path, key, value)
-            log_func(f"Restore: applied {len(overrides)} config override(s)")
+    if os.path.isfile(overrides_path):
+        try:
+            with open(overrides_path, 'rb') as f:
+                overrides = json.loads(f.read())
+        except ValueError:
+            overrides = None
+        if isinstance(overrides, dict):
+            values.update(overrides)
+        else:
+            log_func("Restore: WARNING — config-overrides.json is not a JSON "
+                     "object; skipped")
+    applied, kept = [], []
+    for key, value in values.items():
+        check = RESTORABLE_CONFIG.get(key)
+        if check and isinstance(value, str) and check(value, onion_address):
+            write_value(config_path, key, value)
+            applied.append(key)
+        else:
+            kept.append(key)
+    if applied:
+        log_func(f"Restore: restored settings: {', '.join(applied)}")
+    if kept:
+        # Key names only (they are the backup author's too): no values.
+        names = [k for k in kept if re.fullmatch(r"[A-Z][A-Z0-9_]{0,39}", k)]
+        log_func(f"Restore: kept this install's value for {len(kept)} "
+                 f"setting(s) a restore does not take from a backup"
+                 + (f": {', '.join(names[:20])}" if names else ""))
+    return applied
 
+
+def apply_config_overrides(staging, log_func, *, data_dir=None, onion_address=''):
+    """Restore a backup's user preferences into ~/.onionpress/config
+    (restore_backup_config)."""
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    with _phase_timer(log_func, 'RESTORE', 'config_overrides'):
+        restore_backup_config(staging, os.path.join(_data_dir, 'config'),
+                              log_func, onion_address)
 
 
 def _ensure_multisite_constants(log_func):

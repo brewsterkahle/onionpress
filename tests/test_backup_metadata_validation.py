@@ -56,6 +56,37 @@ CRAFTED_ADDRESSES = [
     "x.onion",
     "evil.onion\"}, \"success\": false, \"x\": {\"a\": \"",
 ]
+# Config a crafted backup could carry (config file or config-overrides.json).
+# A restore takes none of it.
+HOSTILE_CONFIG = {
+    "ONIONPRESS_TOR_IMAGE": "evil.example/tor:latest",
+    "ONIONPRESS_WORDPRESS_IMAGE": "evil.example/wordpress:latest",
+    "ONIONPRESS_BIND_HOST": "0.0.0.0",
+    "ONIONPRESS_PORT_OFFSET": "30000",
+    "DATA_DIR": "/tmp/evil",
+    "REGISTER_WITH_ONIONHEAVEN": "yes",
+    "ONIONHEAVEN_ADDRESS": "evil" + "a" * 52 + ".onion",
+    "ONIONHEAVEN_ACCEPT_REGISTRATIONS": "yes",
+    "ONIONHEAVEN_MAX_SERVICES": "100000",
+    "CLOUDFLARE_TUNNEL_TOKEN": "evil-token",
+    "SHARE_ANALYTICS_WITH_ONIONHOME": "yes",
+    "ONIONHOME_ADDRESS": "evil" + "b" * 52 + ".onion",
+    "UPDATE_ON_LAUNCH": "no",
+    "ONIONNAME": "evilname",
+    "VM_DISK": "500",
+    "ADDRESS_PREFIX": "zzz",                    # not the restored address's
+    "LAUNCH_ON_LOGIN": "maybe",
+    "PREVENT_SLEEP": "never; rm -rf ~",
+    "VM_MEMORY": "2\nREGISTER_WITH_ONIONHEAVEN=yes",
+    "VM_CPU": "999",
+}
+
+
+def _config_text(values):
+    """*values* as a config file (single-line values only)."""
+    return "".join(f"{k}={v}\n" for k, v in values.items() if "\n" not in v)
+
+
 CRAFTED_USERNAMES = [
     "admin\nREGISTER_WITH_ONIONHEAVEN=yes",
     "admin\rCLOUDFLARE_TUNNEL_TOKEN=x",
@@ -392,6 +423,101 @@ class TestPythonRestorePaths(unittest.TestCase):
         with open(os.path.join(self.data_dir, "config")) as f:
             self.assertIn("ONIONNAME=admin\n", f.read())
 
+    def test_config_overrides_take_only_restorable_preferences(self):
+        staging = os.path.join(self.tmp, "overrides")
+        os.makedirs(staging)
+        with open(os.path.join(staging, "config-overrides.json"), "w") as f:
+            json.dump(dict(HOSTILE_CONFIG, VM_CPU="4"), f)
+        backup.apply_config_overrides(staging, self.logs.append,
+                                      data_dir=self.data_dir, onion_address=ADDR)
+        with open(os.path.join(self.data_dir, "config")) as f:
+            config = f.read()
+        self.assertEqual(config, self.config + "VM_CPU=4\n")
+        self.assertFalse(any("0.0.0.0" in m or "evil" in m for m in self.logs))
+
+
+class TestRestoreBackupConfig(unittest.TestCase):
+    """backup.restore_backup_config: an allowlist of user preferences."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.staging = os.path.join(self.tmp, "staging")
+        os.makedirs(self.staging)
+        self.config = os.path.join(self.tmp, "config")
+        self.mine = "REGISTER_WITH_ONIONHEAVEN=no\nONIONPRESS_BIND_HOST=127.0.0.1\nVM_CPU=2\n"
+        with open(self.config, "w") as f:
+            f.write(self.mine)
+        self.logs = []
+
+    def _restore(self, file_values=None, overrides=None, address=ADDR):
+        if file_values is not None:
+            with open(os.path.join(self.staging, "config"), "w") as f:
+                f.write(_config_text(file_values))
+        if overrides is not None:
+            with open(os.path.join(self.staging, "config-overrides.json"), "w") as f:
+                json.dump(overrides, f)
+        applied = backup.restore_backup_config(self.staging, self.config,
+                                               self.logs.append, address)
+        from onionpress.config import read_config
+        return applied, read_config(self.config)
+
+    def test_hostile_keys_keep_this_installs_values(self):
+        applied, config = self._restore(HOSTILE_CONFIG, HOSTILE_CONFIG)
+        self.assertEqual(applied, [])
+        with open(self.config) as f:
+            self.assertEqual(f.read(), self.mine)
+
+    def test_preferences_are_restored(self):
+        prefs = {"INSTALL_IA_PLUGIN": "no", "LAUNCH_ON_LOGIN": "no",
+                 "PREVENT_SLEEP": "never", "VM_MEMORY": "4", "VM_CPU": "3",
+                 "ADDRESS_PREFIX": ADDR[:4]}
+        applied, config = self._restore(dict(HOSTILE_CONFIG, **prefs))
+        self.assertEqual(sorted(applied), sorted(prefs))
+        for key, value in prefs.items():
+            self.assertEqual(config[key], value)
+        self.assertEqual(config["REGISTER_WITH_ONIONHEAVEN"], "no")
+        self.assertEqual(config["ONIONPRESS_BIND_HOST"], "127.0.0.1")
+        self.assertNotIn("ONIONPRESS_TOR_IMAGE", config)
+
+    def test_overrides_win_over_the_config_file(self):
+        _, config = self._restore({"PREVENT_SLEEP": "never"},
+                                  {"PREVENT_SLEEP": "on-battery"})
+        self.assertEqual(config["PREVENT_SLEEP"], "on-battery")
+
+    def test_address_prefix_only_for_the_restored_address(self):
+        _, config = self._restore({"ADDRESS_PREFIX": ADDR[:3]}, address="")
+        self.assertNotIn("ADDRESS_PREFIX", config)
+        _, config = self._restore({"ADDRESS_PREFIX": ADDR[:3]}, address=OLD_ADDR)
+        if not OLD_ADDR.startswith(ADDR[:3]):
+            self.assertNotIn("ADDRESS_PREFIX", config)
+        _, config = self._restore({"ADDRESS_PREFIX": ADDR[:6]})
+        self.assertNotIn("ADDRESS_PREFIX", config)   # longer than 5
+
+    def test_bad_overrides_json_is_skipped(self):
+        with open(os.path.join(self.staging, "config-overrides.json"), "w") as f:
+            f.write("[not an object")
+        applied, _ = self._restore({"VM_CPU": "4"})
+        self.assertEqual(applied, ["VM_CPU"])
+
+    def test_cli_helper(self):
+        with open(os.path.join(self.staging, "config"), "w") as f:
+            f.write(_config_text(dict(HOSTILE_CONFIG, ADDRESS_PREFIX=ADDR[:3],
+                                      VM_MEMORY="3")))
+        err = io.StringIO()
+        with mock.patch.object(cli.OnionPressCLI, "__init__",
+                               side_effect=AssertionError("OnionPressCLI built")), \
+             contextlib.redirect_stderr(err):
+            rc = cli.main(["restore-config", "--staging", self.staging,
+                           "--config", self.config, "--address", ADDR + "\n"])
+        self.assertEqual(rc, 0)
+        from onionpress.config import read_config
+        config = read_config(self.config)
+        self.assertEqual(config["VM_MEMORY"], "3")
+        # A malformed --address counts as none: no ADDRESS_PREFIX.
+        self.assertNotIn("ADDRESS_PREFIX", config)
+        self.assertNotIn("evil", err.getvalue())
+
 
 class TestBackupAddressCli(unittest.TestCase):
     """`onionpress.cli backup-address`, the launchers' gate."""
@@ -563,8 +689,16 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                     self._assert_untouched(data)
 
     def test_a_valid_backup_restores_under_the_key_derived_address(self):
-        # A stale (but well-formed) metadata address, as older clients wrote.
-        path = _make_backup(self.tmp, _metadata(onion_address=OLD_ADDR))
+        # A stale (but well-formed) metadata address, as older clients wrote,
+        # and a config file (Linux backups carry the whole file) with
+        # preferences next to keys a restore must not take.
+        prefs = {"ADDRESS_PREFIX": ADDR[:3], "PREVENT_SLEEP": "never",
+                 "INSTALL_IA_PLUGIN": "no"}
+        path = _make_backup(self.tmp, _metadata(onion_address=OLD_ADDR),
+                            config=_config_text(dict(HOSTILE_CONFIG, **prefs)))
+        from onionpress.config import read_config
+        want_config = dict(prefs, ONIONNAME="me")
+
         for launcher in LAUNCHERS:
             with self.subTest(launcher):
                 data = self._fresh_data_dir()
@@ -574,6 +708,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                 self.assertEqual(os.listdir(vanity), [ADDR])
                 with open(os.path.join(vanity, ADDR, "hostname")) as f:
                     self.assertEqual(f.read(), ADDR + "\n")
+                self.assertEqual(read_config(os.path.join(data, "config")), want_config)
                 if launcher == "linux/onionpress":
                     # The Settings page takes the address from the last line.
                     self.assertEqual(out.rstrip("\n").rsplit("\n", 1)[-1], ADDR)
@@ -583,6 +718,17 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                 self._run(launcher, f'{func} --from-backup "$PW" {path!r}')
                 self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")),
                                  [ADDR])
+                self.assertEqual(read_config(os.path.join(data, "config")), want_config)
+
+    def test_launchers_never_copy_a_backups_config(self):
+        for launcher in LAUNCHERS:
+            code = _read(launcher)
+            with self.subTest(launcher):
+                self.assertNotIn('cp "$staging/config"', code)
+                for func in ("restore_backup", self.SETUP[launcher]):
+                    self.assertIn('restore-config --staging "$staging" '
+                                  '--config "$DATA_DIR/config"',
+                                  _bash_function(code, func), func)
 
     def test_launchers_never_read_the_address_from_metadata(self):
         for launcher in LAUNCHERS:

@@ -496,6 +496,25 @@ class OnionPressCLI:
             print(address)
         return 0
 
+    @staticmethod
+    def cmd_restore_config(staging: str, config_path: str, address: str = "") -> int:
+        """Merge an extracted backup's user preferences into *config_path*
+        (backup.restore_backup_config: an allowlist; every other key keeps
+        its value). *address* is the restored, key-derived address, which
+        ADDRESS_PREFIX must match. Used by the bash launchers instead of
+        copying the backup's config over the install's."""
+        from .backup import restore_backup_config
+        from .key_manager import is_valid_onion_address
+        log = _make_log_func()
+        try:
+            restore_backup_config(
+                staging, config_path, log,
+                address if is_valid_onion_address(address) else "")
+        except Exception as e:
+            log(f"Restore: could not restore settings: {str(e)[:300]}")
+            return 1
+        return 0
+
     def cmd_smoke_test_wayback(self) -> int:
         """End-to-end smoke test of the Wayback archiving pipeline.
 
@@ -924,14 +943,30 @@ def main(argv: list[str] = None) -> int:
         "--staging", required=True,
         help="Directory the backup was extracted into")
 
+    p_rconf = sub.add_parser(
+        "restore-config",
+        help="Merge an extracted backup's user preferences into a config "
+             "file (restore helper; an allowlist, never a copy)")
+    p_rconf.add_argument(
+        "--staging", required=True,
+        help="Directory the backup was extracted into")
+    p_rconf.add_argument("--config", required=True, help="Config file to update")
+    p_rconf.add_argument(
+        "--address", default="",
+        help="The restored onion address (ADDRESS_PREFIX must match it)")
+
     args = parser.parse_args(argv)
 
     if not args.command:
         args.command = "start"
 
+    # Restore helpers, run by the launchers mid-restore: no OnionPressCLI
+    # setup (config/secrets creation, port probing).
     if args.command == "backup-address":
-        # Read-only, run by the launchers mid-restore: no OnionPressCLI setup.
         return OnionPressCLI.cmd_backup_address(args.staging)
+    if args.command == "restore-config":
+        return OnionPressCLI.cmd_restore_config(
+            args.staging, args.config, args.address)
 
     if args.command == "safe-config":
         # Read-only, and run by the Linux launcher every 30 s: skip
