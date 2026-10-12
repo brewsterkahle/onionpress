@@ -212,6 +212,13 @@
 - `tests/test_settings_owner_only.py` enforces it, including a census: only
   the owner-gated settings and status plugins name host action files in
   `/var/lib/onionpress/`.
+- The backup download (`wp_ajax_onionpress_download_backup`) sends and then
+  deletes only `OnionPress-<≤8 chars>-<YYYY-MM-DD-HH-MM>.zip`, a regular
+  file directly in `/var/lib/onionpress/` (basename, strict pattern, no
+  symlink, realpath check): that folder also holds `backup-password` and the
+  config. Changing the create-backup filename in `src/menubar.py` or
+  `linux/onionpress` means changing that pattern; `tests/test_backup_download.py`
+  ties them together.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published, so nothing private may sit there under a name

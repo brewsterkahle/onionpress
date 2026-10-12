@@ -875,13 +875,23 @@ add_action( 'wp_ajax_onionpress_download_backup', function () {
     }
     check_ajax_referer( 'onionpress_download_backup' );
 
-    $filename = sanitize_file_name( $_GET['file'] ?? '' );
-    if ( empty( $filename ) ) {
-        wp_die( 'No file specified' );
+    // Only a backup the create-backup action wrote there, named
+    // OnionPress-<first 8 address characters>-<YYYY-MM-DD-HH-MM>.zip by
+    // src/menubar.py and linux/onionpress. The same folder holds
+    // backup-password, status.json, config-current.json and the action
+    // results, and this handler deletes what it sends.
+    $requested = ( isset( $_GET['file'] ) && is_string( $_GET['file'] ) ) ? wp_unslash( $_GET['file'] ) : '';
+    $filename  = basename( $requested );
+    if ( $filename !== $requested
+         || ! preg_match( '/^OnionPress-[A-Za-z0-9]{0,8}-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}\.zip$/D', $filename ) ) {
+        wp_die( 'Not a backup file.', '', array( 'response' => 400 ) );
     }
 
-    $filepath = '/var/lib/onionpress/' . $filename;
-    if ( ! file_exists( $filepath ) ) {
+    // A regular file directly in the folder, not a symlink to something else.
+    $dir      = realpath( '/var/lib/onionpress' );
+    $filepath = $dir . '/' . $filename;
+    if ( false === $dir || is_link( $filepath ) || ! is_file( $filepath )
+         || realpath( $filepath ) !== $filepath ) {
         wp_die( 'Backup file not found. It may have been cleaned up.' );
     }
 
