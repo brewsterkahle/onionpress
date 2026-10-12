@@ -835,6 +835,9 @@ function onionpress_twitter_sideload_media( $post_id, $tweet_id, $media_dir ) {
 
     foreach ( scandir( $media_dir ) as $f ) {
         if ( strpos( $f, $prefix ) !== 0 ) continue;
+        // The name comes from the uploaded archive and is kept in uploads
+        // as is: media types WordPress accepts only, never .php and the like.
+        if ( ! wp_check_filetype( $f )['ext'] ) continue;
         $src = $media_dir . '/' . $f;
         if ( ! is_file( $src ) ) continue;
 

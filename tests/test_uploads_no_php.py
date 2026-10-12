@@ -15,6 +15,9 @@ Two layers, the same as My Creations (tests/test_creations_no_php.py):
 
 Unlike Creations, .htaccess files stay allowed under uploads: plugins keep
 private folders there behind a "deny" .htaccess.
+
+And at the source: the social-archive importers, which move files into
+uploads themselves, keep only types wp_check_filetype() accepts.
 """
 
 import os
@@ -125,6 +128,65 @@ class TestImageConf(unittest.TestCase):
         self.assertIn("onionpress-uploads", enconf.group(1).split())
         self.assertLess(dockerfile.index("COPY onionpress-uploads.conf"),
                         dockerfile.index("RUN apache2ctl configtest"))
+
+
+PLUGINS_DIR = os.path.join(ROOT, "app", "Resources", "plugins")
+
+
+def _php_function(src, name):
+    """Body of PHP function *name* (from its `{` to the matching `}`)."""
+    m = re.search(r"function " + re.escape(name) + r"\s*\([^)]*\)\s*\{", src)
+    assert m, f"function {name} not found"
+    depth, i = 0, m.end() - 1
+    while True:
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[m.end():i]
+        i += 1
+
+
+class TestImportersWriteOnlyMedia(unittest.TestCase):
+    """The importers put files into uploads with rename()/copy(), not
+    wp_handle_sideload(), so WordPress's type check never ran: a blog or
+    Mastodon server whose media URL ended in .php, or an archive holding
+    `<tweet id>-x.php`, put a .php in uploads under a name the post then
+    published. Each now keeps only a type wp_check_filetype() accepts."""
+
+    def _plugin(self, name):
+        return _read(os.path.join(PLUGINS_DIR, name))
+
+    def test_remote_media_extension_must_be_a_wordpress_media_type(self):
+        for plugin, func in (
+                ("onionpress-social-archive-blog.php", "onionpress_blog_sideload_url"),
+                ("onionpress-social-archive-mastodon.php", "onionpress_mastodon_sideload_media")):
+            with self.subTest(func=func):
+                body = _php_function(self._plugin(plugin), func)
+                check = "! wp_check_filetype( 'x.' . $ext )['ext']"
+                self.assertIn(check, body)
+                self.assertLess(body.index(check), body.index("$basename"))
+                self.assertLess(body.index(check), body.index("rename("))
+
+    def test_archive_media_name_must_be_a_wordpress_media_type(self):
+        body = _php_function(self._plugin("onionpress-social-archive-twitter.php"),
+                             "onionpress_twitter_sideload_media")
+        check = "if ( ! wp_check_filetype( $f )['ext'] ) continue;"
+        self.assertIn(check, body)
+        self.assertLess(body.index(check), body.index("copy( $src, $dest_path )"))
+
+    def test_no_other_plugin_writes_into_uploads_directly(self):
+        # A new writer must be reviewed (and added above), or go through
+        # media_handle_sideload() / wp_handle_upload(), which check types.
+        writers = set()
+        for dirpath, _, filenames in os.walk(PLUGINS_DIR):
+            for name in filenames:
+                if name.endswith(".php") and "wp_upload_dir(" in _read(os.path.join(dirpath, name)):
+                    writers.add(name)
+        self.assertEqual(writers, {"onionpress-social-archive-blog.php",
+                                   "onionpress-social-archive-mastodon.php",
+                                   "onionpress-social-archive-twitter.php"})
 
 
 if __name__ == "__main__":

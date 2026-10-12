@@ -1397,7 +1397,10 @@ function onionpress_mastodon_sideload_media( $post_id, $status_id, $media ) {
         if ( $url === '' ) continue;
 
         $ext = strtolower( pathinfo( parse_url( $url, PHP_URL_PATH ) ?? '', PATHINFO_EXTENSION ) );
-        if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) ) {
+        // The server picks the URL, and the file goes straight into uploads
+        // without wp_handle_sideload()'s checks: keep only an extension
+        // WordPress accepts for media, never .php and the like.
+        if ( ! preg_match( '/^[a-z0-9]{1,5}$/D', $ext ) || ! wp_check_filetype( 'x.' . $ext )['ext'] ) {
             // Guess an extension from MIME type.
             $ext = ( $type === 'video' || $type === 'gifv' ) ? 'mp4'
                  : ( $type === 'audio' ? 'mp3' : 'jpg' );
