@@ -568,8 +568,10 @@ op_py() { _helper "$@"; }
             "ONIONPRESS_VERSION": "2.5.2",
             "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
         }
+        # create_backup checks the address the tor container reports.
+        is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
         r = subprocess.run(
-            ["bash", "-c", prelude + self._create_backup_function()
+            ["bash", "-c", prelude + is_onion + self._create_backup_function()
              + f'\ncreate_backup "$PW" {out!r}\necho "rc=$?"'],
             capture_output=True, text=True, timeout=120, env=env)
         with open(env["LOG_FILE"]) as f:

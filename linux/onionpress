@@ -1935,6 +1935,19 @@ create_backup() {
     fi
     log "Backup: password verified"
 
+    # The onion address, for metadata.json. The tor container writes this
+    # file, and a restore refuses a backup whose metadata holds anything
+    # but a whole address — so refuse now, before any work and while the
+    # site is still here. No address at all (tor not running) stays empty
+    # as before: the restore takes the address from the key.
+    local onion_addr
+    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
+    if [ -n "$onion_addr" ] && ! is_onion_address "$onion_addr"; then
+        log "ERROR: Backup: the tor container's onion address is not a valid v3 address — no backup made"
+        echo "ERROR: The onion address the tor container reports is not a valid v3 .onion address; no backup was made." >&2
+        return 1
+    fi
+
     staging=$(mktemp -d -t onionpress-backup-XXXXXX)
     trap "rm -rf '$staging'" RETURN
 
@@ -2064,9 +2077,7 @@ create_backup() {
         fi
     fi
 
-    # 6. Get onion address and write metadata
-    local onion_addr
-    onion_addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' || echo "")
+    # 6. Write metadata (onion_addr was read and checked at the top)
     local has_onionheaven="false"
     [ -d "$staging/onionheaven" ] && has_onionheaven="true"
 
@@ -3322,7 +3333,14 @@ sys.exit(0 if provision_interactive() else 1)
                         log "Backup failed: no password"
                     else
                         local bp_onion
-                        bp_onion=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ' | sed 's/\.onion//' | cut -c1-8 || echo "site")
+                        bp_onion=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+                        # Its first 8 characters name the file, only from a
+                        # whole address (create_backup refuses any other).
+                        if is_onion_address "$bp_onion"; then
+                            bp_onion="${bp_onion:0:8}"
+                        else
+                            bp_onion="site"
+                        fi
                         local bp_filename="OnionPress-${bp_onion}-$(date +%Y-%m-%d-%H-%M).zip"
                         # A folder of our own, not a guessable name in /tmp.
                         local bp_dir bp_path

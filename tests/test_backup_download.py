@@ -132,9 +132,10 @@ class TestPatternMatchesWhatTheHostsWrite(unittest.TestCase):
     def test_linux(self):
         src = _read(LINUX)
         self.assertIn('local bp_filename="OnionPress-${bp_onion}-$(date +%Y-%m-%d-%H-%M).zip"', src)
-        self.assertIn("sed 's/\\.onion//' | cut -c1-8", src)
+        self.assertIn('bp_onion="${bp_onion:0:8}"', src)
+        self.assertIn('bp_onion="site"', src)
         stamp = time.strftime("%Y-%m-%d-%H-%M")
-        for short in ("op2homei", ""):
+        for short in ("op2homei", "site"):
             with self.subTest(short=short):
                 self.assertIsNotNone(_pattern().match(f"OnionPress-{short}-{stamp}.zip"))
 
