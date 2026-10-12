@@ -4,7 +4,9 @@ Handles starting/stopping the core service stack (Tor, WordPress, MariaDB)
 and OnionHeaven farm workers.
 """
 
+import json
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -84,6 +86,27 @@ def onionheaven_image(config_file: str | None = None) -> str:
             or image_override("ONIONPRESS_TOR_IMAGE", config_file)
             or ONIONHEAVEN_IMAGE_PIN)
 
+
+# The OnionHeaven hub data volume (onionheaven_common.HUB_DATA_VOLUME and
+# ONIONHEAVEN_DATA_DIR in the tor image), and the containers that use it.
+HUB_DATA_VOLUME = "onionpress-onionheaven-data"
+HUB_DATA_DIR = "/var/lib/onionheaven"
+_HUB_CONTAINER_RE = re.compile(
+    r"onionpress-tor|onionheaven|onionheaven-(poll|takeover)-[0-9]+")
+
+
+def mounts_hub_data(mounts_json: str) -> bool:
+    """False only if `docker inspect`'s Mounts certainly lack the hub data
+    volume at HUB_DATA_DIR; anything unreadable is True (doubt keeps a
+    container)."""
+    try:
+        mounts = json.loads(mounts_json)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(mounts, list):
+        return True
+    return any(isinstance(m, dict) and m.get("Name") == HUB_DATA_VOLUME
+               and m.get("Destination") == HUB_DATA_DIR for m in mounts)
 
 
 
@@ -199,6 +222,13 @@ class ContainerManager:
         """
         self._log("Starting core services...")
         compose_files = self._compose_files()
+
+        # Nothing from before the OnionHeaven data volume may run beside the
+        # containers about to start (the data move must not race them).
+        try:
+            self.retire_old_onionheaven_containers()
+        except Exception as e:
+            self._log(f"Could not check for containers of an older OnionPress: {e}")
 
         env = self._build_env()
         for attempt in range(1, retries + 1):
@@ -429,9 +459,10 @@ class ContainerManager:
         if not workers:
             return
 
-        # Stop and remove in parallel
+        # Stop and remove in parallel, a second's grace each: their onion
+        # services are ephemeral (ADD_ONION).
         def _stop_worker(name: str):
-            self.docker.run(["stop", name], timeout=30)
+            self.docker.run(["stop", "-t", "1", name], timeout=30)
             self.docker.run(["rm", name], timeout=15)
 
         with ThreadPoolExecutor(max_workers=min(len(workers), 10)) as pool:
@@ -443,6 +474,38 @@ class ContainerManager:
                     self._log(f"Stopped {name}")
                 except Exception as e:
                     self._log(f"Warning stopping {name}: {e}")
+
+    def retire_old_onionheaven_containers(self) -> list[str]:
+        """Remove every OnionHeaven worker and Tor-side container that does
+        not mount the hub data volume, all at once; returns their names.
+
+        An OnionPress from before the volume started them, and they still
+        read and write the hub's registry and keys on
+        onionpress-persistent-data. The data move must not race them, and
+        nothing may use that copy after it. Compose recreates onionpress-tor
+        and onionheaven, the heartbeat starts new workers. The launchers'
+        retire_old_onionheaven_containers does the same.
+        """
+        result = self.docker.run(["ps", "-a", "--format", "{{.Names}}"],
+                                 timeout=15, quiet=True)
+        if not result.ok:
+            return []
+        stale = []
+        for name in result.output.split():
+            if not _HUB_CONTAINER_RE.fullmatch(name):
+                continue
+            inspected = self.docker.run(["inspect", "--format", "{{json .Mounts}}", name],
+                                        timeout=15, quiet=True)
+            if inspected.ok and not mounts_hub_data(inspected.output):
+                stale.append(name)
+        if not stale:
+            return []
+        for name in stale:
+            self._log(f"Removing {name}: it does not mount {HUB_DATA_VOLUME} "
+                      f"(started by an older OnionPress)")
+        with ThreadPoolExecutor(max_workers=min(len(stale), 10)) as pool:
+            list(pool.map(lambda n: self.docker.run(["rm", "-f", n], timeout=30), stale))
+        return stale
 
     def list_farm_workers(self) -> list[str]:
         """List running farm worker container names."""

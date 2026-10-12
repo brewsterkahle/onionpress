@@ -629,13 +629,53 @@ def _mounts_hub_data(mounts_json):
                for m in mounts)
 
 
+_FARM_WORKER_RE = re.compile(r"onionheaven-(takeover|poll)-[0-9]+")
+
+
+def _retire_unlisted_old_workers(listed):
+    """Remove every takeover or poll worker container the registry does not
+    list that does not mount the hub data volume.
+
+    The registry's takeover_containers is the one the data move brought
+    over: a worker an older heartbeat started after that snapshot, or one
+    it never recorded, is in no row, and would keep serving (and writing)
+    the old location. Doubt keeps a container.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", "name=onionheaven-takeover-",
+             "--filter", "name=onionheaven-poll-", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=15
+        )
+    except Exception:
+        return
+    if result.returncode != 0:
+        return
+    for name in result.stdout.split():
+        if name in listed or not _FARM_WORKER_RE.fullmatch(name):
+            continue
+        try:
+            inspected = subprocess.run(
+                ["docker", "inspect", "--format", "{{json .Mounts}}", name],
+                capture_output=True, text=True, timeout=10
+            )
+            if inspected.returncode != 0 or _mounts_hub_data(inspected.stdout.strip()):
+                continue
+            log(f"Retiring takeover worker {name}: it does not mount "
+                f"{HUB_DATA_VOLUME} at {ONIONHEAVEN_DATA_DIR} (started by an "
+                f"older version; not in the registry)")
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+        except Exception:
+            pass
+
+
 def cleanup_dead_workers(conn):
     """Remove DB entries for workers whose containers no longer exist.
 
     Also retires workers started before the hub data had its own volume
     (they read keys and registry from onionpress-persistent-data, which no
-    longer holds them); the heartbeat reassigns their addresses to workers
-    it spawns with the volume.
+    longer holds them), listed in the registry or not; the heartbeat
+    reassigns their addresses to workers it spawns with the volume.
 
     Called each heartbeat cycle.
     """
@@ -645,6 +685,8 @@ def cleanup_dead_workers(conn):
         ).fetchall()
     except sqlite3.OperationalError:
         return
+
+    _retire_unlisted_old_workers({row["container_name"] for row in rows})
 
     for row in rows:
         name = row["container_name"]

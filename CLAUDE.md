@@ -350,6 +350,12 @@
   the move logs a loud downgrade warning). Kept copies drop keys the volume
   holds identically, lose an address's key on unregister
   (`purge_kept_keys`), and are removed after 30 days.
+- Older containers must not race the move: every start removes each
+  takeover/poll worker, `onionpress-tor` and `onionheaven` that does not
+  mount the volume before `compose up` (`retire_old_onionheaven_containers`,
+  identical in both launchers; `ContainerManager.start_core`), the farm
+  stops in parallel (`stop -t 1`), and the heartbeat retires old workers the
+  registry does not list too.
 - Fails closed only if the first move fails with a real key (non-empty key
   file in `keys/<v3>.onion/`) at stake; a start without keys at stake marks
   the volume (else the next start would shelve live data). Never after the

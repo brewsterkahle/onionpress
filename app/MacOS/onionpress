@@ -534,12 +534,50 @@ stop_onionheaven_farm() {
         ONIONHEAVEN_FARM_MONITOR_PID=""
     fi
 
-    # Stop all farm containers (catches any scaled-up containers too)
+    # Stop all farm containers (catches any scaled-up containers too), all at
+    # once, with a second's grace each: their onion services are ephemeral
+    # (ADD_ONION), and one after another at Docker's default 10 s a farm of
+    # any size outlasted a quit, leaving workers to run on into the next
+    # start.
+    local container pids=""
     for container in $(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^onionheaven-(poll|takeover)-[0-9]+$'); do
-        docker stop "$container" >> "$LOG_FILE" 2>&1 || true
-        docker rm "$container" >> "$LOG_FILE" 2>&1 || true
-        log "OnionHeaven farm: stopped $container"
+        {
+            docker stop -t 1 "$container" >> "$LOG_FILE" 2>&1 || true
+            docker rm "$container" >> "$LOG_FILE" 2>&1 || true
+            log "OnionHeaven farm: stopped $container"
+        } &
+        pids="$pids $!"
     done
+    if [ -n "$pids" ]; then
+        wait $pids || true
+    fi
+}
+
+# Containers an OnionPress from before the OnionHeaven data had a volume of
+# its own started still read and write the hub's registry and keys where
+# they used to be, onionheaven/ on onionpress-persistent-data. The move
+# (onionheaven-data-migrate.py, in the onionheaven and onionpress-tor
+# entrypoints) must not race them, and nothing may go on using that copy
+# after it. So before compose starts anything, every OnionHeaven worker and
+# Tor-side container that does not mount onionpress-onionheaven-data is
+# removed, all at once: compose recreates onionpress-tor and onionheaven,
+# and the heartbeat starts new workers. Identical in both launchers
+# (tests/test_onionheaven_data_move_hardening.py).
+retire_old_onionheaven_containers() {
+    local name mounts pids=""
+    for name in $(docker ps -a --format '{{.Names}}' 2>/dev/null \
+            | grep -E '^(onionpress-tor|onionheaven|onionheaven-(poll|takeover)-[0-9]+)$'); do
+        mounts=$(docker inspect --format '{{range .Mounts}}{{.Name}}:{{.Destination}} {{end}}' "$name" 2>/dev/null) || continue
+        case " $mounts" in
+            *" onionpress-onionheaven-data:/var/lib/onionheaven "*) continue ;;
+        esac
+        log "Removing $name: it does not mount onionpress-onionheaven-data (started by an older OnionPress)"
+        docker rm -f "$name" >> "$LOG_FILE" 2>&1 &
+        pids="$pids $!"
+    done
+    if [ -n "$pids" ]; then
+        wait $pids || true
+    fi
 }
 
 # Function to check if a command exists
@@ -1927,6 +1965,10 @@ start_containers() {
         log "Pulling pre-built images..."
         docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (using cached)"
     fi
+
+    # Nothing from before the OnionHeaven data volume may run beside the
+    # containers about to start (the data move must not race them).
+    retire_old_onionheaven_containers
 
     # Always start WordPress and DB first
     local max_attempts=3

@@ -123,9 +123,16 @@ wait for the first. Nothing moves unless both `/var/lib/onionheaven` and
   starts: WordPress can write to the old location, and must not be able to
   keep the hub from starting.
 
-Takeover workers started before the move mount the old volume; the
-heartbeat removes them (`cleanup_dead_workers`) and reassigns their
-addresses to workers it starts with the new one.
+Containers an older version started (takeover workers, and an
+`onionpress-tor` or `onionheaven` from the older image) mount the old volume
+and would go on using the old location. Before compose starts anything,
+every start (`retire_old_onionheaven_containers` in both launchers,
+`ContainerManager.start_core`) removes each of them that does not mount
+`onionpress-onionheaven-data`; compose recreates the two services, and the
+farm, when stopped, goes all at once with a second's grace. The heartbeat
+removes any it finds later (`cleanup_dead_workers`, whether the registry
+lists them or not) and reassigns their addresses to workers it starts with
+the new volume.
 
 **Release rule:** compose plus tor-image code again. Publish the tor image,
 refresh the pins, then release the app and the `.deb`. A new compose file with

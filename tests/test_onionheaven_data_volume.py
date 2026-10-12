@@ -373,8 +373,16 @@ class TestRetireOldWorkers(unittest.TestCase):
         self.log = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _run(self, inspect_stdout, inspect_rc=0, rm_rc=0):
+    def _run(self, inspect_stdout, inspect_rc=0, rm_rc=0, others=None):
+        """Calls made for the registry's workers. others: {name: mounts
+        JSON} of worker containers Docker lists that the registry does not."""
+        others = others or {}
+
         def fake(argv, **kwargs):
+            if argv[:3] == ["docker", "ps", "-a"]:
+                return _done("\n".join(["onionheaven-takeover-0"] + list(others)) + "\n")
+            if argv[:4] == ["docker", "inspect", "--format", "{{json .Mounts}}"]:
+                return _done(others[argv[4]])
             if argv[:2] == ["docker", "inspect"]:
                 return _done(inspect_stdout, inspect_rc)
             if argv[:3] == ["docker", "rm", "-f"]:
@@ -382,7 +390,9 @@ class TestRetireOldWorkers(unittest.TestCase):
             raise AssertionError(f"unexpected {argv}")
         with mock.patch.object(oc.subprocess, "run", side_effect=fake) as run:
             oc.cleanup_dead_workers(self.conn)
-        return [c.args[0] for c in run.call_args_list]
+        self.all_calls = [c.args[0] for c in run.call_args_list]
+        return [argv for argv in self.all_calls
+                if argv[:3] != ["docker", "ps", "-a"] and argv[-1] not in others]
 
     def _worker_rows(self):
         return self.conn.execute("SELECT COUNT(*) FROM takeover_containers").fetchone()[0]
@@ -425,6 +435,22 @@ class TestRetireOldWorkers(unittest.TestCase):
         calls = self._run("", inspect_rc=1)
         self.assertEqual(len(calls), 1)
         self.assertEqual(self._worker_rows(), 0)
+
+    def test_old_workers_the_registry_does_not_list_are_retired_too(self):
+        """takeover_containers is the snapshot the data move brought over;
+        a worker an older heartbeat started later is in no row."""
+        old = _mounts(("onionpress-persistent-data", "/var/lib/onionpress"))
+        self._run("true " + _mounts((VOLUME, HUB_DIR)), others={
+            "onionheaven-takeover-7": old,
+            "onionheaven-poll-2": old,
+            "onionheaven-takeover-9": _mounts((VOLUME, HUB_DIR)),
+            "onionheaven-takeover-8": "not-json",
+            "onionheaven-takeover-x": old,              # not a worker's name
+        })
+        removed = sorted(argv[3] for argv in self.all_calls if argv[:3] == ["docker", "rm", "-f"])
+        self.assertEqual(removed, ["onionheaven-poll-2", "onionheaven-takeover-7"])
+        self.assertEqual(self._worker_rows(), 1)
+        self.assertEqual(self._assigned(), "onionheaven-takeover-0")
 
 
 # ---------------------------------------------------------------------------

@@ -31,8 +31,9 @@ import json
 import os
 import shutil
 import sqlite3
-import stat
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -692,6 +693,158 @@ class TestDurability(Case):
             self.migrate()
         self.assertEqual(self.marker()["key_dirs"], 40)
         self.assertLessEqual(len(calls), 4)
+
+
+# ---------------------------------------------------------------------------
+# Older containers are gone before anything starts (review items 1, 12)
+# ---------------------------------------------------------------------------
+
+LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+OLD_MOUNTS = "onionpress-persistent-data:/var/lib/onionpress "
+NEW_MOUNTS = ("onionpress-persistent-data:/var/lib/onionpress "
+              "onionpress-onionheaven-data:/var/lib/onionheaven ")
+
+
+def _bash_function(text, name):
+    start = text.index(f"\n{name}() {{")
+    end = text.index("\n}\n", start)
+    return text[start:end + 3]
+
+
+DOCKER_STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_DIR/calls"
+case "$1" in
+    ps) cat "$STUB_DIR/names" ;;
+    inspect) cat "$STUB_DIR/mounts/$4" 2>/dev/null || exit 1 ;;
+    stop) sleep "${STUB_STOP_SECONDS:-0}" ;;
+esac
+exit 0
+"""
+
+
+class TestLaunchers(unittest.TestCase):
+
+    def _run(self, launcher, function, containers, stop_seconds=0):
+        """Run one launcher function with a docker that lists containers
+        ({name: mounts, or None when inspect fails}); returns (calls,
+        seconds taken)."""
+        text = hd._read(launcher)
+        tmp = tempfile.mkdtemp(prefix="op-retire-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "bin"))
+        os.makedirs(os.path.join(tmp, "mounts"))
+        stub = os.path.join(tmp, "bin", "docker")
+        with open(stub, "w") as f:
+            f.write(DOCKER_STUB)
+        os.chmod(stub, 0o755)
+        with open(os.path.join(tmp, "names"), "w") as f:
+            f.write("".join(name + "\n" for name in containers))
+        for name, mounts in containers.items():
+            if mounts is not None:
+                with open(os.path.join(tmp, "mounts", name), "w") as f:
+                    f.write(mounts)
+        open(os.path.join(tmp, "calls"), "w").close()
+        script = ("set -e\n"
+                  f'LOG_FILE="{tmp}/log"\n'
+                  'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
+                  + _bash_function(text, function) + function + "\n")
+        started = time.monotonic()
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                             timeout=60,
+                             env={"PATH": os.path.join(tmp, "bin") + ":/usr/bin:/bin",
+                                  "STUB_DIR": tmp, "STUB_STOP_SECONDS": str(stop_seconds)})
+        took = time.monotonic() - started
+        self.assertEqual(out.returncode, 0, out.stderr)
+        with open(os.path.join(tmp, "calls")) as f:
+            return f.read().splitlines(), took
+
+    def test_the_launchers_carry_the_same_retirement(self):
+        bodies = [_bash_function(hd._read(p), "retire_old_onionheaven_containers")
+                  for p in LAUNCHERS]
+        self.assertEqual(bodies[0], bodies[1])
+
+    def test_containers_without_the_volume_are_removed_before_compose_starts(self):
+        containers = {
+            "onionpress-tor": OLD_MOUNTS,
+            "onionheaven": NEW_MOUNTS,
+            "onionheaven-takeover-3": OLD_MOUNTS,
+            "onionheaven-poll-1": "",
+            "onionheaven-takeover-4": NEW_MOUNTS,
+            "onionheaven-takeover-9": None,             # inspect fails: kept
+            "onionpress-wordpress": OLD_MOUNTS,         # not one of them
+        }
+        for launcher in LAUNCHERS:
+            with self.subTest(launcher=launcher):
+                calls, _ = self._run(launcher, "retire_old_onionheaven_containers",
+                                     containers)
+                removed = sorted(c.split()[-1] for c in calls if c.startswith("rm -f "))
+                self.assertEqual(removed, ["onionheaven-poll-1", "onionheaven-takeover-3",
+                                           "onionpress-tor"])
+                self.assertFalse([c for c in calls if "onionpress-wordpress" in c])
+
+    def test_every_start_retires_them_before_compose_up(self):
+        for launcher in LAUNCHERS:
+            with self.subTest(launcher=launcher):
+                body = _bash_function(hd._read(launcher), "start_containers")
+                self.assertLess(body.index("\n    retire_old_onionheaven_containers\n"),
+                                body.index("docker compose up"))
+
+    def test_the_farm_stops_all_at_once(self):
+        workers = {f"onionheaven-takeover-{i}": NEW_MOUNTS for i in range(4)}
+        workers["onionheaven-poll-0"] = NEW_MOUNTS
+        for launcher in LAUNCHERS:
+            with self.subTest(launcher=launcher):
+                calls, took = self._run(launcher, "stop_onionheaven_farm", workers,
+                                        stop_seconds=1)
+                self.assertEqual(sorted(c for c in calls if c.startswith("stop ")),
+                                 sorted(f"stop -t 1 {name}" for name in workers))
+                self.assertEqual(len([c for c in calls if c.startswith("rm ")]), 5)
+                self.assertLess(took, 3.5, "one second's grace, all at once")
+
+    def test_the_python_start_retires_them_before_compose_up(self):
+        from onionpress.config import PortConfig
+        from onionpress.containers import ContainerManager
+        from onionpress.docker import Docker, DockerResult
+        from test_onionpress_containers import _make_paths
+
+        tmp = tempfile.mkdtemp(prefix="op-retire-py-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        mounts = {
+            "onionpress-tor": hd._mounts(("onionpress-persistent-data", "/var/lib/onionpress")),
+            "onionheaven": hd._mounts((hd.VOLUME, hd.HUB_DIR)),
+            "onionheaven-takeover-3": hd._mounts(("onionpress-persistent-data",
+                                                  "/var/lib/onionpress")),
+            "onionheaven-poll-1": "not-json",
+            "onionpress-wordpress": "[]",
+        }
+        events = []
+
+        def run(args, **kwargs):
+            events.append(("run", list(args)))
+            if args[:2] == ["ps", "-a"]:
+                return DockerResult(0, "\n".join(mounts) + "\n", "")
+            if args[0] == "inspect":
+                return DockerResult(0, mounts[args[-1]], "")
+            return DockerResult(0, "", "")
+
+        def compose(args, **kwargs):
+            events.append(("compose", list(args)))
+            return DockerResult(0, "", "")
+
+        docker = mock.Mock(spec=Docker)
+        docker.run.side_effect = run
+        docker.compose.side_effect = compose
+        cm = ContainerManager(docker, _make_paths(tmp), PortConfig(offset=0, wp_port=8080,
+                                                                   socks_port=9050,
+                                                                   proxy_port=9077))
+        self.assertTrue(cm.start_core())
+        removed = sorted(e[1][2] for e in events if e[1][:2] == ["rm", "-f"])
+        self.assertEqual(removed, ["onionheaven-takeover-3", "onionpress-tor"])
+        last_rm = max(i for i, e in enumerate(events) if e[1][:2] == ["rm", "-f"])
+        first_up = min(i for i, e in enumerate(events) if e[0] == "compose")
+        self.assertLess(last_rm, first_up)
+        self.assertFalse([e for e in events if "onionpress-wordpress" in e[1]
+                          and e[1][0] == "inspect"])
 
 
 if __name__ == "__main__":
