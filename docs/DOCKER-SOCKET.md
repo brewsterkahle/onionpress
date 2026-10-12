@@ -73,8 +73,8 @@ such as the one in front of autoheal cannot inspect them.
    phase, `onions/detached`, worker liveness). `N` is an integer, the address
    must match the v3 pattern, and the worker's shape (image, network, volume,
    ulimit, restart policy, no extra privileges) is built in, not passed.
-   The image should be the stack's pinned one passed in from compose:
-   `TAKEOVER_IMAGE` defaults to the bare `:latest` tag today.
+   The image should be the stack's pinned one passed in from compose, as
+   `onionheaven` already receives it (`ONIONHEAVEN_IMAGE`).
    `onionheaven_common`'s `docker` calls become calls to this client, and
    `onionheaven` loses the socket. Compose and image again ship together.
 2. **Workers without `docker exec`.** Optional, and better: give each worker's

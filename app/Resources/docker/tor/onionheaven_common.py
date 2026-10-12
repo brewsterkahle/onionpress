@@ -309,10 +309,40 @@ def db_ensure_schema(conn):
 # Farm mode helpers
 # ---------------------------------------------------------------------------
 
-# Docker image for takeover workers (same as main tor image)
-TAKEOVER_IMAGE = os.environ.get("ONIONHEAVEN_IMAGE",
-                                "ghcr.io/brewsterkahle/onionpress-tor:latest")
 MAX_SERVICES_PER_WORKER = int(os.environ.get("ONIONHEAVEN_MAX_SERVICES", "50"))
+
+# Image ID of this container, once looked up (see takeover_image()).
+_own_image = None
+
+
+def takeover_image():
+    """The image takeover workers run: the one this container runs.
+
+    docker-compose.yml passes ONIONHEAVEN_IMAGE with the same reference as
+    the onionheaven service's own `image:` (the digest pin from
+    build/image-pins.env, or a local build). Without it, ask Docker which
+    image this container was started from. Never a bare tag: that names
+    whatever is tagged locally (possibly stale) or whatever the registry
+    serves today. A digest literal here would be one image behind, since it
+    ships inside the image it names. None when neither is available.
+    """
+    image = os.environ.get("ONIONHEAVEN_IMAGE", "").strip()
+    if image:
+        return image
+    global _own_image
+    if _own_image is None:
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{.Image}}",
+                 os.environ.get("HOSTNAME", "")],
+                capture_output=True, text=True, timeout=15,
+            )
+            ref = result.stdout.strip()
+            if result.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", ref):
+                _own_image = ref
+        except Exception:
+            pass
+    return _own_image
 
 # Next index for naming new takeover containers
 _next_worker_index = 0
@@ -413,6 +443,11 @@ def _ensure_capacity(conn):
 def _spawn_worker(conn):
     """Start a new takeover worker container via docker run."""
     global _next_worker_index
+    image = takeover_image()
+    if not image:
+        log("WARNING: not spawning a takeover worker: ONIONHEAVEN_IMAGE is "
+            "unset and this container's own image could not be determined")
+        return
     idx = _next_worker_index
     _next_worker_index += 1
     name = f"onionheaven-takeover-{idx}"
@@ -436,7 +471,7 @@ def _spawn_worker(conn):
              "-e", f"MAX_TAKEOVER_SERVICES={MAX_SERVICES_PER_WORKER}",
              "-v", "onionpress-persistent-data:/var/lib/onionpress",
              "--restart", "unless-stopped",
-             TAKEOVER_IMAGE],
+             image],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:

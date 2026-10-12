@@ -287,21 +287,40 @@ class TestDeliberatelyUnpinned(unittest.TestCase):
         self.assertIn("${ONIONPRESS_TOR_IMAGE:-", expr)
         self.assertIn(TOR_REPO, expr)
 
-    def test_in_container_takeover_default_stays_tag_only(self):
+    def test_in_container_takeover_image_is_the_running_one(self):
         """onionheaven_common.py runs INSIDE the tor container, where the
         right image is whichever one is already running. A digest baked in
-        here would outlive the image that contains it.
+        here would outlive the image that contains it, and the bare tag it
+        used to default to named whatever was tagged locally or whatever the
+        registry served that day. So the compose file hands the onionheaven
+        container its own image reference as ONIONHEAVEN_IMAGE, and the code
+        falls back to asking Docker for its own image, never to a tag.
         """
         text = _read("app/Resources/docker/tor/onionheaven_common.py")
-        self.assertIn(
-            f'"{TOR_REPO}"', text,
-            "onionheaven_common.TAKEOVER_IMAGE must default to the plain tag.",
-        )
         self.assertNotIn(
             "onionpress-tor:latest@sha256:", text,
             "onionheaven_common.py must not embed a digest — it runs inside "
             "the very image it would be pinning.",
         )
+        self.assertNotIn(
+            TOR_REPO, text,
+            "onionheaven_common.py must not fall back to a floating tag for "
+            "takeover workers.",
+        )
+        self.assertIn('"{{.Image}}"', text)
+
+        compose = _read("app/Resources/docker/docker-compose.yml")
+        service = compose[compose.index("\n  onionheaven:"):]
+        service = service[:service.index("\nvolumes:")]
+        image = re.search(r"^    image: (\S+)$", service, re.M)
+        env = re.search(r"^      - ONIONHEAVEN_IMAGE=(\S+)$", service, re.M)
+        self.assertIsNotNone(image)
+        self.assertIsNotNone(
+            env, "the onionheaven service must pass ONIONHEAVEN_IMAGE so "
+                 "takeover workers run its pinned image")
+        self.assertEqual(env.group(1), image.group(1),
+                         "takeover workers must run the onionheaven "
+                         "service's own image reference")
 
     def test_mariadb_and_autoheal_stay_floating(self):
         """Deliberate: we rely on upstream shipping security patches without

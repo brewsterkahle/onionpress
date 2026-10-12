@@ -7,6 +7,7 @@
 #
 # Consumers (all rewritten together — that is the whole point):
 #   app/Resources/docker/docker-compose.yml   tor, wordpress, onionheaven
+#                                             (+ its ONIONHEAVEN_IMAGE env)
 #   app/MacOS/onionpress                      update_images(), takeover worker
 #   linux/onionpress                          update_images()
 #   src/onionpress/containers.py              ONIONHEAVEN_IMAGE
@@ -170,8 +171,9 @@ fi
 #
 # Not in this list, on purpose:
 #   app/Resources/docker/tor/onionheaven_common.py — runs INSIDE the tor
-#     container and defaults to the plain tag, because the right image there
-#     is whichever one is already running.
+#     container, where the right image is whichever one is already running:
+#     it takes ONIONHEAVEN_IMAGE from the compose file above, else asks
+#     Docker for its own container's image ID. It embeds no reference.
 #   tests/stress/Dockerfile — FROMs the image CI just built, so any static
 #     digest is stale by construction.
 

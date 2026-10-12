@@ -149,7 +149,7 @@ environment set still works:
 
 | Consumer | What it pins |
 |---|---|
-| `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services |
+| `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services, and the `ONIONHEAVEN_IMAGE` the last one hands its takeover workers |
 | `app/MacOS/onionpress` | `update_images()`, the OnionHeaven takeover worker |
 | `linux/onionpress` | `update_images()` |
 | `src/onionpress/containers.py` | `ONIONHEAVEN_IMAGE` — farm workers |
@@ -209,18 +209,23 @@ proxy passes only the two calls autoheal's script makes; if a new autoheal
 calls anything else, the proxy refuses it and logs a WARN line
 (`docker logs onionpress-autoheal-proxy`). See `docs/DOCKER-SOCKET.md`.
 
-Three more references are deliberately left as bare tags, and
-`tests/test_image_pins.py` asserts they stay that way — a blanket
-"pin everything" sweep breaks each of them quietly at build time and
-painfully at runtime:
+Two more references are deliberately left as bare tags, and one carries no
+image reference at all; `tests/test_image_pins.py` asserts they stay that
+way — a blanket "pin everything" sweep breaks each of them quietly at build
+time and painfully at runtime:
 
 - **`linux/onionpress`'s `docker image inspect …onionpress-tor:latest`.** This
   is how the launcher decides whether vanity-address generation is available.
   Pinned to a digest, a locally built image fails the check and the install
   silently falls back to a random `.onion` — the v2.4.101 regression.
-- **`onionheaven_common.TAKEOVER_IMAGE`.** It runs *inside* the tor container,
-  where the correct image is whichever one is already running. A digest baked
-  in there would outlive the image containing it.
+- **`onionheaven_common.takeover_image()`.** It runs *inside* the tor
+  container, where the correct image is whichever one is already running. A
+  digest baked in there would be one image behind, since it ships inside the
+  image it names, and a bare tag names whatever is tagged locally or whatever
+  the registry serves that day. So `docker-compose.yml` passes the
+  `onionheaven` service's own image reference in as `ONIONHEAVEN_IMAGE`, and
+  without it the code asks Docker for its own container's image ID; with
+  neither it spawns no worker.
 - **`tests/stress/Dockerfile`.** It `FROM`s the image CI just built, so any
   static digest is stale by construction.
 
