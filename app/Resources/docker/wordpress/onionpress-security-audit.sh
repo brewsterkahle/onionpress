@@ -37,8 +37,17 @@
 
 set -uo pipefail   # NOT -e: an audit failure must never block startup
 
+# The report goes where the host can read it: /var/lib/onionpress, a folder
+# www-data owns. This script runs as root, so nothing here may write through
+# a name www-data could have put there: a link at security-report.txt made
+# root rewrite the file it pointed to (docker-entrypoint.sh, say) with lines
+# that carry file names and logins of the planter's choosing. The report is
+# built in a file of root's own and published at exit (publish_report).
 REPORT=/var/lib/onionpress/security-report.txt
-QUARANTINE=/var/lib/onionpress/quarantine
+# Quarantined files go somewhere www-data cannot reach at all: root's own
+# folder in the container. In /var/lib/onionpress www-data could take them
+# back, or swap the folder for a link to send root's mv anywhere.
+QUARANTINE=/var/lib/onionpress-quarantine
 WPROOT=/var/www/html
 WP="wp --allow-root --path=$WPROOT"
 HELPER=/usr/local/lib/onionpress-core-update.php
@@ -82,15 +91,42 @@ wait_for_socks() {
 }
 
 findings=0
+report_tmp=$(mktemp) || report_tmp=/dev/null
 record() {
     findings=$((findings + 1))
     warn "$1"
-    printf '%s\n' "$1" >> "$REPORT"
+    printf '%s\n' "$1" >> "$report_tmp"
 }
 
-mkdir -p "$(dirname "$REPORT")" "$QUARANTINE" 2>/dev/null || true
-: > "$REPORT" 2>/dev/null || true
-printf 'OnionPress security audit — %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$REPORT" 2>/dev/null || true
+# Replace the published report with ours. rm -f removes whatever is at the
+# name (a link included, never its target); dd's conv=excl then creates the
+# file with O_EXCL, which refuses any name that exists again by then, a
+# link included, so a link planted in between is not followed either.
+publish_report() {
+    [ "$report_tmp" = /dev/null ] && return 0
+    rm -f "$REPORT" 2>/dev/null
+    dd if="$report_tmp" of="$REPORT" conv=excl status=none 2>/dev/null \
+        || warn "could not write $REPORT (something else is at that name)"
+    rm -f "$report_tmp"
+}
+trap publish_report EXIT
+
+# Move a known-bad file into quarantine. $1 = its path as find printed it
+# (under $WPROOT), $2 = its sha1. cd -P and the pwd check pin the folder
+# find saw, so no link www-data swapped in among the path's folders since
+# sends root's mv somewhere else; the file itself, if now a link, moves as
+# a link.
+quarantine() {
+    local dir base
+    dir=$(dirname -- "$1")
+    base=$(basename -- "$1")
+    ( cd -P -- "$dir" 2>/dev/null && [ "$(pwd -P)" = "$dir" ] \
+        && mv -- "./$base" "$QUARANTINE/$base.$2" 2>/dev/null \
+        && chmod 000 -- "$QUARANTINE/$base.$2" 2>/dev/null )
+}
+
+mkdir -p -m 700 "$QUARANTINE" 2>/dev/null || true
+printf 'OnionPress security audit — %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$report_tmp" 2>/dev/null || true
 
 # Nothing to do if WordPress isn't installed yet; multisite-init exits the
 # same way on first boot and we'll be re-run on the next start.
@@ -195,7 +231,7 @@ if [ "$verify_status" = "ok" ]; then
         # counter would not survive it. The line above already counted this.
         while IFS='=' read -r kind path; do
             warn "  $kind: $path"
-            printf '  %s: %s\n' "$kind" "$path" >> "$REPORT" 2>/dev/null || true
+            printf '  %s: %s\n' "$kind" "$path" >> "$report_tmp" 2>/dev/null || true
         done < <(printf '%s\n' "$verify_out" | grep -E '^(mismatch|missing)=')
     else
         log "core file integrity verified against WordPress.org checksums"
@@ -216,8 +252,7 @@ while read -r sum path; do
     [ -z "${sum:-}" ] && continue
     if printf '%s\n' "$KNOWN_BAD" | grep -qi "^${sum}$"; then
         dest="$QUARANTINE/$(basename "$path").$sum"
-        if mv "$path" "$dest" 2>/dev/null; then
-            chmod 000 "$dest" 2>/dev/null || true
+        if quarantine "$path" "$sum"; then
             record "QUARANTINED known wp2shell webshell: $path (sha1 $sum) -> $dest"
         else
             record "KNOWN WEBSHELL PRESENT but could not quarantine: $path (sha1 $sum) — DELETE THIS FILE"
@@ -264,15 +299,15 @@ fi
 # ---------------------------------------------------------------- REPORT
 if [ "$findings" -eq 0 ]; then
     log "no indicators of compromise found"
-    printf 'No indicators of compromise found.\n' >> "$REPORT" 2>/dev/null || true
+    printf 'No indicators of compromise found.\n' >> "$report_tmp" 2>/dev/null || true
 else
     warn "=================================================="
     warn "$findings SECURITY FINDING(S) — review $REPORT"
     warn "Full guidance: https://github.com/brewsterkahle/onionpress/security"
     warn "=================================================="
-    printf '\n%s finding(s). If any webshell or rogue admin is listed, treat the\n' "$findings" >> "$REPORT" 2>/dev/null || true
-    printf 'site as compromised: rotate wp-config salts, change all passwords,\n'   >> "$REPORT" 2>/dev/null || true
-    printf 'and restore content from a backup predating the compromise.\n'          >> "$REPORT" 2>/dev/null || true
+    printf '\n%s finding(s). If any webshell or rogue admin is listed, treat the\n' "$findings" >> "$report_tmp" 2>/dev/null || true
+    printf 'site as compromised: rotate wp-config salts, change all passwords,\n'   >> "$report_tmp" 2>/dev/null || true
+    printf 'and restore content from a backup predating the compromise.\n'          >> "$report_tmp" 2>/dev/null || true
 fi
 
 exit 0

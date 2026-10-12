@@ -9,9 +9,10 @@ entrypoint, plus an error message carrying text of the planter's choosing,
 is root code execution at the next start); mu-plugins, sunrise.php, the
 theme and plugins went in by root's docker cp and then a chown that handed
 the link's target to www-data; the restore's `chown -R …/wp-content/`
-resolved a wp-content link through its trailing slash; and the tor
-container's root `cp` of the onion address followed a link in the shared
-volume to any file there.
+resolved a wp-content link through its trailing slash; the tor container's
+root `cp` of the onion address followed a link in the shared volume to any
+file there; and the security audit truncated and rewrote its report through
+whatever sat at that name.
 
 Now every such write runs as www-data (onionpress.wp_files and the
 launchers' wp_put), and root's remaining chowns follow no link. These tests
@@ -20,6 +21,7 @@ sources from growing a root write into www-data's folders again.
 """
 
 import ast
+import importlib.util
 import os
 import re
 import shutil
@@ -420,6 +422,110 @@ class TestDockerExecUser(unittest.TestCase):
         d.exec("onionpress-wordpress", "rm -f /x")
         self.assertEqual(d.run.call_args.args[0],
                          ["exec", "onionpress-wordpress", "sh", "-c", "rm -f /x"])
+
+
+class TestSecurityAuditReport(_Sandbox):
+    """onionpress-security-audit.sh runs as root in the WordPress container
+    at every start and wrote its report through whatever www-data had put
+    at /var/lib/onionpress/security-report.txt."""
+
+    SCRIPT = "app/Resources/docker/wordpress/onionpress-security-audit.sh"
+
+    def setUp(self):
+        super().setUp()
+        self.text = _read(self.SCRIPT)
+
+    def test_nothing_writes_the_published_name_directly(self):
+        code = "\n".join(line for _, line in _code_lines(self.text))
+        self.assertNotRegex(code, r'>>? *"\$REPORT"')
+        self.assertIn('rm -f "$REPORT"', code)
+        self.assertIn('dd if="$report_tmp" of="$REPORT" conv=excl', code)
+        self.assertIn("trap publish_report EXIT", code)
+
+    def test_quarantine_is_out_of_www_data_reach(self):
+        m = re.search(r"^QUARANTINE=(\S+)$", self.text, re.M)
+        self.assertFalse(m.group(1).startswith("/var/lib/onionpress/"), m.group(1))
+        self.assertIn('mkdir -p -m 700 "$QUARANTINE"', self.text)
+        body = self.text[self.text.index("\nquarantine() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn('cd -P -- "$dir"', body)
+        self.assertIn('[ "$(pwd -P)" = "$dir" ]', body)
+
+    def test_publish_replaces_a_planted_link(self):
+        """Run publish_report with a dd that has GNU's conv=excl (O_EXCL),
+        which this Mac's dd lacks."""
+        fn = self.text[self.text.index("\npublish_report() {"):]
+        fn = fn[:fn.index("\n}\n") + 3]
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, "dd"), "w") as f:
+            f.write(f"""#!{sys.executable}
+import os, sys
+a = dict(x.split("=", 1) for x in sys.argv[1:])
+assert a["conv"] == "excl"
+fd = os.open(a["of"], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+with open(a["if"], "rb") as src:
+    os.write(fd, src.read())
+""")
+        os.chmod(os.path.join(bin_dir, "dd"), 0o755)
+        target = self._file("outside/docker-entrypoint.sh", b"#!/bin/sh\n", 0o755)
+        report = os.path.join(self.tmp, "volume", "security-report.txt")
+        os.makedirs(os.path.dirname(report))
+        os.symlink(target, report)
+        tmp_report = self._file("report-tmp", b"No indicators of compromise found.\n")
+        r = subprocess.run(
+            ["bash", "-c", "warn() { echo \"$*\" >&2; }\n" + fn + "publish_report\n"],
+            env=dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"],
+                     REPORT=report, report_tmp=tmp_report),
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.islink(report))
+        with open(report, "rb") as f:
+            self.assertEqual(f.read(), b"No indicators of compromise found.\n")
+        with open(target, "rb") as f:
+            self.assertEqual(f.read(), b"#!/bin/sh\n")
+        self.assertFalse(os.path.exists(tmp_report))
+
+
+class TestWatchdogSharedAddress(_Sandbox):
+    """tor-watchdog.py sends the shared volume's onion_address to the
+    control port (GETINFO, HSFETCH): www-data writes that file."""
+
+    def setUp(self):
+        super().setUp()
+        path = os.path.join(PROJECT_ROOT, "app", "Resources", "docker", "tor",
+                            "tor-watchdog.py")
+        spec = importlib.util.spec_from_file_location("tor_watchdog_shared_addr", path)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+        self.mod.HS_BASE_DIR = os.path.join(self.tmp, "hs")
+        self.path = os.path.join(self.tmp, "volume", "onion_address")
+        os.makedirs(os.path.dirname(self.path))
+        self.mod.SHARED_ONION_ADDRESS_PATH = self.path
+
+    def _found(self):
+        return self.mod.discover_onion_addresses()
+
+    def test_one_address_is_used(self):
+        self._file("volume/onion_address", (ADDR + "\n").encode())
+        self.assertEqual(self._found(), [ADDR[:-len(".onion")]])
+
+    def test_a_control_command_never_rides_along(self):
+        for content in (ADDR + "\r\nSIGNAL HALT\r\nx.onion",
+                        "x\r\nSETCONF ControlPort=0.0.0.0:9051\r\n" + ADDR,
+                        ADDR.upper(), "a" * 56 + ".onion.onion", ""):
+            with self.subTest(content):
+                with open(self.path, "w") as f:
+                    f.write(content)
+                self.assertEqual(self._found(), [])
+
+    def test_a_link_or_fifo_is_not_read(self):
+        secret = self._file("hs-secret/hostname", (ADDR + "\n").encode())
+        os.symlink(secret, self.path)
+        self.assertEqual(self._found(), [])
+        os.unlink(self.path)
+        os.mkfifo(self.path)
+        self.assertEqual(self._found(), [])  # and does not hang
 
 
 class TestPluginDownloadFolder(unittest.TestCase):

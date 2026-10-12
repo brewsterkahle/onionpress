@@ -29,6 +29,7 @@ import json
 import os
 import re
 import signal
+import stat
 import socket
 import sys
 import time
@@ -62,13 +63,12 @@ CONNECT_RETRY_DELAY = 5
 # Hidden service key paths
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
 
-# The content address the launcher copies into the volume it shares with
-# the WordPress container, which can write there too.
+# The content address in the shared volume. WordPress (www-data) can write
+# that folder, so what is read there is untrusted: it goes into control-port
+# commands (GETINFO, HSFETCH), where a CR/LF in a value that merely ends in
+# ".onion" would start a command of the writer's choosing. Only one whole v3
+# address passes, and a link at the name is not followed.
 SHARED_ONION_ADDRESS_PATH = "/var/lib/onionpress/onion_address"
-
-# A whole v3 onion address. What discover_onion_addresses() reads goes into
-# control-port commands (HSFETCH, GETINFO), where a "\r\n" inside a value
-# that merely ends in ".onion" would start a command of its own.
 _ONION_ADDRESS_RE = re.compile(r"[a-z2-7]{56}\.onion")
 
 
@@ -397,10 +397,7 @@ def _hsfetch_missing_descriptors(cmd_sock, state):
 def discover_onion_addresses():
     """Find onion addresses for HSFETCH — our own services + the content address."""
     addresses = set()
-    paths = glob.glob(f"{HS_BASE_DIR}/*/hostname")
-    # Content address (shared volume) — for reachability checks
-    paths.append(SHARED_ONION_ADDRESS_PATH)
-    for path in paths:
+    for path in glob.glob(f"{HS_BASE_DIR}/*/hostname"):
         try:
             with open(path) as f:
                 addr = f.read().strip()
@@ -408,6 +405,18 @@ def discover_onion_addresses():
             continue
         if _ONION_ADDRESS_RE.fullmatch(addr):
             addresses.add(addr[:-len(".onion")])
+    # Content address (shared volume) — for reachability checks. Read without
+    # following a link, and only from a regular file.
+    try:
+        fd = os.open(SHARED_ONION_ADDRESS_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            regular = stat.S_ISREG(os.fstat(f.fileno()).st_mode)
+            raw = f.read(128) if regular else b""
+        addr = raw.decode("ascii", "replace").strip()
+        if _ONION_ADDRESS_RE.fullmatch(addr):
+            addresses.add(addr[:-len(".onion")])
+    except OSError:
+        pass
     return list(addresses)
 
 

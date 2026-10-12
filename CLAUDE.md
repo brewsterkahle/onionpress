@@ -491,6 +491,11 @@
   followed a wp-content link to any folder into a backup the site gets back.
 - The onion address is read from the tor container and written by www-data,
   never `cp`'d by root in the tor container (it followed a link to the key).
+  tor-watchdog.py reads it with O_NOFOLLOW and takes only one v3 address:
+  it goes into control-port commands, where a CR/LF would add one.
+- The image's security audit (root, every start) builds its report in a
+  private temp file and publishes it with `rm -f` + `dd conv=excl`;
+  quarantine is /var/lib/onionpress-quarantine (root, 700).
 - `tests/test_wordpress_writes_as_www_data.py` runs the scripts against a
   sandbox and scans the sources for new root writes. The hub's onionheaven/
   and onionhome/ folders in the shared volume are not covered yet.
