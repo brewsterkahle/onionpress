@@ -35,6 +35,13 @@ def _default_data_dir() -> str:
     return os.path.expanduser("~/.onionpress")
 
 
+# OnionHome's name registry: its own volume, mounted in onionpress-tor only
+# (onionnames.DATA_DIR in the tor image), and the files that are the
+# registry. A backup keeps them in onionhome/.
+ONIONHOME_REGISTRY_DIR = "/var/lib/onionnames"
+ONIONHOME_REGISTRY_FILES = ("onionnames.db", "onionnames.db-wal")
+
+
 # ─── Instrumentation helpers (issue #214) ───────────────────────────────
 # Phase 1: log workload inputs and per-phase wall times so we can later
 # fit an ETA formula and surface estimates in the dialogs. Lines use a
@@ -290,9 +297,10 @@ def get_admin_username(data_dir=None):
 
 
 # ─── Staging what the containers hand over ──────────────────────────────
-# create_backup copies wp-content (and a hub's onionheaven/ and onionhome/)
-# out of the WordPress container, where code running as www-data can plant
-# anything. A symbolic link staged on the host points at a host path:
+# create_backup copies wp-content out of the WordPress container, where code
+# running as www-data can plant anything. (A hub's OnionHeaven data and
+# OnionHome's name registry come from volumes of their own now, and are
+# scrubbed the same way.) A symbolic link staged on the host points at a host path:
 # `zip -r` (no -y) would store the file it points to, so a link to
 # ~/.ssh/id_ed25519 would put that key in a backup whose password the
 # Settings page lets the site choose; prune_image_derivatives would walk
@@ -681,10 +689,14 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #     The DB is tiny (KB) but losing it strands every inbound
         #     /api/name/lookup/NAME that ever pointed here — it's the
         #     canonical record of who's who in the onion directory.
+        #     It lives on its own volume, in onionpress-tor and not in
+        #     onionpress-wordpress (docs/DOCKER-SOCKET.md); the archive
+        #     keeps calling it onionhome/. Only the registry is copied, not
+        #     what the volume's move keeps aside (ONIONHOME_REGISTRY_FILES).
         is_onionhome = False
         onionhome_check = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'test', '-f', '/var/lib/onionpress/onionhome/onionnames.db'],
+            ['docker', 'exec', 'onionpress-tor',
+             'test', '-f', f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
             capture_output=True, timeout=10
         )
         if onionhome_check.returncode == 0:
@@ -692,12 +704,17 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                 log_func("Backup: copying OnionHome name registry...")
                 is_onionhome = True
                 onionhome_dir = os.path.join(staging, 'onionhome')
-                subprocess.run(
-                    ['docker', 'cp',
-                     'onionpress-wordpress:/var/lib/onionpress/onionhome/.',
-                     onionhome_dir],
-                    capture_output=True, timeout=60, check=True
-                )
+                os.makedirs(onionhome_dir)
+                for name in ONIONHOME_REGISTRY_FILES:
+                    # The write-ahead log exists only while SQLite has
+                    # changes not yet in the db file: optional.
+                    subprocess.run(
+                        ['docker', 'cp',
+                         f'onionpress-tor:{ONIONHOME_REGISTRY_DIR}/{name}',
+                         os.path.join(onionhome_dir, name)],
+                        capture_output=True, timeout=60,
+                        check=(name == 'onionnames.db')
+                    )
                 scrub_staged_tree(onionhome_dir, log_func, 'onionhome')
 
         # 5. Save non-default config values
@@ -1825,23 +1842,25 @@ def restore_container_artifacts(staging, metadata, log_func):
             log_func("Restore: OnionHeaven data restored (OnionHeaven will be locked until admin login)")
 
     # 4b. Restore OnionHome name registry if present in backup.
-    #     Kept root-owned — the tor container reads/writes these files
-    #     as root, like the OnionHeaven data above.
+    #     Onto its own volume, through onionpress-tor (whose web-server.py
+    #     is its only reader and writer): never into onionpress-wordpress,
+    #     and root-owned, like the OnionHeaven data above.
+    #     Only the registry's own files: an older backup also carries
+    #     SQLite's -shm index (rebuilt on open), and nothing else in the
+    #     archive belongs on that volume (its move marker among them).
     onionhome_dir = _find_dir(staging, 'onionhome')
     if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
         with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
             log_func("Restore: restoring OnionHome name registry...")
-            subprocess.run(
-                ['docker', 'exec', 'onionpress-wordpress',
-                 'mkdir', '-p', '/var/lib/onionpress/onionhome'],
-                capture_output=True, timeout=10
-            )
-            subprocess.run(
-                ['docker', 'cp',
-                 onionhome_dir + '/.',
-                 'onionpress-wordpress:/var/lib/onionpress/onionhome/'],
-                capture_output=True, timeout=60, check=True
-            )
+            for name in ONIONHOME_REGISTRY_FILES:
+                path = os.path.join(onionhome_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                subprocess.run(
+                    ['docker', 'cp', path,
+                     f'onionpress-tor:{ONIONHOME_REGISTRY_DIR}/{name}'],
+                    capture_output=True, timeout=60, check=True
+                )
             log_func("Restore: OnionHome name registry restored")
 
     # 5. Re-add multisite constants to wp-config.php

@@ -22,7 +22,6 @@ import os
 import random
 import re
 import secrets
-import shutil
 import sqlite3
 import string
 import subprocess
@@ -37,21 +36,29 @@ from datetime import datetime, timezone
 # Paths & constants
 # ---------------------------------------------------------------------------
 
-# The registry DB lives inside the `onionpress-data` named Docker volume
-# (already mounted at /var/lib/onionpress for the tor container), so it
-# survives container recreates — `docker compose down/up`, image updates,
-# VM-memory resizes, etc. OnionHeaven has been using this same volume for
-# its own registry.db since forever; we just park alongside it in a
-# sibling subdirectory.
+# The registry DB lives on a named Docker volume of its own,
+# onionpress-onionnames-data, mounted at /var/lib/onionnames in the tor
+# container and nowhere else, so it survives container recreates (image
+# updates, `docker compose down/up`, VM resizes) and nothing but this
+# container can change which address a name points at. WordPress looks
+# names up through /api/name/lookup. Never put it back under
+# /var/lib/onionpress: that is onionpress-persistent-data, which the
+# wordpress container mounts read-write. It lived in onionhome/ there until
+# the tor image's entrypoint moved it (onionhome-registry-migrate.py;
+# docs/DOCKER-SOCKET.md, "The OnionHome name registry").
 #
 # Analytics stay at /var/lib/onionhome/analytics/ via the existing host
 # bind-mount. Do NOT move that.
-DATA_DIR = "/var/lib/onionpress/onionhome"
+DATA_DIR = "/var/lib/onionnames"
 DB_PATH = os.path.join(DATA_DIR, "onionnames.db")
 
-# Pre-fix path for the one-shot migration on upgrade. Remove once every
-# deployed OnionHome has been booted at least once with the new path.
-LEGACY_DB_PATH = "/var/lib/onionhome/onionnames.db"
+# Written into DATA_DIR by that move once the registry is in place on the
+# volume (moved, or there was none to move, or the volume held one already).
+# Without it DATA_DIR is not the volume (a compose file older than the
+# image) or a registry still waits at the old location, and one opened here
+# would start empty: every name free to claim again, by anyone.
+# registry_in_place() says whether the name endpoints may serve.
+VOLUME_MARKER = os.path.join(DATA_DIR, ".migrated-from-persistent-data")
 
 MIN_NAME_LEN = 5
 MAX_NAME_LEN = 40
@@ -152,43 +159,9 @@ def db_init(conn):
     conn.commit()
 
 
-def migrate_legacy_db():
-    """One-shot migration from the pre-fix location.
-
-    Pre-fix, the DB lived at /var/lib/onionhome/onionnames.db — a path
-    inside the tor container's writable layer, which meant every recreate
-    (image update, VM resize, compose edit) wiped the registry. If we find
-    a legacy file and nothing at the new path, move it across. If the new
-    path already has data, leave the legacy file alone — first-boot after
-    migration wins.
-
-    Never raises: an init-time failure here must not keep the web server
-    from starting, it just means this instance won't auto-migrate.
-    """
-    try:
-        if not os.path.exists(LEGACY_DB_PATH):
-            return False
-        if os.path.exists(DB_PATH):
-            log(f"migrate_legacy_db: new path already populated, "
-                f"leaving {LEGACY_DB_PATH} alone")
-            return False
-        os.makedirs(DATA_DIR, exist_ok=True)
-        shutil.move(LEGACY_DB_PATH, DB_PATH)
-        # Best-effort move of SQLite sidecar files too (-wal, -shm) if WAL
-        # mode left them behind. Absent sidecars are fine; they'll be
-        # regenerated on next open.
-        for suffix in ("-wal", "-shm"):
-            src = LEGACY_DB_PATH + suffix
-            if os.path.exists(src):
-                try:
-                    shutil.move(src, DB_PATH + suffix)
-                except OSError as e:
-                    log(f"migrate_legacy_db: sidecar {suffix} move failed: {e}")
-        log(f"migrate_legacy_db: relocated {LEGACY_DB_PATH} → {DB_PATH}")
-        return True
-    except Exception as e:
-        log(f"migrate_legacy_db: failed: {e}")
-        return False
+def registry_in_place(marker=VOLUME_MARKER):
+    """True once the registry's volume is in place (see VOLUME_MARKER)."""
+    return os.path.exists(marker)
 
 
 def _utcnow():

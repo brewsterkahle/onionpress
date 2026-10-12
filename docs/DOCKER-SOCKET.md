@@ -108,6 +108,85 @@ removes the takeover workers), update, start, and check the logs of
 the OnionHeaven data" line, and the registry count against the one from
 before.
 
+## The OnionHome name registry
+
+OnionHome's onionname registry (`onionnames.db`: which onionname points at
+which onion address, for every lookup and every follow by name) lives on its
+own volume too, `onionpress-onionnames-data`, mounted at `/var/lib/onionnames`
+in one container:
+
+| Container | `onionpress-onionnames-data` |
+|---|---|
+| `onionpress-tor` | yes (`web-server.py`'s `/api/name/*`, its only reader and writer) |
+| `onionpress-wordpress` | **no** (the directory plugin looks names up through `/api/name/lookup`) |
+| `onionheaven`, `onionheaven-takeover-N` | no |
+
+It used to be `onionhome/` on `onionpress-persistent-data`, which WordPress
+mounts read-write (and `fix_onionpress_permissions` handed that directory to
+www-data): code running in WordPress on OnionHome could point any name at an
+onion address of its choosing, or delete the registry. Host-side code reaches
+it through `onionpress-tor`; backup and restore copy `onionnames.db` and its
+`-wal`, nothing else, and the archive still calls the folder `onionhome/`.
+`tests/test_onionhome_registry_volume.py` enforces all of this.
+
+**Moving existing data.** `onionpress-tor`'s entrypoint runs
+`onionhome-registry-migrate.py` before `web-server.py` starts, on every node
+(anywhere but OnionHome there is nothing to move, and the volume is just
+marked). Everything at the old location may be WordPress's work, so it reads
+it as untrusted:
+
+- Nothing there is walked: only `onionnames.db`, `-wal` and `-journal`,
+  through `O_NOFOLLOW` descriptors below the old directory (itself opened
+  without following a link), each a regular file of at most 256 MiB that is
+  not sparse; the database must start with SQLite's header.
+- SQLite never opens a path there. The files are copied into a private,
+  root-only folder on the new volume until the copy is stable (no legitimate
+  writer is left: the old `onionpress-tor` is the container being replaced).
+- The new registry is a new database with `onionnames.py`'s schema holding
+  only rows that pass its checks (name, v3 address, timestamps), read from
+  the private copy under SQLite's defensive settings after `quick_check`. It
+  is renamed into place after any stale `-wal`, `-journal` or `-shm` on the
+  volume is removed; the private copy is always deleted, nothing is kept
+  aside, and the copied files leave the old location if still unchanged.
+- The marker (`.migrated-from-persistent-data`) is written whenever the
+  container is to start on the new volume: after a move, with no registry at
+  the old location (or only something that is not one: no `onionnames`
+  table), or when the volume already holds one (a restore, or an interrupted
+  run). Only when both `/var/lib/onionnames` and `/var/lib/onionpress` are
+  mount points. Once it exists the old location is never read again.
+- Every start makes the volume `root:root`, 0700, and its files 0600.
+
+`web-server.py` serves no name until that marker is on the volume
+(`onionnames.registry_in_place`): without it `/var/lib/onionnames` is not the
+volume, or a registry still waits at the old location, and one opened there
+would start empty, every name free for anyone to claim. `/api/name/*`
+answers 503 then. So a registry that cannot be moved (it keeps changing, or
+SQLite finds it damaged) does not stop the container: the site stays up,
+names answer 503, nothing is removed, and the next start tries again.
+Nothing WordPress plants can keep the container from starting. If a damaged
+registry has to be given up, move the old directory aside (`docker exec
+onionpress-tor mv /var/lib/onionpress/onionhome
+/var/lib/onionpress/onionhome.damaged`) and restore the registry from a
+backup; the next start marks the volume and uses it. The old in-container
+path `/var/lib/onionhome/onionnames.db` is no longer moved by
+`web-server.py` itself; every container recreate wiped it long ago.
+
+**Release rule:** compose plus tor image, as above: publish the tor image,
+refresh the pins, then release the app and the `.deb`. A new compose file
+with an old image moves nothing (the old image keeps the old location), but
+the new app's backups leave the registry out, and a restore writes it where
+the old image does not look (and the later move would take that restored
+copy over the registry in use); so never release this compose file with pins
+to an older image. A new image with an old compose file serves no names
+(503) rather than an empty registry. On OnionHome itself: count the names
+first (`docker exec onionpress-tor sqlite3
+/var/lib/onionpress/onionhome/onionnames.db 'SELECT COUNT(*) FROM
+onionnames'`), update, start, and look for "moved the OnionHome name registry
+to its own volume: N names, …, K invalid rows left out" in `docker logs
+onionpress-tor`: N plus K is the count from before, and the same query on
+`/var/lib/onionnames/onionnames.db` gives N. Never downgrade OnionHome after
+that: an older image would serve the old location, now empty.
+
 ## Next: the heartbeat's socket
 
 What remains is the `onionheaven` container. It hosts no onion service, but

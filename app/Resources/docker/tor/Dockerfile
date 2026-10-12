@@ -231,6 +231,11 @@ RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /oni
 # keys; onionpress-onionheaven-data). Root-only: a fresh volume takes this
 # directory's owner and mode when Docker first mounts it.
 RUN mkdir -m 700 /var/lib/onionheaven
+# OnionHome's name registry: the script that moves it onto its volume, and
+# that volume's mount point (onionnames.db; onionpress-onionnames-data),
+# root-only for the same reason.
+COPY onionhome-registry-migrate.py /onionhome-registry-migrate.py
+RUN mkdir -m 700 /var/lib/onionnames
 ENTRYPOINT ["/entrypoint.sh"]
 # A new ENTRYPOINT resets an inherited CMD, but say so: the base's CMD is a
 # list of tor flags (--RunAsDaemon 0 --HiddenServiceDir …) that would

@@ -424,13 +424,19 @@ class TestCreateBackupWithPlantedLinks(_Base):
         os.symlink(os.path.join(home, "Pictures"), os.path.join(wp, "uploads"))
         # A hub's data as docker cp hands it over (links copied as links):
         # the OnionHeaven volume from the onionheaven container, the
-        # OnionHome name registry from onionpress-wordpress.
+        # OnionHome name registry's files from onionpress-tor's volume.
         hub = os.path.join(self.tmp, "container-hub")
-        for sub in ("onionheaven", "onionhome"):
-            os.makedirs(os.path.join(hub, sub))
-            with open(os.path.join(hub, sub, "registry.db"), "w") as f:
-                f.write(sub)
-            os.symlink(os.path.join(home, "secret.txt"), os.path.join(hub, sub, "stolen"))
+        os.makedirs(os.path.join(hub, "onionheaven"))
+        with open(os.path.join(hub, "onionheaven", "registry.db"), "w") as f:
+            f.write("onionheaven")
+        os.symlink(os.path.join(home, "secret.txt"),
+                   os.path.join(hub, "onionheaven", "stolen"))
+        os.makedirs(os.path.join(hub, "onionhome"))
+        with open(os.path.join(hub, "onionhome", "onionnames.db"), "w") as f:
+            f.write("onionhome")
+        for name in ("onionnames.db-wal", "stolen"):
+            os.symlink(os.path.join(home, "secret.txt"),
+                       os.path.join(hub, "onionhome", name))
         self.pem = os.path.join(self.tmp, "key.pem")
         with open(self.pem, "wb") as f:
             f.write(mv.key_manager.build_openssh_key(mv.PRIV, mv.PUB))
@@ -449,8 +455,8 @@ case "$*" in
   *"tar -cf -"*) COPYFILE_DISABLE=1 tar -cf - -C {wp!r} . ;;
   "cp onionheaven:/var/lib/onionheaven/. "*)
       cp -R {os.path.join(hub, "onionheaven")!r} "$3" ;;
-  "cp onionpress-wordpress:/var/lib/onionpress/onionhome/. "*)
-      cp -R {os.path.join(hub, "onionhome")!r} "$3" ;;
+  "cp onionpress-tor:/var/lib/onionnames/"*)
+      cp -P {os.path.join(hub, "onionhome")!r}/"${{2##*/}}" "$3" ;;
   *) exit 1 ;;
 esac
 """)
@@ -470,9 +476,9 @@ esac
         names = {n.rstrip("/") for n in members}
         self.assertIn("wp-content/themes/flavor.css", names)
         self.assertIn("onionheaven/registry.db", names)
-        self.assertIn("onionhome/registry.db", names)
+        self.assertIn("onionhome/onionnames.db", names)
         for gone in ("wp-content/plugins/key.php", "onionheaven/stolen",
-                     "onionhome/stolen"):
+                     "onionhome/onionnames.db-wal", "onionhome/stolen"):
             self.assertNotIn(gone, names)
         self.assertFalse([n for n in names if n.startswith("wp-content/uploads/")
                           and not n.endswith(".onionpress-regenerate-derivatives")])

@@ -26,6 +26,19 @@ migrate_onionheaven_data() {
     fi
 }
 
+# /var/lib/onionnames is OnionHome's name registry (onionpress-onionnames-data):
+# which onionname points at which onion address. Only this container mounts
+# it; web-server.py is its only reader and writer. It used to be onionhome/
+# on onionpress-persistent-data, which WordPress can write; the script moves
+# it (reading the old files as untrusted) before web-server.py starts. If it
+# cannot, the container starts anyway: web-server.py serves no name (503)
+# until the registry is in place, and the next start tries again.
+migrate_onionhome_registry() {
+    if ! python3 /onionhome-registry-migrate.py; then
+        echo "WARNING: the OnionHome name registry is not in place on its volume; starting, /api/name/* answers 503 until it is (nothing was removed)" >&2
+    fi
+}
+
 # Write a minimal torrc for the SOCKS + control-port modes below.
 write_client_torrc() {
     mkdir -p /var/lib/tor
@@ -200,6 +213,7 @@ fi
 # ==================== Onion service mode (the main tor container) ====================
 
 migrate_onionheaven_data
+migrate_onionhome_registry
 
 # Create compat directories for hostname files
 mkdir -p /var/lib/tor/hidden_service/wordpress

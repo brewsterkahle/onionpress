@@ -320,6 +320,28 @@
 - Compose and tor image ship together (see docs/DOCKER-SOCKET.md, "The
   OnionHeaven hub data"); on the hub, stop fully before updating.
 
+## OnionHome Name Registry Volume
+- OnionHome's `onionnames.db` (onionname → onion address) lives on
+  `onionpress-onionnames-data` at `/var/lib/onionnames`, mounted by
+  onionpress-tor only (web-server.py is its only reader and writer) —
+  **never wordpress**, never under `/var/lib/onionpress`. WordPress looks
+  names up through `/api/name/lookup`. Host code (backup/restore) reaches it
+  via `docker cp` on onionpress-tor and copies only `onionnames.db` and its
+  `-wal` (`backup.ONIONHOME_REGISTRY_FILES`); the archive folder is still
+  `onionhome/`. `tests/test_onionhome_registry_volume.py`.
+- It used to be `onionhome/` on onionpress-persistent-data (www-data owns
+  that folder). `onionhome-registry-migrate.py` (onionpress-tor's
+  entrypoint, before web-server.py) reads only the db/-wal/-journal there,
+  by O_NOFOLLOW descriptor, size-capped, into a private copy, and builds a
+  new registry from the rows that pass onionnames.py's checks; SQLite never
+  opens the old path. Kept separate from onionheaven-data-migrate.py on
+  purpose. web-server.py serves no name (503) until the move's marker is on
+  the volume (`onionnames.registry_in_place`), so the container never fails
+  to start over the registry, and an old compose file or a failed move never
+  serves an empty, claimable registry. Needs a tor image publish; on
+  OnionHome compare the name count before and after, and never downgrade it
+  afterwards (docs/DOCKER-SOCKET.md, "The OnionHome name registry").
+
 ## OnionHeaven Opt-In
 - **`REGISTER_WITH_ONIONHEAVEN` is tri-state and opt-in**: `yes` registers,
   `no` never registers and never asks, unset/empty = undecided → no

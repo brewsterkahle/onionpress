@@ -779,9 +779,21 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
     def _name_query(self):
         return parse_qs(urlparse(self.path).query)
 
-    def _handle_name_suggest(self):
+    def _name_registry_ready(self):
+        """False, with the answer sent, unless this is OnionHome and its
+        registry is in place on its own volume. Never serve or change names
+        from a registry that started empty beside the real one: every name
+        would be free to claim (onionnames.registry_in_place)."""
         if not _is_onionhome():
             self._send_json(404, {"error": "Not found"})
+            return False
+        if not onionnames.registry_in_place():
+            self._send_json(503, {"error": "Name registry unavailable"})
+            return False
+        return True
+
+    def _handle_name_suggest(self):
+        if not self._name_registry_ready():
             return
         params = self._name_query()
         lang = (params.get("lang", ["en"])[0] or "en").lower()
@@ -797,8 +809,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"onionname": name, "lang": lang})
 
     def _handle_name_check(self):
-        if not _is_onionhome():
-            self._send_json(404, {"error": "Not found"})
+        if not self._name_registry_ready():
             return
         params = self._name_query()
         name = params.get("name", [""])[0]
@@ -816,8 +827,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self._send_json(200, result)
 
     def _handle_name_lookup(self, name):
-        if not _is_onionhome():
-            self._send_json(404, {"error": "Not found"})
+        if not self._name_registry_ready():
             return
         if not name:
             self._send_json(400, {"error": "Missing name"})
@@ -834,8 +844,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         self._send_json(200, entry)
 
     def _handle_name_register(self):
-        if not _is_onionhome():
-            self._send_json(404, {"error": "Not found"})
+        if not self._name_registry_ready():
             return
         data = self._read_json()
         if data is False:
@@ -901,8 +910,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_name_release(self):
-        if not _is_onionhome():
-            self._send_json(404, {"error": "Not found"})
+        if not self._name_registry_ready():
             return
         data = self._read_json()
         if data is False:
@@ -994,6 +1002,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
 
         if _is_onionhome():
+            if not self._name_registry_ready():
+                return
             if endpoint == "register":
                 status, body = onionnames.local_register(name, own_address)
             else:
@@ -1747,34 +1757,34 @@ def main():
     conn.close()
 
     # Initialize onionname registry DB and kick off reservation refresh.
-    # Only OnionHome exposes the /api/name/* endpoints, but it's harmless to
-    # create an empty DB on non-OnionHome instances (won't be read).
+    # Only OnionHome exposes the /api/name/* endpoints. The entrypoint has
+    # moved the registry onto its own volume by now; if it is not in place
+    # there, nothing opens it (the endpoints answer 503).
     if _is_onionhome():
-        # One-shot migration for installs that were running the pre-fix
-        # DB location (/var/lib/onionhome/onionnames.db) — harmless no-op
-        # on fresh installs. Runs BEFORE the first db_connect so we don't
-        # create an empty DB at the new path and block the migration.
-        try:
-            onionnames.migrate_legacy_db()
-        except Exception as e:
-            onionnames.log(f"startup: migrate_legacy_db errored: {e}")
-        try:
-            conn = onionnames.db_connect()
+        if not onionnames.registry_in_place():
+            onionnames.log(
+                f"ERROR: the name registry is not in place on its volume "
+                f"({onionnames.DATA_DIR}); /api/name/* answers 503 until it "
+                f"is (see this container's onionhome-registry-migrate lines)"
+            )
+        else:
             try:
-                onionnames.db_init(conn)
-                # Synchronous refresh at boot so reservations are present
-                # before the first request. Failure is non-fatal — retry
-                # handled by the background thread.
-                count = onionnames.refresh_dynamic_reservations(conn)
-                if count is not None:
-                    onionnames.log(
-                        f"dynamic reservations refreshed on startup: {count}"
-                    )
-            finally:
-                conn.close()
-        except Exception as e:
-            onionnames.log(f"startup refresh failed: {e}")
-        onionnames.start_refresh_thread()
+                conn = onionnames.db_connect()
+                try:
+                    onionnames.db_init(conn)
+                    # Synchronous refresh at boot so reservations are present
+                    # before the first request. Failure is non-fatal — retry
+                    # handled by the background thread.
+                    count = onionnames.refresh_dynamic_reservations(conn)
+                    if count is not None:
+                        onionnames.log(
+                            f"dynamic reservations refreshed on startup: {count}"
+                        )
+                finally:
+                    conn.close()
+            except Exception as e:
+                onionnames.log(f"startup refresh failed: {e}")
+            onionnames.start_refresh_thread()
         _start_analytics_cleanup_thread()
 
     # Shrink per-thread stack from the 8MB default to 256KB before any
