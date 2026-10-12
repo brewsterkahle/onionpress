@@ -146,7 +146,17 @@ else
                 log "downloaded $(field "$dl_out" bytes) bytes — applying $target"
                 # Pass the local zip so wp-cli does not re-fetch it over
                 # clearnet; --version is what it uses to label the update.
-                if $WP core update "$zip" --version="$target" >/dev/null 2>&1; then
+                #
+                # Success is the version WordPress reports afterwards, not
+                # wp-cli's exit status. Once the update is in place, wp-cli
+                # fetches wordpress.org's checksum lists to delete files the
+                # old version had, with its own HTTP client (no Tor). The
+                # container has no DNS outside Docker (docker-compose.yml), so
+                # that fetch fails and wp-cli exits non-zero after a
+                # completed update; WordPress's updater has already removed
+                # the files it retires.
+                $WP core update "$zip" --version="$target" >/dev/null 2>&1 || true
+                if [ "$($WP core version 2>/dev/null)" = "$target" ]; then
                     # Multisite stores schema version per-network; core update
                     # alone leaves the DB half-migrated and the admin nags
                     # forever.

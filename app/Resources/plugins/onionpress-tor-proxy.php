@@ -90,8 +90,9 @@ function onionpress_socks_proxy_for( $host ) {
  * NOTE: this hook only covers the WordPress HTTP API. wp-cli's own `core
  * check-update` / `core update` / `core verify-checksums` do NOT use it —
  * they call WP_CLI\Utils\http_request() and go straight to wordpress.org over
- * clearnet. Anything in the container that needs core-update data must go
- * through onionpress-core-update.php instead (shipped in the image at
+ * clearnet (since the compose file's `dns: 127.0.0.1`, they fail at the name
+ * lookup instead). Anything in the container that needs core-update data
+ * must go through onionpress-core-update.php instead (shipped in the image at
  * /usr/local/lib/, run via `wp eval-file`), which keeps its own copy of this
  * routing logic because it can run before this mu-plugin is installed.
  */

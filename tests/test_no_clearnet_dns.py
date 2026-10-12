@@ -14,13 +14,18 @@ through Tor. The iptables clearnet log need not see it: current Docker sends
 those forwarded queries from the Docker host's (on macOS, the Colima VM's)
 own network namespace, not the container's.
 
-Now:
+Now, in layers:
 
   * onionpress-tor-proxy turns that check off for every host it sends through
     Tor and applies the same rules by the URL's shape, with no lookup
     (onionpress_remote_url_is_safe); every redirect stays on the route its
     request took, so a container-network request cannot be redirected to an
     outside host and connect there directly.
+  * docker-compose.yml gives wordpress and db `dns: 127.0.0.1`. Docker's
+    resolver still answers for the containers and forwards any other name to
+    the container's own loopback, where nothing listens: whatever still
+    calls the resolver (wp-cli's own HTTP client, a plugin's raw lookup)
+    fails closed instead of leaking.
   * Raw curl in OnionPress's own plugins always sets a socks5h proxy, or
     talks to a container.
 
@@ -42,6 +47,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGINS = os.path.join(ROOT, "app", "Resources", "plugins")
 TOR_PROXY = os.path.join(PLUGINS, "onionpress-tor-proxy.php")
 BLOGROLL = os.path.join(PLUGINS, "onionpress-blogroll.php")
+DOCKER = os.path.join(ROOT, "app", "Resources", "docker")
+COMPOSE = os.path.join(DOCKER, "docker-compose.yml")
+CLOUDFLARE_COMPOSE = os.path.join(DOCKER, "docker-compose.cloudflare.yml")
+AUDIT = os.path.join(DOCKER, "wordpress", "onionpress-security-audit.sh")
 PHP = shutil.which("php")
 
 ONION = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
@@ -71,6 +80,66 @@ def _function(src, name):
     assert m, f"no function {name}"
     end = src.index("\n" + m.group(1) + "}\n", m.end())
     return src[m.start():end + len(m.group(1)) + 2]
+
+
+def _services(text):
+    """{service: block text} for a compose file, comment lines dropped."""
+    services, current, in_services = {}, None, False
+    for line in text.splitlines():
+        if line.lstrip().startswith("#") or not line.strip():
+            continue
+        if not line.startswith(" "):
+            in_services = line.startswith("services:")
+            current = None
+            continue
+        if not in_services:
+            continue
+        m = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", line)
+        if m:
+            current = m.group(1)
+            services[current] = []
+        elif current:
+            services[current].append(line)
+    return {name: "\n".join(lines) for name, lines in services.items()}
+
+
+def _list_items(block, key):
+    """The `- item` lines under `key:` in a service block."""
+    m = re.search(rf"^    {key}:\s*\n((?:      - .*\n?)+)", block + "\n", re.M)
+    if not m:
+        return None
+    return [re.sub(r"^\s*-\s*", "", line).strip().strip("'\"")
+            for line in m.group(1).splitlines()]
+
+
+class TestComposeKeepsDnsInsideDocker(unittest.TestCase):
+    """wordpress and db: Docker's resolver for the containers, nothing else."""
+
+    def setUp(self):
+        self.services = _services(_read(COMPOSE))
+
+    def test_wordpress_and_db_forward_to_their_own_loopback(self):
+        for name in ("wordpress", "db"):
+            with self.subTest(service=name):
+                self.assertEqual(_list_items(self.services[name], "dns"), ["127.0.0.1"])
+
+    def test_on_the_compose_network_where_dockers_resolver_answers(self):
+        """The loopback upstream only means "the container's own loopback"
+        behind Docker's embedded resolver, which a user-defined network has.
+        On the default bridge or the host's network it would be the host's
+        resolver, or nothing for the container names."""
+        for name in ("wordpress", "db"):
+            with self.subTest(service=name):
+                block = self.services[name]
+                self.assertEqual(_list_items(block, "networks"), ["onionpress-network"])
+                self.assertNotIn("network_mode", block)
+                self.assertNotIn("dns_search", block)
+        self.assertIn("networks:\n  onionpress-network:\n    name: onionpress-network\n"
+                      "    driver: bridge", _read(COMPOSE))
+
+    def test_the_cloudflare_override_leaves_them_alone(self):
+        override = _services(_read(CLOUDFLARE_COMPOSE))
+        self.assertEqual(set(override), {"cloudflared"})
 
 
 class TestTorProxySource(unittest.TestCase):
@@ -186,6 +255,22 @@ class TestPluginCensus(unittest.TestCase):
                                            _read(path), re.M):
                 with self.subTest(const=const):
                     self.assertIn(value, ("onionheaven:9050", "onionpress-tor:9050"))
+
+
+class TestSecurityAuditSurvivesTheDnsBlock(unittest.TestCase):
+
+    def test_core_update_is_judged_by_the_installed_version(self):
+        """wp-cli's `core update` fetches wordpress.org's checksum lists with
+        its own client after the update is in place; with no DNS outside
+        Docker that fails and wp-cli exits non-zero. The audit must not
+        report a completed update as failed, or skip the DB migration."""
+        src = _read(AUDIT)
+        update = src.index('$WP core update "$zip" --version="$target" >/dev/null 2>&1 || true')
+        check = src.index('if [ "$($WP core version 2>/dev/null)" = "$target" ]; then', update)
+        migrate = src.index("$WP core update-db --network", check)
+        self.assertLess(update, check)
+        self.assertLess(check, migrate)
+        self.assertNotIn('if $WP core update "$zip"', src)
 
 
 HARNESS = r"""<?php

@@ -277,9 +277,19 @@
   WordPress's own (Docker answers for them). A redirect must stay on its
   request's route (local→local or Tor→public shape): the proxy choice is
   made from the first URL, so local→outside would connect directly.
-- Raw `curl_init` in plugins must set a socks5h proxy or talk only to a
-  container. `tests/test_no_clearnet_dns.py` (PHP harness with the
-  lookup functions disabled; plugin census).
+- docker-compose.yml: `dns: 127.0.0.1` for wordpress and db. Docker's
+  resolver still answers for containers and forwards anything else to the
+  container's own loopback, where nothing listens: lookups fail closed
+  (wp-cli's own HTTP client, plugin code). Keep them on onionpress-network;
+  the loopback upstream means the container's own loopback only behind the
+  embedded resolver. Not an `internal: true` network: those publish no
+  ports, and WordPress needs 8080 on the host.
+- wp-cli's own HTTP client (not WP_Http, so not Tor) now fails at the
+  lookup: `wp core update <zip>` exits non-zero after a completed update
+  (its checksum-list fetch), so onionpress-security-audit.sh judges the
+  update by `wp core version`. Raw `curl_init` in plugins must set a socks5h
+  proxy or talk only to a container. `tests/test_no_clearnet_dns.py` (PHP
+  harness with the lookup functions disabled; plugin census).
 
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`

@@ -104,6 +104,16 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+    # No DNS outside Docker. Docker's resolver (127.0.0.11) still answers for
+    # the containers (db, onionpress-tor, onionheaven); any other name it
+    # forwards to this server instead of the host's, and a --dns loopback
+    # address is the container's own loopback, where nothing listens: the
+    # lookup fails at once and nothing leaves the machine. Everything this
+    # container fetches goes through Tor's SOCKS port by name (socks5h), so
+    # Tor resolves it at the exit; a lookup here would be a clearnet DNS query
+    # naming the site, from the publisher's network.
+    dns:
+      - 127.0.0.1
     # macOS never sets ONIONPRESS_BIND_HOST. The Linux launcher does: 0.0.0.0
     # by default so a headless Pi can be set up from another device on the
     # LAN, or 127.0.0.1 when ~/.onionpress/config says so.
@@ -130,6 +140,10 @@ services:
     restart: unless-stopped
     networks:
       - onionpress-network
+    # No DNS outside Docker, as for wordpress above: MariaDB has nothing to
+    # look up beyond the containers.
+    dns:
+      - 127.0.0.1
 
   # Auto-restart any container labeled autoheal=true when its HEALTHCHECK
   # reports unhealthy. Prevents wedge-until-manual-reboot scenarios like
