@@ -14,6 +14,8 @@ import subprocess
 import time
 from typing import Callable
 
+from . import wp_files
+
 
 _WORDPRESS_CONTAINER = "onionpress-wordpress"
 
@@ -22,19 +24,16 @@ _WORDPRESS_CONTAINER = "onionpress-wordpress"
 _TEST_TIMEOUT_SEC = 360
 
 
-def _docker_exec(args: list, **kwargs) -> subprocess.CompletedProcess:
+def _wp(args: list, url: str = None, **kwargs) -> subprocess.CompletedProcess:
+    """wp-cli as www-data (wp_files.wp_cli_args), never as root."""
+    cmd = args + ["--path=/var/www/html"]
+    if url:
+        cmd.append("--url=" + url)
     return subprocess.run(
-        ["docker", "exec", _WORDPRESS_CONTAINER] + args,
+        ["docker"] + wp_files.wp_cli_args(*cmd, container=_WORDPRESS_CONTAINER),
         capture_output=True, text=True, encoding='utf-8',
         errors='replace', **kwargs,
     )
-
-
-def _wp(args: list, url: str = None, **kwargs) -> subprocess.CompletedProcess:
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
-    if url:
-        cmd.append("--url=" + url)
-    return _docker_exec(cmd, **kwargs)
 
 
 def _get_post_wayback_state(post_id: str, site_url: str) -> dict:

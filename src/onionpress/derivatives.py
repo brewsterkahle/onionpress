@@ -23,7 +23,8 @@ half of wp-content/uploads (449 of 916 MB). So:
 
 * `regenerate_if_pending()` runs, when either marker is present,
   `wp media regenerate --only-missing --yes` for every site, `nice`d, in
-  the WordPress container, and clears both markers only on success.
+  the WordPress container as www-data, and clears both markers only on
+  success.
   `--only-missing` builds just the sizes absent on disk, so a run that a
   reboot, quit or OOM kill interrupts resumes where it left off at the
   next launcher start instead of starting over. The launchers spawn this
@@ -220,8 +221,8 @@ def _site_urls(docker_bin: str, container: str) -> list[Optional[str]]:
     """Every site's URL on a multisite, else [None] (run without --url)."""
     try:
         r = subprocess.run(
-            [docker_bin, "exec", container, "wp", "site", "list",
-             "--field=url", "--allow-root"],
+            [docker_bin] + wp_files.wp_cli_args("site", "list", "--field=url",
+                                                container=container),
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=60,
         )
@@ -261,21 +262,32 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
             return True
 
         installed = subprocess.run(
-            [docker_bin, "exec", container, "wp", "core", "is-installed", "--allow-root"],
+            [docker_bin] + wp_files.wp_cli_args("core", "is-installed",
+                                                container=container),
             capture_output=True, timeout=60,
         )
         if installed.returncode != 0:
             log("Image derivatives: WordPress is not up — leaving the marker for the next start")
             return False
 
+        # wp-cli runs as www-data, which must be able to write every folder
+        # of uploads: give it what an older version's root wp-cli left
+        # root's, following no link www-data may have planted
+        # (wp_files.own_args).
+        subprocess.run(
+            [docker_bin] + wp_files.own_args(CONTAINER_UPLOADS, recursive=True,
+                                             container=container),
+            capture_output=True, timeout=600,
+        )
         sites = _site_urls(docker_bin, container)
         log(f"Image derivatives: rebuilding missing resized images for "
             f"{len(sites)} site(s) (wp media regenerate --only-missing)")
         for url in sites:
-            cmd = [docker_bin, "exec", container, "nice", "-n", "10",
-                   "wp", "media", "regenerate", "--only-missing", "--yes", "--allow-root"]
+            args = ["media", "regenerate", "--only-missing", "--yes"]
             if url:
-                cmd.append(f"--url={url}")
+                args.append(f"--url={url}")
+            cmd = [docker_bin] + wp_files.wp_cli_args(*args, nice=True,
+                                                      container=container)
             try:
                 r = subprocess.run(
                     cmd, capture_output=True, text=True, encoding="utf-8",
@@ -292,13 +304,6 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
                 return False
             log(f"Image derivatives: {url or 'site'}: {tail[0][:200]}")
 
-        # wp-cli ran as root; hand the new files back to Apache's user,
-        # following no link www-data may have planted (wp_files.own_args).
-        subprocess.run(
-            [docker_bin] + wp_files.own_args(CONTAINER_UPLOADS, recursive=True,
-                                             container=container),
-            capture_output=True, timeout=600,
-        )
         rm = subprocess.run(
             [docker_bin] + wp_files.exec_args("rm", "-f", CONTAINER_MARKER,
                                               container=container),

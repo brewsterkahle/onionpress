@@ -231,11 +231,8 @@ def write_status(
 
     onboarded = False
     if wp_installed:
-        opt = docker.exec(
-            "onionpress-wordpress",
-            ["wp", "--allow-root", "option", "get", "onionpress_onboarded"],
-            timeout=10, quiet=True,
-        )
+        opt = docker.wp("option", "get", "onionpress_onboarded",
+                        timeout=10, quiet=True)
         onboarded = opt.ok and opt.output.strip() in ("1", "true", "yes")
 
     # Wayback queue depth: posts not yet archived (waiting plus in flight),
@@ -243,12 +240,8 @@ def write_status(
     # _op_wayback_* postmeta; the older _op_wayback_pending key it never
     # writes, so counting that always reported 0.
     wayback_queue = 0
-    wq = docker.exec(
-        "onionpress-wordpress",
-        ["wp", "--allow-root", "eval",
-         "echo json_encode(onionpress_wayback_queue_totals());"],
-        timeout=10, quiet=True,
-    )
+    wq = docker.wp("eval", "echo json_encode(onionpress_wayback_queue_totals());",
+                   timeout=10, quiet=True)
     if wq.ok:
         try:
             totals = json.loads(wq.output.strip())

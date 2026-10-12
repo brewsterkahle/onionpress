@@ -199,13 +199,16 @@ class TestWpIsInstalled(unittest.TestCase):
 
     def test_installed(self):
         docker = mock.Mock(spec=Docker)
-        docker.exec.return_value = _ok()
+        docker.wp.return_value = _ok()
         cm = ContainerManager(docker, self.paths, self.port_config)
         self.assertTrue(cm.wp_is_installed())
+        # Docker.wp: wp-cli as www-data, never root.
+        docker.wp.assert_called_once_with("core", "is-installed", timeout=15)
+        docker.exec.assert_not_called()
 
     def test_not_installed(self):
         docker = mock.Mock(spec=Docker)
-        docker.exec.return_value = _fail()
+        docker.wp.return_value = _fail()
         cm = ContainerManager(docker, self.paths, self.port_config)
         self.assertFalse(cm.wp_is_installed())
 

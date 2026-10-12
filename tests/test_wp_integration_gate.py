@@ -58,6 +58,12 @@ def _test_classes(module):
             and unittest.defaultTestLoader.getTestCaseNames(obj)]
 
 
+# wp-cli runs as www-data, as the app runs it (wp_files.wp_cli_args).
+WP_AS_WWW_DATA = ["docker", "exec", "-u", "www-data", "-e",
+                  "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                  wp_integration.WP_CONTAINER, "wp"]
+
+
 class FakeDocker:
     """Stands in for subprocess.run: answers the probe's docker calls and
     records every argv. Anything else is a test failure."""
@@ -78,7 +84,7 @@ class FakeDocker:
             return subprocess.CompletedProcess(argv, 0 if self.running else 1, out, "")
         if argv[:4] == exec_prefix + ["sh"]:
             return subprocess.CompletedProcess(argv, 0, self.onion_file + "\n", "")
-        if argv[:5] == exec_prefix + ["wp", "eval"]:
+        if argv[:9] == WP_AS_WWW_DATA + ["eval"]:
             out = self.probe_stdout
             if out is None:
                 out = "OPPROBE:" + json.dumps(self.probe)
@@ -86,7 +92,7 @@ class FakeDocker:
         raise AssertionError(f"unexpected command: {argv}")
 
     def loaded_wordpress(self):
-        return any(c[3:4] == ["wp"] for c in self.calls)
+        return any("wp" in c for c in self.calls)
 
 
 @contextlib.contextmanager

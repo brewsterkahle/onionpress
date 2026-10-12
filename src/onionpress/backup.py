@@ -179,8 +179,8 @@ def verify_wp_admin(username, password):
     # Verify user exists and has administrator role
     try:
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'user', 'get', username, '--field=roles', '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('user', 'get', username,
+                                              '--field=roles'),
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
         if result.returncode != 0:
@@ -209,8 +209,7 @@ def verify_wp_admin(username, password):
     )
     try:
         result = subprocess.run(
-            ['docker', 'exec', '-i', 'onionpress-wordpress',
-             'wp', 'eval', php_code, '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('eval', php_code, stdin=True),
             input=username + "\n" + password,
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
@@ -250,8 +249,7 @@ def verify_wp_admin_password_any(password):
     )
     try:
         result = subprocess.run(
-            ['docker', 'exec', '-i', 'onionpress-wordpress',
-             'wp', 'eval', php_code, '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('eval', php_code, stdin=True),
             input=password,
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=15,
@@ -279,9 +277,8 @@ def get_admin_username(data_dir=None):
         return name
     try:
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'user', 'list', '--role=administrator',
-             '--field=user_login', '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('user', 'list', '--role=administrator',
+                                              '--field=user_login'),
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=10,
         )
@@ -1974,8 +1971,8 @@ def _ensure_multisite_constants(log_func):
     # Check if the database has multisite tables before adding constants
     try:
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'db', 'query', "SHOW TABLES LIKE 'wp_blogs';", '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('db', 'query',
+                                              "SHOW TABLES LIKE 'wp_blogs';"),
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
         if result.returncode != 0 or 'wp_blogs' not in result.stdout:
@@ -1986,9 +1983,8 @@ def _ensure_multisite_constants(log_func):
     log_func("Restore: re-adding multisite constants to wp-config.php...")
     for name, value in _MULTISITE_CONSTANTS.items():
         subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'config', 'set', name, value,
-             '--raw', '--type=constant', '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('config', 'set', name, value,
+                                              '--raw', '--type=constant'),
             capture_output=True, timeout=15
         )
 
@@ -2011,8 +2007,7 @@ def _get_db_credentials():
     creds = {}
     for field in ('DB_NAME', 'DB_USER', 'DB_PASSWORD'):
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-wordpress',
-             'wp', 'config', 'get', field, '--allow-root'],
+            ['docker'] + wp_files.wp_cli_args('config', 'get', field),
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
         )
         if result.returncode != 0:

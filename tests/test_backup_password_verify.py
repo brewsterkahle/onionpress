@@ -134,11 +134,18 @@ class TestNoCodeSplicingInLaunchers(unittest.TestCase):
                       f"string: {body[:80]!r}")
 
 
+# `docker exec` arguments of a `wp eval` reading stdin, run as www-data
+# (onionpress.wp_files.wp_cli_args).
+WP_EVAL_AS_WWW_DATA = ["exec", "-i", "-u", "www-data", "-e",
+                       "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                       "onionpress-wordpress", "wp", "eval"]
+
+
 class _Harness(unittest.TestCase):
     """Runs launcher functions under bash with stub binaries on PATH.
 
     Each stub appends {"tool", "argv", "stdin"} to $STUB_CALLS. The docker
-    stub answers the verifier's `docker exec -i onionpress-wordpress wp eval`
+    stub answers the verifier's `docker exec -i -u www-data … wp eval`
     like WP-CLI would (an admin login and exit 0 when stdin equals
     $STUB_ACCEPT, exit 1 otherwise), a curl run in a container
     (`docker exec -i onionheaven curl ...`) like curl, and fails every
@@ -155,7 +162,9 @@ with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as f:
 if tool == "docker" and args[:2] == ["exec", "-i"] and args[3:4] == ["curl"]:
     tool = "curl"
 if tool == "docker":
-    if args[:5] == ["exec", "-i", "onionpress-wordpress", "wp", "eval"]:
+    if args[:9] == ["exec", "-i", "-u", "www-data", "-e",
+                    "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                    "onionpress-wordpress", "wp", "eval"]:
         if data == os.environ.get("STUB_ACCEPT"):
             print("admin")
             sys.exit(0)
@@ -225,7 +234,7 @@ class TestCreateBackupHarness(_Harness):
 
     def _verify_calls(self, made):
         return [c for c in made if c["tool"] == "docker"
-                and c["argv"][:5] == ["exec", "-i", "onionpress-wordpress", "wp", "eval"]]
+                and c["argv"][:9] == WP_EVAL_AS_WWW_DATA]
 
     def test_wrong_password_is_refused_before_anything_else_runs(self):
         for pw in TRICKY_PASSWORDS:
@@ -247,7 +256,7 @@ class TestCreateBackupHarness(_Harness):
                 self.assertIn("Backup: password verified", logged, out.stderr)
                 [call] = self._verify_calls(made)
                 self.assertEqual(call["stdin"], pw)
-                php.add(call["argv"][5])
+                php.add(call["argv"][9])
                 for c in made:
                     for arg in c["argv"]:
                         self.assertNotIn(pw, arg, f"password in argv: {c['argv']}")
@@ -294,10 +303,11 @@ class TestPythonVerifierInput(unittest.TestCase):
             for pw in TRICKY_PASSWORDS:
                 ok, user = backup.verify_wp_admin_password_any(pw)
                 self.assertEqual((ok, user), (True, "admin"))
-        php = {argv[5] for argv, _ in seen}
+        php = {argv[10] for argv, _ in seen}
         self.assertEqual(len(php), 1, "the PHP source must not vary with the password")
         for (argv, kwargs), pw in zip(seen, TRICKY_PASSWORDS):
-            self.assertEqual(argv[:5], ["docker", "exec", "-i", "onionpress-wordpress", "wp"])
+            # wp-cli as www-data, never as root.
+            self.assertEqual(argv[:10], ["docker"] + WP_EVAL_AS_WWW_DATA)
             self.assertEqual(kwargs["input"], pw)
             for arg in argv:
                 self.assertNotIn(pw, arg)

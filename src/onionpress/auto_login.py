@@ -29,7 +29,7 @@ import time
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from . import key_manager
+from . import key_manager, wp_files
 
 # The mu-plugin honours a token this many seconds after it is minted. MINT_PHP
 # spells the number out (it is fixed code); a test keeps the two equal.
@@ -96,8 +96,8 @@ def mint(scope: str, *, docker_bin: str = "docker", env=None,
     token = new_token()
     try:
         result = subprocess.run(
-            [docker_bin, "exec", "-i", container,
-             "wp", "eval", MINT_PHP, "--allow-root"],
+            [docker_bin] + wp_files.wp_cli_args("eval", MINT_PHP, stdin=True,
+                                                container=container),
             input=f"{token}\n{scope}\n",
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=timeout, env=env,

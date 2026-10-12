@@ -790,8 +790,7 @@ class OnionPressApp(rumps.App):
             env["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
             env["DOCKER_CONFIG"] = os.path.join(self.app_support, "docker-config")
             result = subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "core", "is-installed", "--allow-root"],
+                [docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
                 env=env, capture_output=True, timeout=10
             )
             return result.returncode == 0
@@ -3414,9 +3413,9 @@ class OnionPressApp(rumps.App):
         try:
             docker_bin = os.path.join(self.bin_dir, "docker")
             result = subprocess.run(
-                [docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "user", "list", "--role=administrator",
-                 "--field=user_login", "--allow-root"],
+                [docker_bin] + wp_files.wp_cli_args(
+                    "user", "list", "--role=administrator",
+                    "--field=user_login"),
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=10,
             )
@@ -3622,11 +3621,10 @@ class OnionPressApp(rumps.App):
             return
         docker_bin = os.path.join(self.bin_dir, "docker")
         result = subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "db", "query",
-             f"UPDATE wp_users SET user_login='{new_name}', "
-             f"user_nicename='{new_name}' WHERE user_login='{old_name}'",
-             "--allow-root"],
+            [docker_bin] + wp_files.wp_cli_args(
+                "db", "query",
+                f"UPDATE wp_users SET user_login='{new_name}', "
+                f"user_nicename='{new_name}' WHERE user_login='{old_name}'"),
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=15
         )

@@ -67,6 +67,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from onionpress import config as op_config  # noqa: E402
+from onionpress import wp_files  # noqa: E402
 
 OPT_IN_ENV = "ONIONPRESS_INTEGRATION_TESTS"
 WP_CONTAINER = "onionpress-wordpress"
@@ -141,10 +142,11 @@ def _run(argv, **kwargs):
 
 
 def _wp_argv(args, url=None):
-    cmd = ["wp"] + args + ["--path=/var/www/html", "--allow-root"]
+    """wp-cli as www-data, as the app runs it (wp_files.wp_cli_args)."""
+    cmd = args + ["--path=/var/www/html"]
     if url:
         cmd.append("--url=" + url)
-    return ["docker", "exec", WP_CONTAINER] + cmd
+    return ["docker"] + wp_files.wp_cli_args(*cmd, container=WP_CONTAINER)
 
 
 # Runs on the network root. Marker-prefixed so a PHP notice printed by

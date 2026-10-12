@@ -413,11 +413,7 @@ class OnionPressCLI:
                     metadata = validate_backup_metadata(json.load(f))
             restore_container_artifacts(staging, metadata, self.log)
             # Migrate DB schema for cross-version backups (non-fatal).
-            res = self.docker.run(
-                ["exec", "onionpress-wordpress",
-                 "wp", "core", "update-db", "--allow-root"],
-                timeout=120,
-            )
+            res = self.docker.wp("core", "update-db", timeout=120)
             if not res.ok:
                 self.log("Install-from-backup: wp core update-db reported a "
                          "problem (continuing)")

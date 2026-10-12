@@ -751,9 +751,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         """Serve the WordPress setup form (first-run only)."""
         # Check if WordPress is already installed
         try:
+            from onionpress import wp_files
             result = subprocess.run(
-                [self.server.docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "core", "is-installed", "--allow-root"],
+                [self.server.docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
                 env=self.server.docker_env,
                 capture_output=True, timeout=10
             )
@@ -837,10 +837,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
     def _wp_installed(self):
         """True if WordPress is installed, None if that can't be told."""
+        from onionpress import wp_files
         try:
             result = subprocess.run(
-                [self.server.docker_bin, "exec", "onionpress-wordpress",
-                 "wp", "core", "is-installed", "--allow-root"],
+                [self.server.docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
                 env=self.server.docker_env, capture_output=True, timeout=10)
         except (subprocess.SubprocessError, OSError):
             return None
@@ -932,7 +932,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             from onionpress import wp_files
             docker = self.server.docker_bin
             denv = self.server.docker_env
-            wp_exec = [docker, "exec", "onionpress-wordpress"]
 
             # sunrise.php is installed by provision-post-install before WordPress
             # exists. It queries wp_site on load, which fails during a fresh install
@@ -949,15 +948,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             # and a subprocess error quotes it. wp-cli generates a password
             # (printed on the stdout we drop) and the user's goes in on
             # stdin once the install is done.
-            cmd = wp_exec + [
-                "wp", "core", "multisite-install",
+            cmd = [docker] + wp_files.wp_cli_args(
+                "core", "multisite-install",
                 "--url=http://localhost",
                 f"--title={title}",
                 f"--admin_user={username}",
                 f"--admin_email={email}",
                 "--skip-email",
-                "--allow-root"
-            ]
+            )
             result = subprocess.run(
                 cmd, env=denv,
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
@@ -996,10 +994,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 ]
                 for const_name, const_value in multisite_constants:
                     subprocess.run(
-                        wp_exec + [
-                            "wp", "config", "set", const_name, const_value,
-                            "--raw", "--type=constant", "--allow-root"
-                        ],
+                        [docker] + wp_files.wp_cli_args(
+                            "config", "set", const_name, const_value,
+                            "--raw", "--type=constant"),
                         env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
                     )
 
@@ -1061,8 +1058,8 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     for key, val in [('onionpress_archive_s3_access', archive_s3_keys['access']),
                                      ('onionpress_archive_s3_secret', archive_s3_keys['secret'])]:
                         subprocess.run(
-                            [docker, "exec", "-i", "onionpress-wordpress",
-                             "wp", "option", "update", key, "--allow-root"],
+                            [docker] + wp_files.wp_cli_args(
+                                "option", "update", key, stdin=True),
                             input=val,
                             env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
                         )

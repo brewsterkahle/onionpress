@@ -22,14 +22,19 @@ if [ ! -f "$DOCKER_BIN" ]; then
     DOCKER_BIN="docker"  # Fallback to system docker
 fi
 
+# wp-cli runs as www-data, never as root (onionpress.wp_files.wp_cli_args):
+# it loads WordPress, whose plugins, themes and wp-config.php www-data can
+# write, so as root a plugin bug became root in the container.
+WP_CLI=("$DOCKER_BIN" exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache "$CONTAINER_NAME" wp)
+
 # Check if WordPress is configured (has database connection)
-if ! timeout 10 "$DOCKER_BIN" exec -T "$CONTAINER_NAME" wp core is-installed --allow-root >/dev/null 2>&1; then
+if ! timeout 10 "${WP_CLI[@]}" core is-installed >/dev/null 2>&1; then
     echo "WordPress not yet configured, plugin will activate after setup"
     exit 1
 fi
 
 # Activate the plugin
-if OUTPUT=$(timeout 10 "$DOCKER_BIN" exec -T "$CONTAINER_NAME" wp plugin activate "$PLUGIN_PATH" --allow-root 2>&1); then
+if OUTPUT=$(timeout 10 "${WP_CLI[@]}" plugin activate "$PLUGIN_PATH" 2>&1); then
     echo "✓ Plugin activated: ${PLUGIN_PATH}"
     [ -n "$OUTPUT" ] && echo "$OUTPUT"
     exit 0

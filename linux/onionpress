@@ -68,6 +68,19 @@ wp_exec() {
     docker exec -u www-data onionpress-wordpress "$@"
 }
 
+# Run wp-cli in the WordPress container as www-data: wp_cli <args...>, and
+# wp_cli_in for what wp-cli reads from stdin (docker exec -i). wp-cli loads
+# WordPress (wp-config.php, mu-plugins, plugins, themes), every file of it
+# www-data's to write, so run as root a plugin bug became root in the
+# container. No --allow-root: wp-cli refuses to run as root. The command is
+# onionpress.wp_files.wp_cli_args; a test keeps the copies equal.
+wp_cli() {
+    docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp "$@"
+}
+wp_cli_in() {
+    docker exec -i -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp "$@"
+}
+
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
@@ -442,7 +455,7 @@ command_exists() {
 
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
-    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1
+    wp_cli core is-installed >/dev/null 2>&1
 }
 
 # Verify a WP admin password without making a backup. Used by scrub/
@@ -561,7 +574,7 @@ db_client() {
 # linux/onionpress, and the PHP is setup_logic.WP_SET_PASSWORD_PHP
 # (test-enforced).
 wp_set_user_password() {
-    printf '%s\n%s' "$1" "$2" | docker exec -i onionpress-wordpress wp eval '
+    printf '%s\n%s' "$1" "$2" | wp_cli_in eval '
 $in = explode("\n", file_get_contents("php://stdin"), 2);
 $u = get_user_by("login", trim($in[0]));
 $pw = isset($in[1]) ? trim($in[1]) : "";
@@ -569,7 +582,7 @@ if (!$u || $pw === "") { fwrite(STDERR, "Error: no such user, or an empty passwo
 wp_set_password($pw, $u->ID);
 delete_user_meta($u->ID, "default_password_nag");
 echo "Success: password set for ", $u->user_login, "\n";
-' --allow-root
+'
 }
 
 # ─── Key import ──────────────────────────────────────────────────────
@@ -1120,13 +1133,12 @@ setup_wordpress_interactive() {
     # generates a password, printed on the stdout dropped here, and
     # wp_set_user_password then sets the user's on stdin.
     local _wp_install_ok=false
-    if docker exec onionpress-wordpress wp core multisite-install \
+    if wp_cli core multisite-install \
         --url="http://localhost" \
         --title="$wp_title" \
         --admin_user="$wp_user" \
         --admin_email="$wp_email" \
-        --skip-email \
-        --allow-root >/dev/null 2>>"$LOG_FILE"; then
+        --skip-email >/dev/null 2>>"$LOG_FILE"; then
         _wp_install_ok=true
     fi
 
@@ -1156,8 +1168,8 @@ setup_wordpress_interactive() {
         echo "  Logging in to Archive.org (over Tor)..."
         local ia_s3_access="" ia_s3_secret=""
         if fetch_archive_s3_keys "$ia_access" "$ia_secret"; then
-            printf '%s' "$ia_s3_access" | docker exec -i onionpress-wordpress wp option update onionpress_archive_s3_access --allow-root >> "$LOG_FILE" 2>&1
-            printf '%s' "$ia_s3_secret" | docker exec -i onionpress-wordpress wp option update onionpress_archive_s3_secret --allow-root >> "$LOG_FILE" 2>&1
+            printf '%s' "$ia_s3_access" | wp_cli_in option update onionpress_archive_s3_access >> "$LOG_FILE" 2>&1
+            printf '%s' "$ia_s3_secret" | wp_cli_in option update onionpress_archive_s3_secret >> "$LOG_FILE" 2>&1
             log "Archive.org S3 keys saved (from login)"
             echo "  Archive.org credentials saved."
         else
@@ -2447,7 +2459,7 @@ print(json.dumps(containers))
     # used to read was the v3 JSON queue, which the v4 plugin deleted, so
     # the count was always 0.
     local wayback_queue=0
-    wayback_queue=$(docker exec onionpress-wordpress wp eval 'echo json_encode(onionpress_wayback_queue_totals());' --allow-root 2>/dev/null | python3 -c "
+    wayback_queue=$(wp_cli eval 'echo json_encode(onionpress_wayback_queue_totals());' 2>/dev/null | python3 -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -2537,7 +2549,7 @@ except: print('false')
         # what the plugin checks, and that's where install_fresh_wordpress
         # now writes the marker.
         local _opt
-        _opt=$(docker exec onionpress-wordpress wp eval 'echo (string) get_site_option("onionpress_onboarded", "");' --allow-root 2>/dev/null | tr -d '\r\n ')
+        _opt=$(wp_cli eval 'echo (string) get_site_option("onionpress_onboarded", "");' 2>/dev/null | tr -d '\r\n ')
         if [ -n "$_opt" ] && [ "$_opt" != "0" ] && [ "$_opt" != "false" ]; then
             onboarded="true"
         fi

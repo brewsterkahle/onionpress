@@ -69,6 +69,12 @@ def _function(text, name):
     return chunk[:chunk.rindex("\n}\n") + 3]
 
 
+# `docker exec -i` arguments that run wp-cli as www-data, never as root
+# (onionpress.wp_files.wp_cli_args); without stdin, the same minus -i.
+WP_AS_WWW_DATA = ["exec", "-i", "-u", "www-data", "-e",
+                  "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache", "onionpress-wordpress", "wp"]
+
+
 class _Recorder:
     """Stands in for subprocess.run: records (argv, stdin, kwargs) and
     answers with *reply(argv, stdin)* -> (returncode, stdout)."""
@@ -182,13 +188,13 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
                 self.assertTrue(self._install(rec, pw), self.logs)
                 rec.assert_not_in_argv(self, pw)
                 install = rec.calls[0][0]
-                self.assertEqual(install[5:7], ["core", "install"])
+                self.assertEqual(install[1:10], WP_AS_WWW_DATA[:1] + WP_AS_WWW_DATA[2:]
+                                 + ["core", "install"])
                 self.assertFalse([a for a in install if "admin_password" in a])
                 # Straight after the install, before anything else.
                 argv, stdin, _ = rec.calls[1]
-                self.assertEqual(argv, [
-                    "/x/docker", "exec", "-i", "onionpress-wordpress",
-                    "wp", "--allow-root", "eval", setup_logic.WP_SET_PASSWORD_PHP])
+                self.assertEqual(argv, ["/x/docker"] + WP_AS_WWW_DATA + [
+                    "eval", setup_logic.WP_SET_PASSWORD_PHP])
                 self.assertEqual(stdin, f"alice\n{pw}")
                 self.assertEqual(len(rec.eval_calls()), 1)
                 for msg in self.logs:
@@ -348,7 +354,7 @@ class TestOnionProxySetupPost(unittest.TestCase):
         self.assertIn("--admin_user=alice", install)
         self.assertFalse([a for a in install if "admin_password" in a])
         [(argv, stdin)] = rec.eval_calls()
-        self.assertEqual(argv[:4], ["/x/docker", "exec", "-i", "onionpress-wordpress"])
+        self.assertEqual(argv[:9], ["/x/docker"] + WP_AS_WWW_DATA)
         self.assertEqual(stdin, f"alice\n{pw}")
         options = {a[a.index("update") + 1]: i for a, i, _ in rec.calls
                    if "option" in a and "update" in a}
@@ -444,7 +450,8 @@ if tool == "curl":
 
     def run_bash(self, rel, functions, snippet, env_extra=None, prelude=""):
         text = _read(rel)
-        source = "".join(_function(text, name) + "\n" for name in functions)
+        source = "".join(_function(text, name) + "\n"
+                         for name in ("wp_cli", "wp_cli_in") + tuple(functions))
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = os.path.join(tmp, "bin")
             os.makedirs(bin_dir)
@@ -497,8 +504,9 @@ class TestWpSetUserPassword(_LauncherHarness):
     def test_identical_in_both_launchers_and_matches_python(self):
         mac, linux = (_function(_read(r), "wp_set_user_password") for r in LAUNCHERS)
         self.assertEqual(mac, linux)
-        self.assertIn("wp eval '" + setup_logic.WP_SET_PASSWORD_PHP + "' --allow-root",
+        self.assertIn("| wp_cli_in eval '" + setup_logic.WP_SET_PASSWORD_PHP + "'\n}",
                       mac)
+        self.assertNotIn("allow-root", mac)
 
     def test_password_reaches_php_on_stdin_only(self):
         for rel in LAUNCHERS:
@@ -509,9 +517,8 @@ class TestWpSetUserPassword(_LauncherHarness):
                         'wp_set_user_password alice "$PW"', {"PW": pw})
                     self.assertEqual(out.returncode, 0, out.stderr)
                     [call] = made
-                    self.assertEqual(call["argv"], [
-                        "exec", "-i", "onionpress-wordpress", "wp", "eval",
-                        setup_logic.WP_SET_PASSWORD_PHP, "--allow-root"])
+                    self.assertEqual(call["argv"], WP_AS_WWW_DATA + [
+                        "eval", setup_logic.WP_SET_PASSWORD_PHP])
                     self.assertEqual(call["stdin"], f"alice\n{pw}")
 
 

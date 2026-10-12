@@ -13,7 +13,7 @@ import re
 import subprocess
 from typing import Callable, Optional
 
-from onionpress import key_manager
+from onionpress import key_manager, wp_files
 
 try:
     from onionpress import onionnames_client as _onc
@@ -217,8 +217,7 @@ def install_welcome_post(
 
     def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [docker_bin, "exec", "onionpress-wordpress",
-             "wp", "--allow-root"] + list(args),
+            [docker_bin] + wp_files.wp_cli_args(*args),
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout,
@@ -281,15 +280,14 @@ echo "Success: password set for ", $u->user_login, "\n";
 
 
 def _run_wp(docker_bin, args, *, input=None, env=None, timeout=60):
-    """Run wp-cli in onionpress-wordpress; with *input*, `docker exec -i`
-    and *input* on stdin.
+    """Run wp-cli in onionpress-wordpress as www-data (wp_files.wp_cli_args);
+    with *input*, `docker exec -i` and *input* on stdin.
 
     A timeout comes back as a failed CompletedProcess (returncode 124) whose
     stderr names the wp command, not the argv: a TimeoutExpired's message
     quotes the whole command line, and callers log what they catch.
     """
-    argv = ([docker_bin, "exec"] + (["-i"] if input is not None else [])
-            + ["onionpress-wordpress", "wp", "--allow-root"] + list(args))
+    argv = [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None)
     try:
         return subprocess.run(
             argv, input=input, env=env,
@@ -348,8 +346,7 @@ def provision_primary_subsite(
     def wp(*args, timeout: int = 30,
            stdin: str | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [docker_bin, "exec"] + (["-i"] if stdin is not None else [])
-            + ["onionpress-wordpress", "wp", "--allow-root"] + list(args),
+            [docker_bin] + wp_files.wp_cli_args(*args, stdin=stdin is not None),
             input=stdin,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
@@ -815,8 +812,7 @@ def _wp_is_installed() -> bool:
     """Cheap wp-cli probe for the SSH/CLI setup path."""
     try:
         r = subprocess.run(
-            ["docker", "exec", "onionpress-wordpress",
-             "wp", "--allow-root", "core", "is-installed"],
+            ["docker"] + wp_files.wp_cli_args("core", "is-installed"),
             capture_output=True, text=True, timeout=15,
         )
         return r.returncode == 0

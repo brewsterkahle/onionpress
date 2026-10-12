@@ -280,11 +280,7 @@ class ContainerManager:
 
     def wp_is_installed(self) -> bool:
         """Check if WordPress core is installed."""
-        result = self.docker.exec(
-            "onionpress-wordpress",
-            ["wp", "--allow-root", "core", "is-installed"],
-            timeout=15,
-        )
+        result = self.docker.wp("core", "is-installed", timeout=15)
         return result.ok
 
     def wait_for_tor(self, timeout: int = 120, interval: int = 2) -> bool:

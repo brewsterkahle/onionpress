@@ -27,6 +27,16 @@ which can reach nothing it could not write anyway:
 
 The bash launchers' wp_put carries PUT_FILE_SCRIPT inline;
 tests/test_wordpress_writes_as_www_data.py keeps the three copies equal.
+
+wp-cli runs as www-data too (wp_cli_args). It loads WordPress, that is
+wp-config.php, the mu-plugins, plugins and themes, every one of them a
+file www-data can write: run as root (`--allow-root`), any code execution
+in WordPress became root in the container at the next wp-cli call, and
+root there reaches the shared volumes and, under rootless Docker, the
+host user's files. Without --allow-root, wp-cli refuses to run as root,
+so a call that slips back to root fails instead of running WordPress.
+The bash launchers' wp_cli/wp_cli_in and the image's onionpress-wp carry
+the same command; tests/test_wp_cli_as_www_data.py keeps them equal.
 """
 
 from __future__ import annotations
@@ -99,6 +109,24 @@ def exec_args(*command: str, container: str = WP_CONTAINER) -> list[str]:
     """`docker` arguments (no binary) that run *command* as www-data: what
     the host reads from or removes in www-data's folders."""
     return ["exec", "-u", WP_USER, container, *command]
+
+
+# wp-cli's cache (core and plugin downloads) goes where www-data can write:
+# its home, /var/www, is root's, and wp-cli warns on every command that
+# wants the cache when it cannot make ~/.wp-cli/cache there.
+WP_CLI_CACHE_DIR = "/tmp/wp-cli-cache"
+
+
+def wp_cli_args(*args: str, stdin: bool = False, nice: bool = False,
+                container: str = WP_CONTAINER) -> list[str]:
+    """`docker` arguments (no binary) that run wp-cli *args* as www-data.
+    *stdin* adds `-i`, for the values and secrets wp-cli reads from stdin
+    (`wp eval` code reading php://stdin, `wp option update <key>`); *nice*
+    runs it at `nice -n 10` (long background sweeps)."""
+    return (["exec"] + (["-i"] if stdin else [])
+            + ["-u", WP_USER, "-e", f"WP_CLI_CACHE_DIR={WP_CLI_CACHE_DIR}",
+               container] + (["nice", "-n", "10"] if nice else [])
+            + ["wp", *args])
 
 
 def own_args(path: str, recursive: bool = False,

@@ -10,6 +10,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import wp_files
 from .platform import OnionPressPaths, detect_timezone
 
 
@@ -148,6 +149,20 @@ class Docker:
         else:
             args += list(command)
         return self.run(args, timeout=timeout, check=check, quiet=quiet)
+
+    def wp(
+        self,
+        *args: str,
+        timeout: int = 30,
+        check: bool = False,
+        quiet: bool = False,
+        input: str | None = None,
+    ) -> DockerResult:
+        """Run wp-cli in the WordPress container as www-data
+        (wp_files.wp_cli_args), never as root. *input* goes to wp-cli's
+        stdin (`docker exec -i`)."""
+        return self.run(wp_files.wp_cli_args(*args, stdin=input is not None),
+                        timeout=timeout, check=check, input=input, quiet=quiet)
 
     def compose(
         self,

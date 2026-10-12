@@ -134,11 +134,11 @@ def _wp(
     timeout: int = 60,
     input: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
-    """Run wp-cli inside the onionpress-wordpress container. With *input*,
-    `docker exec -i` and *input* on wp-cli's stdin."""
+    """Run wp-cli inside the onionpress-wordpress container, as www-data
+    (wp_files.wp_cli_args). With *input*, `docker exec -i` and *input* on
+    wp-cli's stdin."""
     return subprocess.run(
-        [docker_bin, "exec"] + (["-i"] if input is not None else [])
-        + ["onionpress-wordpress", "wp", "--allow-root"] + list(args),
+        [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None),
         input=input,
         capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=timeout,
@@ -500,8 +500,8 @@ def fix_wordpress_uploads_permissions(
     """Ensure `wp-content/uploads` is owned by www-data so the multisite
     per-blog subtree (`sites/<id>/<YYYY>/<MM>/`) can be created on demand.
     Fresh installs had it created root-owned, which broke media uploads
-    with "Unable to create directory" errors, and wp-cli (root) still adds
-    root's files. The chown follows no link (wp_files.own).
+    with "Unable to create directory" errors, and wp-cli added root's files
+    until it ran as www-data. The chown follows no link (wp_files.own).
     """
     log = log_func or _noop_log
     r = _exec_www_data(

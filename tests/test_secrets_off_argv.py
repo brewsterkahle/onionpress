@@ -297,9 +297,9 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
             f.write("SELECT 1;\n")
 
         def reply(argv):
-            if argv[-3:-1] == ["get", "DB_PASSWORD"]:
+            if argv[-2:] == ["get", "DB_PASSWORD"]:
                 return TRICKY_PASSWORD + "\n"
-            if argv[-3:-1] in (["get", "DB_NAME"], ["get", "DB_USER"]):
+            if argv[-2:] in (["get", "DB_NAME"], ["get", "DB_USER"]):
                 return "wordpress\n"
             return ""
         rec = _Recorder(reply)

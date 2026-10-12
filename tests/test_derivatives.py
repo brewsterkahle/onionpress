@@ -236,23 +236,28 @@ class TestRegenerateIfPending(unittest.TestCase):
         regen = fake.regenerate_calls()
         self.assertEqual(len(regen), 2)
         for call in regen:
-            self.assertEqual(call[:3], ["docker", "exec", "onionpress-wordpress"])
-            self.assertEqual(call[3:6], ["nice", "-n", "10"])
+            # wp-cli as www-data, never as root (it loads WordPress's PHP).
+            self.assertEqual(call[:7], ["docker", "exec", "-u", "www-data", "-e",
+                                        "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                                        "onionpress-wordpress"])
+            self.assertEqual(call[7:11], ["nice", "-n", "10", "wp"])
             self.assertIn("--only-missing", call)
             self.assertIn("--yes", call)
-            self.assertIn("--allow-root", call)
+            self.assertNotIn("--allow-root", call)
         self.assertIn("--url=http://localhost/", regen[0])
         self.assertIn("--url=http://localhost/alice/", regen[1])
-        # Cleared on success: both markers, after a chown of the new files.
+        # Cleared on success: both markers.
         self.assertFalse(derivatives.host_marker_present(self.data_dir))
         self.assertFalse(fake.container_marker)
-        # The chown follows no link www-data may have planted (wp_files.own);
-        # the marker goes as www-data.
+        # Before the sweep, www-data gets what an older version's root
+        # wp-cli left root's in uploads, following no link www-data may have
+        # planted (wp_files.own); the marker goes as www-data.
         chown = fake.calls.index(["docker"] + wp_files.own_args(
             derivatives.CONTAINER_UPLOADS, recursive=True))
         rm = fake.calls.index(["docker"] + wp_files.exec_args(
             "rm", "-f", derivatives.CONTAINER_MARKER))
-        self.assertLess(chown, rm)
+        self.assertLess(chown, fake.calls.index(regen[0]))
+        self.assertLess(fake.calls.index(regen[-1]), rm)
         self.assertTrue(any("complete" in m for m in self.logs), self.logs)
 
     def test_container_marker_alone_triggers_the_sweep(self):

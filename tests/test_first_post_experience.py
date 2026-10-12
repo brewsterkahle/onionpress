@@ -44,12 +44,17 @@ def _fail(stderr="error", code=1):
 
 
 def _wp_calls(mrun):
-    """The wp-cli argv (after `wp --allow-root`) of every mocked call."""
+    """The wp-cli argv (after `wp`) of every mocked call, each of which must
+    run wp-cli as www-data (onionpress.wp_files.wp_cli_args)."""
     out = []
     for c in mrun.call_args_list:
         argv = c.args[0] if c.args else []
         if isinstance(argv, list) and "wp" in argv:
-            out.append(argv[argv.index("--allow-root") + 1:])
+            i = argv.index("wp")
+            assert argv[i - 5:i - 1] == ["-u", "www-data", "-e",
+                                         "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache"], argv
+            assert "--allow-root" not in argv, argv
+            out.append(argv[i + 1:])
     return out
 
 

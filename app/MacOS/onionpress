@@ -78,6 +78,19 @@ wp_put() {
         sh "$1" "${2:-600}"
 }
 
+# Run wp-cli in the WordPress container as www-data: wp_cli <args...>, and
+# wp_cli_in for what wp-cli reads from stdin (docker exec -i). wp-cli loads
+# WordPress (wp-config.php, mu-plugins, plugins, themes), every file of it
+# www-data's to write, so run as root a plugin bug became root in the
+# container. No --allow-root: wp-cli refuses to run as root. The command is
+# onionpress.wp_files.wp_cli_args; a test keeps the copies equal.
+wp_cli() {
+    docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp "$@"
+}
+wp_cli_in() {
+    docker exec -i -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp "$@"
+}
+
 # Copy the tor hostname into the shared volume so WP code (theme,
 # mu-plugins, REST endpoints) can answer "what's my .onion?" without
 # parsing Host headers. Read from the tor container, written by www-data:
@@ -537,7 +550,7 @@ command_exists() {
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
     local rc=0
-    docker exec onionpress-wordpress wp core is-installed --allow-root >/dev/null 2>&1 || rc=$?
+    wp_cli core is-installed >/dev/null 2>&1 || rc=$?
     # rc 1 is WordPress answering "not installed"; anything else is docker
     # or wp-cli itself failing, which must not be mistaken for a fresh site.
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
@@ -635,7 +648,7 @@ db_client() {
 # linux/onionpress, and the PHP is setup_logic.WP_SET_PASSWORD_PHP
 # (test-enforced).
 wp_set_user_password() {
-    printf '%s\n%s' "$1" "$2" | docker exec -i onionpress-wordpress wp eval '
+    printf '%s\n%s' "$1" "$2" | wp_cli_in eval '
 $in = explode("\n", file_get_contents("php://stdin"), 2);
 $u = get_user_by("login", trim($in[0]));
 $pw = isset($in[1]) ? trim($in[1]) : "";
@@ -643,7 +656,7 @@ if (!$u || $pw === "") { fwrite(STDERR, "Error: no such user, or an empty passwo
 wp_set_password($pw, $u->ID);
 delete_user_meta($u->ID, "default_password_nag");
 echo "Success: password set for ", $u->user_login, "\n";
-' --allow-root
+'
 }
 
 # Function to detect container runtime
@@ -1202,7 +1215,7 @@ configure_cache_enabler() {
     fi
 
     local configured
-    configured=$(docker exec onionpress-wordpress wp option get onionpress_cache_enabler_configured --allow-root 2>/dev/null || echo "")
+    configured=$(wp_cli option get onionpress_cache_enabler_configured 2>/dev/null || echo "")
     if [ "$configured" = "1" ]; then
         return 0
     fi
@@ -1212,19 +1225,21 @@ configure_cache_enabler() {
     # Ensure FS_METHOD=direct before the settings update triggers Cache
     # Enabler's on_update_option hook, which calls WP_Filesystem to write
     # its per-hostname settings file. Without this, WP_Filesystem falls
-    # back to FTP mode when wp-cli runs as root (ownership mismatch vs.
-    # www-data) and throws "FTP hostname is required". Idempotent.
-    docker exec onionpress-wordpress wp config set FS_METHOD direct --type=constant --allow-root >> "$LOG_FILE" 2>&1 \
+    # back to FTP mode when the files it tests are not the process's own
+    # (wp-cli ran as root before it ran as www-data; a file an older
+    # version left root's does the same) and throws "FTP hostname is
+    # required". Idempotent.
+    wp_cli config set FS_METHOD direct --type=constant >> "$LOG_FILE" 2>&1 \
         || log "WARNING: Failed to set FS_METHOD=direct"
 
     # Pass the full settings array as JSON — wp-cli converts to a PHP array
     # for storage. on_update_option() hooks this and syncs to disk.
     local settings_json='{"cache_expires":1,"cache_expiry_time":1,"clear_site_cache_on_saved_post":1,"clear_site_cache_on_saved_comment":1,"clear_site_cache_on_saved_term":1,"clear_site_cache_on_saved_user":0,"clear_site_cache_on_changed_plugin":1,"convert_image_urls_to_webp":0,"mobile_cache":0,"compress_cache":0,"minify_html":0,"minify_inline_css_js":0,"excluded_post_ids":"","excluded_page_paths":"","excluded_query_strings":"","excluded_cookies":""}'
 
-    docker exec onionpress-wordpress wp option update cache_enabler "$settings_json" --format=json --allow-root >> "$LOG_FILE" 2>&1 \
+    wp_cli option update cache_enabler "$settings_json" --format=json >> "$LOG_FILE" 2>&1 \
         || log "WARNING: Failed to set cache_enabler option"
 
-    docker exec onionpress-wordpress wp option update onionpress_cache_enabler_configured 1 --allow-root >> "$LOG_FILE" 2>&1 \
+    wp_cli option update onionpress_cache_enabler_configured 1 >> "$LOG_FILE" 2>&1 \
         || log "WARNING: Failed to mark Cache Enabler as configured"
 
     log "✓ Cache Enabler configured (1h TTL, auto-purge enabled)"
@@ -1401,23 +1416,23 @@ configure_site_timezones() {
     # On multisite, iterate all sites; on single-site, fall back to the
     # main siteurl. Empty output from `wp site list` means single-site.
     local sites
-    sites="$(docker exec onionpress-wordpress wp site list --field=url --allow-root 2>/dev/null)"
+    sites="$(wp_cli site list --field=url 2>/dev/null)"
     if [ -z "$sites" ]; then
-        sites="$(docker exec onionpress-wordpress wp option get siteurl --allow-root 2>/dev/null)"
+        sites="$(wp_cli option get siteurl 2>/dev/null)"
     fi
 
     local site_url current
     for site_url in $sites; do
-        current="$(docker exec onionpress-wordpress wp option get timezone_string --url="$site_url" --allow-root 2>/dev/null || echo "")"
+        current="$(wp_cli option get timezone_string --url="$site_url" 2>/dev/null || echo "")"
         if [ -z "$current" ]; then
-            if docker exec onionpress-wordpress wp option update timezone_string "$host_tz" --url="$site_url" --allow-root >> "$LOG_FILE" 2>&1; then
+            if wp_cli option update timezone_string "$host_tz" --url="$site_url" >> "$LOG_FILE" 2>&1; then
                 log "✓ Set timezone_string=$host_tz for $site_url"
             else
                 log "WARNING: Failed to set timezone for $site_url"
             fi
             # With timezone_string set, gmt_offset becomes redundant;
             # blank it so WP uses the IANA name rather than a fixed offset.
-            docker exec onionpress-wordpress wp option update gmt_offset "" --url="$site_url" --allow-root >> "$LOG_FILE" 2>&1 || true
+            wp_cli option update gmt_offset "" --url="$site_url" >> "$LOG_FILE" 2>&1 || true
         fi
     done
 }
@@ -2538,13 +2553,12 @@ setup_wordpress_cli() {
     # No --admin_password: ps shows every user's command lines. wp-cli
     # generates a password, printed on the stdout dropped here, and
     # wp_set_user_password then sets the user's on stdin.
-    if docker exec onionpress-wordpress wp core multisite-install \
+    if wp_cli core multisite-install \
         --url="http://localhost" \
         --title="$wp_title" \
         --admin_user="$wp_user" \
         --admin_email="$wp_email" \
-        --skip-email \
-        --allow-root >/dev/null 2>>"$LOG_FILE"; then
+        --skip-email >/dev/null 2>>"$LOG_FILE"; then
         log "WordPress multisite installed successfully via WP-CLI"
     else
         log "ERROR: WP-CLI core multisite-install failed"
@@ -3010,7 +3024,7 @@ main() {
                 exit 0
             fi
             # Make sure WordPress container is running
-            if ! docker exec onionpress-wordpress wp --info --allow-root >/dev/null 2>&1; then
+            if ! wp_cli --info >/dev/null 2>&1; then
                 echo "WordPress container is not running. Start OnionPress first."
                 exit 1
             fi

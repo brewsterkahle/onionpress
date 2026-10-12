@@ -24,6 +24,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+from . import wp_files
+
 LAUNCHER_BIN = "/opt/onionpress/onionpress"
 DATA_DIR = os.path.expanduser("~/.onionpress")
 
@@ -404,9 +406,8 @@ def _wayback_creds_present(timeout_s: int = 90) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         r = subprocess.run(
-            ["docker", "exec", "onionpress-wordpress",
-             "wp", "option", "get", "onionpress_archive_s3_access",
-             "--allow-root"],
+            ["docker"] + wp_files.wp_cli_args(
+                "option", "get", "onionpress_archive_s3_access"),
             capture_output=True, text=True, timeout=10,
         )
         if r.returncode == 0 and (r.stdout or "").strip():

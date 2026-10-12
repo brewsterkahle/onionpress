@@ -310,8 +310,8 @@ class TestSubsiteGetsOnionPressTheme(unittest.TestCase):
                 tokens = _extract_str_args(node.args)
                 if tokens:
                     calls.append(
-                        ["docker", "exec", "onionpress-wordpress",
-                         "wp", "--allow-root"] + tokens
+                        ["docker", "exec", "-u", "www-data",
+                         "onionpress-wordpress", "wp"] + tokens
                     )
 
         return calls

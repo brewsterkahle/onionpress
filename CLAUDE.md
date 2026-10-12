@@ -543,6 +543,34 @@
   sandbox and scans the sources for new root writes. The hub's onionheaven/
   and onionhome/ folders in the shared volume are not covered yet.
 
+## wp-cli Runs as www-data
+- wp-cli loads WordPress: wp-config.php, mu-plugins, plugins, themes, all
+  www-data's to write. Every call ran as root (`--allow-root`), so any PHP
+  execution in WordPress became root in the container at the next call.
+  Host Python: `wp_files.wp_cli_args` (`docker exec -u www-data -e
+  WP_CLI_CACHE_DIR=/tmp/wp-cli-cache … wp`) or `Docker.wp`; the launchers:
+  `wp_cli` / `wp_cli_in` (stdin); activate_plugin.sh the same; the image's
+  scripts: `onionpress-wp` (setsid + runuser to www-data). **Never pass
+  `--allow-root`**: without it wp-cli refuses root, so a regression fails
+  instead of running WordPress as root. `tests/test_wp_cli_as_www_data.py`
+  scans everything that ships for `--allow-root` and for "wp" argv lists
+  outside wp_files, and keeps the copies equal.
+- What wp-cli prints is www-data's to choose. Root acts on none of it but
+  the audit's downloaded core zip, removed only when the name is
+  `/tmp/onionpress-wordpress-<version>.zip`.
+- `onionpress-web-root-owner.sh` (entrypoint, every start, before
+  multisite-init and the audit) gives www-data what root's wp-cli left in
+  /var/www/html (core files from the audit's root `wp core update`,
+  wp-content/upgrade, Cache Enabler's files): www-data's core update fails
+  on them otherwise. `find -execdir chown -h`, never following a link;
+  every folder named `creations` is pruned (the My Creations bind mount:
+  a mount point cannot be renamed), and /proc/self/mountinfo must show
+  every mount below the web root to be such a folder (Docker follows a link
+  at the mount path when it starts) and nothing mounted over the web root,
+  or nothing is changed.
+- App and WordPress image ship together: an old image's scripts still run
+  wp-cli as root, an old app's calls too.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

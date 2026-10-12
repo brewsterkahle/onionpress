@@ -152,8 +152,10 @@ class TestMint(unittest.TestCase):
                 token = auto_login.mint(scope, docker_bin="/x/docker")
             self.assertRegex(token, r"\A[A-Za-z0-9_-]{43}\Z")
             [(argv, stdin)] = rec.calls
-            self.assertEqual(argv, ["/x/docker", "exec", "-i", "onionpress-wordpress",
-                                    "wp", "eval", auto_login.MINT_PHP, "--allow-root"])
+            self.assertEqual(argv, ["/x/docker", "exec", "-i", "-u", "www-data",
+                                    "-e", "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                                    "onionpress-wordpress",
+                                    "wp", "eval", auto_login.MINT_PHP])
             self.assertEqual(stdin, f"{token}\n{scope}\n")
             rec.assert_not_in_argv(self, token)
 
