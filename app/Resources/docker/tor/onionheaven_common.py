@@ -1321,6 +1321,36 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
         if os.path.isdir(key_dir):
             shutil.rmtree(key_dir, ignore_errors=True)
             log(f"Deleted keys for {content_address}")
+        purge_kept_keys(content_address)
+
+
+# Copies the move to the hub data volume kept aside (onionheaven-data-migrate.py):
+# <prefix><time>/keys/<address>/, or keys-2/... where a name was taken.
+_KEPT_COPY_PREFIXES = (".pre-migration-", "legacy-leftover-")
+_KEPT_KEYS_RE = re.compile(r"keys(-[0-9]+)?")
+
+
+def purge_kept_keys(content_address):
+    """Delete content_address's key from every copy the data move kept aside:
+    an unregistered site's key must not outlive its registration there."""
+    if not _ONION_ADDRESS_RE.fullmatch(content_address or ""):
+        return
+    import shutil
+    try:
+        kept = os.listdir(ONIONHEAVEN_DATA_DIR)
+    except OSError:
+        return
+    for name in kept:
+        copy = os.path.join(ONIONHEAVEN_DATA_DIR, name)
+        if not name.startswith(_KEPT_COPY_PREFIXES) or os.path.islink(copy) \
+                or not os.path.isdir(copy):
+            continue
+        for keys in os.listdir(copy):
+            key_dir = os.path.join(copy, keys, content_address)
+            if (_KEPT_KEYS_RE.fullmatch(keys) and not os.path.islink(os.path.join(copy, keys))
+                    and os.path.isdir(key_dir) and not os.path.islink(key_dir)):
+                shutil.rmtree(key_dir, ignore_errors=True)
+                log(f"Deleted the copy of {content_address}'s key kept in {name}/")
 
 
 # ---------------------------------------------------------------------------

@@ -103,6 +103,14 @@ def _rows(db_path):
         conn.close()
 
 
+_BASE32 = "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def _address(i, fill="a"):
+    """A distinct, well-formed v3 onion address for each i < 1024."""
+    return _BASE32[i // 32] + _BASE32[i % 32] + fill * 54 + ".onion"
+
+
 # ---------------------------------------------------------------------------
 # Compose
 # ---------------------------------------------------------------------------
@@ -517,12 +525,13 @@ class TestMigration(MigrationCase):
         self.assertFalse(os.path.exists(self.legacy))
 
     def test_moves_everything_verified(self):
-        self.make_registry(rows=3, keep_open=True)   # leaves -wal and -shm behind
+        self.make_registry(rows=3, keep_open=True)   # the rows are in -wal; -shm too
         kdir = self.add_registrant()
         self.write("heartbeat.log", "pass complete\n", 0o644)
         self.write("activate", "2026-10-12T00:00:00Z\n", 0o644)
         os.chmod(self.legacy, 0o755)
         before = self.tree(self.legacy)
+        self.assertIn("registry.db-wal", before)
         self.assertIn("registry.db-shm", before)
 
         rc, err = self.run_script()
@@ -531,15 +540,19 @@ class TestMigration(MigrationCase):
 
         after = self.tree(self.dest)
         for rel, entry in before.items():
-            if rel.endswith("-shm"):
-                self.assertNotIn(rel, after, "the -shm index is rebuilt, not copied")
-                continue
+            if rel.startswith("registry.db"):
+                continue        # one database file now: below
             with self.subTest(rel=rel):
-                self.assertEqual(after.get(rel), entry)
+                # Same bytes; root's and private on the volume, whatever
+                # the old modes were.
+                want = ("dir", 0o700) if entry[0] == "dir" else ("file", 0o600, entry[2])
+                self.assertEqual(after.get(rel), want)
         key_rel = os.path.relpath(kdir, self.legacy)
         self.assertEqual(after[key_rel], ("dir", 0o700))
-        self.assertEqual(after[os.path.join(key_rel, "ks_hs_id.ed25519_expanded_private")][1],
-                         0o600)
+        self.assertEqual(sorted(r for r in after if r.startswith("registry.db")),
+                         ["registry.db"], "SQLite made one file of the database and "
+                         "its log; the -shm index is rebuilt, not copied")
+        self.assertEqual(after["registry.db"][1], 0o600)
         self.assertEqual(_rows(os.path.join(self.dest, "registry.db")), 3)
 
         self.assertFalse(os.path.lexists(self.legacy), "the old directory is removed")
@@ -550,7 +563,7 @@ class TestMigration(MigrationCase):
     def test_two_containers_at_once_move_it_once(self):
         self.make_registry(rows=4)
         for i in range(20):
-            self.add_registrant(f"{i:02d}" + "a" * 54 + ".onion")
+            self.add_registrant(_address(i))
         argv = [sys.executable, MIGRATE, "--legacy-parent", self.parent,
                 "--dest", self.dest, "--no-mount-check"]
         procs = [subprocess.Popen(argv, stderr=subprocess.PIPE, text=True)
@@ -625,10 +638,14 @@ class TestMigration(MigrationCase):
         self.assertEqual(self.marker()["key_dirs"], 1)
         with open(os.path.join(self.dest, ".migrate.lock")) as f:
             self.assertEqual(f.read(), "")
-        aside = [n for n in os.listdir(self.dest) if n.startswith(".pre-migration-")]
-        self.assertEqual(len(aside), 1)
-        self.assertEqual(sorted(os.listdir(os.path.join(self.dest, aside[0]))),
-                         [".migrate.lock", ".migrated-from-persistent-data"])
+        # No older version wrote these names: never copied, not even aside.
+        self.assertFalse([n for n in os.listdir(self.dest)
+                          if n.startswith((".pre-migration-", "legacy-leftover-"))])
+        self.assertIn("not OnionHeaven data", err)
+        rc, err = self.run_script()
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(os.path.lexists(self.legacy), "the next run removes them")
+        self.assertEqual(self.marker()["key_dirs"], 1)
 
     def test_symlinks_are_never_followed(self):
         self.add_registrant()
@@ -693,16 +710,16 @@ class TestMigration(MigrationCase):
         self.make_registry()
         self.add_registrant()
         self.assertEqual(self.run_script()[0], 0)
-        self.add_registrant("c" * 56 + ".onion")
-        stuck = self.write("stuck.db", "x")
+        late = "c" * 56 + ".onion"
+        self.add_registrant(late)
+        stuck = os.path.join(self.legacy, "keys", late, "ks_hs_id.ed25519_expanded_private")
         os.chmod(stuck, 0o000)
         rc, err = self.run_script()
         os.chmod(stuck, 0o600)
         self.assertEqual(rc, 0, err)
-        self.assertIn("moved earlier", err)
-        self.assertTrue(os.path.exists(stuck))
-        self.assertFalse([n for n in os.listdir(self.dest)
-                          if n.startswith("legacy-leftover-")])
+        self.assertIn("did not copy", err)
+        self.assertTrue(os.path.exists(stuck), "what could not be copied stays")
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "keys", late)))
 
     @unittest.skipIf(os.geteuid() == 0, "root reads unreadable files")
     def test_a_failed_copy_without_keys_still_starts(self):
@@ -711,8 +728,9 @@ class TestMigration(MigrationCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("starting anyway", err)
         self.assertTrue(os.path.exists(os.path.join(self.legacy, "heartbeat.log")))
-        self.assertFalse(os.path.exists(os.path.join(self.dest,
-                                                     ".migrated-from-persistent-data")))
+        # The containers start on this volume, so it is the current one
+        # from now on (tests/test_onionheaven_data_move_hardening.py).
+        self.assertIn("move_failed", self.marker())
 
 
 class TestMigrationInternals(MigrationCase):
@@ -722,39 +740,42 @@ class TestMigrationInternals(MigrationCase):
         self.mod = _load_migrate()
 
     def test_a_file_that_changed_after_the_copy_stays(self):
-        path = self.write("keys/x/k", "NEW")
+        address = "x" * 56 + ".onion"
+        path = self.write(f"keys/{address}/hostname", "NEW")
+        parent_fd = os.open(self.parent, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, parent_fd)
         fd = os.open(self.legacy, os.O_RDONLY | os.O_DIRECTORY)
         self.addCleanup(os.close, fd)
-        stale = hashlib.sha256(b"OLD").hexdigest()
-        kept = self.mod._remove_copied(fd, {
-            "keys": ("dir", 0o700, 0, 0, None),
-            "keys/x": ("dir", 0o700, 0, 0, None),
-            "keys/x/k": ("file", 0o600, 0, 0, stale),
-        }, [])
-        self.assertIn("keys/x/k", kept)
+        tree = self.mod._scan(fd)
+        stale = (3, hashlib.sha256(b"OLD").hexdigest())
+        kept = self.mod._remove_old(parent_fd, fd, tree,
+                                    {f"keys/{address}/hostname": stale}, {}, False, [])
+        self.assertIn(f"keys/{address}/hostname", kept)
         with open(path) as f:
             self.assertEqual(f.read(), "NEW")
 
-    def test_a_change_during_the_copy_is_retried(self):
+    def test_a_key_rewritten_during_its_copy_is_copied_again(self):
         self.make_registry()
-        self.add_registrant()
-        real = self.mod._copy_tree
+        kdir = self.add_registrant(key="OLD-KEY")
+        key = os.path.join(kdir, "ks_hs_id.ed25519_expanded_private")
+        real = self.mod._copy_out
         calls = []
 
-        def copy_then_touch(dir_fd, dest_dir, rel, copied):
-            real(dir_fd, dest_dir, rel, copied)
-            if rel:
-                return          # a subdirectory: the copy recurses
-            calls.append(1)
-            if len(calls) == 1:
-                with open(os.path.join(self.legacy, "registry.db"), "ab") as f:
-                    f.write(b"\0")
+        def copy_then_rewrite(src, target, limit):
+            got = real(src, target, limit)
+            if target.endswith("ks_hs_id.ed25519_expanded_private"):
+                calls.append(1)
+                if len(calls) == 1:
+                    with open(key, "w") as f:
+                        f.write("NEW-KEY")
+            return got
 
-        with mock.patch.object(self.mod, "_copy_tree", side_effect=copy_then_touch), \
-                mock.patch.object(self.mod, "log") as log:
-            self.mod.migrate(self.parent, self.dest, attempts=3, delay=0)
-        self.assertEqual(len(calls), 2)
-        self.assertTrue(any("trying again" in c.args[0] for c in log.call_args_list))
+        with mock.patch.object(self.mod, "_copy_out", side_effect=copy_then_rewrite), \
+                mock.patch.object(self.mod, "log"):
+            self.mod.migrate(self.parent, self.dest, attempts=1, delay=0)
+        self.assertEqual(len(calls), 2, "a copy the file no longer matches is not used")
+        with open(os.path.join(self.dest, os.path.relpath(key, self.legacy))) as f:
+            self.assertEqual(f.read(), "NEW-KEY")
         self.assertEqual(self.marker()["key_dirs"], 1)
         self.assertFalse(os.path.lexists(self.legacy))
 

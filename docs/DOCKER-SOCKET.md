@@ -81,19 +81,50 @@ or `onionpress-tor` container, never `onionpress-wordpress`.
 **Moving existing data.** In `onionpress-tor` and `onionheaven` the
 entrypoint runs `onionheaven-data-migrate.py` before anything opens the
 registry, on every start; a lock on the volume makes the second container
-wait for the first. It copies the old directory, verifies the copy and that
-the source did not change meanwhile, puts it in place, writes
-`.migrated-from-persistent-data`, and only then removes each old file that
-still has the bytes it copied. What was already on the volume before that
-first move is kept in `.pre-migration-<time>/`; anything that turns up at the
-old location later is kept in `legacy-leftover-<time>/` and not used.
-Symlinks at the old location are never followed. Nothing moves unless
-`/var/lib/onionheaven` is a mount point. If the first move fails while
-registrants' keys are at stake, the container exits without removing
-anything and Docker restarts it; with no keys there, or once the data in use
-has moved, it starts anyway and tries again next time (WordPress can write
-to the old location, and must not be able to keep the hub from starting). Takeover workers started before the move mount the old volume;
-the heartbeat removes them (`cleanup_dead_workers`) and reassigns their
+wait for the first. Nothing moves unless both `/var/lib/onionheaven` and
+`/var/lib/onionpress` are mount points.
+
+- Only what older versions wrote there moves: `registry.db` (with its
+  `-wal` or `-journal`), `keys/<address>.onion/` with its key files and
+  `hostname`, and the hub's logs and flag files. WordPress owns the folder
+  the old directory is in and can replace it, so the directory is walked
+  through directory descriptors, never following a link and never deeper
+  than that layout. Nothing else there (other names, deeper trees, special
+  files, a file over its size limit or with holes in it) is ever copied.
+- The registry is never opened where it is: root's SQLite would write
+  through a link planted beside it as its `-shm`. The database and its
+  write-ahead log are copied by descriptor, with the log's header unchanged
+  around the copy, so they are one state even while an older container
+  still writes to them, and SQLite makes one database file of that copy on
+  the volume (`Connection.backup`). A registry that is no sound SQLite
+  database moves as it is.
+- Everything copied is root's, folders `0700`, files `0600`. The copy is
+  verified and synced to disk, put in place (a log or journal before its
+  database), `.migrated-from-persistent-data` is written, and only then is
+  each old file removed that still has the bytes copied: the registry's
+  files all together or none. A file that changed stays at the old
+  location, and the next run (the other container's, seconds later, or the
+  next start's) keeps it aside.
+- What was already on the volume before that first move is kept in
+  `.pre-migration-<time>/`. What turns up at the old location later is kept
+  in `legacy-leftover-<time>/` and not used, if it fits beside a reserve of
+  free space; everything else there is removed. A registry written there
+  after the move gets a loud warning in the log: an older OnionPress used
+  the old location since.
+- Kept copies hold registrants' private keys, so they do not stay: a key
+  the volume holds with the same bytes is dropped from them, unregistering
+  an address drops its key from them (`purge_kept_keys`), and each copy is
+  removed 30 days after it was made.
+- If the first move fails while registrants' keys are at stake (a non-empty
+  key file in `keys/<address>.onion/`), the container exits without
+  removing anything and Docker restarts it. With no keys there it starts
+  anyway and marks the volume, so a later start never sets aside what the
+  hub writes there meanwhile. Once the data in use has moved it always
+  starts: WordPress can write to the old location, and must not be able to
+  keep the hub from starting.
+
+Takeover workers started before the move mount the old volume; the
+heartbeat removes them (`cleanup_dead_workers`) and reassigns their
 addresses to workers it starts with the new one.
 
 **Release rule:** compose plus tor-image code again. Publish the tor image,
@@ -102,11 +133,32 @@ an old image moves nothing (the old image keeps using the old location), but
 the hub's status counts and the Linux backup's hub data come up empty until
 the image arrives. An old compose file with a new image must never ship: the
 data stays put, but the hub would run on an empty registry in the container's
-writable layer. On the hub itself, stop OnionPress completely (that also
-removes the takeover workers), update, start, and check the logs of
-`onionheaven` (or `onionpress-tor`, whichever started first) for the "moved
-the OnionHeaven data" line, and the registry count against the one from
-before.
+writable layer.
+
+**Never downgrade a hub across this release.** An older image reads and
+writes the old location again, which the move has emptied: it runs on an
+empty registry, and what it records there is kept aside, not used, by the
+next start of a newer one (with the warning above). Registrations made in
+between then exist only in that `legacy-leftover-<time>/registry.db`.
+
+On the hub itself:
+
+1. Before updating, count what there is: `docker exec onionheaven sqlite3
+   /var/lib/onionpress/onionheaven/registry.db 'SELECT COUNT(*) FROM
+   registry WHERE unregistered_at IS NULL'` and `docker exec onionheaven sh
+   -c 'ls /var/lib/onionpress/onionheaven/keys | wc -l'`. Keep a copy of the
+   old directory too, since a backup made by an older OnionPress does not
+   hold it: `docker exec onionheaven tar -C /var/lib/onionpress -cf -
+   onionheaven > onionheaven-before-update.tar`. It holds every registrant's
+   private key: keep it encrypted and offline, and delete it once the
+   counts below agree.
+2. Stop OnionPress completely, which also removes the takeover workers;
+   `docker ps -a` then lists no `onionheaven-takeover-*` or `onionpress-tor`.
+3. Update, start, and look for the "moved the OnionHeaven data" line in the
+   logs of `onionheaven` (or `onionpress-tor`, whichever started first),
+   and for no `WARNING` or `ERROR` line from `onionheaven-data-migrate`.
+4. Count again on the new location (`/var/lib/onionheaven/registry.db`,
+   `/var/lib/onionheaven/keys`) and compare.
 
 ## The OnionHome name registry
 

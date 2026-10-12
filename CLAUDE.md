@@ -333,13 +333,32 @@
   `onionheaven` or `onionpress-tor`. `tests/test_onionheaven_data_volume.py`.
 - It used to be `onionheaven/` on onionpress-persistent-data. The tor image's
   entrypoint (`onionheaven-data-migrate.py`, onionpress-tor and onionheaven)
-  moves it on start: copy, verify, put in place, marker
+  moves it on start: copy, verify, sync, put in place, marker
   `.migrated-from-persistent-data`, then remove each old file only if it is
-  unchanged. Never into a non-mount; later arrivals go to
-  `legacy-leftover-<time>/`. Fails closed only if the first move fails with
-  keys at stake (never after: WordPress can write the old location).
+  unchanged (the registry's files all or none). Only between mount points
+  (both `/var/lib/onionheaven` and `/var/lib/onionpress`).
+- WordPress owns the old location's folder, so: only `SCHEMA` moves
+  (registry, `keys/<v3>.onion/` key files + hostname, logs, flags), walked
+  by directory fd and never deeper; nothing sparse or over its `LIMITS`.
+  **SQLite never opens a path there** (a planted `-shm` link would have
+  root write through it): db + WAL are copied by fd with the WAL header
+  unchanged around the copy (one state even with an older writer still
+  running), then `Connection.backup` makes one file on the volume. Copies
+  are root's, 0700/0600. A WAL/journal goes into place before its db.
+- Later arrivals go to `legacy-leftover-<time>/` (allowlist only, within a
+  free-space reserve; the rest there is removed; a registry written after
+  the move logs a loud downgrade warning). Kept copies drop keys the volume
+  holds identically, lose an address's key on unregister
+  (`purge_kept_keys`), and are removed after 30 days.
+- Fails closed only if the first move fails with a real key (non-empty key
+  file in `keys/<v3>.onion/`) at stake; a start without keys at stake marks
+  the volume (else the next start would shelve live data). Never after the
+  marker: WordPress can write the old location.
+  `tests/test_onionheaven_data_move_hardening.py`.
 - Compose and tor image ship together (see docs/DOCKER-SOCKET.md, "The
-  OnionHeaven hub data"); on the hub, stop fully before updating.
+  OnionHeaven hub data"). **Never downgrade a hub across this release**;
+  on the hub follow the procedure there (count, tar the old dir, stop
+  fully, update, check the log line and the counts).
 
 ## OnionHome Name Registry Volume
 - OnionHome's `onionnames.db` (onionname → onion address) lives on
