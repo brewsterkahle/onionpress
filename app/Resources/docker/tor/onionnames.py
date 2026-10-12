@@ -613,7 +613,7 @@ def read_local_onion_address(
             addr = f.read().strip()
     except OSError:
         return None
-    if addr.endswith(".onion") and len(addr) == 62:
+    if _ONION_RE.fullmatch(addr):
         return addr
     return None
 

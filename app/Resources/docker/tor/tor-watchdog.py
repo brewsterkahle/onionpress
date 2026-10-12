@@ -27,6 +27,7 @@ import base64
 import glob
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -60,6 +61,15 @@ CONNECT_RETRY_DELAY = 5
 
 # Hidden service key paths
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
+
+# The content address the launcher copies into the volume it shares with
+# the WordPress container, which can write there too.
+SHARED_ONION_ADDRESS_PATH = "/var/lib/onionpress/onion_address"
+
+# A whole v3 onion address. What discover_onion_addresses() reads goes into
+# control-port commands (HSFETCH, GETINFO), where a "\r\n" inside a value
+# that merely ends in ".onion" would start a command of its own.
+_ONION_ADDRESS_RE = re.compile(r"[a-z2-7]{56}\.onion")
 
 
 # ---------------------------------------------------------------------------
@@ -387,22 +397,17 @@ def _hsfetch_missing_descriptors(cmd_sock, state):
 def discover_onion_addresses():
     """Find onion addresses for HSFETCH — our own services + the content address."""
     addresses = set()
-    for path in glob.glob(f"{HS_BASE_DIR}/*/hostname"):
+    paths = glob.glob(f"{HS_BASE_DIR}/*/hostname")
+    # Content address (shared volume) — for reachability checks
+    paths.append(SHARED_ONION_ADDRESS_PATH)
+    for path in paths:
         try:
             with open(path) as f:
                 addr = f.read().strip()
-                if addr.endswith(".onion"):
-                    addresses.add(addr.replace(".onion", ""))
         except OSError:
-            pass
-    # Content address (shared volume) — for reachability checks
-    try:
-        with open("/var/lib/onionpress/onion_address") as f:
-            addr = f.read().strip()
-            if addr.endswith(".onion"):
-                addresses.add(addr.replace(".onion", ""))
-    except OSError:
-        pass
+            continue
+        if _ONION_ADDRESS_RE.fullmatch(addr):
+            addresses.add(addr[:-len(".onion")])
     return list(addresses)
 
 
