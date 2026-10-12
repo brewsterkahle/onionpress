@@ -171,9 +171,20 @@ class TestHostRule(unittest.TestCase):
         """The follow rule refuses what onionpress_is_local_host() calls
         local; the proxy's two direct-connection decisions must be that call."""
         php = _read(TOR_PROXY)
-        decisions = re.findall(r"(?<!function )onionpress_is_local_host\( \$host \)", php)
-        self.assertEqual(len(decisions), 2)
-        self.assertEqual(php.count("parse_url( $url, PHP_URL_HOST )"), 3)
+        curl = php[php.index("add_action( 'http_api_curl', function"):]
+        self.assertTrue(curl.startswith(
+            "add_action( 'http_api_curl', function ( $handle, $parsed_args = array(), $url = '' ) {\n"
+            "    $host = strtolower( (string) parse_url( $url, PHP_URL_HOST ) );\n"
+            "    if ( onionpress_is_local_host( $host ) ) {\n"
+            "        return;\n"), curl[:300])
+        pre = php[php.index("add_filter( 'pre_http_request', function"):]
+        self.assertTrue(pre.startswith(
+            "add_filter( 'pre_http_request', function ( $pre, $args, $url ) {\n"
+            "    $host = strtolower( (string) parse_url( $url, PHP_URL_HOST ) );\n"
+            "    if ( '' === $host || onionpress_is_local_host( $host ) ) {\n"
+            "        return $pre;\n"), pre[:300])
+        self.assertEqual(php.count("add_action( 'http_api_curl'"), 1)
+        self.assertEqual(php.count("add_filter( 'pre_http_request', function"), 1)
 
 
 class TestUrlRule(unittest.TestCase):
@@ -261,6 +272,9 @@ class TestEveryFollowRequestIsChecked(unittest.TestCase):
         allowed = args.index("if ( onionpress_follow_url_allowed( $url ) ) {")
         self.assertIn("$args['reject_unsafe_urls'] = false;", args[allowed:allowed + 100])
         self.assertEqual(args.count("reject_unsafe_urls"), 1)
+        # onionpress-tor-proxy's own lookup-free check gives way to the
+        # follow rule (tests/test_no_clearnet_dns.py covers that check).
+        self.assertIn("unset( $args['onionpress_check_url'] );", args[allowed:allowed + 150])
 
         redirect = _function(self.blogroll, "onionpress_follow_guard_redirect")
         self.assertIn("if ( onionpress_follow_url_allowed( $location ) )", redirect)

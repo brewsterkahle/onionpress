@@ -257,6 +257,30 @@
 - Never call `wp_remote_*`/`fetch_feed` directly for a follow;
   `tests/test_follow_requests.py` fails if one appears.
 
+## WordPress Resolves No Name Outside Docker
+- Tor resolves every name WordPress fetches (socks5h), so a DNS lookup in
+  the wordpress container is only ever a leak: Docker's resolver forwards
+  non-container names to the Docker host's resolvers (the Colima VM's on
+  macOS), on current Docker from the host's own namespace, so the iptables
+  clearnet log may never see it. WordPress made one per `wp_safe_remote_*`
+  request (oEmbed, pingbacks, enclosures, `fetch_feed` and the dashboard
+  feeds, `download_url`, link previews) via `wp_http_validate_url()`'s
+  `gethostbyname()`.
+- onionpress-tor-proxy: `onionpress_tor_proxy_request_args` (last
+  `http_request_args`) turns `reject_unsafe_urls` off for every non-local
+  host and marks it `onionpress_check_url`; `onionpress_tor_proxy_check_url`
+  (pre_http_request) applies `onionpress_remote_url_is_safe()`, WordPress's
+  rules by shape (no IP literal in private ranges unless
+  `http_request_host_is_external`, 2+ labels with an alphabetic TLD, no
+  local-network names, ports per `http_allowed_safe_ports`), never a lookup.
+  `.onion` and update hosts skip the check as before; local hosts keep
+  WordPress's own (Docker answers for them). A redirect must stay on its
+  request's route (local→local or Tor→public shape): the proxy choice is
+  made from the first URL, so local→outside would connect directly.
+- Raw `curl_init` in plugins must set a socks5h proxy or talk only to a
+  container. `tests/test_no_clearnet_dns.py` (PHP harness with the
+  lookup functions disabled; plugin census).
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

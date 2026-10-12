@@ -202,10 +202,14 @@ function onionpress_follow_guarded( $fn ) {
  * blogroll. The request itself goes through Tor, which resolves the name at
  * the exit, and this guard holds the URL, every further request and every
  * redirect to onionpress_follow_url_allowed() in place of that check.
+ * onionpress-tor-proxy replaces the check for every Tor-routed request with
+ * its own lookup-free one (onionpress_check_url); for a follow, the follow
+ * rule replaces that too, as before.
  */
 function onionpress_follow_guard_args( $args, $url ) {
     if ( onionpress_follow_url_allowed( $url ) ) {
         $args['reject_unsafe_urls'] = false;
+        unset( $args['onionpress_check_url'] );
     }
     return $args;
 }
