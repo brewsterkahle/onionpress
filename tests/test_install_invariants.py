@@ -2070,6 +2070,7 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
     def test_py2app_bundles_the_module(self):
         self.assertIn("'onionpress.derivatives'", _read("setup.py"))
 
+
 class TestTorServicesLogEachRequest(unittest.TestCase):
     """The healthcheck server (port 8081) and the OnionHeaven redirect
     service (port 8082) in the tor image used to handle requests silently,
