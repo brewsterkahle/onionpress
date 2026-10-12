@@ -2329,7 +2329,9 @@ setup_wordpress_cli() {
         local staging
         staging=$(mktemp -d -t onionpress-setup-XXXXXX)
         trap "rm -rf '$staging'" RETURN
-        if ! unzip -P "$from_backup_pass" -o "$from_backup_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+        # Either backup format; format 2 needs the Python decoder (plain
+        # unzip can't read it). The password goes over stdin, not argv.
+        if ! printf '%s' "$from_backup_pass" | bundled_python -m onionpress.cli extract-backup --archive "$from_backup_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
             echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
             return 1
         fi
@@ -2460,7 +2462,7 @@ restore_backup() {
 
     # Extract zip
     log "Restore: extracting backup archive..."
-    if ! unzip -P "$password" -o "$zip_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+    if ! printf '%s' "$password" | bundled_python -m onionpress.cli extract-backup --archive "$zip_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
         log "ERROR: Failed to extract backup (wrong password or corrupt zip)"
         echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
         return 1

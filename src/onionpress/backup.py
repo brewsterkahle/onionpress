@@ -1,8 +1,10 @@
 """
 Backup and Restore for OnionPress
 
-Creates password-protected zip archives containing Tor keys, WordPress database,
-and wp-content (themes, plugins, uploads).
+Creates password-protected backups containing Tor keys, WordPress database,
+and wp-content (themes, plugins, uploads). New backups are format 2 (a zip
+inside scrypt + SHAKE256/HMAC-SHA256 encryption, see backup_crypto); format 1
+backups (ZipCrypto zips from `zip -P`) still restore.
 """
 
 import json
@@ -10,13 +12,14 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from onionpress import derivatives, key_manager
+from onionpress import backup_crypto, derivatives, key_manager
 from onionpress.config import DEFAULTS, read_config, read_value, write_value
 
 
@@ -291,7 +294,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
     Args:
         onion_address: Current .onion address
         username: WP admin username (stored in metadata)
-        password: Zip encryption password
+        password: Backup encryption password
         data_dir: OnionPress data directory (defaults to ~/.onionpress). Tests pass a sandbox path.
         output_path: Where to write the .zip file
         version: OnionPress version string
@@ -486,30 +489,18 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # the launchers act on; the archive's uploads/ marker covers
             # restores by versions that don't know this flag.
             'excludes_image_derivatives': True,
+            # Format 2: encrypted container, not a ZipCrypto zip. Restores
+            # pick the decoder from the file itself; this records it.
+            'backup_format': backup_crypto.BACKUP_FORMAT,
         }
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
-        # 8. Create password-protected zip using macOS system zip
+        # 8. Zip and encrypt (format 2). The phase keeps its old name so the
+        #    BACKUP_PHASE timings stay comparable across versions (#214).
         with _phase_timer(log_func, 'BACKUP', 'zip_encrypt'):
-            log_func("Backup: creating encrypted zip archive...")
-            # Remove target if it already exists (zip would append otherwise)
-            if os.path.exists(output_path):
-                os.unlink(output_path)
-
-            # -n skips deflate for already-compressed formats (images, video,
-            # audio, PDFs, archives). Encryption + CRC still run, but we don't
-            # waste CPU running deflate on bytes that won't shrink.
-            result = subprocess.run(
-                ['zip', '-r', '-P', password,
-                 '-n', '.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
-                       ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz',
-                 output_path, '.'],
-                cwd=staging,
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600
-            )
-            if result.returncode != 0:
-                raise Exception(f"zip failed: {result.stderr}")
+            log_func("Backup: creating encrypted archive...")
+            pack_backup(staging, output_path, password, log_func)
 
         log_func(f"BACKUP_PHASE: name=total elapsed_s={time.monotonic() - backup_start:.2f}")
         zip_bytes = os.path.getsize(output_path)
@@ -519,7 +510,79 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         shutil.rmtree(staging, ignore_errors=True)
 
 
-_WRONG_PASSWORD_MSG = "Incorrect password for this backup."
+# Already-compressed formats that `zip -n` stores without deflating: deflate
+# would only burn CPU on bytes that won't shrink.
+_ZIP_STORE_SUFFIXES = ('.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
+                       ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz')
+_ZIP_TIMEOUT_S = 600
+
+
+def pack_backup(staging, output_path, password, log_func):
+    """Write the staged backup tree *staging* to *output_path* as a format-2
+    encrypted backup (see backup_crypto). Shared by create_backup and, via
+    `onionpress.cli pack-backup`, the Linux launcher's bash create_backup.
+
+    The system `zip` builds the same archive it always has (same member
+    names, same -n list) but without -P; its output streams from stdout
+    straight into the encrypting writer, so no unencrypted copy of the
+    archive is written to disk. metadata.json is stamped with
+    backup_format and also stored as the container's metadata record, which
+    is what restore dialogs read. The file appears at *output_path* only
+    once complete.
+    """
+    meta_path = os.path.join(staging, 'metadata.json')
+    with open(meta_path) as f:
+        metadata = json.load(f)
+    if metadata.get('backup_format') != backup_crypto.BACKUP_FORMAT:
+        metadata['backup_format'] = backup_crypto.BACKUP_FORMAT
+        with open(meta_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+    with open(meta_path, 'rb') as f:
+        metadata_bytes = f.read()
+    readme = backup_crypto.readme_text(metadata.get('onionpress_version'))
+
+    # stderr goes to a file, not a pipe: zip can warn once per file, and a
+    # full stderr pipe nobody reads while we drain stdout would deadlock.
+    with tempfile.TemporaryFile() as zip_err:
+        proc = subprocess.Popen(
+            ['zip', '-r', '-q', '-n', _ZIP_STORE_SUFFIXES, '-', '.'],
+            cwd=staging, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=zip_err,
+        )
+        # Same 600 s budget subprocess.run(timeout=) gave the old zip call.
+        killer = threading.Timer(_ZIP_TIMEOUT_S, proc.kill)
+        killer.daemon = True
+        killer.start()
+        try:
+            with backup_crypto.create(output_path, password, metadata_bytes,
+                                      readme) as out:
+                for chunk in iter(lambda: proc.stdout.read(1 << 20), b''):
+                    out.write(chunk)
+                # The last record is written only after zip has exited 0, so
+                # a zip that died midway never yields a complete-looking file.
+                if proc.wait() != 0:
+                    zip_err.seek(0)
+                    err = zip_err.read().decode('utf-8', errors='replace').strip()
+                    raise Exception(f"zip failed (rc={proc.returncode}): {err}")
+        finally:
+            killer.cancel()
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    log_func(f"Backup: archive encrypted (backup format {backup_crypto.BACKUP_FORMAT})")
+
+
+_WRONG_PASSWORD_MSG = backup_crypto.WRONG_PASSWORD_MSG
+
+
+def _check_backup_format(metadata):
+    """Refuse a backup from a newer OnionPress whose format this one doesn't
+    know (format 1 backups carry no backup_format)."""
+    fmt = metadata.get('backup_format', 1)
+    if not isinstance(fmt, int) or fmt > backup_crypto.BACKUP_FORMAT:
+        raise backup_crypto.NewerBackupError(backup_crypto.NEWER_MSG)
+    return metadata
 
 
 @contextmanager
@@ -558,7 +621,10 @@ def read_backup_metadata(zip_path, password):
     """
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            # Try to find metadata.json (may be at root or ./metadata.json)
+            if backup_crypto.PAYLOAD_NAME in zf.namelist():
+                return _check_backup_format(json.loads(
+                    backup_crypto.read_metadata(zip_path, password)))
+            # Format 1. Try to find metadata.json (may be at root or ./metadata.json)
             metadata_name = None
             for name in zf.namelist():
                 if name == 'metadata.json' or name == './metadata.json':
@@ -578,7 +644,8 @@ def _unzip_cli_extract(zip_path, password, dest, log_func):
     """Fast-path extraction via the system `unzip` CLI — C code, ~30-50x faster
     than zipfile's pure-Python ZipCrypto decryption (which runs ~2 MB/s on a
     ~900 MB encrypted backup). Returns True on success, False if `unzip` is
-    absent or errors (caller falls back to zipfile).
+    absent or errors (caller falls back to zipfile). *password* is None for
+    the unencrypted inner zip of a format-2 backup.
 
     Injection-safe: arguments are passed as a LIST to subprocess.run with NO
     shell=True, so the password and paths are literal argv values that a shell
@@ -590,11 +657,12 @@ def _unzip_cli_extract(zip_path, password, dest, log_func):
     import shutil as _shutil
     if _shutil.which('unzip') is None:
         return False
+    pw_args = ['-P', password] if password is not None else []
     try:
         result = subprocess.run(
-            ['unzip', '-o', '-qq', '-P', password, zip_path, '-d', dest],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=900,
+            ['unzip', '-o', '-qq', *pw_args, zip_path, '-d', dest],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=900,
         )
     except (OSError, subprocess.TimeoutExpired) as e:
         # Type only: str(TimeoutExpired) is the full argv, password included.
@@ -609,6 +677,34 @@ def _unzip_cli_extract(zip_path, password, dest, log_func):
     return True
 
 
+def extract_archive(zip_path, password, dest, log_func):
+    """Extract a backup of either format into *dest*.
+
+    Format 2: decrypt the inner zip to a temp file (every record verified
+    first), then unzip it — no password, so `unzip` and zipfile are both
+    fast. Format 1: `unzip -P`, falling back to zipfile. Either way a wrong
+    password raises ValueError before anything lands in *dest*.
+    """
+    if backup_crypto.is_encrypted_backup(zip_path):
+        log_func("Restore: decrypting backup (format 2)...")
+        fd, inner = tempfile.mkstemp(prefix='onionpress-restore-', suffix='.zip')
+        os.close(fd)
+        try:
+            backup_crypto.decrypt_archive(zip_path, password, inner)
+            if not _unzip_cli_extract(inner, None, dest, log_func):
+                with zipfile.ZipFile(inner, 'r') as zf:
+                    zf.extractall(dest)
+        finally:
+            os.unlink(inner)
+        return
+    if not _unzip_cli_extract(zip_path, password, dest, log_func):
+        # Fallback: pure-Python zipfile — always available, but slow for
+        # ZipCrypto. Also the path that surfaces a wrong-password error.
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            with _wrong_password_as_valueerror(zf):
+                zf.extractall(dest, pwd=password.encode())
+
+
 def extract_backup(zip_path, password, log_func, staging=None):
     """Extract a backup zip into a staging dir; return (staging, metadata).
 
@@ -618,25 +714,20 @@ def extract_backup(zip_path, password, log_func, staging=None):
     install-from-backup. Validates the password as a side effect — a wrong
     password raises ValueError here before any state is touched.
 
-    Uses the system `unzip` CLI when available (much faster for password-
-    protected archives), falling back to pure-Python zipfile otherwise.
+    Handles both backup formats (extract_archive); also the bash launchers'
+    restore paths, via `onionpress.cli extract-backup`.
     """
     if staging is None:
         staging = tempfile.mkdtemp(prefix='onionpress-restore-')
     with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
         log_func("Restore: extracting backup archive...")
-        if not _unzip_cli_extract(zip_path, password, staging, log_func):
-            # Fallback: pure-Python zipfile — always available, but slow for
-            # ZipCrypto. Also the path that surfaces a wrong-password error.
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                with _wrong_password_as_valueerror(zf):
-                    zf.extractall(staging, pwd=password.encode())
+        extract_archive(zip_path, password, staging, log_func)
     metadata_path = os.path.join(staging, 'metadata.json')
     if not os.path.exists(metadata_path):
         metadata_path = os.path.join(staging, '.', 'metadata.json')
     with open(metadata_path) as f:
         metadata = json.load(f)
-    return staging, metadata
+    return staging, _check_backup_format(metadata)
 
 
 def peek_backup_metadata(zip_path, password):
@@ -645,6 +736,9 @@ def peek_backup_metadata(zip_path, password):
     front (and show the address/username being restored) before committing.
     Raises ValueError on a wrong password; raises on an invalid backup.
     """
+    if backup_crypto.is_encrypted_backup(zip_path):
+        return _check_backup_format(json.loads(
+            backup_crypto.read_metadata(zip_path, password)))
     with tempfile.TemporaryDirectory(prefix='onionpress-peek-') as tmp:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             names = [n for n in zf.namelist()
@@ -797,16 +891,14 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         # Extract zip
         with _phase_timer(log_func, 'RESTORE', 'zip_extract'):
             log_func("Restore: extracting backup archive...")
-            with zipfile.ZipFile(zip_path, 'r') as zf:
-                with _wrong_password_as_valueerror(zf):
-                    zf.extractall(staging, pwd=password.encode())
+            extract_archive(zip_path, password, staging, log_func)
 
         # Normalize paths -- zip may have ./ prefix
         metadata_path = os.path.join(staging, 'metadata.json')
         if not os.path.exists(metadata_path):
             metadata_path = os.path.join(staging, '.', 'metadata.json')
         with open(metadata_path) as f:
-            metadata = json.load(f)
+            metadata = _check_backup_format(json.load(f))
 
         # Find extracted content directories
         tor_dir = _find_dir(staging, 'tor-keys')

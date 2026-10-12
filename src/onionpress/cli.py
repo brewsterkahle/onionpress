@@ -444,6 +444,33 @@ class OnionPressCLI:
         print(f"{removed} {freed}")
         return 0
 
+    def cmd_pack_backup(self, staging: str, output_path: str, password: str) -> int:
+        """Zip and encrypt a staged backup tree into *output_path* (backup
+        format 2). Used by the Linux launcher's bash create_backup so both
+        platforms write the one format. Messages go to stderr only: the
+        launcher appends them to its own log."""
+        from .backup import pack_backup
+        log = _make_log_func()
+        try:
+            pack_backup(staging, output_path, password, log)
+            return 0
+        except Exception as e:
+            log(f"Backup: encrypting the archive failed: {e}")
+            return 1
+
+    def cmd_extract_backup(self, archive: str, dest: str, password: str) -> int:
+        """Decrypt and extract a backup of either format into *dest*. Used by
+        the bash launchers' restore and `setup --from-backup` paths, which
+        used to run `unzip -P` and cannot read format 2."""
+        from .backup import extract_backup
+        log = _make_log_func()
+        try:
+            extract_backup(archive, password, log, staging=dest)
+            return 0
+        except Exception as e:
+            log(f"Restore: could not extract the backup: {e}")
+            return 1
+
     def cmd_smoke_test_wayback(self) -> int:
         """End-to-end smoke test of the Wayback archiving pipeline.
 
@@ -830,6 +857,26 @@ def main(argv: list[str] = None) -> int:
         help="Print the allowlisted (non-secret) config keys as JSON — "
              "what the WordPress container may see")
 
+    # Backup helpers for the bash launchers. The password comes on stdin,
+    # never in argv.
+    p_pack = sub.add_parser(
+        "pack-backup",
+        help="Zip and encrypt a staged backup directory (backup helper; "
+             "reads the password from stdin)")
+    p_pack.add_argument(
+        "--staging", required=True,
+        help="Staged backup tree (metadata.json, tor-keys/, database/, ...)")
+    p_pack.add_argument(
+        "--output", required=True, help="Backup file to write")
+    p_extract = sub.add_parser(
+        "extract-backup",
+        help="Decrypt and extract a backup, either format, into a directory "
+             "(restore helper; reads the password from stdin)")
+    p_extract.add_argument(
+        "--archive", required=True, help="Backup file to read")
+    p_extract.add_argument(
+        "--dest", required=True, help="Directory to extract into")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -878,6 +925,14 @@ def main(argv: list[str] = None) -> int:
         return cli.cmd_regenerate_derivatives()
     elif args.command == "prune-image-derivatives":
         return cli.cmd_prune_image_derivatives(args.uploads_dir)
+    elif args.command in ("pack-backup", "extract-backup"):
+        pw = sys.stdin.read().rstrip("\n")
+        if not pw:
+            print("ERROR: no password on stdin", file=sys.stderr)
+            return 1
+        if args.command == "pack-backup":
+            return cli.cmd_pack_backup(args.staging, args.output, pw)
+        return cli.cmd_extract_backup(args.archive, args.dest, pw)
     elif args.command == "reset":
         return cli.cmd_reset(yes=args.yes)
     elif args.command == "smoke-test-wayback":

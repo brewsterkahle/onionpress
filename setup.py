@@ -69,7 +69,8 @@ OPTIONS = {
     # All shared code now lives in the `onionpress` package — adding a new
     # submodule means one new line here and nothing in the build scripts.
     'includes': ['subprocess', 'threading', 'os', 'time', 'json',
-                 'onionpress', 'onionpress.backup', 'onionpress.key_manager',
+                 'onionpress', 'onionpress.backup', 'onionpress.backup_crypto',
+                 'onionpress.key_manager',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
                  'onionpress.tor', 'onionpress.colima',

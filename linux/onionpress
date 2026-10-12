@@ -924,7 +924,7 @@ setup_wordpress_interactive() {
         local staging
         staging=$(mktemp -d -t onionpress-setup-XXXXXX)
         trap "rm -rf '$staging'" RETURN
-        if ! unzip -P "$from_backup_pass" -o "$from_backup_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+        if ! printf '%s' "$from_backup_pass" | op_py extract-backup --archive "$from_backup_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
             echo "ERROR: Failed to extract backup (wrong password or corrupt zip)" >&2
             return 1
         fi
@@ -1983,12 +1983,13 @@ with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
 " "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives"
 
-    # 7. Create password-protected zip
-    log "Backup: creating encrypted zip archive..."
-    rm -f "$output_path"
-    (cd "$staging" && zip -r -P "$password" "$output_path" .) >>"$LOG_FILE" 2>&1
-    if [ $? -ne 0 ]; then
-        log "ERROR: zip failed"
+    # 7. Zip and encrypt — backup format 2, written by the shared Python
+    #    helper so both platforms produce the one format (not `zip -P`,
+    #    whose ZipCrypto cipher is weak). It stamps backup_format into
+    #    metadata.json. The password goes over stdin, not argv.
+    log "Backup: creating encrypted archive..."
+    if ! printf '%s' "$password" | op_py pack-backup --staging "$staging" --output "$output_path" >>"$LOG_FILE" 2>&1; then
+        log "ERROR: creating the encrypted archive failed"
         return 1
     fi
 
@@ -2016,9 +2017,10 @@ restore_backup() {
     staging=$(mktemp -d -t onionpress-restore-XXXXXX)
     trap "rm -rf '$staging'" RETURN
 
-    # Extract zip
+    # Extract — either backup format (format 2 needs the Python decoder;
+    # format 1 ZipCrypto zips still go through unzip inside it).
     log "Restore: extracting backup archive..."
-    if ! unzip -P "$password" -o "$zip_path" -d "$staging" >>"$LOG_FILE" 2>&1; then
+    if ! printf '%s' "$password" | op_py extract-backup --archive "$zip_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
         log "ERROR: Failed to extract backup (wrong password or corrupt zip)"
         return 1
     fi

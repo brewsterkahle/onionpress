@@ -233,6 +233,26 @@
 - `metadata.json` gains `excludes_image_derivatives: true`. Old backups restore
   as before (the sweep finds nothing to do).
 
+## Backup Encryption (backup format 2)
+- New backups are an ordinary, unencrypted `.zip` holding `README.txt` and
+  `onionpress-backup.enc`: scrypt (N=2^17, r=8, p=1) → SHAKE256 keystream +
+  HMAC-SHA256 per 1 MiB record, wrapped around the same zip of the same
+  members. Python standard library only — no new dependency in the py2app
+  bundle or on Linux. The layout is in `src/onionpress/backup_crypto.py`'s
+  docstring, pinned by a known-answer vector and an independent decoder in
+  `tests/test_backup_manager.py`; changing the bytes means a new format.
+- **Format 1 (ZipCrypto zips from `zip -P`, everything through 2.5.2) must
+  restore forever.** `backup.extract_archive` picks the decoder by whether
+  the zip holds `onionpress-backup.enc`. Never write `zip -P` again; the
+  tests fail if a launcher does.
+- `metadata.json` carries `backup_format: 2` (absent = 1); a higher number,
+  or unknown version/kdf/suite bytes in the container header, is refused as
+  "made by a newer version of OnionPress".
+- The bash launchers go through `onionpress.cli pack-backup` / `extract-backup`
+  (password on stdin); Linux's inline create_backup no longer zips itself.
+- OnionPress 2.5.2 and older cannot restore a format-2 backup (they report it
+  as not a valid OnionPress backup); the README inside the zip says so.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

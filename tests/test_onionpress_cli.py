@@ -113,6 +113,40 @@ class TestCLIArgParsing(unittest.TestCase):
         instance.cmd_prune_image_derivatives.assert_called_once_with("/tmp/stage/uploads")
 
     @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_pack_backup_reads_the_password_from_stdin(self, MockCLI):
+        """The Linux launcher's bash create_backup pipes the password in;
+        it never appears in argv."""
+        instance = MockCLI.return_value
+        instance.cmd_pack_backup.return_value = 0
+        with mock.patch("sys.stdin", io.StringIO("s3cret pass\n")):
+            self.assertEqual(main(["pack-backup", "--staging", "/tmp/st",
+                                   "--output", "/tmp/b.zip"]), 0)
+        instance.cmd_pack_backup.assert_called_once_with(
+            "/tmp/st", "/tmp/b.zip", "s3cret pass")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_extract_backup_reads_the_password_from_stdin(self, MockCLI):
+        instance = MockCLI.return_value
+        instance.cmd_extract_backup.return_value = 0
+        with mock.patch("sys.stdin", io.StringIO("s3cret pass")):
+            self.assertEqual(main(["extract-backup", "--archive", "/tmp/b.zip",
+                                   "--dest", "/tmp/out"]), 0)
+        instance.cmd_extract_backup.assert_called_once_with(
+            "/tmp/b.zip", "/tmp/out", "s3cret pass")
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
+    def test_backup_helpers_refuse_an_empty_password(self, MockCLI):
+        instance = MockCLI.return_value
+        for argv in (["pack-backup", "--staging", "/s", "--output", "/o"],
+                     ["extract-backup", "--archive", "/a", "--dest", "/d"]):
+            with self.subTest(argv[0]), \
+                    mock.patch("sys.stdin", io.StringIO("")), \
+                    mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(main(argv), 1)
+        instance.cmd_pack_backup.assert_not_called()
+        instance.cmd_extract_backup.assert_not_called()
+
+    @mock.patch("onionpress.cli.OnionPressCLI")
     def test_reset_with_yes(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_reset.return_value = 0
