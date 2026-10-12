@@ -133,12 +133,13 @@ def read_config():
 # Docker exec helper
 # ---------------------------------------------------------------------------
 
-def docker_exec(container, args, timeout=30):
-    """Run a command inside a Docker container. Returns (success, stdout)."""
-    cmd = ["docker", "exec", container] + args
+def docker_exec(container, args, timeout=30, input=None):
+    """Run a command inside a Docker container. Returns (success, stdout).
+    *input*, if given, is written to the command's stdin (docker exec -i)."""
+    cmd = ["docker", "exec"] + (["-i"] if input is not None else []) + [container] + args
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True,
+            cmd, input=input, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout
         )
         if result.returncode != 0 and result.stderr.strip():
@@ -485,18 +486,21 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
         log.debug("POST /%s: persistent path failed, falling back to docker exec", endpoint)
 
     # Fallback: docker exec curl. Used at first-use (no _hub_conn yet)
-    # and when the persistent connection refuses to recover.
+    # and when the persistent connection refuses to recover. The payload
+    # goes on stdin, never in argv: /online carries the onion private key,
+    # and /proc/<pid>/cmdline is readable by every user.
     ok, output = docker_exec(
         "onionpress-tor",
         [
             "curl", "-s", "-X", "POST",
             "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
-            "-d", json.dumps(payload),
+            "--data-binary", "@-",
             "--max-time", str(max_time),
             f"http://{hub_addr}:{API_PORT}/{endpoint}",
         ],
         timeout=docker_timeout,
+        input=json.dumps(payload),
     )
 
     if ok and output:

@@ -48,11 +48,12 @@ def _docker_bin(app):
     return os.path.join(app.bin_dir, "docker")
 
 
-def _run_docker(app, args, timeout=15):
-    """Run a docker command and return (success, stdout)."""
+def _run_docker(app, args, timeout=15, input=None):
+    """Run a docker command and return (success, stdout).
+    *input*, if given, is written to the command's stdin."""
     try:
         result = subprocess.run(
-            [_docker_bin(app)] + args,
+            [_docker_bin(app)] + args, input=input,
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             env=_docker_env(app)
         )
@@ -80,12 +81,13 @@ def _run_docker_raw(app, args, timeout=15):
         return False, b""
 
 
-def _run_docker_rc(app, args, timeout=15):
+def _run_docker_rc(app, args, timeout=15, input=None):
     """Run a docker command and return (returncode, stdout).
-    Unlike _run_docker, returns the actual return code rather than a bool."""
+    Unlike _run_docker, returns the actual return code rather than a bool.
+    *input*, if given, is written to the command's stdin."""
     try:
         result = subprocess.run(
-            [_docker_bin(app)] + args,
+            [_docker_bin(app)] + args, input=input,
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             env=_docker_env(app)
         )
@@ -474,12 +476,15 @@ def _send_heartbeat(app, wordpress_healthy=True):
 
     payload = json.dumps(payload_dict)
 
+    # The payload carries the onion private key, so it goes to curl on
+    # stdin (docker exec -i, --data-binary @-), never in argv: `ps` shows
+    # every user's command lines, on macOS and Linux alike.
     curl_args = [
-        "exec", "onionpress-tor",
+        "exec", "-i", "onionpress-tor",
         "curl", "-s", "-S", "-X", "POST",
         "--socks5-hostname", "127.0.0.1:9050",
         "-H", "Content-Type: application/json",
-        "-d", payload,
+        "--data-binary", "@-",
         "--max-time", "30",
         f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/online"
     ]
@@ -487,7 +492,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
     had_success = getattr(app, '_onionheaven_heartbeat_succeeded', False)
     if not had_success:
         app.log("OnionHeaven: heartbeat sending /online...")
-    rc, output = _run_docker_rc(app, curl_args, timeout=45)
+    rc, output = _run_docker_rc(app, curl_args, timeout=45, input=payload)
     ok = (rc == 0)
     if ok and output:
         try:
@@ -513,7 +518,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
             app.log(f"OnionHeaven: heartbeat /online {reason} rc={rc}, retrying in 3s")
         import time
         time.sleep(3)
-        rc, output = _run_docker_rc(app, curl_args, timeout=45)
+        rc, output = _run_docker_rc(app, curl_args, timeout=45, input=payload)
         ok = (rc == 0)
 
     if ok and output:
@@ -633,15 +638,17 @@ def unregister_from_onionheaven(app, content_address=None):
     last_output = ""
 
     for attempt in range(max_attempts):
+        # Payload on stdin, like the heartbeat's: a signed request stays
+        # out of argv.
         ok, output = _run_docker(app, [
-            "exec", "onionpress-tor",
+            "exec", "-i", "onionpress-tor",
             "curl", "-s", "-X", "POST",
             "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
-            "-d", payload,
+            "--data-binary", "@-",
             "--max-time", "60",
             f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/unregister"
-        ], timeout=75)
+        ], timeout=75, input=payload)
         last_output = output
 
         if ok and output:
@@ -745,15 +752,17 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     last_output = ""
 
     for attempt in range(max_attempts):
+        # Payload on stdin, like the heartbeat's: /online carries the
+        # onion private key, which must stay out of argv.
         ok, output = _run_docker(app, [
-            "exec", "onionpress-tor",
+            "exec", "-i", "onionpress-tor",
             "curl", "-s", "-X", "POST",
             "--socks5-hostname", "127.0.0.1:9050",
             "-H", "Content-Type: application/json",
-            "-d", payload,
+            "--data-binary", "@-",
             "--max-time", str(max_time),
             f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/{endpoint}"
-        ], timeout=max_time + 15)
+        ], timeout=max_time + 15, input=payload)
         last_output = output
 
         if ok and output:

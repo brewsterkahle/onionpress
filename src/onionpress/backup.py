@@ -72,12 +72,11 @@ def _query_workload_stats(db_creds):
         "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE();"
     )
     result = subprocess.run(
-        ['docker', 'exec', 'onionpress-db',
-         'mariadb', '-B', '-N',
-         '-u', db_creds['user'],
-         '-p' + db_creds['password'],
-         '-D', db_creds['name'],
-         '-e', sql],
+        _db_client_argv('mariadb', '-B', '-N',
+                        '-u', db_creds['user'],
+                        '-D', db_creds['name'],
+                        '-e', sql),
+        input=db_creds['password'] + '\n',
         capture_output=True, text=True, encoding='utf-8',
         errors='replace', timeout=10,
     )
@@ -351,11 +350,10 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             os.makedirs(db_dir)
 
             result = subprocess.run(
-                ['docker', 'exec', 'onionpress-db',
-                 'mariadb-dump',
-                 '-u', db_creds['user'],
-                 '-p' + db_creds['password'],
-                 db_creds['name']],
+                _db_client_argv('mariadb-dump',
+                                '-u', db_creds['user'],
+                                db_creds['name']),
+                input=(db_creds['password'] + '\n').encode(),
                 capture_output=True, timeout=120
             )
             if result.returncode != 0:
@@ -983,12 +981,11 @@ def restore_container_artifacts(staging, metadata, log_func):
             capture_output=True, timeout=30, check=True
         )
         result = subprocess.run(
-            ['docker', 'exec', 'onionpress-db',
-             'mariadb',
-             '-u', db_creds['user'],
-             '-p' + db_creds['password'],
-             db_creds['name'],
-             '-e', 'source /tmp/wordpress.sql'],
+            _db_client_argv('mariadb',
+                            '-u', db_creds['user'],
+                            db_creds['name'],
+                            '-e', 'source /tmp/wordpress.sql'),
+            input=db_creds['password'] + '\n',
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
         )
         if result.returncode != 0:
@@ -1014,6 +1011,9 @@ def restore_container_artifacts(staging, metadata, log_func):
         # user's password to match what the current containers are
         # using (from env / wp-config / secrets). Idempotent — if
         # they already match, ALTER USER is effectively a no-op.
+        #
+        # The statement carries the password, so it goes in on stdin; the
+        # root password comes from the db container's own environment.
         log_func("Restore: reconciling DB user password with current secrets...")
         alter_sql = (
             f"ALTER USER 'wordpress'@'%' "
@@ -1021,8 +1021,9 @@ def restore_container_artifacts(staging, metadata, log_func):
             f"FLUSH PRIVILEGES;"
         )
         alter = subprocess.run(
-            ['docker', 'exec', 'onionpress-db', 'sh', '-c',
-             'mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" -e "' + alter_sql + '"'],
+            ['docker', 'exec', '-i', 'onionpress-db', 'sh', '-c',
+             'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb -uroot'],
+            input=alter_sql,
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=15,
         )
@@ -1171,6 +1172,19 @@ def _ensure_multisite_constants(log_func):
              '--raw', '--type=constant', '--allow-root'],
             capture_output=True, timeout=15
         )
+
+
+# The MariaDB clients in onionpress-db take the password from MYSQL_PWD,
+# which this reads from the first line of stdin. As `-p<password>` it would
+# sit in the host's process list, where `ps` shows every user's argv.
+_DB_PASSWORD_FROM_STDIN = 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"'
+
+
+def _db_client_argv(*client_argv):
+    """argv that runs a MariaDB client in onionpress-db. Feed the password
+    as the first line of stdin: ``input=password + '\\n'``."""
+    return ['docker', 'exec', '-i', 'onionpress-db',
+            'sh', '-c', _DB_PASSWORD_FROM_STDIN, 'sh', *client_argv]
 
 
 def _get_db_credentials():

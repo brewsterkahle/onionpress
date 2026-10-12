@@ -573,7 +573,14 @@ if __name__ == "__main__":
         print("  key_manager.py write-keys <hex_privkey> <hex_pubkey> <key_dir>")
         print("  key_manager.py import-key <base32_key> <output_dir>")
         print("  key_manager.py decode-key <base32_key>")
+        print("  (<base32_key> may be '-' to read the key from stdin)")
         sys.exit(1)
+
+    def _key_arg(arg):
+        # '-' reads the key from stdin. The launchers pass it that way so
+        # the key never sits in this process's argv, which `ps` shows to
+        # every user.
+        return sys.stdin.read().strip() if arg == "-" else arg
 
     if len(sys.argv) < 2:
         _usage()
@@ -625,13 +632,13 @@ if __name__ == "__main__":
         elif cmd == "import-key":
             if len(sys.argv) < 4:
                 _usage()
-            address = import_key_b32(sys.argv[2], sys.argv[3])
+            address = import_key_b32(_key_arg(sys.argv[2]), sys.argv[3])
             print(address)
 
         elif cmd == "decode-key":
             if len(sys.argv) < 3:
                 _usage()
-            private_key = decode_base32_key(sys.argv[2])
+            private_key = decode_base32_key(_key_arg(sys.argv[2]))
             public_key = derive_public_key(private_key)
             address = derive_onion_address(public_key)
             print(address)

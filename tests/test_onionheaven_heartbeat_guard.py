@@ -68,7 +68,7 @@ class HeartbeatGuardTest(unittest.TestCase):
         self._orig_build = key_manager.build_openssh_key
         self._orig_wp_healthy = onionheaven._check_wordpress_healthy
 
-        def fake_run_docker_rc(app, args, timeout=None):
+        def fake_run_docker_rc(app, args, timeout=None, input=None):
             self.curl_calls += 1
             return 0, '{"online":true,"registered":true}'
         onionheaven._run_docker_rc = fake_run_docker_rc

@@ -555,6 +555,17 @@ EOF
     fi
 }
 
+# Run a MariaDB client in onionpress-db: db_client <password> <client> [args...]
+# The password goes in on stdin and reaches the client as MYSQL_PWD. As
+# -p<password> it would sit in the process list, where ps shows every
+# user's command lines.
+db_client() {
+    local db_pass="$1"
+    shift
+    printf '%s\n' "$db_pass" | docker exec -i onionpress-db \
+        sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
+}
+
 # Function to detect container runtime
 detect_container_runtime() {
     # Called as RUNTIME=$(detect_container_runtime): stdout IS the return
@@ -785,6 +796,12 @@ generate_vanity_address() {
 # Function to import a pre-generated onion service key
 import_key() {
     local key_b32="$1"
+    # "-" reads the key from stdin, so a caller (the menubar's settings-page
+    # import) can keep it out of this process's argv, which ps shows to
+    # every user. The key is passed on to key_manager.py on stdin too.
+    if [ "$key_b32" = "-" ]; then
+        IFS= read -r key_b32 || true
+    fi
 
     # Ensure data directory exists (import-key may run before first launch)
     mkdir -p "$DATA_DIR"
@@ -836,7 +853,7 @@ HELPEOF
 
     # Decode base32 key and derive .onion address (no files written yet)
     local address
-    address=$(bundled_python "$SCRIPTS_DIR/key_manager.py" decode-key "$key_b32" 2>&1)
+    address=$(printf '%s\n' "$key_b32" | bundled_python "$SCRIPTS_DIR/key_manager.py" decode-key - 2>&1)
 
     if [ $? -ne 0 ]; then
         echo "$address" >&2
@@ -905,7 +922,7 @@ HELPEOF
     touch "$DATA_DIR/.import-key-pending"
 
     # Write all key files (PEM + C Tor + hostname)
-    if ! bundled_python "$SCRIPTS_DIR/key_manager.py" import-key "$key_b32" "$DATA_DIR/shared/vanity-keys" 2>>"$LOG_FILE"; then
+    if ! printf '%s\n' "$key_b32" | bundled_python "$SCRIPTS_DIR/key_manager.py" import-key - "$DATA_DIR/shared/vanity-keys" 2>>"$LOG_FILE"; then
         echo "ERROR: Failed to write key files" >&2
         return 1
     fi
@@ -2493,7 +2510,7 @@ restore_backup() {
             db_pass="$WORDPRESS_DB_PASSWORD"
         fi
         docker cp "$sql_file" onionpress-db:/tmp/wordpress.sql 2>>"$LOG_FILE"
-        docker exec onionpress-db mariadb -u wordpress "-p${db_pass}" wordpress -e "source /tmp/wordpress.sql" 2>>"$LOG_FILE"
+        db_client "$db_pass" mariadb -u wordpress wordpress -e "source /tmp/wordpress.sql" 2>>"$LOG_FILE"
         if [ $? -ne 0 ]; then
             log "ERROR: Database import failed"
             echo "ERROR: Database import failed" >&2

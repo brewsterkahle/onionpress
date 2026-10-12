@@ -5510,9 +5510,12 @@ License: AGPL v3"""
                             "imported_at": now_iso
                         })
                     else:
-                        # Use the onionpress script's import-key command
+                        # Use the onionpress script's import-key command.
+                        # "-" hands it the key on stdin: in argv it would
+                        # show in `ps` to every user on this Mac.
                         r = subprocess.run(
-                            [self.launcher_script, "import-key", key_data],
+                            [self.launcher_script, "import-key", "-"],
+                            input=key_data + "\n",
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
                             timeout=120
                         )
