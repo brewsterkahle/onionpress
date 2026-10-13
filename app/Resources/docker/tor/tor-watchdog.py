@@ -62,6 +62,13 @@ CONNECT_RETRY_DELAY = 5
 
 # Hidden service key paths
 HS_BASE_DIR = "/var/lib/tor/hidden_service"
+SERVICES_JSON_PATH = "/etc/tor/onion-services.json"  # written by entrypoint.sh
+# The delivered key (the install's identity): <name>/<DELIVERED_KEY_NAME>
+# in the onion-keys volume. entrypoint.sh derives C Tor's files from it.
+KEYS_DIR = "/var/lib/onionpress-keys"
+DELIVERED_KEY_NAME = "ks_hs_id.ed25519_expanded_private"
+KEY_CONVERT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "key-convert.py")
 
 # The content address in the shared volume. WordPress (www-data) can write
 # that folder, so what is read there is untrusted: it goes into control-port
@@ -208,7 +215,7 @@ def discover_services():
     """
     # Read service definitions from JSON
     try:
-        with open("/etc/tor/onion-services.json") as f:
+        with open(SERVICES_JSON_PATH) as f:
             svc_defs = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         log(f"No onion-services.json found ({e}) — no services to manage")
@@ -244,18 +251,44 @@ def discover_services():
         if hostname:
             service_id = hostname[:-len(".onion")]
 
-        # Read key — if missing, flag for NEW:BEST generation
         secret_key_file = os.path.join(service_dir, "hs_ed25519_secret_key")
         key_b64 = None
+        refuse_new = False
         try:
             key_b64 = _read_ed25519_key(secret_key_file)
-        except (OSError, ValueError):
-            log(f"No key for {name} — will generate with NEW:BEST")
+        except (OSError, ValueError) as e:
+            key_error = e
+            pem_path = os.path.join(KEYS_DIR, name, DELIVERED_KEY_NAME)
+            traces = _identity_traces(service_dir, pem_path)
+            if not traces:
+                # Nothing anywhere: a fresh install with no delivered key.
+                log(f"No key for {name} — will generate with NEW:BEST")
+            else:
+                # Issue #311: this service has (or had) an address. A key
+                # that cannot be read is a damaged file or a disk that is
+                # not there yet, never permission to become another site.
+                # The delivered key gives back the same address; failing
+                # that, the service stays down rather than mint a new one.
+                pem = _key_from_delivered_pem(pem_path) if "delivered key" in traces else None
+                if pem:
+                    key_b64, service_id = pem
+                    log(f"WARNING: C Tor key for {name} is unusable ({key_error}); "
+                        f"serving {service_id[:16]}... from the delivered key. "
+                        f"The next container start re-derives C Tor's key files.")
+                else:
+                    refuse_new = True
+                    log(f"ERROR: REFUSING to mint a new onion address for {name}: "
+                        f"its key is unusable ({key_error}) but {', '.join(traces)} "
+                        f"exist{'s' if len(traces) == 1 else ''}"
+                        + (f" (address {service_id[:16]}...)" if service_id else "")
+                        + ". The service stays down until its key is restored; "
+                        "NEW:BEST would change the address.")
 
         services.append({
             "service_id": service_id if key_b64 else None,
             "service_name": name,
             "key_b64": key_b64,
+            "refuse_new": refuse_new,
             "ports": ports,
             "service_dir": service_dir,
         })
@@ -263,8 +296,39 @@ def discover_services():
     return services
 
 
-def _save_generated_key(service_dir, resp_lines):
-    """Save key and hostname returned by ADD_ONION NEW:BEST to disk."""
+def _identity_traces(service_dir, pem_path):
+    """What on disk says this service already has an address.
+
+    Any of these means NEW:BEST would replace an existing identity: the
+    delivered key, or C Tor's secret key, public key or hostname (even a
+    damaged or dangling one).
+    """
+    traces = []
+    if os.path.lexists(pem_path):
+        traces.append("delivered key")
+    for fname in ("hs_ed25519_secret_key", "hs_ed25519_public_key", "hostname"):
+        if os.path.lexists(os.path.join(service_dir, fname)):
+            traces.append(fname)
+    return traces
+
+
+def _key_from_delivered_pem(pem_path):
+    """(key_b64, service_id) from the delivered PEM, or None if unusable."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("key_convert", KEY_CONVERT_PATH)
+        key_convert = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(key_convert)
+        expanded_key, public_key = key_convert.parse_arti_pem(pem_path)
+        service_id = key_convert._onion_address(public_key)
+    except Exception as e:  # any failure means "no usable delivered key"
+        log(f"Delivered key {pem_path} is unusable too ({e})")
+        return None
+    return base64.b64encode(expanded_key).decode("ascii"), service_id
+
+
+def _parse_generated_key(resp_lines):
+    """(service_id, key_b64) from an ADD_ONION NEW:BEST reply, or Nones."""
     service_id = None
     key_b64 = None
     for line in resp_lines.splitlines():
@@ -272,24 +336,62 @@ def _save_generated_key(service_dir, resp_lines):
             service_id = line.split("=", 1)[1]
         elif line.startswith("250-PrivateKey=ED25519-V3:"):
             key_b64 = line.split(":", 1)[1]
-    if not service_id or not key_b64:
-        return None
+    return service_id, key_b64
+
+
+def _write_new_file(path, data, mode):
+    """Create path with data in one step; never replaces or follows anything
+    there (FileExistsError). A temp file beside it (O_EXCL, O_NOFOLLOW) is
+    synced, then hard-linked to path, which fails if path exists."""
+    directory, name = os.path.split(path)
+    tmp = os.path.join(directory, f".{name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.link(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    dfd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def _save_generated_key(service_dir, service_id, key_b64):
+    """Save a key minted by ADD_ONION NEW:BEST to disk.
+
+    Only ever creates files: an existing secret key or hostname is an
+    existing identity (issue #311), so it is left alone and the clash is
+    logged. The secret key goes first, so a hostname never exists without it.
+    """
     try:
         os.makedirs(service_dir, exist_ok=True)
         # Secret key first, in C Tor format (32-byte header + 64-byte key),
-        # then the hostname, each in one step: a short key file left by a
-        # crash reads as no key, and the next start would mint yet another
-        # address.
+        # then the hostname, each in one step and never over an existing
+        # file: a short key file left by a crash reads as no key, and an
+        # existing one is an existing identity (issue #311).
         key_bytes = base64.b64decode(key_b64)
         header = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
-        _write_atomic(os.path.join(service_dir, "hs_ed25519_secret_key"),
-                      header + key_bytes)
-        _write_atomic(os.path.join(service_dir, "hostname"),
-                      (service_id + ".onion\n").encode("ascii"))
+        _write_new_file(os.path.join(service_dir, "hs_ed25519_secret_key"),
+                        header + key_bytes, 0o600)
+        _write_new_file(os.path.join(service_dir, "hostname"),
+                        (service_id + ".onion\n").encode("ascii"), 0o644)
         log(f"Saved generated key for {service_id[:16]}... to {service_dir}")
+        return True
+    except FileExistsError as e:
+        log(f"ERROR: not saving generated key for {service_id[:16]}...: "
+            f"{e.filename} already exists and is not overwritten")
     except (OSError, ValueError) as e:
         log(f"Warning: failed to save generated key: {e}")
-    return service_id
+    return False
 
 
 def _write_atomic(path, data):
@@ -326,15 +428,34 @@ def add_all_services(cmd_sock, services):
         if svc.get("key_b64"):
             cmd = f"ADD_ONION ED25519-V3:{svc['key_b64']} Flags=Detach {port_args}"
         else:
+            # NEW:BEST only for a service with no identity anywhere (issue
+            # #311), checked again now: files may have appeared since
+            # discovery, and a key that cannot be read is no licence.
+            traces = _identity_traces(
+                svc.get("service_dir", ""),
+                os.path.join(KEYS_DIR, svc["service_name"], DELIVERED_KEY_NAME))
+            if svc.get("refuse_new") or traces:
+                if not svc.get("refusal_logged"):
+                    log(f"ADD_ONION {svc['service_name']} — SKIPPED: no usable key, "
+                        f"refusing to mint a replacement address")
+                    svc["refusal_logged"] = True
+                svc["refuse_new"] = True
+                continue
             cmd = f"ADD_ONION NEW:BEST Flags=Detach {port_args}"
         resp = send_cmd(cmd_sock, cmd)
         if "250" in resp:
             if svc.get("key_b64"):
-                log(f"ADD_ONION {svc['service_name']} ({svc['service_id'][:16]}...) — ok")
+                if not svc.get("service_id"):
+                    svc["service_id"] = _parse_generated_key(resp)[0]
+                log(f"ADD_ONION {svc['service_name']} ({(svc['service_id'] or '?')[:16]}...) — ok")
             else:
-                # Save the generated key to disk for future restarts
-                new_id = _save_generated_key(svc.get("service_dir", ""), resp)
+                new_id, new_key = _parse_generated_key(resp)
                 svc["service_id"] = new_id
+                if new_id and new_key:
+                    # Keep the key: the next DEL+ADD (sleep/wake, republish)
+                    # must bring back this address, not mint another.
+                    svc["key_b64"] = new_key
+                    _save_generated_key(svc.get("service_dir", ""), new_id, new_key)
                 log(f"ADD_ONION {svc['service_name']} (generated {new_id[:16] if new_id else '?'}...) — ok")
             count += 1
         elif "Onion address collision" in resp:
