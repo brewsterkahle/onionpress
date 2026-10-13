@@ -143,7 +143,9 @@ class TestNoTorImplementationSwitch(unittest.TestCase):
     sleep/wake, the watchdog's stall recovery and the OnionHeaven takeover
     pipeline are all built on the control port. The switch must not creep
     back into the app, the launchers or the compose file — a value nobody
-    honours is worse than none.
+    honours is worse than none. The Settings page offered "Arti (default)"
+    and sent a TOR_IMPL restart key until issue #321, because this scan
+    did not read PHP; it now reads everything that ships.
     """
 
     FILES = [
@@ -152,17 +154,32 @@ class TestNoTorImplementationSwitch(unittest.TestCase):
         "app/Resources/docker/tor/entrypoint.sh",
         "app/Resources/config-template.txt",
     ]
+    # Everything that ships, by extension: Python, the WordPress plugins and
+    # theme, the scripts in the images and the Linux package.
+    GLOBS = [
+        "src/**/*.py", "linux/**/*",
+        "app/Resources/**/*.php", "app/Resources/**/*.js",
+        "app/Resources/**/*.py", "app/Resources/**/*.sh",
+        "app/Resources/**/*.conf", "app/Resources/**/*.yml",
+        "app/MacOS/*",
+    ]
 
     def test_tor_impl_is_gone(self):
         import glob
-        paths = glob.glob(os.path.join(PROJECT_ROOT, "src", "**", "*.py"), recursive=True)
-        paths += [os.path.join(PROJECT_ROOT, f) for f in self.FILES]
+        paths = set()
+        for pattern in self.GLOBS:
+            paths.update(p for p in glob.glob(os.path.join(PROJECT_ROOT, pattern),
+                                              recursive=True) if os.path.isfile(p))
+        paths.update(os.path.join(PROJECT_ROOT, f) for f in self.FILES)
+        paths = sorted(paths)
+        self.assertTrue(any(p.endswith("onionpress-settings.php") for p in paths))
         offenders = []
         for path in paths:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "rb") as f:  # linux/ and app/MacOS/ hold binaries too
                 for lineno, line in enumerate(f, 1):
-                    if "TOR_IMPL" in line:
-                        offenders.append(f"{os.path.relpath(path, PROJECT_ROOT)}:{lineno}: {line.strip()}")
+                    if b"TOR_IMPL" in line:
+                        text = line.decode("utf-8", "replace").strip()
+                        offenders.append(f"{os.path.relpath(path, PROJECT_ROOT)}:{lineno}: {text}")
         self.assertEqual(
             offenders, [],
             "TOR_IMPL was removed with Arti on 2026-09-24. Found:\n" + "\n".join(offenders),
