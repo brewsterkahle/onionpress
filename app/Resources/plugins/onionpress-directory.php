@@ -224,10 +224,23 @@ function onionpress_directory_handle_follow_by_name( $name ) {
         header( 'X-Robots-Tag: noindex, nofollow' );
     }
 
+    // What to follow is the complete <addr>.onion/<onionname>, as the
+    // site's own /follow page (page-follow.php) gives it: a bare address is
+    // the follow key of the network root (blog 1), not of the name's
+    // subsite (#260). The Follow form reads the name out of this form and
+    // its feed discovery falls back to the root feed for a site without a
+    // /<onionname>/ path. A registry name that is not a plain onionname is
+    // left out, never put into the link.
+    $onionname = strtolower( (string) ( $info['onionname'] ?? '' ) );
+    $follow_id = $info['onionaddress'];
+    if ( preg_match( '/^[a-z0-9][a-z0-9._-]*[a-z0-9]$/D', $onionname ) ) {
+        $follow_id .= '/' . $onionname;
+    }
+
     $name_h = esc_html( $info['onionname'] );
-    $addr_h = esc_html( $info['onionaddress'] );
+    $addr_h = esc_html( $follow_id );
     $site_url = 'http://' . $info['onionaddress'] . '/';
-    $deep_link = 'onionpress://follow/' . $info['onionaddress'];
+    $deep_link = 'onionpress://follow/' . $follow_id;
 
     echo '<!doctype html><meta charset="utf-8">';
     echo '<title>Follow @' . $name_h . ' — OnionPress</title>';
@@ -239,7 +252,10 @@ function onionpress_directory_handle_follow_by_name( $name ) {
     echo '<p>To follow this site, open it in <a href="https://www.torproject.org/download/">Tor Browser</a>:</p>';
     echo '<p style="background:#f3f4f6;padding:1em;border-radius:6px;word-break:break-all;font-family:ui-monospace,monospace;font-size:14px">' . $addr_h . '</p>';
     echo '<p>Direct link: <a href="' . esc_url( $site_url ) . '">' . esc_html( $site_url ) . '</a></p>';
-    echo '<p>If you run OnionPress: <a href="' . esc_url( $deep_link ) . '">+ Follow @' . $name_h . '</a></p>';
+    // esc_attr, not esc_url: onionpress: is not in wp_allowed_protocols(),
+    // so esc_url() returned '' and the link pointed back at this page.
+    // $follow_id is a checked v3 address and onionname, nothing else.
+    echo '<p>If you run OnionPress: <a href="' . esc_attr( $deep_link ) . '">+ Follow @' . $name_h . '</a></p>';
     echo '</body>';
     exit;
 }
