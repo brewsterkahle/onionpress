@@ -230,14 +230,34 @@ it as untrusted:
 (`onionnames.registry_in_place`): without it `/var/lib/onionnames` is not the
 volume, or a registry still waits at the old location, and one opened there
 would start empty, every name free for anyone to claim. `/api/name/*`
-answers 503 then. So a registry that cannot be moved (it keeps changing, or
-SQLite finds it damaged) does not stop the container: the site stays up,
-names answer 503, nothing is removed, and the next start tries again.
-Nothing WordPress plants can keep the container from starting. If a damaged
-registry has to be given up, move the old directory aside (`docker exec
-onionpress-tor mv /var/lib/onionpress/onionhome
-/var/lib/onionpress/onionhome.damaged`) and restore the registry from a
-backup; the next start marks the volume and uses it. The old in-container
+answers 503 then. So a registry that cannot be moved does not stop the
+container: the site stays up, names answer 503, nothing is moved or removed,
+no marker is written, and the next start tries again. That covers a registry
+that keeps changing, one SQLite finds damaged, and a file carrying SQLite's
+header (`onionnames.db`, or its `-wal`/`-journal`) that is too large or too
+sparse to read safely: such a file is held, never taken for "not a
+registry", because abandoning a real one would serve an empty registry with
+every name free to claim. Each hold logs one ERROR line from
+onionhome-registry-migrate. Nothing WordPress plants can keep the container
+from starting.
+
+When the ERROR appears:
+1. Preferred: restore a backup made before the update. The restore puts the
+   registry on the new volume; the next start finds it there, marks the
+   volume and serves it. (Backups taken during the hold contain no registry.)
+2. No backup, and the held file is the real registry: copy the old
+   directory out (`docker cp onionpress-tor:/var/lib/onionpress/onionhome
+   ./held`), inspect only the copy with `sqlite3 -safe` and `PRAGMA
+   trusted_schema=OFF` (`PRAGMA integrity_check; SELECT COUNT(*) FROM
+   onionnames;`), compact it (`PRAGMA wal_checkpoint(TRUNCATE); VACUUM;`),
+   copy the compacted `onionnames.db` back over the old one, delete the old
+   `-wal`, `-shm` and `-journal`, and restart onionpress-tor. Check that the
+   "moved … N names, … K invalid rows left out" line gives N+K equal to the
+   count you took.
+3. Only if the file holds no names worth keeping: move the old directory
+   aside (`docker exec onionpress-tor mv /var/lib/onionpress/onionhome
+   /var/lib/onionpress/onionhome.aside`) and restart; the volume is marked
+   and starts empty, every name free to claim. The old in-container
 path `/var/lib/onionhome/onionnames.db` is no longer moved by
 `web-server.py` itself; every container recreate wiped it long ago.
 

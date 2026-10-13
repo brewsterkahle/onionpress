@@ -389,7 +389,12 @@
   purpose. web-server.py serves no name (503) until the move's marker is on
   the volume (`onionnames.registry_in_place`), so the container never fails
   to start over the registry, and an old compose file or a failed move never
-  serves an empty, claimable registry. Needs a tor image publish; on
+  serves an empty, claimable registry. A file with SQLite's header that is
+  too large or sparse to read (db, -wal or -journal) is held — no marker,
+  names at 503, retried every start, one ERROR line — never abandoned as
+  "not a registry"; "sparse" means holes (SEEK_HOLE beyond SPARSE_SLACK),
+  not few allocated blocks, which compressing filesystems report for dense
+  files. Needs a tor image publish; on
   OnionHome compare the name count before and after, and never downgrade it
   afterwards (docs/DOCKER-SOCKET.md, "The OnionHome name registry").
 
