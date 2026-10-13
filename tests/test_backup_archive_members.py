@@ -390,7 +390,7 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
                 self.assert_untouched()
 
     def test_the_extract_backup_helper_refuses(self):
-        """What both bash launchers run (restore_backup, setup --from-backup)."""
+        """What the bash launchers run (restore_backup, setup --from-backup)."""
         dest = os.path.join(self.tmp, "dest")
         os.makedirs(dest)
         err = io.StringIO()
@@ -485,8 +485,9 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
 
 
 class TestLauncherPathsRefuseLinks(unittest.TestCase):
-    """restore_backup and setup --from-backup of both launchers, run for
-    real (docker stubbed) against link-holding backups of both formats."""
+    """restore_backup (Linux) and setup --from-backup (both launchers),
+    run for real (docker stubbed) against link-holding backups of both
+    formats."""
 
     def setUp(self):
         self.h = mv.TestLauncherRestorePaths("test_failed_setup_and_restore_stop_the_launcher")
@@ -510,7 +511,7 @@ class TestLauncherPathsRefuseLinks(unittest.TestCase):
         return text
 
     def test_restore_backup_refuses(self):
-        for launcher in mv.LAUNCHERS:
+        for launcher in mv.TestLauncherRestorePaths.RESTORE:
             for fmt, path in self.backups.items():
                 with self.subTest(launcher=launcher, fmt=fmt):
                     data = self.h._fresh_data_dir()
@@ -536,7 +537,7 @@ class TestLauncherPathsRefuseLinks(unittest.TestCase):
     def test_launchers_extract_only_through_the_helper(self):
         for launcher in mv.LAUNCHERS:
             code = mv._read(launcher)
-            for func in ("restore_backup", mv.TestLauncherRestorePaths.SETUP[launcher]):
+            for func in self.h._restore_functions(launcher):
                 body = "\n".join(line for line in mv._bash_function(code, func).splitlines()
                                  if not line.lstrip().startswith("#"))
                 with self.subTest(launcher, func=func):

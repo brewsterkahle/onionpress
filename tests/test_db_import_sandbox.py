@@ -77,7 +77,7 @@ class TestNoInsecureImportInSources(unittest.TestCase):
         self.assertNotRegex(text, r"source\s+/tmp/")
 
     def test_launcher_db_import_uses_the_safe_flags_on_stdin(self):
-        for path in (MAC, LINUX):
+        for path in (LINUX,):
             fn = _shell_function(_read(path), "db_import")
             for flag in ("--sandbox", "--binary-mode", "--local-infile=0"):
                 self.assertIn(flag, fn, f"{path}: db_import missing {flag}")
@@ -89,14 +89,15 @@ class TestNoInsecureImportInSources(unittest.TestCase):
             self.assertIn("grep -q -- --sandbox", fn)
 
     def test_launcher_restore_calls_db_import(self):
-        for path in (MAC, LINUX):
-            text = _read(path)
-            self.assertRegex(text, r'db_import "\$db_pass" "\$sql_file"',
-                             f"{path}: restore does not call db_import")
+        self.assertRegex(_read(LINUX), r'db_import "\$db_pass" "\$sql_file"',
+                         f"{LINUX}: restore does not call db_import")
 
-    def test_db_import_identical_in_both_launchers(self):
-        self.assertEqual(_shell_function(_read(MAC), "db_import"),
-                         _shell_function(_read(LINUX), "db_import"))
+    def test_mac_launcher_imports_no_dump(self):
+        # Its `restore` is onionpress.cli restore (backup.py's sandboxed
+        # import); the launcher's own restore_backup and db_import are gone.
+        text = _read(MAC)
+        self.assertNotIn("db_import", text)
+        self.assertNotRegex(text, r"\bmariadb\b(?! *--sandbox)[^\n]*wordpress\s*$")
 
 
 # ── backup.py import behaviour ─────────────────────────────────────────────
