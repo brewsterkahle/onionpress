@@ -703,6 +703,14 @@
   largest listed member, with a watchdog on the disk's free space; the
   extracted tree may hold no more than the archive lists. metadata.json
   reads stop at 1 MiB. `tests/test_backup_extract_limits.py`.
+- Restored keys are checked before anything uses them: the site's key
+  files must parse and agree (`key_manager.staged_key_address`), and so
+  must Linux's healthcheck key, whose hostname must name exactly its
+  address (`backup.staged_healthcheck_address`: tor-watchdog.py puts that
+  service id into DEL_ONION on the control port). Only its key files are
+  copied and the hostname is written from the key; the Settings page's
+  restore takes no healthcheck key at all.
+  `tests/test_backup_healthcheck_key_restore.py`.
 
 ## Backups Stage Plain Files Only
 - What create_backup copies out of a container (wp-content; a hub's

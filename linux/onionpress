@@ -2521,14 +2521,31 @@ restore_backup() {
         log "WARNING: No Tor keys in backup — skipping key restore"
     fi
 
-    # Restore healthcheck keys if present in backup
+    # Restore healthcheck keys if present in backup. The next start puts
+    # them in the tor container, where tor-watchdog.py takes the service id
+    # from the hostname for DEL_ONION on the control port (a CR/LF there
+    # would add a command) and the heartbeat sends the hub that address.
+    # Never from the Settings page (the upload is WordPress's to make; a
+    # start makes new keys). Otherwise only a key whose files agree and
+    # whose hostname names its address (healthcheck-key-address), and only
+    # those files, the hostname written from the checked address.
     local hc_backup="$staging/tor-keys/healthcheck"
     if [ -d "$hc_backup" ] && [ -f "$hc_backup/hs_ed25519_secret_key" ]; then
-        local hc_dest="$DATA_DIR/shared/healthcheck-keys"
-        rm -rf "$hc_dest"
-        mkdir -p "$hc_dest"
-        cp "$hc_backup/"* "$hc_dest/"
-        log "Restore: healthcheck keys restored"
+        local hc_addr=""
+        if [ "$from_settings_page" = "true" ]; then
+            log "Restore: the backup's healthcheck keys left out (the Settings page's restore; a start makes new ones)"
+        elif hc_addr=$(op_py healthcheck-key-address --dir "$hc_backup" 2>>"$LOG_FILE") \
+                && is_onion_address "$hc_addr"; then
+            local hc_dest="$DATA_DIR/shared/healthcheck-keys"
+            rm -rf "$hc_dest"
+            mkdir -p "$hc_dest"
+            cp "$hc_backup/hs_ed25519_secret_key" "$hc_dest/"
+            [ -f "$hc_backup/hs_ed25519_public_key" ] && cp "$hc_backup/hs_ed25519_public_key" "$hc_dest/"
+            echo "$hc_addr" > "$hc_dest/hostname"
+            log "Restore: healthcheck keys restored"
+        else
+            log "WARNING: the backup's healthcheck keys do not check out; left out (a start makes new ones)"
+        fi
     fi
 
     # 2. Restore database
