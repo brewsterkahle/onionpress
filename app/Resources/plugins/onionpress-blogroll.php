@@ -22,10 +22,15 @@ add_filter( 'wp_feed_cache_transient_lifetime', function () {
     return HOUR_IN_SECONDS;
 } );
 
-// Invalidate the aggregated cache when the following list changes.
-add_action( 'update_option_onionpress_following', function () {
+// Invalidate the aggregated cache when the following list changes. The
+// first write to a site's list adds the option, and update_option() then
+// fires add_option_*, not update_option_*: hook both, or a blog's first
+// follow stays out of the sidebar and Blogroll until the cache expires.
+add_action( 'add_option_onionpress_following', 'onionpress_blogroll_flush_items' );
+add_action( 'update_option_onionpress_following', 'onionpress_blogroll_flush_items' );
+function onionpress_blogroll_flush_items() {
     delete_transient( 'onionpress_blogroll_items' );
-} );
+}
 
 /**
  * Default follows seeded for a fresh install.
@@ -40,6 +45,26 @@ function onionpress_default_follows() {
     );
 }
 }
+
+/**
+ * Store the default follows in a site's list the first time it is read.
+ *
+ * The stored option is the one list: the sidebar, the Blogroll and the
+ * aggregator read it with an empty default, and Settings does too. Settings
+ * used to fall back to the defaults instead, while nothing ever wrote them,
+ * so a fresh site showed OnionHome and OnionHeaven as followed in Settings
+ * (stuck at "Not checked yet") and nothing in public. Seeding runs only when
+ * the option does not exist: a list the administrator emptied stays empty.
+ * Every site (each subsite too) is seeded on its own first request.
+ */
+if ( ! function_exists( 'onionpress_follow_seed_defaults' ) ) {
+function onionpress_follow_seed_defaults() {
+    if ( false === get_option( 'onionpress_following', false ) ) {
+        add_option( 'onionpress_following', onionpress_default_follows() );
+    }
+}
+}
+add_action( 'init', 'onionpress_follow_seed_defaults' );
 
 /**
  * Parse a follow key into its parts.
