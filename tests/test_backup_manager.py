@@ -312,9 +312,13 @@ class TestCreateBackupZipStructure(unittest.TestCase):
             f.write('    echo "testpass123"; exit 0\n')
             f.write('elif [[ "$1" == "exec" && "$*" == *"mariadb-dump"* ]]; then\n')
             f.write('    echo "CREATE TABLE wp_posts; INSERT INTO wp_posts VALUES (1);"; exit 0\n')
-            f.write('elif [[ "$1" == "exec" && "$*" == *"test -f"* ]]; then\n')
-            # OnionHeaven detection probe — not an OnionHeaven install
-            f.write('    exit 1\n')
+            f.write('elif [[ "$1 $2 $3 $4" == "exec onionpress-tor sh -c" ]]; then\n')
+            # OnionHome's registry check (backup.onionhome_registry_present)
+            # — not OnionHome
+            f.write('    echo no; exit 0\n')
+            f.write('elif [[ "$1 $2 $3 $4" == "exec onionheaven sh -c" ]]; then\n')
+            # OnionHeaven hub data check (backup.HUB_DATA_STATE_SH) — not a hub
+            f.write('    echo none; exit 0\n')
             f.write('elif [[ "$1" == "exec" && "$*" == *"tar -cf -"* ]]; then\n')
             # New wp-content backup flow: stream a tar of fake wp-content
             # (matching what the old `docker cp` branch used to fabricate).

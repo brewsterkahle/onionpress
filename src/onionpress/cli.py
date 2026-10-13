@@ -424,7 +424,8 @@ class OnionPressCLI:
 
     def cmd_backup(self, password: str, output_path: str = None, username: str = None) -> int:
         """Create a backup."""
-        from .backup import create_backup, backup_filename, verify_wp_admin, get_admin_username
+        from .backup import (create_backup, backup_filename, verify_wp_admin,
+                             get_admin_username, unchecked_notes)
         if not username:
             username = get_admin_username(data_dir=self.paths.data_dir)
         ok, err = verify_wp_admin(username, password)
@@ -456,6 +457,10 @@ class OnionPressCLI:
             if isinstance(metadata, dict) and metadata.get("onionheaven_data") == "unsealed":
                 from .backup import HUB_DATA_UNSEALED_NOTE
                 print(f"WARNING: {HUB_DATA_UNSEALED_NOTE}", file=sys.stderr)
+            # A hub or OnionHome check that did not answer: what this
+            # backup may lack.
+            for note in unchecked_notes(metadata):
+                print(f"WARNING: {note}", file=sys.stderr)
             return 0
         except Exception as e:
             self.log(f"Backup failed: {e}")

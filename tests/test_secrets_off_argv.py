@@ -381,7 +381,8 @@ case "$*" in
   *mariadb-dump*) echo "CREATE TABLE wp_posts (id int);" ;;
   *"mariadb -B -N"*) printf '1\\t2\\t3\\t4\\t5\\t6\\n' ;;
   *"tar -cf -"*) d=$(mktemp -d); tar -cf - -C "$d" .; rm -rf "$d" ;;
-  *"test -f"*) exit 1 ;;
+  "exec onionpress-tor sh -c "*) echo no ;;     # not OnionHome
+  "exec onionheaven sh -c "*) echo none ;;      # not a hub
 esac
 exit 0
 """)

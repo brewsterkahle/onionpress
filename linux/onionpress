@@ -2650,11 +2650,16 @@ create_backup() {
     # anything is copied (not on status.json's server_active, which is
     # true on every Linux node). Fails closed: no address, a container
     # that does not answer, or a helper that fails, and it is refused too.
+    # Only exit 3 says why on stdout; any other failure (a crash, an older
+    # CLI) gets the words of backup.UNVERIFIED_BACKUP_REFUSED_MSG, which the
+    # Mac shows for the same case (a test keeps the two equal).
     if [ "$with_hub_data" = "no" ]; then
         local refusal="" refusal_rc=0
         refusal=$(op_py --data-dir "$DATA_DIR" settings-page-backup-check --address "$onion_addr" 2>>"$LOG_FILE") || refusal_rc=$?
         if [ "$refusal_rc" -ne 0 ]; then
-            [ -n "$refusal" ] || refusal="Could not check whether this node may be backed up from the Settings page; nothing was backed up. Back it up with onionpress backup."
+            if [ "$refusal_rc" -ne 3 ] || [ -z "$refusal" ]; then
+                refusal="OnionPress could not check whether this node is an OnionHeaven hub or OnionHome (its containers did not answer), and a backup made here goes through WordPress. Nothing was backed up: try again once OnionPress is running, or back up from the OnionPress app (Backup... in its menu) or with onionpress backup."
+            fi
             BACKUP_REFUSAL="$refusal"
             log "Backup: refused (the Settings page's backup): $refusal"
             return 3
@@ -2810,13 +2815,19 @@ create_backup() {
     #    time (backup.stage_hub_backup). It prints the metadata fields.
     #    Never in a backup handed to WordPress (--without-hub-data), which a
     #    hub refused above.
-    local hub_rc=0 hub_fields=""
+    #    No answer (4) is never "not a hub": the backup goes ahead without
+    #    the hub data and says so (the log, metadata.json's
+    #    onionheaven_data_unchecked, and backup.HUB_DATA_UNCHECKED_NOTE on
+    #    the terminal, a test keeps the words equal).
+    local hub_rc=0 hub_fields="" hub_unchecked="false"
     if [ "$with_hub_data" = "yes" ]; then
         hub_fields=$(op_py --data-dir "$DATA_DIR" stage-hub-backup --staging "$staging" 2>>"$LOG_FILE") || hub_rc=$?
         case "$hub_rc" in
             0) ;;
             3) ;;   # not a hub
-            4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
+            4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not"
+               hub_unchecked="true"
+               echo "WARNING: OnionPress could not check whether this node is an OnionHeaven hub (its onionheaven container did not answer, or could not read the hub registry), so this backup holds no hub registry or registrants' keys. If this is a hub, make another backup once OnionPress is running." >&2 ;;
             *) log "ERROR: could not back up the OnionHeaven data (see above)"
                return 1 ;;
         esac
@@ -2854,6 +2865,10 @@ if sys.argv[7]:
                 'onionheaven_recovery_key_id'):
         if key in fields:
             metadata[key] = fields[key]
+if sys.argv[10] == 'true':
+    # The onionheaven container did not say whether this is a hub: the
+    # hub data may be missing (backup.unchecked_notes).
+    metadata['onionheaven_data_unchecked'] = True
 if sys.argv[8] == 'no':
     # Handed to WordPress: no host secrets, and the names of those that
     # were set (backup.TUNNEL_TOKEN_KEY).
@@ -2861,7 +2876,7 @@ if sys.argv[8] == 'no':
     metadata['secret_config_left_out'] = sys.argv[9].split()
 with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_fields" "$with_host_secrets" "$secrets_left_out"
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_fields" "$with_host_secrets" "$secrets_left_out" "$hub_unchecked"
 
     # 7. Zip and encrypt — backup format 2, written by the shared Python
     #    helper so both platforms produce the one format (not `zip -P`,

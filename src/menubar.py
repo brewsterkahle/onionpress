@@ -4285,6 +4285,10 @@ class OnionPressApp(rumps.App):
                 # A hub without a recovery key: said every time.
                 if metadata.get("onionheaven_data") == "unsealed":
                     msg += "\n\n" + backup_manager.HUB_DATA_UNSEALED_NOTE
+                # A hub or OnionHome check that did not answer: what this
+                # backup may lack, said every time.
+                for note in backup_manager.unchecked_notes(metadata):
+                    msg += "\n\n" + note
                 # Route completion through finish's on_done so on_complete(True)
                 # fires on the main thread AFTER the user dismisses the Done
                 # alert (not from this daemon thread, and not before the alert).

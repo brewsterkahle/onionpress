@@ -26,6 +26,13 @@ file itself.
   (plain or sealed) or OnionHome's name registry before anything is
   touched, and never writes either volume (a registry alone, as every
   Linux backup through 2.5.2 carries, is left out).
+- The checks never read an error as "no": the hub check
+  (HUB_DATA_STATE_SH) answers nothing for a registry sqlite3 cannot read
+  and waits out a writer's lock; create_backup's OnionHome step asks as the
+  refusal does. The owner's backup is then made without that data and
+  says so (the log, metadata.json, the note with the finished backup), and
+  Linux refuses a Settings page backup whose check failed in the Mac's
+  words.
 
 No docker: the container side is a stub script on PATH (the onionheaven
 side is the real shell, run on a sandbox folder), a bash function, or
@@ -83,17 +90,22 @@ class _Container:
     wp-content, and a docker stub on PATH that serves them (onionheaven's
     scripts and onionpress-tor's registry check run for real against the
     folders). The containers named in *unanswered* answer those scripts
-    as a stopped container does: an error from the daemon, exit 1."""
+    as a stopped container does: an error from the daemon, exit 1.
+    keys=False keeps a hub's keys/ empty (registry rows only);
+    sqlite3_fails puts a sqlite3 on PATH that fails as on a registry
+    locked past its busy timeout."""
 
-    def __init__(self, test, tmp, *, hub=True, onionhome=False, unanswered=()):
+    def __init__(self, test, tmp, *, hub=True, keys=True, onionhome=False, unanswered=(),
+                 sqlite3_fails=False):
         self.tmp = tmp
         self.hub = os.path.join(tmp, "hub")
         os.makedirs(os.path.join(self.hub, "keys"))
         if hub:
-            path = os.path.join(self.hub, "keys", A, KEY)
-            os.makedirs(os.path.dirname(path))
-            with open(path, "wb") as f:
-                f.write(REGISTRANT_KEY)
+            if keys:
+                path = os.path.join(self.hub, "keys", A, KEY)
+                os.makedirs(os.path.dirname(path))
+                with open(path, "wb") as f:
+                    f.write(REGISTRANT_KEY)
             conn = sqlite3.connect(os.path.join(self.hub, "registry.db"))
             conn.execute("CREATE TABLE registry (content_address TEXT)")
             conn.execute("INSERT INTO registry VALUES (?)", (A,))
@@ -134,8 +146,6 @@ if [ "$1 $2 $3 $4 $6" = "exec onionpress-tor sh -c sh" ]; then
     exec sh -c "$5" sh "${{7//\\/var\\/lib\\/onionnames/{self.names}}}"
 fi
 case "$*" in
-  "exec onionpress-tor test -f /var/lib/onionnames/onionnames.db")
-      test -f {self.names!r}/onionnames.db ;;
   "cp onionpress-tor:/var/lib/onionnames/"*)
       cp {self.names!r}/"${{2##*/}}" "$3" ;;
   *ks_hs_id.ed25519_expanded_private*) cat {pem!r} ;;
@@ -147,6 +157,10 @@ case "$*" in
 esac
 """)
         os.chmod(os.path.join(self.bin, "docker"), 0o755)
+        if sqlite3_fails:
+            with open(os.path.join(self.bin, "sqlite3"), "w") as f:
+                f.write('#!/bin/sh\necho "Error: database is locked" >&2\nexit 5\n')
+            os.chmod(os.path.join(self.bin, "sqlite3"), 0o755)
         patcher = mock.patch.dict(os.environ, {
             "PATH": self.bin + os.pathsep + os.environ["PATH"],
             "DOCKER_HOST": DOCKER_HOST})
@@ -234,6 +248,11 @@ class TestCreateBackup(unittest.TestCase):
         self.assertNotIn("excludes_onionheaven_data", meta)
         self.assertNotIn("onionheaven_data", meta)
         self.assertFalse([m for m in self.logs if "refused" in m])
+        # Both checks answered: nothing unchecked.
+        self.assertNotIn("onionheaven_data_unchecked", meta)
+        self.assertNotIn("onionhome_registry_unchecked", meta)
+        self.assertEqual(backup.unchecked_notes(meta), [])
+        self.assertFalse([m for m in self.logs if "did not say whether" in m])
 
     def test_no_answer_from_onionheaven_is_refused_a_backup_for_wordpress(self):
         """Fails closed: a hub whose onionheaven container does not answer
@@ -251,11 +270,70 @@ class TestCreateBackup(unittest.TestCase):
 
     def test_no_answer_from_onionheaven_the_owners_backup_goes_ahead_without_it(self):
         """The owner's backup is not handed to WordPress: it is made, says
-        the hub data is not in it, and holds none."""
+        the hub data is not in it (the log, metadata.json, the note with
+        the finished backup), and holds none."""
         meta, members = self._backup(include_hub_data=True, unanswered=("onionheaven",))
         _assert_no_hub_data(self, members)
         self.assertNotIn("onionheaven_data", meta)
         self.assertTrue([m for m in self.logs if "did not say whether" in m])
+        self.assertIn(backup.HUB_DATA_UNCHECKED_WARNING, self.logs)
+        self.assertIs(meta["onionheaven_data_unchecked"], True)
+        self.assertIs(json.loads(members["metadata.json"])["onionheaven_data_unchecked"], True)
+        self.assertNotIn("onionhome_registry_unchecked", meta)
+        self.assertEqual(backup.unchecked_notes(meta), [backup.HUB_DATA_UNCHECKED_NOTE])
+
+    def test_a_hubs_registry_alone_makes_it_a_hub(self):
+        """Registry rows and no keys yet: refused as a hub's."""
+        self._refused(backup.HUB_BACKUP_REFUSED_MSG, keys=False)
+
+    def test_a_registry_sqlite3_cannot_read_is_no_answer(self):
+        """keys/ empty and the registry's rows unreadable (locked past the
+        busy timeout, damaged, no sqlite3): the check printed "none" here,
+        and the Settings page's backup took the hub for any other node. Now
+        it is refused, fail closed."""
+        self._refused(backup.UNVERIFIED_BACKUP_REFUSED_MSG, keys=False, sqlite3_fails=True)
+        self.assertTrue([m for m in self.logs if "refused (the Settings page's backup)" in m])
+
+    def test_a_registry_sqlite3_cannot_read_the_owners_backup_says_so(self):
+        meta, members = self._backup(include_hub_data=True, keys=False, sqlite3_fails=True)
+        _assert_no_hub_data(self, members)
+        self.assertIs(meta["is_onionheaven"], False)
+        self.assertIs(meta["onionheaven_data_unchecked"], True)
+        self.assertIn(backup.HUB_DATA_UNCHECKED_WARNING, self.logs)
+
+    def test_no_answer_about_onionhomes_registry_the_owners_backup_goes_ahead_without_it(self):
+        """Step 4b asks as the refusal does (onionhome_registry_present).
+        Its `docker exec onionpress-tor test -f` read a failed exec as "not
+        OnionHome": the registry stayed out of OnionHome's backup and
+        nothing said so. Now the backup is made, without it, and says so."""
+        meta, members = self._backup(include_hub_data=True, hub=False, onionhome=True,
+                                     unanswered=("onionpress-tor",))
+        self.assertFalse([n for n in members if n.startswith("onionhome")], sorted(members))
+        self.assertIs(meta["is_onionhome"], False)
+        self.assertIs(meta["onionhome_registry_unchecked"], True)
+        self.assertIs(json.loads(members["metadata.json"])["onionhome_registry_unchecked"], True)
+        self.assertNotIn("onionheaven_data_unchecked", meta)
+        self.assertIn(backup.ONIONHOME_REGISTRY_UNCHECKED_WARNING, self.logs)
+        self.assertEqual(backup.unchecked_notes(meta),
+                         [backup.ONIONHOME_REGISTRY_UNCHECKED_NOTE])
+        calls = self.container.calls_made()
+        self.assertFalse([c for c in calls if "test -f" in c], calls)
+        self.assertFalse([c for c in calls if c.startswith("cp onionpress-tor:")], calls)
+
+    def test_a_timeout_asking_about_onionhomes_registry_does_not_abort_the_owners_backup(self):
+        """It raised out of create_backup before."""
+        real_run = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            if list(argv[:5]) == ["docker", "exec", "onionpress-tor", "sh", "-c"]:
+                raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+            return real_run(argv, *args, **kwargs)
+
+        with mock.patch.object(backup.subprocess, "run", side_effect=run):
+            meta, members = self._backup(include_hub_data=True, hub=False, onionhome=True)
+        self.assertNotIn("onionhome/onionnames.db", members)
+        self.assertIs(meta["onionhome_registry_unchecked"], True)
+        self.assertIn(backup.ONIONHOME_REGISTRY_UNCHECKED_WARNING, self.logs)
 
     def test_onionhomes_name_registry_stays_in(self):
         """Not secret (names and addresses /api/name/lookup serves), and an
@@ -264,6 +342,7 @@ class TestCreateBackup(unittest.TestCase):
         meta, members = self._backup(include_hub_data=True, hub=False, onionhome=True)
         self.assertIn("onionhome/onionnames.db", members)
         self.assertIs(meta["is_onionhome"], True)
+        self.assertNotIn("onionhome_registry_unchecked", meta)
 
     def test_the_cli_backup_keeps_it(self):
         """`onionpress backup` (Mac launcher, scrub) writes to the owner's
@@ -279,6 +358,53 @@ class TestCreateBackup(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.cmd_backup(PW, os.path.join(self.tmp, "b.zip"), "admin"), 0)
         self.assertIs(create.call_args.kwargs["include_hub_data"], True)
+
+    def test_the_cli_backup_says_what_could_not_be_checked(self):
+        cli = object.__new__(OnionPressCLI)
+        cli.paths = mock.Mock(data_dir=self.data_dir)
+        cli.containers = mock.Mock(get_onion_address=mock.Mock(return_value=mv.ADDR))
+        cli.log = self.logs.append
+        for meta, want in (
+                ({"onionheaven_data_unchecked": True, "onionhome_registry_unchecked": True},
+                 [backup.HUB_DATA_UNCHECKED_NOTE, backup.ONIONHOME_REGISTRY_UNCHECKED_NOTE]),
+                ({"onionhome_registry_unchecked": True},
+                 [backup.ONIONHOME_REGISTRY_UNCHECKED_NOTE]),
+                ({"is_onionhome": False}, [])):
+            with self.subTest(meta=meta):
+                err = io.StringIO()
+                with mock.patch("onionpress.backup.verify_wp_admin", return_value=(True, None)), \
+                        mock.patch("onionpress.backup.create_backup", return_value=meta), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(err):
+                    self.assertEqual(cli.cmd_backup(PW, os.path.join(self.tmp, "b.zip"),
+                                                    "admin"), 0)
+                self.assertEqual(err.getvalue().splitlines(),
+                                 [f"WARNING: {note}" for note in want])
+
+    def test_the_apps_finished_backup_says_what_could_not_be_checked(self):
+        """src/menubar.py's Backup... (AppKit, so checked as source)."""
+        text = mv._read("src/menubar.py")
+        create = text.index("metadata = backup_manager.create_backup(")
+        body = text[create:text.index("threading.Thread(target=do_backup", create)]
+        self.assertIn("include_hub_data=True", body)
+        notes = body.index("for note in backup_manager.unchecked_notes(metadata):")
+        self.assertLess(notes, body.index("pw.finish(\n                    msg,"))
+        self.assertIn('msg += "\\n\\n" + note', body[notes:])
+
+    def test_unchecked_notes(self):
+        notes = backup.unchecked_notes
+        self.assertEqual(notes({}), [])
+        self.assertEqual(notes(None), [])
+        self.assertEqual(notes(mock.Mock()), [])
+        # Only a real true: metadata.json is read back from a file too.
+        for value in ("true", 1, "yes", False, None):
+            with self.subTest(value=value):
+                self.assertEqual(notes({"onionheaven_data_unchecked": value,
+                                        "onionhome_registry_unchecked": value}), [])
+        self.assertEqual(notes({"onionhome_registry_unchecked": True,
+                                "onionheaven_data_unchecked": True}),
+                         [backup.HUB_DATA_UNCHECKED_NOTE,
+                          backup.ONIONHOME_REGISTRY_UNCHECKED_NOTE])
 
 
 class TestLinuxCreateBackup(unittest.TestCase):
@@ -314,6 +440,16 @@ if cmd == "stage-wp-content":
 if cmd == "stage-hub-backup":
     sys.exit(C.cmd_stage_hub_backup(a[1], data_dir))
 if cmd == "settings-page-backup-check":
+    import os
+    fails = os.environ.get("CHECK_FAILS", "")
+    if fails == "crash":
+        raise RuntimeError("the check crashed")
+    if fails == "says-something":
+        print("half a reason")
+        sys.exit(1)
+    if fails == "usage":
+        print("usage: onionpress [-h] ...", file=sys.stderr)
+        sys.exit(2)
     sys.exit(C.cmd_settings_page_backup_check(a[1], data_dir))
 if cmd == "prune-image-derivatives":
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))
@@ -328,24 +464,26 @@ sys.exit(2)' "$@"
         self.tmp = tempfile.mkdtemp(prefix="op-hub-off-wp-linux-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def _run(self, *args, recovery_key=False, no_address=False, **container):
-        c = _Container(self, self.tmp, **container)
+    def _run(self, *args, recovery_key=False, no_address=False, check_fails="", **container):
+        tmp = tempfile.mkdtemp(dir=self.tmp)       # a run of its own
+        c = _Container(self, tmp, **container)
         self.container = c
-        out = os.path.join(self.tmp, "backup.zip")
-        home = os.path.join(self.tmp, "home")
+        out = os.path.join(tmp, "backup.zip")
+        home = os.path.join(tmp, "home")
         if recovery_key:
             from onionpress import hub_backup
             self.private_text, self.key_id = hub_backup.create_recovery_key(
                 os.path.join(home, ".onionpress"))
-        tmpdir = os.path.join(self.tmp, "t")
+        tmpdir = os.path.join(tmp, "t")
         os.makedirs(tmpdir, exist_ok=True)
         env = {
             "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
             "DATA_DIR": os.path.join(home, ".onionpress"),
-            "LOG_FILE": os.path.join(self.tmp, "log"),
+            "LOG_FILE": os.path.join(tmp, "log"),
             "SRC": mv.SRC, "PY": sys.executable, "PW": PW, "ADDR": mv.ADDR,
             "WORDPRESS_DB_PASSWORD": "x", "ONIONPRESS_VERSION": "2.5.3",
             "DOCKER_HOST": DOCKER_HOST, "NO_ADDR": "1" if no_address else "",
+            "CHECK_FAILS": check_fails,
         }
         is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
         call = " ".join(["create_backup", '"$PW"', repr(out)] + list(args))
@@ -359,7 +497,7 @@ sys.exit(2)' "$@"
                 log = f.read()
         except FileNotFoundError:
             log = ""
-        self.stderr = r.stderr
+        self.stderr, self.stdout = r.stderr, r.stdout
         return r.stdout, log, out
 
     def test_without_hub_data_a_hub_is_refused(self):
@@ -396,12 +534,43 @@ sys.exit(2)' "$@"
         cannot be ruled out."""
         self._assert_unverified(*self._run("--without-hub-data", hub=False, no_address=True))
 
+    def test_without_hub_data_a_check_that_fails_is_refused_in_the_macs_words(self):
+        """Only exit 3 says why on stdout. A check that crashes, prints
+        something and fails, or is not known to an older CLI is refused
+        with UNVERIFIED_BACKUP_REFUSED_MSG, the Mac's words for the case
+        (the launcher's copy of them is held equal here)."""
+        for fails in ("crash", "says-something", "usage"):
+            with self.subTest(fails=fails):
+                self._assert_unverified(*self._run("--without-hub-data", hub=False,
+                                                   check_fails=fails))
+                self.assertNotIn("half a reason", self.stdout)
+
     def test_the_owners_backup_needs_no_answer(self):
         """Without --without-hub-data nothing is asked: the owner's backup
-        is made even when the containers do not answer."""
+        is made even when the containers do not answer, and says the hub
+        data is not in it (metadata.json, HUB_DATA_UNCHECKED_NOTE on the
+        terminal: the launcher's copy of the words is held equal here)."""
         stdout, log, out = self._run(hub=False, unanswered=("onionheaven", "onionpress-tor"))
         self.assertIn("rc=0 refusal=\n", stdout, log)
         self.assertTrue(os.path.exists(out))
+        meta = json.loads(bsl._inner_names_and_bytes(out, PW)["metadata.json"])
+        self.assertIs(meta["onionheaven_data_unchecked"], True)
+        self.assertIn(f"WARNING: {backup.HUB_DATA_UNCHECKED_NOTE}\n", self.stderr)
+        self.assertIn("did not say whether it holds OnionHeaven data", log)
+
+    def test_a_registry_sqlite3_cannot_read_the_owners_backup_says_so(self):
+        stdout, log, out = self._run(keys=False, sqlite3_fails=True)
+        self.assertIn("rc=0 refusal=\n", stdout, log)
+        members = bsl._inner_names_and_bytes(out, PW)
+        _assert_no_hub_data(self, members)
+        meta = json.loads(members["metadata.json"])
+        self.assertIs(meta["onionheaven_data_unchecked"], True)
+        self.assertIs(meta["has_onionheaven"], False)
+        self.assertIn(backup.HUB_DATA_UNCHECKED_NOTE, self.stderr)
+
+    def test_without_hub_data_a_registry_sqlite3_cannot_read_is_refused(self):
+        self._assert_unverified(*self._run("--without-hub-data", keys=False,
+                                           sqlite3_fails=True))
 
     def test_the_owners_backup_keeps_it(self):
         """No recovery key: in the clear under the password, with a
@@ -442,6 +611,11 @@ sys.exit(2)' "$@"
         meta = json.loads(bsl._inner_names_and_bytes(out, PW)["metadata.json"])
         self.assertNotIn("excludes_onionheaven_data", meta)
         self.assertNotIn("onionheaven_data", meta)
+        self.assertNotIn("onionheaven_data_unchecked", meta)
+        stdout, log, out = self._run(hub=False)          # the owner's
+        meta = json.loads(bsl._inner_names_and_bytes(out, PW)["metadata.json"])
+        self.assertNotIn("onionheaven_data_unchecked", meta)
+        self.assertNotIn(backup.HUB_DATA_UNCHECKED_NOTE, self.stderr)
 
     def test_an_unknown_option_is_refused(self):
         stdout, _, out = self._run("--with-hub-data")
@@ -768,6 +942,119 @@ class TestOnionHomeRegistryCheck(unittest.TestCase):
             r = subprocess.run(["sh", "-c", script, "sh", path], capture_output=True,
                                text=True, timeout=10)
             self.assertEqual((r.returncode, r.stdout.strip()), (0, want), path)
+
+
+class TestHubDataStateScript(unittest.TestCase):
+    """backup.HUB_DATA_STATE_SH, which hub_data_state runs in onionheaven:
+    run here for real (sh, ls, sqlite3) on a folder standing in for
+    /var/lib/onionheaven. "none" only when that is known; anything it
+    cannot read is no answer (None), which the Settings page's backup
+    refuses and the owner's backup names as left out. Its sqlite3 query
+    ran under 2>/dev/null and a failure printed "none"."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="op-hub-state-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hub = os.path.join(self.tmp, "hub")
+        os.makedirs(self.hub)
+        self.registry = os.path.join(self.hub, "registry.db")
+
+    def _state(self, path=None):
+        """hub_data_state(), its `docker exec onionheaven sh -c` run here
+        on the sandbox folder (*path*: the script's PATH)."""
+        real_run = subprocess.run
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            self.assertEqual(argv[:5], ["docker", "exec", "onionheaven", "sh", "-c"])
+            script = argv[5].replace(backup.ONIONHEAVEN_DATA_DIR, self.hub)
+            env = dict(os.environ, PATH=path or os.environ["PATH"])
+            return real_run(["/bin/sh", "-c", script], env=env, **kwargs)
+
+        with mock.patch.object(backup.subprocess, "run", side_effect=run):
+            state = backup.hub_data_state()
+        self.assertEqual(len(calls), 1)
+        return state
+
+    def _registry(self, rows, table="registry", journal_mode=None):
+        conn = sqlite3.connect(self.registry)
+        if journal_mode:
+            conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        conn.execute(f"CREATE TABLE {table} (content_address TEXT)")
+        conn.executemany(f"INSERT INTO {table} VALUES (?)", [(A,)] * rows)
+        conn.commit()
+        conn.close()
+
+    def test_known_answers(self):
+        self.assertEqual(self._state(), "none")         # nothing at all
+        self.assertFalse(os.path.lexists(self.registry), "never makes a registry.db")
+        os.makedirs(os.path.join(self.hub, "keys"))
+        self.assertEqual(self._state(), "none")         # an empty keys/
+        open(self.registry, "wb").close()
+        self.assertEqual(self._state(), "none")         # an empty file: no rows
+        self.assertEqual(os.path.getsize(self.registry), 0)
+        os.remove(self.registry)
+        self._registry(rows=0, table="takeover_containers")
+        self.assertEqual(self._state(), "none")         # no registry table: no rows
+        os.remove(self.registry)
+        self._registry(rows=0, journal_mode="WAL")
+        self.assertEqual(self._state(), "none")         # a status query made the schema
+        os.remove(self.registry)
+        self._registry(rows=2)
+        self.assertEqual(self._state(), "hub")          # registry rows, no keys yet
+        os.remove(self.registry)
+        os.makedirs(os.path.join(self.hub, "keys", A))
+        self.assertEqual(self._state(), "hub")          # a registrant's key folder
+
+    def test_a_registry_sqlite3_cannot_read_is_no_answer(self):
+        self._registry(rows=1)
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        failing = os.path.join(bin_dir, "sqlite3")
+        with open(failing, "w") as f:
+            f.write('#!/bin/sh\necho "Error: database is locked" >&2\nexit 5\n')
+        os.chmod(failing, 0o755)
+        # sqlite3 failing (locked past the busy timeout, an I/O error).
+        self.assertIsNone(self._state(path=bin_dir + os.pathsep + os.environ["PATH"]))
+        # No sqlite3 at all: only ls on PATH.
+        os.remove(failing)
+        os.symlink(shutil.which("ls"), os.path.join(bin_dir, "ls"))
+        self.assertIsNone(self._state(path=bin_dir))
+        # A damaged registry, or not a database.
+        with open(self.registry, "wb") as f:
+            f.write(b"not a database " * 64)
+        self.assertIsNone(self._state())
+
+    def test_a_registry_being_written_is_waited_for(self):
+        """A writer's lock is waited out (sqlite3's busy timeout), not taken
+        for no answer: a busy hub's Settings page backup is refused as a
+        hub's, not as an unchecked node's, and its owner's backup holds
+        its data."""
+        import threading
+        self._registry(rows=1, journal_mode="DELETE")
+        writer = sqlite3.connect(self.registry, isolation_level=None,
+                                 check_same_thread=False)
+        self.addCleanup(writer.close)
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT INTO registry VALUES ('b')")
+        done = threading.Timer(1.5, writer.execute, ("COMMIT",))
+        done.start()
+        self.addCleanup(done.cancel)
+        self.assertEqual(self._state(), "hub")
+        done.join()
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads it anyway")
+    def test_a_keys_folder_it_cannot_list_is_no_answer(self):
+        keys = os.path.join(self.hub, "keys")
+        os.makedirs(keys)
+        os.chmod(keys, 0)
+        self.addCleanup(os.chmod, keys, 0o700)
+        self.assertIsNone(self._state())
+
+    def test_no_data_folder_is_no_answer(self):
+        shutil.rmtree(self.hub)
+        self.assertIsNone(self._state())
 
 
 # ---------------------------------------------------------------------------

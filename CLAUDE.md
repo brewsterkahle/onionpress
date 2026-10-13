@@ -520,7 +520,20 @@
   `tests/test_onionheaven_data_move_hardening.py`.
 - Backups hold hub data when the volume has a key dir or a registry row
   (`backup.hub_data_state`, not the long-dead `master-key.json`): registry
-  via `sqlite3 .backup` + `keys/`, nothing else. **Sealed to the hub's
+  via `sqlite3 .backup` + `keys/`, nothing else. **An error is never a
+  "no"**: `HUB_DATA_STATE_SH` says `none` only for no registry file, an
+  empty one or one without a `registry` table or rows; `keys/` or a
+  registry it cannot read (sqlite3 failing or missing, locked past its
+  10 s busy timeout) prints nothing, so `hub_data_state()` is None.
+  OnionHome's check is tri-state the same way (`onionhome_registry_present`,
+  now also create_backup's step 4b, which used `test -f`: a docker error
+  read as "not OnionHome"). The owner's backup then goes ahead
+  without that data and says so: a WARNING in the log, metadata
+  `onionheaven_data_unchecked` / `onionhome_registry_unchecked`, and
+  `unchecked_notes` with the finished backup (Mac message, `onionpress
+  backup`; Linux create_backup prints the hub's on stderr, its words
+  test-locked to `HUB_DATA_UNCHECKED_NOTE`;
+  `tests/test_backup_hub_data_off_wordpress.py`). **Sealed to the hub's
   recovery key** (issue #60 O7, `src/onionpress/hub_backup.py`) when
   `~/.onionpress/hub-backup-recovery.pub` exists: read into memory
   (`read_hub_data`, never a file in the clear), one tar, PyNaCl `SealedBox`
@@ -567,11 +580,13 @@
   OnionHome's, `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`, `hub_data_state() ==
   "hub"`, or OnionHome's registry present; never `server_active` (true on
   every Linux node). **Fails closed**: no own address, `hub_data_state()`
-  not `"none"` (onionheaven did not answer) or no yes/no from
-  `onionhome_registry_present()` (`sh -c` printing yes/no: a failed exec
-  and a missing file both exit 1) is refused too
-  (`UNVERIFIED_BACKUP_REFUSED_MSG`, same paths, rc 3 on Linux); the owner's
-  backups never ask. Every other `create_backup` caller passes
+  not `"none"` (onionheaven did not answer or could not tell) or no yes/no
+  from `onionhome_registry_present()` (`sh -c` printing yes/no: a failed
+  exec and a missing file both exit 1) is refused too
+  (`UNVERIFIED_BACKUP_REFUSED_MSG`, same paths, rc 3 on Linux; Linux
+  create_backup uses its words, test-locked, whenever
+  `settings-page-backup-check` fails without exit 3 and a reason); the
+  owner's backups never ask. Every other `create_backup` caller passes
   `include_hub_data=True` (owner's disk). The page's restore
   (`restore_from_backup(through_wordpress=True)`, Linux `restore_backup
   --from-settings-page`) refuses, before touching anything, a backup with

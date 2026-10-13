@@ -451,7 +451,7 @@ case "$*" in
   *"wp config get DB_PASSWORD"*) echo pw ;;
   *"wp config get"*) echo wordpress ;;
   *mariadb-dump*) echo "CREATE TABLE wp_posts;" ;;
-  *"test -f"*) exit 0 ;;
+  "exec onionpress-tor sh -c "*" sh /var/lib/onionnames/onionnames.db") echo yes ;;
   "exec onionheaven sh -c "*"echo hub"*) echo hub ;;
   "exec onionheaven sh -c "*"tar -cf -"*)
       COPYFILE_DISABLE=1 tar -cf - -C {os.path.join(hub, "onionheaven")!r} . ;;

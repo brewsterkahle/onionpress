@@ -53,10 +53,26 @@ ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
 
 # Prints "hub" if the volume holds hub data (a key directory, or a row in
 # the registry), else "none". Never makes a registry.db (sqlite3 would).
+# "none" only when that is known: no keys/ (or an empty one) and no
+# registry file, an empty one, or one without a registry table or rows.
+# Anything it cannot read (keys/, a registry sqlite3 fails on: corrupt,
+# locked past the busy timeout, no sqlite3) prints nothing and exits 1, so
+# hub_data_state() is None, never a "none" the Settings page's backup check
+# would take for "not a hub". The busy timeout (SQLite's, in ms) lets a hub
+# that is writing its registry answer; both queries fit in hub_data_state's
+# 30 s.
 HUB_DATA_STATE_SH = f"""cd {ONIONHEAVEN_DATA_DIR} || exit 1
-if [ -n "$(ls -A keys 2>/dev/null)" ]; then echo hub; exit 0; fi
-if [ -s registry.db ] && [ -n "$(sqlite3 registry.db 'SELECT 1 FROM registry LIMIT 1' 2>/dev/null)" ]; then
-    echo hub; exit 0
+if [ -e keys ] || [ -L keys ]; then
+    k=$(ls -A keys) || exit 1
+    if [ -n "$k" ]; then echo hub; exit 0; fi
+fi
+if [ -s registry.db ]; then
+    q() {{ sqlite3 -cmd '.timeout 10000' registry.db "$1"; }}
+    t=$(q "SELECT 1 FROM sqlite_master WHERE type = 'table' AND lower(name) = 'registry'") || exit 1
+    if [ -n "$t" ]; then
+        r=$(q 'SELECT 1 FROM registry LIMIT 1') || exit 1
+        if [ -n "$r" ]; then echo hub; exit 0; fi
+    fi
 fi
 echo none
 """
@@ -144,6 +160,29 @@ HUB_DATA_UNSEALED_NOTE = (
     "a key you keep off this machine: in Terminal, run "
     "/Applications/OnionPress.app/Contents/MacOS/onionpress hub-recovery-key "
     "create (on Linux: onionpress hub-recovery-key create).")
+# An owner's backup whose hub or OnionHome check did not answer (a container
+# stopped or restarting, Docker busy, a registry sqlite3 could not read):
+# never taken for "not a hub" or "not OnionHome". The backup is made without
+# that data, and says so: the log (the WARNINGs), metadata.json
+# (onionheaven_data_unchecked, onionhome_registry_unchecked) and, with the
+# finished backup, the NOTEs (unchecked_notes: the Mac's finished-backup
+# message, `onionpress backup`; Linux create_backup prints the hub's).
+HUB_DATA_UNCHECKED_WARNING = (
+    "Backup: WARNING: the onionheaven container did not say whether it holds "
+    "OnionHeaven data; this backup does not")
+ONIONHOME_REGISTRY_UNCHECKED_WARNING = (
+    "Backup: WARNING: the onionpress-tor container did not say whether "
+    "OnionHome's name registry is on its volume; this backup does not hold it")
+HUB_DATA_UNCHECKED_NOTE = (
+    "OnionPress could not check whether this node is an OnionHeaven hub (its "
+    "onionheaven container did not answer, or could not read the hub "
+    "registry), so this backup holds no hub registry or registrants' keys. "
+    "If this is a hub, make another backup once OnionPress is running.")
+ONIONHOME_REGISTRY_UNCHECKED_NOTE = (
+    "OnionPress could not check whether this node is OnionHome (its "
+    "onionpress-tor container did not answer), so this backup does not hold "
+    "OnionHome's name registry. If this is OnionHome, make another backup "
+    "once OnionPress is running.")
 # Logged once a restore has put the hub data in place (the menubar's restore
 # summary looks for it in the CLI's output).
 HUB_DATA_RESTORED_LOG = "Restore: OnionHeaven registry and keys restored"
@@ -713,8 +752,9 @@ def _stage_container_tar(argv, dest, log_func, where):
 
 def hub_data_state():
     """"hub" if the OnionHeaven volume holds a hub's data (registrants'
-    keys, or a registry with a row), "none" if not, None if the onionheaven
-    container did not answer."""
+    keys, or a registry with a row), "none" if it is known not to, None if
+    the onionheaven container did not answer or could not tell (a registry
+    sqlite3 could not read: HUB_DATA_STATE_SH)."""
     try:
         r = subprocess.run(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_STATE_SH],
                            capture_output=True, text=True, timeout=30)
@@ -956,6 +996,17 @@ def onionhome_registry_present():
     return {"yes": True, "no": False}.get(answer)
 
 
+def unchecked_notes(metadata):
+    """The NOTEs for what create_backup could not check and so left out
+    (*metadata* is what it returned), in the order the backup asked."""
+    if not isinstance(metadata, dict):
+        return []
+    return [note for key, note in (
+        ('onionheaven_data_unchecked', HUB_DATA_UNCHECKED_NOTE),
+        ('onionhome_registry_unchecked', ONIONHOME_REGISTRY_UNCHECKED_NOTE))
+        if metadata.get(key) is True]
+
+
 class SettingsPageBackupRefused(ValueError):
     """The Settings page's backup is refused on this node (its message says
     why and where to back it up instead)."""
@@ -1143,12 +1194,13 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    Sealed to the hub's recovery key when one is set up, else in
         #    the clear under the password with a warning (stage_hub_backup).
         #    Never in a backup handed to WordPress (include_hub_data=False),
-        #    which a hub refused at 1b.
+        #    which a hub refused at 1b. No answer (None) is never "not a
+        #    hub": the backup goes ahead without the hub data and says so
+        #    (the log, metadata onionheaven_data_unchecked, unchecked_notes).
         is_onionheaven = False
         hub_fields = {}
         if hub is None:
-            log_func("Backup: WARNING: the onionheaven container did not say whether "
-                     "it holds OnionHeaven data; this backup does not")
+            log_func(HUB_DATA_UNCHECKED_WARNING)
         elif hub == "hub" and include_hub_data:
             with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
                 log_func("Backup: copying the OnionHeaven registry and registrants' keys...")
@@ -1163,13 +1215,17 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #     onionpress-wordpress (docs/DOCKER-SOCKET.md); the archive
         #     keeps calling it onionhome/. Only the registry is copied, not
         #     what the volume's move keeps aside (ONIONHOME_REGISTRY_FILES).
+        #     Asked as the Settings page's check asks
+        #     (onionhome_registry_present): a tor container that does not
+        #     answer is never "not OnionHome" (a failed `docker exec` and a
+        #     missing file both exit 1). The backup goes ahead without the
+        #     registry and says so (the log, metadata
+        #     onionhome_registry_unchecked, unchecked_notes).
         is_onionhome = False
-        onionhome_check = subprocess.run(
-            ['docker', 'exec', 'onionpress-tor',
-             'test', '-f', f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
-            capture_output=True, timeout=10
-        )
-        if onionhome_check.returncode == 0:
+        onionhome = onionhome_registry_present()
+        if onionhome is None:
+            log_func(ONIONHOME_REGISTRY_UNCHECKED_WARNING)
+        elif onionhome:
             with _phase_timer(log_func, 'BACKUP', 'onionhome_copy'):
                 log_func("Backup: copying OnionHome name registry...")
                 is_onionhome = True
@@ -1230,6 +1286,12 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         # A hub's: onionheaven_data "sealed" (with the recovery key's id) or
         # "unsealed" (stage_hub_backup).
         metadata.update(hub_fields)
+        # A check that did not answer: what this backup may lack
+        # (unchecked_notes says it with the finished backup).
+        if hub is None:
+            metadata['onionheaven_data_unchecked'] = True
+        if onionhome is None:
+            metadata['onionhome_registry_unchecked'] = True
         if not include_host_secrets:
             # Which secrets were set and are not in here (names only): a
             # restore says what to enter again (restore_backup_config).

@@ -156,7 +156,12 @@ Linux runs it as `onionpress.cli stage-hub-backup`), and `metadata.json`
 says `onionheaven_data: "sealed"` with the key's id. Without a key it is as
 before: a plain `onionheaven/` folder under the backup's password only
 (`stage_hub_data`), with a warning in the log, in the app's finished-backup
-message and in `onionpress backup`'s output, every time.
+message and in `onionpress backup`'s output, every time. When `onionheaven`
+cannot say whether the volume holds hub data (the container is not running,
+or `sqlite3` cannot read the registry, locked for more than 10 seconds,
+damaged), the backup is made without it and says so in the same places and
+in `metadata.json` (`onionheaven_data_unchecked`); it is never taken for a
+node without hub data.
 
 A restore checks whatever it would put on this volume, sealed or not: a
 backup file is whoever made it's, and one made by code in WordPress, under a
@@ -284,6 +289,9 @@ www-data): code running in WordPress on OnionHome could point any name at an
 onion address of its choosing, or delete the registry. Host-side code reaches
 it through `onionpress-tor`; backup and restore copy `onionnames.db` and its
 `-wal`, nothing else, and the archive still calls the folder `onionhome/`.
+When `onionpress-tor` does not answer whether the registry is there, a
+backup is made without it and says so (the log, the finished-backup
+message, `metadata.json`'s `onionhome_registry_unchecked`).
 A restore never puts the backup's file on the volume: the image's own
 `onionhome-registry-migrate.py` rebuilds it from a private copy in
 `onionpress-tor`, with the checks described below, and the result replaces
