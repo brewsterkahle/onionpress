@@ -268,5 +268,52 @@ class TestNoBootstrapPasswordOnNewInstalls(unittest.TestCase):
         )
 
 
+class TestOnionnameErrorMessages(unittest.TestCase):
+    """Issue #324: the Linux tray and `onionpress setup` said "min 2" and
+    "max 63" while the rule enforced 5 and 40. Every front end's message
+    must name the limits the rule actually enforces."""
+
+    REPO = os.path.join(os.path.dirname(__file__), "..")
+
+    def _read(self, rel):
+        with open(os.path.join(self.REPO, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def test_local_rule_matches_onionnames_client(self):
+        from onionpress import onionnames_client
+        self.assertEqual(setup_logic._ONIONNAME_MIN_LEN, onionnames_client.MIN_NAME_LEN)
+        self.assertEqual(setup_logic._ONIONNAME_MAX_LEN, onionnames_client.MAX_NAME_LEN)
+
+    def test_messages_name_the_enforced_limits(self):
+        lo, hi = setup_logic._ONIONNAME_MIN_LEN, setup_logic._ONIONNAME_MAX_LEN
+        short = "a" * (lo - 1)
+        long_ = "a" * (hi + 1)
+        self.assertEqual(setup_logic.validate_onionname(short)[1], "too_short")
+        self.assertEqual(setup_logic.validate_onionname(long_)[1], "too_long")
+        self.assertIn(f"min {lo} ", setup_logic.onionname_error_message("too_short"))
+        self.assertIn(f"max {hi} ", setup_logic.onionname_error_message("too_long"))
+        # The limits themselves are valid lengths.
+        self.assertTrue(setup_logic.validate_onionname("a" * lo)[0])
+        self.assertTrue(setup_logic.validate_onionname("a" * hi)[0])
+
+    def test_every_reason_has_its_own_message(self):
+        fallback = setup_logic.onionname_error_message("no-such-reason")
+        for reason in ("empty", "too_short", "too_long", "invalid_chars", "all_numeric"):
+            self.assertNotEqual(setup_logic.onionname_error_message(reason), fallback, reason)
+
+    def test_linux_front_ends_use_the_shared_messages(self):
+        """No hard-coded length message in the tray or the CLI setup."""
+        for rel in ("linux/onionpress-tray", "src/onionpress/setup_logic.py"):
+            src = self._read(rel)
+            self.assertNotRegex(src, r"(?i)(min|max) \d+ characters\"", rel)
+        self.assertIn("onionname_error_message(reason)",
+                      self._read("linux/onionpress-tray"))
+
+    def test_mac_setup_window_names_the_enforced_limits(self):
+        src = self._read("src/onionpress/setup_window.py")
+        self.assertIn(f"at least {setup_logic._ONIONNAME_MIN_LEN} characters", src)
+        self.assertIn(f"{setup_logic._ONIONNAME_MAX_LEN} characters or fewer", src)
+
+
 if __name__ == "__main__":
     unittest.main()
