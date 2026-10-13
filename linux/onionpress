@@ -888,6 +888,9 @@ replace_onion_key() {
         return 1
     fi
     touch "$DATA_DIR/.import-key-pending"
+    # A replaced identity ends any unfinished move of the old key into
+    # its new volume: the next start must not copy it back.
+    rm -f "$DATA_DIR/.key-volume-migration-pending"
     rm -rf "$staging"
 
     # 5.
