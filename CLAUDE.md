@@ -657,6 +657,25 @@
 - Re-pinning either plugin means re-reading these against its internals
   (docs/BUILDING.md). `tests/test_bundled_plugins.py`.
 
+## Auto-Update Swaps Bundles by Rename
+- `updater.download_and_install` copies the new bundle from the mounted DMG
+  into a hidden sibling folder (`/Applications/.onionpress-update-*`,
+  `stage_new_bundle`), strips quarantine there, then renames the old bundle
+  to `.bak-<pid>` and the staged one into place (`swap_in_bundle`). **Never
+  write into `/Applications/OnionPress.app` while the app runs**: the
+  MenubarApp's `bin_dir` is that absolute path, so after the old bundle is
+  renamed away its next docker call (health probes every few seconds)
+  executes out of whatever sits at that path, and macOS 26/27's Gatekeeper
+  then revokes the writing process's access to the file it has open
+  (`fcopyfile failed: Input/output error`, `fchmod failed: No such file or
+  directory`, then `Operation not permitted` for every further write). That
+  is how 2.5.2 → 2.5.3 failed on 2026-10-13 (the 2.5.1 → 2.5.2 copy, same
+  code, just won the race). Reproduced 3/3 with an ad-hoc-signed test app;
+  the staged swap passed 150 concurrent execs. `tests/test_updater_staged_swap.py`.
+- The fix only helps once an app carrying it is installed: the *running*
+  app's updater does the update, so the first update after a release with
+  this change still runs the old code.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers
