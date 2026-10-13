@@ -498,7 +498,7 @@ class OnionPress_Creations {
      * server may answer with the whole file).
      */
     public static function parse_range($header, $size) {
-        if (!is_string($header) || !preg_match('/^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i', $header, $m)) {
+        if (!is_string($header) || !preg_match('/^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/iD', $header, $m)) {
             return null;
         }
         // Numbers longer than any file size are clamped, never overflowed.
