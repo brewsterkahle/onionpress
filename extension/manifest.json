@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OnionPress",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Browse .onion sites in any browser. Requires OnionPress to be running.",
   "permissions": [
     "proxy",
@@ -9,7 +9,8 @@
     "storage"
   ],
   "host_permissions": [
-    "http://localhost:9077/*"
+    "http://127.0.0.1/*",
+    "*://*.onion/*"
   ],
   "background": {
     "service_worker": "background.js"

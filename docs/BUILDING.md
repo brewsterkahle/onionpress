@@ -913,7 +913,7 @@ There are **two Firefox manifests in the tree and they are not equivalent**:
 
 | | `extension/manifest.firefox.json` | `extension-firefox/manifest.json` |
 |---|---|---|
-| Version | 1.0.0, min Firefox 109 | 1.1.0, min Firefox 142 |
+| Version | 1.0.0, min Firefox 109 | 1.2.0, min Firefox 142 |
 | Permissions | + `webRequest`, `webRequestBlocking`, `webNavigation`, `<all_urls>` | narrow |
 | Content script | yes | no |
 | `data_collection_permissions` | **absent** | present |
@@ -923,17 +923,27 @@ would re-request four permissions the extension no longer needs and produce a
 package addons.mozilla.org rejects — AMO requires
 `data_collection_permissions` from Firefox 142.
 
-`extension-firefox/` is overlaid on top of `extension/`, so **every file it
-contains wins** — `manifest.json`, `offline.html`, `offline.js` *and*
-`background.js`. Only the icons and the popup come from `extension/`. The two
-`background.js` files happen to be byte-identical today, which is exactly what
-would make a future divergence silent: fix a bug in `extension/background.js`
-alone and the Firefox package will not contain it.
+`extension-firefox/` is overlaid on top of `extension/`, so every file it
+contains wins. It holds only `manifest.json`: `background.js`, `offline.html`
+and `offline.js` are shared from `extension/` (issue #318 removed the
+overlay's copies; a fix to `extension/background.js` alone used to miss the
+Firefox package, and `extension/`'s `offline.html` carried an inline
+`<script>` the extension CSP refuses). A test fails if any of them comes back
+to the overlay. The build fails if the manifest references a file that is not
+in the package.
 
-`offline.html` is deliberately different: `extension/`'s uses an inline
-`<script>`, which violates the extension CSP, and `extension-firefox/`
-externalises it to `offline.js`. The build fails if the manifest references a
-file that is not in the package.
+How the extension reaches Tor (#318): `.onion` requests go to the menubar's
+HTTP proxy (`onion_proxy.py`, `127.0.0.1:9077`, +10000 per extra macOS user),
+never to Tor's SOCKS port, which does not work through Colima's port
+forwarding. The proxy port comes from the native messaging host
+(`native_messaging_host.get_proxy_port`, read from Docker's published
+WordPress port). The extension polls `/status` every 5 s with
+`X-OnionPress-Browser`, which writes `~/.onionpress/extension-connected`
+(`browser.write_extension_marker`; the native host writes the same JSON).
+`https://` `.onion` URLs are not proxied (the proxy refuses CONNECT to an
+onion). A `.onion` page load while OnionPress is down opens `offline.html`;
+one whose onion service does not answer gets the proxy's own page. Both offer
+a retry and a link to the Wayback Machine's copy.
 
 `.gitignore` used to list `extension-firefox/` while four of its files were
 tracked. Ignore rules do not apply to already-tracked files, so the entry was
@@ -944,7 +954,7 @@ untracked, in the directory holding the current manifest. That entry is gone.
 produces, and cannot be.** Its inputs no longer exist: its `background.js`
 matches neither current source (it is an older revision), and its
 `manifest.json` appears in **no commit in this repository**. It is v1.0.0
-where the sources are v1.1.0. Nothing in the repo references it. It is left in
+where the sources are v1.2.0. Nothing in the repo references it. It is left in
 place rather than deleted, because whether to replace a distributable that may
 already be published is the maintainer's call — but it should not be treated
 as the output of any build.

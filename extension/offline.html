@@ -123,41 +123,19 @@
     <p class="retry-note">
       This page will automatically retry every 10 seconds.
     </p>
+
+    <div id="wayback" hidden>
+      <p>Or see an archived copy of this page:</p>
+      <a class="btn btn-secondary" href="#" id="wayback-link">
+        Open in the Wayback Machine
+      </a>
+      <p class="retry-note">
+        The Wayback Machine opens over the regular internet, not through Tor,
+        so archive.org will see which address you asked for.
+      </p>
+    </div>
   </div>
 
-  <script>
-    const PROXY_STATUS = "http://localhost:9077/status";
-
-    // Store the original .onion URL (passed via query param or referrer)
-    const params = new URLSearchParams(window.location.search);
-    const originalUrl = params.get("url");
-
-    async function tryReconnect() {
-      try {
-        const resp = await fetch(PROXY_STATUS, { signal: AbortSignal.timeout(3000) });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.running) {
-            // Proxy is back — reload the original URL if we have it
-            if (originalUrl) {
-              window.location.href = originalUrl;
-            } else {
-              window.location.reload();
-            }
-          }
-        }
-      } catch (_) {
-        // still down
-      }
-    }
-
-    document.getElementById("retry-btn").addEventListener("click", (e) => {
-      e.preventDefault();
-      tryReconnect();
-    });
-
-    // Auto-retry every 10 seconds
-    setInterval(tryReconnect, 10000);
-  </script>
+  <script src="offline.js"></script>
 </body>
 </html>
