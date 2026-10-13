@@ -17,10 +17,12 @@ Everything at the old location may have been written by WordPress, so:
   * Nothing there is walked. Only onionnames.db and its -wal and -journal
     are read, through O_NOFOLLOW descriptors below the old directory (itself
     opened without following a link), and only if each is a regular file of
-    at most MAX_BYTES that is not sparse. The database must start with
+    at most MAX_BYTES that is not sparse (more than SPARSE_SLACK of it in
+    holes, asked with SEEK_DATA/SEEK_HOLE). The database must start with
     SQLite's header.
   * SQLite never opens a path there. The files are copied into a private,
-    root-only folder on the new volume, again until the copy is stable. No
+    root-only folder on the new volume, again until the copy is stable, with
+    runs of zeros kept as holes: a copy takes no more room than the file. No
     legitimate writer is left by then: the old onionpress-tor is the
     container this one replaces.
   * The new registry is not a copy of the old file. It is a new database
@@ -83,7 +85,7 @@ LOCK = ".migrate.lock"
 STAGING = ".migrating"
 
 MAX_BYTES = 256 << 20
-SPARSE_SLACK = 1 << 20
+SPARSE_SLACK = 1 << 20          # bytes of holes a file may have and still be read
 SQLITE_HEADER = b"SQLite format 3\x00"
 ATTEMPTS = 5
 RETRY_DELAY = 1
@@ -246,13 +248,50 @@ def _open_old_dir(parent_fd):
     return None
 
 
-def _odd(st):
-    """Why a regular file is not read, or None."""
-    if st.st_size > MAX_BYTES:
-        return f"larger than {MAX_BYTES >> 20} MiB"
-    if st.st_blocks * 512 + SPARSE_SLACK < st.st_size:
-        return "sparse"
-    return None
+def _sparse(fd, size):
+    """True if more than SPARSE_SLACK of the file's size bytes are holes.
+
+    Asked with SEEK_DATA/SEEK_HOLE, not by comparing st_blocks with
+    st_size: on a compressing filesystem (ZFS, btrfs with compression) a
+    file with no hole in it takes fewer blocks than its size too, and the
+    real registry would be taken for a planted file and left behind. ZFS
+    with compression does keep all-zero blocks as holes, hence the slack.
+    Where the system cannot say
+    (no SEEK_DATA, or the filesystem refuses it) the file counts as dense;
+    that costs no room either, since its copy keeps runs of zeros as holes
+    (_copy_fd), and MAX_BYTES still applies. Raises Unstable if the file
+    shrinks meanwhile.
+    """
+    if size <= 0 or not (hasattr(os, "SEEK_DATA") and hasattr(os, "SEEK_HOLE")):
+        return False
+    holes = pos = 0
+    try:
+        while pos < size:
+            try:
+                data = min(os.lseek(fd, pos, os.SEEK_DATA), size)
+            except OSError as e:
+                if e.errno != errno.ENXIO:
+                    raise
+                if os.fstat(fd).st_size < size:
+                    raise Unstable("it shrank while being checked for holes")
+                data = size                     # nothing but a hole from pos on
+            holes += data - pos
+            if holes > SPARSE_SLACK:
+                return True
+            if data >= size:
+                break
+            end = os.lseek(fd, data, os.SEEK_HOLE)
+            if end <= data:
+                break
+            pos = end
+        return False
+    except OSError:
+        return False
+    finally:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            pass
 
 
 def _open_member(dir_fd, name):
@@ -264,19 +303,27 @@ def _open_member(dir_fd, name):
         return None, "absent"
     if not stat.S_ISREG(st.st_mode):
         return None, "not a regular file"
-    why = _odd(st)
-    if why:
-        return None, why
+    if st.st_size > MAX_BYTES:
+        return None, f"larger than {MAX_BYTES >> 20} MiB"
     try:
         fd = os.open(name, FILE_FLAGS, dir_fd=dir_fd)
     except OSError as e:
         if e.errno in (errno.ENOENT, errno.ELOOP):
             raise Unstable(f"{name} changed while being opened")
         raise
-    fst = os.fstat(fd)
-    if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+    try:
+        fst = os.fstat(fd)
+        if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+            raise Unstable(f"{name} changed while being opened")
+        if fst.st_size > MAX_BYTES:
+            raise Unstable(f"{name} grew past the size limit")
+        why = "sparse" if _sparse(fd, fst.st_size) else None
+    except BaseException:
         os.close(fd)
-        raise Unstable(f"{name} changed while being opened")
+        raise
+    if why:
+        os.close(fd)
+        return None, why
     return fd, None
 
 
@@ -292,21 +339,31 @@ def _signature(dir_fd):
     return sig
 
 
+_ZEROS = bytes(1 << 16)
+
+
 def _copy_fd(fd, path):
+    """Copy the open file fd to path (new, 0600), at most MAX_BYTES. Runs of
+    zeros become holes in the copy: whatever holes the file has, or gains
+    after _sparse looked, its copy takes no more room than it does."""
     out = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC,
                   0o600)
     total = 0
     try:
         while True:
-            chunk = os.read(fd, 1 << 20)
+            chunk = os.read(fd, len(_ZEROS))
             if not chunk:
                 break
             total += len(chunk)
             if total > MAX_BYTES:
                 raise Unstable("it grew past the size limit while being copied")
+            if chunk == _ZEROS[:len(chunk)]:
+                os.lseek(out, len(chunk), os.SEEK_CUR)
+                continue
             view = memoryview(chunk)
             while view:
                 view = view[os.write(out, view):]
+        os.ftruncate(out, total)
         os.fsync(out)
     finally:
         os.close(out)

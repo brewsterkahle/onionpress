@@ -28,6 +28,7 @@ No PyYAML and no Docker: the compose file is read with a line-based
 splitter, subprocess is mocked, and the move runs on temporary directories.
 """
 
+import errno
 import hashlib
 import importlib.util
 import json
@@ -114,6 +115,19 @@ def _has_fts5():
         return False
     finally:
         conn.close()
+
+
+def _has_a_hole(path):
+    """True if the filesystem left a hole in path before its end."""
+    if not hasattr(os, "SEEK_HOLE"):
+        return False
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        return os.lseek(fd, 0, os.SEEK_HOLE) < os.fstat(fd).st_size
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
 
 
 def _code_files():
@@ -607,7 +621,7 @@ class TestMove(MoveCase):
                 with open(path, "wb") as f:
                     f.write(mig.SQLITE_HEADER)
                     f.truncate(size)
-                if os.stat(path).st_blocks * 512 >= size // 2:
+                if not _has_a_hole(path):
                     self.skipTest("this filesystem does not make sparse files")
                 rc, err = self.run_script()
                 self.assertEqual(rc, 0, err)
@@ -755,6 +769,176 @@ class TestMoveInternals(MoveCase):
                     + target.replace(" ", "\\040") + " rw - ext4 /dev/sda1 rw\n")
         self.assertTrue(mig.is_mount_point(self.dest, mountinfo=info))
         self.assertFalse(mig.is_mount_point(self.parent, mountinfo=info))
+
+
+class _FewBlocks:
+    """A regular file's stat as a compressing filesystem (ZFS, btrfs with
+    compression) reports it: far fewer blocks than its size, no hole."""
+
+    def __init__(self, st):
+        self._st = st
+
+    def __getattr__(self, name):
+        return 8 if name == "st_blocks" else getattr(self._st, name)
+
+
+def _extents(data, size):
+    """An os.lseek that answers SEEK_DATA/SEEK_HOLE from data, a list of
+    (start, end) data extents of a size-byte file, apart from each other."""
+    real = os.lseek
+
+    def lseek(fd, pos, how):
+        if how == os.SEEK_DATA:
+            for start, end in data:
+                if pos < end:
+                    return max(pos, start)
+            raise OSError(errno.ENXIO, "no data after that")
+        if how == os.SEEK_HOLE:
+            for start, end in data:
+                if start <= pos < end:
+                    return end
+            return min(pos, size)
+        return real(fd, pos, how)
+    return lseek
+
+
+class TestHoles(MoveCase):
+    """Sparse means holes, asked with SEEK_DATA/SEEK_HOLE: a compressing
+    filesystem's dense file takes fewer blocks than its size and must move."""
+
+    CAROL = "c" * 56 + ".onion"
+
+    def _db(self):
+        return os.path.join(self.legacy, "onionnames.db")
+
+    def test_a_dense_registry_with_few_blocks_on_disk_still_moves(self):
+        # 3 MiB in the database, 2 MiB more and a name in its -wal.
+        self.make_registry(extra_sql=("CREATE TABLE filler (x)",
+                                      "INSERT INTO filler VALUES (randomblob(3 << 20))"))
+        conn = onionnames.db_connect(self._db())
+        self.addCleanup(conn.close)
+        conn.execute("INSERT INTO filler VALUES (randomblob(2 << 20))")
+        ok, reason, _ = onionnames.register_name(conn, "carol", self.CAROL)
+        self.assertTrue(ok, reason)
+        conn.commit()
+        real_stat, real_fstat = os.stat, os.fstat
+
+        def few(st):
+            return _FewBlocks(st) if stat.S_ISREG(st.st_mode) else st
+
+        logs = []
+        with mock.patch("os.stat", lambda *a, **k: few(real_stat(*a, **k))), \
+                mock.patch("os.fstat", lambda *a, **k: few(real_fstat(*a, **k))), \
+                mock.patch.object(mig, "log", side_effect=logs.append):
+            for name in ("onionnames.db", "onionnames.db-wal"):
+                st = os.stat(os.path.join(self.legacy, name))
+                self.assertLess(st.st_blocks * 512 + mig.SPARSE_SLACK, st.st_size,
+                                f"{name}: st_blocks alone would call it sparse")
+            mig.migrate(self.parent, self.dest)
+        self.assertFalse([line for line in logs if "sparse" in line], logs)
+        self.assertTrue(self.in_place())
+        self.assertTrue(self.marker()["moved"])
+        self.assertEqual(self.names(), {"alice": ALICE, "brewster": BOB,
+                                        "carol": self.CAROL})
+
+    def test_a_registry_with_a_real_hole_is_still_refused(self):
+        self.make_registry()
+        db = self._db()
+        os.truncate(db, os.path.getsize(db) + (32 << 20))
+        if not _has_a_hole(db):
+            self.skipTest("this filesystem does not make sparse files")
+        before = self.tree(self.legacy)
+        rc, err = self.run_script()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("onionnames.db: sparse", err)
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "onionnames.db")))
+        self.assertEqual(self.tree(self.legacy), before)
+
+    def test_a_journal_with_a_real_hole_is_left_out(self):
+        self.make_registry()
+        wal = self._db() + "-wal"
+        with open(wal, "wb") as f:
+            f.truncate(32 << 20)
+        if not _has_a_hole(wal):
+            self.skipTest("this filesystem does not make sparse files")
+        rc, err = self.run_script()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("left onionnames.db-wal at the old location out (sparse)", err)
+        self.assertEqual(self.names(), {"alice": ALICE, "brewster": BOB})
+        self.assertTrue(os.path.exists(wal))
+
+    def _sparse(self, data, size):
+        path = os.path.join(self.base, "probe")
+        with open(path, "wb") as f:
+            f.truncate(size)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            with mock.patch("os.lseek", _extents(data, size)):
+                return mig._sparse(fd, size)
+        finally:
+            os.close(fd)
+
+    def test_only_holes_beyond_the_slack_make_a_file_sparse(self):
+        mib, size = 1 << 20, 8 << 20
+        self.assertFalse(self._sparse([(0, size)], size))
+        # ZFS with compression keeps a database's all-zero blocks as holes.
+        self.assertFalse(self._sparse([(0, 4 * mib), (4 * mib + 65536, size)], size))
+        self.assertFalse(self._sparse([(0, size - mib)], size))
+        self.assertTrue(self._sparse([(0, 4 * mib), (6 * mib, size)], size))
+        self.assertTrue(self._sparse([(0, 4096)], size))
+        self.assertTrue(self._sparse([(6 * mib, size)], size))
+        self.assertTrue(self._sparse([], size))
+
+    def test_a_file_counts_as_dense_where_holes_cannot_be_asked_for(self):
+        path = os.path.join(self.base, "probe")
+        with open(path, "wb") as f:
+            f.write(b"x" * 4096)
+            f.truncate(32 << 20)
+        real = os.lseek
+
+        def unsupported(fd, pos, how):
+            if how in (os.SEEK_DATA, os.SEEK_HOLE):
+                raise OSError(errno.EINVAL, "not supported")
+            return real(fd, pos, how)
+
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            with mock.patch("os.lseek", unsupported):
+                self.assertFalse(mig._sparse(fd, 32 << 20))
+            self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 0)
+        finally:
+            os.close(fd)
+
+    def test_a_file_that_shrinks_while_checked_is_unstable(self):
+        path = os.path.join(self.base, "probe")
+        with open(path, "wb") as f:
+            f.truncate(4 << 20)
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            with mock.patch("os.lseek", _extents([(0, 4 << 20)], 8 << 20)), \
+                    self.assertRaises(mig.Unstable):
+                mig._sparse(fd, 8 << 20)
+        finally:
+            os.close(fd)
+
+    def test_a_copy_keeps_holes(self):
+        src = os.path.join(self.base, "src")
+        with open(src, "wb") as f:
+            f.write(mig.SQLITE_HEADER + os.urandom(100_000))
+            f.truncate(32 << 20)
+        if not _has_a_hole(src):
+            self.skipTest("this filesystem does not make sparse files")
+        copy = os.path.join(self.base, "copy")
+        fd = os.open(src, os.O_RDONLY)
+        try:
+            mig._copy_fd(fd, copy)
+        finally:
+            os.close(fd)
+        with open(src, "rb") as a, open(copy, "rb") as b:
+            self.assertEqual(hashlib.sha256(a.read()).digest(),
+                             hashlib.sha256(b.read()).digest())
+        self.assertEqual(os.path.getsize(copy), 32 << 20)
+        self.assertLess(os.stat(copy).st_blocks * 512, 4 << 20)
 
 
 # ---------------------------------------------------------------------------
