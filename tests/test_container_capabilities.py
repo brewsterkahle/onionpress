@@ -231,13 +231,10 @@ class TestTakeoverWorkers(unittest.TestCase):
         self.assertEqual(argv[-1], "img")
         self.assertHardened(argv[:-1])
 
-        mac = _read("app/MacOS/onionpress")
-        fn = mac[mac.index("_start_takeover_worker() {"):]
-        fn = fn[:fn.index("\n}\n")]
-        self.assertRegex(fn, r"(?m)^        --cap-drop NET_RAW \\$")
-        self.assertRegex(fn, r"(?m)^        --security-opt no-new-privileges:true \\$")
-        self.assertNotIn("--cap-add", fn)
-        self.assertNotIn("--privileged", fn)
+    def test_mac_launcher_starts_no_worker(self):
+        """Its unused _start_takeover_worker is gone; a worker it started
+        again would have to pass the checks above."""
+        self.assertNotIn("TAKEOVER_WORKER=1", _read("app/MacOS/onionpress"))
 
 
 # ---------------------------------------------------------------------------

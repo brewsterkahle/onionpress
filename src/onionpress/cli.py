@@ -505,7 +505,7 @@ class OnionPressCLI:
     @staticmethod
     def cmd_restore_hub_data(src: str) -> int:
         """Put a backup's onionheaven/ (*src*) onto the hub data volume
-        (backup.restore_hub_data): the bash launchers' restore_backup.
+        (backup.restore_hub_data): the Linux launcher's restore_backup.
         Messages go to stderr."""
         from .backup import restore_hub_data
         log = _make_log_func()

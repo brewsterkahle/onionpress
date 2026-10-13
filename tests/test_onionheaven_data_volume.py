@@ -252,9 +252,9 @@ class TestPaths(unittest.TestCase):
         self.assertIn("['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]", backup)
         self.assertIn("f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'", backup)
         self.assertNotRegex(backup, r"www-data[^\n]*onionheaven")
-        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
-            with self.subTest(launcher=launcher):
-                self.assertIn('restore-hub-data --src "$staging/onionheaven"', _read(launcher))
+        # The Mac launcher's `restore` is onionpress.cli restore (backup.py).
+        self.assertIn("restore_hub_data(onionheaven_dir, log_func)", backup)
+        self.assertIn('restore-hub-data --src "$staging/onionheaven"', _read("linux/onionpress"))
         self.assertIn('stage-hub-data --dest "$staging/onionheaven"', _read("linux/onionpress"))
 
 
@@ -346,12 +346,8 @@ class TestWorkerMounts(unittest.TestCase):
         cm.start_farm_worker(0, image="img")
         self.assertEqual(self._volume_args(docker.run.call_args.args[0]),
                          [f"{VOLUME}:{HUB_DIR}"])
-
-        mac = _read("app/MacOS/onionpress")
-        fn = mac[mac.index("_start_takeover_worker() {"):]
-        fn = fn[:fn.index("\n}\n")]
-        self.assertIn(f'-v "{VOLUME}:{HUB_DIR}"', fn)
-        self.assertNotIn("persistent-data", fn)
+        # The Mac launcher's unused _start_takeover_worker is gone.
+        self.assertNotIn("TAKEOVER_WORKER=1", _read("app/MacOS/onionpress"))
 
 
 class TestRetireOldWorkers(unittest.TestCase):

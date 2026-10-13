@@ -1033,12 +1033,13 @@ def staged_backup_address(staging, log_func):
     """Validate an extracted backup and return the onion address its key
     belongs to ('' if it carries no key).
 
-    For the bash launchers' restore_backup and `setup --from-backup`, which
-    name a directory after the address and write its prefix into config:
-    they take the address from here, never from metadata.json. A metadata
-    address that is well formed but differs from the key's is logged, as
-    the Python restore paths do (older clients left it stale). Raises
-    ValueError on invalid metadata or key files; nothing is touched.
+    For the bash launchers' `setup --from-backup` and Linux's
+    restore_backup, which name a directory after the address and write its
+    prefix into config: they take the address from here, never from
+    metadata.json. A metadata address that is well formed but differs from
+    the key's is logged, as the Python restore paths do (older clients left
+    it stale). Raises ValueError on invalid metadata or key files; nothing
+    is touched.
     """
     metadata = read_staged_metadata(staging)
     address = key_manager.staged_key_address(_find_dir(staging, 'tor-keys'))
