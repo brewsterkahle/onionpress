@@ -301,8 +301,10 @@ class OnionPressCLI:
                 version=__version__,
                 log_func=self.log,
                 # Written to the owner's disk, never handed to WordPress: an
-                # OnionHeaven hub's registry and registrants' keys stay in.
+                # OnionHeaven hub's registry and registrants' keys stay in,
+                # and so does the whole config.
                 include_hub_data=True,
+                include_host_secrets=True,
             )
             print(f"Backup saved to: {output_path}")
             return 0
@@ -537,6 +539,24 @@ class OnionPressCLI:
             print(refusal)
             return 3
         return 0
+
+    @staticmethod
+    def cmd_wordpress_safe_config(config_path: str, dest: str) -> int:
+        """Write the config file *config_path*, cut to what a backup
+        handed to WordPress may carry (backup.write_wordpress_safe_config:
+        no Cloudflare tunnel token), to *dest*; print the names of the
+        secrets that were set and left out, one per line. For the Linux
+        launcher's create_backup --without-host-secrets. Messages go to
+        stderr."""
+        from .backup import write_wordpress_safe_config
+        log = _make_log_func()
+        try:
+            for name in write_wordpress_safe_config(config_path, dest, log):
+                print(name)
+            return 0
+        except Exception as e:
+            log(f"Backup: could not write the config for WordPress: {e}")
+            return 1
 
     @staticmethod
     def cmd_restore_hub_data(src: str) -> int:
@@ -1048,6 +1068,12 @@ def main(argv: list[str] = None) -> int:
     p_sp_check.add_argument(
         "--staging", required=True,
         help="Directory the backup was extracted into")
+    p_wp_conf = sub.add_parser(
+        "wordpress-safe-config",
+        help="Write a config file cut to what a backup handed to WordPress "
+             "may carry (backup helper); prints the secrets left out, by name")
+    p_wp_conf.add_argument("--config", required=True, help="Config file to read")
+    p_wp_conf.add_argument("--dest", required=True, help="File to write (new)")
     p_restore_hub = sub.add_parser(
         "restore-hub-data",
         help="Put a backup's OnionHeaven registry and keys onto the hub "
@@ -1164,6 +1190,8 @@ def main(argv: list[str] = None) -> int:
         return OnionPressCLI.cmd_hub_data_state()
     if args.command == "settings-page-restore-check":
         return OnionPressCLI.cmd_settings_page_restore_check(args.staging)
+    if args.command == "wordpress-safe-config":
+        return OnionPressCLI.cmd_wordpress_safe_config(args.config, args.dest)
     if args.command == "restore-hub-data":
         return OnionPressCLI.cmd_restore_hub_data(args.src)
     # Restore and plugin-install helper for the bash launchers: same.

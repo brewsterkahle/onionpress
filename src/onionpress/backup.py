@@ -23,7 +23,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from onionpress import backup_crypto, derivatives, key_manager, wp_files
-from onionpress.config import DEFAULTS, read_config, read_value, write_value
+from onionpress.config import (DEFAULTS, SECRET_CONFIG_KEYS, read_config, read_value,
+                               redact_config, write_value)
 
 
 def _default_data_dir() -> str:
@@ -94,6 +95,21 @@ ONIONHOME_RESTORE_REFUSED_MSG = (
     "This backup holds OnionHome's name registry, which is never restored "
     "through WordPress. Nothing was restored: restore it from the OnionPress "
     "app (Restore... in its menu) or with onionpress restore.")
+
+# The host's secrets never pass through WordPress in a backup either. The
+# Settings page's backup (create_backup(include_host_secrets=False); Linux:
+# create_backup --without-host-secrets) carries only the config WordPress's
+# status page already shows (config.redact_config, SAFE_CONFIG_KEYS): never
+# the Cloudflare tunnel token, which the page's write-only field keeps out of
+# WordPress, nor (Linux, whose backups carry the whole config file) image
+# overrides, bind host or hub admission. Linux also leaves out the
+# healthcheck onion service's key, which a start regenerates. The site's
+# own onion key stays: it is what the backup restores. metadata.json says so
+# (excludes_host_secrets) and names the secrets that were set
+# (secret_config_left_out, names only). No restore takes a secret from a
+# backup anyway (RESTORABLE_CONFIG): this install's token is kept, and on a
+# new machine the owner enters it again (restore_backup_config says so).
+TUNNEL_TOKEN_KEY = "CLOUDFLARE_TUNNEL_TOKEN"
 
 # A tar of the registry, as sqlite3's .backup copies it (one consistent
 # state while the hub writes; a copy of the file could miss its -wal or catch
@@ -684,7 +700,7 @@ def restore_hub_data(src, log_func):
 
 
 def create_backup(onion_address, username, password, output_path, version, log_func, *,
-                  data_dir=None, include_hub_data=True):
+                  data_dir=None, include_hub_data=True, include_host_secrets=True):
     """Create a full OnionPress backup zip; return its metadata.
 
     Args:
@@ -699,6 +715,10 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             Settings page's download): an OnionHeaven hub's registry and
             registrants' keys are then left out, and metadata.json says so
             (excludes_onionheaven_data). Every caller passes it.
+        include_host_secrets: False for that backup too: its config is cut
+            to what WordPress's status page shows (wordpress_safe_config: no
+            Cloudflare tunnel token), and metadata.json says so
+            (excludes_host_secrets). Every caller passes it.
     """
     backup_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-backup-')
@@ -856,13 +876,18 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                     )
                 scrub_staged_tree(onionhome_dir, log_func, 'onionhome')
 
-        # 5. Save non-default config values
+        # 5. Save non-default config values. Not the host's secrets in a
+        #    backup handed to WordPress (include_host_secrets=False): only
+        #    what its status page shows anyway (wordpress_safe_config).
         _data_dir = data_dir if data_dir is not None else _default_data_dir()
         config_path = os.path.join(_data_dir, 'config')
+        secrets_left_out = []
         if os.path.exists(config_path):
             current = read_config(config_path)
             overrides = {k: v for k, v in current.items()
                          if k in DEFAULTS and v != DEFAULTS[k]}
+            if not include_host_secrets:
+                overrides, secrets_left_out = wordpress_safe_config(overrides, log_func)
             if overrides:
                 with open(os.path.join(staging, 'config-overrides.json'), 'w') as f:
                     json.dump(overrides, f, indent=2)
@@ -896,6 +921,11 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # purpose and why; restores say so (restore_container_artifacts).
             metadata['excludes_onionheaven_data'] = True
             metadata['excludes_onionheaven_data_reason'] = HUB_DATA_LEFT_OUT_REASON
+        if not include_host_secrets:
+            # Which secrets were set and are not in here (names only): a
+            # restore says what to enter again (restore_backup_config).
+            metadata['excludes_host_secrets'] = True
+            metadata['secret_config_left_out'] = secrets_left_out
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
@@ -2159,11 +2189,71 @@ def restore_backup_config(staging, config_path, log_func, onion_address=''):
         log_func(f"Restore: restored settings: {', '.join(applied)}")
     if kept:
         # Key names only (they are the backup author's too): no values.
-        names = [k for k in kept if re.fullmatch(r"[A-Z][A-Z0-9_]{0,39}", k)]
+        names = [k for k in kept if _CONFIG_KEY_NAME_RE.fullmatch(k)]
         log_func(f"Restore: kept this install's value for {len(kept)} "
                  f"setting(s) a restore does not take from a backup"
                  + (f": {', '.join(names[:20])}" if names else ""))
+    _tunnel_token_note(staging, values, config_path, log_func)
     return applied
+
+
+_CONFIG_KEY_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{0,39}")
+
+
+def _tunnel_token_note(staging, values, config_path, log_func):
+    """Say what became of the Cloudflare tunnel when the backed-up site had
+    one: its token is in the backup's config (a backup made from the app or
+    the CLI) or named in metadata.json's secret_config_left_out (one made
+    from the Settings page). Either way no restore takes it (a token from a
+    crafted backup would put this site on the clear web through someone
+    else's tunnel): this install's token stays, and without one the owner
+    enters it again."""
+    had_tunnel = bool(values.get(TUNNEL_TOKEN_KEY))
+    if not had_tunnel:
+        try:
+            left_out = read_staged_metadata(staging).get('secret_config_left_out')
+        except (OSError, ValueError):
+            left_out = None
+        had_tunnel = isinstance(left_out, list) and TUNNEL_TOKEN_KEY in left_out
+    if not had_tunnel:
+        return
+    if read_value(config_path, TUNNEL_TOKEN_KEY, ""):
+        log_func("Restore: kept this install's Cloudflare tunnel token (a "
+                 "restore never takes one from a backup)")
+    else:
+        log_func("Restore: the backed-up site used a Cloudflare tunnel; a "
+                 "restore never brings its token back. Enter it again in the "
+                 "Settings page (Cloudflare Tunnel Token) to put the site back "
+                 "on its tunnel.")
+
+
+def wordpress_safe_config(values, log_func):
+    """*values* (config key → value) cut to what a backup handed to
+    WordPress may carry: config.redact_config, the keys WordPress's status
+    page shows anyway. Returns (what is kept, the SECRET_CONFIG_KEYS that
+    had a value and are left out, sorted). Logs the names of the keys left
+    out, never a value."""
+    kept = redact_config(values)
+    left_out = sorted(k for k in values if k not in kept)
+    secrets = [k for k in left_out if k in SECRET_CONFIG_KEYS and values[k]]
+    if left_out:
+        names = [k for k in left_out if _CONFIG_KEY_NAME_RE.fullmatch(k)]
+        log_func(f"Backup: left {len(left_out)} setting(s) out of this backup, "
+                 f"which is handed to WordPress"
+                 + (f": {', '.join(names[:20])}" if names else ""))
+    return kept, secrets
+
+
+def write_wordpress_safe_config(config_path, dest, log_func):
+    """Write the config file at *config_path*, cut by wordpress_safe_config,
+    to *dest* (a new file, owner-only); return the secrets left out. For
+    the Linux launcher's create_backup --without-host-secrets, whose
+    backups carry the config file itself."""
+    kept, secrets = wordpress_safe_config(read_config(config_path), log_func)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        f.writelines(f"{k}={v}\n" for k, v in kept.items())
+    return secrets
 
 
 def apply_config_overrides(staging, log_func, *, data_dir=None, onion_address=''):

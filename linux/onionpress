@@ -2147,23 +2147,31 @@ wait_for_services() {
 
 create_backup() {
     # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
-    # Usage: create_backup <password> <output_path> [--without-hub-data]
+    # Usage: create_backup <password> <output_path> [--without-hub-data] [--without-host-secrets]
     # --without-hub-data: for a backup handed to WordPress (the Settings
     # page's download), whose password came from there too. An OnionHeaven
     # hub's registry and registrants' keys are left out, metadata.json says
     # so, and BACKUP_LEFT_OUT_HUB_DATA is set to "true" for the caller.
+    # --without-host-secrets: for that backup too. Its config is cut to what
+    # WordPress's status page shows (no Cloudflare tunnel token, image
+    # overrides, bind host...), the healthcheck onion service's key (a start
+    # makes a new one) is left out, and metadata.json says so
+    # (backup.TUNNEL_TOKEN_KEY).
     local password="$1"
     local output_path="$2"
-    local with_hub_data="yes"
+    local with_hub_data="yes" with_host_secrets="yes"
     local staging
     BACKUP_LEFT_OUT_HUB_DATA=""
 
-    case "${3:-}" in
-        "") ;;
-        --without-hub-data) with_hub_data="no" ;;
-        *) echo "ERROR: create_backup: unknown option: $3" >&2
-           return 1 ;;
-    esac
+    local opt
+    for opt in "${@:3}"; do
+        case "$opt" in
+            --without-hub-data) with_hub_data="no" ;;
+            --without-host-secrets) with_host_secrets="no" ;;
+            *) echo "ERROR: create_backup: unknown option: $opt" >&2
+               return 1 ;;
+        esac
+    done
 
     if [ -z "$password" ]; then
         echo "ERROR: Password is required" >&2
@@ -2246,18 +2254,24 @@ create_backup() {
         log "WARNING: No Tor keys found — backup will not include keys"
     fi
 
-    # Healthcheck onion service keys (separate address, random per install)
-    mkdir -p "$staging/tor-keys/healthcheck"
-    docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_secret_key' > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
-    docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_public_key' > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
-    docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hostname' > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
-    # Clean up empty files
-    find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
-    if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then
-        log "Backup: healthcheck keys saved"
+    # Healthcheck onion service keys (separate address, random per install).
+    # Not in a backup handed to WordPress (--without-host-secrets): a start
+    # makes new ones, and the heartbeat gives the hub the new address.
+    if [ "$with_host_secrets" = "no" ]; then
+        log "Backup: healthcheck keys left out of this backup, which is handed to WordPress (a restore makes new ones)"
     else
-        rmdir "$staging/tor-keys/healthcheck" 2>/dev/null || true
-        log "Backup: no healthcheck keys found (will be regenerated)"
+        mkdir -p "$staging/tor-keys/healthcheck"
+        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_secret_key' > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
+        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_public_key' > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
+        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hostname' > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
+        # Clean up empty files
+        find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
+        if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then
+            log "Backup: healthcheck keys saved"
+        else
+            rmdir "$staging/tor-keys/healthcheck" 2>/dev/null || true
+            log "Backup: no healthcheck keys found (will be regenerated)"
+        fi
     fi
 
     # 2. Dump WordPress database
@@ -2303,10 +2317,20 @@ create_backup() {
         log "WARNING: derivative pruning failed — backing up uploads in full"
     fi
 
-    # 4. Save config
+    # 4. Save config. A backup handed to WordPress (--without-host-secrets)
+    #    gets only what WordPress's status page shows anyway; the names of
+    #    the secrets that were set go into metadata.json, so a restore can
+    #    say what to enter again (backup.write_wordpress_safe_config).
+    local secrets_left_out=""
     if [ -f "$DATA_DIR/config" ]; then
         log "Backup: saving config..."
-        cp "$DATA_DIR/config" "$staging/config"
+        if [ "$with_host_secrets" = "yes" ]; then
+            cp "$DATA_DIR/config" "$staging/config"
+        elif ! secrets_left_out=$(op_py wordpress-safe-config --config "$DATA_DIR/config" \
+                --dest "$staging/config" 2>>"$LOG_FILE"); then
+            log "ERROR: could not write the config for a backup handed to WordPress"
+            return 1
+        fi
     fi
 
     # 5. OnionHeaven registry + keys, if this instance is an OnionHeaven hub
@@ -2363,9 +2387,14 @@ if sys.argv[7] == 'true':
     # (backup.HUB_DATA_LEFT_OUT_REASON).
     metadata['excludes_onionheaven_data'] = True
     metadata['excludes_onionheaven_data_reason'] = 'settings-page'
+if sys.argv[8] == 'no':
+    # Handed to WordPress: no host secrets, and the names of those that
+    # were set (backup.TUNNEL_TOKEN_KEY).
+    metadata['excludes_host_secrets'] = True
+    metadata['secret_config_left_out'] = sys.argv[9].split()
 with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_left_out"
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_left_out" "$with_host_secrets" "$secrets_left_out"
 
     # 7. Zip and encrypt — backup format 2, written by the shared Python
     #    helper so both platforms produce the one format (not `zip -P`,
@@ -3669,8 +3698,10 @@ sys.exit(0 if provision_interactive() else 1)
                         bp_path="$bp_dir/$bp_filename"
                         # Handed to WordPress below, and the password came
                         # from there: never an OnionHeaven hub's registry or
-                        # registrants' keys (--without-hub-data).
-                        if create_backup "$bp_password" "$bp_path" --without-hub-data 2>>"$LOG_FILE"; then
+                        # registrants' keys (--without-hub-data), nor the
+                        # Cloudflare tunnel token or any other config
+                        # WordPress is not shown (--without-host-secrets).
+                        if create_backup "$bp_password" "$bp_path" --without-hub-data --without-host-secrets 2>>"$LOG_FILE"; then
                             # Hand the zip to the WordPress container for
                             # download, written as www-data (the page's own
                             # user). Not docker cp + chown as root: both

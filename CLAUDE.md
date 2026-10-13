@@ -190,6 +190,18 @@
   `loggable_value` so `SECRET_CONFIG_KEYS` values never reach a log.
   `tests/test_settings_page_updates.py` locks the page's fields, choices,
   ranges and token pattern to the allowlist.
+- Nor does the token reach WordPress in a backup. The page's backup is
+  handed to WordPress, with a password from there, so it is
+  `create_backup(include_hub_data=False, include_host_secrets=False)`
+  (Linux `--without-hub-data --without-host-secrets`): its config is cut to
+  `SAFE_CONFIG_KEYS` (`backup.wordpress_safe_config`, what status.json
+  shows), Linux's healthcheck key is left out, and `metadata.json` gets
+  `excludes_host_secrets` + `secret_config_left_out` (names). The site's
+  onion key stays: it is what the backup restores. App and CLI backups keep
+  the whole config. No restore takes the token from any backup
+  (`RESTORABLE_CONFIG`): this install's stays, and `restore_backup_config`
+  tells an owner without one to enter it again.
+  `tests/test_backup_host_secrets_off_wordpress.py` keeps the census.
 
 ## WordPress Host Controls Are the Owner's
 - OnionPress is a multisite: each additional user administers their own

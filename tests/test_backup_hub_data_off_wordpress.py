@@ -478,13 +478,13 @@ docker() {
 
     def test_a_hub_hears_what_its_backup_leaves_out(self):
         args, result = self._run(hub=True)
-        self.assertEqual(args[-1], "--without-hub-data")
+        self.assertEqual(args[2:], ["--without-hub-data", "--without-host-secrets"])
         self.assertIs(result["success"], True)
         self.assertEqual(result["note"], backup.HUB_DATA_LEFT_OUT_NOTE)
 
     def test_any_other_node_gets_no_note(self):
         args, result = self._run(hub=False)
-        self.assertEqual(args[-1], "--without-hub-data")
+        self.assertEqual(args[2:], ["--without-hub-data", "--without-host-secrets"])
         self.assertIs(result["success"], True)
         self.assertNotIn("note", result)
 

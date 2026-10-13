@@ -4258,11 +4258,12 @@ class OnionPressApp(rumps.App):
                     _main_thread(lambda: pw.update(display))
 
                 # Saved where the owner chose, never handed to WordPress: an
-                # OnionHeaven hub's registry and registrants' keys stay in.
+                # OnionHeaven hub's registry and registrants' keys stay in,
+                # and so does the whole config.
                 backup_manager.create_backup(
                     self.onion_address, username, password,
                     output_path, self.version, log_and_update,
-                    include_hub_data=True)
+                    include_hub_data=True, include_host_secrets=True)
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
@@ -5640,11 +5641,13 @@ License: AGPL v3"""
                         onion_addr = self.onion_address or "unknown"
                         # Handed to WordPress below, and the password came
                         # from there: never an OnionHeaven hub's registry or
-                        # registrants' keys (backup.HUB_DATA_LEFT_OUT_LOG).
+                        # registrants' keys (backup.HUB_DATA_LEFT_OUT_LOG),
+                        # nor the Cloudflare tunnel token or any other
+                        # config WordPress is not shown (backup.TUNNEL_TOKEN_KEY).
                         backup_metadata = backup_manager.create_backup(
                             onion_addr, self._get_admin_username(), password,
                             tmp_path, self.version, self.log,
-                            include_hub_data=False
+                            include_hub_data=False, include_host_secrets=False
                         )
 
                         # Hand it to the WordPress container for download,
