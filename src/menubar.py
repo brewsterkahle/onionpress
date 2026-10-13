@@ -4478,20 +4478,19 @@ class OnionPressApp(rumps.App):
                 # every local user (ps), the environment only by this one.
                 # So does a hub's recovery key (the CLI removes it from its
                 # environment before any docker child could inherit it).
+                # A failure shows the launcher's last lines, the staging
+                # folder kept for the next start and the log's path (#323).
                 hub_key_env = ({hub_backup.RECOVERY_KEY_ENV: hub_recovery_key}
                                if hub_recovery_key else {})
-                r = subprocess.run(
-                    [self.launcher_script, "restore", zip_path],
-                    env={**os.environ,
-                         launcher_ops.BACKUP_PASSWORD_ENV: password} | hub_key_env,
-                    capture_output=True, text=True, encoding='utf-8',
-                    errors='replace', timeout=1800)
-                if r.returncode != 0:
-                    self.log(f"Restore: launcher restore rc={r.returncode}: "
-                             f"{(r.stderr or r.stdout or '')[:300]}")
-                    _main_thread(lambda: pw.finish(
-                        "Restore failed — the backup was refused or could "
-                        "not be restored. Check the log for details."))
+                ok, failure, restore_stderr = launcher_ops.run_launcher_restore(
+                    self.launcher_script, zip_path, password,
+                    data_dir=self.app_support,
+                    log_path=os.path.join(self.app_support, "onionpress.log"),
+                    extra_env=hub_key_env)
+                if not ok:
+                    self.log(f"Restore: launcher restore failed: {failure}")
+                    _main_thread(lambda: pw.finish(failure,
+                                                   title="Restore Failed"))
                     return
 
                 # The address the restore derived from the backup's key, from
@@ -4541,7 +4540,7 @@ class OnionPressApp(rumps.App):
                 # A hub's sealed registry and registrants' keys: whether they
                 # came back (the CLI logs HUB_DATA_RESTORED_LOG once written).
                 if metadata.get("onionheaven_data") == "sealed":
-                    if backup_manager.HUB_DATA_RESTORED_LOG in (r.stderr or ""):
+                    if backup_manager.HUB_DATA_RESTORED_LOG in restore_stderr:
                         notes.append("OnionHeaven registry and registrants' keys: restored.")
                     else:
                         notes.append(backup_manager.HUB_DATA_NOT_RESTORED_NOTE)

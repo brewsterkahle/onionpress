@@ -871,9 +871,9 @@ class TestMac(unittest.TestCase):
         self.assertLess(body.index('if metadata.get("onionheaven_data") == "sealed":'), ask)
         self.assertLess(ask, body.index("_BackupProgressWindow("))
         self.assertIn("hub_key_env = ({hub_backup.RECOVERY_KEY_ENV: hub_recovery_key}", body)
-        self.assertIn("launcher_ops.BACKUP_PASSWORD_ENV: password} | hub_key_env,", body)
-        self.assertIn('[self.launcher_script, "restore", zip_path]', body)
-        self.assertIn("backup_manager.HUB_DATA_RESTORED_LOG in (r.stderr", body)
+        self.assertIn("extra_env=hub_key_env)", body)
+        self.assertIn("launcher_ops.run_launcher_restore(", body)
+        self.assertIn("backup_manager.HUB_DATA_RESTORED_LOG in restore_stderr", body)
         ask_body = self.src[self.src.index("def _ask_hub_recovery_key"):]
         ask_body = ask_body[:ask_body.index('@rumps.clicked("Restore...")')]
         self.assertIn("NSSecureTextField", ask_body)
