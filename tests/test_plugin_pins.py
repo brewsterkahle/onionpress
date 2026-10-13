@@ -45,9 +45,9 @@ class TestPins(unittest.TestCase):
             with self.subTest(slug):
                 version, _, sha = pin.partition(" ")
                 self.assertRegex(version, r"^\d+(\.\d+)+$")
-                # An empty SHA256 means "not pinned yet": install_plugin.sh
-                # refuses the plugin until build/pin-wp-plugin.sh fills it.
-                self.assertRegex(sha, r"^([0-9a-f]{64})?$")
+                # Every shipped plugin carries its SHA256 (install_plugin.sh
+                # refuses one without it); build/pin-wp-plugin.sh prints it.
+                self.assertRegex(sha, r"^[0-9a-f]{64}$")
 
     def test_launchers_install_only_pinned_slugs(self):
         pins = _pins(_read(SCRIPT))

@@ -23,9 +23,9 @@ DEST_DIR="$2"
 plugin_pin() {
     case "$1" in
         cache-enabler)
-            echo "1.8.17 " ;;
+            echo "1.8.17 d57e23c3c1ca84fce4b14feeaaf493ba00f2a7e443bfbb7066b234285c7b7235" ;;
         internet-archive-wayback-machine-link-fixer)
-            echo "1.4.2 " ;;
+            echo "1.4.2 874d7dc369acc8a363c8f0c73e0ba65e3b12d6fe366bf85985800de6eab91112" ;;
         *) return 1 ;;
     esac
 }
