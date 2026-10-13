@@ -288,7 +288,7 @@ class TestRestoreContainerArtifacts(unittest.TestCase):
                 stderr="" if kwargs.get("text") else b"")
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, {}, logs.append)
+            backup.restore_container_artifacts(staging, {}, logs.append, data_dir=root)
         self.assertTrue([m for m in logs if "ERROR — OnionHome's name registry was not "
                          "restored" in m and "unchanged" in m], logs)
         self.assertFalse([c for c in calls if any(f"onionpress-tor:{NAMES_DIR}" in a
@@ -350,6 +350,13 @@ class TestOnionpressRestore(unittest.TestCase):
             with self.subTest(kw=kw):
                 logs = []
                 with mock.patch.object(backup, "restore_name_registry") as names, \
+                        mock.patch.object(backup, "_get_db_credentials",
+                                          return_value={"name": "wordpress",
+                                                        "user": "wordpress",
+                                                        "password": "wp"}), \
+                        mock.patch.object(backup, "_restore_db_password",
+                                          return_value="wp"), \
+                        mock.patch.object(backup, "_assert_db_client_sandboxed"), \
                         mock.patch.object(backup.subprocess, "run", return_value=
                                           subprocess.CompletedProcess([], 0, stdout="", stderr="")):
                     backup.restore_container_artifacts(staging, {}, logs.append, **kw)

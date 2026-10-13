@@ -638,7 +638,8 @@ class OnionPressCLI:
                     metadata = validate_backup_metadata(json.load(f))
             restore_container_artifacts(staging, metadata, self.log,
                                         name_registry=name_registry,
-                                        hub_data=hub_data)
+                                        hub_data=hub_data,
+                                        data_dir=self.paths.data_dir)
             # Migrate DB schema for cross-version backups (non-fatal).
             res = self.docker.wp("core", "update-db", timeout=120)
             if not res.ok:

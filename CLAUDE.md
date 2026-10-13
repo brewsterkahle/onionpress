@@ -861,6 +861,26 @@
   (tor image): a service id comes only from one whole v3 address, else the
   hostname is rewritten from the public key
   (`tests/test_tor_watchdog_service_ids.py`).
+- **A restored dump, and the DB password re-set after it, run only SQL.**
+  The MariaDB client honours `source`/`\.`, `\!`/`system`, `tee` and `pager`
+  inside a sourced file — a root shell in onionpress-db, reachable from
+  WordPress through the Settings page's restore — and `LOAD DATA LOCAL
+  INFILE` reads the exec'd process's inherited `MYSQL_ROOT_PASSWORD` out of
+  `/proc`. So every import (`backup.restore_container_artifacts`; both
+  launchers' `db_import`, test-enforced identical) streams the dump on
+  stdin after the password line — never `docker cp`'d to a fixed
+  `/tmp/wordpress.sql` and `source`d — through a client run
+  `--sandbox --binary-mode --local-infile=0`, and refuses a client too old
+  for `--sandbox` rather than fall back. mariadb-dump's own output still
+  imports (its first line is the sandbox directive). The password re-set
+  (`ALTER USER … IDENTIFIED BY`) no longer splices a wp-config.php value
+  (WordPress's to write, so `x'; \! cmd` gave a root shell on any restore):
+  the password is the host secrets file's (`_restore_db_password`, what the
+  bash launchers already use), validated by `_reject_unsafe_db_value` (no
+  quote/backslash/backtick/control char; DB_NAME/DB_USER also no leading
+  dash, checked in `_get_db_credentials` for every caller), and the root
+  client runs `--binary-mode --sandbox` too. Needs no image publish.
+  `tests/test_db_import_sandbox.py`, `tests/test_secrets_off_argv.py`.
 
 ## Backups Stage Plain Files Only
 - What create_backup copies out of a container (wp-content; a hub's

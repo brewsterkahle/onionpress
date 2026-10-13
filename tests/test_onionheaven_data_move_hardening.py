@@ -1066,7 +1066,8 @@ esac
                 stderr="" if kwargs.get("text") else b"")
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, {}, lambda msg: None)
+            backup.restore_container_artifacts(staging, {}, lambda msg: None,
+                                               data_dir=self.tmp)
         hub_calls = [(c, i) for c, i in calls if any("onionheaven" in a for a in c)]
         self.assertEqual([c for c, _ in hub_calls], [
             ["docker", "exec", "onionheaven", "mkdir", "-p", "/var/lib/onionheaven/keys"],

@@ -473,8 +473,10 @@ class TestRestoreSealed(unittest.TestCase):
         with mock.patch.object(backup.subprocess, "run", side_effect=docker), \
                 mock.patch.object(backup, "put_wp_content"), \
                 mock.patch.object(backup, "_ensure_multisite_constants"):
+            # data_dir: a sandbox, so the DB password is never read from
+            # the live ~/.onionpress/secrets.
             backup.restore_container_artifacts(self.staging, self.metadata, self.logs.append,
-                                               hub_data=hub_data)
+                                               hub_data=hub_data, data_dir=self.staging)
         return docker
 
     def test_with_the_key_the_hub_data_comes_back(self):
@@ -494,7 +496,8 @@ class TestRestoreSealed(unittest.TestCase):
         self.assertIn(backup.sealed_skipped_message(self.metadata), self.logs)
         self.assertIn(self.kid, backup.sealed_skipped_message(self.metadata))
         # The site itself was restored.
-        self.assertTrue([c for c, _ in docker.calls if "onionpress-db:/tmp/wordpress.sql" in c])
+        self.assertTrue([c for c, i in docker.calls
+                         if "onionpress-db" in c and "--sandbox" in c and i])
 
     def test_another_key_is_caught_before_anything_is_written(self):
         other, _ = hub_backup.create_recovery_key(os.path.join(self.staging, "x"))

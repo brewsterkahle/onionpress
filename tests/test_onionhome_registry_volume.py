@@ -1126,7 +1126,8 @@ class TestRestore(unittest.TestCase):
                 stderr="" if kwargs.get("text") else b"")
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(self.staging, {}, lambda msg: None)
+            backup.restore_container_artifacts(self.staging, {}, lambda msg: None,
+                                               data_dir=self.tmp)
 
         copies = [argv for argv in calls if argv[:2] == ["docker", "cp"]
                   and any("onionnames" in a or "onionhome" in a for a in argv)]

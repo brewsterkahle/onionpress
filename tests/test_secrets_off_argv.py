@@ -297,35 +297,54 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
         rec.assert_secret_not_in_argv(self, TRICKY_PASSWORD)
 
     def test_restore_import_and_password_reconcile(self):
+        # The DB password is the host secrets file's (source of truth, what
+        # the containers run with), on stdin, never argv — and validated, so
+        # it can be spliced into the ALTER USER literal. (A wp-config.php
+        # value with quotes is refused elsewhere; see test_db_import_sandbox.)
+        safe_password = "Restore" + secrets.token_hex(8)
+        data_dir = os.path.join(self.tmpdir, "data")
+        os.makedirs(data_dir)
+        with open(os.path.join(data_dir, "secrets"), "w") as f:
+            f.write(f"WORDPRESS_DB_PASSWORD='{safe_password}'\n")
+
         staging = os.path.join(self.tmpdir, "staging")
         os.makedirs(os.path.join(staging, "database"))
-        with open(os.path.join(staging, "database", "wordpress.sql"), "w") as f:
-            f.write("SELECT 1;\n")
+        with open(os.path.join(staging, "database", "wordpress.sql"), "wb") as f:
+            f.write(b"SELECT 1;\n")
 
         def reply(argv):
             if argv[-2:] == ["get", "DB_PASSWORD"]:
-                return TRICKY_PASSWORD + "\n"
+                return "wpconfig-ignored\n"
             if argv[-2:] in (["get", "DB_NAME"], ["get", "DB_USER"]):
                 return "wordpress\n"
             return ""
         rec = _Recorder(reply)
         logs = []
         with mock.patch.object(backup.subprocess, "run", rec):
-            backup.restore_container_artifacts(staging, {}, logs.append)
-        rec.assert_secret_not_in_argv(self, TRICKY_PASSWORD)
+            backup.restore_container_artifacts(staging, {}, logs.append,
+                                               data_dir=data_dir)
+        rec.assert_secret_not_in_argv(self, safe_password)
 
-        imports = [(a, i) for a, i in rec.calls if "source /tmp/wordpress.sql" in a]
+        # The dump goes in on stdin, through a sandboxed client, never
+        # docker cp'd to /tmp and sourced.
+        for argv, _ in rec.calls:
+            self.assertNotIn("cp", argv, argv)
+            self.assertNotIn("/tmp/wordpress.sql", " ".join(argv))
+        imports = [(a, i) for a, i in rec.calls
+                   if isinstance(i, (bytes, bytearray)) and "mariadb" in a
+                   and "--sandbox" in a]
         self.assertEqual(len(imports), 1, rec.calls)
-        self.assertEqual(imports[0][0], backup._db_client_argv(
-            "mariadb", "-u", "wordpress", "wordpress",
-            "-e", "source /tmp/wordpress.sql"))
-        self.assertEqual(imports[0][1], TRICKY_PASSWORD + "\n")
+        argv, stdin = imports[0]
+        for flag in ("--sandbox", "--binary-mode", "--local-infile=0"):
+            self.assertIn(flag, argv)
+        self.assertEqual(stdin, safe_password.encode() + b"\n" + b"SELECT 1;\n")
 
-        alters = [(a, i) for a, i in rec.calls if i and "ALTER USER" in i]
+        alters = [(a, i) for a, i in rec.calls
+                  if isinstance(i, str) and "ALTER USER" in i]
         self.assertEqual(len(alters), 1, rec.calls)
         argv, stdin = alters[0]
         self.assertEqual(argv[:4], ["docker", "exec", "-i", "onionpress-db"])
-        self.assertIn(f"IDENTIFIED BY '{TRICKY_PASSWORD}'", stdin)
+        self.assertIn(f"IDENTIFIED BY '{safe_password}'", stdin)
         # Run the container side here, against a stub mariadb: the root
         # password comes from the container's environment, the SQL from stdin.
         bindir = os.path.join(self.tmpdir, "bin")
@@ -338,7 +357,7 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
             env={**os.environ, "MYSQL_ROOT_PASSWORD": "root-pw",
                  "PATH": bindir + os.pathsep + os.environ["PATH"]})
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(out.stdout, "pwd=root-pw args=-uroot\n" + stdin)
+        self.assertEqual(out.stdout, "pwd=root-pw args=-uroot --binary-mode --sandbox\n" + stdin)
 
     def test_create_backup_dump(self):
         """End to end through a stub `docker` that logs its argv and stdin."""

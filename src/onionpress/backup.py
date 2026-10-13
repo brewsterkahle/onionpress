@@ -24,8 +24,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from onionpress import backup_crypto, derivatives, hub_backup, key_manager, wp_files
-from onionpress.config import (DEFAULTS, SECRET_CONFIG_KEYS, read_config, read_value,
-                               redact_config, write_value)
+from onionpress.config import (DEFAULTS, SECRET_CONFIG_KEYS, load_secrets,
+                               read_config, read_value, redact_config,
+                               write_value)
 
 
 def _default_data_dir() -> str:
@@ -2283,7 +2284,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
         # 2-6. Container-side artifacts + config overrides — shared with the
         # install-from-backup path (restore_container_artifacts / apply_config_overrides).
         restore_container_artifacts(staging, metadata, log_func,
-                                    hub_volumes=not through_wordpress)
+                                    hub_volumes=not through_wordpress,
+                                    data_dir=data_dir)
         apply_config_overrides(staging, log_func, data_dir=data_dir,
                                onion_address=metadata.get('onion_address', ''))
 
@@ -2300,11 +2302,14 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
 
 
 def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True,
-                                name_registry=True, hub_data=None):
+                                name_registry=True, hub_data=None, data_dir=None):
     """Import a backup's container-side state into the RUNNING db + wordpress
     containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
     and multisite constants. Shared by restore_from_backup (in-place) and the
     install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
+
+    data_dir locates the host secrets file, the source of truth for the DB
+    password (defaults to ~/.onionpress).
 
     hub_volumes=False (the Settings page's restore) never writes the
     OnionHeaven hub data or the OnionHome name registry: what the backup
@@ -2339,28 +2344,35 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
             raise Exception("Backup is missing wordpress.sql")
 
         db_creds = _get_db_credentials()
+        # The source of truth for the password is the host secrets file, not
+        # wp-config.php (WordPress's to write): the Settings page's restore is
+        # reachable from WordPress, and a poisoned wp-config.php password would
+        # otherwise ride into the ALTER USER below.
+        db_password = _restore_db_password(data_dir, db_creds['password'])
 
-        # Copy SQL into db container then import
-        subprocess.run(
-            ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
-            capture_output=True, timeout=30, check=True
-        )
+        # Import the dump with the client's command parsing OFF so a crafted
+        # dump cannot run \! / system / \. / tee / pager (a shell in the db
+        # container as OS root) or LOAD DATA LOCAL (read MYSQL_ROOT_PASSWORD
+        # out of /proc/self/environ). The dump goes in on stdin after the
+        # password line — never docker cp'd to a fixed /tmp path and sourced.
+        # The DB dump is the database only (media rides wp-content), so its
+        # bytes fit in memory the way create_backup already holds them.
+        _assert_db_client_sandboxed()
+        import_argv = _db_client_argv(
+            'mariadb', *_DB_IMPORT_SAFE_FLAGS,
+            '-u', db_creds['user'], db_creds['name'])
+        with open(sql_path, 'rb') as f:
+            dump_bytes = f.read()
         result = subprocess.run(
-            _db_client_argv('mariadb',
-                            '-u', db_creds['user'],
-                            db_creds['name'],
-                            '-e', 'source /tmp/wordpress.sql'),
-            input=db_creds['password'] + '\n',
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
+            import_argv,
+            # First stdin line is the password (read into MYSQL_PWD); the
+            # dump bytes follow for the client to read as SQL.
+            input=db_password.encode() + b'\n' + dump_bytes,
+            capture_output=True, timeout=600,
         )
         if result.returncode != 0:
-            raise Exception(f"Database import failed: {result.stderr}")
-
-        # Clean up SQL file in container
-        subprocess.run(
-            ['docker', 'exec', 'onionpress-db', 'rm', '-f', '/tmp/wordpress.sql'],
-            capture_output=True, timeout=10
-        )
+            raise Exception("Database import failed: "
+                            f"{result.stderr.decode('utf-8', 'replace').strip()}")
 
         # Reconcile the wordpress mysql user's password with the
         # CURRENT install's secrets. The mariadb-dump only dumps
@@ -2374,20 +2386,24 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
         #
         # The fix is unconditional: always re-assert the wordpress
         # user's password to match what the current containers are
-        # using (from env / wp-config / secrets). Idempotent — if
-        # they already match, ALTER USER is effectively a no-op.
+        # using (the host secrets file). Idempotent — if they already
+        # match, ALTER USER is effectively a no-op.
         #
+        # db_password is validated (no quote/backslash/backtick/control
+        # char), so splicing it into the literal cannot break out; the
+        # root client runs --sandbox --binary-mode as belt and braces.
         # The statement carries the password, so it goes in on stdin; the
         # root password comes from the db container's own environment.
         log_func("Restore: reconciling DB user password with current secrets...")
         alter_sql = (
             f"ALTER USER 'wordpress'@'%' "
-            f"IDENTIFIED BY '{db_creds['password']}'; "
+            f"IDENTIFIED BY '{db_password}'; "
             f"FLUSH PRIVILEGES;"
         )
         alter = subprocess.run(
             ['docker', 'exec', '-i', 'onionpress-db', 'sh', '-c',
-             'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb -uroot'],
+             'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; '
+             'exec mariadb -uroot --binary-mode --sandbox'],
             input=alter_sql,
             capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=15,
@@ -2833,6 +2849,58 @@ def _ensure_multisite_constants(log_func):
 # sit in the host's process list, where `ps` shows every user's argv.
 _DB_PASSWORD_FROM_STDIN = 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"'
 
+# A dump is restored, and the wordpress user's password re-set, with the
+# client's own command parsing *off*, so nothing in a crafted dump or a
+# poisoned wp-config.php can run anything but SQL in the db container:
+#   --sandbox        refuses \!/system, \./source, tee and pager (a sourced
+#                    dump runs them as OS root otherwise — a shell in the db
+#                    container, reachable from WordPress via the Settings
+#                    page's restore)
+#   --binary-mode    treats the dump as data, never a `\x` client escape,
+#                    and leaves binary blobs intact (mariadb-dump's own
+#                    output still imports: its first line is the sandbox
+#                    directive /*M!999999\- enable the sandbox mode */)
+#   --local-infile=0 refuses LOAD DATA LOCAL INFILE, which would read the
+#                    exec'd process's inherited MYSQL_ROOT_PASSWORD out of
+#                    /proc/self/environ into a table
+_DB_IMPORT_SAFE_FLAGS = ('--sandbox', '--binary-mode', '--local-infile=0')
+
+# A value spliced into SQL text (the ALTER USER password re-set) or used as a
+# client argv (DB_NAME/DB_USER as -D/positional, where a leading dash would be
+# read as an option re-enabling local-infile) must carry none of this. The
+# passwords ensure_secrets and both launchers generate are [A-Za-z0-9]{32};
+# identifiers are always `wordpress`. This denylist still passes any sane
+# hand-set value while refusing a quote, backslash, backtick or control char.
+_DB_VALUE_FORBIDDEN = re.compile(r"[\x00-\x1f\x7f'\"\\`]")
+
+
+def _reject_unsafe_db_value(label, value, *, as_argv=False):
+    """Return *value* unchanged, or raise if it could escape a SQL string
+    literal or a client argv. ``as_argv`` also refuses a leading dash."""
+    if not isinstance(value, str) or value == '':
+        raise Exception(f"{label} is empty or not a string")
+    if _DB_VALUE_FORBIDDEN.search(value):
+        raise Exception(
+            f"{label} holds a quote, backslash, backtick or control "
+            f"character not allowed in a database credential")
+    if as_argv and value.startswith('-'):
+        raise Exception(f"{label} may not begin with '-'")
+    return value
+
+
+def _assert_db_client_sandboxed():
+    """Refuse the import outright on a MariaDB client too old for --sandbox,
+    rather than fall back to an unsandboxed one."""
+    check = subprocess.run(
+        ['docker', 'exec', 'onionpress-db', 'sh', '-c',
+         'mariadb --help 2>/dev/null | grep -q -- --sandbox'],
+        capture_output=True, timeout=15,
+    )
+    if check.returncode != 0:
+        raise Exception(
+            "the onionpress-db MariaDB client is too old to import a backup "
+            "safely (no --sandbox support); update the database image")
+
 
 def _db_client_argv(*client_argv):
     """argv that runs a MariaDB client in onionpress-db. Feed the password
@@ -2842,7 +2910,14 @@ def _db_client_argv(*client_argv):
 
 
 def _get_db_credentials():
-    """Read WordPress database credentials from wp-config.php via WP-CLI."""
+    """Read WordPress database credentials from wp-config.php via WP-CLI.
+
+    wp-config.php is WordPress's to write, so the values are validated before
+    any caller uses them as a client argv or splices them into SQL: a
+    DB_NAME/DB_USER starting with '-' would be read as a client option
+    (e.g. re-enabling --local-infile), and a quote or backslash in any field
+    would break out of a string literal.
+    """
     creds = {}
     for field in ('DB_NAME', 'DB_USER', 'DB_PASSWORD'):
         result = subprocess.run(
@@ -2853,10 +2928,31 @@ def _get_db_credentials():
             raise Exception(f"Could not read {field} from WordPress config")
         creds[field] = result.stdout.strip()
     return {
-        'name': creds['DB_NAME'],
-        'user': creds['DB_USER'],
-        'password': creds['DB_PASSWORD'],
+        'name': _reject_unsafe_db_value('DB_NAME', creds['DB_NAME'], as_argv=True),
+        'user': _reject_unsafe_db_value('DB_USER', creds['DB_USER'], as_argv=True),
+        'password': _reject_unsafe_db_value('DB_PASSWORD', creds['DB_PASSWORD']),
     }
+
+
+def _restore_db_password(data_dir, fallback):
+    """The password to authenticate the restore's DB client and to re-assert
+    for the wordpress user.
+
+    The host's secrets file (``~/.onionpress/secrets``) is the source of
+    truth — it is what the running containers were started with, and the
+    bash launchers' restore reads the same WORDPRESS_DB_PASSWORD. wp-config.php
+    is WordPress's to write, so a value read from it (``fallback``) is only a
+    last resort when the secrets file is missing. Either way the value is
+    validated before it reaches SQL text."""
+    try:
+        secrets_path = os.path.join(data_dir or _default_data_dir(), 'secrets')
+        if os.path.exists(secrets_path):
+            pw = load_secrets(secrets_path).wordpress_db_password
+            if pw:
+                return _reject_unsafe_db_value('WORDPRESS_DB_PASSWORD', pw)
+    except Exception:
+        pass
+    return _reject_unsafe_db_value('DB_PASSWORD', fallback)
 
 
 def _find_dir(staging, name):

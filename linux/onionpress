@@ -603,6 +603,30 @@ db_client() {
         sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh "$@"
 }
 
+# Import a restored dump into the wordpress DB: db_import <password> <sql_file>
+# The password is the first stdin line (reaches the client as MYSQL_PWD); the
+# dump is streamed after it. The client runs with its own command parsing OFF
+# so nothing in a crafted dump can run anything but SQL in the db container:
+#   --sandbox        refuses \!/system, \./source, tee, pager (a sourced dump
+#                    runs them as OS root otherwise — a shell in onionpress-db)
+#   --binary-mode    treats the dump as data, not \x client escapes, and keeps
+#                    binary blobs intact (mariadb-dump's own output imports)
+#   --local-infile=0 refuses LOAD DATA LOCAL INFILE (reading the exec'd
+#                    process's inherited MYSQL_ROOT_PASSWORD from /proc)
+# No docker cp of the dump to a fixed /tmp/wordpress.sql + `source`.
+# Identical in app/MacOS/onionpress and linux/onionpress (test-enforced).
+db_import() {
+    local db_pass="$1"
+    local sql_file="$2"
+    if ! docker exec onionpress-db sh -c 'mariadb --help 2>/dev/null | grep -q -- --sandbox'; then
+        log "ERROR: the onionpress-db MariaDB client is too old (no --sandbox); refusing to import a backup unsandboxed"
+        return 1
+    fi
+    { printf '%s\n' "$db_pass"; cat "$sql_file"; } | docker exec -i onionpress-db \
+        sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh \
+        mariadb --sandbox --binary-mode --local-infile=0 -u wordpress wordpress
+}
+
 # Set a WordPress user's password: wp_set_user_password <login> <password>
 # Both reach a fixed `wp eval` PHP on stdin. As --admin_password or
 # --user_pass the password would sit in the process list, where ps shows
@@ -2916,13 +2940,11 @@ restore_backup() {
             setup_db_passwords
             db_pass="$WORDPRESS_DB_PASSWORD"
         fi
-        docker cp "$sql_file" onionpress-db:/tmp/wordpress.sql 2>>"$LOG_FILE"
-        db_client "$db_pass" mariadb -u wordpress wordpress -e "source /tmp/wordpress.sql" 2>>"$LOG_FILE"
+        db_import "$db_pass" "$sql_file" 2>>"$LOG_FILE"
         if [ $? -ne 0 ]; then
             log "ERROR: Database import failed"
             return 1
         fi
-        docker exec onionpress-db rm -f /tmp/wordpress.sql 2>/dev/null
         log "Restore: database imported"
     else
         log "WARNING: No database dump in backup — skipping"

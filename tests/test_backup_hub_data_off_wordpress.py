@@ -811,7 +811,8 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
                 stderr="" if kwargs.get("text") else b"")
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, metadata or {}, logs.append, **kw)
+            backup.restore_container_artifacts(staging, metadata or {}, logs.append,
+                                               data_dir=self.tmp, **kw)
         touched = [c for c in calls if any("onionheaven" in a or "onionnames" in a
                                            for a in c)]
         return touched, logs
@@ -848,6 +849,7 @@ class TestLinuxRestoreBackup(unittest.TestCase):
 log() { echo "[log] $1" | tee -a "$LOG_FILE"; }
 docker() { echo "docker $*" >> "$CALLS"; return 0; }
 db_client() { echo "db_client $*" >> "$CALLS"; return 0; }
+db_import() { echo "db_import $*" >> "$CALLS"; return 0; }
 setup_db_passwords() { :; }
 python3() { "$PY" "$@"; }
 op_py() {

@@ -256,8 +256,9 @@ services:
     # this image floats, so its own ownership repair has to keep working.
     # First start, restarts and MARIADB_AUTO_UPGRADE run with just these.
     # The host's dumps and imports are clients over the socket; a restore's
-    # import reads a docker cp'd dump that keeps the host user's uid and
-    # mode (DAC_OVERRIDE again).
+    # import streams the dump into the client on stdin (no docker cp of a
+    # file into the container), the client run --sandbox so a crafted dump
+    # runs only SQL (see CLAUDE.md "Restores Extract Plain Files Only").
     cap_drop:
       - ALL
     cap_add:
