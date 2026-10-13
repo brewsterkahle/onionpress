@@ -78,6 +78,33 @@ wp_put() {
         sh "$1" "${2:-600}"
 }
 
+# Before this install forgets its onion service key (reset, key import, a
+# restore to another address): ask every OnionHeaven hub that may hold a
+# copy to delete it, while the key is still here to sign the request.
+# onionpress.cli onionheaven-unregister sends the signed /unregister for
+# the whole address to the hub the registration record names, through the
+# tor container (which must be running), and says what it did; with nothing
+# registered it does and prints nothing. The menubar's heartbeats are held
+# off meanwhile (a lock and a hold in the record), so none puts the key back.
+# Usage: onionheaven_release <reason> [<address whose key stays>]. Sets
+# ONIONHEAVEN_RELEASE_RC (0 nothing left on a hub, 1 something the user
+# could still take back, 3 something nothing here can take back, other:
+# the command failed) and returns 1 only when the user chose to stop at
+# the question.
+onionheaven_release() {
+    local answer=""
+    ONIONHEAVEN_RELEASE_RC=0
+    bundled_python -m onionpress.cli onionheaven-unregister --reason "$1" \
+        ${2:+--keep-address "$2"} || ONIONHEAVEN_RELEASE_RC=$?
+    # 0 and 3: nothing the user could still do. Anything else (1, or a
+    # failure of the command itself) may leave a key on a hub: ask.
+    case "$ONIONHEAVEN_RELEASE_RC" in 0|3) return 0 ;; esac
+    [ "$ONIONPRESS_YES" = "true" ] && return 0
+    printf "Continue anyway? The hub keeps the key listed above. [y/N] "
+    read -r answer || true
+    [ "$answer" = "y" ] || [ "$answer" = "Y" ]
+}
+
 # Run wp-cli in the WordPress container as www-data: wp_cli <args...>, and
 # wp_cli_in for what wp-cli reads from stdin (docker exec -i). wp-cli loads
 # WordPress (wp-config.php, mu-plugins, plugins, themes), every file of it
@@ -1023,6 +1050,13 @@ HELPEOF
             return 1
         fi
 
+        # The old key goes: OnionHeaven hubs that may hold a copy are
+        # asked to delete it first, while it can still sign the request.
+        if ! onionheaven_release key-import; then
+            echo "Cancelled."
+            return 1
+        fi
+
         # Stop OnionPress if running
         echo "Stopping OnionPress..."
         stop_containers 2>/dev/null
@@ -1046,9 +1080,18 @@ HELPEOF
         # Remove old vanity-keys directory
         rm -rf "$DATA_DIR/shared/vanity-keys/"
         echo "Old keys removed."
-    elif [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-        # Docker not running but old vanity-keys exist — clean them up
-        rm -rf "$DATA_DIR/shared/vanity-keys/"
+    else
+        # Docker not running: the old key stays in its volume until the
+        # next start swaps it out, and nothing can sign for it until then.
+        # If a hub holds a copy, say so and ask before going on.
+        if ! onionheaven_release key-import; then
+            echo "Cancelled."
+            return 1
+        fi
+        if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
+            # Docker not running but old vanity-keys exist — clean them up
+            rm -rf "$DATA_DIR/shared/vanity-keys/"
+        fi
     fi
 
     # Mark that a key was imported so next startup removes the old key volume
@@ -3025,6 +3068,13 @@ main() {
                 # into the key volume so Tor uses the restored address.
                 # Use .import-key-pending flag so start_containers removes the old
                 # key volume and installs the restored key.
+                # The backup's key replaces the one Tor serves now: hubs
+                # that may hold a copy of that one are asked to delete it
+                # first (not the backup's own address, which stays).
+                local restored_key_dir=""
+                restored_key_dir=$(vanity_key_dir) || restored_key_dir=""
+                ONIONPRESS_YES=true onionheaven_release restore \
+                    "${restored_key_dir:+$(basename "$restored_key_dir")}"
                 log "Setup --from-backup: flagging key reimport..."
                 touch "$DATA_DIR/.import-key-pending"
                 stop_containers
@@ -3100,6 +3150,14 @@ main() {
                 read -r
             fi
 
+            # The onion service key goes with the reset: OnionHeaven hubs
+            # that may hold a copy are asked to delete it first, while it
+            # can still sign the request.
+            if ! onionheaven_release reset; then
+                echo "Cancelled."
+                exit 1
+            fi
+
             log "Resetting OnionPress (full wipe)..."
 
             # Stop everything
@@ -3113,10 +3171,14 @@ main() {
                 docker volume rm "$vol" >> "$LOG_FILE" 2>&1 && log "Removed volume: $vol" || log "WARNING: Failed to remove volume: $vol"
             done
 
-            # Wipe data directory (keep colima VM and docker-config)
+            # Wipe data directory (keep colima VM and docker-config). The
+            # OnionHeaven registration record stays when a hub may still
+            # hold a key: it is what says what remains on which hub.
             rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
             rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
-            rm -f "$DATA_DIR/onionheaven-registration.json"
+            if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then
+                rm -f "$DATA_DIR/onionheaven-registration.json"
+            fi
             rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
             rm -rf "$DATA_DIR/shared/vanity-keys/"
             log "Removed keys, config, secrets, and logs"
@@ -3176,6 +3238,14 @@ main() {
             # ── Step 2: Reset ───────────────────────────────────────────
             echo ""
             echo "── Step 2/4: Reset ──"
+            # The reset wipes the config (OnionHeaven back to undecided, so
+            # no heartbeat follows the restore): hubs that may hold the key
+            # are asked to delete their copy, as by `reset`, or one would
+            # take the restored, running site over.
+            if ! onionheaven_release scrub; then
+                echo "Cancelled. Backup kept at: $scrub_backup"
+                exit 1
+            fi
             stop_containers 2>/dev/null || true
 
             # Remove all Docker volumes
@@ -3184,10 +3254,13 @@ main() {
                 docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
             done
 
-            # Wipe data directory (keep colima VM and docker-config)
+            # Wipe data directory (keep colima VM and docker-config); the
+            # OnionHeaven record stays when a hub may still hold a key.
             rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
             rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
-            rm -f "$DATA_DIR/onionheaven-registration.json"
+            if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then
+                rm -f "$DATA_DIR/onionheaven-registration.json"
+            fi
             rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
             rm -rf "$DATA_DIR/shared/vanity-keys/"
             echo "  Reset complete."

@@ -2108,9 +2108,16 @@ class OnionPressApp(rumps.App):
                 # next beat, and any heartbeat already on its way lands
                 # before the /unregister (onionheaven._HUB_LOCK). Unset
                 # (undecided) sends nothing.
+                #
+                # And whatever the choice: a hub this site no longer uses
+                # (ONIONHEAVEN_ADDRESS changed; it is read at startup) is
+                # asked to delete its copy of the key, and the record says
+                # what hubs may still hold a key this install has lost
+                # (onionheaven.maintain_registration).
                 if (tor_bootstrapped and not self.is_onionheaven
                         and key_manager.is_valid_onion_address(self.onion_address)):
                     onionheaven.maybe_unregister_after_opt_out(self)
+                    onionheaven.maintain_registration(self)
 
                 # Start analytics sharing (opt-in, checks config each cycle).
                 # Runs for ALL instances including OnionHeaven.
@@ -4429,6 +4436,15 @@ class OnionPressApp(rumps.App):
                 # Build summary of what was restored and what will happen
                 notes = [f"Onion address: {restored_addr}"]
 
+                # The restore asked OnionHeaven to delete its copy of the
+                # replaced key (onionpress.cli restore); say what a hub may
+                # still hold of a key this install no longer has.
+                left = [{"content_address": a, "onionheaven_address": h, "why": "no-key"}
+                        for a, h in onionheaven.registrations_left(self)
+                        if a != restored_addr]
+                if left:
+                    notes.append(onionheaven.describe_remaining(left))
+
                 # Check if onionheaven mode was restored
                 onionheaven_addr = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
                 if restored_addr == onionheaven_addr:
@@ -4449,6 +4465,22 @@ class OnionPressApp(rumps.App):
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
 
         threading.Thread(target=do_restore, daemon=True).start()
+
+    def _release_onionheaven_before_restore(self, restored_address):
+        """backup.restore_from_backup's before_key_change: the Settings
+        page's restore is about to replace the key in the tor container.
+        OnionHeaven hubs that may hold a copy of the current one (not the
+        restored address's: a backup of this same site keeps it) are asked
+        to delete it now, while it can still sign the request. What
+        remains is logged and kept in the registration record."""
+        if self.is_onionheaven:
+            return
+        try:
+            onionheaven.release_registration(
+                self, "restore", keep_address=restored_address)
+        except Exception as e:
+            self.log(f"Restore: could not ask OnionHeaven to delete the old "
+                     f"key (continuing): {e}")
 
     def _reconcile_archive_s3_keys(self):
         """Ensure the Wayback sweep's archive.org S3 keys exist, retrying
@@ -4982,6 +5014,30 @@ License: AGPL v3"""
         """Final 'DELETE' confirmation + teardown. Invoked directly for
         "Delete Everything", or as the backup on_complete callback (success
         only) so the destructive work never races an in-progress backup (#258)."""
+        # An OnionHeaven hub may hold a copy of the key. Only the key can
+        # sign the request that makes the hub delete it, and the key lives
+        # in the tor container: with OnionPress stopped, say so first.
+        hubs_holding = [] if self.is_onionheaven else onionheaven.registrations_left(self)
+        if hubs_holding and not self.is_running:
+            listed = "\n".join(f"• {hub} (key of {addr})" for addr, hub in hubs_holding)
+            button_index = self.show_native_alert(
+                title="OnionHeaven Holds Your Key",
+                message=("These OnionHeaven hubs may hold a copy of your onion "
+                         f"service private key:\n\n{listed}\n\n"
+                         "OnionPress asks them to delete it when you uninstall, "
+                         "but only while it is running. Start OnionPress and "
+                         "uninstall again, or uninstall anyway and the hub "
+                         "keeps the key."),
+                buttons=["Cancel", "Uninstall Anyway"],
+                default_button=0,
+                cancel_button=0,
+                style="critical"
+            )
+            if button_index != 1:
+                self.log("Uninstall cancelled - OnionHeaven hub holds the key, "
+                         "OnionPress not running")
+                return
+
         # Step 2: Final confirmation with explicit acknowledgment
         # Use rumps.Window for text input (no osascript, no permissions needed)
         window = rumps.Window(
@@ -5019,13 +5075,23 @@ License: AGPL v3"""
                 self.monitoring_tor_install = False
                 self.dismiss_setup_dialog()
 
-                # Unregister from OnionHeaven before stopping (needs running containers)
-                if self.is_running:
-                    self.log("Uninstall: Unregistering from OnionHeaven...")
-                    try:
-                        onionheaven.unregister_from_onionheaven(self)
-                    except Exception as e:
-                        self.log(f"Uninstall: OnionHeaven unregister failed (continuing): {e}")
+                # Take the key back off every OnionHeaven hub that may hold
+                # it, before stopping (the key in the tor container signs
+                # the request). No heartbeat goes out from here on, so none
+                # can put the key back after the /unregister.
+                onionheaven.end_hub_traffic(self)
+                hub_notice = ""
+                if not self.is_onionheaven:
+                    left = [{"content_address": a, "onionheaven_address": h,
+                             "why": "key-unreadable"}
+                            for a, h in onionheaven.registrations_left(self)]
+                    if left and self.is_running:
+                        self.log("Uninstall: asking OnionHeaven to delete its copy of the key...")
+                        try:
+                            left = onionheaven.release_registration(self, "uninstall")
+                        except Exception as e:
+                            self.log(f"Uninstall: OnionHeaven unregister failed (continuing): {e}")
+                    hub_notice = onionheaven.describe_remaining(left)
 
                 # Stop the service (this will cancel any startup in progress)
                 self.log("Uninstall: Stopping services...")
@@ -5068,9 +5134,14 @@ License: AGPL v3"""
 
                 # Step 5: Show final dialog and quit
                 # Use show_native_alert which already handles main thread
+                if hub_notice:
+                    self.log(f"Uninstall: {hub_notice}")
+                    hub_notice = ("\n\n" + hub_notice + " Ask the hub's "
+                                  "operator to remove it if you need it gone.")
                 self.show_native_alert(
                     title="Uninstall Complete",
-                    message="OnionPress has been uninstalled.\n\nFinal step: Move OnionPress.app to the Trash.\n\nClick OK to quit.",
+                    message=("OnionPress has been uninstalled." + hub_notice +
+                             "\n\nFinal step: Move OnionPress.app to the Trash.\n\nClick OK to quit."),
                     buttons=["OK"]
                 )
                 rumps.quit_application()
@@ -5735,7 +5806,8 @@ License: AGPL v3"""
                             # hub's keys or OnionHome's name registry is
                             # refused, and neither volume is written.
                             backup_manager.restore_from_backup(local_zip, password, self.log,
-                                                               through_wordpress=True)
+                                                               through_wordpress=True,
+                                                               before_key_change=self._release_onionheaven_before_restore)
                             restored = True
                         else:
                             restored = False

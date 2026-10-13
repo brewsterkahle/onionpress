@@ -108,6 +108,83 @@ def _make_log_func(log_file: str | None = None) -> Callable[[str], None]:
     return log
 
 
+def _file_log_func(log_file: str | None) -> Callable[[str], None]:
+    """A log function that writes to the log file only (the terminal gets
+    a summary instead)."""
+    def log(msg: str) -> None:
+        if not log_file:
+            return
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(log_file, "a") as f:
+                f.write(f"[{ts}] {msg}\n")
+        except OSError:
+            pass
+    return log
+
+
+def _hub_context(data_dir: str | None = None,
+                 log_func: Callable[[str], None] | None = None):
+    """onionheaven.HubContext for this install, with the configured hub
+    and a docker environment key_manager.extract_keys (plain `docker`,
+    this process's environment) can use: the launchers export
+    DOCKER_HOST, a direct run gets the socket resolve_paths finds."""
+    from . import onionheaven
+    paths = resolve_paths(data_dir=data_dir)
+    log = log_func or _file_log_func(paths.log_file)
+    ctx = onionheaven.HubContext(paths, log)
+    onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
+        ctx.read_config_value("ONIONHEAVEN_ADDRESS", ""), log)
+    os.environ.setdefault("DOCKER_HOST", f"unix://{paths.docker_socket}")
+    if paths.bin_dir and os.path.isdir(paths.bin_dir):
+        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+        if paths.bin_dir not in path_dirs:
+            os.environ["PATH"] = os.pathsep.join([paths.bin_dir] + path_dirs)
+    return ctx
+
+
+# Remaining items the user can do something about: start OnionPress (the
+# key could not be read) or try again later (the hub did not answer).
+_RETRYABLE = ("key-unreadable", "unanswered", "busy")
+
+
+def release_onionheaven(reason: str, keep_address: str | None = None,
+                        data_dir: str | None = None,
+                        log_func: Callable[[str], None] | None = None,
+                        out=None) -> list:
+    """Before this install forgets an onion service key (reset, key
+    import, restore, uninstall): ask every OnionHeaven hub that may hold
+    one of its keys to delete its copy (onionheaven.release_registration:
+    a signed /unregister, the hub the record names), and tell the user on
+    *out* (stdout) what happened. Nothing is printed when no hub holds
+    anything. Returns what may remain on a hub ([] = nothing).
+    """
+    from . import onionheaven
+    out = out or sys.stdout
+    ctx = _hub_context(data_dir, log_func)
+    pairs = [p for p in onionheaven.registrations_left(ctx) if p[0] != keep_address]
+    if not pairs:
+        return []
+    print("Asking the OnionHeaven hub to delete its copy of this site's "
+          "onion service key (this can take a few minutes over Tor)...", file=out)
+    remaining = onionheaven.release_registration(ctx, reason, keep_address=keep_address)
+    left = {(i["content_address"], i["onionheaven_address"]) for i in remaining}
+    for addr, hub in pairs:
+        if (addr, hub) not in left:
+            print(f"  Done: the hub {hub} no longer holds the key of {addr}.", file=out)
+    if remaining:
+        print("", file=out)
+        print("WARNING: " + onionheaven.describe_remaining(remaining).replace(
+            "\n", "\nWARNING: "), file=out)
+        if any(i["why"] in _RETRYABLE for i in remaining):
+            print("To have it deleted, make sure OnionPress is running and "
+                  "try again before the key is gone.", file=out)
+        print("OnionPress keeps a note of it in "
+              f"{os.path.join(ctx.app_support, onionheaven.REGISTRATION_RECORD)}.",
+              file=out)
+    return remaining
+
+
 class OnionPressCLI:
     """Wires together all OnionPress modules for CLI use."""
 
@@ -333,6 +410,17 @@ class OnionPressCLI:
         except Exception as e:
             self.log(f"Restore failed during extract/seed: {e}")
             return 1
+        # A backup of another address replaces this install's key: ask the
+        # OnionHeaven hubs that may hold the current one to delete their
+        # copy first, while it is here to sign the request. The restored
+        # address's own registration (a backup of this same site) stays.
+        # Not a reason to stop: what remains is reported and recorded.
+        try:
+            release_onionheaven("restore", keep_address=addr,
+                                data_dir=self.paths.data_dir)
+        except Exception as e:
+            self.log(f"Restore: could not ask the OnionHeaven hub to delete "
+                     f"the old key ({e}); continuing")
         try:
             # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
             # the seeded key and imported backup cleanly (no stale keystore
@@ -856,6 +944,20 @@ class OnionPressCLI:
                 print("\n  Cancelled.")
                 return 1
 
+        # The key goes with the reset: ask the OnionHeaven hubs that may
+        # hold a copy to delete it first, while the key is here to sign
+        # the request.
+        remaining = release_onionheaven("reset", data_dir=self.paths.data_dir)
+        if (not yes and any(i["why"] in _RETRYABLE for i in remaining)):
+            try:
+                answer = input("  Reset anyway? The hub keeps the key listed "
+                               "above. [y/N] ")
+            except (KeyboardInterrupt, EOFError):
+                answer = ""
+            if answer.strip().lower() not in ("y", "yes"):
+                print("\n  Cancelled.")
+                return 1
+
         self.log("Resetting OnionPress (full wipe)...")
 
         # Stop everything
@@ -876,10 +978,14 @@ class OnionPressCLI:
                     self.docker.run(["volume", "rm", vol], timeout=15)
                     self.log(f"Removed volume: {vol}")
 
-        # Wipe data files (keep colima VM)
+        # Wipe data files (keep colima VM). The OnionHeaven registration
+        # record stays when a hub may still hold a key: it is what tells
+        # the user what remains on which hub.
+        from .onionheaven import REGISTRATION_RECORD
         for name in [
             "secrets", "onionpress.log", ".last_status_state",
-            "config", "config.bak", "onionheaven-registration.json",
+            "config", "config.bak",
+            *([] if remaining else [REGISTRATION_RECORD]),
             "onion_address", "healthcheck-address",
         ]:
             path = os.path.join(self.paths.data_dir, name)
@@ -982,6 +1088,22 @@ def main(argv: list[str] = None) -> int:
 
     p_reset = sub.add_parser("reset", help="Wipe all data and start fresh")
     p_reset.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
+    p_ohu = sub.add_parser(
+        "onionheaven-unregister",
+        help="Ask every OnionHeaven hub that may hold one of this install's "
+             "onion service keys to delete its copy (before a reset, key "
+             "import, restore or uninstall; the tor container must be "
+             "running). Exit 0 when no hub holds anything any more")
+    p_ohu.add_argument("--reason", default="unregister",
+                       help="Why, for the record and the log (reset, ...)")
+    p_ohu.add_argument("--keep-address", default="",
+                       help="An address whose key stays (a restore of it): "
+                            "its registrations are left alone")
+    sub.add_parser(
+        "onionheaven-registrations",
+        help="List what the registration record says OnionHeaven hubs may "
+             "hold of this install's keys (no network)")
 
     p_cfu = sub.add_parser(
         "check-for-update",
@@ -1294,6 +1416,32 @@ def main(argv: list[str] = None) -> int:
             paths, Docker(paths), action="check" if args.check else "apply")
         print(result.line())
         return 0 if result.ok else 1
+
+    if args.command == "onionheaven-unregister":
+        # Run by both launchers before a reset, key import, restore or
+        # uninstall: no OnionPressCLI setup (config/secrets creation, port
+        # probing) on a path that is about to remove them.
+        from .key_manager import is_valid_onion_address
+        keep = (args.keep_address or "").strip()
+        if keep and not is_valid_onion_address(keep):
+            print("ERROR: --keep-address is not an onion address", file=sys.stderr)
+            return 2
+        remaining = release_onionheaven(args.reason, keep_address=keep or None,
+                                        data_dir=args.data_dir)
+        # 0: no hub holds anything; 1: a hub may, and starting OnionPress
+        # or trying again could still take it back (the launchers ask
+        # before going on); 3: a hub may, but nothing here can sign for it
+        # any more (reported, recorded).
+        if any(i["why"] in _RETRYABLE for i in remaining):
+            return 1
+        return 3 if remaining else 0
+
+    if args.command == "onionheaven-registrations":
+        from . import onionheaven
+        ctx = _hub_context(args.data_dir)
+        for addr, hub in onionheaven.registrations_left(ctx):
+            print(f"{addr} {hub}")
+        return 0
 
     if args.command == "open-login":
         # Needs only docker and a browser: skip OnionPressCLI's setup.

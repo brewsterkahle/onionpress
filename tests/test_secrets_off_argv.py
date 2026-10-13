@@ -474,6 +474,10 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
             "log() { :; }\n"
             "docker() { return 1; }\n"  # no key volume exists
             "stop_containers() { :; }\n"
+            # Nothing registered with an OnionHeaven hub (that path is
+            # tests/test_onionheaven_lifecycle.py's).
+            "onionheaven_release() { :; }\n"
+            "start_heartbeat_client() { :; }\n"
             f'{wrapper}() {{ printf "%s\\n" "$*" >> "$ARGV_LOG"; "$PY" "$@"; }}\n'
             + _shell_function(rel, function) + "\n" + call + "\n"
         )

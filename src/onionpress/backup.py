@@ -1778,7 +1778,8 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
 
 
 def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
-                        through_wordpress=False):
+                        through_wordpress=False,
+                        before_key_change=None):
     """Restore an OnionPress site from a backup zip.
 
     Args:
@@ -1791,6 +1792,10 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
             OnionHeaven hub's registrants' keys or OnionHome's name registry
             is refused before anything is touched
             (settings_page_restore_refusal), and neither volume is written.
+        before_key_change: Called with the restored address (derived from
+            the backup's key) before that key replaces the one in the tor
+            container: the menubar asks OnionHeaven hubs to delete their
+            copy of the current key there, while it can still sign.
 
     Returns:
         metadata dict from the backup
@@ -1856,6 +1861,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
             # is recorded only as a diagnostic check. Derived (and the key
             # checked for consistency) before the key is written anywhere.
             derived_address = key_manager.key_pair_onion_address(priv, pub)
+            if before_key_change is not None:
+                before_key_change(derived_address)
             key_manager.write_private_key(priv, pub)
             metadata_address = metadata.get('onion_address', '')
             if metadata_address and metadata_address != derived_address:

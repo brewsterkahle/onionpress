@@ -91,7 +91,10 @@ private key to the hub (run by the Internet Archive) so it can publish
 your address while you are away. The key is used only to keep your site
 reachable. OnionPress asks you the first time your site comes online. We
 strongly recommend enabling it; without it, visitors get a connection
-error whenever your computer is off.
+error whenever your computer is off. Disabling it, uninstalling, resetting,
+importing another key, restoring another site's backup or changing the hub
+asks the hub to delete its copy of the key (OnionPress has to be running for
+that; it tells you if a copy may remain).
 
 - **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*
 - **Linux:** `onionpress onionheaven enable` (or `disable`, `status`)

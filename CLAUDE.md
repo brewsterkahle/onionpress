@@ -611,6 +611,29 @@
   every 15 min while the hub does not answer; "Entry not found" counts as
   done. Unset sends nothing, not even this (the 2026-10-11 decision above).
   `tests/test_onionheaven_opt_out.py`.
+- **Every end of a hub's hold on a key takes the key back, whatever the
+  choice** (the user ends it explicitly): uninstall, reset (and scrub's), a
+  key import, a restore or `setup --from-backup` of another address send
+  the same signed `/unregister` before the key goes, via
+  `onionheaven.release_registration` (menubar: uninstall, and the Settings
+  page's restore through `restore_from_backup(before_key_change=)`; all else
+  via `onionpress.cli onionheaven-unregister` — the launchers'
+  `onionheaven_release`, `cmd_reset`, `cmd_restore`). Only the key in the tor
+  container can sign: if OnionPress is not running or the hub does not
+  answer, the launchers ask before going on, and the pair stays in the
+  record's `left_on_hubs` (a reset keeps the record) so `onionpress
+  onionheaven status`, the uninstall and restore dialogs and the log say what
+  remains on which hub. Linux stops the heartbeat client first
+  (`stop_heartbeat_client`, user and system unit): it holds the key in
+  memory. A hub change: Mac `maintain_registration` from check_status
+  (`ONIONHEAVEN_ADDRESS` is in `_NEEDS_RESTART`), Linux the daemon; an old hub
+  that does not answer stays in `left_on_hubs`, retried every 15 min. The
+  daemon also notices a key replaced under it and unregisters the old one
+  with the copy in its memory before it exits. Between processes,
+  `_hub_lock` (`_HUB_LOCK` + flock on `~/.onionpress/onionheaven-hub.lock`)
+  and the record's 10-min `released` hold keep the menubar's heartbeat from
+  putting a released key back before the launcher removes it.
+  `tests/test_onionheaven_lifecycle.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - `create_backup` prunes WordPress's regenerable derivatives (`-WxH` sizes,

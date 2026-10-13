@@ -99,6 +99,9 @@ SETTINGS_HELP = {
         "The .onion address of the OnionHeaven hub your site registers with. "
         "When your site goes offline, the hub redirects visitors to the "
         "Wayback Machine copy.\n\n"
+        "A change takes effect when OnionPress restarts: the site then "
+        "registers with the new hub, and OnionPress asks the old one to "
+        "delete its copy of your onion service key.\n\n"
         "Default: oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
     ),
     "CLOUDFLARE_TUNNEL_TOKEN": (
@@ -173,6 +176,10 @@ SETTINGS_CONSEQUENCES = {
 _NEEDS_RESTART = {
     "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU",
     "CLOUDFLARE_TUNNEL_TOKEN",
+    # Read at startup only (onionheaven.ONIONHEAVEN_ADDRESS). After the
+    # restart the site registers with the new hub and the old one is asked
+    # to delete its copy of the key (onionheaven.maintain_registration).
+    "ONIONHEAVEN_ADDRESS",
 }
 
 # Human-readable labels for each setting key

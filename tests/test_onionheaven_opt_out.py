@@ -671,6 +671,7 @@ class TestLinuxDaemonLoop(_LinuxCase):
                 mock.patch.object(hb, "register", side_effect=fake_register) as reg, \
                 mock.patch.object(hb, "heartbeat") as beat, \
                 mock.patch.object(hb, "send_offline") as offline, \
+                mock.patch.object(hb, "_key_replaced", return_value=None), \
                 mock.patch.object(hb, "unregister", return_value=True) as unreg:
             hb.main()
             mocks.update(register=reg, heartbeat=beat, send_offline=offline,

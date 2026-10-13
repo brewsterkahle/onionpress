@@ -638,7 +638,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
         body = body[:body.index("\n            else:")]
         self.assertIn("restore_from_backup(local_zip, password, self.log,\n", body)
         self.assertRegex(body, r"restore_from_backup\(local_zip, password, self\.log,\s+"
-                               r"through_wordpress=True\)")
+                               r"through_wordpress=True[,)]")
         # The only caller in what ships.
         callers = [rel for rel in ("src/menubar.py", "src/onionpress/cli.py",
                                    "src/onionpress/setup_window.py")

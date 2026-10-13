@@ -11,6 +11,11 @@ Reads config from ~/.onionpress/config (again every cycle):
     no    - send nothing; if this install registered before, send one
             signed /unregister so the hub deletes its copy of the key
     unset - send nothing at all (the tray and the CLI ask the user)
+  Whatever the choice, a hub this site no longer uses (ONIONHEAVEN_ADDRESS
+  changed) and the hubs of a key replaced while the daemon runs (a key
+  import or restore) are asked to delete their copy of the key; the
+  launcher's reset, import-key, restore and uninstall do the same through
+  onionpress.cli onionheaven-unregister after stopping this daemon.
   ONIONHEAVEN_ADDRESS=<hub .onion>  (default: centralized OH)
   SHARE_ANALYTICS_WITH_ONIONHOME=yes  (opt-in; anything else = no upload)
 
@@ -610,18 +615,17 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
         if _registration_choice(read_config()) != "yes":
             log.info("Registration stopped: REGISTER_WITH_ONIONHEAVEN is no longer yes")
             return False
+        if _address_on_hold(content_addr):
+            log.info("Registration skipped: the key of %s is being given up "
+                     "and its hubs were asked to delete it", content_addr)
+            return False
         log.info("Registration attempt %d/4 with %s...", attempt + 1, hub_addr)
         ok, resp = sign_and_post("online", hub_addr, content_addr, hc_addr, priv_key, pub_key, extra)
 
         if ok and resp:
             if resp.get("registered"):
                 log.info("Registration successful: %s", resp)
-                _save_state({
-                    "registered": True,
-                    "last_attempt": datetime.now(timezone.utc).isoformat(),
-                    "onionheaven_address": hub_addr,
-                    "content_address": content_addr,
-                })
+                _record_registered(hub_addr, content_addr)
                 return True
             error = resp.get("error", "unknown")
             log.error("Registration rejected: %s", error)
@@ -695,12 +699,7 @@ def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key, while_choice=
                 else:
                     log.info("Hub %s holds no entry for %s; nothing to unregister",
                              hub_addr, content_addr)
-                _save_state({
-                    "registered": False,
-                    "unregistered_at": datetime.now(timezone.utc).isoformat(),
-                    "onionheaven_address": hub_addr,
-                    "content_address": content_addr,
-                })
+                _record_unregistered(hub_addr, content_addr)
                 return True
             log.error("Unregister rejected: %s", error or "unknown")
             if error:
@@ -721,6 +720,10 @@ def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key, while_choice=
 
 def heartbeat(hub_addr, content_addr, hc_addr, priv_key, pub_key):
     """Send a single /online heartbeat. Returns True on success."""
+    if _address_on_hold(content_addr):
+        log.info("Heartbeat skipped: the key of %s is being given up and its "
+                 "hubs were asked to delete it", content_addr)
+        return False
     # Check WordPress health
     wp_healthy = False
     ok, output = docker_exec(
@@ -777,20 +780,140 @@ def send_offline(hub_addr, content_addr, hc_addr, priv_key, pub_key):
 # State persistence
 # ---------------------------------------------------------------------------
 
+# The registration record is shared with onionpress.onionheaven (the CLI's
+# onionheaven-unregister, run by the launcher before a reset, key import,
+# restore or uninstall); its comments describe the fields. Besides
+# "registered" this daemon keeps "left_on_hubs" (registrations not taken
+# back yet) and honours "released" (an address whose key is being given up:
+# no /online for it until "until").
+_STATE_CARRIED = ("left_on_hubs", "released")
+
+
 def _save_state(data):
+    """Write the record whole. left_on_hubs and released are carried over
+    from the file unless *data* sets them (None drops one)."""
+    data = dict(data)
+    missing = [k for k in _STATE_CARRIED if k not in data]
+    if missing:
+        previous = _load_state()
+        for key in missing:
+            if key in previous:
+                data[key] = previous[key]
+    for key in _STATE_CARRIED:
+        if data.get(key) is None:
+            data.pop(key, None)
+    tmp = f"{STATE_PATH}.{os.getpid()}.tmp"
     try:
-        with open(STATE_PATH, "w") as f:
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, STATE_PATH)
     except OSError as e:
         log.warning("Failed to save state: %s", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _load_state():
     try:
         with open(STATE_PATH) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
+            state = json.load(f)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
         return {}
+
+
+def _state_registration(state):
+    """(content_address, hub) the record says is registered, or None."""
+    if not state.get("registered"):
+        return None
+    addr = state.get("content_address")
+    hub = state.get("onionheaven_address")
+    if not key_manager.is_valid_onion_address(addr):
+        return None
+    if not key_manager.is_valid_onion_address(hub):
+        hub = _current_hub
+    return (addr, hub) if key_manager.is_valid_onion_address(hub) else None
+
+
+def _left_on_hubs(state):
+    entries = state.get("left_on_hubs")
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries
+            if isinstance(e, dict)
+            and key_manager.is_valid_onion_address(e.get("content_address"))
+            and key_manager.is_valid_onion_address(e.get("onionheaven_address"))]
+
+
+def _entry_pair(entry):
+    return entry["content_address"], entry["onionheaven_address"]
+
+
+def _note_left_on_hub(state, addr, hub, reason):
+    entries = _left_on_hubs(state)
+    if not any(_entry_pair(e) == (addr, hub) for e in entries):
+        entries.append({"content_address": addr, "onionheaven_address": hub,
+                        "since": datetime.now(timezone.utc).isoformat(),
+                        "reason": reason})
+    state["left_on_hubs"] = entries
+
+
+def _forget_left_on_hub(state, addr, hub):
+    entries = _left_on_hubs(state)
+    kept = [e for e in entries if _entry_pair(e) != (addr, hub)]
+    state["left_on_hubs"] = kept
+    return len(kept) != len(entries)
+
+
+def _record_registered(hub_addr, content_addr):
+    """A hub took an /online: the record says it holds the key. A
+    registration the record named before, for another hub or address,
+    moves to left_on_hubs instead of being forgotten."""
+    state = _load_state()
+    previous = _state_registration(state)
+    if previous is not None and previous != (content_addr, hub_addr):
+        _note_left_on_hub(state, previous[0], previous[1], "superseded")
+        if previous[0] != content_addr:
+            log.warning("OnionHeaven: %s may still hold the key of %s, the "
+                        "address this install had before; this install no "
+                        "longer has that key", previous[1], previous[0])
+    _forget_left_on_hub(state, content_addr, hub_addr)
+    state.update({
+        "registered": True,
+        "last_attempt": datetime.now(timezone.utc).isoformat(),
+        "onionheaven_address": hub_addr,
+        "content_address": content_addr,
+    })
+    state.pop("unregistered_at", None)
+    _save_state(state)
+
+
+def _record_unregistered(hub_addr, content_addr):
+    """*hub_addr* answered an /unregister for *content_addr*: drop that
+    pair. The registration is cleared only when it names that pair."""
+    state = _load_state()
+    if _state_registration(state) == (content_addr, hub_addr):
+        state.update({
+            "registered": False,
+            "unregistered_at": datetime.now(timezone.utc).isoformat(),
+            "onionheaven_address": hub_addr,
+            "content_address": content_addr,
+        })
+    _forget_left_on_hub(state, content_addr, hub_addr)
+    _save_state(state)
+
+
+def _address_on_hold(content_addr, now=None):
+    """True while the record's "released" hold covers *content_addr*: the
+    launcher had its hubs delete that key, which is about to go."""
+    released = _load_state().get("released")
+    if not isinstance(released, dict) or released.get("content_address") != content_addr:
+        return False
+    until = released.get("until")
+    now = time.time() if now is None else now
+    return isinstance(until, (int, float)) and now < until
 
 
 def _read_version():
@@ -1322,6 +1445,118 @@ def _maybe_unregister_after_opt_out(choice, now=None):
     return result
 
 
+# ---------------------------------------------------------------------------
+# What the hubs may still hold (record upkeep)
+# ---------------------------------------------------------------------------
+#
+# These follow explicit ends of a hub's hold on a key (a hub change, a key
+# import or restore, a reset or uninstall the launcher could not finish),
+# so they go out whatever REGISTER_WITH_ONIONHEAVEN says.
+
+_left_last_attempt = 0.0   # time.monotonic() of the last left_on_hubs retry
+_left_reported = set()     # entries for a lost key, logged once per run
+
+HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
+
+
+def _reconcile_record():
+    """At start, with this daemon's key loaded. A registration the record
+    names for another address is a key this install no longer has (an
+    import or restore while the daemon was stopped, nothing sent first):
+    it moves to left_on_hubs. Entries for a lost key are logged once."""
+    state = _load_state()
+    reg = _state_registration(state)
+    if reg is not None and reg[0] != _content_addr:
+        _note_left_on_hub(state, reg[0], reg[1], "address changed")
+        state["registered"] = False
+        _save_state(state)
+    for entry in _left_on_hubs(state):
+        pair = _entry_pair(entry)
+        if pair[0] != _content_addr and pair not in _left_reported:
+            _left_reported.add(pair)
+            log.warning("OnionHeaven: %s may still hold the onion service key of "
+                        "%s (since %s, %s). This install no longer has that key, "
+                        "so OnionPress cannot ask the hub to delete it; ask the "
+                        "hub's operator.", pair[1], pair[0],
+                        entry.get("since", "?"), entry.get("reason", "?"))
+
+
+def _maybe_release_left_hubs(choice, now=None):
+    """left_on_hubs entries for this daemon's address (its key is in
+    memory) get a signed /unregister, every OPT_OUT_RETRY_SECONDS. Not the
+    hub this install registers with while the choice is yes: the
+    heartbeat puts the key there again, so that entry is dropped.
+    Returns the unregister() results, or None when nothing was sent."""
+    global _left_last_attempt
+    state = _load_state()
+    current = (_content_addr, _current_hub)
+    if choice == "yes" and _forget_left_on_hub(state, *current):
+        _save_state(state)
+    pairs = [_entry_pair(e) for e in _left_on_hubs(state)
+             if e["content_address"] == _content_addr
+             and e["onionheaven_address"] != _content_addr
+             and not (choice == "yes" and _entry_pair(e) == current)]
+    if not pairs:
+        return None
+    now = time.monotonic() if now is None else now
+    if _left_last_attempt and now - _left_last_attempt < OPT_OUT_RETRY_SECONDS:
+        return None
+    _left_last_attempt = now
+    results = []
+    for _addr, hub in pairs:
+        log.info("OnionHeaven: asking %s to delete its copy of this site's key", hub)
+        results.append(unregister(hub, _content_addr, _hc_addr, _priv_key, _pub_key))
+    return results
+
+
+def _holding_key_on_hubs():
+    """Does the record say a hub may hold the key this daemon loaded?"""
+    state = _load_state()
+    reg = _state_registration(state)
+    return ((reg is not None and reg[0] == _content_addr)
+            or any(e["content_address"] == _content_addr
+                   for e in _left_on_hubs(state)))
+
+
+def _key_replaced():
+    """The address the tor container serves, when it is not the one whose
+    key this daemon loaded (a key import or restore while it ran), else
+    None (also when it cannot be read: the container may be restarting)."""
+    ok, served = docker_exec("onionpress-tor", ["cat", HOSTNAME_PATH], timeout=10)
+    served = served.strip() if ok else ""
+    if key_manager.is_valid_onion_address(served) and served != _content_addr:
+        return served
+    return None
+
+
+def _release_replaced_key(served):
+    """This daemon holds a key that is no longer the site's. Before it exits
+    (systemd starts it again with the new key), every hub the record says
+    may hold the old key is asked to delete it: the key is still in
+    memory to sign the request, and nothing else can once it exits. What
+    does not answer stays in left_on_hubs."""
+    log.warning("OnionHeaven: the onion service key changed (Tor serves %s now; "
+                "this daemon holds the key of %s). Asking the hubs to delete "
+                "their copy of the old key, then restarting.", served, _content_addr)
+    state = _load_state()
+    pairs = []
+    reg = _state_registration(state)
+    if reg is not None and reg[0] == _content_addr:
+        pairs.append(reg)
+    pairs += [_entry_pair(e) for e in _left_on_hubs(state)
+              if e["content_address"] == _content_addr and _entry_pair(e) not in pairs]
+    for _addr, hub in pairs:
+        if hub == _content_addr:
+            continue
+        if unregister(hub, _content_addr, _hc_addr, _priv_key, _pub_key) is not True:
+            state = _load_state()
+            _note_left_on_hub(state, _content_addr, hub, "key replaced")
+            if _state_registration(state) == (_content_addr, hub):
+                state["registered"] = False
+            _save_state(state)
+            log.warning("OnionHeaven: %s may still hold the key of %s", hub, _content_addr)
+
+
 def main():
     global _current_hub, _content_addr, _hc_addr, _priv_key, _pub_key, _running
     global _pending_offline, _pending_online
@@ -1371,6 +1606,10 @@ def main():
 
     global _registered, _hub_conn
     _registered = False
+
+    # A registration recorded for an address whose key this install no
+    # longer has, and what earlier hubs may still hold.
+    _reconcile_record()
 
     if enabled:
         _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
@@ -1425,6 +1664,19 @@ def main():
         new_hub = _hub_address(config)
         analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
 
+        # The key this daemon loaded at start may have been replaced since
+        # (a key import or restore while it ran): it must not go on sending
+        # it. While a hub may hold it, check what Tor serves; if that
+        # changed, have the hubs delete the old key (signed with the copy
+        # in memory, the last one this install has) and exit, so systemd
+        # starts the daemon again with the new key.
+        if _registered or _holding_key_on_hubs():
+            served = _key_replaced()
+            if served:
+                _registered = False
+                _release_replaced_key(served)
+                break
+
         # Turned off ("no", or back to unset): stop at once. Nothing that
         # carries the key goes out from here on, and no /offline either:
         # it would make the hub take over a site that is still running.
@@ -1457,6 +1709,10 @@ def main():
         # /unregister (retried while the hub does not answer), so the hub
         # deletes its copy of the key. Unset sends nothing.
         _maybe_unregister_after_opt_out(choice)
+        # Earlier hubs (a hub change, a release the launcher could not
+        # finish) that may hold this site's key: asked again, whatever the
+        # choice.
+        _maybe_release_left_hubs(choice)
         if choice == "no":
             _current_hub = new_hub
             enabled = False
@@ -1465,8 +1721,15 @@ def main():
         # Handle hub address change
         if new_hub != _current_hub and _registered:
             log.info("Hub address changed from %s to %s", _current_hub, new_hub)
-            # Unregister from old hub to prevent false takeover
-            unregister(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+            # Unregister from old hub to prevent false takeover (and so it
+            # deletes its copy of the key). If it does not answer, the record
+            # keeps it in left_on_hubs and _maybe_release_left_hubs asks again.
+            if unregister(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key) is not True:
+                state = _load_state()
+                _note_left_on_hub(state, _content_addr, _current_hub, "hub changed")
+                if _state_registration(state) == (_content_addr, _current_hub):
+                    state["registered"] = False
+                _save_state(state)
             _registered = False
             # Persistent socket points at the old hub — drop it so the
             # next /online opens a fresh one to the new hub.
