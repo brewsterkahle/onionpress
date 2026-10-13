@@ -337,7 +337,7 @@ export ONIONPRESS_VERSION
 # Read Cloudflare Tunnel token from config (empty = disabled)
 CLOUDFLARE_TUNNEL_TOKEN=""
 if [ -f "$DATA_DIR/config" ]; then
-    _cf_token=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$DATA_DIR/config" | cut -d= -f2)
+    _cf_token=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
     if [ ! -z "$_cf_token" ]; then
         CLOUDFLARE_TUNNEL_TOKEN="$_cf_token"
     fi
