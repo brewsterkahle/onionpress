@@ -425,16 +425,6 @@ set -- "${_filtered_args[@]}"
 
 # ─── Helper functions ───────────────────────────────────────────────
 
-confirm_or_skip() {
-    # Usage: confirm_or_skip "prompt text"
-    # Returns 0 (proceed) if --yes or user confirms, 1 if declined
-    if [ "$ONIONPRESS_YES" = "true" ]; then
-        return 0
-    fi
-    echo "$1"
-    read -r
-}
-
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
