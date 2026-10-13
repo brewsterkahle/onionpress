@@ -168,8 +168,9 @@ def _dir_size_bytes(path):
 
 
 def _log_workload_stats(log_func, label, db_creds):
-    """Emit a single STATS line. Never raises — instrumentation must
-    not break the operation it's measuring."""
+    """Emit a single STATS line and return its figures (empty if they
+    could not be read): the backup sizes its time limits from them. Never
+    raises — instrumentation must not break the operation it's measuring."""
     try:
         stats = _query_workload_stats(db_creds)
         wpcontent_bytes = _du_bytes(
@@ -188,8 +189,11 @@ def _log_workload_stats(log_func, label, db_creds):
             f"onionheaven_bytes={onionheaven_bytes}",
         ]
         log_func(f"{label}: " + ' '.join(kvs))
+        return dict(stats, wpcontent_bytes=wpcontent_bytes,
+                    onionheaven_bytes=onionheaven_bytes)
     except Exception as e:
         log_func(f"{label}: error={e}")
+        return {}
 
 
 # Multisite constants that WordPress needs in wp-config.php for a network install.
@@ -345,7 +349,9 @@ def get_admin_username(data_dir=None):
 # tarfile's stream reader copies its whole buffer on every header read, so
 # a larger buffer is slower: 64 KiB unpacks as fast as bsdtar here.
 _STAGE_BUFSIZE = 64 << 10
-_STAGE_COPY_TIMEOUT_S = 300
+# A copy out of a container gets this, plus its size at
+# wp_files.COPY_BYTES_PER_S (issue #317: a fixed 300 s cut off large sites).
+_STAGE_COPY_FLOOR_S = 300
 # Entries left out are logged by name up to this many per tree, then counted.
 _STAGE_LOG_LIMIT = 20
 
@@ -527,22 +533,30 @@ def wp_content_tar_argv(*excludes):
             + ['-C', '/var/www/html/wp-content', '.'])
 
 
-def stage_wp_content(dest, log_func, *excludes):
+def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None):
     """Copy wp-content out of the WordPress container into *dest* as plain
     files and folders (wp_content_tar_argv, unpack_plain_tar), then
     scrub_staged_tree. The Linux launcher's create_backup runs this through
-    `onionpress.cli stage-wp-content`."""
+    `onionpress.cli stage-wp-content`. The time allowed is sized from
+    *wpcontent_bytes*, measured in the container when not given."""
+    if wpcontent_bytes is None:
+        wpcontent_bytes = _du_bytes('onionpress-wordpress',
+                                    '/var/www/html/wp-content',
+                                    excludes=tuple(e.removeprefix('./') for e in excludes))
     os.makedirs(dest, exist_ok=True)
     _stage_container_tar(wp_content_tar_argv(*excludes), dest, log_func,
-                         'wp-content')
+                         'wp-content',
+                         timeout=wp_files.sized_timeout(wpcontent_bytes,
+                                                        _STAGE_COPY_FLOOR_S))
     scrub_staged_tree(dest, log_func, 'wp-content')
 
 
-def put_wp_content(src, log_func, timeout=300):
+def put_wp_content(src, log_func, timeout=None):
     """Unpack the staged *src* over wp-content in the WordPress container,
     as www-data (wp_files.put_tree). Not docker cp + chown -R as root: the
     copy followed links www-data can plant in wp-content (the destination's
-    own `wp-content/` too), and so did the trailing-slash chown."""
+    own `wp-content/` too), and so did the trailing-slash chown. *timeout*
+    defaults to one sized to *src* (wp_files.put_tree)."""
     r = wp_files.put_tree(src, '/var/www/html/wp-content', merge=True,
                           timeout=timeout)
     if r.returncode != 0:
@@ -550,13 +564,20 @@ def put_wp_content(src, log_func, timeout=300):
         raise Exception("Could not copy wp-content into the WordPress container")
 
 
-def _stage_container_tar(argv, dest, log_func, where):
+def _stage_container_tar(argv, dest, log_func, where,
+                         timeout=_STAGE_COPY_FLOOR_S):
     """Run *argv* (`docker exec … tar -cf - …`) and unpack its stdout into
-    *dest* with unpack_plain_tar; raise if either side fails. The container
-    gets _STAGE_COPY_TIMEOUT_S to finish."""
+    *dest* with unpack_plain_tar; raise if either side fails. The copy gets
+    *timeout* seconds; then the docker client is killed, which closes the
+    pipe the container's tar writes to."""
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE)
-    killer = threading.Timer(_STAGE_COPY_TIMEOUT_S, proc.kill)
+    timed_out = threading.Event()
+
+    def _kill():
+        timed_out.set()
+        proc.kill()
+    killer = threading.Timer(timeout, _kill)
     killer.daemon = True
     killer.start()
     try:
@@ -567,6 +588,8 @@ def _stage_container_tar(argv, dest, log_func, where):
             pass
     except BaseException as e:
         proc.kill()
+        if timed_out.is_set():
+            raise Exception(f"{where} copy did not finish within {timeout} s") from e
         if isinstance(e, tarfile.TarError):
             raise Exception(f"{where} tar failed: {e}") from e
         raise
@@ -574,6 +597,8 @@ def _stage_container_tar(argv, dest, log_func, where):
         proc.stdout.close()
         rc = proc.wait()
         killer.cancel()
+    if timed_out.is_set():
+        raise Exception(f"{where} copy did not finish within {timeout} s")
     if rc != 0:
         raise Exception(f"{where} tar failed: docker={rc}")
 
@@ -665,7 +690,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    creds here so we can reuse them for the dump phase below
         #    without paying for two round trips through wp-cli.
         db_creds = _get_db_credentials()
-        _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
+        stats = _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
 
         # 1. Extract Tor keys (OpenSSH PEM, the delivered-key format)
         with _phase_timer(log_func, 'BACKUP', 'tor_keys'):
@@ -710,17 +735,17 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             db_dir = os.path.join(staging, 'database')
             os.makedirs(db_dir)
 
-            result = subprocess.run(
+            # Streamed to the file, not held in memory, with a time limit
+            # sized from the database (issue #317).
+            _run_db_client_to_file(
                 _db_client_argv('mariadb-dump',
                                 '-u', db_creds['user'],
                                 db_creds['name']),
-                input=(db_creds['password'] + '\n').encode(),
-                capture_output=True, timeout=120
-            )
-            if result.returncode != 0:
-                raise Exception(f"Database export failed: {result.stderr.decode(errors='replace')}")
-            with open(os.path.join(db_dir, 'wordpress.sql'), 'wb') as f:
-                f.write(result.stdout)
+                db_creds['password'],
+                os.path.join(db_dir, 'wordpress.sql'),
+                wp_files.sized_timeout(stats.get('db_bytes', 0),
+                                       _DB_DUMP_FLOOR_S),
+                'Database export')
 
         # 3. Copy wp-content from container, excluding:
         #    - creations/: bind-mounted from ~/OnionPress/Creations,
@@ -742,7 +767,8 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             log_func("Backup: copying wp-content (excluding Creations, thumbs, .DS_Store)...")
             wpcontent_dir = os.path.join(staging, 'wp-content')
             stage_wp_content(wpcontent_dir, log_func,
-                             './creations', '.thumbs', '.DS_Store')
+                             './creations', '.thumbs', '.DS_Store',
+                             wpcontent_bytes=stats.get('wpcontent_bytes'))
 
         # 3b. Drop WordPress's regenerable image derivatives (-WxH sizes and
         #     -scaled copies) from the staged uploads — about half of a
@@ -863,7 +889,9 @@ def create_backup(onion_address, username, password, output_path, version, log_f
 # would only burn CPU on bytes that won't shrink.
 _ZIP_STORE_SUFFIXES = ('.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
                        ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz')
-_ZIP_TIMEOUT_S = 600
+# zip + encryption get this, plus the staged tree's size at
+# wp_files.COPY_BYTES_PER_S (was a fixed 600 s, issue #317).
+_ZIP_FLOOR_S = 600
 
 
 def pack_backup(staging, output_path, password, log_func):
@@ -904,8 +932,8 @@ def pack_backup(staging, output_path, password, log_func):
             cwd=staging, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=zip_err,
         )
-        # Same 600 s budget subprocess.run(timeout=) gave the old zip call.
-        killer = threading.Timer(_ZIP_TIMEOUT_S, proc.kill)
+        killer = threading.Timer(
+            wp_files.sized_timeout(_tree_bytes(staging), _ZIP_FLOOR_S), proc.kill)
         killer.daemon = True
         killer.start()
         try:
@@ -1248,19 +1276,7 @@ def _validate_archive_file(zip_path):
         raise ValueError("Not a valid zip file.") from e
 
 
-def _tree_bytes(root):
-    """The total size of the regular files under *root* (lstat: links count
-    as nothing)."""
-    total = 0
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for name in filenames:
-            try:
-                st = os.lstat(os.path.join(dirpath, name))
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode):
-                total += st.st_size
-    return total
+_tree_bytes = wp_files.tree_bytes
 
 
 def _free_bytes(path):
@@ -1301,6 +1317,8 @@ def check_staged_tree(root):
                 what=what, name=_member_label(os.path.relpath(path, root))))
 
 
+# unzip gets this, plus the archive's listed size at
+# wp_files.COPY_BYTES_PER_S (was a fixed 900 s, issue #317).
 _UNZIP_TIMEOUT_S = 900
 _UNZIP_POLL_S = 0.25
 
@@ -1347,7 +1365,8 @@ def _unzip_cli_extract(zip_path, password, dest, log_func, *,
             log_func(f"Restore: unzip CLI unavailable ({type(e).__name__}); "
                      f"using zipfile")
             return False
-        deadline = time.monotonic() + _UNZIP_TIMEOUT_S
+        deadline = time.monotonic() + wp_files.sized_timeout(
+            max_total_bytes, _UNZIP_TIMEOUT_S)
         while True:
             try:
                 rc = proc.wait(timeout=_UNZIP_POLL_S)
@@ -1828,10 +1847,14 @@ def restore_container_artifacts(staging, metadata, log_func):
 
         db_creds = _get_db_credentials()
 
-        # Copy SQL into db container then import
+        # Copy SQL into db container then import. Both get a time limit
+        # sized from the dump (issue #317: a fixed 30 s / 120 s failed
+        # large sites); importing is the slower of the two.
+        sql_bytes = os.path.getsize(sql_path)
         subprocess.run(
             ['docker', 'cp', sql_path, 'onionpress-db:/tmp/wordpress.sql'],
-            capture_output=True, timeout=30, check=True
+            capture_output=True, check=True,
+            timeout=wp_files.sized_timeout(sql_bytes, 60)
         )
         result = subprocess.run(
             _db_client_argv('mariadb',
@@ -1839,7 +1862,9 @@ def restore_container_artifacts(staging, metadata, log_func):
                             db_creds['name'],
                             '-e', 'source /tmp/wordpress.sql'),
             input=db_creds['password'] + '\n',
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=120
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=wp_files.sized_timeout(sql_bytes, _DB_IMPORT_FLOOR_S,
+                                           _DB_IMPORT_BYTES_PER_S)
         )
         if result.returncode != 0:
             raise Exception(f"Database import failed: {result.stderr}")
@@ -2078,6 +2103,42 @@ def _ensure_multisite_constants(log_func):
 # which this reads from the first line of stdin. As `-p<password>` it would
 # sit in the host's process list, where `ps` shows every user's argv.
 _DB_PASSWORD_FROM_STDIN = 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"'
+
+
+# The database dump gets this, plus the database's size at
+# wp_files.COPY_BYTES_PER_S; the import this, plus the dump's size at the
+# slower _DB_IMPORT_BYTES_PER_S (it rebuilds every index).
+_DB_DUMP_FLOOR_S = 120
+_DB_IMPORT_FLOOR_S = 120
+_DB_IMPORT_BYTES_PER_S = 256 << 10
+
+
+def _run_db_client_to_file(argv, password, out_path, timeout, what):
+    """Run the MariaDB client *argv* (_db_client_argv) with its stdout
+    written to *out_path*; raise if it fails or takes more than *timeout*
+    seconds, in which case it is killed. *what* names it in the error."""
+    with open(out_path, 'wb') as out, tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=out,
+                                stderr=err)
+        try:
+            try:
+                proc.stdin.write((password + '\n').encode())
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass  # it exited already; its status says why
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            rc = None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        if rc is None:
+            raise Exception(f"{what} did not finish within {timeout} s")
+        if rc != 0:
+            err.seek(0)
+            raise Exception(f"{what} failed: "
+                            f"{err.read().decode(errors='replace').strip()[-500:]}")
 
 
 def _db_client_argv(*client_argv):

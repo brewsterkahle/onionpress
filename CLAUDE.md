@@ -450,6 +450,26 @@
 - `metadata.json` gains `excludes_image_derivatives: true`. Old backups restore
   as before (the sweep finds nothing to do).
 
+## Backup/Restore Time Limits Grow With the Site (issue #317)
+- No fixed limit on a copy: each gets a floor plus its size at
+  `wp_files.COPY_BYTES_PER_S` (`wp_files.sized_timeout`): the dump (from
+  BACKUP_STATS' db_bytes, streamed to its file by `_run_db_client_to_file`,
+  never held in memory), its import (sql size, at the slower
+  `_DB_IMPORT_BYTES_PER_S`), wp-content out (`stage_wp_content`) and in
+  (`put_tree`, default sized from the tree), zip, unzip, and the Settings
+  page's upload/download copies. A process past its limit is killed.
+- The UIs that start the launcher's `backup`/`restore` wait for it (no
+  timeout: killing the launcher stopped only the shell, its docker and
+  Python steps ran on) and notify on failure (tray `_notify_failed`).
+  `tests/test_backup_timeouts.py`.
+- The Mac Settings page's restore is the menu's: `_launcher_restore`
+  (install-from-backup), after `read_backup_metadata` has checked the
+  password. Linux's Settings-page restore is still bash's in-place
+  `restore_backup`.
+- `wp_files.own(recursive=True)` (put_tree's first step, so every restore)
+  never enters a folder named `creations` (My Creations' bind mount), and
+  follows no link (find -execdir chown -h), like onionpress-web-root-owner.sh.
+
 ## Backup Encryption (backup format 2)
 - New backups are an ordinary, unencrypted `.zip` holding `README.txt` and
   `onionpress-backup.enc`: the same zip of the same members, encrypted with

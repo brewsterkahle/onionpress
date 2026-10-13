@@ -93,6 +93,35 @@ OWN_SCRIPT = (
     '-execdir chown -h www-data:www-data -- {} +'
 )
 
+# Copies into and out of the containers get a time limit sized to what they
+# carry (issue #317): a fixed one cut off a large site's backup or restore.
+# The rate is a floor for a slow disk (a Colima VM, a Raspberry Pi), not an
+# estimate; the limit is there to end a copy that hangs.
+COPY_BYTES_PER_S = 1 << 20
+
+
+def sized_timeout(nbytes: int, floor_s: int,
+                  bytes_per_s: int = COPY_BYTES_PER_S) -> int:
+    """Seconds to allow a step that moves *nbytes*: *floor_s* (small sites,
+    and whatever the step does besides copying) plus *nbytes* at
+    *bytes_per_s*."""
+    return int(floor_s + max(0, nbytes or 0) // bytes_per_s)
+
+
+def tree_bytes(root: str) -> int:
+    """The total size of the regular files under *root* (lstat: links count
+    as nothing)."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                total += st.st_size
+    return total
+
 
 def put_file_args(path: str, mode: str = "600",
                   container: str = WP_CONTAINER) -> list[str]:
@@ -194,9 +223,12 @@ def write_tar(src_dir: str, out) -> None:
                     raise ValueError(f"not a plain file or folder: {arcname}")
 
 
+PUT_TREE_FLOOR_S = 300
+
+
 def put_tree(src_dir: str, dest: str, *, merge: bool = False,
              docker_bin: str = "docker", env: Optional[dict] = None,
-             timeout: int = 300,
+             timeout: Optional[int] = None,
              container: str = WP_CONTAINER) -> subprocess.CompletedProcess:
     """Hand *src_dir*'s contents to the container at *dest*, as www-data.
 
@@ -204,8 +236,11 @@ def put_tree(src_dir: str, dest: str, *, merge: bool = False,
     otherwise *dest* is replaced whole (the theme, a plugin). What an older
     version left root's at *dest* is given to www-data first (own), so
     www-data can replace it. Returns the unpacking exec's result; raises
-    ValueError for a link or special file in *src_dir*.
+    ValueError for a link or special file in *src_dir*. *timeout* (each of
+    the two steps) defaults to one sized to *src_dir* (sized_timeout).
     """
+    if timeout is None:
+        timeout = sized_timeout(tree_bytes(src_dir), PUT_TREE_FLOOR_S)
     own(dest, recursive=True, docker_bin=docker_bin, env=env,
         timeout=timeout, container=container)
     script = MERGE_TREE_SCRIPT if merge else REPLACE_TREE_SCRIPT
