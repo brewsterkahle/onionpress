@@ -721,7 +721,7 @@ HELPEOF
     echo "Imported key for: $address"
     echo "Key files written to: $DATA_DIR/shared/vanity-keys/$address"
     echo ""
-    echo "Run 'sudo systemctl restart onionpress' to use this address."
+    echo "Run 'systemctl --user restart onionpress' to use this address."
     return 0
 }
 
@@ -1490,6 +1490,51 @@ regenerate_derivatives_pending() {
         /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives >/dev/null 2>&1
 }
 
+# Run "$@" in the background so that it outlives this script; its output
+# goes to $LOG_FILE. The settings watcher (onionpress-watcher.service) is a
+# Type=oneshot unit: systemd kills everything left in its cgroup when
+# handle-action returns, a `( cmd & )` included, so there the command goes
+# into a transient user unit of its own (issue #316). Only the environment
+# it needs is passed (systemd-run puts --setenv values on a command line
+# and in the unit's properties, so never a secret). Anywhere else (the
+# long-running onionpress.service, a terminal) a detached subshell lives
+# long enough.
+run_detached() {
+    if [ "${ONIONPRESS_IN_WATCHER:-}" = "true" ] && command -v systemd-run >/dev/null 2>&1; then
+        local setenv=(--setenv=PYTHONDONTWRITEBYTECODE=1)
+        [ -z "${DOCKER_HOST:-}" ] || setenv+=(--setenv=DOCKER_HOST="$DOCKER_HOST")
+        if systemd-run --user --quiet --collect --no-block \
+                --property=StandardOutput=append:"$LOG_FILE" \
+                --property=StandardError=append:"$LOG_FILE" \
+                "${setenv[@]}" -- "$@" 2>>"$LOG_FILE"; then
+            return 0
+        fi
+        log "WARNING: systemd-run failed; running in the background here (it may not finish)"
+    fi
+    ( "$@" >> "$LOG_FILE" 2>&1 & )
+}
+
+# The heartbeat client (onionpress-heartbeat.service) is a systemd *user*
+# unit: install.sh and the .deb both install it as one. stop, restart and
+# reset asked system-scope systemctl about it, which never saw it, so the
+# containers went down without the client's /offline (issue #316).
+# stop_heartbeat_client stops it if it runs and is true if it did; the
+# caller restarts it only then (starting it would also start
+# onionpress.service, which it Wants=).
+stop_heartbeat_client() {
+    if systemctl --user is-active --quiet onionpress-heartbeat.service 2>/dev/null; then
+        log "Stopping heartbeat client..."
+        systemctl --user stop onionpress-heartbeat.service 2>>"$LOG_FILE" || true
+        return 0
+    fi
+    return 1
+}
+start_heartbeat_client() {
+    log "Starting heartbeat client..."
+    systemctl --user start "$@" onionpress-heartbeat.service 2>>"$LOG_FILE" \
+        || log "WARNING: Failed to start heartbeat client"
+}
+
 # Tor's SOCKS port must be published on 127.0.0.1 only (docker-compose.yml).
 # A compose file from before that, which re-running install.sh leaves in
 # place (it copies the new one into docker/docker), still publishes it on
@@ -1797,12 +1842,13 @@ start_containers() {
     setup_bundled_plugins
 
     # Image derivatives (#257): if a restore left resized images to rebuild,
-    # do it in the background — niced, detached in a subshell so it is not
-    # in this script's job table, resumable across restarts. After
+    # do it in the background — niced, detached (run_detached: out of this
+    # script's job table, and out of the settings watcher's cgroup when a
+    # Settings-page restore got here), resumable across restarts. After
     # provision-post-install so the image-fallback mu-plugin is in place.
     if $wp_installed && regenerate_derivatives_pending; then
         log "Image derivatives: rebuild pending — starting in the background"
-        ( op_py regenerate-derivatives >> "$LOG_FILE" 2>&1 & )
+        run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -m onionpress.cli regenerate-derivatives
     fi
 }
 
@@ -2817,10 +2863,15 @@ apply_config_updates() {
     if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
         local boot_val
         boot_val=$(grep "^START_ON_BOOT=" "$DATA_DIR/config" | cut -d= -f2)
+        # User units, as installed (a system-scope enable never matched
+        # them, issue #316). The heartbeat goes with onionpress.service: it
+        # is WantedBy=default.target too and Wants= onionpress.service, so
+        # left enabled it would start OnionPress at boot anyway.
+        # onionpress.service starts it whenever it starts.
         if [ "$boot_val" = "yes" ]; then
-            systemctl enable onionpress 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
+            systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
         else
-            systemctl disable onionpress 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
+            systemctl --user disable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
         fi
     fi
 
@@ -2828,6 +2879,135 @@ apply_config_updates() {
     write_status
 
     log "Config updates applied"
+}
+
+# ─── Update ───────────────────────────────────────────────────────────
+#
+# `onionpress update` (and the Settings page's Update button, through
+# handle-action) installs a tagged release with that release's own
+# installer: its .deb on a .deb install, its linux/install.sh on any other.
+# The command used to keep a copy list of its own, which went stale: it
+# copied src/onion_auth.py after that file moved into src/onionpress/, so
+# under set -e it stopped with only the launcher replaced; it nested
+# folders (docker/docker) as install.sh did; it never refreshed lib/, the
+# themes, the tray or the units; it installed main's HEAD, not a release;
+# and when a fast-forward failed it reset the first checkout it found under
+# /home/* to origin/main, a developer's work included (issue #316). It now
+# works in a temporary folder of its own and touches no other checkout.
+ONIONPRESS_GITHUB_REPO="brewsterkahle/onionpress"
+
+# Status 0: updated, or already on the latest release. 1: failed. 3: needs
+# administrator rights (sudo) and has no terminal to ask for them in (the
+# Settings page's watcher).
+update_onionpress() {
+    local tag="$1" new_version current tmp rc=0
+
+    if [ -z "$tag" ]; then
+        log "Checking for OnionPress updates..."
+        echo "  Checking for updates..."
+        tag=$(curl -fsSL --max-time 30 \
+                "https://api.github.com/repos/$ONIONPRESS_GITHUB_REPO/releases/latest" 2>>"$LOG_FILE" \
+              | jq -r '.tag_name // empty' 2>>"$LOG_FILE") || tag=""
+    else
+        tag="v${tag#v}"
+    fi
+    # The tag goes into a URL and a git ref: a release tag and nothing else.
+    if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log "ERROR: Update: could not find a release tag (vX.Y.Z)"
+        echo "  ERROR: Could not find the OnionPress release to install. Check $LOG_FILE for details."
+        return 1
+    fi
+    new_version="${tag#v}"
+
+    # Without a tag named on the command line, only a newer release is
+    # installed: a developer's install from a checkout is left alone.
+    current=$(tr -d '[:space:]' < "$INSTALL_DIR/VERSION" 2>/dev/null || true)
+    if [ -z "$1" ] && [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            && [ "$(printf '%s\n%s\n' "$new_version" "$current" | sort -V | tail -1)" = "$current" ]; then
+        log "Update: OnionPress $current is up to date (latest release $new_version)"
+        echo "  OnionPress $current is up to date (latest release: $new_version)."
+        return 0
+    fi
+
+    # Both installers need sudo. In a terminal sudo asks for the password;
+    # the watcher has none, so there it works only without one.
+    if [ ! -t 0 ] && ! sudo -n true 2>/dev/null; then
+        log "Update to $new_version needs administrator rights: run 'onionpress update' in a terminal"
+        echo "  Updating needs administrator rights: run 'onionpress update' in a terminal."
+        return 3
+    fi
+
+    tmp=$(mktemp -d -t onionpress-update-XXXXXX) || return 1
+    log "Updating OnionPress ${current:-?} -> $new_version..."
+    echo "  Updating OnionPress to $new_version..."
+    if dpkg-query -W -f='${Status}' onionpress 2>/dev/null | grep -q 'install ok installed'; then
+        _update_from_deb "$tag" "$tmp" || rc=$?
+    else
+        _update_from_install_sh "$tag" "$tmp" || rc=$?
+    fi
+    rm -rf "$tmp"
+    if [ "$rc" -ne 0 ]; then
+        log "ERROR: Update to $new_version failed"
+        echo "  ERROR: Update failed. Check $LOG_FILE for details."
+        return 1
+    fi
+    log "Update complete: $new_version"
+    echo "  Update complete! Now running OnionPress $new_version."
+}
+
+# Run "$@", its output to $LOG_FILE and, in a terminal, to the screen too.
+_update_run() {
+    if [ -t 1 ]; then
+        "$@" 2>&1 | tee -a "$LOG_FILE"
+        return "${PIPESTATUS[0]}"
+    fi
+    "$@" >> "$LOG_FILE" 2>&1
+}
+
+# A .deb install: the release's onionpress.deb through apt (dpkg replaces
+# each file by rename, so this script keeps running), then a restart of
+# onionpress.service if it runs. Its upgrade postinst restarts nothing.
+# The restart's ExecStop stops the heartbeat client first, and the new
+# `start` starts it again.
+_update_from_deb() {
+    local tag="$1" tmp="$2"
+    if ! curl -fsSL --max-time 900 -o "$tmp/onionpress.deb" \
+            "https://github.com/$ONIONPRESS_GITHUB_REPO/releases/download/$tag/onionpress.deb" 2>>"$LOG_FILE"; then
+        log "ERROR: Update: could not download onionpress.deb for $tag"
+        return 1
+    fi
+    chmod 755 "$tmp"
+    chmod 644 "$tmp/onionpress.deb"
+    if ! _update_run sudo apt-get install -y "$tmp/onionpress.deb"; then
+        log "ERROR: Update: apt-get could not install onionpress.deb for $tag"
+        return 1
+    fi
+    systemctl --user daemon-reload 2>>"$LOG_FILE" || true
+    if systemctl --user is-active --quiet onionpress.service 2>/dev/null; then
+        log "Restarting OnionPress..."
+        echo "  Restarting OnionPress..."
+        systemctl --user restart onionpress.service 2>>"$LOG_FILE" || return 1
+    else
+        echo "  OnionPress is not running; start it with: systemctl --user start onionpress"
+    fi
+}
+
+# Any other install: the release's own linux/install.sh, from a shallow
+# clone of its tag. It stops the services (the heartbeat client first),
+# replaces every file and folder, reinstalls the units and restarts them.
+_update_from_install_sh() {
+    local tag="$1" tmp="$2"
+    if ! git clone --quiet --depth 1 --branch "$tag" \
+            "https://github.com/$ONIONPRESS_GITHUB_REPO.git" "$tmp/onionpress" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: Update: could not download OnionPress $tag"
+        return 1
+    fi
+    if [ ! -f "$tmp/onionpress/linux/install.sh" ]; then
+        log "ERROR: Update: $tag has no linux/install.sh"
+        return 1
+    fi
+    echo "  Installing (this restarts OnionPress)..."
+    _update_run bash "$tmp/onionpress/linux/install.sh" < /dev/null
 }
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -2934,6 +3114,10 @@ main() {
             # tray icon and reachability state stay current.
             if [ "${NOTIFY_SOCKET:-}" ]; then
                 systemd-notify --ready 2>/dev/null || true
+                # Our ExecStop (`stop`) stops the heartbeat client so its
+                # /offline goes out first; bring it back with the service.
+                # --no-block: it is ordered After= this unit.
+                start_heartbeat_client --no-block
             fi
             _status_poll_loop &
             wait
@@ -2941,29 +3125,24 @@ main() {
 
         stop)
             setup_db_passwords
-            # Stop heartbeat client first (sends /offline before containers go down)
-            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Stopping heartbeat client..."
-                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-            fi
+            # Stop heartbeat client first (sends /offline before containers
+            # go down). This is onionpress.service's ExecStop too; `start`
+            # starts the client again.
+            stop_heartbeat_client || true
             stop_containers
             ;;
 
         restart)
             setup_db_passwords
             # Stop heartbeat client first (sends /offline before containers go down)
-            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Stopping heartbeat client..."
-                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-            fi
+            local heartbeat_was_running=false
+            stop_heartbeat_client && heartbeat_was_running=true
             stop_containers
             start_containers
             wait_for_services
             write_status
-            # Restart heartbeat client if service exists
-            if systemctl list-unit-files onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Starting heartbeat client..."
-                sudo systemctl start onionpress-heartbeat 2>>"$LOG_FILE" || log "WARNING: Failed to start heartbeat client"
+            if $heartbeat_was_running; then
+                start_heartbeat_client
             fi
             ;;
 
@@ -3000,7 +3179,7 @@ main() {
             fi
             # Make sure containers are running
             if ! curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
-                echo "WordPress container is not running. Start OnionPress first: sudo systemctl start onionpress"
+                echo "WordPress container is not running. Start OnionPress first: systemctl --user start onionpress"
                 exit 1
             fi
             shift  # remove "setup" from args
@@ -3218,109 +3397,8 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         update)
-            log "Checking for OnionPress updates..."
-            echo "  Checking for updates..."
-
-            # Find the git repo
-            local repo_dir=""
-            for d in /home/*/tmp/onionpress /home/*/onionpress /opt/onionpress-src; do
-                if [ -d "$d/.git" ]; then
-                    repo_dir="$d"
-                    break
-                fi
-            done
-
-            # Clone fresh if no repo found
-            if [ -z "$repo_dir" ]; then
-                repo_dir="/opt/onionpress-src"
-                log "No git repo found — cloning to $repo_dir..."
-                echo "  Cloning OnionPress repo..."
-                if ! sudo git clone https://github.com/brewsterkahle/onionpress.git "$repo_dir" >> "$LOG_FILE" 2>&1; then
-                    log "ERROR: git clone failed"
-                    echo "  ERROR: git clone failed. Check $LOG_FILE for details."
-                    exit 1
-                fi
-            fi
-
-            # Pull latest
-            log "Pulling latest from $repo_dir..."
-            cd "$repo_dir"
-            if ! git pull --ff-only >> "$LOG_FILE" 2>&1; then
-                # ff-only failed — try reset to origin/main
-                log "Fast-forward pull failed, resetting to origin/main..."
-                git fetch origin >> "$LOG_FILE" 2>&1
-                git reset --hard origin/main >> "$LOG_FILE" 2>&1 || {
-                    log "ERROR: git pull failed"
-                    echo "  ERROR: git pull failed. Check $LOG_FILE for details."
-                    exit 1
-                }
-            fi
-
-            local new_version
-            if [ -f "$repo_dir/VERSION" ]; then
-                new_version=$(cat "$repo_dir/VERSION" | tr -d '[:space:]')
-            else
-                new_version=$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || echo "unknown")
-                new_version="${new_version#v}"
-            fi
-
-            # Re-install files
-            log "Installing updated files..."
-            local resources_dir="$repo_dir/app/Resources"
-            sudo cp "$repo_dir/linux/onionpress" "$INSTALL_DIR/onionpress"
-            sudo chmod +x "$INSTALL_DIR/onionpress"
-            sudo cp -r "$resources_dir/docker" "$INSTALL_DIR/docker"
-            sudo cp -r "$resources_dir/plugins" "$INSTALL_DIR/plugins"
-            if [ -d "$resources_dir/scripts" ]; then
-                sudo cp -r "$resources_dir/scripts" "$INSTALL_DIR/scripts"
-            fi
-            # Copy heartbeat client scripts
-            sudo mkdir -p "$INSTALL_DIR/scripts"
-            sudo cp "$repo_dir/src/onion_auth.py" "$INSTALL_DIR/scripts/"
-            sudo cp "$repo_dir/src/key_manager.py" "$INSTALL_DIR/scripts/"
-            sudo cp "$repo_dir/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
-            # No port-binding rewrite: WordPress's reach comes from
-            # ONIONPRESS_BIND_HOST at compose-up time, and Tor's SOCKS port
-            # must stay on 127.0.0.1 (a test keeps sed off the compose file).
-            echo "$new_version" | sudo tee "$INSTALL_DIR/VERSION" > /dev/null
-
-            # Deploy updated plugins to running container
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
-                for plugin in "$INSTALL_DIR/plugins/"*.php; do
-                    wp_put "/var/www/html/wp-content/mu-plugins/$(basename "$plugin")" 644 \
-                        < "$plugin" 2>>"$LOG_FILE"
-                done
-                log "Updated plugins deployed to WordPress container"
-            fi
-
-            # Pull latest docker images. Unlike the start path this has no
-            # --policy guard, so it would clobber a local build outright.
-            cd "$INSTALL_DIR/docker"
-            setup_db_passwords
-            if using_local_images; then
-                log "Skipping image pull: running locally built images"
-                echo "  Skipping image pull (running locally built images)"
-            else
-                log "Pulling latest Docker images..."
-                echo "  Pulling latest Docker images..."
-                docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
-            fi
-
-            # Restart
-            log "Restarting OnionPress..."
-            echo "  Restarting OnionPress..."
-            stop_containers
-            start_containers
-            wait_for_services
-            write_status
-
-            # Restart heartbeat client service if it exists
-            if systemctl list-unit-files onionpress-heartbeat.service >/dev/null 2>&1; then
-                sudo systemctl restart onionpress-heartbeat 2>>"$LOG_FILE" || log "WARNING: Failed to restart heartbeat client"
-            fi
-
-            log "Update complete: $new_version"
-            echo "  Update complete! Now running OnionPress $new_version."
+            # `onionpress update [vX.Y.Z]`: the latest release, or that one.
+            update_onionpress "${2:-}"
             ;;
 
         write-status)
@@ -3342,7 +3420,10 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         handle-action)
-            # Process action requests from the WordPress settings page
+            # Process action requests from the WordPress settings page.
+            # This runs as onionpress-watcher.service, a oneshot: whatever
+            # must outlive it goes through run_detached.
+            ONIONPRESS_IN_WATCHER=true
             local action
             action=$(wp_exec cat /var/lib/onionpress/requested-action 2>/dev/null || echo "")
             if [ -z "$action" ]; then
@@ -3373,10 +3454,15 @@ sys.exit(0 if provision_interactive() else 1)
                     apply_config_updates 2>/dev/null || true
                     # Write pending marker to shared volume before stopping (survives container restart)
                     echo restart | wp_put /var/lib/onionpress/service-pending 2>/dev/null
+                    local heartbeat_was_running=false
+                    stop_heartbeat_client && heartbeat_was_running=true
                     stop_containers
                     start_containers
                     wait_for_services
                     write_status
+                    if $heartbeat_was_running; then
+                        start_heartbeat_client
+                    fi
                     local containers_info
                     containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
                     echo '{"success":true,"action":"restart","message":"Restarted '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
@@ -3384,6 +3470,7 @@ sys.exit(0 if provision_interactive() else 1)
                     ;;
                 stop)
                     setup_db_passwords
+                    stop_heartbeat_client || true
                     stop_containers
                     ;;
                 check-reachability)
@@ -3592,13 +3679,20 @@ sys.exit(0 if provision_interactive() else 1)
                     ;;
                 update)
                     log "Update requested from settings page..."
-                    # Run the update command and capture result
-                    if "$0" update >> "$LOG_FILE" 2>&1; then
+                    # Run the update command and capture result. The
+                    # installer replaces $0 by rename, so this copy runs on.
+                    local update_rc=0
+                    "$0" update >> "$LOG_FILE" 2>&1 || update_rc=$?
+                    if [ "$update_rc" -eq 0 ]; then
                         local updated_ver
-                        updated_ver=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
-                        echo '{"success":true,"version":"'"$updated_ver"'","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                        updated_ver=$(tr -cd '0-9A-Za-z.-' < "$INSTALL_DIR/VERSION" 2>/dev/null || true)
+                        echo '{"success":true,"version":"'"${updated_ver:-unknown}"'","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
                             wp_put /var/lib/onionpress/update-result.json 2>/dev/null
-                        log "Update complete: $updated_ver"
+                        log "Update complete: ${updated_ver:-unknown}"
+                    elif [ "$update_rc" -eq 3 ]; then
+                        echo '{"success":false,"error":"Updating needs administrator rights: run onionpress update in a terminal","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            wp_put /var/lib/onionpress/update-result.json 2>/dev/null
+                        log "Update not started: needs administrator rights"
                     else
                         echo '{"success":false,"error":"Update failed — check logs","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
                             wp_put /var/lib/onionpress/update-result.json 2>/dev/null
@@ -3629,10 +3723,8 @@ sys.exit(0 if provision_interactive() else 1)
 
             # Stop everything
             setup_db_passwords 2>/dev/null || true
-            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Stopping heartbeat client..."
-                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-            fi
+            local heartbeat_was_running=false
+            stop_heartbeat_client && heartbeat_was_running=true
             stop_containers 2>/dev/null || true
 
             # Remove all Docker volumes
@@ -3664,6 +3756,12 @@ sys.exit(0 if provision_interactive() else 1)
             if docker ps --format '{{.Names}}' | grep -q '^onionheaven$'; then
                 log "Resetting OnionHeaven..."
                 reset_onionheaven_in_container >> "$LOG_FILE" || true
+            fi
+
+            # The wiped config leaves OnionHeaven undecided, so the client
+            # registers nothing until the user opts in again.
+            if $heartbeat_was_running; then
+                start_heartbeat_client
             fi
 
             log "OnionPress reset and restarted"

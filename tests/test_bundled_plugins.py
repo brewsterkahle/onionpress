@@ -386,8 +386,11 @@ class TestShipped(unittest.TestCase):
 
     def test_install_sh_puts_them_in_scripts_itself(self):
         text = _read("linux/install.sh")
+        # Into the staged scripts/ that replaces the old one (issue #316).
         self.assertIn('$SUDO install -m 0755 "$REPO_DIR"/app/Resources/scripts/*.sh '
-                      '"$INSTALL_DIR/scripts/"', text)
+                      '"$_scripts_stage/"', text)
+        self.assertIn('_scripts_stage=$(staging_name "$INSTALL_DIR/scripts")', text)
+        self.assertIn('swap_in_dir "$_scripts_stage" "$INSTALL_DIR/scripts"', text)
         self.assertNotRegex(text, r'cp -r "\$REPO_DIR/app/Resources/scripts"')
 
     def test_dmg_carries_the_scripts(self):

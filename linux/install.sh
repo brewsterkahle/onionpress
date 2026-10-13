@@ -276,11 +276,49 @@ if [ ! -d "$REPO_DIR/app/Resources/docker" ]; then
     exit 1
 fi
 
+# Every file and folder in $INSTALL_DIR is replaced, never copied over.
+# `cp -r src "$INSTALL_DIR/docker"` into a docker/ that a previous install
+# left there made docker/docker (and lib/onionpress/onionpress, and so on)
+# on every re-run, and kept the first install's copies in use beside a new
+# launcher (issue #316). A folder is staged beside its old copy and swapped
+# in by rename; a file is written beside its old copy and renamed over it,
+# so a launcher that bash is running (`onionpress update` runs this
+# script) keeps reading the file it opened.
+staging_name() {
+    echo "$(dirname "$1")/.$(basename "$1").new.$$"
+}
+# Put the staged folder $1 in place at $2, removing what was there.
+swap_in_dir() {
+    local old
+    old="$(dirname "$2")/.$(basename "$2").old.$$"
+    $SUDO rm -rf "$old"
+    if [ -e "$2" ] || [ -L "$2" ]; then
+        $SUDO mv "$2" "$old"
+    fi
+    $SUDO mv "$1" "$2"
+    $SUDO rm -rf "$old"
+}
+# Replace folder $2 with a copy of folder $1, without __pycache__.
+replace_dir() {
+    local stage
+    stage=$(staging_name "$2")
+    $SUDO rm -rf "$stage"
+    $SUDO mkdir -p "$stage"
+    $SUDO cp -r "$1/." "$stage/"
+    $SUDO find "$stage" -depth -type d -name __pycache__ -exec rm -rf {} +
+    swap_in_dir "$stage" "$2"
+}
+# Replace file $2 with a copy of file $1, mode $3.
+replace_file() {
+    local stage
+    stage=$(staging_name "$2")
+    $SUDO install -m "$3" "$1" "$stage"
+    $SUDO mv -f "$stage" "$2"
+}
+
 # Copy files
-$SUDO cp "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress"
-$SUDO chmod +x "$INSTALL_DIR/onionpress"
-$SUDO cp "$REPO_DIR/linux/onionpress-tray" "$INSTALL_DIR/onionpress-tray"
-$SUDO chmod +x "$INSTALL_DIR/onionpress-tray"
+replace_file "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress" 0755
+replace_file "$REPO_DIR/linux/onionpress-tray" "$INSTALL_DIR/onionpress-tray" 0755
 
 # Create /usr/local/bin symlinks NOW, before the tray is started below —
 # the tray's SetupDialog shells out to `/usr/local/bin/onionpress
@@ -292,26 +330,26 @@ $SUDO mkdir -p /usr/local/bin
 $SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress
 $SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray
 
-$SUDO cp -r "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
-$SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
+replace_dir "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
+replace_dir "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
 
 # OnionPress theme (header w/ @onionname, Follow/Directory templates).
 # The launcher's install_onionpress_theme() silently skips if the
 # directory is missing, leaving WP on a default theme.
 if [ -d "$REPO_DIR/app/Resources/themes" ]; then
-    $SUDO cp -r "$REPO_DIR/app/Resources/themes" "$INSTALL_DIR/themes"
+    replace_dir "$REPO_DIR/app/Resources/themes" "$INSTALL_DIR/themes"
 fi
 
 # Shared Python package — required by `op_py` in the launcher (PYTHONPATH=$INSTALL_DIR/lib)
 # and by onionpress-tray which inserts $INSTALL_DIR/lib into sys.path.
 $SUDO mkdir -p "$INSTALL_DIR/lib"
-$SUDO cp -r "$REPO_DIR/src/onionpress" "$INSTALL_DIR/lib/onionpress"
+replace_dir "$REPO_DIR/src/onionpress" "$INSTALL_DIR/lib/onionpress"
 
 # Tray icons (tray-running/-starting/-stopped.png). The tray's ICON_THEME_PATH
 # points at $INSTALL_DIR/assets; without these the indicator falls back to the
 # distro's missing-icon glyph.
 if [ -d "$REPO_DIR/linux/assets" ]; then
-    $SUDO cp -r "$REPO_DIR/linux/assets" "$INSTALL_DIR/assets"
+    replace_dir "$REPO_DIR/linux/assets" "$INSTALL_DIR/assets"
 fi
 
 # Bring up the tray immediately — with the binary, shared lib, and icons in
@@ -329,21 +367,25 @@ fi
 # Icon for the per-user .desktop entry created at the end. Kept in INSTALL_DIR
 # so it survives temp-dir cleanup below.
 if [ -f "$REPO_DIR/app/Resources/app-icon.png" ]; then
-    $SUDO cp "$REPO_DIR/app/Resources/app-icon.png" "$INSTALL_DIR/app-icon.png"
+    replace_file "$REPO_DIR/app/Resources/app-icon.png" "$INSTALL_DIR/app-icon.png" 0644
 fi
 
-# Copy shared scripts
-$SUDO mkdir -p "$INSTALL_DIR/scripts"
-$SUDO cp "$REPO_DIR/src/onionpress/onion_auth.py" "$INSTALL_DIR/scripts/"
-$SUDO cp "$REPO_DIR/src/onionpress/key_manager.py" "$INSTALL_DIR/scripts/"
+# Copy shared scripts, into a new scripts/ staged and swapped in like the
+# folders above.
+_scripts_stage=$(staging_name "$INSTALL_DIR/scripts")
+$SUDO rm -rf "$_scripts_stage"
+$SUDO mkdir -p "$_scripts_stage"
+$SUDO cp "$REPO_DIR/src/onionpress/onion_auth.py" "$_scripts_stage/"
+$SUDO cp "$REPO_DIR/src/onionpress/key_manager.py" "$_scripts_stage/"
 if [ -f "$REPO_DIR/linux/onionpress-heartbeat.py" ]; then
-    $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
+    $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$_scripts_stage/"
 fi
 # The plugin scripts the launcher runs from $SCRIPTS_DIR (install_plugin.sh,
 # activate_plugin.sh), into scripts/ itself: the `cp -r` of the folder this
 # replaces put them in scripts/scripts/ on a reinstall, where the launcher
 # never looked, and kept the first install's copies in use.
-$SUDO install -m 0755 "$REPO_DIR"/app/Resources/scripts/*.sh "$INSTALL_DIR/scripts/"
+$SUDO install -m 0755 "$REPO_DIR"/app/Resources/scripts/*.sh "$_scripts_stage/"
+swap_in_dir "$_scripts_stage" "$INSTALL_DIR/scripts"
 
 # Copy systemd service files into install dir (so they survive temp dir cleanup)
 $SUDO cp "$REPO_DIR/linux/onionpress.service" "$INSTALL_DIR/"

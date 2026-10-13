@@ -408,7 +408,7 @@ class TestLinuxInstallTray(unittest.TestCase):
     def test_tray_binary_copied_to_install_dir(self):
         self.assertRegex(
             self.script,
-            r'cp\s+.*linux/onionpress-tray.*INSTALL_DIR',
+            r'(cp|replace_file)\s+.*linux/onionpress-tray.*INSTALL_DIR',
             "install.sh must copy linux/onionpress-tray into INSTALL_DIR — "
             "without it the symlink and tray launch both fail silently.",
         )
@@ -2047,11 +2047,16 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
                 guard = body.index("regenerate_derivatives_pending; then")
                 kick = body.index("regenerate-derivatives", guard)
                 self.assertLess(guard, kick, "the kick-off must be guarded on the marker")
-                # Detached in a subshell (not in the script's job table) and
-                # after provision-post-install so the fallback mu-plugin is
-                # already installed when the sweep starts.
+                # Detached (not in the script's job table) and after
+                # provision-post-install so the fallback mu-plugin is
+                # already installed when the sweep starts. Linux detaches
+                # through run_detached, which also gets it out of the
+                # settings watcher's oneshot cgroup (issue #316).
                 kick_line = body[body.rfind("\n", 0, kick):body.index("\n", kick)]
-                self.assertRegex(kick_line, r"^\s*\(\s*\S.*regenerate-derivatives.*&\s*\)\s*$")
+                self.assertRegex(
+                    kick_line,
+                    r"^\s*(\(\s*\S.*regenerate-derivatives.*&\s*\)"
+                    r"|run_detached\s.*regenerate-derivatives)\s*$")
                 self.assertLess(body.index("provision-post-install"), guard)
 
     def test_python_marker_paths_match_the_launchers(self):

@@ -483,14 +483,14 @@ log() { echo "$1" >> "$LOG_FILE"; }
         self.assertIn("CLOUDFLARE_TUNNEL_TOKEN", log)
         self.assertRegex(log, r"ignored.*ONIONPRESS_TOR_IMAGE")
         self.assertRegex(log, r"ignored.*ONIONHEAVEN_ADDRESS")
-        self.assertIn("systemctl enable onionpress", self._read_out("calls"))
+        self.assertIn("systemctl --user enable onionpress.service onionpress-heartbeat.service", self._read_out("calls"))
         self.assertIn("write_status", self._read_out("calls"))
         self.assertFalse(os.path.exists(os.path.join(self.out, "config-updates.json")))
 
     def test_start_on_boot_is_reapplied_when_unchanged(self):
         result = self._run(json.dumps({"START_ON_BOOT": "no"}))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("systemctl disable onionpress", self._read_out("calls"))
+        self.assertIn("systemctl --user disable onionpress.service onionpress-heartbeat.service", self._read_out("calls"))
 
     def test_invalid_json_is_kept_and_nothing_written(self):
         result = self._run('{"UPDATE_ON_LAUNCH": "n',

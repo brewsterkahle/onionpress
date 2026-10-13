@@ -52,10 +52,11 @@ Or download the [`.deb` package](https://github.com/brewsterkahle/onionpress/rel
 ```bash
 wget https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.deb
 sudo apt-get install ./onionpress.deb
-sudo systemctl start onionpress
+systemctl --user start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
+`onionpress update` installs the latest release the same way it was installed.
 To check that a site is reachable over Tor: `onionpress get http://<address>.onion/` (fetches through the tor container and prints the page).
 
 On Linux, WordPress (`http://<this machine>:8080`) is open to other devices on

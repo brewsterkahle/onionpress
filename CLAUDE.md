@@ -676,6 +676,34 @@
   app's updater does the update, so the first update after a release with
   this change still runs the old code.
 
+## Linux Install, Update and Units (issue #316)
+- install.sh replaces every file and folder in `/opt/onionpress`, never
+  copies over one: `replace_dir` (stage `.<name>.new.$$` beside, swap by
+  rename, no `__pycache__`), `replace_file` (rename over, so a launcher bash
+  is running keeps its open file). `cp -r src "$INSTALL_DIR/docker"` into an
+  existing folder made docker/docker etc. on every re-run.
+- `onionpress update [vX.Y.Z]` (and the Settings page's Update button) runs
+  a release's own installer: the release's `.deb` via apt on a .deb install
+  (then `systemctl --user restart onionpress` if it runs), else a shallow
+  clone of the tag and its `linux/install.sh`. No copy list of its own, no
+  main HEAD, never touches a checkout it did not make. Without an argument
+  it installs only a newer release. Exit 3 = needs sudo and has no terminal
+  (the watcher); the page says to run it in a terminal.
+- Both installers set up **user** units. Every `systemctl` in the launcher
+  is `--user` (only `uninstall` still cleans up legacy system units).
+  `stop` (also onionpress.service's ExecStop) stops the heartbeat client
+  first so /offline goes out; `start` under systemd starts it again
+  (`--no-block`); restart/reset restart it only if it was running (starting
+  it Wants= onionpress.service). START_ON_BOOT enables/disables both
+  onionpress and onionpress-heartbeat (the heartbeat, left enabled, would
+  pull OnionPress up at boot). A .deb's `systemctl --global enable` links
+  are not undone by a per-user disable.
+- onionpress-watcher.service is a oneshot: systemd kills its cgroup when
+  handle-action returns. handle-action sets `ONIONPRESS_IN_WATCHER=true`,
+  and background work goes through `run_detached`, which then uses
+  `systemd-run --user --collect` (only DOCKER_HOST passed; never a secret).
+  `tests/test_linux_install_update.py`.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers
