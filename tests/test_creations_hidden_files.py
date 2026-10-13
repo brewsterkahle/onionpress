@@ -130,7 +130,7 @@ class TestEveryEntryPointChecks(unittest.TestCase):
         self.assertLess(body.index("is_servable_path($requested)"),
                         body.index("realpath("))
         self.assertLess(body.index("is_servable_path($resolved_rel)"),
-                        body.index("readfile("))
+                        body.index("self::send_bytes("))
 
     def test_folder_browsing_and_upload_target(self):
         for fn, resolved in (("get_folder_contents", "$browse_rel"),
@@ -140,7 +140,7 @@ class TestEveryEntryPointChecks(unittest.TestCase):
             self.assertIn(f"self::is_public_path({resolved})", body, fn)
 
     def test_get_files_does_not_descend_into_hidden_folders(self):
-        body = _php_function(self.src, "get_files")
+        body = _php_function(self.src, "scan_tree")
         self.assertIn("RecursiveCallbackFilterIterator", body)
         self.assertIn("getFilename()[0] !== '.'", body)
 
@@ -148,7 +148,8 @@ class TestEveryEntryPointChecks(unittest.TestCase):
         self.assertIn("const THUMBS_PREFIX = '.thumbs/';", self.src)
         links = re.findall(r"urlencode\('(\.thumbs/)' \. \$rel_path \. '\.png'\)",
                            self.src)
-        self.assertEqual(links, [".thumbs/", ".thumbs/"],
+        # One place makes them (listing_entry), for both listings.
+        self.assertEqual(links, [".thumbs/"],
                          "thumbnail links moved; keep is_servable_path in step")
 
 
