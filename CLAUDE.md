@@ -39,7 +39,7 @@
 - **After editing ANY `src/` file that the MenubarApp uses, you MUST rebuild the MenubarApp** via `build/rebuild-menubar.sh`. The py2app bundle contains compiled `.pyc` files — editing `src/` alone does NOT update the running app.
 - **py2app entry point**: `MenubarApp/Contents/Resources/menubar.py` is the ONLY copy that matters at runtime — py2app `exec()`s it from `__boot__.py`. The copies in `lib/python3.14/` and `scripts/` are unused build artifacts. When hot-patching the installed app without a full rebuild, only update `Contents/Resources/menubar.py` (and its `__pycache__/` pyc).
   - `src/menubar.py` — main app (entry point)
-  - `src/onionpress/` — shared package: backup, key_manager, setup_window, onion_proxy, onion_auth, onionheaven, updater, install_native_messaging, native_messaging_host, power, health, docker, tor, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*
+  - `src/onionpress/` — shared package: backup, key_manager, setup_window, onion_proxy, onion_auth, onionheaven, updater, install_native_messaging, native_messaging_host, power, health, docker, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*
   - `setup.py` — py2app config. Adding a new submodule to `onionpress` just means one new line in the `includes` list — no build-script change needed. Build scripts only copy the whole `onionpress` package into site-packages.
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - **Cut releases with `build/release.sh`** — it builds BOTH artifacts and uploads both to one release, so the Linux `.deb` can't be forgotten. (It was: v2.4.101–v2.4.106 shipped only the `.dmg`, which 404'd the README's `releases/latest/download/onionpress.deb` link — that link resolves to the *Latest* release's asset of that name.) Bump + commit first, then run it. Cross-platform rule it enforces: the `.dmg` can only be built on macOS, so on **macOS** it builds `.dmg`+`.deb` and creates/updates the release with both; on **Linux** it builds only the `.deb` and *refuses to create* a release (a `.dmg`-less "Latest" would break the Mac link) — it only attaches the `.deb` to an existing release that already carries the matching `.dmg`. Always run the Mac side first.
@@ -180,6 +180,9 @@
   (`launcher_ops.request_watchdog_republish`) and `tor-watchdog.py` answers with
   DEL_ONION + ADD_ONION — fresh intro points, immediate descriptor upload. Without it,
   C Tor keeps a dead descriptor on the HSDirs until its next scheduled upload (60–120 min).
+- **Linux does not run this loop yet** (issue #310): `linux/onionpress-service.py`
+  carries the same probe, trigger and wake reset, but neither `install.sh` nor
+  `build-linux.sh` installs it and no systemd unit runs it.
 - Rate limits: one request per 15 min on the host, one forced republish per 15 min in
   the watchdog, never within 5 min of an HS_DESC UPLOADED event. Takeover codes never
   trigger it (the heartbeat's /online is the reclaim path).
@@ -530,8 +533,8 @@
 
 ## Containers Drop Every Capability
 - Every compose service (both compose files), every takeover worker
-  (`_spawn_worker` in onionheaven_common.py, the unused `start_farm_worker`
-  and the Mac launcher's `_start_takeover_worker`) and every one-shot
+  (`_spawn_worker` in onionheaven_common.py and the unused
+  `start_farm_worker`; the Mac launcher starts none) and every one-shot
   `docker run` in the launchers, cli.py and launcher_ops.py has
   `cap_drop: [ALL]` / `--cap-drop ALL`, adds back only the capabilities
   `tests/test_container_capabilities.py` lists for it, and has

@@ -1,4 +1,4 @@
-"""Tests for src/onionpress/tor.py."""
+"""Tests for tests/stress/orchestrator/tor_control.py."""
 
 import os
 import sys
@@ -8,7 +8,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.docker import DockerResult
-from onionpress.tor import (
+from stress.orchestrator.tor_control import (
     TorControl, DirectTorControl, TorControlError, OnionService,
     create_tor_control,
 )
@@ -248,7 +248,7 @@ class TestHsfetch(unittest.TestCase):
 
 
 class TestFlushDescriptorCache(unittest.TestCase):
-    @mock.patch("onionpress.tor.time.sleep")
+    @mock.patch("stress.orchestrator.tor_control.time.sleep")
     def test_sends_newnym_then_hsfetch(self, mock_sleep):
         docker = mock.Mock()
         docker.exec.return_value = _ok("250 OK\r\n")
@@ -330,7 +330,7 @@ class TestDirectTorControl(unittest.TestCase):
         with self.assertRaises(TorControlError):
             dtc._read_cookie()
 
-    @mock.patch("onionpress.tor.socket.create_connection")
+    @mock.patch("stress.orchestrator.tor_control.socket.create_connection")
     def test_direct_send_command(self, mock_conn):
         docker = mock.Mock()
         docker.exec.return_value = _ok("cookiehex")
@@ -343,7 +343,7 @@ class TestDirectTorControl(unittest.TestCase):
         self.assertIn("250 OK", lines)
         mock_sock.sendall.assert_called_once()
 
-    @mock.patch("onionpress.tor.socket.create_connection", side_effect=OSError("refused"))
+    @mock.patch("stress.orchestrator.tor_control.socket.create_connection", side_effect=OSError("refused"))
     def test_direct_falls_back_to_exec(self, mock_conn):
         docker = mock.Mock()
         # First exec: cookie read succeeds
@@ -358,14 +358,14 @@ class TestDirectTorControl(unittest.TestCase):
 
 
 class TestCreateTorControl(unittest.TestCase):
-    @mock.patch("onionpress.tor.socket.create_connection")
+    @mock.patch("stress.orchestrator.tor_control.socket.create_connection")
     def test_direct_when_port_reachable(self, mock_conn):
         mock_conn.return_value = mock.Mock()
         docker = mock.Mock()
         tc = create_tor_control(docker, prefer_direct=True)
         self.assertIsInstance(tc, DirectTorControl)
 
-    @mock.patch("onionpress.tor.socket.create_connection", side_effect=OSError("refused"))
+    @mock.patch("stress.orchestrator.tor_control.socket.create_connection", side_effect=OSError("refused"))
     def test_exec_when_port_not_reachable(self, mock_conn):
         docker = mock.Mock()
         tc = create_tor_control(docker, prefer_direct=True)
