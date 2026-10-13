@@ -244,6 +244,25 @@ class TestRefreshScriptOwnsEveryConsumer(unittest.TestCase):
             "relying on the pin-context lookahead alone already failed once.",
         )
 
+    def test_refresh_resolves_from_the_registry_by_default(self):
+        """Issue #327: the default used to be `docker images --digests`,
+        whatever this machine last pulled, and it pinned stale images during
+        the 2.5.3 release. The registry is the default; the cache needs
+        --local.
+        """
+        script = _read("build/refresh-image-digests.sh")
+        self.assertIn('SOURCE="registry"', script)
+        self.assertIn("build/base-image-digest.sh", script)
+        self.assertRegex(script, r'--local\)\s+SOURCE="local"')
+        uses = [line for line in script.splitlines()
+                if "docker images --digests" in line
+                and not line.lstrip().startswith("#")]
+        self.assertEqual(
+            len(uses), 1,
+            "`docker images --digests` should appear only in local_digest_of")
+        self.assertRegex(
+            script, r"(?s)local_digest_of\(\) \{.*?docker images --digests.*?\n\}")
+
     def test_refresh_script_offers_check_mode(self):
         """`--check` is what makes drift a build failure rather than a code
         review question; docs/BUILDING.md and `make doctor` both rely on it.
