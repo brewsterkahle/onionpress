@@ -193,11 +193,16 @@ WORKDIR /
 
 # ca-certificates and wget are already in the base; they are listed anyway so
 # this image's own requirements do not depend on upstream's incidental
-# package choices. sqlite3 is the OnionHeaven registry's CLI.
+# package choices. sqlite3 is the OnionHeaven registry's CLI. python3-nacl
+# (PyNaCl on the libsodium above, from Debian) checks that a registrant's
+# private key belongs to its address before the hub stores it
+# (web-server.py's private_key_problem, key-convert.py's keypair_error):
+# crypto from an established library, never computed here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     socat openssl ca-certificates sqlite3 python3 curl wget procps netcat-openbsd xxd \
-    libsodium23 \
-    && rm -rf /var/lib/apt/lists/*
+    libsodium23 python3-nacl \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -c "from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp, has_crypto_scalarmult_ed25519 as ok; assert ok"
 # Docker CLI for heartbeat to manage takeover containers via docker exec/run
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=mkp224o-builder /build/mkp224o/mkp224o /usr/local/bin/mkp224o

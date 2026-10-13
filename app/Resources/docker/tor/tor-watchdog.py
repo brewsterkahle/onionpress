@@ -259,18 +259,45 @@ def _save_generated_key(service_dir, resp_lines):
         return None
     try:
         os.makedirs(service_dir, exist_ok=True)
-        # Write hostname
-        with open(os.path.join(service_dir, "hostname"), "w") as f:
-            f.write(service_id + ".onion\n")
-        # Write secret key in C Tor format (32-byte header + 64-byte key)
+        # Secret key first, in C Tor format (32-byte header + 64-byte key),
+        # then the hostname, each in one step: a short key file left by a
+        # crash reads as no key, and the next start would mint yet another
+        # address.
         key_bytes = base64.b64decode(key_b64)
         header = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
-        with open(os.path.join(service_dir, "hs_ed25519_secret_key"), "wb") as f:
-            f.write(header + key_bytes)
+        _write_atomic(os.path.join(service_dir, "hs_ed25519_secret_key"),
+                      header + key_bytes)
+        _write_atomic(os.path.join(service_dir, "hostname"),
+                      (service_id + ".onion\n").encode("ascii"))
         log(f"Saved generated key for {service_id[:16]}... to {service_dir}")
-    except OSError as e:
+    except (OSError, ValueError) as e:
         log(f"Warning: failed to save generated key: {e}")
     return service_id
+
+
+def _write_atomic(path, data):
+    """Write path in one step, mode 0600: a new file beside it (O_EXCL,
+    O_NOFOLLOW), synced, renamed over it, directory synced."""
+    directory, name = os.path.split(path)
+    tmp = os.path.join(directory, f".{name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dfd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
 
 
 def add_all_services(cmd_sock, services):

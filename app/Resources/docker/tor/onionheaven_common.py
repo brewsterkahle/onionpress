@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -1497,6 +1498,92 @@ def _key_dir(content_address):
                 f"not an onion address")
         return None
     return os.path.join(KEYS_DIR, content_address)
+
+
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# A temp file write_key_file left behind (a crash between create and
+# rename) is removed by a later write once it is this old; a younger one may
+# belong to a concurrent /online for the same address.
+_STALE_TEMP_SECONDS = 600
+
+
+def _same_contents(path, data):
+    """True if path is a regular file (not a link) holding exactly data."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | _O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size != len(data):
+            return False
+        if f.read(len(data) + 1) != data:
+            return False
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            os.fchmod(f.fileno(), 0o600)
+        return True
+
+
+def write_key_file(path, data):
+    """Put data (key material, or a key directory's hostname) at path.
+
+    Nothing is written when path already holds exactly these bytes: every
+    /online carries the key, and rewriting it on each heartbeat only made
+    room for the failure below. Otherwise the bytes go to a new file in the
+    same directory (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), synced, renamed
+    over path, and the directory is synced. A crash or a full disk leaves
+    the old file or the new one, never an empty or short key (with the old
+    in-place `open(path, "wb")`, it left one, and that site's next takeover
+    failed). A link planted at path is replaced, never followed.
+
+    Returns True if it wrote, False if the bytes were already there.
+    """
+    if _same_contents(path, data):
+        return False
+    directory, name = os.path.split(path)
+    prefix = f".{name}."
+    tmp = os.path.join(directory, f"{prefix}{os.urandom(8).hex()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC,
+                 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | _O_CLOEXEC)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    _remove_stale_temps(directory, prefix)
+    return True
+
+
+def _remove_stale_temps(directory, prefix):
+    """Remove write_key_file's temp files that a crash left behind."""
+    cutoff = time.time() - _STALE_TEMP_SECONDS
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for entry in names:
+        if not (entry.startswith(prefix) and entry.endswith(".tmp")):
+            continue
+        path = os.path.join(directory, entry)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and st.st_mtime < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
 
 
 # Copies the move to the hub data volume kept aside (onionheaven-data-migrate.py):

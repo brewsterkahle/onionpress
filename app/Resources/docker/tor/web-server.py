@@ -67,10 +67,24 @@ from onion_auth import verify_payload, verify_name_payload
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function,
-    is_registration_hub, registrations_opted_in,
+    is_registration_hub, registrations_opted_in, write_key_file,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR, OWN_HOSTNAME_PATH,
 )
 import onionnames
+
+
+def _load_key_convert():
+    """key-convert.py, beside this file: the parser the takeover path uses
+    (tor-manager and the queue manager run its pem-to-* commands)."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key-convert.py")
+    spec = importlib.util.spec_from_file_location("key_convert", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+key_convert = _load_key_convert()
 
 SERVER_VERSION = os.environ.get("ONIONPRESS_VERSION", "unknown")
 
@@ -365,6 +379,47 @@ def build_openssh_key(private_key, public_key):
     pem += "\n".join(lines) + "\n"
     pem += "-----END OPENSSH PRIVATE KEY-----\n"
     return pem.encode("utf-8")
+
+
+_warned_no_sodium = False
+
+
+def private_key_problem(pem_bytes, public_key):
+    """Why the PEM's private key is not public_key's, or None if it is.
+
+    public_key is the PEM's public half, already found to derive to the
+    content address. That alone says nothing about the private half, which
+    is what a takeover hands to Tor: a PEM with the right public key and a
+    wrong secret scalar would overwrite a good stored key, and that site's
+    next takeover would fail. So the private section is read the way the
+    takeover path reads it (key-convert.py), must carry the same public
+    key, and its secret scalar times the base point must be that public key
+    (libsodium through PyNaCl: key_convert.keypair_error).
+
+    The request signature covers endpoint, addresses and timestamp, not the
+    PEM; with this check the PEM proves itself, since only the address's
+    key holder can produce a matching scalar.
+
+    Without PyNaCl (an image built without python3-nacl, which the
+    Dockerfile installs) the scalar is not checked: refusing every /online
+    would have the hub take over every registered site. Logged once.
+    """
+    global _warned_no_sodium
+    try:
+        expanded, inner_public = key_convert.parse_arti_pem_bytes(pem_bytes)
+    except Exception:
+        return "the private section cannot be read"
+    if inner_public != public_key:
+        return "the private section carries a different public key"
+    try:
+        return key_convert.keypair_error(expanded, public_key)
+    except key_convert.SodiumUnavailable as e:
+        if not _warned_no_sodium:
+            _warned_no_sodium = True
+            log(f"WARNING: PyNaCl is not available ({e}): registrants' private "
+                f"keys are stored without checking them against their "
+                f"public keys")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1183,20 +1238,31 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 })
                 return
 
-            # Store plaintext PEM key
+            # The public half derives to content_address; the private half
+            # must be that key's too, or it would replace a working key.
+            problem = private_key_problem(arti_pem, public_key)
+            if problem:
+                log(f"REJECT-KEYPAIR /online: content_address={content_address} "
+                    f"{problem} client_ip={self.client_address[0]}")
+                self._send_json(400, {
+                    "error": "arti_key_pem: the private key does not belong "
+                             "to content_address",
+                    "reason": problem,
+                })
+                return
+
+            # Store plaintext PEM key: in one step (write_key_file), and
+            # only when it changed. A heartbeat used to rewrite it in place,
+            # and a crash or full disk at that moment left an empty key.
             keys_dir = os.path.join(KEYS_DIR, content_address)
             os.makedirs(keys_dir, mode=0o700, exist_ok=True)
 
             pem_path = os.path.join(keys_dir, "ks_hs_id.ed25519_expanded_private")
-            with open(pem_path, "wb") as f:
-                f.write(arti_pem)
-            os.chmod(pem_path, 0o600)
+            write_key_file(pem_path, arti_pem)
 
             # Write hostname file
             hostname_path = os.path.join(keys_dir, "hostname")
-            with open(hostname_path, "w") as f:
-                f.write(content_address + "\n")
-            os.chmod(hostname_path, 0o600)
+            write_key_file(hostname_path, (content_address + "\n").encode("ascii"))
 
             # Remove old encrypted files if present (migration cleanup)
             for old_file in ("ks_hs_id.ed25519_expanded_private.enc",

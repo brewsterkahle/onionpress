@@ -389,6 +389,23 @@
   `REVIEWED` with why it is not registry data. A new docker call fails it
   until it is looked at.
 
+## Stored Registrant Keys Are Checked and Written in One Step
+- `/online`'s signature covers endpoint|content|healthcheck|timestamp, not
+  `arti_key_pem`. The PEM must prove itself: web-server.py's
+  `private_key_problem` reads the private section with key-convert.py's
+  `parse_arti_pem_bytes` (what the takeover path uses), requires its public
+  key to be the one that derives to the address, and its scalar times the
+  base point to be that key (`keypair_error`: libsodium via PyNaCl,
+  `crypto_scalarmult_ed25519_base_noclamp`; scalar bit 255 refused). 400
+  otherwise; the stored key is untouched. The tor image installs
+  `python3-nacl` (Debian) and checks it at build; without it the scalar is
+  not checked (logged once) rather than refusing every heartbeat.
+- Key files are never rewritten in place: `write_key_file` (hub keys and
+  hostname; skips identical bytes), `key-convert.py _write_atomic` (node key
+  at start, secret key written last), the watchdog's NEW:BEST save. Temp
+  file O_EXCL|O_NOFOLLOW 0600, fsync, rename, fsync dir.
+  `tests/test_hub_stored_keys.py`. All of this ships in the tor image.
+
 ## OnionHome Name Registry Volume
 - OnionHome's `onionnames.db` (onionname → onion address) lives on
   `onionpress-onionnames-data` at `/var/lib/onionnames`, mounted by

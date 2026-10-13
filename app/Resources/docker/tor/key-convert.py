@@ -18,6 +18,8 @@ Usage:
 
 import base64
 import hashlib
+import hmac
+import io
 import os
 import struct
 import sys
@@ -51,8 +53,18 @@ def parse_arti_pem(pem_path):
 
     expanded_key: 64 bytes, public_key: 32 bytes.
     """
-    with open(pem_path, "r") as f:
-        lines = f.readlines()
+    with open(pem_path, "rb") as f:
+        return parse_arti_pem_bytes(f.read())
+
+
+def parse_arti_pem_bytes(pem_bytes):
+    """parse_arti_pem for a PEM in memory: (expanded_key, public_key) from
+    the private section, the key ADD_ONION gets at takeover time.
+
+    web-server.py reads a registration's PEM with this same function, so the
+    key it checks is the key a takeover will use.
+    """
+    lines = io.StringIO(pem_bytes.decode("utf-8"), newline=None).readlines()
 
     # Strip PEM header/footer and decode base64
     b64_lines = []
@@ -114,6 +126,76 @@ def parse_arti_pem(pem_path):
     return expanded_key, public_key
 
 
+class SodiumUnavailable(RuntimeError):
+    """PyNaCl (python3-nacl, libsodium) is not installed."""
+
+
+def keypair_error(expanded_key, public_key):
+    """Why expanded_key is not public_key's secret key, or None if it is.
+
+    An expanded ed25519 key is a secret scalar a (its first 32 bytes) and a
+    nonce prefix; the public key is a times the base point. The scalar is
+    what Tor signs with and derives the onion address from, so a key whose
+    scalar does not give public_key cannot serve that address. The point
+    multiplication is libsodium's (PyNaCl), never computed here. Raises
+    SodiumUnavailable without PyNaCl.
+    """
+    if len(expanded_key) != 64 or len(public_key) != 32:
+        return "the key has the wrong length"
+    scalar = expanded_key[:32]
+    if scalar[31] & 0x80:
+        # libsodium (and Tor's ref10) take the scalar mod 2^255: a set top
+        # bit would check one scalar here and hand Tor another.
+        return "the secret scalar is not below 2^255"
+    try:
+        from nacl import bindings
+    except ImportError as e:
+        raise SodiumUnavailable(str(e)) from e
+    if not getattr(bindings, "has_crypto_scalarmult_ed25519", True):
+        raise SodiumUnavailable("libsodium was built without ed25519 scalar multiplication")
+    try:
+        derived = bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
+    except (RuntimeError, TypeError, ValueError):
+        # libsodium refuses a zero scalar and one that gives the identity
+        return "the secret scalar is zero or a multiple of the group order"
+    if not hmac.compare_digest(derived, public_key):
+        return "the secret scalar does not give the public key"
+    return None
+
+
+def _write_atomic(path, data):
+    """Write key material to path in one step, mode 0600.
+
+    A new file next to it (O_EXCL, O_NOFOLLOW), synced, renamed over path,
+    and the directory synced: a crash or a full disk leaves the old file or
+    the new one, never a short one. A short hs_ed25519_secret_key is not
+    converted again at the next start (the entrypoint converts only a
+    missing one) and the watchdog then mints a new onion address.
+    """
+    directory, name = os.path.split(path)
+    tmp = os.path.join(directory or ".", f".{name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                 | getattr(os, "O_CLOEXEC", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dfd = os.open(directory or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def build_arti_pem(expanded_key, public_key):
     """Build an Arti-format OpenSSH PEM from expanded key + public key."""
     pub_blob = _pack(KEY_TYPE) + _pack(public_key)
@@ -145,15 +227,13 @@ def arti_to_ctor(pem_path, output_dir):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    secret_path = os.path.join(output_dir, "hs_ed25519_secret_key")
-    with open(secret_path, "wb") as f:
-        f.write(CTOR_SECRET_HEADER + expanded_key)
-    os.chmod(secret_path, 0o600)
-
+    # The public key first: the entrypoint converts again only while the
+    # secret key is missing, so the secret key is the one written last.
     public_path = os.path.join(output_dir, "hs_ed25519_public_key")
-    with open(public_path, "wb") as f:
-        f.write(CTOR_PUBLIC_HEADER + public_key)
-    os.chmod(public_path, 0o600)
+    _write_atomic(public_path, CTOR_PUBLIC_HEADER + public_key)
+
+    secret_path = os.path.join(output_dir, "hs_ed25519_secret_key")
+    _write_atomic(secret_path, CTOR_SECRET_HEADER + expanded_key)
 
     print(f"Wrote {secret_path} ({32 + 64} bytes)")
     print(f"Wrote {public_path} ({32 + 32} bytes)")
@@ -196,8 +276,7 @@ def ctor_to_arti(secret_key_path, output_pem_path):
 
     pem = build_arti_pem(expanded_key, public_key)
 
-    with open(output_pem_path, "w") as f:
-        f.write(pem)
+    _write_atomic(output_pem_path, pem.encode("ascii"))
 
     print(f"Wrote {output_pem_path}")
 
