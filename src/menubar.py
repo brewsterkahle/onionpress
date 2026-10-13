@@ -5545,9 +5545,13 @@ License: AGPL v3"""
                     else:
                         # Use the onionpress script's import-key command.
                         # "-" hands it the key on stdin: in argv it would
-                        # show in `ps` to every user on this Mac.
+                        # show in `ps` to every user on this Mac. --yes
+                        # answers its replace-the-current-key question: the
+                        # user chose the replacement on this page, and with
+                        # stdin holding only the key the question read
+                        # end-of-input and the import cancelled itself.
                         r = subprocess.run(
-                            [self.launcher_script, "import-key", "-"],
+                            [self.launcher_script, "import-key", "--yes", "-"],
                             input=key_data + "\n",
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
                             timeout=120
@@ -5568,7 +5572,12 @@ License: AGPL v3"""
                             })
                             self.log(f"Settings page: key imported, address: {new_addr}")
                         else:
-                            error_msg = r.stderr.strip() or r.stdout.strip() or "Import failed"
+                            # The launcher's last line says why ("Cancelled.",
+                            # "ERROR: ..."); the lines before it are progress.
+                            out_lines = [ln.strip() for ln in
+                                         (r.stderr.strip() or r.stdout.strip()).splitlines()
+                                         if ln.strip()]
+                            error_msg = out_lines[-1] if out_lines else "Import failed"
                             _write_result("import-result.json", {
                                 "success": False, "error": error_msg,
                                 "imported_at": now_iso

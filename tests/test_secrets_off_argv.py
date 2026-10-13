@@ -499,9 +499,66 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
         self._run_import("linux/onionpress", "import_key_noninteractive",
                          "python3", 'import_key_noninteractive "$KEY"')
 
+    def _run_mac_replace(self, call):
+        """The Mac launcher's import_key with a key volume already present:
+        the docker stand-in lists it until `docker volume rm` removes it."""
+        data_dir = os.path.join(self.tmpdir, "mac-replace")
+        gone = os.path.join(self.tmpdir, "volume-gone")
+        script = (
+            "log() { :; }\n"
+            "stop_containers() { :; }\n"
+            'docker() {\n'
+            '    case "$1 $2" in\n'
+            '        "volume ls") [ -e "$GONE" ] || echo onionpress-onion-keys ;;\n'
+            '        "volume rm") touch "$GONE" ;;\n'
+            '    esac\n'
+            '    return 0\n'
+            '}\n'
+            'bundled_python() { "$PY" "$@"; }\n'
+            + _shell_function("app/MacOS/onionpress", "import_key") + "\n"
+            + call + "\n"
+        )
+        out = subprocess.run(
+            ["bash", "-c", script], input=self.key_b32 + "\n",
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "PY": sys.executable, "GONE": gone,
+                 "DATA_DIR": data_dir,
+                 "LOG_FILE": os.path.join(self.tmpdir, "log"),
+                 "SCRIPTS_DIR": os.path.dirname(KEY_MANAGER)})
+        imported = os.path.isfile(os.path.join(
+            data_dir, "shared", "vanity-keys", self.addr, "hostname"))
+        return out, imported
+
+    def test_mac_launcher_replace_without_yes_cancels(self):
+        # stdin holds only the key: the question reads end-of-input.
+        out, imported = self._run_mac_replace("import_key -")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertFalse(imported)
+        self.assertEqual(out.stderr.strip().splitlines()[-1], "Cancelled.")
+
+    def test_mac_launcher_replace_with_yes(self):
+        for call in ("import_key --yes -", "import_key - --yes"):
+            with self.subTest(call=call):
+                shutil.rmtree(os.path.join(self.tmpdir, "mac-replace"),
+                              ignore_errors=True)
+                if os.path.exists(os.path.join(self.tmpdir, "volume-gone")):
+                    os.remove(os.path.join(self.tmpdir, "volume-gone"))
+                out, imported = self._run_mac_replace(call)
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertTrue(imported, out.stdout + out.stderr)
+                self.assertNotIn("Continue?", out.stdout)
+
+    def test_mac_launcher_dispatch_passes_flags(self):
+        src = _read("app/MacOS/onionpress")
+        m = re.search(r"^        import-key\)\n(.*?);;", src,
+                      re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertIn('import_key "$@"', m.group(1))
+
     def test_menubar_passes_key_on_stdin(self):
         src = _read("src/menubar.py")
-        self.assertIn('[self.launcher_script, "import-key", "-"],', src)
+        # --yes: the page is where the user chose to replace the key.
+        self.assertIn('[self.launcher_script, "import-key", "--yes", "-"],', src)
         self.assertNotIn('"import-key", key_data', src)
 
 

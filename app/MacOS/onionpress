@@ -926,7 +926,18 @@ generate_vanity_address() {
 
 # Function to import a pre-generated onion service key
 import_key() {
-    local key_b32="$1"
+    # --yes (-y) answers the replace-the-current-key question: the Settings
+    # page's import passes it, since the user chose the replacement there and
+    # stdin holds only the key (a `read` of the answer got end-of-input, and
+    # the import cancelled itself).
+    local assume_yes=0 key_b32=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes|-y) assume_yes=1 ;;
+            *) [ -z "$key_b32" ] && key_b32="$1" ;;
+        esac
+        shift
+    done
     # "-" reads the key from stdin, so a caller (the menubar's settings-page
     # import) can keep it out of this process's argv, which ps shows to
     # every user. The key is passed on to key_manager.py on stdin too.
@@ -940,7 +951,7 @@ import_key() {
     # Show help if no argument or --help
     if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
         cat <<HELPEOF
-Usage: onionpress import-key <base32-secret-key>
+Usage: onionpress import-key [--yes] <base32-secret-key | ->
 
 Import a pre-generated ed25519 key for your onion service.
 
@@ -975,8 +986,9 @@ WHAT THIS COMMAND DOES:
   4. On next start, OnionPress will use this key
 
 NOTE: If an onion address already exists, you will be prompted to
-confirm the replacement. OnionPress will handle stopping and
-removing the old keys automatically.
+confirm the replacement (--yes confirms it in advance). OnionPress
+will handle stopping and removing the old keys automatically.
+"-" reads the key from stdin instead of the command line.
 
 HELPEOF
         return 0
@@ -1013,10 +1025,15 @@ HELPEOF
         echo "Importing a new key will REPLACE your current onion address."
         echo "Your old address will stop working permanently."
         echo ""
-        printf "Continue? [y/N] "
-        read -r confirm
+        local confirm=""
+        if [ "$assume_yes" -eq 1 ]; then
+            confirm=y
+        else
+            printf "Continue? [y/N] "
+            read -r confirm || true
+        fi
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-            echo "Cancelled."
+            echo "Cancelled." >&2
             return 1
         fi
 
@@ -2938,7 +2955,8 @@ main() {
             ;;
 
         import-key)
-            import_key "$2"
+            shift
+            import_key "$@"
             ;;
 
         logs)
