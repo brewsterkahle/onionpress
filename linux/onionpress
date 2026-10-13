@@ -1711,13 +1711,17 @@ start_containers() {
     # containers about to start (the data move must not race them).
     retire_old_onionheaven_containers
 
-    # Start WordPress, DB, and OnionHeaven first
+    # Start WordPress, DB, OnionHeaven and autoheal first. autoheal (which
+    # brings autoheal-proxy) restarts a container whose healthcheck has
+    # failed for its full retry window; without it an unhealthy container
+    # stays unhealthy until the next start. The Mac launcher starts the
+    # same set (test_autoheal_started.py).
     local max_attempts=3
     local attempt=1
     while [ $attempt -le $max_attempts ]; do
         # tee for the same reason as docker compose pull above — keeps the
         # journal tail visible while compose creates networks/volumes/containers.
-        docker compose up -d wordpress db onionheaven 2>&1 | tee -a "$LOG_FILE"
+        docker compose up -d wordpress db onionheaven autoheal 2>&1 | tee -a "$LOG_FILE"
         if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             break
         fi
