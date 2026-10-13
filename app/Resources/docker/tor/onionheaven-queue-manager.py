@@ -15,6 +15,7 @@ Interface:
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -36,6 +37,18 @@ KEY_CONVERT = "/key-convert.py"
 REDIRECT_PORT = 8082
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")
 SOCK_PATH = "/tmp/queue-manager.sock"
+
+# Commands that take an onion address. The heartbeat reads the address from
+# the registry (which onionpress-tor and every takeover worker can write) or
+# from a worker's own Tor, and it ends up in control-port commands
+# (DEL_ONION, GETINFO matching) and in a key path under KEYS_DIR: one v3
+# address, whole, or the command is refused.
+ADDRESS_COMMANDS = ("takeover", "release", "addr_state", "has")
+_ONION_ADDRESS_RE = re.compile(r"[a-z2-7]{56}\.onion")
+
+
+def is_onion_address(address):
+    return isinstance(address, str) and _ONION_ADDRESS_RE.fullmatch(address) is not None
 
 
 def log(msg):
@@ -618,6 +631,34 @@ class QueueManager:
 # Command interface via Unix socket
 # ---------------------------------------------------------------------------
 
+def handle_command(qm, data):
+    """Run one command line from the socket; returns the JSON-able reply.
+
+    An address argument must be one v3 onion address, whole (see
+    ADDRESS_COMMANDS), before anything reaches Tor or the key directory.
+    """
+    parts = data.split(None, 1)
+    cmd = parts[0] if parts else ""
+    arg = parts[1] if len(parts) > 1 else ""
+
+    if cmd in ADDRESS_COMMANDS and arg and not is_onion_address(arg):
+        log(f"refused {cmd}: {arg[:80]!r} is not an onion address")
+        return {"error": "not an onion address"}
+    if cmd == "takeover" and arg:
+        return qm.takeover(arg)
+    if cmd == "release" and arg:
+        return qm.release(arg)
+    if cmd == "status":
+        return qm.status()
+    if cmd == "reset":
+        return qm.reset()
+    if cmd == "addr_state" and arg:
+        return {"address": arg, "serving_status": qm.addr_state(arg)}
+    if cmd == "has" and arg:
+        return {"address": arg, "has_onion": qm.cmd.has_onion(arg)}
+    return {"error": f"unknown command: {data}"}
+
+
 def run_daemon():
     """Run as daemon — listen for commands on Unix socket."""
     log("Waiting for Tor control port...")
@@ -662,27 +703,8 @@ def run_daemon():
         try:
             conn, _ = server.accept()
             conn.settimeout(5.0)
-            data = conn.recv(4096).decode().strip()
-            parts = data.split(None, 1)
-            cmd = parts[0] if parts else ""
-            arg = parts[1] if len(parts) > 1 else ""
-
-            if cmd == "takeover" and arg:
-                result = qm.takeover(arg)
-            elif cmd == "release" and arg:
-                result = qm.release(arg)
-            elif cmd == "status":
-                result = qm.status()
-            elif cmd == "reset":
-                result = qm.reset()
-            elif cmd == "addr_state" and arg:
-                state = qm.addr_state(arg)
-                result = {"address": arg, "serving_status": state}
-            elif cmd == "has" and arg:
-                result = {"address": arg, "has_onion": qm.cmd.has_onion(arg)}
-            else:
-                result = {"error": f"unknown command: {data}"}
-
+            data = conn.recv(4096).decode(errors="replace").strip()
+            result = handle_command(qm, data)
             conn.sendall(json.dumps(result).encode() + b"\n")
             conn.close()
         except socket.timeout:

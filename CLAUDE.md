@@ -371,6 +371,24 @@
   on the hub follow the procedure there (count, tar the old dir, stop
   fully, update, check the log line and the counts).
 
+## Registry Names Reach Docker Only as Workers'
+- The registry is data anything mounting the hub volume can write as root
+  (onionpress-tor faces Tor; every takeover worker). The heartbeat holds the
+  Docker socket and takes container names from it (`takeover_containers`,
+  `registry.takeover_container`): a planted `onionpress-wordpress` row got
+  `docker rm -f` from `cleanup_dead_workers`. So in the tor image's code a
+  name reaches a docker call only through `worker_name_ok`/`is_worker_name`
+  (`onionheaven-(takeover|poll)-N`, whole), an address only through
+  `onion_address_ok`/`is_onion_address`; `drop_unnamed_worker_rows` (start
+  of `cleanup_dead_workers`) deletes such rows and unassigns their
+  addresses. The queue manager refuses non-addresses itself
+  (`handle_command`), and key directories are removed only for an onion
+  address (`_key_dir`: ".." or an absolute path removed other trees).
+- `tests/test_hub_registry_names.py` keeps a census of every docker argv in
+  the image's Python: each variable is guarded in its function or listed in
+  `REVIEWED` with why it is not registry data. A new docker call fails it
+  until it is looked at.
+
 ## OnionHome Name Registry Volume
 - OnionHome's `onionnames.db` (onionname → onion address) lives on
   `onionpress-onionnames-data` at `/var/lib/onionnames`, mounted by

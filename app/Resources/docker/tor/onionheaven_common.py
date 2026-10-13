@@ -23,7 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -318,6 +318,90 @@ def db_ensure_schema(conn):
 
 MAX_SERVICES_PER_WORKER = int(os.environ.get("ONIONHEAVEN_MAX_SERVICES", "50"))
 
+# What a Docker call on the hub may be aimed at. Besides the two compose
+# services it names literally (onionpress-tor, onionheaven), every container
+# the hub drives is a takeover worker it started and named itself, or a poll
+# worker an older version started. But the names it acts on are read back
+# from the registry (takeover_containers, registry.takeover_container), and
+# the registry is on the hub data volume, which onionpress-tor (it faces
+# Tor) and every takeover worker can write as root. So a name from there
+# reaches no docker call unless it is a worker's name, whole: a planted row
+# naming onionpress-wordpress would otherwise have the heartbeat, which
+# holds the Docker socket, `docker rm -f` it or exec into it. The same goes
+# for the onion addresses handed to a worker's queue manager (they end up in
+# control-port commands and key paths). tests/test_hub_registry_names.py
+# keeps every docker call in the hub's code behind these checks.
+_FARM_WORKER_RE = re.compile(r"onionheaven-(takeover|poll)-[0-9]{1,9}")
+
+
+def is_worker_name(name):
+    """True if name is a takeover or poll worker's container name, whole."""
+    return isinstance(name, str) and _FARM_WORKER_RE.fullmatch(name) is not None
+
+
+def is_onion_address(address):
+    """True if address is one v3 onion address, whole (no path, no newline)."""
+    return isinstance(address, str) and _ONION_ADDRESS_RE.fullmatch(address) is not None
+
+
+def _printable(value):
+    """A refused value as it may go into the log: quoted, bounded."""
+    return repr(value)[:100]
+
+
+def worker_name_ok(name, action):
+    """True if `action` (a docker call) may be aimed at container `name`.
+
+    Anything but a worker's name is refused and logged; see _FARM_WORKER_RE.
+    """
+    if is_worker_name(name):
+        return True
+    log(f"WARNING: not going to {action} {_printable(name)}: not a takeover "
+        f"worker's name (read from the registry)")
+    return False
+
+
+def onion_address_ok(address, action):
+    """True if `address` may be handed to a worker for `action`."""
+    if is_onion_address(address):
+        return True
+    log(f"WARNING: not going to {action} {_printable(address)}: not an onion "
+        f"address")
+    return False
+
+
+def drop_unnamed_worker_rows(conn):
+    """Forget every worker the registry names that is not a worker's name.
+
+    Deletes its takeover_containers row and unassigns every registry row
+    assigned to it, so the heartbeat queues those addresses on a real
+    worker. Nothing goes to Docker. Returns how many names were dropped.
+    """
+    try:
+        listed = [r[0] for r in conn.execute(
+            "SELECT container_name FROM takeover_containers").fetchall()]
+        assigned = [r[0] for r in conn.execute(
+            "SELECT DISTINCT takeover_container FROM registry "
+            "WHERE takeover_container IS NOT NULL").fetchall()]
+    except sqlite3.OperationalError:
+        return 0
+    bad = []
+    for name in listed + assigned:
+        if not is_worker_name(name) and name not in bad:
+            bad.append(name)
+    for name in bad:
+        log(f"WARNING: the registry names container {_printable(name)}, which "
+            f"is not a takeover worker's name: dropped, nothing is sent to "
+            f"Docker for it")
+        conn.execute("UPDATE registry SET takeover_container = NULL "
+                     "WHERE takeover_container IS ?", (name,))
+        conn.execute("DELETE FROM takeover_containers WHERE container_name IS ?",
+                     (name,))
+    if bad:
+        db_commit_with_retry(conn)
+    return len(bad)
+
+
 # Image ID of this container, once looked up (see takeover_image()).
 _own_image = None
 
@@ -388,13 +472,12 @@ def _init_worker_index(conn):
         max_idx = -1
         for row in rows:
             name = row["container_name"]
-            # parse "onionheaven-takeover-N"
-            try:
-                idx = int(name.rsplit("-", 1)[-1])
-                if idx > max_idx:
-                    max_idx = idx
-            except (ValueError, IndexError):
-                pass
+            # parse "onionheaven-takeover-N"; another name is no worker's
+            if not is_worker_name(name):
+                continue
+            idx = int(name.rsplit("-", 1)[-1])
+            if idx > max_idx:
+                max_idx = idx
         _next_worker_index = max_idx + 1
     except sqlite3.OperationalError:
         _next_worker_index = 0
@@ -403,16 +486,21 @@ def _init_worker_index(conn):
 def _pick_worker(conn):
     """Pick the bootstrapped worker with the fewest addresses.
 
-    Returns container_name or None if no bootstrapped workers exist.
+    Returns container_name or None if no bootstrapped workers exist. A row
+    whose name is no worker's is passed over (drop_unnamed_worker_rows
+    removes it on the heartbeat's next pass).
     """
     try:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT container_name FROM takeover_containers "
-            "WHERE bootstrapped = 1 ORDER BY assigned_count ASC LIMIT 1"
-        ).fetchone()
-        return row["container_name"] if row else None
+            "WHERE bootstrapped = 1 ORDER BY assigned_count ASC"
+        ).fetchall()
     except sqlite3.OperationalError:
         return None
+    for row in rows:
+        if is_worker_name(row["container_name"]):
+            return row["container_name"]
+    return None
 
 
 
@@ -514,6 +602,8 @@ def _check_worker_process(container_name):
     Returns True if the process is running, False otherwise.
     Checks for the specific takeover-worker script, not just any python3.
     """
+    if not worker_name_ok(container_name, "check the worker process in"):
+        return False
     try:
         result = subprocess.run(
             ["docker", "exec", container_name, "sh", "-c",
@@ -546,6 +636,8 @@ def check_worker_bootstrap(conn):
         name = row["container_name"]
         bootstrapped = row["bootstrapped"]
         created_at = row["created_at"]
+        if not is_worker_name(name):
+            continue  # never exec'd into; drop_unnamed_worker_rows drops it
 
         # --- Check unbootstrapped workers ---
         if not bootstrapped:
@@ -629,9 +721,6 @@ def _mounts_hub_data(mounts_json):
                for m in mounts)
 
 
-_FARM_WORKER_RE = re.compile(r"onionheaven-(takeover|poll)-[0-9]+")
-
-
 def _retire_unlisted_old_workers(listed):
     """Remove every takeover or poll worker container the registry does not
     list that does not mount the hub data volume.
@@ -652,7 +741,7 @@ def _retire_unlisted_old_workers(listed):
     if result.returncode != 0:
         return
     for name in result.stdout.split():
-        if name in listed or not _FARM_WORKER_RE.fullmatch(name):
+        if name in listed or not is_worker_name(name):
             continue
         try:
             inspected = subprocess.run(
@@ -677,8 +766,14 @@ def cleanup_dead_workers(conn):
     longer holds them), listed in the registry or not; the heartbeat
     reassigns their addresses to workers it spawns with the volume.
 
+    First of all it forgets every name in the registry that is not a
+    worker's (drop_unnamed_worker_rows): those rows can be planted by
+    anything that writes the hub data volume, and none of them reaches
+    `docker inspect` or `docker rm`.
+
     Called each heartbeat cycle.
     """
+    drop_unnamed_worker_rows(conn)
     try:
         rows = conn.execute(
             "SELECT container_name FROM takeover_containers"
@@ -690,6 +785,8 @@ def cleanup_dead_workers(conn):
 
     for row in rows:
         name = row["container_name"]
+        if not worker_name_ok(name, "inspect or remove container"):
+            continue
         try:
             result = subprocess.run(
                 ["docker", "inspect", "--format",
@@ -764,6 +861,9 @@ def _exec_takeover(container_name, content_address):
     The queue manager rate-limits ADD_ONION calls and monitors descriptor
     propagation. Returns True if the address was queued successfully.
     """
+    if not (worker_name_ok(container_name, "queue a takeover on")
+            and onion_address_ok(content_address, "queue a takeover of")):
+        return False
     log(f"Queuing takeover of {content_address} on {container_name}")
     try:
         result = subprocess.run(
@@ -814,6 +914,9 @@ def _exec_release(container_name, content_address):
 
     Returns True on verified success, False otherwise.
     """
+    if not (worker_name_ok(container_name, "release on")
+            and onion_address_ok(content_address, "release")):
+        return False
     addr_log(content_address, f"Releasing {content_address} via {container_name}")
 
     try:
@@ -868,6 +971,9 @@ def _has_onion_on_worker(container_name, content_address):
     Returns True/False on success, or None if the probe itself fails
     (e.g. docker exec error, worker on older image without `has`).
     """
+    if not (worker_name_ok(container_name, "ask about onions on")
+            and onion_address_ok(content_address, "ask a worker about")):
+        return None
     try:
         result = subprocess.run(
             ["docker", "exec", container_name,
@@ -895,6 +1001,8 @@ def get_queue_status(container_name):
     each call would otherwise spawn a `docker` that can only fail.
     """
     if not docker_available():
+        return None
+    if not worker_name_ok(container_name, "ask for the queue status of"):
         return None
     try:
         result = subprocess.run(
@@ -935,6 +1043,10 @@ def get_addr_serving_status(conn, content_address):
 
     if not docker_available():
         return "activating"  # same fallback as an unreachable worker, below
+
+    if not (worker_name_ok(container, "ask for an address's state on")
+            and onion_address_ok(content_address, "ask a worker about")):
+        return "activating"
 
     # Ask the worker's queue manager
     try:
@@ -1056,7 +1168,10 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
     # services when takeover/release cycles bounce between workers.
     worker = None
     if is_farm_mode():
-        preferred = row["takeover_container"] if row["takeover_container"] else None
+        # A name that is no worker's is never preferred: every takeover of
+        # this address would fail on it until the row is cleaned up.
+        preferred = (row["takeover_container"]
+                     if is_worker_name(row["takeover_container"]) else None)
         if preferred:
             # Verify the preferred worker is still bootstrapped
             ok = conn.execute(
@@ -1286,6 +1401,8 @@ def release_function(conn, content_address, healthcheck_address):
         wname = w["container_name"] if isinstance(w, dict) else w[0]
         if wname == takeover_container:
             continue  # already handled above
+        if not is_worker_name(wname):
+            continue  # no worker; drop_unnamed_worker_rows drops the row
         if not _exec_release(wname, content_address):
             sweep_problems.append(wname)
     if sweep_problems:
@@ -1359,11 +1476,27 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
     ).fetchone()[0]
 
     if other_active == 0:
-        key_dir = os.path.join(KEYS_DIR, content_address)
-        if os.path.isdir(key_dir):
+        key_dir = _key_dir(content_address)
+        if key_dir and os.path.isdir(key_dir):
             shutil.rmtree(key_dir, ignore_errors=True)
             log(f"Deleted keys for {content_address}")
         purge_kept_keys(content_address)
+
+
+def _key_dir(content_address):
+    """KEYS_DIR/<content_address>, or None unless it is an onion address.
+
+    The address comes from the registry, which a takeover worker or
+    onionpress-tor can write: ".." or an absolute path would have the
+    heartbeat (which mounts onionpress-persistent-data too) remove some
+    other directory tree.
+    """
+    if not is_onion_address(content_address):
+        if content_address:
+            log(f"WARNING: not deleting keys for {_printable(content_address)}: "
+                f"not an onion address")
+        return None
+    return os.path.join(KEYS_DIR, content_address)
 
 
 # Copies the move to the hub data volume kept aside (onionheaven-data-migrate.py):
@@ -1467,8 +1600,8 @@ def cleanup_stress_tests(conn=None):
             (ca,)
         ).fetchone()[0]
         if real_refs == 0:
-            key_dir = os.path.join(KEYS_DIR, ca)
-            if os.path.isdir(key_dir):
+            key_dir = _key_dir(ca)
+            if key_dir and os.path.isdir(key_dir):
                 shutil.rmtree(key_dir, ignore_errors=True)
                 stats["keys_deleted"] += 1
 
@@ -1507,20 +1640,15 @@ def cleanup_stress_tests(conn=None):
         )
         if result.returncode == 0:
             for name in result.stdout.strip().splitlines():
-                if name.startswith("onionheaven-takeover-") and name not in db_workers:
+                if (name.startswith("onionheaven-takeover-") and is_worker_name(name)
+                        and name not in db_workers):
                     to_remove.add(name)
     except Exception:
         pass
 
-    # Remove all in parallel
+    # Remove all in parallel (the registry's names only if they are workers')
     if to_remove:
-        def _rm(name):
-            subprocess.run(["docker", "rm", "-f", name],
-                           capture_output=True, timeout=15)
-            return name
-        with ThreadPoolExecutor(max_workers=len(to_remove)) as pool:
-            for _ in as_completed({pool.submit(_rm, n): n for n in to_remove}):
-                stats["workers_removed"] += 1
+        stats["workers_removed"] = _remove_workers(to_remove)
         log(f"cleanup_stress_tests: removed {stats['workers_removed']} workers")
 
     if own_conn:
@@ -1528,6 +1656,24 @@ def cleanup_stress_tests(conn=None):
 
     log(f"cleanup_stress_tests complete: {stats}")
     return stats
+
+
+def _rm_worker(name):
+    """`docker rm -f` one takeover worker; any other name is refused."""
+    if not worker_name_ok(name, "remove container"):
+        return False
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
+    return True
+
+
+def _remove_workers(names):
+    """Remove takeover workers in parallel (_rm_worker). Returns how many
+    were removed; names that are no worker's are refused and not counted."""
+    names = list(set(names))
+    if not names:
+        return 0
+    with ThreadPoolExecutor(max_workers=min(len(names), 16)) as pool:
+        return sum(1 for removed in pool.map(_rm_worker, names) if removed)
 
 
 # ---------------------------------------------------------------------------
@@ -1556,6 +1702,8 @@ def _patch_worker_code(container_name):
     """
     # We're running inside the onionheaven container, so we copy from local
     # filesystem into the target container via `docker cp`.
+    if not worker_name_ok(container_name, "copy code into"):
+        return
     failed = []
     for fpath in _WORKER_CODE_FILES:
         if not os.path.isfile(fpath):
@@ -1698,21 +1846,13 @@ def reset_onionheaven(conn=None):
         )
         if result.returncode == 0:
             for name in result.stdout.strip().splitlines():
-                if name.startswith("onionheaven-takeover-"):
+                if name.startswith("onionheaven-takeover-") and is_worker_name(name):
                     old_workers.add(name)
     except Exception:
         pass
 
     if old_workers:
-        def _rm(name):
-            subprocess.run(["docker", "rm", "-f", name],
-                           capture_output=True, timeout=15)
-            return name
-        with ThreadPoolExecutor(max_workers=len(old_workers)) as pool:
-            for name in as_completed(
-                {pool.submit(_rm, n): n for n in old_workers}
-            ):
-                stats["old_workers_removed"] += 1
+        stats["old_workers_removed"] = _remove_workers(old_workers)
         log(f"reset_onionheaven: removed {stats['old_workers_removed']} workers")
 
     _next_worker_index = 0

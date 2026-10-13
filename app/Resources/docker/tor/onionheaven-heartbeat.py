@@ -41,6 +41,7 @@ from onionheaven_common import (
     _init_worker_index, _ensure_capacity, _pick_worker,
     _exec_takeover, _exec_release,
     is_registration_hub, registrations_opted_in, read_tor_container_address,
+    worker_name_ok, is_onion_address,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, ONIONHEAVEN_DATA_DIR,
 )
 
@@ -106,7 +107,11 @@ def _get_tor_detached(container_name):
     """Query a worker's Tor for its actual detached onion services.
 
     Returns a set of content addresses (with .onion suffix), or None on error.
+    Only well-formed onion addresses: the RECONCILE pass hands each "extra"
+    one back to the worker's queue manager.
     """
+    if not worker_name_ok(container_name, "list the onions of"):
+        return None
     try:
         result = subprocess.run(
             ["docker", "exec", container_name, "python3", "-c",
@@ -136,7 +141,7 @@ def _get_tor_detached(container_name):
         onions = set()
         for line in result.stdout.strip().splitlines():
             line = line.strip()
-            if line:
+            if is_onion_address(line):
                 onions.add(line)
         return onions
     except Exception:

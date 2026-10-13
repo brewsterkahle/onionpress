@@ -23,7 +23,7 @@ sys.path.insert(0, DOCKER_TOR_DIR)
 import onionheaven_common  # noqa: E402
 
 
-CONTAINER = "onionheaven-takeover-test"
+CONTAINER = "onionheaven-takeover-7"  # a worker's name: anything else is refused
 ADDR = "op2ijk3cvd7kswainvwlg7uqxuoghaxzns6quht2csz3cdp5sgr2lnqd.onion"
 
 

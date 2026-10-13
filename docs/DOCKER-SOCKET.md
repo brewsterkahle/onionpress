@@ -134,6 +134,16 @@ removes any it finds later (`cleanup_dead_workers`, whether the registry
 lists them or not) and reassigns their addresses to workers it starts with
 the new volume.
 
+**What the socket is aimed at.** The heartbeat reads the names of its
+workers back from the registry, and `onionpress-tor` and every takeover
+worker can write the registry as root. So a name from there gets a docker
+call (exec, inspect, cp, rm) only if it is a worker's name, whole
+(`onionheaven-takeover-N`, or `onionheaven-poll-N` from an older version),
+and an address handed to a worker only if it is one v3 onion address; a
+row naming anything else is dropped on the next pass and its addresses are
+reassigned. `tests/test_hub_registry_names.py` lists every docker call in
+the image and where its arguments come from.
+
 **Backups.** A backup holds a hub's data when the volume has any (a key
 directory, or a row in the registry; `backup.hub_data_state`): the registry
 as `sqlite3 .backup` copies it, one consistent state while the hub writes,
