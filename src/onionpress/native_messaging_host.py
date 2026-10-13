@@ -8,7 +8,7 @@ native messaging protocol (4-byte length-prefixed JSON over stdin/stdout).
 Provides:
 - Proxy port and service status
 - User's .onion address
-- Writes ~/.onionpress/extension-connected marker file on connection
+- Writes ~/.onionpress/extension-connected marker file on each message
 """
 
 import json
@@ -19,7 +19,12 @@ import sys
 import time
 
 APP_SUPPORT = os.path.expanduser("~/.onionpress")
-PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
+DEFAULT_PROXY_PORT = 9077
+DEFAULT_WP_PORT = 8080
+
+# Same list as onionpress.browser.ALLOWED_BROWSERS (test-enforced): this
+# script is started by the browser, outside the app's Python package.
+ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
 
 
 def read_message():
@@ -77,15 +82,65 @@ def is_service_running():
         return False
 
 
-def write_extension_marker():
-    """Write timestamp to ~/.onionpress/extension-connected."""
+def get_proxy_port():
+    """The host port this user's onion proxy listens on.
+
+    The browser starts this script, so it does not get the app's
+    ONIONPRESS_PROXY_PORT. A second macOS user's ports are offset by +10000
+    (19077, ...; CLAUDE.md "Multi-User Support"), so read the offset from
+    what Docker published for our own WordPress container, the way
+    launcher_ops.get_running_wp_port does, and fall back to 9077.
+    """
+    env_port = os.environ.get("ONIONPRESS_PROXY_PORT", "")
+    if env_port.isdigit():
+        return int(env_port)
+    try:
+        result = subprocess.run(
+            [_find_docker(), "port", "onionpress-wordpress", "80"],
+            capture_output=True, text=True, timeout=5, env=_docker_env()
+        )
+    except Exception:
+        return DEFAULT_PROXY_PORT
+    return proxy_port_from_docker_port(result.stdout) if result.returncode == 0 \
+        else DEFAULT_PROXY_PORT
+
+
+def proxy_port_from_docker_port(output):
+    """Proxy port for `docker port onionpress-wordpress 80` output
+    ("127.0.0.1:18080" -> 19077). Offsets are multiples of 10000; anything
+    else is not a mapping OnionPress made, so the default is returned."""
+    first = output.strip().splitlines()[0] if output.strip() else ""
+    port_str = first.rsplit(":", 1)[-1]
+    if not port_str.isdigit():
+        return DEFAULT_PROXY_PORT
+    offset = int(port_str) - DEFAULT_WP_PORT
+    if offset < 0 or offset % 10000 or DEFAULT_PROXY_PORT + offset > 65535:
+        return DEFAULT_PROXY_PORT
+    return DEFAULT_PROXY_PORT + offset
+
+
+def write_extension_marker(browser):
+    """Record in ~/.onionpress/extension-connected that *browser*'s extension
+    is connected now. The same JSON object onionpress.browser's
+    write_extension_marker writes and extension_connected_recently reads
+    (issue #318: a bare integer here was never detected). *browser* is what
+    the extension says it runs in; only a known name is written."""
+    if browser not in ALLOWED_BROWSERS:
+        return False
     marker_path = os.path.join(APP_SUPPORT, "extension-connected")
+    tmp = f"{marker_path}.{os.getpid()}.tmp"
     try:
         os.makedirs(APP_SUPPORT, exist_ok=True)
-        with open(marker_path, 'w') as f:
-            f.write(str(int(time.time())))
-    except Exception:
-        pass
+        with open(tmp, 'w') as f:
+            f.write(json.dumps({"timestamp": int(time.time()), "browser": browser}))
+        os.replace(tmp, marker_path)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
 
 
 def _find_app_bundle():
@@ -133,7 +188,7 @@ def handle_message(msg):
         running = is_service_running()
         address = get_onion_address() if running else None
         return {
-            "proxy_port": PROXY_PORT,
+            "proxy_port": get_proxy_port(),
             "onion_address": address,
             "running": running,
         }
@@ -143,18 +198,17 @@ def handle_message(msg):
 
 def main():
     """Main loop: read messages from stdin, send responses to stdout."""
-    # Write marker on connection
-    write_extension_marker()
-
     while True:
         msg = read_message()
         if msg is None:
             # stdin closed — browser terminated the host
             break
+        if not isinstance(msg, dict):
+            continue
         response = handle_message(msg)
         send_message(response)
-        # Update marker on each message
-        write_extension_marker()
+        # Every message names the browser the extension runs in
+        write_extension_marker(msg.get("browser"))
 
 
 if __name__ == "__main__":

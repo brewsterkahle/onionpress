@@ -20,7 +20,7 @@
 #         webRequest, webRequestBlocking, webNavigation and <all_urls>, and
 #         declares content_scripts. Has NO data_collection_permissions.
 #
-#     extension-firefox/manifest.json   v1.1.0, min 142.0. Drops all four
+#     extension-firefox/manifest.json   v1.2.0, min 142.0. Drops all four
 #         broad permissions and the content script, and declares
 #         data_collection_permissions — which addons.mozilla.org REQUIRES
 #         from Firefox 142 onward.
@@ -29,11 +29,11 @@
 #   manifest.firefox.json would re-request permissions the extension no longer
 #   needs and produce an AMO-rejectable package.
 #
-#   extension-firefox/ holds only the files that differ (manifest.json,
-#   offline.html, offline.js); everything else — icons, popup, background —
-#   comes from extension/. offline.html in particular is deliberately
-#   different: extension/'s uses an inline <script>, which violates the
-#   extension CSP; extension-firefox/ externalises it to offline.js.
+#   extension-firefox/ holds only the file that differs, manifest.json;
+#   everything else — icons, popup, background.js, offline.html/.js —
+#   comes from extension/, shared by both packages (#318 removed the
+#   overlay's copies of background.js and offline.html/.js: two copies of
+#   one file drift silently, and only the overlay's reached Firefox).
 #
 # REPRODUCIBILITY
 #   Entries are added in sorted order with a fixed timestamp and `zip -X`
@@ -106,7 +106,7 @@ build_firefox() {
     # Overlay: the Firefox-specific files, including its manifest.
     if [ ! -f "$FIREFOX_OVERLAY/manifest.json" ]; then
         echo "ERROR: $FIREFOX_OVERLAY/manifest.json not found." >&2
-        echo "  That directory holds the current Firefox manifest (v1.1.0," >&2
+        echo "  That directory holds the current Firefox manifest (v1.2.0," >&2
         echo "  min 142.0). See the header of this script." >&2
         exit 1
     fi

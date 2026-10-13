@@ -6,9 +6,9 @@ A local HTTP forward proxy on localhost:9077 that routes:
   - .onion URLs through Tor (via PHP proxy in WordPress container)
   - Clearnet URLs directly over the internet
 
-The browser extension routes ALL traffic through this proxy so that
-.onion SPAs that reference clearnet resources work seamlessly.
-HTTPS clearnet is handled via CONNECT tunneling.
+The browser extension routes .onion URLs through this proxy (an HTTP proxy
+on the Mac itself: Tor's SOCKS port does not work through Colima's port
+forwarding, issue #318). HTTPS clearnet is handled via CONNECT tunneling.
 
 Status endpoint: http://localhost:9077/status
 """
@@ -27,6 +27,7 @@ import http.client
 from collections import OrderedDict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from html import escape as html_escape
 from urllib.parse import urlparse, parse_qs
 
 PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
@@ -39,6 +40,37 @@ PHP_PROXY_PATH = "/__op_proxy.php"
 # PHP_PROXY_TOKEN_PLACEHOLDER; new for each run of the app, kept in memory.
 PHP_PROXY_TOKEN = secrets.token_urlsafe(32)
 PHP_PROXY_TOKEN_PLACEHOLDER = "__ONIONPRESS_PROXY_TOKEN__"
+# How onion-forward.php's body starts when Tor could not fetch the URL.
+PHP_PROXY_FETCH_FAILED = b"Tor fetch failed"
+WAYBACK_PREFIX = "https://web.archive.org/web/"
+
+# Shown for a page load whose onion service did not answer (_send_onion_unreachable).
+ONION_UNREACHABLE_PAGE = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Onion site not reachable</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f0f0f1; color: #3c434a; margin: 0; padding: 40px 20px; }
+  .box { max-width: 560px; margin: 0 auto; background: #fff; border: 1px solid #c3c4c7; border-radius: 4px; padding: 24px; }
+  h1 { font-size: 20px; color: #1d2327; margin-top: 0; }
+  code { word-break: break-all; }
+  a.btn { display: inline-block; margin: 8px 8px 0 0; padding: 8px 18px; border-radius: 4px; background: #7b4e9e; color: #fff; text-decoration: none; }
+  a.btn.secondary { background: #dcdcde; color: #1d2327; }
+  .note { font-size: 13px; color: #646970; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>This onion site did not answer</h1>
+  <p>OnionPress asked Tor for <code>{{URL}}</code>, but the onion service could not be reached. It may be offline, or Tor may still be finding a route to it.</p>
+  <p><a class="btn" href="{{URL}}">Try again</a><a class="btn secondary" href="{{WAYBACK_URL}}">Archived copy in the Wayback Machine</a></p>
+  <p class="note">The Wayback Machine link opens web.archive.org over the regular internet, not through Tor, so archive.org will see which address you asked for.</p>
+</div>
+</body>
+</html>
+'''
 # A v3 onion host, optionally under subdomain labels (Tor serves
 # www.<address>.onion as <address>.onion). Matched with fullmatch against a
 # lowercased host without a trailing dot (see _onion_host).
@@ -409,6 +441,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         if self.server.log_func:
             self.server.log_func(f"Proxy: {format % args}")
 
+    def log_request(self, code='-', size='-'):
+        # The browser extension polls /status every few seconds (it is how
+        # the menubar knows the extension is there); a line for each would
+        # bury everything else in onionpress.log.
+        if self.path == '/status' and getattr(code, 'value', code) == 200:
+            return
+        super().log_request(code, size)
+
     def do_GET(self):
         self._handle_request()
 
@@ -566,7 +606,17 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     content_type=content_type, head_only=head_only
                 )
         except Exception as e:
+            if is_onion and self._wants_page():
+                self._send_onion_unreachable(target_url, head_only)
+                return
             self.send_error(502, f"Fetch failed: {e}")
+            return
+
+        # Tor could not reach the onion service (onion-forward.php's own
+        # 502, not one the site sent): a page with a way to the archived copy.
+        if (is_onion and status == 502 and body.startswith(PHP_PROXY_FETCH_FAILED)
+                and self._wants_page()):
+            self._send_onion_unreachable(target_url, head_only)
             return
 
         # Determine content type for link rewriting
@@ -604,6 +654,25 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
+
+    def _wants_page(self):
+        """True for a request a person is looking at (a page load), not a
+        script, image or form post: those keep the plain 502."""
+        return (self.command in ('GET', 'HEAD')
+                and 'text/html' in self.headers.get('Accept', ''))
+
+    def _send_onion_unreachable(self, url, head_only=False):
+        """502 with a page saying the onion service did not answer, offering
+        a retry and the Wayback Machine's copy (issue #99). The archive link
+        is only a link: following it is the visitor's choice, and it goes to
+        web.archive.org over the regular internet, which the page says."""
+        body = ONION_UNREACHABLE_PAGE.replace(
+            '{{URL}}', html_escape(url, quote=True)).replace(
+            '{{WAYBACK_URL}}', html_escape(WAYBACK_PREFIX + url, quote=True)
+        ).encode('utf-8')
+        self._send_response(502, {'content-type': 'text/html; charset=utf-8',
+                                  'cache-control': 'no-store'},
+                            body, head_only)
 
     def _fetch_via_php(self, url, post_data=None, content_type=None, head_only=False):
         """Fetch a .onion URL through the PHP proxy (via Tor SOCKS)."""
@@ -1194,17 +1263,10 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
     def _handle_status(self):
         """Return proxy status as JSON."""
         # Write extension-connected marker when polled by the browser extension
-        ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
-        if self.server.data_dir:
-            try:
-                browser = self.headers.get('X-OnionPress-Browser', '')
-                if browser and browser in ALLOWED_BROWSERS:
-                    marker = os.path.join(self.server.data_dir, "extension-connected")
-                    data = json.dumps({"timestamp": int(time.time()), "browser": browser})
-                    with open(marker, 'w') as f:
-                        f.write(data)
-            except Exception:
-                pass
+        browser = self.headers.get('X-OnionPress-Browser', '')
+        if self.server.data_dir and browser:
+            from onionpress import browser as op_browser
+            op_browser.write_extension_marker(self.server.data_dir, browser)
 
         cache_stats = self.server.cache.stats() if self.server.cache else {}
         info = {

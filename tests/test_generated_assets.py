@@ -228,9 +228,8 @@ class TestExtensionRecipe(unittest.TestCase):
             # Everything the manifest points at must be in the package. A
             # missing icon or popup installs fine and then misbehaves.
             self.assertIn("offline.js", names,
-                          "offline.js must ship — extension-firefox/ "
-                          "externalised the inline script to satisfy the "
-                          "extension CSP.")
+                          "offline.js must ship — offline.html loads it "
+                          "(the extension CSP refuses inline scripts).")
             self.assertNotIn("content.js", names,
                              "content.js is not referenced by the Firefox "
                              "manifest and should not ship.")

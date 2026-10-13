@@ -34,23 +34,70 @@ def is_brave_installed():
     return os.path.isdir(BRAVE_BROWSER_PATH)
 
 
+# ~/.onionpress/extension-connected says which browser's OnionPress
+# extension was last heard from, and when: one JSON object,
+# {"timestamp": <unix seconds>, "browser": <a name in ALLOWED_BROWSERS>}.
+# Two writers: the onion proxy's /status (the extension polls it every few
+# seconds) and the native messaging host. Both must write this format: the
+# native host wrote a bare integer, which the readers here could not parse,
+# so the menubar never detected the extension (issue #318). The browser
+# starts the native host outside the app's Python, so it keeps its own copy
+# of the writer; tests/test_browser_extension.py ties the two together.
+EXTENSION_MARKER = "extension-connected"
+
+
+def write_extension_marker(app_support, browser, allowed=ALLOWED_BROWSERS):
+    """Record that *browser*'s extension is connected now.
+
+    *browser* comes from the extension (a request header or a native
+    message), so only a name in *allowed* is written. Written to a temp file
+    and renamed, so a reader never sees half a file. Returns True if written.
+    """
+    if browser not in allowed:
+        return False
+    marker = os.path.join(app_support, EXTENSION_MARKER)
+    tmp = f"{marker}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"timestamp": int(time.time()), "browser": browser}))
+        os.replace(tmp, marker)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def _read_extension_marker(app_support, allowed=ALLOWED_BROWSERS):
+    """(timestamp, browser) from the marker, or None when there is none or it
+    is not what write_extension_marker writes (an older native host's bare
+    integer names no browser, so it does not count)."""
+    marker = os.path.join(app_support, EXTENSION_MARKER)
+    try:
+        with open(marker, "r") as f:
+            data = json.loads(f.read(4096).strip())
+        timestamp = data["timestamp"]
+        browser = data.get("browser")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        return None
+    if browser not in allowed:
+        return None
+    return timestamp, browser
+
+
 def extension_connected_recently(app_support, allowed=ALLOWED_BROWSERS):
     """Check if a browser extension is actively connected.
 
     Returns the browser app name (e.g. "Firefox") if connected in the
     last 10 seconds, or None.
     """
-    marker = os.path.join(app_support, "extension-connected")
-    try:
-        if os.path.exists(marker):
-            with open(marker, 'r') as f:
-                data = json.loads(f.read().strip())
-            if (time.time() - data["timestamp"]) < 10:
-                browser = data.get("browser")
-                if browser in allowed:
-                    return browser
-    except Exception:
-        pass
+    entry = _read_extension_marker(app_support, allowed)
+    if entry and (time.time() - entry[0]) < 10:
+        return entry[1]
     return None
 
 
@@ -226,14 +273,9 @@ def wait_for_extension_active(app_support, timeout=30):
 
     Returns True if extension became active within timeout.
     """
-    marker = os.path.join(app_support, "extension-connected")
     for _ in range(timeout):
-        try:
-            with open(marker, 'r') as f:
-                data = json.loads(f.read().strip())
-            if (time.time() - data["timestamp"]) < 5:
-                return True
-        except Exception:
-            pass
+        entry = _read_extension_marker(app_support)
+        if entry and (time.time() - entry[0]) < 5:
+            return True
         time.sleep(1)
     return False
