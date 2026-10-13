@@ -155,6 +155,16 @@ the keys as root's (`restore_hub_data`, all three restore paths). Until this
 release Mac backups held no hub data at all (they waited for a
 `master-key.json` nothing writes any more).
 
+None of it goes through WordPress. The Settings page's backup is handed to
+the WordPress container for download, under the admin password WordPress
+saw: it leaves the hub data out (`create_backup(include_hub_data=False)`,
+Linux `create_backup --without-hub-data`), records
+`excludes_onionheaven_data` in `metadata.json` and tells the owner. A hub is
+backed up from the app (Backup…) or with `onionpress backup`. The Settings
+page's restore refuses a backup holding registrants' keys before touching
+anything, and never writes this volume; restore such a backup from the app
+or with `onionpress restore`.
+
 **Release rule:** compose plus tor-image code again. Publish the tor image,
 refresh the pins, then release the app and the `.deb`. A new compose file with
 an old image moves nothing (the old image keeps using the old location), but

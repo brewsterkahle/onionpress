@@ -4257,9 +4257,12 @@ class OnionPressApp(rumps.App):
                     display = msg.replace("Backup: ", "") if msg.startswith("Backup: ") else msg
                     _main_thread(lambda: pw.update(display))
 
+                # Saved where the owner chose, never handed to WordPress: an
+                # OnionHeaven hub's registry and registrants' keys stay in.
                 backup_manager.create_backup(
                     self.onion_address, username, password,
-                    output_path, self.version, log_and_update)
+                    output_path, self.version, log_and_update,
+                    include_hub_data=True)
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
@@ -5635,9 +5638,13 @@ License: AGPL v3"""
                         tmp_path = os.path.join(tempfile.gettempdir(), filename)
 
                         onion_addr = self.onion_address or "unknown"
-                        backup_manager.create_backup(
+                        # Handed to WordPress below, and the password came
+                        # from there: never an OnionHeaven hub's registry or
+                        # registrants' keys (backup.HUB_DATA_LEFT_OUT_LOG).
+                        backup_metadata = backup_manager.create_backup(
                             onion_addr, self._get_admin_username(), password,
-                            tmp_path, self.version, self.log
+                            tmp_path, self.version, self.log,
+                            include_hub_data=False
                         )
 
                         # Hand it to the WordPress container for download,
@@ -5663,10 +5670,13 @@ License: AGPL v3"""
                         if r.returncode != 0:
                             raise Exception("Could not hand the backup to the "
                                             "Settings page")
-                        _write_result("backup-result.json", {
+                        backup_result = {
                             "success": True, "filename": filename,
                             "created_at": now_iso
-                        })
+                        }
+                        if backup_metadata.get("excludes_onionheaven_data"):
+                            backup_result["note"] = backup_manager.HUB_DATA_LEFT_OUT_NOTE
+                        _write_result("backup-result.json", backup_result)
                         self.log(f"Settings page: backup created: {filename}")
                 except Exception as e:
                     _write_result("backup-result.json", {
@@ -5717,7 +5727,12 @@ License: AGPL v3"""
                         )
                         if password and os.path.lexists(local_zip):
                             backup_manager.check_uploaded_backup(local_zip)
-                            backup_manager.restore_from_backup(local_zip, password, self.log)
+                            # The file and its password came through
+                            # WordPress: a backup holding an OnionHeaven
+                            # hub's keys is refused, and the hub data is
+                            # never written.
+                            backup_manager.restore_from_backup(local_zip, password, self.log,
+                                                               through_wordpress=True)
                             restored = True
                         else:
                             restored = False

@@ -1386,6 +1386,10 @@ function onionpress_settings_page() {
                         echo ' &mdash; <a href="' . esc_url( $dl_url ) . '">Download</a>';
                     }
                     echo '</p>';
+                    // On an OnionHeaven hub: what the backup leaves out.
+                    if ( ! empty( $backup_result['note'] ) && is_string( $backup_result['note'] ) ) {
+                        echo '<p class="description">' . esc_html( $backup_result['note'] ) . '</p>';
+                    }
                 } elseif ( ! empty( $backup_result['error'] ) ) {
                     echo '<p><strong style="color:#dc2626">Error:</strong> ' . esc_html( $backup_result['error'] ) . '</p>';
                 }
@@ -1393,6 +1397,10 @@ function onionpress_settings_page() {
         }
         ?>
         <p class="description">Create a password-protected backup of your database, wp-content, Tor keys, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
+        <?php if ( $oh_server_active ) : ?>
+        <?php // A backup made here is handed to WordPress for download (src/onionpress/backup.py, HUB_DATA_LEFT_OUT_NOTE). ?>
+        <p class="description">On an OnionHeaven hub, a backup made here leaves out the hub's registry and its registrants' onion service keys, so they never pass through WordPress. Back the hub up from the OnionPress app (Backup&hellip; in its menu) or with <code>onionpress backup</code>.</p>
+        <?php endif; ?>
         <form method="post" style="margin-top: 8px;">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="create-backup">
@@ -1428,6 +1436,8 @@ function onionpress_settings_page() {
         }
         ?>
         <p class="description">Restore from an OnionPress backup zip. This will <strong>overwrite</strong> your current database, wp-content, and Tor keys. OnionPress will restart automatically after restore.</p>
+        <?php // backup.settings_page_restore_refusal: refused before anything is restored. ?>
+        <p class="description">A backup of an OnionHeaven hub made in the OnionPress app is refused here: restore it from the app (Restore&hellip; in its menu) or with <code>onionpress restore</code>. Do not upload it here at all: it holds the registrants' onion service keys, and this page hands what you upload to WordPress.</p>
         <form method="post" enctype="multipart/form-data" style="margin-top: 8px;">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="restore-backup">
@@ -1625,6 +1635,12 @@ function onionpress_settings_page() {
                             link.textContent = ' Download';
                             link.style.marginLeft = '8px';
                             p.appendChild(link);
+                        }
+                        /* On an OnionHeaven hub: what the backup leaves out */
+                        if (result && result.success && typeof result.note === 'string' && result.note) {
+                            var note = document.createElement('p');
+                            note.textContent = result.note;
+                            notice.appendChild(note);
                         }
                     })
                     .catch(function() { /* server may be restarting — keep polling */ });

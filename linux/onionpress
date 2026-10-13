@@ -2068,10 +2068,23 @@ wait_for_services() {
 
 create_backup() {
     # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
-    # Usage: create_backup <password> <output_path>
+    # Usage: create_backup <password> <output_path> [--without-hub-data]
+    # --without-hub-data: for a backup handed to WordPress (the Settings
+    # page's download), whose password came from there too. An OnionHeaven
+    # hub's registry and registrants' keys are left out, metadata.json says
+    # so, and BACKUP_LEFT_OUT_HUB_DATA is set to "true" for the caller.
     local password="$1"
     local output_path="$2"
+    local with_hub_data="yes"
     local staging
+    BACKUP_LEFT_OUT_HUB_DATA=""
+
+    case "${3:-}" in
+        "") ;;
+        --without-hub-data) with_hub_data="no" ;;
+        *) echo "ERROR: create_backup: unknown option: $3" >&2
+           return 1 ;;
+    esac
 
     if [ -z "$password" ]; then
         echo "ERROR: Password is required" >&2
@@ -2221,16 +2234,32 @@ create_backup() {
     #    else from there (backup.stage_hub_data, shared with the Mac). It
     #    used to take every node with an onionheaven container, and copied
     #    registry.db without its write-ahead log.
-    local hub_rc=0
-    op_py stage-hub-data --dest "$staging/onionheaven" >>"$LOG_FILE" 2>&1 || hub_rc=$?
-    case "$hub_rc" in
-        0) ;;
-        3) ;;   # not a hub
-        4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
-        *) log "ERROR: could not copy the OnionHeaven data out of the onionheaven container"
-           return 1 ;;
-    esac
-    [ "$hub_rc" -eq 0 ] || rm -rf "$staging/onionheaven"
+    #    Never in a backup handed to WordPress (--without-hub-data): for that
+    #    one the container is only asked whether this is a hub, to say so.
+    local hub_rc=0 hub_left_out="false"
+    if [ "$with_hub_data" = "no" ]; then
+        local hub_state
+        hub_state=$(op_py hub-data-state 2>>"$LOG_FILE") || hub_state=""
+        case "$hub_state" in
+            hub)
+                hub_left_out="true"
+                BACKUP_LEFT_OUT_HUB_DATA="true"
+                log "Backup: this is an OnionHeaven hub; its registry and registrants' onion service keys are left out of this backup, which is handed to WordPress (the Settings page's download). Make the hub's backup from the OnionPress app or with onionpress backup."
+                ;;
+            none) ;;
+            *) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
+        esac
+    else
+        op_py stage-hub-data --dest "$staging/onionheaven" >>"$LOG_FILE" 2>&1 || hub_rc=$?
+        case "$hub_rc" in
+            0) ;;
+            3) ;;   # not a hub
+            4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
+            *) log "ERROR: could not copy the OnionHeaven data out of the onionheaven container"
+               return 1 ;;
+        esac
+    fi
+    [ "$with_hub_data" = "yes" ] && [ "$hub_rc" -eq 0 ] || rm -rf "$staging/onionheaven"
 
     # 6. Write metadata (onion_addr was read and checked at the top)
     local has_onionheaven="false"
@@ -2248,9 +2277,14 @@ metadata = {
     # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
     'excludes_image_derivatives': sys.argv[6] == 'true'
 }
+if sys.argv[7] == 'true':
+    # A hub's backup handed to WordPress: no registry, no registrants' keys
+    # (backup.HUB_DATA_LEFT_OUT_REASON).
+    metadata['excludes_onionheaven_data'] = True
+    metadata['excludes_onionheaven_data_reason'] = 'settings-page'
 with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives"
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_left_out"
 
     # 7. Zip and encrypt — backup format 2, written by the shared Python
     #    helper so both platforms produce the one format (not `zip -P`,
@@ -2269,10 +2303,23 @@ with open(sys.argv[5], 'w') as f:
 
 restore_backup() {
     # Restores from a password-protected backup zip.
-    # Usage: restore_backup <password> <zip_path>
+    # Usage: restore_backup <password> <zip_path> [--from-settings-page]
+    # --from-settings-page: the file and its password came through
+    # WordPress. A backup holding an OnionHeaven hub's registrants' keys is
+    # refused before anything is touched (return 3, the reason as the last
+    # line of stdout), and the hub data volume is never written
+    # (backup.settings_page_restore_refusal).
     local password="$1"
     local zip_path="$2"
+    local from_settings_page="false"
     local staging
+
+    case "${3:-}" in
+        "") ;;
+        --from-settings-page) from_settings_page="true" ;;
+        *) echo "ERROR: restore_backup: unknown option: $3" >&2
+           return 1 ;;
+    esac
 
     if [ -z "$password" ] || [ -z "$zip_path" ]; then
         echo "ERROR: Password and zip path are required" >&2
@@ -2302,6 +2349,18 @@ restore_backup() {
     if [ ! -f "$metadata_file" ]; then
         log "ERROR: Not a valid OnionPress backup (no metadata.json)"
         return 1
+    fi
+
+    # The Settings page's restore: refused before anything is touched.
+    if [ "$from_settings_page" = "true" ]; then
+        local refusal="" refusal_rc=0
+        refusal=$(op_py settings-page-restore-check --staging "$staging" 2>>"$LOG_FILE") || refusal_rc=$?
+        if [ "$refusal_rc" -ne 0 ]; then
+            [ -n "$refusal" ] || refusal="Could not check the backup; nothing was restored."
+            log "Restore: refused (the Settings page's restore): $refusal"
+            echo "$refusal"
+            return 3
+        fi
     fi
 
     # metadata.json and the key files are whoever made the backup file's (a
@@ -2415,9 +2474,16 @@ restore_backup() {
     # 5. Restore OnionHeaven registry + keys (if present in backup), through
     #    the onionheaven container: the registry by SQLite's .restore, never
     #    a copy over the one in use, whose -wal SQLite would apply to it
-    #    (backup.restore_hub_data, shared with the Mac).
+    #    (backup.restore_hub_data, shared with the Mac). Never from the
+    #    Settings page (what passed the check above is a registry alone, as
+    #    every node's backup through 2.5.2 carries one).
+    if grep -q '"excludes_onionheaven_data": true' "$metadata_file" 2>/dev/null; then
+        log "Restore: NOTE — this backup of an OnionHeaven hub was made from the Settings page and holds neither the hub's registry nor its registrants' keys; this restore leaves the hub data as it is. Restore those from a backup made in the OnionPress app or with onionpress backup."
+    fi
     if [ -d "$staging/onionheaven" ] && { [ -s "$staging/onionheaven/registry.db" ] || [ -d "$staging/onionheaven/keys" ]; }; then
-        if docker inspect onionheaven >/dev/null 2>&1; then
+        if [ "$from_settings_page" = "true" ]; then
+            log "Restore: the backup's OnionHeaven data left out: the Settings page's restore never writes the hub data"
+        elif docker inspect onionheaven >/dev/null 2>&1; then
             log "Restore: restoring OnionHeaven registry and keys..."
             if op_py restore-hub-data --src "$staging/onionheaven" >>"$LOG_FILE" 2>&1; then
                 log "Restore: OnionHeaven data restored"
@@ -3520,7 +3586,10 @@ sys.exit(0 if provision_interactive() else 1)
                         local bp_dir bp_path
                         bp_dir=$(mktemp -d -t onionpress-settings-backup-XXXXXX) || bp_dir=/nonexistent
                         bp_path="$bp_dir/$bp_filename"
-                        if create_backup "$bp_password" "$bp_path" 2>>"$LOG_FILE"; then
+                        # Handed to WordPress below, and the password came
+                        # from there: never an OnionHeaven hub's registry or
+                        # registrants' keys (--without-hub-data).
+                        if create_backup "$bp_password" "$bp_path" --without-hub-data 2>>"$LOG_FILE"; then
                             # Hand the zip to the WordPress container for
                             # download, written as www-data (the page's own
                             # user). Not docker cp + chown as root: both
@@ -3531,7 +3600,13 @@ sys.exit(0 if provision_interactive() else 1)
                                 sh -c 'umask 077; cat > "$1"' sh "/var/lib/onionpress/$bp_filename" \
                                 < "$bp_path" 2>>"$LOG_FILE"
                             rm -rf "$bp_dir"
-                            echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
+                            # The owner hears that a hub's data is not in
+                            # it (backup.HUB_DATA_LEFT_OUT_NOTE, same text).
+                            local bp_note=""
+                            if [ "${BACKUP_LEFT_OUT_HUB_DATA:-}" = "true" ]; then
+                                bp_note=',"note":"This is an OnionHeaven hub: its registry and its registrants'"'"' onion service keys are not in this backup, so they never pass through WordPress. Back the hub up from the OnionPress app (Backup... in its menu) or with onionpress backup."'
+                            fi
+                            echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"'"$bp_note"'}' | \
                                 wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
                             log "Backup created: $bp_filename"
                         else
@@ -3570,7 +3645,13 @@ sys.exit(0 if provision_interactive() else 1)
                         log "Restore refused: the uploaded backup is not a regular file"
                     else
                         local rp_addr
-                        if rp_addr=$(restore_backup "$rp_password" "$rp_local" 2>>"$LOG_FILE"); then
+                        local rp_rc=0
+                        # The file and its password came through WordPress
+                        # (--from-settings-page): a backup holding an
+                        # OnionHeaven hub's keys is refused, and the hub
+                        # data is never written.
+                        rp_addr=$(restore_backup "$rp_password" "$rp_local" --from-settings-page 2>>"$LOG_FILE") || rp_rc=$?
+                        if [ "$rp_rc" -eq 0 ]; then
                             rm -rf "$rp_dir"
                             # restore_backup's stdout is its log lines, then
                             # the address (empty for a backup without a key).
@@ -3584,6 +3665,13 @@ sys.exit(0 if provision_interactive() else 1)
                             write_status
                             write_restore_result true "$rp_addr"
                             log "Restore complete: $rp_addr"
+                        elif [ "$rp_rc" -eq 3 ]; then
+                            # Refused before anything was touched; its last
+                            # line says why and where to restore it instead.
+                            rm -rf "$rp_dir"
+                            local rp_nl=$'\n'
+                            write_restore_result false "${rp_addr##*$rp_nl}"
+                            log "Restore refused: the backup must be restored from the app or the CLI"
                         else
                             rm -rf "$rp_dir"
                             write_restore_result false "Restore failed — wrong password or invalid backup"

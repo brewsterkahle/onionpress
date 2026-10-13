@@ -58,6 +58,38 @@ fi
 echo none
 """
 
+# What never passes through WordPress in a backup. The Settings page's backup
+# is handed to the WordPress container for download, and its password is the
+# admin password WordPress sees in plain text: code running there would have
+# both. So that backup (create_backup(include_hub_data=False); Linux:
+# create_backup --without-hub-data) leaves out a hub's registry and its
+# registrants' onion service keys, and says so in metadata.json
+# (excludes_onionheaven_data, with the reason code below) and to the owner.
+# Backups made from the app or the CLI, written to the owner's disk, keep
+# them. The Settings page's restore, whose upload and password came through
+# WordPress too, refuses a backup holding registrants' keys
+# (settings_page_restore_refusal) and never writes the hub data volume.
+HUB_DATA_LEFT_OUT_REASON = "settings-page"
+HUB_DATA_LEFT_OUT_LOG = (
+    "Backup: this is an OnionHeaven hub; its registry and registrants' onion "
+    "service keys are left out of this backup, which is handed to WordPress "
+    "(the Settings page's download). Make the hub's backup from the "
+    "OnionPress app or with onionpress backup.")
+# The Settings page shows the note with the finished backup and the refusal
+# with a refused restore. Plain text, safe in JSON and HTML as it stands:
+# linux/onionpress writes the same note into its result file (a test keeps
+# the copies equal).
+HUB_DATA_LEFT_OUT_NOTE = (
+    "This is an OnionHeaven hub: its registry and its registrants' onion "
+    "service keys are not in this backup, so they never pass through "
+    "WordPress. Back the hub up from the OnionPress app (Backup... in its "
+    "menu) or with onionpress backup.")
+HUB_DATA_RESTORE_REFUSED_MSG = (
+    "This backup holds an OnionHeaven hub's registry and its registrants' "
+    "onion service keys, which are never restored through WordPress. Nothing "
+    "was restored: restore it from the OnionPress app (Restore... in its "
+    "menu) or with onionpress restore.")
+
 # A tar of the registry, as sqlite3's .backup copies it (one consistent
 # state while the hub writes; a copy of the file could miss its -wal or catch
 # a checkpoint half done), and of keys/.
@@ -646,8 +678,9 @@ def restore_hub_data(src, log_func):
     log_func("Restore: OnionHeaven registry and keys restored")
 
 
-def create_backup(onion_address, username, password, output_path, version, log_func, *, data_dir=None):
-    """Create a full OnionPress backup zip.
+def create_backup(onion_address, username, password, output_path, version, log_func, *,
+                  data_dir=None, include_hub_data=True):
+    """Create a full OnionPress backup zip; return its metadata.
 
     Args:
         onion_address: Current .onion address
@@ -657,6 +690,10 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         output_path: Where to write the .zip file
         version: OnionPress version string
         log_func: Callable for progress logging
+        include_hub_data: False for a backup that is handed to WordPress (the
+            Settings page's download): an OnionHeaven hub's registry and
+            registrants' keys are then left out, and metadata.json says so
+            (excludes_onionheaven_data). Every caller passes it.
     """
     backup_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-backup-')
@@ -764,11 +801,18 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    container and not in onionpress-wordpress (docs/DOCKER-SOCKET.md).
         #    This used to wait for a master-key.json that nothing has written
         #    for a long time, so no backup made here held a hub's data.
+        #    Never in a backup handed to WordPress (include_hub_data=False):
+        #    for that one the container is only asked whether this is a hub,
+        #    to say so.
         is_onionheaven = False
+        hub_data_left_out = False
         hub = hub_data_state()
         if hub is None:
             log_func("Backup: WARNING: the onionheaven container did not say whether "
                      "it holds OnionHeaven data; this backup does not")
+        elif hub == "hub" and not include_hub_data:
+            hub_data_left_out = True
+            log_func(HUB_DATA_LEFT_OUT_LOG)
         elif hub == "hub":
             with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
                 log_func("Backup: copying the OnionHeaven registry and registrants' keys...")
@@ -842,6 +886,11 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # pick the decoder from the file itself; this records it.
             'backup_format': backup_crypto.BACKUP_FORMAT,
         }
+        if hub_data_left_out:
+            # A hub's backup without its registry and registrants' keys, on
+            # purpose and why; restores say so (restore_container_artifacts).
+            metadata['excludes_onionheaven_data'] = True
+            metadata['excludes_onionheaven_data_reason'] = HUB_DATA_LEFT_OUT_REASON
         with open(os.path.join(staging, 'metadata.json'), 'w') as f:
             json.dump(metadata, f, indent=2)
 
@@ -854,6 +903,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         log_func(f"BACKUP_PHASE: name=total elapsed_s={time.monotonic() - backup_start:.2f}")
         zip_bytes = os.path.getsize(output_path)
         log_func(f"Backup: complete ({zip_bytes / 1_048_576:.1f} MB)")
+        return metadata
 
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -1449,6 +1499,36 @@ def check_uploaded_backup(path):
         raise ValueError("The uploaded backup is not a regular file.")
 
 
+class SettingsPageRestoreRefused(ValueError):
+    """A backup the Settings page's restore must not restore (its message
+    says why and where to restore it instead)."""
+
+
+def settings_page_restore_refusal(staging):
+    """Why the Settings page's restore must not restore this extracted
+    backup, or None.
+
+    That restore's upload and password both came through WordPress, so
+    code running there has already had them, and could have made the file
+    itself. It never writes the OnionHeaven hub data
+    (restore_container_artifacts(hub_volumes=False)): that volume is kept
+    out of WordPress's reach. A backup holding registrants' keys is refused
+    whole rather than restored without them: on a new machine the hub's
+    address would come up with none of its registrants' keys under a
+    "Restored" message, and the full restore from the app would have to
+    follow anyway.
+
+    Registrants' keys means any entry in onionheaven/keys/ (a key
+    directory, as hub_data_state counts them). A registry alone does not
+    count: backups made by Linux through 2.5.2 carry the empty one every
+    node has. It is left out of the restore, and the backup goes ahead.
+    """
+    keys = os.path.join(_find_dir(staging, 'onionheaven'), 'keys')
+    if os.path.isdir(keys) and not os.path.islink(keys) and os.listdir(keys):
+        return HUB_DATA_RESTORE_REFUSED_MSG
+    return None
+
+
 def extract_backup(zip_path, password, log_func, staging=None):
     """Extract a backup zip into a staging dir; return (staging, metadata).
 
@@ -1627,7 +1707,8 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
     return staging, metadata
 
 
-def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
+def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
+                        through_wordpress=False):
     """Restore an OnionPress site from a backup zip.
 
     Args:
@@ -1635,12 +1716,17 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         password: Zip password
         log_func: Callable for progress logging
         data_dir: OnionPress data directory (defaults to ~/.onionpress). Tests pass a sandbox path.
+        through_wordpress: True for the Settings page's restore, whose file
+            and password came through WordPress: a backup holding an
+            OnionHeaven hub's registrants' keys is refused before anything
+            is touched (settings_page_restore_refusal), and the hub data
+            volume is not written.
 
     Returns:
         metadata dict from the backup
 
     Raises:
-        ValueError on a wrong password.
+        ValueError on a wrong password; SettingsPageRestoreRefused.
     """
     restore_start = time.monotonic()
     staging = tempfile.mkdtemp(prefix='onionpress-restore-')
@@ -1652,6 +1738,13 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
 
         # Validated before anything is restored (validate_backup_metadata).
         metadata = read_staged_metadata(staging)
+
+        # The Settings page's restore: refused before anything is touched.
+        if through_wordpress:
+            refusal = settings_page_restore_refusal(staging)
+            if refusal:
+                log_func(f"Restore: refused (the Settings page's restore): {refusal}")
+                raise SettingsPageRestoreRefused(refusal)
 
         # Find extracted content directories
         tor_dir = _find_dir(staging, 'tor-keys')
@@ -1788,7 +1881,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
 
         # 2-6. Container-side artifacts + config overrides — shared with the
         # install-from-backup path (restore_container_artifacts / apply_config_overrides).
-        restore_container_artifacts(staging, metadata, log_func)
+        restore_container_artifacts(staging, metadata, log_func,
+                                    hub_volumes=not through_wordpress)
         apply_config_overrides(staging, log_func, data_dir=data_dir,
                                onion_address=metadata.get('onion_address', ''))
 
@@ -1804,11 +1898,15 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def restore_container_artifacts(staging, metadata, log_func):
+def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True):
     """Import a backup's container-side state into the RUNNING db + wordpress
     containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
     and multisite constants. Shared by restore_from_backup (in-place) and the
     install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
+
+    hub_volumes=False (the Settings page's restore) never writes the
+    OnionHeaven hub data: what the backup holds for it is left out and
+    logged.
     """
     # docker cp follows a link in the source path (a `wp-content` link to
     # the home folder would copy that folder into the web root) and copies
@@ -1911,14 +2009,27 @@ def restore_container_artifacts(staging, metadata, log_func):
                  "They live in ~/OnionPress/Creations/ — if restoring "
                  "on a new machine, copy that folder across separately.")
 
+    # A hub's backup made from the Settings page: no registry, no keys.
+    if metadata.get('excludes_onionheaven_data') is True:
+        log_func("Restore: NOTE — this backup of an OnionHeaven hub was made "
+                 "from the Settings page and holds neither the hub's registry "
+                 "nor its registrants' keys; this restore leaves the hub data "
+                 "as it is. Restore those from a backup made in the "
+                 "OnionPress app or with onionpress backup.")
+
     # 4. Restore OnionHeaven data if present in backup: its registry and
     #    registrants' keys onto the OnionHeaven data volume, through the
     #    onionheaven container (restore_hub_data): never into
     #    onionpress-wordpress, root-owned, the registry through SQLite.
+    #    Not from the Settings page's restore (hub_volumes=False).
     onionheaven_dir = _find_dir(staging, 'onionheaven')
-    if os.path.isdir(onionheaven_dir) and (
-            os.path.isfile(os.path.join(onionheaven_dir, 'registry.db'))
-            or os.path.isdir(os.path.join(onionheaven_dir, 'keys'))):
+    has_hub_data = os.path.isdir(onionheaven_dir) and (
+        os.path.isfile(os.path.join(onionheaven_dir, 'registry.db'))
+        or os.path.isdir(os.path.join(onionheaven_dir, 'keys')))
+    if has_hub_data and not hub_volumes:
+        log_func("Restore: the backup's OnionHeaven data left out: the "
+                 "Settings page's restore never writes the hub data")
+    elif has_hub_data:
         with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
             log_func("Restore: restoring the OnionHeaven registry and registrants' keys...")
             restore_hub_data(onionheaven_dir, log_func)

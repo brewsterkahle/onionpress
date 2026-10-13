@@ -300,6 +300,9 @@ class OnionPressCLI:
                 output_path=output_path,
                 version=__version__,
                 log_func=self.log,
+                # Written to the owner's disk, never handed to WordPress: an
+                # OnionHeaven hub's registry and registrants' keys stay in.
+                include_hub_data=True,
             )
             print(f"Backup saved to: {output_path}")
             return 0
@@ -501,6 +504,34 @@ class OnionPressCLI:
         except Exception as e:
             log(f"Backup: could not copy the OnionHeaven data: {e}")
             return 1
+
+    @staticmethod
+    def cmd_hub_data_state() -> int:
+        """Print "hub" if the OnionHeaven volume holds a hub's data, "none"
+        if not (backup.hub_data_state); exit 4, printing nothing, when the
+        onionheaven container did not answer. For the Linux launcher's
+        create_backup --without-hub-data, which leaves the data out and
+        only says whether it did. Reads nothing out of the volume."""
+        from .backup import hub_data_state
+        state = hub_data_state()
+        if state is None:
+            return 4
+        print(state)
+        return 0
+
+    @staticmethod
+    def cmd_settings_page_restore_check(staging: str) -> int:
+        """For the Linux launcher's restore_backup --from-settings-page:
+        exit 0 when the extracted backup in *staging* may be restored
+        through the Settings page; exit 3, printing why on stdout, when it
+        must not (backup.settings_page_restore_refusal: an OnionHeaven hub's
+        registrants' keys)."""
+        from .backup import settings_page_restore_refusal
+        refusal = settings_page_restore_refusal(staging)
+        if refusal:
+            print(refusal)
+            return 3
+        return 0
 
     @staticmethod
     def cmd_restore_hub_data(src: str) -> int:
@@ -1001,6 +1032,17 @@ def main(argv: list[str] = None) -> int:
         help="Copy a hub's OnionHeaven registry and keys out of the "
              "onionheaven container (backup helper; exit 3: not a hub)")
     p_stage_hub.add_argument("--dest", required=True, help="Folder to fill")
+    sub.add_parser(
+        "hub-data-state",
+        help="Print 'hub' or 'none': whether the OnionHeaven volume holds a "
+             "hub's data (backup helper; exit 4: no answer)")
+    p_sp_check = sub.add_parser(
+        "settings-page-restore-check",
+        help="Exit 3 and say why if an extracted backup must not be restored "
+             "through the WordPress Settings page (restore helper)")
+    p_sp_check.add_argument(
+        "--staging", required=True,
+        help="Directory the backup was extracted into")
     p_restore_hub = sub.add_parser(
         "restore-hub-data",
         help="Put a backup's OnionHeaven registry and keys onto the hub "
@@ -1101,6 +1143,10 @@ def main(argv: list[str] = None) -> int:
         return OnionPressCLI.cmd_stage_wp_content(args.dest)
     if args.command == "stage-hub-data":
         return OnionPressCLI.cmd_stage_hub_data(args.dest)
+    if args.command == "hub-data-state":
+        return OnionPressCLI.cmd_hub_data_state()
+    if args.command == "settings-page-restore-check":
+        return OnionPressCLI.cmd_settings_page_restore_check(args.staging)
     if args.command == "restore-hub-data":
         return OnionPressCLI.cmd_restore_hub_data(args.src)
     # Restore and plugin-install helper for the bash launchers: same.

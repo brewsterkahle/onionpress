@@ -366,6 +366,23 @@
   via `sqlite3 .backup` + `keys/`, nothing else (`stage_hub_data`; Linux via
   `onionpress.cli stage-hub-data`). Restores go through `restore_hub_data`
   (SQLite `.restore`, never `docker cp` over the live db).
+- **Never in a backup that goes through WordPress.** The Settings page's
+  backup is handed to the WordPress container for download, and its
+  password is the admin password WordPress saw in plain text; its restore
+  takes an upload and a password from there too. So the page's backup is
+  `create_backup(include_hub_data=False)` (Linux `create_backup
+  --without-hub-data`): hub data left out and logged, `metadata.json` gets
+  `excludes_onionheaven_data: true` + `excludes_onionheaven_data_reason:
+  "settings-page"`, the page shows `HUB_DATA_LEFT_OUT_NOTE`. Every other
+  `create_backup` caller passes `include_hub_data=True` (owner's disk).
+  The page's restore (`restore_from_backup(through_wordpress=True)`, Linux
+  `restore_backup --from-settings-page`) refuses, before touching anything,
+  a backup with any entry in `onionheaven/keys/`
+  (`settings_page_restore_refusal`; refused whole, since a hub restored
+  without its registrants' keys looks restored) and never writes the volume
+  (`hub_volumes=False`: a registry alone, as every Linux backup through
+  2.5.2 carries, is left out). `tests/test_backup_hub_data_off_wordpress.py`
+  keeps a census of the hand-offs to WordPress and the callers.
 - Compose and tor image ship together (see docs/DOCKER-SOCKET.md, "The
   OnionHeaven hub data"). **Never downgrade a hub across this release**;
   on the hub follow the procedure there (count, tar the old dir, stop
