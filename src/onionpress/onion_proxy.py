@@ -2,15 +2,16 @@
 """
 OnionPress Local Proxy Server
 
-A local HTTP forward proxy on localhost:9077 that routes:
-  - .onion URLs through Tor (via PHP proxy in WordPress container)
-  - Clearnet URLs directly over the internet
-
-The browser extension routes ALL traffic through this proxy so that
-.onion SPAs that reference clearnet resources work seamlessly.
-HTTPS clearnet is handled via CONNECT tunneling.
-
-Status endpoint: http://localhost:9077/status
+A local HTTP server on localhost:9077 (+10000 per additional macOS user):
+  - /status: whether OnionPress is running, and its onion address. The
+    browser extension reads only this. It does not send traffic through
+    this server: its proxy settings send .onion hosts to Tor's SOCKS port
+    (9050) and everything else direct (extension/background.js).
+  - /setup: the first-run WordPress setup page.
+  - an HTTP forward proxy, plus /proxy/{host}/{path}, for a browser or tool
+    configured to use it: .onion URLs go through Tor (via the PHP proxy in
+    the WordPress container), clearnet URLs directly, HTTPS clearnet by
+    CONNECT tunnelling.
 """
 
 import os

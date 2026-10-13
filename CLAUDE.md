@@ -94,8 +94,9 @@
   arm64-only and damaged real bundles via a lowercase-path match on APFS.
   `make build` now runs `build-dmg-simple.sh`.
 - Generated assets: `build/make-icons.sh` (icns is byte-exact; menubar PNGs need
-  ImageMagick), `build/build-extension.sh` (builds Firefox from
-  `extension-firefox/`, NOT the stale `extension/manifest.firefox.json`).
+  ImageMagick), `build/build-extension.sh` (Firefox = `extension/` overlaid
+  with `extension-firefox/`; keep only files Firefox needs to differ there,
+  since an overlay file silently replaces `extension/`'s).
 - **`.github/workflows/docker-publish.yml` needs nothing outside GitHub**: amd64
   on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` (no self-hosted runner), and
   `IMAGE_NAMESPACE` defaults to the repo owner so a fork's "Run workflow"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The committed binaries that used to have no build recipe.
 
-build/onionpress-firefox.xpi, app/Resources/AppIcon.icns, the three menubar
+build/onionpress-firefox.xpi (since removed), app/Resources/AppIcon.icns, the three menubar
 PNGs and build/dmg-assets/* were all committed with nothing in the repo that
 could produce them. These tests guard the recipes that now exist, and the few
 sharp edges that make each one easy to break silently.
@@ -159,12 +159,9 @@ class TestExtensionRecipe(unittest.TestCase):
         self.assertTrue(os.access(path, os.X_OK))
 
     def test_firefox_manifest_is_the_current_one(self):
-        """There are two Firefox manifests and they are not equivalent.
-        extension/manifest.firefox.json is stale: it re-requests webRequest,
-        webRequestBlocking, webNavigation and <all_urls>, and has no
-        data_collection_permissions, which AMO requires from Firefox 142.
-        Building from it would ship an AMO-rejectable package with broader
-        permissions than the extension needs.
+        """extension-firefox/manifest.json declares data_collection_permissions,
+        which AMO requires from Firefox 142, and none of the broad permissions
+        the old extension/manifest.firefox.json requested (removed, #321).
         """
         current = json.loads(_read("extension-firefox/manifest.json"))
         gecko = current["browser_specific_settings"]["gecko"]
@@ -182,18 +179,24 @@ class TestExtensionRecipe(unittest.TestCase):
                     f"{permission}.",
                 )
 
-    def test_build_script_uses_the_overlay_not_the_stale_manifest(self):
+    def test_build_script_uses_the_overlay(self):
         script = _read(self.SCRIPT)
         self.assertIn("extension-firefox", script)
         self.assertIn(
-            'rm -f "$stage/manifest.json" "$stage/manifest.firefox.json"', script,
-            "The Firefox build must drop both of extension/'s manifests "
-            "before overlaying extension-firefox/'s.",
+            'rm -f "$stage/manifest.json"', script,
+            "The Firefox build must drop extension/'s manifest before "
+            "overlaying extension-firefox/'s.",
         )
 
-    def test_chrome_package_excludes_the_firefox_manifest(self):
-        script = _read(self.SCRIPT)
-        self.assertIn('rm -f "$stage/manifest.firefox.json"', script)
+    def test_leftovers_stay_gone(self):
+        """Issue #321: the stale Firefox manifest, the unused content script,
+        the committed .xpi nothing could rebuild, and extension-firefox/'s
+        copy of background.js, which silently replaced extension/'s."""
+        for rel in ("extension/manifest.firefox.json", "extension/content.js",
+                    "build/onionpress-firefox.xpi",
+                    "extension-firefox/background.js"):
+            with self.subTest(rel):
+                self.assertFalse(os.path.exists(os.path.join(PROJECT_ROOT, rel)))
 
     def test_archives_are_reproducible(self):
         """Fixed timestamps, sorted entries and -X (no uid/gid/extra fields),
@@ -231,10 +234,11 @@ class TestExtensionRecipe(unittest.TestCase):
                           "offline.js must ship — extension-firefox/ "
                           "externalised the inline script to satisfy the "
                           "extension CSP.")
-            self.assertNotIn("content.js", names,
-                             "content.js is not referenced by the Firefox "
-                             "manifest and should not ship.")
+            self.assertNotIn("content.js", names)
             self.assertNotIn("manifest.firefox.json", names)
+            with zipfile.ZipFile(xpi) as archive:
+                self.assertEqual(archive.read("background.js").decode(),
+                                 _read("extension/background.js"))
             self.assertIn(
                 "data_collection_permissions",
                 manifest["browser_specific_settings"]["gecko"],
