@@ -22,8 +22,9 @@ which can reach nothing it could not write anyway:
 - own: root's one remaining job, giving www-data what an older version left
   root's at a destination (mu-plugins/ was made by root's mkdir). It acts
   only on the canonical path: `cd -P` into the folder, check `pwd -P`, then
-  chown the bare name, so no link in the path is followed; chown -h and
-  chown -R never follow a link at the name itself.
+  chown the bare name, so no link in the path is followed; chown -h never
+  follows a link at the name itself, and the recursive form (find
+  -execdir) follows none below it and never enters My Creations.
 
 The bash launchers' wp_put carries PUT_FILE_SCRIPT inline;
 tests/test_wordpress_writes_as_www_data.py keeps the three copies equal.
@@ -79,9 +80,17 @@ MERGE_TREE_SCRIPT = 'mkdir -p "$1" && exec tar -xf - -C "$1"'
 
 # Run as root. $1 = a folder (canonical: absolute, no link, no trailing
 # slash), $2 = a name in it, $3 = -h (that entry) or -R (and all below it).
+# -R never enters a folder named "creations": My Creations, the user's
+# ~/OnionPress folder bind-mounted at wp-content/creations, whose files are
+# the host user's (under rootless Docker a chown there hands them to a
+# subordinate uid) and can be many GB. As in onionpress-web-root-owner.sh,
+# find follows no link and -execdir chowns each bare name from inside the
+# folder find holds, so a link swapped in meanwhile sends nothing elsewhere.
 OWN_SCRIPT = (
     'cd -P "$1" && [ "$(pwd -P)" = "$1" ] || exit 1; '
-    'exec chown "$3" www-data:www-data -- "$2"'
+    'if [ "$3" = -h ]; then exec chown -h www-data:www-data -- "$2"; fi; '
+    'exec find "./$2" -xdev -name creations -prune -o '
+    '-execdir chown -h www-data:www-data -- {} +'
 )
 
 
