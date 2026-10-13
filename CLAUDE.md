@@ -577,8 +577,11 @@
   (exactly yes/no); every gate is `== "yes"`, never `!= "no"`.
   `tests/test_onionheaven_opt_in.py` enforces it.
 - Installs whose config carries `REGISTER_WITH_ONIONHEAVEN=yes` keep
-  registering: Linux (`install.sh` wrote it) and Macs whose config was seeded
-  from `config-template.txt`. Mac configs without the line (older installs,
+  registering: Linux (`install.sh` wrote it once, the .deb's postinst until
+  2026-10-13) and Macs whose config was seeded from `config-template.txt`.
+  Every config writer now leaves it unset (template, both launchers, both
+  installers, `config.DEFAULTS`); `test_onionheaven_opt_in.py` keeps a
+  census of shipped files. Mac configs without the line (older installs,
   or ones the launcher's inline fallback created; Ivar's live install is one)
   used to register via the `yes` default and are now treated as undecided,
   so they get the startup prompt at next launch. **Decided 2026-10-11

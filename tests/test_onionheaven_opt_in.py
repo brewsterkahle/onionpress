@@ -44,9 +44,16 @@ class TestDefaultsAreOptIn(unittest.TestCase):
         self.assertNotEqual(
             registration_choice(op_config.DEFAULTS["REGISTER_WITH_ONIONHEAVEN"]), "yes")
 
+    # Every place that writes a fresh ~/.onionpress/config. The .deb's
+    # postinst (build/build-linux.sh) wrote REGISTER_WITH_ONIONHEAVEN=yes
+    # until 2026-10-13: every new apt install shipped its key to the hub
+    # without being asked.
+    CONFIG_WRITERS = ("app/Resources/config-template.txt",
+                      "linux/install.sh", "linux/onionpress",
+                      "build/build-linux.sh")
+
     def test_shipped_configs_do_not_preset_yes(self):
-        for rel in ("app/Resources/config-template.txt",
-                    "linux/install.sh", "linux/onionpress"):
+        for rel in self.CONFIG_WRITERS:
             text = _read(rel)
             self.assertNotRegex(
                 text, re.compile(r"^REGISTER_WITH_ONIONHEAVEN=yes\s*$", re.M),
@@ -54,6 +61,67 @@ class TestDefaultsAreOptIn(unittest.TestCase):
             self.assertRegex(
                 text, re.compile(r"^REGISTER_WITH_ONIONHEAVEN=\s*$", re.M),
                 f"{rel} should ship the key unset (undecided)")
+
+    def test_mac_launcher_fallback_config_leaves_it_unset(self):
+        # The launcher's inline config (no config-template.txt in the
+        # bundle) does not name the key at all: unset, undecided.
+        src = _read("app/MacOS/onionpress")
+        start = src.index('if [ ! -f "$DATA_DIR/config" ]; then')
+        block = src[start:src.index("\nfi\n", start)]
+        self.assertIn('cat > "$DATA_DIR/config" <<EOF', block)
+        self.assertNotIn("REGISTER_WITH_ONIONHEAVEN", block)
+
+    def test_python_config_writer_skips_the_empty_default(self):
+        # ensure_config writes DEFAULTS when there is no template, leaving
+        # out empty values: the key stays absent.
+        import tempfile
+        from onionpress.platform import resolve_paths
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = resolve_paths(data_dir=tmp, app_bundle="")
+            op_config.ensure_config(paths)
+            with open(paths.config_file, encoding="utf-8") as f:
+                self.assertNotIn("REGISTER_WITH_ONIONHEAVEN", f.read())
+
+    def test_nothing_shipped_presets_yes(self):
+        # A census of every shipped text file, so a new config writer
+        # cannot opt a new install in either: no line sets the key to a
+        # value registration_choice() reads as yes. (Turning it on is the
+        # user's: the prompts' Enable buttons, `onionpress onionheaven
+        # enable`, the Settings dialog and page.)
+        # A config line (template, heredoc) or an echo/printf of one; not
+        # prose such as "REGISTER_WITH_ONIONHEAVEN=yes|no".
+        pat = re.compile(
+            r"(^[ \t]*(export[ \t]+)?|(echo|printf)[ \t]+['\"]?)"
+            r"REGISTER_WITH_ONIONHEAVEN[ \t]*=[ \t]*['\"]?(yes|true|1|on)['\"]?"
+            r"[ \t]*($|>|\\n|\")", re.I | re.M)
+        found = []
+        for top in ("app", "linux", "build", "src"):
+            for dirpath, dirnames, filenames in os.walk(os.path.join(REPO, top)):
+                dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+                for name in filenames:
+                    path = os.path.join(dirpath, name)
+                    try:
+                        with open(path, encoding="utf-8") as f:
+                            text = f.read()
+                    except (UnicodeDecodeError, OSError):
+                        continue
+                    if pat.search(text):
+                        found.append(os.path.relpath(path, REPO))
+        self.assertEqual(found, [])
+
+    def test_python_writes_of_yes_are_the_prompts_enable_button(self):
+        # The only Python write of "yes": the Mac startup prompt's Enable.
+        pat = re.compile(r'["\']REGISTER_WITH_ONIONHEAVEN["\']\s*,\s*["\']yes["\']')
+        hits = []
+        for rel in ("src/menubar.py", "src/onionpress/config.py",
+                    "src/onionpress/settings_ui.py", "src/onionpress/cli.py",
+                    "src/onionpress/onionheaven.py", "linux/onionpress-tray",
+                    "linux/onionpress-service.py", "linux/onionpress-heartbeat.py"):
+            text = _read(rel)
+            for m in pat.finditer(text):
+                fn = text.rfind("\n    def ", 0, m.start())
+                hits.append((rel, text[fn:text.index("(", fn)].strip()))
+        self.assertEqual(hits, [("src/menubar.py", "def prompt_enable_onionheaven")])
 
     def test_settings_form_default_is_unchecked(self):
         text = _read("src/onionpress/settings_ui.py")

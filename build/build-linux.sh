@@ -289,7 +289,9 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
-REGISTER_WITH_ONIONHEAVEN=yes
+# OnionHeaven is opt-in: unset = not decided (you will be asked), yes = on, no = off.
+# Enable with: onionpress onionheaven enable
+REGISTER_WITH_ONIONHEAVEN=
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 # WordPress's local web port (normally 8080) is open to other devices on
 # your network, so a headless machine can be set up from a phone or laptop.
