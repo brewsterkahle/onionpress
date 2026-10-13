@@ -402,7 +402,11 @@ class TestWebRootOwnerGivesBack(_Sandbox):
         out = set()
         for line in self._recorded():
             where, rest = line.split(" -h www-data:www-data -- ")
-            out.add((os.path.relpath(where, self.tmp), rest.removeprefix("./")))
+            # `-execdir … {} +` may hand one chown several names (GNU find
+            # does, BSD find often doesn't); the fixture's names hold no
+            # spaces.
+            for name in rest.split(" "):
+                out.add((os.path.relpath(where, self.tmp), name.removeprefix("./")))
         return out
 
     def test_root_files_given_back_in_place(self):
