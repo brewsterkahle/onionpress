@@ -109,17 +109,24 @@ function onionpress_get_avatar_letter() {
  * can't determine one (pre-name-sync installs).
  */
 function onionpress_get_onionname() {
-    // Multisite: primary author of the current blog.
+    // Multisite: the owner of the current blog. A subsite lives at
+    // /<onionname>/ (`wp site create --slug=<onionname>`, setup_logic), and
+    // that path is the only place WordPress records whose it is: WP_Site
+    // has no user_id, and the lowest-ID administrator is usually the
+    // network owner, which put the owner's name on every subsite's Follow
+    // button (issue #321).
     if ( is_multisite() ) {
         $blog_id = get_current_blog_id();
         $blog    = function_exists( 'get_site' ) ? get_site( $blog_id ) : null;
-        if ( $blog && ! empty( $blog->user_id ) ) {
-            $user = get_userdata( (int) $blog->user_id );
-            if ( $user && ! empty( $user->user_login ) ) {
+        $slug    = $blog ? trim( (string) $blog->path, '/' ) : '';
+        if ( '' !== $slug && false === strpos( $slug, '/' ) ) {
+            $user = get_user_by( 'login', $slug );
+            if ( $user && is_user_member_of_blog( $user->ID, $blog_id ) ) {
                 return $user->user_login;
             }
         }
-        // Fallback: the first administrator registered for this blog.
+        // The network root, or a subsite not named after a member: the
+        // first administrator registered for this blog.
         $admins = get_users( array(
             'blog_id' => $blog_id,
             'role'    => 'administrator',
