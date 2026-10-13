@@ -280,10 +280,17 @@ elif command -v git >/dev/null 2>&1; then
     mkdir -p "$SODIUM_X86_SRC"
     tar xzf "$TEMP_BIN_DIR/libsodium.tar.gz" -C "$SODIUM_X86_SRC" --strip-components=1
     cd "$SODIUM_X86_SRC"
+    # -O2: libsodium's configure, like mkp224o's (see MKP_OPT), picks an
+    # optimisation level only when CFLAGS arrives unset, so without it this
+    # half was built at -O0 (Homebrew's arm64 libsodium is optimised). It
+    # does not move mining speed — mkp224o 1.7.0's batch worker calls
+    # libsodium only for a fresh seed (at start and after a hit), never in
+    # the per-key loop (worker_batch.inc.h) — so MKP_CACHE_KEY
+    # stays: a cached binary from before this line mines just as fast.
     ./configure --host=x86_64-apple-darwin --prefix="$SODIUM_X86_DIR" \
         --disable-shared --enable-static \
         CC="clang -arch x86_64" \
-        CFLAGS="-arch x86_64 -mmacosx-version-min=13.0" \
+        CFLAGS="-O2 -arch x86_64 -mmacosx-version-min=13.0" \
         LDFLAGS="-arch x86_64" > /dev/null 2>&1
     make -j"$(sysctl -n hw.ncpu)" > /dev/null 2>&1
     make install > /dev/null 2>&1
@@ -446,6 +453,7 @@ MENUBAR_BUILD_DIR=$(mktemp -d)
 #      binary, required for release builds that must run on Intel too.
 #   2. uv-managed Python 3.14 — single-arch but reproducible; good for local
 #      dev on Apple Silicon where the app only needs to run on the dev box.
+#      Refused when ONIONPRESS_RELEASE_BUILD=1 (build/release.sh).
 #   3. HARD FAIL — do not fall back to /usr/bin/python3: on macOS 13/14 that
 #      is 3.9, and src/onionpress/ uses PEP 604 `X | None` annotations that
 #      fail to import on 3.9 (py2app freezes bytecode against the build
@@ -455,6 +463,14 @@ UNIVERSAL_PYTHON="/Library/Frameworks/Python.framework/Versions/3.14/bin/python3
 if [ -x "$UNIVERSAL_PYTHON" ]; then
     echo "Using universal2 Python: $UNIVERSAL_PYTHON"
     "$UNIVERSAL_PYTHON" -m venv "$MENUBAR_BUILD_DIR/venv"
+elif [ "${ONIONPRESS_RELEASE_BUILD:-}" = "1" ]; then
+    # build/release.sh sets this. 2.5.2 and 2.5.3 shipped an arm64-only
+    # MenubarApp because the uv fallback below was taken without a word.
+    echo "ERROR: release build, but no python.org universal2 Python 3.14 at" >&2
+    echo "  $UNIVERSAL_PYTHON" >&2
+    echo "  uv's Python is single-arch: the app would not run on Intel Macs." >&2
+    echo "  Install it from https://www.python.org/downloads/ and retry." >&2
+    exit 1
 elif command -v uv >/dev/null 2>&1; then
     echo "Using uv-managed Python 3.14 (single-arch — local dev build)"
     UV_PYTHON=$(uv python find 3.14 2>/dev/null || true)

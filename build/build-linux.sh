@@ -479,8 +479,14 @@ POSTRM
 chmod 755 "$DEB_ROOT/DEBIAN/postrm"
 
 # Build the .deb
+#
+# Every file in the package is root's. Without --root-owner-group dpkg-deb
+# records the staging tree's real owner, so the 2.5.3 .deb listed its files
+# as the builder's user and group (dpkg then installs them that way). The
+# manual path's tar gets the same: GNU tar spells it --owner/--group, BSD tar
+# (macOS, where dpkg-deb is usually missing) --uid/--gid/--uname/--gname.
 if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb --build "$DEB_ROOT" "$DEB_OUT"
+    dpkg-deb --root-owner-group --build "$DEB_ROOT" "$DEB_OUT"
 else
     # dpkg-deb not available (e.g. building on macOS) — assemble manually.
     # A .deb is an ar archive containing: debian-binary, control.tar.gz, data.tar.gz
@@ -489,14 +495,20 @@ else
     DEB_TMP="$STAGE_DIR/deb-parts"
     mkdir -p "$DEB_TMP"
 
+    if tar --version 2>/dev/null | grep -q "GNU tar"; then
+        ROOT_OWNED=(--owner=root:0 --group=root:0)
+    else
+        ROOT_OWNED=(--uid 0 --gid 0 --uname root --gname root)
+    fi
+
     # debian-binary
     echo "2.0" > "$DEB_TMP/debian-binary"
 
     # control.tar.gz
-    (cd "$DEB_ROOT/DEBIAN" && tar czf "$DEB_TMP/control.tar.gz" .)
+    (cd "$DEB_ROOT/DEBIAN" && tar "${ROOT_OWNED[@]}" -czf "$DEB_TMP/control.tar.gz" .)
 
     # data.tar.gz — everything except DEBIAN/
-    (cd "$DEB_ROOT" && tar czf "$DEB_TMP/data.tar.gz" --exclude='./DEBIAN' .)
+    (cd "$DEB_ROOT" && tar "${ROOT_OWNED[@]}" -czf "$DEB_TMP/data.tar.gz" --exclude='./DEBIAN' .)
 
     # Assemble with ar (BSD ar on macOS needs 'r' not 'rcs')
     # But macOS ar adds Mach-O warnings, so use a simple concatenation approach
