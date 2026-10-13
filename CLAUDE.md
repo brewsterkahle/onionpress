@@ -317,24 +317,42 @@
   (`install_clearnet_logging`), which the script removes.
   `tests/test_wordpress_egress.py` (fake iptables).
 
-## Containers Drop NET_RAW
+## Containers Drop Every Capability
+- Every compose service (both compose files), every takeover worker
+  (`_spawn_worker` in onionheaven_common.py, the unused `start_farm_worker`
+  and the Mac launcher's `_start_takeover_worker`) and every one-shot
+  `docker run` in the launchers, cli.py and launcher_ops.py has
+  `cap_drop: [ALL]` / `--cap-drop ALL`, adds back only the capabilities
+  `tests/test_container_capabilities.py` lists for it, and has
+  `no-new-privileges:true`. The test keeps a census of every `docker run`
+  in shipped code (a new one fails until it is listed with its set) and
+  never allows NET_RAW, NET_ADMIN, SYS_ADMIN, SYS_PTRACE, SYS_MODULE,
+  DAC_READ_SEARCH (open_by_handle_at, the "shocker" escape: root reads
+  other users' files with DAC_OVERRIDE instead), ALL or privileged. Write
+  compose lists block style; the test reads them line by line.
+- The sets (found on the 2.5.3 images by starting each with nothing and
+  adding one at a time; docker-compose.yml says what needs which): tor
+  CHOWN DAC_OVERRIDE FOWNER SETGID SETUID; wordpress the same plus KILL
+  (Apache's graceful restart signals its www-data children) and
+  NET_BIND_SERVICE (only Docker < 20.10 lacks ip_unprivileged_port_start=0);
+  db CHOWN DAC_OVERRIDE SETGID SETUID; onionheaven and takeover workers
+  DAC_OVERRIDE SETGID SETUID (their /var/lib/tor is the image's, so the
+  entrypoint's chmod of it logs "Operation not permitted" harmlessly);
+  autoheal, autoheal-proxy, cloudflared nothing. Helpers: reads of key
+  files, mkp224o and key seeds DAC_OVERRIDE; migrate_key_volume and the
+  Linux tor-state seeds CHOWN DAC_OVERRIDE FOWNER; the mkp224o probe
+  nothing. `docker exec` runs with the container's set, so a root exec
+  into tor or wordpress that touches debian-tor's or www-data's files
+  relies on that DAC_OVERRIDE. Change a set only after the same live test.
 - Auto-login's "local" scope and `/__op_proxy.php` admit loopback and the
-  onionpress-network gateway by source address, so no container may forge
-  packets on that network: every compose service (both compose files) has
-  `cap_drop: [NET_RAW]` (or `ALL`) and `security_opt: [no-new-privileges:true]`,
-  and so does every takeover-worker `docker run` (`_spawn_worker` in
-  onionheaven_common.py, plus the unused `start_farm_worker` and the Mac
-  launcher's `_start_takeover_worker`). Write them block style;
-  `tests/test_container_capabilities.py` reads them line by line.
+  onionpress-network gateway by source address, which is why no container
+  may hold NET_RAW (packet forging on that network).
 - no-new-privileges blocks setuid binaries, not root calling setuid(): the
   tor image starts as root and drops with `su` (from root only), MariaDB
   uses gosu, Apache drops its own children. Never make a non-root process
-  call su or sudo in these images; the test keeps a census of su callers.
-- autoheal, autoheal-proxy and cloudflared drop ALL (none uses a
-  capability). tor, wordpress, db and onionheaven keep Docker's other
-  defaults: their root entrypoints chown, cross other users' 0700
-  directories, switch users and signal other users' processes, and su's PAM
-  writes audit records (AUDIT_WRITE). Narrow those only after a live test.
+  call su or sudo in these images; the test keeps a census of su callers,
+  and of the tor image's signal senders (none may signal another user's
+  process without KILL back).
 - Nothing in the images uses raw sockets (no ping, arping, SOCK_RAW); a
   healthcheck or tool that needs one has to get past the same test.
 

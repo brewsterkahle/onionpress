@@ -429,8 +429,12 @@ class ContainerManager:
             "--ulimit", "nofile=10000:10000",
             "--log-opt", "max-size=10m",
             "--log-opt", "max-file=3",
-            # The same hardening as _spawn_worker and every compose service.
-            "--cap-drop", "NET_RAW",
+            # The same hardening and capabilities as _spawn_worker: su to
+            # debian-tor, the control cookie in its 0700 /var/lib/tor.
+            "--cap-drop", "ALL",
+            "--cap-add", "DAC_OVERRIDE",
+            "--cap-add", "SETGID",
+            "--cap-add", "SETUID",
             "--security-opt", "no-new-privileges:true",
             "-e", f"TZ={os.environ.get('TZ', 'UTC')}",
             "-e", "TAKEOVER_WORKER=1",

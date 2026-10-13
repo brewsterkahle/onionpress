@@ -562,11 +562,17 @@ def _spawn_worker(conn):
              "--network", "onionpress-network",
              "--ulimit", "nofile=10000:10000",
              # As every compose service (docker-compose.yml's header): no
-             # raw packets on onionpress-network, where WordPress admits
-             # the gateway's address, and no setuid way back to root. The
-             # entrypoint drops to debian-tor with su as root, which
-             # no-new-privileges leaves alone.
-             "--cap-drop", "NET_RAW",
+             # capability but what the worker uses, no raw packets on
+             # onionpress-network, where WordPress admits the gateway's
+             # address, and no setuid way back to root. The entrypoint
+             # drops to debian-tor with su as root (SETGID, SETUID), which
+             # no-new-privileges leaves alone; the watchdog, the queue
+             # manager and the tor-manager read the control cookie in
+             # debian-tor's 0700 /var/lib/tor (DAC_OVERRIDE).
+             "--cap-drop", "ALL",
+             "--cap-add", "DAC_OVERRIDE",
+             "--cap-add", "SETGID",
+             "--cap-add", "SETUID",
              "--security-opt", "no-new-privileges:true",
              "-e", f"TZ={tz}",
              "-e", "TAKEOVER_WORKER=1",

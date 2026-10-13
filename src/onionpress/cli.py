@@ -356,6 +356,11 @@ class OnionPressCLI:
                 self.paths.data_dir, "shared", "vanity-keys", addr)
             seed = self.docker.run([
                 "run", "--rm",
+                # Root reads the key out of the user's folder, whose
+                # permissions Linux enforces: DAC_OVERRIDE, nothing else.
+                "--cap-drop", "ALL",
+                "--cap-add", "DAC_OVERRIDE",
+                "--security-opt", "no-new-privileges:true",
                 "-v", "onionpress-onion-keys:/dest",
                 "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
                 "alpine", "sh", "-c",

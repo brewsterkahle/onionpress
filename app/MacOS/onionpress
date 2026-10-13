@@ -402,7 +402,10 @@ _start_takeover_worker() {
         --ulimit nofile=10000:10000 \
         --log-opt max-size=10m \
         --log-opt max-file=3 \
-        --cap-drop NET_RAW \
+        --cap-drop ALL \
+        --cap-add DAC_OVERRIDE \
+        --cap-add SETGID \
+        --cap-add SETUID \
         --security-opt no-new-privileges:true \
         -e TZ="${TZ:-UTC}" \
         -e TAKEOVER_WORKER=1 \
@@ -1662,7 +1665,16 @@ migrate_key_volume() {
         log "ERROR: could not create onionpress-onion-keys; not starting (the old key volume is untouched)"
         return 1
     fi
+    # Arti's files are its own user's, in 0700 folders: reading them takes
+    # DAC_OVERRIDE, cp -a keeping their owner CHOWN, and the chmods of what
+    # it made FOWNER. Without DAC_OVERRIDE the script copies nothing and
+    # still exits 0; without FOWNER the chmod fails and the start stops.
     if ! docker run --rm \
+        --cap-drop ALL \
+        --cap-add CHOWN \
+        --cap-add DAC_OVERRIDE \
+        --cap-add FOWNER \
+        --security-opt no-new-privileges:true \
         -v onionpress-arti-state:/old:ro \
         -v onionpress-onion-keys:/new \
         alpine sh -c '
@@ -1865,7 +1877,14 @@ start_containers() {
                 log "ERROR: Failed to create the onionpress-onion-keys volume"
                 return 1
             fi
+            # Root reads the key out of the user's 0700 folder. virtiofs
+            # leaves that check to macOS, which allows it; DAC_OVERRIDE is
+            # for a mount that enforces it in the VM (the untested qemu/sshfs
+            # fallback), as cli.py's same seed needs on Linux.
             if ! docker run --rm \
+                --cap-drop ALL \
+                --cap-add DAC_OVERRIDE \
+                --security-opt no-new-privileges:true \
                 -v onionpress-onion-keys:/dest \
                 --mount type=bind,source="$VANITY_DIR",target=/src \
                 alpine sh -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then

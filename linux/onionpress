@@ -1446,7 +1446,16 @@ migrate_key_volume() {
         log "ERROR: could not create onionpress-onion-keys; not starting (the old key volume is untouched)"
         return 1
     fi
+    # Arti's files are its own user's, in 0700 folders: reading them takes
+    # DAC_OVERRIDE, cp -a keeping their owner CHOWN, and the chmods of what
+    # it made FOWNER. Without DAC_OVERRIDE the script copies nothing and
+    # still exits 0; without FOWNER the chmod fails and the start stops.
     if ! docker run --rm \
+        --cap-drop ALL \
+        --cap-add CHOWN \
+        --cap-add DAC_OVERRIDE \
+        --cap-add FOWNER \
+        --security-opt no-new-privileges:true \
         -v onionpress-arti-state:/old:ro \
         -v onionpress-onion-keys:/new \
         alpine sh -c '
@@ -1660,7 +1669,11 @@ start_containers() {
         # Sync imported key to the key volume the entrypoint reads the PEM from
         # (<name>/ks_hs_id.ed25519_expanded_private, read as root)
         docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1 || true
+        # Root reads the key out of the user's 0700 folder: DAC_OVERRIDE.
         if ! docker run --rm \
+            --cap-drop ALL \
+            --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges:true \
             -v onionpress-onion-keys:/dest \
             --mount type=bind,source="$VANITY_DIR",target=/src \
             alpine sh -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
@@ -1673,7 +1686,15 @@ start_containers() {
         # Sync imported key to C Tor state volume as well
         if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ]; then
             docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
+            # Reads the user's key files and writes into Tor's folders,
+            # debian-tor's once Tor has run (DAC_OVERRIDE), then chowns
+            # (CHOWN) and chmods what is no longer root's (FOWNER).
             if docker run --rm \
+                --cap-drop ALL \
+                --cap-add CHOWN \
+                --cap-add DAC_OVERRIDE \
+                --cap-add FOWNER \
+                --security-opt no-new-privileges:true \
                 -v onionpress-tor-state:/dest \
                 --mount type=bind,source="$VANITY_DIR",target=/src \
                 alpine sh -c '
@@ -1698,7 +1719,13 @@ start_containers() {
         local hc_keys="$DATA_DIR/shared/healthcheck-keys"
         if [ -d "$hc_keys" ] && [ -f "$hc_keys/hs_ed25519_secret_key" ]; then
             docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
+            # As for the address key above.
             if docker run --rm \
+                --cap-drop ALL \
+                --cap-add CHOWN \
+                --cap-add DAC_OVERRIDE \
+                --cap-add FOWNER \
+                --security-opt no-new-privileges:true \
                 -v onionpress-tor-state:/dest \
                 --mount type=bind,source="$hc_keys",target=/src \
                 alpine sh -c '
@@ -2171,7 +2198,9 @@ create_backup() {
     staging=$(mktemp -d -t onionpress-backup-XXXXXX)
     trap "rm -rf '$staging'" RETURN
 
-    # 1. Extract Tor keys (both PEM and C Tor formats)
+    # 1. Extract Tor keys (both PEM and C Tor formats). The volume reads
+    # below run as root in a throwaway container with DAC_OVERRIDE alone:
+    # the files are debian-tor's (or arti's), in 0700 folders.
     log "Backup: extracting Tor keys..."
     mkdir -p "$staging/tor-keys"
 
@@ -2184,8 +2213,8 @@ create_backup() {
         # Try extracting from the key volume — the current name first, then the
         # pre-2026-09-25 one for an install backed up before its first start
         # on this version migrated it.
-        docker run --rm -v onionpress-onion-keys:/src alpine cat /src/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
-            || docker run --rm -v onionpress-arti-state:/src alpine cat /src/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
+        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/src alpine cat /src/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
+            || docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-arti-state:/src alpine cat /src/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
             || true
         if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
             rm -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
@@ -2203,12 +2232,12 @@ create_backup() {
         [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
     else
         # Try extracting from the tor-state volume
-        docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_secret_key' > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
+        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_secret_key' > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
         if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
             rm -f "$staging/tor-keys/hs_ed25519_secret_key"
             log "WARNING: No C Tor secret key found"
         else
-            docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_public_key' > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
+            docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_public_key' > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
             [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
         fi
     fi
@@ -2219,9 +2248,9 @@ create_backup() {
 
     # Healthcheck onion service keys (separate address, random per install)
     mkdir -p "$staging/tor-keys/healthcheck"
-    docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_secret_key' > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
-    docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_public_key' > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
-    docker run --rm -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hostname' > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
+    docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_secret_key' > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
+    docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_public_key' > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
+    docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hostname' > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
     # Clean up empty files
     find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
     if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then

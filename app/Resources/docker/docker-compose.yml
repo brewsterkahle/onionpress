@@ -1,6 +1,22 @@
-# Every service drops NET_RAW and runs with no-new-privileges, and so do the
-# takeover workers the onionheaven container starts (onionheaven_common's
-# _spawn_worker). tests/test_container_capabilities.py enforces both.
+# Every service drops every capability, adds back only the ones it was seen
+# to need, and runs with no-new-privileges. So do the takeover workers the
+# onionheaven container starts (onionheaven_common's _spawn_worker) and every
+# one-shot `docker run` in the launchers. tests/test_container_capabilities.py
+# enforces it, with each service's and each `docker run`'s cap_add held to
+# an allowlist in the test.
+#
+# Each set was found on the 2.5.3 images by starting the service with no
+# capability and adding one at a time until start-up, the healthcheck, the
+# service's real work and the host's `docker exec` into it (which runs with
+# the same set) all worked; the comment at each service says which step
+# needs which. Of Docker's defaults, none here needs AUDIT_WRITE (su and
+# runuser switch users without it), FSETID, MKNOD, NET_RAW, SETFCAP, SETPCAP
+# or SYS_CHROOT, and only WordPress needs KILL or NET_BIND_SERVICE. Root in
+# these containers reads and writes other users' files with DAC_OVERRIDE.
+# DAC_READ_SEARCH, which could do the reading, never: with it,
+# open_by_handle_at() opens any file on a mounted filesystem by inode
+# number, the "shocker" escape from a container to the whole volume or host
+# filesystem.
 #
 # NET_RAW: auto-login's "local" scope and /__op_proxy.php admit loopback and
 # the onionpress-network gateway by source address. With NET_RAW, root in
@@ -21,11 +37,8 @@
 # debian-tor, www-data or mysql process climbing back to root through su,
 # mount, passwd or any other setuid binary in an image.
 #
-# autoheal and cloudflared drop every capability; neither uses one (see
-# each). The others keep Docker's remaining defaults: as root, their
-# entrypoints chown volumes, traverse other users' 0700 directories, switch
-# users and signal other users' processes, and su runs PAM, which writes
-# audit records. A narrower set for them needs a live test first.
+# autoheal, autoheal-proxy and cloudflared add nothing back; none of them
+# uses a capability (see each).
 services:
   tor:
     image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}
@@ -66,8 +79,26 @@ services:
     depends_on:
       - wordpress
     restart: unless-stopped
+    # The entrypoint (root) makes the key folders and writes the converted
+    # key and the version file in /var/lib/tor, debian-tor's 0700 folder,
+    # and the two migrations read and clear the old locations in
+    # /var/lib/onionpress, www-data's 0750 folder (DAC_OVERRIDE; without it
+    # the first mkdir fails and the key conversion refuses to start). It
+    # gives /var/lib/tor back to debian-tor (CHOWN; without it Tor cannot
+    # open its root-made tor.log and exits), sets the key folders to 0700
+    # (FOWNER; without it they stay 0755) and starts Tor with su (SETGID,
+    # SETUID). The watchdog (root) reads the control cookie and saves
+    # generated keys there, and the host's `docker exec cat` reads the
+    # hostname and key files (DAC_OVERRIDE). Nothing in it signals another
+    # user's process or binds below 1024.
     cap_drop:
-      - NET_RAW
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     networks:
@@ -143,8 +174,29 @@ services:
     depends_on:
       - db
     restart: unless-stopped
+    # The image's entrypoint (root) unpacks WordPress into the volume as
+    # www-data's (CHOWN; tar then sets each file's mode and time, which
+    # takes FOWNER once the file is www-data's: without it files stay 0600)
+    # and Apache's root parent drops its children to www-data (SETGID,
+    # SETUID; also runuser for wp-cli). Root's work in www-data's folders —
+    # the security audit's report and quarantine in /var/lib/onionpress
+    # (0750), web-root-owner.sh, and the host's fix_onionpress_permissions
+    # and wp_files.own — takes DAC_OVERRIDE besides. KILL: Apache's parent
+    # signals its www-data children on a graceful restart; without it the
+    # old generation keeps serving. NET_BIND_SERVICE: Apache binds :80. Docker
+    # 20.10 and later set ip_unprivileged_port_start=0 in the container, so
+    # it is only needed on older Docker (Linux distribution packages), where
+    # Apache otherwise stops with "could not bind to address 0.0.0.0:80".
     cap_drop:
-      - NET_RAW
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - KILL
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     networks:
@@ -188,8 +240,23 @@ services:
     volumes:
       - db-data:/var/lib/mysql
     restart: unless-stopped
+    # The official entrypoint (root) walks the data folder, whose database
+    # folders are mysql's and 0700, before it switches to mysql with gosu
+    # (DAC_OVERRIDE; without it the walk fails on a restart and the entrypoint
+    # stops; SETGID, SETUID). The same walk gives any file not mysql's back
+    # to mysql (CHOWN): without it one such file means a restart loop, and
+    # this image floats, so its own ownership repair has to keep working.
+    # First start, restarts and MARIADB_AUTO_UPGRADE run with just these.
+    # The host's dumps and imports are clients over the socket; a restore's
+    # import reads a docker cp'd dump that keeps the host user's uid and
+    # mode (DAC_OVERRIDE again).
     cap_drop:
-      - NET_RAW
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     networks:
@@ -307,8 +374,21 @@ services:
       - onionheaven-data:/var/lib/onionheaven
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     restart: unless-stopped
+    # Starts Tor with su (SETGID, SETUID). DAC_OVERRIDE: the data migration
+    # reads and clears the old location in /var/lib/onionpress (www-data's,
+    # 0750; without it a first move with keys at stake refuses to start), and
+    # the watchdog and the tor-manager read the control cookie in
+    # debian-tor's /var/lib/tor. /var/lib/tor comes from the image, already
+    # debian-tor's and private, so the entrypoint's chown -R and chmod 700 of
+    # it change nothing: no CHOWN or FOWNER (the chmod logs "Operation not
+    # permitted" and Tor starts). The Docker socket needs no capability: it
+    # is root's (the user's under rootless Docker), and so is this process.
     cap_drop:
-      - NET_RAW
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
     security_opt:
       - no-new-privileges:true
     networks:

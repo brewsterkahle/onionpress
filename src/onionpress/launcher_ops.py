@@ -212,8 +212,11 @@ def tor_image_has_mkp224o(image: str = DEFAULT_TOR_IMAGE) -> bool:
     )
     if inspect.returncode != 0:
         return False
+    # A file test needs no capability.
     probe = subprocess.run(
-        ["docker", "run", "--rm", "--entrypoint", "test", image,
+        ["docker", "run", "--rm",
+         "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+         "--entrypoint", "test", image,
          "-x", "/usr/local/bin/mkp224o"],
         capture_output=True, timeout=30,
     )
@@ -270,9 +273,13 @@ def generate_vanity_in_container(
     # that doesn't own the bind mount, whereas in-container root maps to
     # the host user — exactly what we want for file ownership of the keys.
     # Under rootful Docker, files end up root-owned but the next pass
-    # of start_containers fixes that with a chown.
+    # of start_containers fixes that with a chown. There root writes into
+    # the user's folder, which takes DAC_OVERRIDE (mkp224o: "could not
+    # create directory ... for key output" without it); nothing else.
     cmd = [
         "docker", "run", "--rm",
+        "--cap-drop", "ALL", "--cap-add", "DAC_OVERRIDE",
+        "--security-opt", "no-new-privileges:true",
         "-v", f"{vanity_dir}:/out",
         "--entrypoint", "/usr/local/bin/mkp224o",
         image,

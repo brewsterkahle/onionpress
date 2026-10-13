@@ -6,7 +6,7 @@ services:
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     # No capability at all (docker-compose.yml's header says why every
-    # service drops NET_RAW): the image runs as an unprivileged user (65532)
+    # service drops them all): the image runs as an unprivileged user (65532)
     # with no file capabilities, so it holds none of Docker's defaults to
     # begin with; this empties the bounding set too. It only dials out (TCP
     # and QUIC) and binds no low port.
