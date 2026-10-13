@@ -454,7 +454,7 @@ add_action( 'admin_init', function () {
         return;
     }
 
-    $following = get_option( 'onionpress_following', onionpress_default_follows() );
+    $following = get_option( 'onionpress_following', array() );
     if ( ! is_array( $following ) ) {
         $following = array();
     }
@@ -670,6 +670,9 @@ add_action( 'admin_init', function () {
                     }
                 }
             }
+            // The probe's feed URL and stats were written after the list
+            // itself: drop any aggregate rebuilt in between.
+            delete_transient( 'onionpress_blogroll_items' );
             set_transient( 'onionpress_follow_probe_' . get_current_user_id(), $probe, 60 );
         }
         wp_safe_redirect( admin_url( 'admin.php?page=onionpress-settings' ) );
@@ -1765,7 +1768,7 @@ function onionpress_settings_render_following() {
     ?>
         <!-- Following Section -->
         <?php
-        $following = get_option( 'onionpress_following', onionpress_default_follows() );
+        $following = get_option( 'onionpress_following', array() );
         if ( ! is_array( $following ) ) {
             $following = array();
         }
