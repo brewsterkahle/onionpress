@@ -103,6 +103,23 @@ def validate_onionname(name: str) -> tuple[bool, str]:
         return True, ""
 
 
+def onionname_error_message(reason: str) -> str:
+    """The text a setup front end shows for validate_onionname's *reason*.
+
+    Built from the limits the rule enforces, so the message cannot drift
+    from them (the Linux tray and `onionpress setup` once said 2 and 63
+    while the rule said 5 and 40).
+    """
+    return {
+        "empty": "Cannot be empty",
+        "too_short": f"Too short (min {_ONIONNAME_MIN_LEN} characters)",
+        "too_long": f"Too long (max {_ONIONNAME_MAX_LEN} characters)",
+        "invalid_chars": "Letters, digits, '.', '_' or '-' only; "
+                         "start and end with a letter or digit",
+        "all_numeric": "Cannot be all numbers",
+    }.get(reason, "Invalid username")
+
+
 def _refuse_invalid_onionname(onionname, log) -> bool:
     """True (after logging why) when *onionname* must not be installed.
 
@@ -771,14 +788,7 @@ def provision_interactive(data_dir: str | None = None) -> bool:
         ok, reason = validate_onionname(onionname)
         if ok:
             break
-        msgs: dict[str, str] = {
-            "too_short": "Too short (min 2 characters)",
-            "too_long": "Too long (max 63 characters)",
-            "invalid_chars": "Letters and numbers only",
-            "all_numeric": "Cannot be all numbers",
-            "empty": "Cannot be empty",
-        }
-        print(f"  Invalid username: {msgs.get(reason, reason)}")
+        print(f"  Invalid username: {onionname_error_message(reason)}")
 
     while True:
         pw = getpass.getpass("  Password: ")
