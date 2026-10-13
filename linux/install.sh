@@ -251,7 +251,7 @@ fi
 echo ""
 echo "  Installing OnionPress to $INSTALL_DIR..."
 
-$SUDO mkdir -p "$INSTALL_DIR"
+$SUDO mkdir -p "$(dirname "$INSTALL_DIR")"
 
 # Determine source: if we're in the repo, use local files; otherwise clone
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -276,11 +276,12 @@ if [ ! -d "$REPO_DIR/app/Resources/docker" ]; then
     exit 1
 fi
 
-# Copy files
-$SUDO cp "$REPO_DIR/linux/onionpress" "$INSTALL_DIR/onionpress"
-$SUDO chmod +x "$INSTALL_DIR/onionpress"
-$SUDO cp "$REPO_DIR/linux/onionpress-tray" "$INSTALL_DIR/onionpress-tray"
-$SUDO chmod +x "$INSTALL_DIR/onionpress-tray"
+# Install the files: the one list in linux/install-tree.sh (the .deb's and
+# `onionpress update`'s too), staged beside $INSTALL_DIR and renamed into
+# place, so a reinstall replaces the whole tree. The `cp -r` of each folder
+# this replaces copied into docker/docker/ (and plugins/, themes/...) when
+# the folder was already there, and the old compose file stayed in use.
+$SUDO bash "$REPO_DIR/linux/install-tree.sh" install "$REPO_DIR" "$INSTALL_DIR"
 
 # Create /usr/local/bin symlinks NOW, before the tray is started below —
 # the tray's SetupDialog shells out to `/usr/local/bin/onionpress
@@ -291,28 +292,6 @@ $SUDO chmod +x "$INSTALL_DIR/onionpress-tray"
 $SUDO mkdir -p /usr/local/bin
 $SUDO ln -sf "$INSTALL_DIR/onionpress" /usr/local/bin/onionpress
 $SUDO ln -sf "$INSTALL_DIR/onionpress-tray" /usr/local/bin/onionpress-tray
-
-$SUDO cp -r "$REPO_DIR/app/Resources/docker" "$INSTALL_DIR/docker"
-$SUDO cp -r "$REPO_DIR/app/Resources/plugins" "$INSTALL_DIR/plugins"
-
-# OnionPress theme (header w/ @onionname, Follow/Directory templates).
-# The launcher's install_onionpress_theme() silently skips if the
-# directory is missing, leaving WP on a default theme.
-if [ -d "$REPO_DIR/app/Resources/themes" ]; then
-    $SUDO cp -r "$REPO_DIR/app/Resources/themes" "$INSTALL_DIR/themes"
-fi
-
-# Shared Python package — required by `op_py` in the launcher (PYTHONPATH=$INSTALL_DIR/lib)
-# and by onionpress-tray which inserts $INSTALL_DIR/lib into sys.path.
-$SUDO mkdir -p "$INSTALL_DIR/lib"
-$SUDO cp -r "$REPO_DIR/src/onionpress" "$INSTALL_DIR/lib/onionpress"
-
-# Tray icons (tray-running/-starting/-stopped.png). The tray's ICON_THEME_PATH
-# points at $INSTALL_DIR/assets; without these the indicator falls back to the
-# distro's missing-icon glyph.
-if [ -d "$REPO_DIR/linux/assets" ]; then
-    $SUDO cp -r "$REPO_DIR/linux/assets" "$INSTALL_DIR/assets"
-fi
 
 # Bring up the tray immediately — with the binary, shared lib, and icons in
 # place it can show a gray "stopped" icon and a working "View Logs" menu
@@ -325,31 +304,6 @@ if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
     run_as_user "$INSTALL_DIR/onionpress-tray" >/dev/null 2>&1 &
     echo "  Tray icon launched — use it to view logs during install."
 fi
-
-# Icon for the per-user .desktop entry created at the end. Kept in INSTALL_DIR
-# so it survives temp-dir cleanup below.
-if [ -f "$REPO_DIR/app/Resources/app-icon.png" ]; then
-    $SUDO cp "$REPO_DIR/app/Resources/app-icon.png" "$INSTALL_DIR/app-icon.png"
-fi
-
-# Copy shared scripts
-$SUDO mkdir -p "$INSTALL_DIR/scripts"
-$SUDO cp "$REPO_DIR/src/onionpress/onion_auth.py" "$INSTALL_DIR/scripts/"
-$SUDO cp "$REPO_DIR/src/onionpress/key_manager.py" "$INSTALL_DIR/scripts/"
-if [ -f "$REPO_DIR/linux/onionpress-heartbeat.py" ]; then
-    $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
-fi
-# The plugin scripts the launcher runs from $SCRIPTS_DIR (install_plugin.sh,
-# activate_plugin.sh), into scripts/ itself: the `cp -r` of the folder this
-# replaces put them in scripts/scripts/ on a reinstall, where the launcher
-# never looked, and kept the first install's copies in use.
-$SUDO install -m 0755 "$REPO_DIR"/app/Resources/scripts/*.sh "$INSTALL_DIR/scripts/"
-
-# Copy systemd service files into install dir (so they survive temp dir cleanup)
-$SUDO cp "$REPO_DIR/linux/onionpress.service" "$INSTALL_DIR/"
-$SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.service" "$INSTALL_DIR/"
-$SUDO cp "$REPO_DIR/linux/onionpress-watcher.service" "$INSTALL_DIR/"
-$SUDO cp "$REPO_DIR/linux/onionpress-watcher.timer" "$INSTALL_DIR/"
 
 # system-sleep hook so the suspend/resume cycle notifies the hub +
 # DEL_ONION/ADD_ONION. Without this, a laptop close-lid leaves a stale
@@ -366,26 +320,7 @@ $SUDO install -D -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
 # can be reached from another device on the LAN. Tor's SOCKS port is fixed
 # to 127.0.0.1. No sed rewrite of the compose file, here or anywhere.
 
-# Write version file (VERSION file is the single source of truth)
-VERSION="unknown"
-if [ -f "$REPO_DIR/VERSION" ]; then
-    VERSION=$(cat "$REPO_DIR/VERSION")
-elif [ -f "$REPO_DIR/app/Info.plist" ] && command -v python3 >/dev/null 2>&1; then
-    VERSION=$(python3 -c "
-import xml.etree.ElementTree as ET, sys
-try:
-    tree = ET.parse(sys.argv[1])
-    keys = list(tree.iter())
-    for i, el in enumerate(keys):
-        if el.tag == 'key' and el.text == 'CFBundleShortVersionString':
-            print(keys[i+1].text)
-            break
-except:
-    print('unknown')
-" "$REPO_DIR/app/Info.plist" 2>/dev/null || echo "unknown")
-fi
-echo "$VERSION" | $SUDO tee "$INSTALL_DIR/VERSION" > /dev/null
-
+VERSION=$(cat "$INSTALL_DIR/VERSION")
 echo "  OnionPress $VERSION installed to $INSTALL_DIR"
 
 # Clean up temp dir if we cloned

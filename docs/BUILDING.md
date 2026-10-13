@@ -354,8 +354,9 @@ had run the test suite. Two of them (`follow-fetch`, `wayback-static`) had no
 `.py` source left in the repo at all.
 
 Each context now has a `.dockerignore`. The same leak went into the Linux
-`.deb` — 18 stale `.pyc` files — and `build/build-linux.sh` now strips them
-too. It also went into the `.dmg`: `build/build-dmg-simple.sh` copies
+`.deb` — 18 stale `.pyc` files — and the Linux tree is now staged by
+`linux/install-tree.sh` (the .deb's, install.sh's and `onionpress update`'s
+one file list), which strips them. It also went into the `.dmg`: `build/build-dmg-simple.sh` copies
 `app/Resources/` and `src/onionpress/` with `cp -R`, so a DMG built right
 after `make test-unit` carried 31 `.pyc` files a clean-tree build did not (24
 under the py2app bundle's `onionpress/__pycache__/`, 7 under `docker/tor/`).

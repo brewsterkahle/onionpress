@@ -30,80 +30,12 @@ DEB_ARCH="all"
 echo "Architecture: all (scripts only, works on any platform)"
 
 # ─── Collect source files ──────────────────────────────────────────────
-# These are the files that get installed to /opt/onionpress
+# These are the files that get installed to /opt/onionpress: the one list
+# in linux/install-tree.sh, which install.sh and `onionpress update` install
+# from too (a test keeps all three on it).
 
 collect_files() {
-    local dest="$1"
-
-    mkdir -p "$dest"
-
-    # Main launcher script
-    cp "$PROJECT_DIR/linux/onionpress" "$dest/onionpress"
-    chmod +x "$dest/onionpress"
-
-    # Docker Compose files. Strip __pycache__ the same way the lib/ copy
-    # below does: the tor container's scripts are importable and the test
-    # suite imports them, so this tree accumulates .pyc — 18 of which were
-    # shipping in the .deb, two for modules whose .py no longer exists.
-    cp -r "$PROJECT_DIR/app/Resources/docker" "$dest/docker"
-    find "$dest/docker" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-
-    # Plugins
-    if [ -d "$PROJECT_DIR/app/Resources/plugins" ]; then
-        cp -r "$PROJECT_DIR/app/Resources/plugins" "$dest/plugins"
-    fi
-
-    # Themes (onionpress theme used by root redirect, directory, blank canvas,
-    # page-follow, page-blogroll, page-creations, onionname header)
-    if [ -d "$PROJECT_DIR/app/Resources/themes" ]; then
-        cp -r "$PROJECT_DIR/app/Resources/themes" "$dest/themes"
-    fi
-
-    # Scripts (legacy — the heartbeat service imports from here).
-    mkdir -p "$dest/scripts"
-    cp "$PROJECT_DIR/src/onionpress/onion_auth.py" "$dest/scripts/"
-    cp "$PROJECT_DIR/src/onionpress/key_manager.py" "$dest/scripts/"
-    if [ -f "$PROJECT_DIR/linux/onionpress-heartbeat.py" ]; then
-        cp "$PROJECT_DIR/linux/onionpress-heartbeat.py" "$dest/scripts/"
-    fi
-    # The plugin scripts the launcher runs from $SCRIPTS_DIR: install_plugin.sh
-    # (a pinned WordPress.org plugin, downloaded over Tor) and
-    # activate_plugin.sh (wp-cli activation as www-data). Without them the
-    # .deb installed neither Cache Enabler nor the Link Fixer.
-    install -m 0755 "$PROJECT_DIR"/app/Resources/scripts/*.sh "$dest/scripts/"
-
-    # Shared Python package — the bash launcher (via `python3 -m
-    # onionpress.cli ...`) and the tray app both consume this. Ship the
-    # whole src/onionpress/ tree under lib/ (the name "onionpress" is
-    # taken at the top of $dest by the bash launcher binary).
-    # PYTHONPATH=$INSTALL_DIR/lib resolves the import.
-    mkdir -p "$dest/lib/onionpress"
-    cp -r "$PROJECT_DIR/src/onionpress/." "$dest/lib/onionpress/"
-    find "$dest/lib/onionpress" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-
-    # Tray app + its icon assets (hicolor theme tree).
-    if [ -f "$PROJECT_DIR/linux/onionpress-tray" ]; then
-        cp "$PROJECT_DIR/linux/onionpress-tray" "$dest/onionpress-tray"
-        chmod +x "$dest/onionpress-tray"
-    fi
-    if [ -d "$PROJECT_DIR/linux/assets" ]; then
-        cp -r "$PROJECT_DIR/linux/assets" "$dest/assets"
-    fi
-
-    # The WordPress network's egress rules as a plain sh script, for the
-    # docker.service drop-in below (it runs as root before dockerd starts,
-    # so no Python): RULES_SCRIPT, cut out of wordpress_egress.py.
-    # tests/test_wordpress_egress.py checks that this cut is the script.
-    { echo '#!/bin/sh'
-      awk '/^RULES_SCRIPT = r"""$/ { f = 1; next } f && /^"""$/ { exit } f' \
-          "$PROJECT_DIR/src/onionpress/wordpress_egress.py"
-    } > "$dest/onionpress-wordpress-egress"
-    chmod 0755 "$dest/onionpress-wordpress-egress"
-    grep -q '^esac$' "$dest/onionpress-wordpress-egress" \
-        || { echo "ERROR: could not cut RULES_SCRIPT out of wordpress_egress.py" >&2; exit 1; }
-
-    # Version
-    echo "$VERSION" > "$dest/VERSION"
+    bash "$PROJECT_DIR/linux/install-tree.sh" stage "$PROJECT_DIR" "$1"
 }
 
 # ─── Build .deb ─────────────────────────────────────────────────────────

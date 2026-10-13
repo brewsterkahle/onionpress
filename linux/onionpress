@@ -3556,6 +3556,103 @@ _validate_oh_address() {
     return 0
 }
 
+# ─── The source `onionpress update` installs from ─────────────────────
+
+# The git checkout `onionpress update` installs from, brought up to date:
+# the invoking user's own ($HOME/tmp/onionpress, $HOME/onionpress), else
+# root's /opt/onionpress-src (cloned from GitHub when there is none). Never
+# another account's home: update used to take the first checkout in any
+# /home/*/, so any user on the machine could leave one there for it to
+# install as root. The checkout must pass update_checkout_trusted, have no
+# local changes, and only move forward (git pull --ff-only; it used to
+# reset --hard to whatever origin/main said). Sets UPDATE_REPO_DIR, or
+# UPDATE_ERROR and returns 1.
+update_source_checkout() {
+    local d uid state git_as=""
+    uid=$(id -u)
+    UPDATE_REPO_DIR=""
+    UPDATE_ERROR=""
+    for d in "$HOME/tmp/onionpress" "$HOME/onionpress"; do
+        if [ -d "$d/.git" ] && [ ! -L "$d" ]; then
+            UPDATE_REPO_DIR="$d"
+            break
+        fi
+    done
+    if [ -z "$UPDATE_REPO_DIR" ]; then
+        # root's checkout, and root's git for it (git refuses a repository
+        # another user owns).
+        UPDATE_REPO_DIR="/opt/onionpress-src"
+        git_as="sudo"
+        if [ ! -e "$UPDATE_REPO_DIR" ] && [ ! -L "$UPDATE_REPO_DIR" ]; then
+            log "No checkout found -- cloning to $UPDATE_REPO_DIR..."
+            echo "  Cloning OnionPress repo..."
+            if ! sudo git clone https://github.com/brewsterkahle/onionpress.git "$UPDATE_REPO_DIR" >> "$LOG_FILE" 2>&1; then
+                UPDATE_ERROR="git clone failed. Check $LOG_FILE for details."
+                return 1
+            fi
+        elif [ -L "$UPDATE_REPO_DIR" ] || [ ! -d "$UPDATE_REPO_DIR/.git" ]; then
+            UPDATE_ERROR="$UPDATE_REPO_DIR is not a git checkout; not updating from it."
+            return 1
+        fi
+    fi
+    update_checkout_trusted "$UPDATE_REPO_DIR" "$uid" || return 1
+    if ! state=$($git_as git -C "$UPDATE_REPO_DIR" status --porcelain 2>>"$LOG_FILE"); then
+        UPDATE_ERROR="could not read the state of $UPDATE_REPO_DIR (see $LOG_FILE); nothing was installed."
+        return 1
+    fi
+    if [ -n "$state" ]; then
+        UPDATE_ERROR="$UPDATE_REPO_DIR has local changes; commit or remove them, or update it yourself. Nothing was installed."
+        return 1
+    fi
+    log "Pulling latest into $UPDATE_REPO_DIR..."
+    if ! $git_as git -C "$UPDATE_REPO_DIR" pull --ff-only >> "$LOG_FILE" 2>&1; then
+        UPDATE_ERROR="$UPDATE_REPO_DIR cannot move forward to what it pulls from (git pull --ff-only failed); bring it up to date yourself. Nothing was installed."
+        return 1
+    fi
+    # What the pull brought must pass the same checks.
+    update_checkout_trusted "$UPDATE_REPO_DIR" "$uid" || return 1
+    return 0
+}
+
+# A checkout update may install from (as root): every file and folder in
+# it, and every folder above it, belongs to the invoking user (uid $2) or
+# root, and none is writable by everyone (a folder above may be, with the
+# sticky bit, like /tmp). Returns 1 with UPDATE_ERROR set.
+update_checkout_trusted() {
+    local real d bad uid="$2"
+    if ! real=$(cd -P "$1" 2>/dev/null && pwd -P); then
+        UPDATE_ERROR="cannot read $1; not updating from it."
+        return 1
+    fi
+    d="$real"
+    while :; do
+        bad=$(find "$d" -maxdepth 0 \( \( ! -uid 0 ! -uid "$uid" \) -o \( -perm -0002 ! -perm -1000 \) \) -print 2>/dev/null) || bad="$d"
+        if [ -n "$bad" ]; then
+            UPDATE_ERROR="$d belongs to another user or is writable by everyone; not updating from $real."
+            return 1
+        fi
+        [ "$d" = "/" ] && break
+        d=$(dirname "$d")
+    done
+    if ! bad=$(find "$real" \( ! -uid 0 ! -uid "$uid" \) -print -quit 2>>"$LOG_FILE"); then
+        UPDATE_ERROR="cannot read all of $real; not updating from it."
+        return 1
+    fi
+    if [ -n "$bad" ]; then
+        UPDATE_ERROR="$bad belongs to another user; not updating from $real."
+        return 1
+    fi
+    if ! bad=$(find "$real" ! -type l -perm -0002 -print -quit 2>>"$LOG_FILE"); then
+        UPDATE_ERROR="cannot read all of $real; not updating from it."
+        return 1
+    fi
+    if [ -n "$bad" ]; then
+        UPDATE_ERROR="$bad is writable by everyone; not updating from $real."
+        return 1
+    fi
+    return 0
+}
+
 main() {
     case "${1:-start}" in
         start)
@@ -3925,68 +4022,33 @@ sys.exit(0 if provision_interactive() else 1)
             log "Checking for OnionPress updates..."
             echo "  Checking for updates..."
 
-            # Find the git repo
-            local repo_dir=""
-            for d in /home/*/tmp/onionpress /home/*/onionpress /opt/onionpress-src; do
-                if [ -d "$d/.git" ]; then
-                    repo_dir="$d"
-                    break
-                fi
-            done
-
-            # Clone fresh if no repo found
-            if [ -z "$repo_dir" ]; then
-                repo_dir="/opt/onionpress-src"
-                log "No git repo found — cloning to $repo_dir..."
-                echo "  Cloning OnionPress repo..."
-                if ! sudo git clone https://github.com/brewsterkahle/onionpress.git "$repo_dir" >> "$LOG_FILE" 2>&1; then
-                    log "ERROR: git clone failed"
-                    echo "  ERROR: git clone failed. Check $LOG_FILE for details."
-                    exit 1
-                fi
+            # The checkout to install from, brought forward (see
+            # update_source_checkout: never another user's).
+            if ! update_source_checkout; then
+                log "ERROR: update: $UPDATE_ERROR"
+                echo "  ERROR: $UPDATE_ERROR"
+                exit 1
             fi
+            local repo_dir="$UPDATE_REPO_DIR"
 
-            # Pull latest
-            log "Pulling latest from $repo_dir..."
-            cd "$repo_dir"
-            if ! git pull --ff-only >> "$LOG_FILE" 2>&1; then
-                # ff-only failed — try reset to origin/main
-                log "Fast-forward pull failed, resetting to origin/main..."
-                git fetch origin >> "$LOG_FILE" 2>&1
-                git reset --hard origin/main >> "$LOG_FILE" 2>&1 || {
-                    log "ERROR: git pull failed"
-                    echo "  ERROR: git pull failed. Check $LOG_FILE for details."
-                    exit 1
-                }
+            # Install exactly the checkout's file set (its own
+            # linux/install-tree.sh, the list the .deb and install.sh use),
+            # staged beside $INSTALL_DIR and renamed into place: a failure
+            # leaves the installed files as they were.
+            if [ ! -f "$repo_dir/linux/install-tree.sh" ]; then
+                log "ERROR: update: $repo_dir has no linux/install-tree.sh"
+                echo "  ERROR: $repo_dir is too old to update from (no linux/install-tree.sh)."
+                exit 1
             fi
-
+            log "Installing updated files from $repo_dir..."
+            echo "  Installing updated files..."
+            if ! sudo bash "$repo_dir/linux/install-tree.sh" install "$repo_dir" "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
+                log "ERROR: update: installing from $repo_dir failed; $INSTALL_DIR is unchanged"
+                echo "  ERROR: installing the update failed; nothing was changed. Check $LOG_FILE for details."
+                exit 1
+            fi
             local new_version
-            if [ -f "$repo_dir/VERSION" ]; then
-                new_version=$(cat "$repo_dir/VERSION" | tr -d '[:space:]')
-            else
-                new_version=$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || echo "unknown")
-                new_version="${new_version#v}"
-            fi
-
-            # Re-install files
-            log "Installing updated files..."
-            local resources_dir="$repo_dir/app/Resources"
-            sudo cp "$repo_dir/linux/onionpress" "$INSTALL_DIR/onionpress"
-            sudo chmod +x "$INSTALL_DIR/onionpress"
-            sudo cp -r "$resources_dir/docker" "$INSTALL_DIR/docker"
-            sudo cp -r "$resources_dir/plugins" "$INSTALL_DIR/plugins"
-            if [ -d "$resources_dir/scripts" ]; then
-                sudo cp -r "$resources_dir/scripts" "$INSTALL_DIR/scripts"
-            fi
-            # Copy heartbeat client scripts
-            sudo mkdir -p "$INSTALL_DIR/scripts"
-            sudo cp "$repo_dir/src/onion_auth.py" "$INSTALL_DIR/scripts/"
-            sudo cp "$repo_dir/src/key_manager.py" "$INSTALL_DIR/scripts/"
-            sudo cp "$repo_dir/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
-            # No port-binding rewrite: WordPress's reach comes from
-            # ONIONPRESS_BIND_HOST at compose-up time, and Tor's SOCKS port
-            # must stay on 127.0.0.1 (a test keeps sed off the compose file).
-            echo "$new_version" | sudo tee "$INSTALL_DIR/VERSION" > /dev/null
+            new_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
 
             # Deploy updated plugins to running container
             if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then

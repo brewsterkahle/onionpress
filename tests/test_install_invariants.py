@@ -406,12 +406,17 @@ class TestLinuxInstallTray(unittest.TestCase):
         self.script = _read("linux/install.sh")
 
     def test_tray_binary_copied_to_install_dir(self):
+        # install.sh installs linux/install-tree.sh's list, before the
+        # symlink and the tray launch.
         self.assertRegex(
-            self.script,
-            r'cp\s+.*linux/onionpress-tray.*INSTALL_DIR',
-            "install.sh must copy linux/onionpress-tray into INSTALL_DIR — "
+            _read("linux/install-tree.sh"),
+            r'\nfile +linux/onionpress-tray +onionpress-tray +0755\n',
+            "install-tree.sh must install linux/onionpress-tray into INSTALL_DIR — "
             "without it the symlink and tray launch both fail silently.",
         )
+        installed = self.script.index('install-tree.sh" install "$REPO_DIR" "$INSTALL_DIR"')
+        self.assertLess(installed, self.script.index("ln -sf"))
+        self.assertLess(installed, self.script.index('run_as_user "$INSTALL_DIR/onionpress-tray"'))
 
     def test_tray_symlink_created(self):
         self.assertRegex(

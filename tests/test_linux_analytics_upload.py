@@ -91,13 +91,15 @@ class TestDaemonImportPath(unittest.TestCase):
         self.assertIn(hb.LIB_DIR, sys.path)
 
     def test_install_paths_lay_down_lib(self):
+        # One file list for the .deb, install.sh and `onionpress update`
+        # (tests/test_linux_install_tree.py ties them to it).
+        self.assertRegex(
+            _read("linux/install-tree.sh"), r"\ntree +src/onionpress +lib/onionpress\n",
+            "linux/install-tree.sh must install src/onionpress as <install>/lib/onionpress — "
+            "the heartbeat daemon imports onionpress.analytics_sharing from there.",
+        )
         for rel in ("linux/install.sh", "build/build-linux.sh"):
-            src = _read(rel)
-            self.assertRegex(
-                src, r'cp -r "\$[A-Za-z_]+/src/onionpress(/\.)?" "\$[A-Za-z_]+/lib/onionpress',
-                f"{rel} must copy src/onionpress to <install>/lib/onionpress — "
-                "the heartbeat daemon imports onionpress.analytics_sharing from there.",
-            )
+            self.assertIn("linux/install-tree.sh", _read(rel), rel)
 
     def test_main_starts_analytics_before_hub_self_check(self):
         src = _read("linux/onionpress-heartbeat.py")

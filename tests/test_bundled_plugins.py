@@ -385,10 +385,17 @@ class TestShipped(unittest.TestCase):
                 self.assertTrue(os.path.isfile(os.path.join(dest, "plugins", name)))
 
     def test_install_sh_puts_them_in_scripts_itself(self):
+        """install.sh installs linux/install-tree.sh's list, which puts each
+        script in scripts/ itself (a `cp -r` of the folder put them in
+        scripts/scripts/ on a reinstall)."""
         text = _read("linux/install.sh")
-        self.assertIn('$SUDO install -m 0755 "$REPO_DIR"/app/Resources/scripts/*.sh '
-                      '"$INSTALL_DIR/scripts/"', text)
+        self.assertIn('linux/install-tree.sh" install "$REPO_DIR" "$INSTALL_DIR"', text)
         self.assertNotRegex(text, r'cp -r "\$REPO_DIR/app/Resources/scripts"')
+        tree = _read("linux/install-tree.sh")
+        for name in ("install_plugin.sh", "activate_plugin.sh"):
+            with self.subTest(name):
+                self.assertRegex(tree, rf"\nfile +app/Resources/scripts/{name} +"
+                                       rf"scripts/{name} +0755\n")
 
     def test_dmg_carries_the_scripts(self):
         self.assertIn('cp -R "$PROJECT_DIR/app/Resources/scripts" '

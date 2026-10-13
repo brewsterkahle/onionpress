@@ -123,21 +123,23 @@ class TestDebPackagingStripsBytecode(unittest.TestCase):
     """
 
     def test_collect_files_strips_pycache_from_docker_tree(self):
+        """collect_files stages the tree with linux/install-tree.sh, which
+        strips bytecode from the whole tree (the docker tree collects it
+        when the suite imports the tor container's scripts)."""
+        import subprocess
+        import tempfile
         script = _read("build/build-linux.sh")
-        match = re.search(
-            r'cp -r "\$PROJECT_DIR/app/Resources/docker" "\$dest/docker"\n(.*?)\n\n',
-            script, re.S,
-        )
-        self.assertIsNotNone(
-            match,
-            "Could not find the docker-tree copy in build-linux.sh's "
-            "collect_files — has it been restructured? Update this test.",
-        )
-        self.assertIn(
-            "__pycache__", match.group(1),
-            "build-linux.sh must strip __pycache__ from the copied docker "
-            "tree, the way it already does for lib/onionpress.",
-        )
+        self.assertIn('linux/install-tree.sh" stage "$PROJECT_DIR"', script)
+        # tests/test_linux_install_tree.py plants bytecode in a scratch
+        # checkout; this stages the real one (the suite's own imports of
+        # the tor scripts leave __pycache__ in its docker tree).
+        with tempfile.TemporaryDirectory() as dest:
+            subprocess.run(["bash", os.path.join(PROJECT_ROOT, "linux", "install-tree.sh"),
+                            "stage", PROJECT_ROOT, os.path.join(dest, "t")],
+                           check=True, capture_output=True, timeout=120)
+            found = [r for r, dirs, files in os.walk(dest)
+                     if "__pycache__" in dirs or any(f.endswith(".pyc") for f in files)]
+            self.assertEqual(found, [], "install-tree.sh must strip __pycache__")
 
 
 class TestStressWorkerBaseIsParameterized(unittest.TestCase):

@@ -1297,15 +1297,19 @@ exit 0
         service runs; the drop-in puts the rules there first. It runs as
         root before dockerd, so it is plain sh cut from RULES_SCRIPT."""
         build = _read(os.path.join(ROOT, "build", "build-linux.sh"))
-        m = re.search(r"\n      (awk '.*?') \\\n", build)
+        # The .deb's tree is linux/install-tree.sh's list, which cuts the
+        # script (an "egress" entry).
+        tree = _read(os.path.join(ROOT, "linux", "install-tree.sh"))
+        m = re.search(r"\n +(awk '.*?') \\\n", tree)
         self.assertIsNotNone(m)
         out = subprocess.run(
             ["sh", "-c", m.group(1) + ' "$1"', "sh",
              os.path.join(ROOT, "src", "onionpress", "wordpress_egress.py")],
             capture_output=True, text=True, check=True).stdout
         self.assertEqual("#!/bin/sh\n" + out, "#!/bin/sh" + egress.RULES_SCRIPT)
-        self.assertIn('> "$dest/onionpress-wordpress-egress"', build)
-        self.assertIn('chmod 0755 "$dest/onionpress-wordpress-egress"', build)
+        self.assertRegex(tree, r"\negress +src/onionpress/wordpress_egress.py +"
+                               r"onionpress-wordpress-egress +0755\n")
+        self.assertIn('linux/install-tree.sh" stage', build)
 
         dropin = _read(os.path.join(ROOT, "linux", "onionpress-wordpress-egress.conf"))
         self.assertIn("[Service]\n", dropin)
