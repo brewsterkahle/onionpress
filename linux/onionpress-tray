@@ -233,9 +233,10 @@ class Launcher:
     """Subprocess wrapper around `/usr/local/bin/onionpress`."""
 
     @staticmethod
-    def run(*args, capture: bool = False, timeout: int = 60,
+    def run(*args, capture: bool = False, timeout: Optional[int] = 60,
             password: Optional[str] = None) -> subprocess.CompletedProcess:
-        """password: handed to `backup`/`restore` in the environment."""
+        """password: handed to `backup`/`restore` in the environment.
+        timeout=None waits for the launcher however long it takes."""
         cmd = [LAUNCHER, *args]
         log(f"launcher: {_loggable(cmd)}")
         env = None
@@ -514,6 +515,16 @@ def show_log_viewer(parent=None):
     dlg.destroy()
 
 
+def _notify_failed(title: str) -> None:
+    """Tell the user a backup or restore ended without a result (the
+    launcher could not be run): they would otherwise wait for nothing."""
+    try:
+        Notify.Notification.new(
+            title, "Check the OnionPress log for details.", "onionpress").show()
+    except Exception as e:
+        log(f"notification failed: {e}")
+
+
 def show_backup_dialog(parent=None):
     # Custom Gtk.Dialog (not MessageDialog) so we can verify the password
     # inline against WordPress before kicking off the long-running backup
@@ -612,8 +623,12 @@ def show_backup_dialog(parent=None):
         return
 
     def _run():
+        # No time limit here (issue #317): a fixed 300 s ended large sites'
+        # backups, and killing the launcher stopped only the shell, not the
+        # docker and Python steps under it. The copies there carry their own
+        # limits, sized to the site, and fail the launcher when one is hit.
         try:
-            r = Launcher.run("backup", capture=True, timeout=300,
+            r = Launcher.run("backup", capture=True, timeout=None,
                              password=password)
             if r.returncode == 0:
                 Notify.Notification.new(
@@ -626,6 +641,7 @@ def show_backup_dialog(parent=None):
                 ).show()
         except Exception as e:
             log(f"backup error: {e}")
+            _notify_failed("Backup failed")
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -668,9 +684,11 @@ def show_restore_dialog(parent=None):
         return
 
     def _run():
+        # No time limit, as for the backup above: a fixed 600 s ended large
+        # sites' restores halfway, the launcher's own steps still running.
         try:
             r = Launcher.run("restore", backup_path,
-                             capture=True, timeout=600, password=password)
+                             capture=True, timeout=None, password=password)
             if r.returncode == 0:
                 Notify.Notification.new(
                     "Restore complete",
@@ -683,6 +701,7 @@ def show_restore_dialog(parent=None):
                 ).show()
         except Exception as e:
             log(f"restore error: {e}")
+            _notify_failed("Restore failed")
     threading.Thread(target=_run, daemon=True).start()
 
 
