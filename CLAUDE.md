@@ -342,7 +342,9 @@
   `migrate_tor_network` (identical, test-enforced) and
   `ContainerManager.migrate_tor_network` remove an old onionpress-network
   before the first `compose up` (onionheaven first, then OnionPress's
-  containers on it; anything else is only disconnected). Compose 2.40
+  containers on it, by exact name, workers only as
+  `onionheaven-{poll,takeover}-<digits>`; anything else is only
+  disconnected, never removed). Compose 2.40
   would recreate it itself, but fails the start while a takeover worker
   is attached. A Cloudflare tunnel whose ingress names a LAN service
   stops reaching it.

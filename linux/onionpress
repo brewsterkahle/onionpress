@@ -1344,7 +1344,7 @@ retire_old_onionheaven_containers() {
 # both launchers (ContainerManager.migrate_tor_network does the same), a
 # test enforces it.
 migrate_tor_network() {
-    local options names name pids=""
+    local options names name ours pids=""
     options=$(docker network inspect --format '{{json .Options}}' onionpress-network 2>/dev/null) || return 0
     case "$options" in
         *'"com.docker.network.bridge.name":"onionpress-tor0"'*) return 0 ;;
@@ -1359,14 +1359,24 @@ migrate_tor_network() {
             names=$(docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' onionpress-network 2>/dev/null) || names="" ;;
     esac
     for name in $names; do
+        # OnionPress's own names only: its compose services and the
+        # workers, onionheaven-poll-<n> and onionheaven-takeover-<n>.
+        ours=no
         case "$name" in
-            onionpress-tor|onionpress-wordpress|onionpress-db|onionpress-cloudflared|onionheaven|onionheaven-poll-[0-9]*|onionheaven-takeover-[0-9]*)
-                docker rm -f "$name" >> "$LOG_FILE" 2>&1 &
-                pids="$pids $!" ;;
-            *)
-                log "WARNING: $name is on onionpress-network but is not OnionPress's: disconnecting it"
-                docker network disconnect -f onionpress-network "$name" >> "$LOG_FILE" 2>&1 || true ;;
+            onionpress-tor|onionpress-wordpress|onionpress-db|onionpress-cloudflared|onionheaven) ours=yes ;;
+            onionheaven-poll-[0-9]*|onionheaven-takeover-[0-9]*)
+                case "${name##*-}" in
+                    *[!0-9]*) ;;
+                    *) ours=yes ;;
+                esac ;;
         esac
+        if [ "$ours" = yes ]; then
+            docker rm -f "$name" >> "$LOG_FILE" 2>&1 &
+            pids="$pids $!"
+        else
+            log "WARNING: $name is on onionpress-network but is not OnionPress's: disconnecting it"
+            docker network disconnect -f onionpress-network "$name" >> "$LOG_FILE" 2>&1 || true
+        fi
     done
     if [ -n "$pids" ]; then
         wait $pids || true

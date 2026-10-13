@@ -101,7 +101,7 @@ _HUB_CONTAINER_RE = re.compile(
 # launchers' migrate_tor_network matches the same names.
 _TOR_NETWORK_CONTAINER_RE = re.compile(
     r"onionpress-(tor|wordpress|db|cloudflared)|onionheaven"
-    r"|onionheaven-(poll|takeover)-[0-9].*")
+    r"|onionheaven-(poll|takeover)-[0-9]+")
 _BRIDGE_NAME_OPTION = "com.docker.network.bridge.name"
 
 

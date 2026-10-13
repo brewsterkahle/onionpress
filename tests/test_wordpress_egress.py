@@ -1006,6 +1006,21 @@ class TestTorNetworkMove(unittest.TestCase):
         self.assertEqual(docker.calls[-1], ["network", "rm", egress.TOR_NETWORK])
         self.assertTrue(any("someone-else" in l and "disconnecting" in l for l in logs))
 
+    # Names that only look like OnionPress's: never removed, only
+    # disconnected (the workers are onionheaven-poll-<n> and
+    # onionheaven-takeover-<n>, nothing else).
+    LOOK_ALIKES = ["onionheaven-takeover-3x", "onionheaven-poll-1-mine",
+                   "onionheaven-takeover-", "onionpress-tor-dev", "my-onionheaven"]
+
+    def test_names_that_only_look_like_ours_are_never_removed(self):
+        docker = FakeTorNetworkDocker("{}", self.LOOK_ALIKES + self.OURS)
+        cm, _ = self._manager(docker)
+        self.assertTrue(cm.migrate_tor_network())
+        removed = [c[2] for c in docker.calls if c[:2] == ["rm", "-f"]]
+        self.assertEqual(sorted(removed), sorted(self.OURS))
+        disconnected = [c[4] for c in docker.calls if c[:3] == ["network", "disconnect", "-f"]]
+        self.assertEqual(sorted(disconnected), sorted(self.LOOK_ALIKES))
+
     def test_a_network_on_its_bridge_is_left_alone(self):
         docker = FakeTorNetworkDocker(
             json.dumps({"com.docker.network.bridge.name": egress.TOR_BRIDGE}), self.OURS)
@@ -1182,6 +1197,18 @@ exit 0
                 self.assertIn(f"network disconnect -f {egress.TOR_NETWORK} other", calls)
                 self.assertEqual(calls[-1], f"network rm {egress.TOR_NETWORK}")
                 self.assertIn("other is on onionpress-network but is not OnionPress's", lines)
+
+    def test_the_move_never_removes_names_that_only_look_like_ours(self):
+        look_alikes = TestTorNetworkMove.LOOK_ALIKES
+        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
+            with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
+                calls, lines = self._move(launcher, "{}", look_alikes + ["onionpress-tor"])
+                removed = [c.split()[-1] for c in calls if c.startswith("rm -f ")]
+                self.assertEqual(removed, ["onionpress-tor"])
+                for name in look_alikes:
+                    self.assertIn(f"network disconnect -f {egress.TOR_NETWORK} {name}", calls)
+                    self.assertIn(f"{name} is on onionpress-network but is not OnionPress's",
+                                  lines)
 
     def test_the_move_leaves_a_network_on_its_bridge_alone(self):
         options = json.dumps({"com.docker.network.bridge.name": egress.TOR_BRIDGE},
