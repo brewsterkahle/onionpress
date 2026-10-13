@@ -20,7 +20,15 @@ Republish request (from the host app via docker exec, issue #266):
   lands during a cooldown or a frozen container is acted on later rather
   than lost or duplicated.
 
-Usage: Started by entrypoint.sh in the background after Tor launches.
+Supervision (issue #313): entrypoint.sh runs this under supervise_watchdog,
+which restarts it with backoff whenever it exits and kills it when
+ALIVE_PATH goes stale (a hung loop). The services survive a restart (they
+are added with Flags=Detach), and so does what the host told us: the sleep
+state is kept in SLEEPING_PATH and a pending republish request stays in
+its file. The supervisor clears both once per container start, so neither
+outlives the container.
+
+Usage: Started by entrypoint.sh (supervise_watchdog) after Tor launches.
 """
 
 import base64
@@ -33,6 +41,7 @@ import stat
 import socket
 import sys
 import time
+import traceback
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -57,6 +66,17 @@ HS_DESC_UPLOAD_TIMEOUT = 60     # no descriptor upload 60s after recovery → DE
 REPUBLISH_REQUEST_PATH = "/run/tor-watchdog/republish-requested"
 REPUBLISH_COOLDOWN = 900            # at most one forced republish per 15 min
 REPUBLISH_MIN_AGE_AFTER_UPLOAD = 300  # never tear down a descriptor < 5 min old
+
+# Liveness and the sleep state, beside the request file (issue #313).
+# ALIVE_PATH is touched every pass of every loop (seconds apart; tens of
+# seconds when control-port calls time out); entrypoint.sh's supervisor kills a watchdog whose file
+# is 300 s old, and launcher_ops.request_watchdog_republish reports a
+# request as unheard when it is 120 s old. Must match
+# WATCHDOG_ALIVE_PATH in onionpress.launcher_ops and WATCHDOG_RUN_DIR in
+# entrypoint.sh (test-enforced). SLEEPING_PATH exists between USR1 and
+# USR2, so a watchdog restarted while the host sleeps does not ADD_ONION.
+ALIVE_PATH = "/run/tor-watchdog/alive"
+SLEEPING_PATH = "/run/tor-watchdog/sleeping"
 # Reconnect delay when control port isn't available yet
 CONNECT_RETRY_DELAY = 5
 
@@ -81,6 +101,39 @@ def log(msg):
 
 
 # ---------------------------------------------------------------------------
+# Liveness and sleep state (issue #313)
+# ---------------------------------------------------------------------------
+def touch_alive():
+    """Mark this watchdog alive for the supervisor and the host (best effort)."""
+    try:
+        os.makedirs(os.path.dirname(ALIVE_PATH), exist_ok=True)
+        with open(ALIVE_PATH, "a"):
+            pass
+        os.utime(ALIVE_PATH)
+    except OSError:
+        pass
+
+
+def set_sleep_marker(sleeping):
+    """Record the host's sleep state so it survives a watchdog restart."""
+    try:
+        if sleeping:
+            os.makedirs(os.path.dirname(SLEEPING_PATH), exist_ok=True)
+            with open(SLEEPING_PATH, "w") as f:
+                f.write(f"{int(time.time())}\n")
+        else:
+            os.remove(SLEEPING_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"Warning: could not record sleep state: {e}")
+
+
+def sleep_marker_present():
+    return os.path.exists(SLEEPING_PATH)
+
+
+# ---------------------------------------------------------------------------
 # Control port connection
 # ---------------------------------------------------------------------------
 def read_cookie():
@@ -90,6 +143,7 @@ def read_cookie():
             with open(COOKIE_PATH, "rb") as f:
                 return f.read()
         except FileNotFoundError:
+            touch_alive()
             time.sleep(CONNECT_RETRY_DELAY)
     return None
 
@@ -782,10 +836,17 @@ def run():
     global _signal_sleep, _signal_wake
 
     log("Starting tor-watchdog")
+    touch_alive()
     state = WatchdogState()
-    # A request left over from a previous life of this container is moot:
-    # the ADD_ONION we are about to do is itself a fresh publish.
-    clear_republish_request()
+    # A request left over from a previous life of this container is moot
+    # (the first ADD_ONION is a fresh publish); entrypoint.sh's supervisor
+    # removes it once per container start. One that is here now arrived
+    # while an earlier watchdog in this container had died: honour it.
+    # Likewise a sleep marker means USR1 came and USR2 has not: the
+    # services were removed on purpose and stay removed until wake.
+    if sleep_marker_present():
+        state.sleeping = True
+        log("Restarted while the host sleeps — onion services stay removed until USR2")
 
     # Discover onion services from disk (keys + torrc port mappings)
     state.services = discover_services()
@@ -802,6 +863,7 @@ def run():
         while event_sock is None:
             event_sock = connect_and_auth()
             if event_sock is None:
+                touch_alive()
                 time.sleep(CONNECT_RETRY_DELAY)
 
         # Connect command socket
@@ -809,6 +871,7 @@ def run():
         while cmd_sock is None:
             cmd_sock = connect_and_auth()
             if cmd_sock is None:
+                touch_alive()
                 time.sleep(CONNECT_RETRY_DELAY)
 
         # Subscribe to events
@@ -855,11 +918,14 @@ def run():
         buf = ""
 
         while True:
+            touch_alive()
+
             # Check for USR1 (sleep) signal
             if _signal_sleep:
                 _signal_sleep = False
                 log("Received USR1 (sleep) — removing onion services")
                 state.sleeping = True
+                set_sleep_marker(True)
                 if state.services and state.services_active:
                     del_all_services(cmd_sock, state.services)
                     state.services_active = False
@@ -868,6 +934,7 @@ def run():
             if _signal_wake:
                 _signal_wake = False
                 state.sleeping = False
+                set_sleep_marker(False)
                 state.last_recovery_time = time.time()
                 state.last_recovery_trigger = "wake"
                 state.hs_desc_uploaded_since_recovery = False
@@ -886,6 +953,7 @@ def run():
                     if "circuit-established=1" in resp:
                         log(f"Circuits established after {waited}s — proceeding with ADD_ONION")
                         break
+                    touch_alive()
                     time.sleep(5)
                     waited += 5
                 else:
@@ -974,5 +1042,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log("Shutting down")
     except Exception as e:
-        log(f"Fatal error: {e}")
+        # entrypoint.sh's supervisor restarts us; the traceback is what
+        # tells the next reader why it had to.
+        log(f"Fatal error: {e!r}")
+        for line in traceback.format_exc().rstrip().splitlines():
+            log(f"  {line}")
         sys.exit(1)
