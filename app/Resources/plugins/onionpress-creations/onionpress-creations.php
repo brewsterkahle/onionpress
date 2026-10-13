@@ -17,10 +17,26 @@ if (!defined('ABSPATH')) {
 class OnionPress_Creations {
 
     const CREATIONS_DIR = '/var/www/html/wp-content/creations';
-    // Renamed when what get_files() leaves out changes, so a list cached by
-    // the previous version (blog-archives/ snapshots included) is not reused.
-    const FILES_CACHE_KEY = 'op_creations_files_v2';
-    const FILES_CACHE_TTL = 60;  // seconds
+    // Renamed when what get_files() leaves out, or what the cache holds,
+    // changes, so a list cached by the previous version is not reused
+    // (v2: blog-archives/ left out; v3: no URLs, see listing_entry()).
+    const FILES_CACHE_KEY = 'op_creations_files_v3';
+    // The home page shows the newest four files of the whole tree, so a
+    // rebuild walks all of it: at most every 10 minutes, or sooner when
+    // the top folder or its thumbnails change, or after an upload.
+    const FILES_CACHE_TTL = 600;  // seconds
+    // One folder's listing (get_folder_contents()), keyed by its path.
+    const FOLDER_CACHE_PREFIX = 'op_creations_dir_v1_';
+    // Rebuilt sooner when the folder or its thumbnail folder changes.
+    const FOLDER_CACHE_TTL = 300;  // seconds
+    // How long a cached listing is kept to hand out while it is rebuilt.
+    const CACHE_KEEP_TTL = 86400;  // seconds
+    const CACHE_LOCK_TTL = 60;  // seconds
+    // Network-wide counter in every cache stamp: handle_upload() raises it,
+    // so an upload shows on every site at the next page load.
+    const CACHE_GENERATION_OPTION = 'op_creations_generation';
+    // Streamed in pieces this size, so a large file never sits in memory.
+    const SEND_CHUNK = 1048576;
     // File types a web server may run instead of serve. My Creations sits
     // under DocumentRoot, so these are refused at upload; the WordPress
     // image (onionpress-creations.conf) and the multisite .htaccess also
@@ -120,8 +136,11 @@ class OnionPress_Creations {
 
     /**
      * Handle file uploads from the My Creations page.
-     * Requires can_upload() and a valid nonce. Skips dotfiles;
-     * refuses BLOCKED_EXT_RE types and tells the uploader which ones.
+     * Requires can_upload() and a valid nonce. Refuses BLOCKED_EXT_RE
+     * types and dotfiles, and tells the uploader about every file that did
+     * not arrive: refused, failed in PHP's upload (too large, partial ...),
+     * not moved into place, or dropped by PHP for exceeding
+     * max_file_uploads (counted against the form's creations_upload_count).
      */
     public function handle_upload() {
         if (empty($_FILES['creations_upload']) || empty($_POST['creations_upload_nonce'])) {
@@ -149,7 +168,12 @@ class OnionPress_Creations {
             return;
         }
         if (!is_dir($real_target) || !is_writable($real_target)) {
-            return;
+            error_log('OnionPress Creations: upload folder missing or not writable');
+            wp_die(
+                '<p>Nothing was uploaded: the folder is missing or OnionPress cannot write to it.</p>',
+                'Upload failed',
+                array('response' => 500, 'back_link' => true)
+            );
         }
 
         $files = $_FILES['creations_upload'];
@@ -164,13 +188,23 @@ class OnionPress_Creations {
             );
         }
 
-        $refused = array();
+        $refused = array();  // server-executable types and dotfiles
+        $failed = array();   // array(display name, why), one per file
+        $received = 0;
         for ($i = 0; $i < $count; $i++) {
-            if ($files['error'][$i] !== UPLOAD_ERR_OK) {
+            $error = (int) $files['error'][$i];
+            if ($error === UPLOAD_ERR_NO_FILE) {
                 continue;
             }
+            $received++;
             $name = sanitize_file_name($files['name'][$i]);
-            if (empty($name) || $name[0] === '.') {
+            $shown = $name !== '' ? $name : 'file ' . ($i + 1);
+            if ($error !== UPLOAD_ERR_OK) {
+                $failed[] = array($shown, self::upload_error_text($error));
+                continue;
+            }
+            if ($name === '' || $name[0] === '.') {
+                $refused[] = $shown;
                 continue;
             }
             if (preg_match(self::BLOCKED_EXT_RE, $name)) {
@@ -188,24 +222,81 @@ class OnionPress_Creations {
                     $n++;
                 }
             }
-            move_uploaded_file($files['tmp_name'][$i], $dest);
+            if (!move_uploaded_file($files['tmp_name'][$i], $dest)) {
+                $failed[] = array($name, 'could not be saved into the folder');
+            }
         }
 
-        delete_transient(self::FILES_CACHE_KEY);
+        self::clear_listing_caches();
 
-        if ($refused) {
-            error_log('OnionPress Creations: refused upload of ' . implode(', ', $refused) . ' (server-executable file type)');
+        // PHP keeps the first max_file_uploads files of a request and drops
+        // the rest without telling the script; the page's form says how
+        // many it sent.
+        $sent = isset($_POST['creations_upload_count']) ? (int) $_POST['creations_upload_count'] : 0;
+        $dropped = $sent > $received ? $sent - $received : 0;
+
+        if ($refused || $failed || $dropped) {
+            $html = '';
+            if ($failed) {
+                $items = array();
+                foreach ($failed as $f) {
+                    $items[] = '<li>' . esc_html($f[0]) . ': ' . esc_html($f[1]) . '</li>';
+                }
+                $html .= '<p>Not uploaded:</p><ul>' . implode('', $items) . '</ul>';
+                error_log('OnionPress Creations: ' . count($failed) . ' upload(s) failed');
+            }
+            if ($dropped) {
+                $html .= '<p>' . esc_html($dropped) . ' more file(s) were not received: at most '
+                    . esc_html((int) ini_get('max_file_uploads'))
+                    . ' files can be uploaded at once. Upload the rest in smaller groups.</p>';
+                error_log('OnionPress Creations: ' . $dropped . ' upload(s) dropped over max_file_uploads');
+            }
+            if ($refused) {
+                error_log('OnionPress Creations: refused upload of ' . implode(', ', $refused) . ' (server-executable file type or hidden name)');
+                $html .= '<p>Not uploaded: ' . esc_html(implode(', ', $refused)) . '</p>'
+                    . '<p>My Creations publishes files as they are, so it does not accept files a web server could run as a program (.php and similar), nor hidden files (names starting with a dot), which it never publishes.</p>';
+            }
+            $html .= '<p>Other files in this upload were not affected.</p>';
             wp_die(
-                '<p>Not uploaded: ' . esc_html(implode(', ', $refused)) . '</p>'
-                . '<p>My Creations publishes files as they are, so it does not accept files a web server could run as a program (.php and similar). Other files in this upload were not affected.</p>',
-                'File type not allowed',
-                array('response' => 415, 'back_link' => true)
+                $html,
+                ($failed || $dropped) ? 'Some files were not uploaded' : 'File type not allowed',
+                array('response' => $failed ? 500 : ($dropped ? 413 : 415), 'back_link' => true)
             );
         }
 
         // Redirect back to avoid form resubmission
         wp_redirect(wp_get_referer() ? wp_get_referer() : home_url('/'));
         exit;
+    }
+
+    /**
+     * What went wrong with one file of an upload, for the uploader.
+     */
+    private static function upload_error_text($error) {
+        switch ($error) {
+            case UPLOAD_ERR_INI_SIZE:
+            case UPLOAD_ERR_FORM_SIZE:
+                return 'larger than the ' . size_format(wp_max_upload_size()) . ' upload limit';
+            case UPLOAD_ERR_PARTIAL:
+                return 'the upload was interrupted';
+            case UPLOAD_ERR_NO_TMP_DIR:
+            case UPLOAD_ERR_CANT_WRITE:
+                return 'the server could not store it';
+            default:
+                return 'the upload failed (error ' . (int) $error . ')';
+        }
+    }
+
+    /**
+     * Limits the upload form checks before it sends anything: PHP drops
+     * files past max_file_uploads silently, and a request over
+     * post_max_size arrives with no files (and no nonce) at all.
+     */
+    public static function upload_limits() {
+        return array(
+            'max_files' => (int) ini_get('max_file_uploads'),
+            'max_bytes' => (int) wp_convert_hr_to_bytes(ini_get('post_max_size')),
+        );
     }
 
     /**
@@ -243,6 +334,10 @@ class OnionPress_Creations {
      * Only what the Creations pages list, and their generated thumbnails:
      * a hidden file or folder is a 404 whether it is named in the request
      * or reached through a symlink.
+     *
+     * Answers conditional requests (ETag, Last-Modified) with 304 and a
+     * single byte range with 206, so a video can seek and a download
+     * interrupted over Tor resumes where it stopped.
      */
     public function serve_file() {
         if (!isset($_GET['onionpress_creation'])) {
@@ -276,23 +371,53 @@ class OnionPress_Creations {
         $mime = wp_check_filetype($basename);
         $content_type = $mime['type'] ? $mime['type'] : 'application/octet-stream';
 
-        // Last-Modified: standard HTTP header that lets clients (browsers,
-        // mirror tools) detect changes without re-downloading. No downside.
+        $size = filesize($filepath);
         $mtime = filemtime($filepath);
-        if ($mtime) {
-            header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
-            // Honor If-Modified-Since with a 304 response.
-            if (!empty($_SERVER['HTTP_IF_MODIFIED_SINCE'])) {
-                $since = strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']);
-                if ($since !== false && $since >= $mtime) {
-                    status_header(304);
-                    exit;
-                }
+        if ($size === false) {
+            status_header(404);
+            exit;
+        }
+        // Validators: Last-Modified, and an ETag from mtime and size (as
+        // Apache makes one), so a client can revalidate or resume safely.
+        $etag = self::etag($mtime, $size);
+        $last_modified = $mtime ? gmdate('D, d M Y H:i:s', $mtime) . ' GMT' : null;
+        header('ETag: ' . $etag);
+        if ($last_modified) {
+            header('Last-Modified: ' . $last_modified);
+        }
+        header('Accept-Ranges: bytes');
+
+        // If-None-Match takes precedence over If-Modified-Since (RFC 9110).
+        if (isset($_SERVER['HTTP_IF_NONE_MATCH'])) {
+            if (self::etag_matches($_SERVER['HTTP_IF_NONE_MATCH'], $etag)) {
+                status_header(304);
+                exit;
+            }
+        } elseif ($mtime && !empty($_SERVER['HTTP_IF_MODIFIED_SINCE'])) {
+            $since = strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']);
+            if ($since !== false && $since >= $mtime) {
+                status_header(304);
+                exit;
             }
         }
 
+        // A Range is honored only while If-Range (when sent) still names
+        // this version of the file; otherwise the whole file goes out.
+        $range = null;
+        if (isset($_SERVER['HTTP_RANGE'])) {
+            $if_range = isset($_SERVER['HTTP_IF_RANGE']) ? trim($_SERVER['HTTP_IF_RANGE']) : null;
+            if ($if_range === null || $if_range === $etag
+                    || ($last_modified !== null && $if_range === $last_modified)) {
+                $range = self::parse_range($_SERVER['HTTP_RANGE'], $size);
+            }
+        }
+        if ($range === false) {
+            status_header(416);
+            header('Content-Range: bytes */' . $size);
+            exit;
+        }
+
         header('Content-Type: ' . $content_type);
-        header('Content-Length: ' . filesize($filepath));
 
         // Allow images/media to be displayed inline, force download for others
         $inline_types = array('image/', 'video/', 'audio/', 'text/html', 'text/plain', 'application/pdf');
@@ -310,8 +435,119 @@ class OnionPress_Creations {
             header('Content-Disposition: attachment; filename="' . $basename . '"');
         }
 
-        readfile($filepath);
+        if ($range) {
+            list($first, $last) = $range;
+            status_header(206);
+            header('Content-Range: bytes ' . $first . '-' . $last . '/' . $size);
+        } else {
+            $first = 0;
+            $last = $size - 1;
+        }
+        $length = $last - $first + 1;
+        header('Content-Length: ' . $length);
+
+        if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'HEAD') {
+            exit;
+        }
+        self::send_bytes($filepath, $first, $length);
         exit;
+    }
+
+    /**
+     * The ETag serve_file() sends for a file of this mtime and size.
+     */
+    public static function etag($mtime, $size) {
+        return '"' . dechex((int) $mtime) . '-' . dechex((int) $size) . '"';
+    }
+
+    /**
+     * Whether an If-None-Match header names $etag (weak comparison: a
+     * W/ prefix is ignored) or is "*".
+     */
+    public static function etag_matches($header, $etag) {
+        $header = trim((string) $header);
+        if ($header === '*') {
+            return true;
+        }
+        foreach (explode(',', $header) as $tag) {
+            $tag = trim($tag);
+            if (strncmp($tag, 'W/', 2) === 0) {
+                $tag = substr($tag, 2);
+            }
+            if ($tag === $etag) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The byte range a Range header asks of a file of $size bytes:
+     * array(first, last) inclusive; false when it cannot be satisfied
+     * (answer 416); null when the whole file should be sent instead (no
+     * range, a malformed one, another unit, or several ranges, which a
+     * server may answer with the whole file).
+     */
+    public static function parse_range($header, $size) {
+        if (!is_string($header) || !preg_match('/^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$/i', $header, $m)) {
+            return null;
+        }
+        // Numbers longer than any file size are clamped, never overflowed.
+        $num = function ($digits) {
+            return strlen($digits) > 18 ? PHP_INT_MAX : (int) $digits;
+        };
+        if ($m[1] === '') {
+            if ($m[2] === '') {
+                return null;
+            }
+            // bytes=-N: the last N bytes.
+            $suffix = $num($m[2]);
+            if ($suffix === 0 || $size === 0) {
+                return false;
+            }
+            return array(max(0, $size - $suffix), $size - 1);
+        }
+        $first = $num($m[1]);
+        if ($m[2] !== '' && $num($m[2]) < $first) {
+            return null;
+        }
+        if ($first >= $size) {
+            return false;
+        }
+        $last = ($m[2] === '') ? $size - 1 : min($num($m[2]), $size - 1);
+        return array($first, $last);
+    }
+
+    /**
+     * Send $length bytes of $path from offset $first, a piece at a time,
+     * stopping when the client goes away.
+     */
+    private static function send_bytes($path, $first, $length) {
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        $fh = fopen($path, 'rb');
+        if (!$fh) {
+            return;
+        }
+        if ($first > 0 && fseek($fh, $first) !== 0) {
+            fclose($fh);
+            return;
+        }
+        @set_time_limit(0);
+        while ($length > 0 && !feof($fh)) {
+            $chunk = fread($fh, min(self::SEND_CHUNK, $length));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            echo $chunk;
+            flush();
+            $length -= strlen($chunk);
+            if (connection_aborted()) {
+                break;
+            }
+        }
+        fclose($fh);
     }
 
     /**
@@ -397,6 +633,10 @@ class OnionPress_Creations {
     /**
      * Get folders and files in a specific subdirectory (one level, like Google Drive).
      * Returns array with 'folders' and 'files' keys.
+     *
+     * Cached per folder (see cached_listing()): a listing stats every
+     * entry and counts every subfolder's items across the host mount,
+     * the access pattern behind the outage described at get_files().
      */
     public static function get_folder_contents( $subfolder = '' ) {
         $creations_dir = self::CREATIONS_DIR;
@@ -419,7 +659,41 @@ class OnionPress_Creations {
             return $result;
         }
 
-        $entries = scandir($real_browse);
+        // Adding, removing or renaming an entry changes the folder's mtime,
+        // a new thumbnail its .thumbs/ folder's: either rebuilds at once.
+        $thumbs_dir = $creations_dir . '/' . self::THUMBS_PREFIX . $subfolder;
+        $stamp = @filemtime($real_browse) . '|' . @filemtime($thumbs_dir);
+
+        $listing = self::cached_listing(
+            self::FOLDER_CACHE_PREFIX . md5($subfolder),
+            $stamp,
+            self::FOLDER_CACHE_TTL,
+            function () use ($subfolder, $real_browse) {
+                return self::scan_folder($subfolder, $real_browse);
+            }
+        );
+
+        foreach ($listing['folders'] as $folder) {
+            $result['folders'][] = $folder;
+        }
+        foreach ($listing['files'] as $file) {
+            $result['files'][] = self::listing_entry($file);
+        }
+        return $result;
+    }
+
+    /**
+     * One folder's entries, for get_folder_contents() to cache: no URLs
+     * (listing_entry() adds those per request).
+     */
+    private static function scan_folder($subfolder, $real_browse) {
+        $creations_dir = self::CREATIONS_DIR;
+        $result = array( 'folders' => array(), 'files' => array() );
+
+        $entries = @scandir($real_browse);
+        if (!$entries) {
+            return $result;
+        }
         foreach ($entries as $entry) {
             $rel_path = $subfolder ? $subfolder . '/' . $entry : $entry;
             if (!self::is_public_path($rel_path)) {
@@ -442,22 +716,13 @@ class OnionPress_Creations {
                     'count'    => $count,
                 );
             } else {
-                $thumb_path = $creations_dir . '/.thumbs/' . $rel_path . '.png';
-                $thumb_url = null;
-                if (file_exists($thumb_path)) {
-                    $thumb_url = add_query_arg('onionpress_creation', urlencode('.thumbs/' . $rel_path . '.png'), home_url('/'));
-                }
                 $result['files'][] = array(
                     'name'      => $entry,
                     'rel_path'  => $rel_path,
                     'path'      => $full_path,
-                    'size'      => filesize($full_path),
-                    'time'      => filemtime($full_path),
-                    'is_image'  => self::is_image($entry),
-                    'is_video'  => self::is_video($entry),
-                    'icon'      => self::file_icon($entry),
-                    'url'       => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
-                    'thumb_url' => $thumb_url,
+                    'size'      => @filesize($full_path),
+                    'time'      => @filemtime($full_path),
+                    'has_thumb' => file_exists($creations_dir . '/.thumbs/' . $rel_path . '.png'),
                 );
             }
         }
@@ -474,27 +739,96 @@ class OnionPress_Creations {
     }
 
     /**
+     * A cached file entry as the templates use it. URLs are made here,
+     * per request, never cached: the domain map makes home_url() the
+     * request's host (localhost for the owner), and a cached localhost
+     * link must not reach a Tor visitor.
+     */
+    private static function listing_entry($file) {
+        $name = $file['name'];
+        $rel_path = $file['rel_path'];
+        $thumb_url = null;
+        if (!empty($file['has_thumb'])) {
+            $thumb_url = add_query_arg('onionpress_creation', urlencode('.thumbs/' . $rel_path . '.png'), home_url('/'));
+        }
+        return array(
+            'name'      => $name,
+            'rel_path'  => $rel_path,
+            'path'      => $file['path'],
+            'size'      => $file['size'],
+            'time'      => $file['time'],
+            'is_image'  => self::is_image($name),
+            'is_video'  => self::is_video($name),
+            'icon'      => self::file_icon($name),
+            'url'       => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
+            'thumb_url' => $thumb_url,
+        );
+    }
+
+    /**
+     * $build()'s result, cached in the transient $key.
+     *
+     * Rebuilt once it is $ttl seconds old or $stamp (with the upload
+     * generation in front) no longer matches. While one request rebuilds,
+     * the others get the previous listing instead of all scanning the
+     * mount at once: piled-up scans are what took the site down.
+     */
+    private static function cached_listing($key, $stamp, $ttl, $build) {
+        $stamp = (int) get_site_option(self::CACHE_GENERATION_OPTION, 0) . '|' . $stamp;
+        $entry = get_transient($key);
+        $have = is_array($entry) && isset($entry['stamp'], $entry['built'])
+            && isset($entry['data']) && is_array($entry['data']);
+        if ($have && $entry['stamp'] === $stamp && time() - (int) $entry['built'] < $ttl) {
+            return $entry['data'];
+        }
+        $lock = $key . '_lock';
+        if ($have && get_transient($lock)) {
+            return $entry['data'];
+        }
+        set_transient($lock, 1, self::CACHE_LOCK_TTL);
+        $data = $build();
+        set_transient($key, array('stamp' => $stamp, 'built' => time(), 'data' => $data), self::CACHE_KEEP_TTL);
+        delete_transient($lock);
+        return $data;
+    }
+
+    /**
+     * Make every cached listing, on every site of the network, rebuild at
+     * its next use (handle_upload()).
+     */
+    public static function clear_listing_caches() {
+        update_site_option(self::CACHE_GENERATION_OPTION,
+            (int) get_site_option(self::CACHE_GENERATION_OPTION, 0) + 1);
+    }
+
+    /**
      * Get all files in the creations directory, recursively scanning subdirectories.
      *
-     * Results are cached in a transient for FILES_CACHE_TTL seconds. The
+     * Results are cached in a transient (see cached_listing()). The
      * creations dir is a FUSE/SSHFS mount into the host's Documents folder
      * — recursive stat()s across that boundary on every homepage render
      * piled apache workers on fuse_lock_inode and took onionpress.org
-     * down for 34h on 2026-04-19. handle_upload() busts the transient so
-     * freshly uploaded files show up within one page load, not a minute.
+     * down for 34h on 2026-04-19. handle_upload() raises the cache
+     * generation so freshly uploaded files show up at the next page load;
+     * files added on the host show within FILES_CACHE_TTL (at once when
+     * they land in the top folder).
      */
     public static function get_files() {
-        $cached = get_transient(self::FILES_CACHE_KEY);
-        if (is_array($cached)) {
-            return $cached;
+        $creations_dir = self::CREATIONS_DIR;
+        if (!is_dir($creations_dir)) {
+            return array();
         }
+        $stamp = @filemtime($creations_dir) . '|' . @filemtime($creations_dir . '/.thumbs');
+        $files = self::cached_listing(self::FILES_CACHE_KEY, $stamp, self::FILES_CACHE_TTL, array(__CLASS__, 'scan_tree'));
+        return array_map(array(__CLASS__, 'listing_entry'), $files);
+    }
 
+    /**
+     * Every listed file of the tree, newest first, for get_files() to cache.
+     */
+    public static function scan_tree() {
         $creations_dir = self::CREATIONS_DIR;
         $files = array();
-
-        if (!is_dir($creations_dir)) {
-            return $files;
-        }
 
         // Hidden folders (.git/, .thumbs/ ...) and the legacy blog-archives/
         // are neither listed nor descended into: not publications, and a
@@ -510,36 +844,28 @@ class OnionPress_Creations {
             \RecursiveIteratorIterator::LEAVES_ONLY
         );
 
-        foreach ($iterator as $file_info) {
-            if (!$file_info->isFile() || $file_info->getFilename()[0] === '.') {
-                continue;
+        try {
+            foreach ($iterator as $file_info) {
+                if (!$file_info->isFile() || $file_info->getFilename()[0] === '.') {
+                    continue;
+                }
+                $path = $file_info->getPathname();
+                // Relative path from creations dir (for URL and subfolder display)
+                $rel_path = substr($path, strlen($creations_dir) + 1);
+                $files[] = array(
+                    'name'      => $file_info->getFilename(),
+                    'rel_path'  => $rel_path,
+                    'path'      => $path,
+                    'size'      => $file_info->getSize(),
+                    'time'      => $file_info->getMTime(),
+                    // Generated thumbnail in .thumbs/
+                    'has_thumb' => file_exists($creations_dir . '/.thumbs/' . $rel_path . '.png'),
+                );
             }
-            $path = $file_info->getPathname();
-            // Skip files inside the .thumbs directory
-            if (strpos($path, $creations_dir . '/.thumbs') === 0) {
-                continue;
-            }
-            $name = $file_info->getFilename();
-            // Relative path from creations dir (for URL and subfolder display)
-            $rel_path = substr($path, strlen($creations_dir) + 1);
-            // Check for a generated thumbnail in .thumbs/
-            $thumb_path = $creations_dir . '/.thumbs/' . $rel_path . '.png';
-            $thumb_url = null;
-            if (file_exists($thumb_path)) {
-                $thumb_url = add_query_arg('onionpress_creation', urlencode('.thumbs/' . $rel_path . '.png'), home_url('/'));
-            }
-            $files[] = array(
-                'name'      => $name,
-                'rel_path'  => $rel_path,
-                'path'      => $path,
-                'size'      => $file_info->getSize(),
-                'time'      => $file_info->getMTime(),
-                'is_image'  => self::is_image($name),
-                'is_video'  => self::is_video($name),
-                'icon'      => self::file_icon($name),
-                'url'       => add_query_arg('onionpress_creation', urlencode($rel_path), home_url('/')),
-                'thumb_url' => $thumb_url,
-            );
+        } catch (\UnexpectedValueException $e) {
+            // A folder that vanished or cannot be read mid-walk: list what
+            // was found rather than fail the page.
+            error_log('OnionPress Creations: listing stopped early: ' . $e->getMessage());
         }
 
         // Sort by modification time, newest first
@@ -547,7 +873,6 @@ class OnionPress_Creations {
             return $b['time'] - $a['time'];
         });
 
-        set_transient(self::FILES_CACHE_KEY, $files, self::FILES_CACHE_TTL);
         return $files;
     }
 }

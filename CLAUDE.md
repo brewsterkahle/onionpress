@@ -240,6 +240,27 @@
   `<DirectoryMatch>`), and the importer page says what could not be moved.
   `tests/test_blog_snapshots_private.py`.
 
+## My Creations Listings, Serving and Uploads (issue #319)
+- Both listings (`get_folder_contents`, `get_files`) go through
+  `cached_listing()`: a transient per folder, rebuilt when old (5 min per
+  folder, 10 min for the whole-tree home page list), when the folder's or
+  its `.thumbs/` folder's mtime changes, or when an upload raises the
+  network-wide `op_creations_generation` site option. While one request
+  rebuilds, others get the previous listing (the 2026-04-19 outage was
+  piled-up scans of the host mount). Cached entries hold no URLs:
+  `listing_entry()` adds them per request, because the domain map makes
+  `home_url()` the request's host.
+- `serve_file` sends ETag/Last-Modified, answers 304, one byte range with
+  206 (416, If-Range honoured; several ranges get the whole file) and
+  streams in 1 MiB pieces. `tests/test_creations_listing_and_serving.py`.
+- Uploads: `max_file_uploads = 200` in the WordPress image's
+  `onionpress-uploads.ini` (needs an image publish); the form checks the
+  limits before sending and posts `creations_upload_count`, and
+  `handle_upload` reports refused, failed, unmoved and dropped files.
+- The Mac thumbnail generator starts at launch; `onionpress.thumbnails`
+  decides what to make and removes thumbnails of files that are gone
+  (never when part of the folder could not be read).
+
 ## Follow Requests Stay Off the Container Network
 - Every site administrator types follow targets, and onionpress-tor-proxy
   connects to `onionpress_is_local_host()` names (containers, localhost)

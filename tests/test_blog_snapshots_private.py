@@ -200,11 +200,12 @@ class TestTheOldFolderStaysUnpublished(unittest.TestCase):
         self.assertLess(body.index("LEGACY_SNAPSHOTS_DIR"), body.index("return true;"))
 
     def test_both_listings_go_through_the_path_rule(self):
-        folder = _php_function(self.creations, "get_folder_contents")
+        # The scans the listings cache (scan_folder, scan_tree).
+        folder = _php_function(self.creations, "scan_folder")
         loop = folder[folder.index("foreach ($entries as $entry)"):]
         self.assertLess(loop.index("if (!self::is_public_path($rel_path))"),
                         loop.index("$full_path = "))
-        files = _php_function(self.creations, "get_files")
+        files = _php_function(self.creations, "scan_tree")
         callback = files[files.index("RecursiveCallbackFilterIterator"):
                          files.index("RecursiveIteratorIterator::LEAVES_ONLY")]
         self.assertIn("self::is_public_path(substr($file_info->getPathname(), "

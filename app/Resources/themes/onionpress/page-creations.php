@@ -13,6 +13,9 @@ $contents = class_exists('OnionPress_Creations')
     ? OnionPress_Creations::get_folder_contents($current_folder)
     : array('folders' => array(), 'files' => array());
 $page_url = get_permalink();
+$upload_limits = (class_exists('OnionPress_Creations') && method_exists('OnionPress_Creations', 'upload_limits'))
+    ? OnionPress_Creations::upload_limits()
+    : array('max_files' => 0, 'max_bytes' => 0);
 ?>
 
 <article class="post">
@@ -20,14 +23,17 @@ $page_url = get_permalink();
 
     <?php if (class_exists('OnionPress_Creations') && OnionPress_Creations::can_upload()) : ?>
         <div class="creations-upload">
-            <form method="post" enctype="multipart/form-data" id="creations-upload-form">
+            <form method="post" enctype="multipart/form-data" id="creations-upload-form"
+                  data-max-files="<?php echo esc_attr($upload_limits['max_files']); ?>"
+                  data-max-bytes="<?php echo esc_attr($upload_limits['max_bytes']); ?>">
                 <?php wp_nonce_field('creations_upload', 'creations_upload_nonce'); ?>
                 <?php if ($current_folder) : ?>
                     <input type="hidden" name="creations_upload_folder" value="<?php echo esc_attr($current_folder); ?>">
                 <?php endif; ?>
+                <input type="hidden" name="creations_upload_count" value="0" id="creations-upload-count">
                 <label class="creations-upload-area" id="creations-drop-area">
                     <input type="file" name="creations_upload[]" multiple style="display:none" id="creations-file-input">
-                    <span class="creations-upload-text">Drop files here or click to upload</span>
+                    <span class="creations-upload-text" id="creations-upload-text">Drop files here or click to upload</span>
                 </label>
             </form>
         </div>
@@ -36,15 +42,42 @@ $page_url = get_permalink();
             var area = document.getElementById('creations-drop-area');
             var input = document.getElementById('creations-file-input');
             var form = document.getElementById('creations-upload-form');
+            var countField = document.getElementById('creations-upload-count');
+            var text = document.getElementById('creations-upload-text');
+            var maxFiles = parseInt(form.getAttribute('data-max-files'), 10) || 0;
+            var maxBytes = parseInt(form.getAttribute('data-max-bytes'), 10) || 0;
+            // PHP drops files past max_file_uploads without a word, and a
+            // request over post_max_size arrives empty: say so before
+            // sending anything. The server reports what still goes wrong.
+            function send() {
+                var files = input.files, total = 0;
+                if (!files.length) return;
+                for (var i = 0; i < files.length; i++) total += files[i].size;
+                if (maxFiles && files.length > maxFiles) {
+                    text.textContent = files.length + ' files is more than ' + maxFiles +
+                        ' at once. Nothing was uploaded; please upload them in smaller groups.';
+                    input.value = '';
+                    return;
+                }
+                if (maxBytes && total > maxBytes) {
+                    text.textContent = 'These files are larger together than the ' +
+                        Math.floor(maxBytes / 1048576) + ' MB upload limit. Nothing was uploaded; please upload fewer at a time.';
+                    input.value = '';
+                    return;
+                }
+                countField.value = files.length;
+                text.textContent = 'Uploading ' + files.length + (files.length === 1 ? ' file' : ' files') + '...';
+                form.submit();
+            }
             area.addEventListener('dragover', function(e) { e.preventDefault(); area.classList.add('dragover'); });
             area.addEventListener('dragleave', function() { area.classList.remove('dragover'); });
             area.addEventListener('drop', function(e) {
                 e.preventDefault();
                 area.classList.remove('dragover');
                 input.files = e.dataTransfer.files;
-                form.submit();
+                send();
             });
-            input.addEventListener('change', function() { if (input.files.length) form.submit(); });
+            input.addEventListener('change', send);
         })();
         </script>
     <?php endif; ?>
