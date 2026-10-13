@@ -364,13 +364,42 @@ def signal_watchdog(docker, container: str, sig: str) -> bool:
 # volume) so only something with docker exec on that container — the app —
 # can request one. Level-triggered: the file sits there until the watchdog
 # acts on it or discards it, so a request made while the container is
-# frozen or the watchdog is in its cooldown is coalesced, never lost or
-# duplicated. Must match REPUBLISH_REQUEST_PATH in
-# app/Resources/docker/tor/tor-watchdog.py (a test enforces it).
+# frozen, the watchdog is in its cooldown or is being restarted by its
+# supervisor is coalesced, never lost or duplicated. Must match
+# REPUBLISH_REQUEST_PATH in app/Resources/docker/tor/tor-watchdog.py (a
+# test enforces it).
 WATCHDOG_REPUBLISH_REQUEST_PATH = "/run/tor-watchdog/republish-requested"
 
+# The file the watchdog touches every pass of its loops (issue #313); must
+# match ALIVE_PATH in tor-watchdog.py (test-enforced). Older than
+# WATCHDOG_ALIVE_MAX_AGE, the watchdog is hung (its supervisor kills it at
+# 300 s) and a request written now is not being read.
+WATCHDOG_ALIVE_PATH = "/run/tor-watchdog/alive"
+WATCHDOG_ALIVE_MAX_AGE = 120
 
-def request_watchdog_republish(docker, container: str, reason: str) -> bool:
+# request_watchdog_republish() results.
+REPUBLISH_REQUESTED = "requested"      # written, and a live watchdog reads it
+REPUBLISH_NO_WATCHDOG = "no-watchdog"  # written, but no live watchdog to read it
+REPUBLISH_FAILED = "failed"            # not written (docker exec failed)
+
+# Exit status of the request script when the file was written but no
+# watchdog is there to act on it.
+_NO_WATCHDOG_EXIT = 3
+
+# $1 reason, $2 request path, $3 alive path, $4 max alive age. The pattern
+# is "python3 /[t]or-watchdog.py", not the bare name: this shell's own argv
+# holds the request path, which contains "tor-watchdog". An image older
+# than the alive file has none; then the process check is all there is.
+_REQUEST_SCRIPT = (
+    'mkdir -p "$(dirname "$2")" && printf \'%s\\n\' "$1" > "$2" || exit 1\n'
+    "pgrep -f 'python3 /[t]or-watchdog.py' >/dev/null || exit 3\n"
+    '[ -f "$3" ] || exit 0\n'
+    'mtime=$(stat -c %Y "$3") || exit 0\n'
+    '[ $(( $(date +%s) - mtime )) -le "$4" ] || exit 3\n'
+)
+
+
+def request_watchdog_republish(docker, container: str, reason: str) -> str:
     """Ask the tor-watchdog in `container` to force a descriptor republish.
 
     Writes the request file the watchdog polls (see
@@ -383,19 +412,40 @@ def request_watchdog_republish(docker, container: str, reason: str) -> bool:
     health.REPUBLISH_AFTER_UNREACHABLE_SECONDS while Tor itself looked
     healthy.
 
-    `reason` is free text for the watchdog's log line. Returns True if the
-    request file was written. A tor image whose watchdog predates the
-    request file simply never reads it — harmless.
+    `reason` is free text for the watchdog's log line. Returns
+    REPUBLISH_REQUESTED when the file was written and a watchdog is alive
+    to read it; REPUBLISH_NO_WATCHDOG when the file was written but no
+    watchdog process runs or its alive file is stale (issue #313: the
+    entrypoint's supervisor restarts it, and the restarted watchdog acts
+    on the waiting file); REPUBLISH_FAILED when the file could not be
+    written. A tor image whose watchdog predates the request file simply
+    never reads it — harmless.
     """
     reason = " ".join(str(reason or "").split())[:200] or "unspecified"
     result = docker.exec(
         container,
-        ["sh", "-c",
-         'mkdir -p "$(dirname "$2")" && printf \'%s\\n\' "$1" > "$2"',
-         "_", reason, WATCHDOG_REPUBLISH_REQUEST_PATH],
+        ["sh", "-c", _REQUEST_SCRIPT, "_", reason,
+         WATCHDOG_REPUBLISH_REQUEST_PATH, WATCHDOG_ALIVE_PATH,
+         str(WATCHDOG_ALIVE_MAX_AGE)],
         timeout=10,
     )
-    return bool(getattr(result, "ok", False))
+    if getattr(result, "ok", False):
+        return REPUBLISH_REQUESTED
+    if (getattr(result, "returncode", None) == _NO_WATCHDOG_EXIT
+            and not getattr(result, "timed_out", False)):
+        return REPUBLISH_NO_WATCHDOG
+    return REPUBLISH_FAILED
+
+
+def describe_republish_request(status: str) -> str:
+    """The log text for a request_watchdog_republish() result (both hosts)."""
+    if status == REPUBLISH_REQUESTED:
+        return "requested descriptor republish from tor-watchdog"
+    if status == REPUBLISH_NO_WATCHDOG:
+        return ("republish request written, but tor-watchdog is not running "
+                "or is hung; it waits for the watchdog's restart by the tor "
+                "container's supervisor")
+    return "republish request to tor-watchdog FAILED (docker exec)"
 
 
 def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int]:

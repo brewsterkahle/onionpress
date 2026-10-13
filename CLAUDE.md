@@ -166,6 +166,20 @@
 - The request path is a literal in both `launcher_ops.py` and `tor-watchdog.py`; a test
   fails if they drift. The watchdog ships in the tor image, so this needs an image
   publish + `build/refresh-image-digests.sh` to reach users.
+- **The watchdog is supervised (issue #313).** Every entrypoint mode starts it
+  through `supervise_watchdog` (never a bare `python3 /tor-watchdog.py &`):
+  each exit is logged, restarts back off 1 s → 60 s, and a watchdog whose
+  `/run/tor-watchdog/alive` is 300 s old is killed (a clock gap in the
+  supervisor's own loop, i.e. a suspended VM, skips that check). The
+  supervisor is a function in entrypoint.sh, not a script named
+  `*tor-watchdog*`: the hosts signal `pgrep -f '[t]or-watchdog'`, and USR1
+  kills a shell. A restarted watchdog keeps the host's sleep state
+  (`/run/tor-watchdog/sleeping`, written on USR1, removed on USR2) and a
+  pending republish request; the supervisor clears the run dir once per
+  container start. A signal sent while the watchdog is down is still lost.
+  `request_watchdog_republish` returns `requested` / `no-watchdog` (file
+  written, but no `python3 /tor-watchdog.py` process or alive file > 120 s
+  old) / `failed`. `tests/test_tor_watchdog_supervised.py`.
 
 ## Security
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
