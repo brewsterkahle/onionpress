@@ -123,9 +123,44 @@ add_action( 'http_api_curl', function ( $handle, $parsed_args = array(), $url = 
     // timeout the caller passed to wp_remote_get(). Floor raised to 60 to
     // stay above the CONNECTTIMEOUT above — a 45s connect budget inside a
     // 30s total timeout could never succeed.
-    $timeout = isset( $parsed_args['timeout'] ) ? (int) $parsed_args['timeout'] : 0;
-    curl_setopt( $handle, CURLOPT_TIMEOUT, max( 60, $timeout ) );
+    //
+    // A request that sets 'onionpress_exact_timeout' keeps its own timeout:
+    // the Following feature's requests, which run under a wall-clock budget
+    // (the follow form's probe, the background blogroll refresh). The floor
+    // turned their 8-15s into 60s each, so one Follow click could block for
+    // minutes. The connect timeout above still applies; the shorter wins.
+    $timeout = isset( $parsed_args['timeout'] ) ? (float) $parsed_args['timeout'] : 0;
+    if ( ! empty( $parsed_args['onionpress_exact_timeout'] ) && $timeout > 0 ) {
+        curl_setopt( $handle, CURLOPT_TIMEOUT, max( 1, (int) ceil( $timeout ) ) );
+        return;
+    }
+    curl_setopt( $handle, CURLOPT_TIMEOUT, max( 60, (int) $timeout ) );
 }, 10, 3 );
+
+/**
+ * Send WordPress's wp-cron loopback to http://localhost inside the
+ * container, whatever host the page view arrived on.
+ *
+ * WP_SITEURL is the request's own host (docker-compose.yml), so a Tor
+ * visitor's page view spawned wp-cron at http://<onion>/wp-cron.php: out
+ * through Tor to this same site, with WordPress's 0.01 s non-blocking
+ * timeout, which ends long before a circuit is built. A clearnet view
+ * (Cloudflare tunnel) went out the same way, and the owner's
+ * http://localhost:8080 names a port nothing listens on inside the
+ * container. So scheduled events only ever ran on the main site, from the
+ * tor container's health checks. Apache listens on port 80 here (the
+ * container's own healthcheck uses http://localhost/), and sunrise.php
+ * routes a subsite by its path on any host, so only the scheme, host and
+ * port change. The background blogroll refresh depends on this.
+ */
+function onionpress_tor_proxy_cron_request( $cron_request ) {
+    if ( ! is_array( $cron_request ) || empty( $cron_request['url'] ) || ! is_string( $cron_request['url'] ) ) {
+        return $cron_request;
+    }
+    $cron_request['url'] = preg_replace( '#^https?://[^/?\#]*#i', 'http://localhost', $cron_request['url'], 1 );
+    return $cron_request;
+}
+add_filter( 'cron_request', 'onionpress_tor_proxy_cron_request', PHP_INT_MAX );
 
 /**
  * Refuse any non-local request we cannot guarantee is proxied.
