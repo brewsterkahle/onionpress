@@ -29,7 +29,7 @@ Now, in layers:
   * Raw curl in OnionPress's own plugins always sets a socks5h proxy, or
     talks to a container.
 
-php is preinstalled on ubuntu-latest, so the PHP half runs in CI; locally it
+php is preinstalled on ubuntu-24.04, so the PHP half runs in CI; locally it
 is skipped when php is missing. The harness runs the plugin against a small
 emulation of WP_Http::request() and wp_http_validate_url(), with PHP's own
 lookup functions disabled and replaced by recorders.
