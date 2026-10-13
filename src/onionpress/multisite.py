@@ -13,6 +13,7 @@ restore) can invoke just the steps they need.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from typing import Callable, Optional
@@ -45,6 +46,11 @@ MU_PLUGINS = (
     "onionpress-social-archive-mastodon.php",
     "onionpress-social-archive-bluesky.php",
     "onionpress-image-fallback.php",
+    # What Cache Enabler and the Link Fixer may do here
+    # (configure_cache_enabler and configure_ia_plugin refuse to set them
+    # up without these).
+    "onionpress-cache-policy.php",
+    "onionpress-link-fixer-policy.php",
 )
 
 # Icon assets co-located with the mu-plugins.
@@ -552,48 +558,220 @@ def write_shared_onion_address(
     return False
 
 
+# The two WordPress.org plugins OnionPress installs (app/Resources/scripts/
+# install_plugin.sh, from the launchers' install_cache_enabler and
+# install_ia_plugin). The launchers' setup_bundled_plugins runs, for each:
+# configure_* below, then activate_plugin.sh, then (Cache Enabler)
+# apply_cache_policy.
+WP_PLUGINS_DIR = "/var/www/html/wp-content/plugins"
+WP_MU_PLUGINS_DIR = "/var/www/html/wp-content/mu-plugins"
+CACHE_ENABLER_PLUGIN = "cache-enabler/cache-enabler.php"
+IA_PLUGIN = ("internet-archive-wayback-machine-link-fixer/"
+             "internet-archive-wayback-machine-link-fixer.php")
+CACHE_POLICY_MU_PLUGIN = "onionpress-cache-policy.php"
+IA_POLICY_MU_PLUGIN = "onionpress-link-fixer-policy.php"
+
+# Cache Enabler's per-host settings files and its stored pages, both
+# remade from the database on the next request (apply_cache_policy).
+CACHE_ENABLER_SETTINGS_DIR = "/var/www/html/wp-content/settings/cache-enabler"
+CACHE_ENABLER_CACHE_DIR = "/var/www/html/wp-content/cache/cache-enabler"
+
+# What OnionPress sets in a site's Link Fixer whose setup wizard has not
+# been completed, before the plugin is activated there (activation shows
+# the wizard to a site that has not completed it): links checked on
+# publish and, a few posts at a time (onionpress-link-fixer-policy.php),
+# in existing posts; a link archive.org finds broken points at its Wayback
+# copy, over https; this site's own posts are not sent to Save Page Now
+# (onionpress-wayback-archive.php archives them).
+IA_PLUGIN_OPTIONS = (
+    ("iawmlf_process_links", "1"),
+    ("iawmlf_fixer_option", "replace_link"),
+    ("iawmlf_scan_existing_posts", "1"),
+    ("iawmlf_cast_to_https", "1"),
+    ("iawmlf_allow_own_content_submissions", "0"),
+    ("iawmlf_setup_wizard_completed", "1"),
+)
+# Links the Link Fixer's front-end script leaves alone (fnmatch patterns,
+# its iawmlf_link_exclusions option): onion services and this machine.
+# archive.org is never asked about them either (onionpress-link-fixer-
+# policy.php); these keep them out of the page's link data as well.
+IA_LINK_EXCLUSIONS = (
+    "*://*.onion", "*://*.onion/*", "*://*.onion:*", "*://*.onion?*", "*://*.onion#*",
+    "*://localhost", "*://localhost/*", "*://localhost:*",
+)
+# Set in each site once the above is applied there. Raise the version when
+# OnionPress's choices change, so sites configured earlier get them.
+IA_CONFIG_MARKER = "onionpress_link_fixer_config"
+IA_CONFIG_VERSION = "1"
+
+
+def _in_container(path: str, *, docker_bin: str = "docker") -> bool:
+    """Is *path* a file in the WordPress container? Looked at as www-data,
+    whose folders these are."""
+    return _exec_www_data(f"test -f '{path}'", docker_bin=docker_bin).returncode == 0
+
+
+def site_urls(*, docker_bin: str = "docker") -> list:
+    """Every site's URL on a multisite; [None] on a single site (or when
+    the list cannot be had), meaning: run without --url."""
+    r = _wp("site", "list", "--field=url", docker_bin=docker_bin)
+    urls = [u.strip() for u in (r.stdout or "").splitlines() if u.strip()]
+    if r.returncode != 0 or not urls:
+        return [None]
+    return urls
+
+
 def configure_ia_plugin(
     *,
     docker_bin: str = "docker",
     log_func: Optional[Callable[[str], None]] = None,
 ) -> bool:
-    """Configure the Internet Archive Wayback Machine Link Fixer plugin
-    if it's installed and WP is set up. Skips silently if either is not
-    yet the case (the bash launcher used to run this every start; we
-    preserve the no-op-when-not-ready semantics).
+    """Configure the Internet Archive Wayback Machine Link Fixer in every
+    site, before setup_bundled_plugins activates it there.
+
+    The Link Fixer keeps its options and its link table per site, and the
+    user's own posts live in their subsite, not the main site this used to
+    configure. A site whose wizard is not completed gets IA_PLUGIN_OPTIONS;
+    one whose wizard is (an older OnionPress set it on the main site, or
+    the owner went through it) keeps its choices. Every site gets
+    IA_LINK_EXCLUSIONS merged into its own. Once per site and
+    IA_CONFIG_VERSION.
+
+    True when there is nothing to do (WordPress or the plugin not there
+    yet) or every site is configured; False when a site could not be, or
+    onionpress-link-fixer-policy.php is missing, so that the launcher does
+    not activate the plugin without it.
     """
     log = log_func or _noop_log
     if not wp_is_installed(docker_bin):
         return True
-
-    plugin_file = (
-        "/var/www/html/wp-content/plugins/"
-        "internet-archive-wayback-machine-link-fixer/"
-        "internet-archive-wayback-machine-link-fixer.php"
-    )
-    if _exec_sh(f"test -f {plugin_file}",
-                docker_bin=docker_bin).returncode != 0:
+    if not _in_container(f"{WP_PLUGINS_DIR}/{IA_PLUGIN}", docker_bin=docker_bin):
         return True  # Plugin not installed; nothing to configure
+    if not _in_container(f"{WP_MU_PLUGINS_DIR}/{IA_POLICY_MU_PLUGIN}",
+                         docker_bin=docker_bin):
+        log(f"WARNING: {IA_POLICY_MU_PLUGIN} is not installed — "
+            "not setting up the Internet Archive Link Fixer without it")
+        return False
 
-    done = _wp("option", "get", "iawmlf_setup_wizard_completed",
-               docker_bin=docker_bin)
-    if done.returncode == 0 and done.stdout.strip() == "1":
-        log("Internet Archive plugin already configured")
+    ok = True
+    for url in site_urls(docker_bin=docker_bin):
+        ok = _configure_ia_site(url, docker_bin=docker_bin, log=log) and ok
+    return ok
+
+
+def _configure_ia_site(url: Optional[str], *, docker_bin: str, log) -> bool:
+    where = [f"--url={url}"] if url else []
+    site = url or "the site"
+
+    def wp(*args):
+        return _wp(*args, *where, docker_bin=docker_bin)
+
+    done = wp("option", "get", IA_CONFIG_MARKER)
+    if done.returncode == 0 and done.stdout.strip() == IA_CONFIG_VERSION:
         return True
 
-    log("Configuring Internet Archive Wayback Machine Link Fixer plugin...")
-    options = (
-        ("iawmlf_process_links", "1"),
-        ("iawmlf_fixer_option", "replace_link"),
-        ("iawmlf_scan_existing_posts", "1"),
-        ("iawmlf_setup_wizard_completed", "1"),
-    )
-    for name, value in options:
-        r = _wp("option", "update", name, value, docker_bin=docker_bin)
-        if r.returncode != 0:
-            log(f"WARNING: Failed to set {name}: {r.stderr.strip()[:200]}")
+    ok = True
+    wizard = wp("option", "get", "iawmlf_setup_wizard_completed")
+    if wizard.returncode == 0 and wizard.stdout.strip() == "1":
+        log(f"Internet Archive Link Fixer already set up on {site} — keeping its settings")
+    else:
+        log(f"Configuring the Internet Archive Link Fixer on {site}...")
+        for name, value in IA_PLUGIN_OPTIONS:
+            r = wp("option", "update", name, value)
+            if r.returncode != 0:
+                ok = False
+                log(f"WARNING: Failed to set {name} on {site}: {r.stderr.strip()[:200]}")
 
-    log("Internet Archive plugin configured (link fixer enabled, wizard completed)")
+    current = wp("option", "get", "iawmlf_link_exclusions", "--format=json")
+    try:
+        existing = json.loads(current.stdout) if current.returncode == 0 else []
+    except ValueError:
+        existing = []
+    if isinstance(existing, dict):
+        existing = list(existing.values())
+    if not isinstance(existing, list):
+        existing = []
+    existing = [e for e in existing if isinstance(e, str)]
+    merged = existing + [p for p in IA_LINK_EXCLUSIONS if p not in existing]
+    r = wp("option", "update", "iawmlf_link_exclusions", json.dumps(merged),
+           "--format=json")
+    if r.returncode != 0:
+        ok = False
+        log(f"WARNING: Failed to set the Link Fixer's exclusions on {site}: "
+            f"{r.stderr.strip()[:200]}")
+
+    if ok:
+        wp("option", "update", IA_CONFIG_MARKER, IA_CONFIG_VERSION)
+        log(f"Internet Archive Link Fixer configured on {site}")
+    return ok
+
+
+def configure_cache_enabler(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """Prepare Cache Enabler's activation (setup_bundled_plugins runs this
+    first). Its settings come from onionpress-cache-policy.php, which Cache
+    Enabler consults when it validates them on activation; without that
+    mu-plugin it would cache with its own defaults (any host, utm_* query
+    strings served the bare page), so this refuses (False) and the launcher
+    does not activate it. Activation writes its settings file through
+    WP_Filesystem, which under wp-cli (the wp-cli phar is root's, wp-cli
+    runs as www-data) falls back to FTP and fails unless FS_METHOD is
+    'direct'; set only when it is not, so wp-config.php is not rewritten
+    at every start. True when there is nothing to do.
+    """
+    log = log_func or _noop_log
+    if not wp_is_installed(docker_bin):
+        return True
+    if not _in_container(f"{WP_PLUGINS_DIR}/{CACHE_ENABLER_PLUGIN}",
+                         docker_bin=docker_bin):
+        return True
+    if not _in_container(f"{WP_MU_PLUGINS_DIR}/{CACHE_POLICY_MU_PLUGIN}",
+                         docker_bin=docker_bin):
+        log(f"WARNING: {CACHE_POLICY_MU_PLUGIN} is not installed — "
+            "not setting up Cache Enabler without it")
+        return False
+    current = _wp("config", "get", "FS_METHOD", docker_bin=docker_bin)
+    if current.returncode == 0 and current.stdout.strip() == "direct":
+        return True
+    r = _wp("config", "set", "FS_METHOD", "direct", "--type=constant",
+            docker_bin=docker_bin)
+    if r.returncode != 0:
+        log(f"WARNING: Failed to set FS_METHOD=direct: {r.stderr.strip()[:200]}")
+        return False
+    log("FS_METHOD=direct set for Cache Enabler")
+    return True
+
+
+def apply_cache_policy(
+    *,
+    docker_bin: str = "docker",
+    log_func: Optional[Callable[[str], None]] = None,
+) -> bool:
+    """After Cache Enabler is activated: validate every site's settings
+    again through onionpress-cache-policy.php (`wp onionpress-cache-policy
+    apply`), then remove its settings files and stored pages, as www-data
+    (they are www-data's; rm follows no link). Both are snapshots of
+    whatever settings were in force when they were written; the next
+    request remakes them from the settings just checked. False when the
+    command fails; the files are left as they are then.
+    """
+    log = log_func or _noop_log
+    r = _wp("onionpress-cache-policy", "apply", docker_bin=docker_bin, timeout=120)
+    if r.returncode != 0:
+        log(f"WARNING: Cache Enabler settings not checked: "
+            f"{(r.stderr or r.stdout).strip()[:200]}")
+        return False
+    r = _exec_www_data(
+        f"rm -f {CACHE_ENABLER_SETTINGS_DIR}/*.php && rm -rf {CACHE_ENABLER_CACHE_DIR}",
+        docker_bin=docker_bin, timeout=300,
+    )
+    if r.returncode != 0:
+        log(f"WARNING: Cache Enabler's stored pages not cleared: {r.stderr.strip()[:200]}")
+        return False
+    log("Cache Enabler: settings checked on every site, stored pages cleared")
     return True
 
 

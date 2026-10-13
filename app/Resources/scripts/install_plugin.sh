@@ -1,9 +1,13 @@
 #!/bin/bash
 # Download and verify WordPress plugin from WordPress.org
 # Usage: install_plugin.sh <plugin-slug> <destination-dir>
+#        install_plugin.sh --pinned-version <plugin-slug>
+#            prints the version pinned below (the launchers replace an
+#            installed copy of any other version)
 
 if [ $# -ne 2 ]; then
     echo "Usage: install_plugin.sh <plugin-slug> <destination-dir>"
+    echo "       install_plugin.sh --pinned-version <plugin-slug>"
     exit 1
 fi
 
@@ -29,6 +33,12 @@ plugin_pin() {
         *) return 1 ;;
     esac
 }
+
+if [ "$1" = "--pinned-version" ]; then
+    PIN=$(plugin_pin "$2") || exit 1
+    echo "${PIN%% *}"
+    exit 0
+fi
 
 if [ ! -d "$DEST_DIR" ]; then
     echo "Error: Destination directory does not exist: $DEST_DIR"

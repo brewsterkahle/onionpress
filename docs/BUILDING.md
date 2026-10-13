@@ -672,7 +672,26 @@ same versioned URL the launcher fetches over Tor
 (`downloads.wordpress.org/plugin/<slug>.<version>.zip`). WordPress.org
 builds those zips itself; if it ever rebuilds one, the install refuses it
 until the pin is renewed (`tests/test_plugin_pins.py` checks the pins'
-form and runs the check).
+form and runs the check). An installed copy of any other version is
+replaced at the next start.
+
+Both plugins are held in check by mu-plugins that lean on their internals,
+so a new release is also read against those:
+
+- `onionpress-cache-policy.php` (Cache Enabler): the
+  `cache_enabler_settings_before_validation` and `cache_enabler_bypass_cache`
+  filters, the per-host settings files in `wp-content/settings/cache-enabler/`
+  and `Cache_Enabler_Disk::delete_settings_file()`, and clearing going
+  through `Cache_Enabler_Disk::cache_iterator()` → `esc_url_raw()` (how
+  clearing reaches the onion address). If clearing moves, posts published
+  from localhost show on the onion site only when the hour is up.
+- `onionpress-link-fixer-policy.php` (IA Link Fixer): every request through
+  the WordPress HTTP API with a `WP-Wayback-Link-Fixer` header and the link
+  in a `url` parameter or POST field, the `iawmlf_posts_per_batch` and
+  `iawmlf_scan_posts_interval` filters, the `iawmlf_process_links` option and
+  `iawmlf_links` post meta, and the importers' `_source_id` post meta.
+
+`tests/test_bundled_plugins.py` runs both mu-plugins against those shapes.
 
 ---
 

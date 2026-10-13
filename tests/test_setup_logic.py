@@ -53,7 +53,11 @@ class TestInstallFreshWordpress(unittest.TestCase):
             data_dir=self.tmpdir,
         )
         defaults.update(kwargs)
-        return setup_logic.install_fresh_wordpress(**defaults)
+        # Never start a real launcher (a machine running the tests may have
+        # one at these paths, with a live site behind it).
+        with mock.patch.object(setup_logic, "start_bundled_plugin_setup",
+                               return_value=True) as self.plugin_setup:
+            return setup_logic.install_fresh_wordpress(**defaults)
 
     def test_happy_path_invokes_wp_core_install(self):
         with mock.patch(

@@ -610,6 +610,53 @@
   `build/pin-wp-plugin.sh <slug> <version>` prints a pin.
   `tests/test_plugin_pins.py`.
 
+## Cache Enabler and the Link Fixer Are Active
+- Until this release neither was ever activated: activate_plugin.sh forced
+  DOCKER_HOST to the Colima socket (nothing on Linux), used timeout(1)
+  (none on macOS) and, earlier, `docker exec -T`; the .deb shipped neither
+  script. It now runs in the launcher's environment, `--network` or
+  `--each-site`, exit 2 when WordPress is not installed.
+- Both launchers, identical functions (test-enforced): `install_ia_plugin`/
+  `install_cache_enabler` → `install_wp_org_plugin` (pinned release; any
+  other installed version is replaced) before provision-post-install (which
+  installs the policy mu-plugins), then `setup_bundled_plugins`:
+  `configure-cache-enabler` (FS_METHOD=direct; refuses without
+  onionpress-cache-policy.php) → `activate_plugin.sh … --network` →
+  `apply-cache-policy` (`wp onionpress-cache-policy apply` re-validates every
+  site, then settings files and stored pages are removed as www-data); and
+  `configure-ia-plugin` (per site, before activation, once per
+  `IA_CONFIG_VERSION`; refuses without onionpress-link-fixer-policy.php) →
+  `activate_plugin.sh … --each-site`. Every start, and once more via the
+  `setup-bundled-plugins` subcommand that `install_fresh_wordpress` starts
+  in the background after the user's subsite exists. `INSTALL_IA_PLUGIN` /
+  `INSTALL_CACHE_ENABLER=no` skip a plugin (an active one stays active).
+- Why network vs per site: Cache Enabler's drop-in and page cache serve the
+  whole network and the mu-plugin fills in every site's settings (new sites
+  too); the Link Fixer creates its link table only in the site it is
+  activated on (network activation left the user's subsite failing on save).
+- **Cache policy** (onionpress-cache-policy.php): pages are stored only for
+  Host == this install's onion address exactly (no port), anonymous, no
+  Set-Cookie or no-cache/private header, not is_404, not the My Creations
+  or Directory templates. Serving happens before WordPress loads and checks
+  only the settings file's exclusions, so every site gets, whatever is
+  saved: any query string, `wordpress*`/`wp-postpass`/`wp-settings`/
+  `comment_author` cookies, wp-admin/wp-json/wp-login.php/onionpress-status
+  paths, expiry 1–24 h. Cache Enabler clears the home URL's host, which the
+  domain map makes the request's (localhost for the owner): a `clean_url`
+  filter rewrites it to the onion address, only inside
+  `Cache_Enabler_Disk::cache_iterator`. A settings change drops the onion
+  address's settings files; settings files of any host but the onion,
+  localhost, 127.0.0.1, [::1] and wordpress are removed at shutdown (Tor
+  visitors choose the Host header).
+- **Link Fixer policy** (onionpress-link-fixer-policy.php): its requests
+  (WP-Wayback-Link-Fixer header) never name an onion, local or private link
+  (refused before the HTTP call; its own exclusions do not stop the
+  lookups), always verify TLS (its Save Page Now POST turns it off), get
+  30–60 s; the existing-posts scan does 5 posts per 15 min, and an imported
+  post (`_source_id`) is left to that scan on its first save.
+- Re-pinning either plugin means re-reading these against its internals
+  (docs/BUILDING.md). `tests/test_bundled_plugins.py`.
+
 ## Multi-User Support (v2.4.11+)
 - Multiple macOS users can run OnionPress simultaneously from the same `/Applications/OnionPress.app`
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers

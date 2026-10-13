@@ -230,11 +230,14 @@ class TestConfigureIaPlugin(unittest.TestCase):
         wp.assert_not_called()
 
     def test_skips_when_already_configured(self):
-        # wizard_completed = "1" → short-circuit, no option-update calls.
+        # The site carries OnionPress's marker at the current version →
+        # short-circuit, no option-update calls (tests/test_bundled_plugins.py
+        # covers the rest).
         def fake_wp(*args, **kwargs):
-            if "get" in args and "iawmlf_setup_wizard_completed" in args:
+            if "get" in args and multisite.IA_CONFIG_MARKER in args:
                 return subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout="1\n", stderr="")
+                    args=[], returncode=0,
+                    stdout=multisite.IA_CONFIG_VERSION + "\n", stderr="")
             return _ok()
 
         update_calls = []
@@ -245,12 +248,12 @@ class TestConfigureIaPlugin(unittest.TestCase):
             return r
 
         with mock.patch.object(multisite, "wp_is_installed", return_value=True), \
-             mock.patch.object(multisite, "_exec_sh", return_value=_ok()), \
+             mock.patch.object(multisite, "_exec_www_data", return_value=_ok()), \
              mock.patch.object(multisite, "_wp", side_effect=tracker):
-            multisite.configure_ia_plugin(log_func=lambda _: None)
+            self.assertTrue(multisite.configure_ia_plugin(log_func=lambda _: None))
         self.assertEqual(
             update_calls, [],
-            "must NOT re-write IA plugin options when wizard already done",
+            "must NOT re-write IA plugin options when already configured",
         )
 
 

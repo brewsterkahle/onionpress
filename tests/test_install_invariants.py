@@ -933,11 +933,15 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # etc.) USED to be here but have been ported to
     # src/onionpress/multisite.py — see TestMultisiteModuleExports below
     # for the equivalent assertion at the Python level. What stays bash:
-    # install_ia_plugin (shells out to install_plugin.sh + activate_
-    # plugin.sh helpers; bigger lift to port) and detect_port_offset
-    # (needs to run before the Python lib path is set up).
+    # the WordPress.org plugin steps (install_plugin.sh + activate_plugin.sh
+    # helpers around the Python configure-*/apply-cache-policy steps;
+    # tests/test_bundled_plugins.py also holds the two copies equal) and
+    # detect_port_offset (needs to run before the Python lib path is set up).
     REQUIRED_ON_BOTH = {
         "install_ia_plugin",
+        "install_cache_enabler",
+        "install_wp_org_plugin",
+        "setup_bundled_plugins",
         "detect_port_offset",
     }
     # `fetch_archive_s3_keys` exists only on Linux: it's a helper used by
@@ -986,6 +990,8 @@ class TestMultisiteModuleExports(unittest.TestCase):
         "fix_wordpress_uploads_permissions",
         "write_shared_onion_address",
         "configure_ia_plugin",
+        "configure_cache_enabler",
+        "apply_cache_policy",
         "deactivate_wp_statistics",
         "ensure_archive_s3_keys",
         "provision_post_install",  # orchestrator

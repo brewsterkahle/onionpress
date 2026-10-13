@@ -302,10 +302,6 @@ if [ -d "$REPO_DIR/app/Resources/themes" ]; then
     $SUDO cp -r "$REPO_DIR/app/Resources/themes" "$INSTALL_DIR/themes"
 fi
 
-if [ -d "$REPO_DIR/app/Resources/scripts" ]; then
-    $SUDO cp -r "$REPO_DIR/app/Resources/scripts" "$INSTALL_DIR/scripts"
-fi
-
 # Shared Python package — required by `op_py` in the launcher (PYTHONPATH=$INSTALL_DIR/lib)
 # and by onionpress-tray which inserts $INSTALL_DIR/lib into sys.path.
 $SUDO mkdir -p "$INSTALL_DIR/lib"
@@ -343,6 +339,11 @@ $SUDO cp "$REPO_DIR/src/onionpress/key_manager.py" "$INSTALL_DIR/scripts/"
 if [ -f "$REPO_DIR/linux/onionpress-heartbeat.py" ]; then
     $SUDO cp "$REPO_DIR/linux/onionpress-heartbeat.py" "$INSTALL_DIR/scripts/"
 fi
+# The plugin scripts the launcher runs from $SCRIPTS_DIR (install_plugin.sh,
+# activate_plugin.sh), into scripts/ itself: the `cp -r` of the folder this
+# replaces put them in scripts/scripts/ on a reinstall, where the launcher
+# never looked, and kept the first install's copies in use.
+$SUDO install -m 0755 "$REPO_DIR"/app/Resources/scripts/*.sh "$INSTALL_DIR/scripts/"
 
 # Copy systemd service files into install dir (so they survive temp dir cleanup)
 $SUDO cp "$REPO_DIR/linux/onionpress.service" "$INSTALL_DIR/"

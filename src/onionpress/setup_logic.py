@@ -433,6 +433,27 @@ def provision_primary_subsite(
     return True
 
 
+def start_bundled_plugin_setup(launcher_bin: str, log: Callable[[str], None]) -> bool:
+    """Start `<launcher_bin> setup-bundled-plugins` in the background: the
+    launcher configures and activates Cache Enabler and the Link Fixer
+    (setup_bundled_plugins). Its start skipped them, WordPress not being
+    installed then, and the Link Fixer is activated site by site, so this
+    runs once setup has made the user's site. A minute of wp-cli calls
+    (more on a Raspberry Pi) the user need not wait for; the launcher logs
+    it, and its next start does it otherwise."""
+    try:
+        subprocess.Popen(
+            [launcher_bin, "setup-bundled-plugins"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as e:
+        log(f"WARNING: plugin setup not started ({e}); it runs at the next start")
+        return False
+    log("Cache Enabler and Link Fixer setup started in background")
+    return True
+
+
 def install_fresh_wordpress(
     *,
     site_title: str,
@@ -463,7 +484,8 @@ def install_fresh_wordpress(
          conversion, sunrise.php + mu-plugins, theme, permission fixes.
          The bash subcommand stays bash for now; planned Python port in
          src/onionpress/multisite.py as a follow-up.
-      6. provision_primary_subsite() — per-user subsite at /<onionname>/.
+      6. provision_primary_subsite() — per-user subsite at /<onionname>/,
+         then start_bundled_plugin_setup() (Cache Enabler, Link Fixer).
       7. Mark onboarded; persist onionname to ~/.onionpress/config.
 
     Returns True on success (best-effort — individual sub-steps may log
@@ -565,6 +587,10 @@ def install_fresh_wordpress(
         docker_bin=docker_bin,
         log_func=log_func,
     )
+
+    # 6b. Cache Enabler and the Link Fixer, now that every site exists.
+    if launcher_bin is not None:
+        start_bundled_plugin_setup(launcher_bin, log)
 
     # 7. Mark onboarded + persist onionname.
     # `wp option update` writes wp_options (per-blog). The

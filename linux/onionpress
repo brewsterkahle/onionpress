@@ -769,65 +769,139 @@ import_key_noninteractive() {
 
 # ─── Plugin installation ─────────────────────────────────────────────
 
-install_ia_plugin() {
-    local install_plugin="yes"
-    if [ -f "$DATA_DIR/config" ]; then
-        local config_value=$(grep "^INSTALL_IA_PLUGIN=" "$DATA_DIR/config" | cut -d= -f2)
-        if [ ! -z "$config_value" ]; then
-            install_plugin="$config_value"
-        fi
+# Is a WordPress.org plugin wanted? plugin_wanted INSTALL_CACHE_ENABLER |
+# INSTALL_IA_PLUGIN: yes unless ~/.onionpress/config sets it to something
+# else; missing or empty means yes, as it always has.
+plugin_wanted() {
+    local value
+    value=$(grep "^$1=" "$DATA_DIR/config" 2>/dev/null | tail -1 | cut -d= -f2)
+    [ -z "$value" ] || [ "$value" = "yes" ]
+}
+
+# Is the plugin file $1 (<folder>/<main file>.php) in the WordPress
+# container's plugins folder? Looked at as www-data, whose folder it is.
+wp_plugin_present() {
+    wp_exec test -f "/var/www/html/wp-content/plugins/$1" 2>/dev/null
+}
+
+# The Version: header of the plugin file $1, as installed ('' if none).
+# Compared with the pin only; kept to version characters for the log.
+wp_plugin_version() {
+    wp_exec sed -n 's/^[[:space:]*]*Version:[[:space:]]*//p' \
+        "/var/www/html/wp-content/plugins/$1" 2>/dev/null | head -1 | tr -cd '0-9A-Za-z.-'
+}
+
+# Put the pinned release of a WordPress.org plugin in the WordPress
+# container: install_wp_org_plugin <slug> <name for the log>. Downloaded
+# over Tor and checked against its pin (install_plugin.sh); a copy of any
+# other version (installed before plugins were pinned) is replaced, so
+# what gets activated is the release that was reviewed. Activation is
+# setup_bundled_plugins's.
+install_wp_org_plugin() {
+    local slug="$1" name="$2"
+    local pinned installed temp_dir
+
+    if [ ! -d "$SCRIPTS_DIR" ] || [ ! -f "$SCRIPTS_DIR/install_plugin.sh" ]; then
+        log "Plugin installation scripts not available, skipping $name"
+        return 0
+    fi
+    if ! pinned=$("$SCRIPTS_DIR/install_plugin.sh" --pinned-version "$slug"); then
+        log "No pinned release of $name — not installing it"
+        return 0
     fi
 
-    if [ "$install_plugin" != "yes" ]; then
+    installed=$(wp_plugin_version "$slug/$slug.php")
+    if [ "$installed" = "$pinned" ]; then
+        log "$name $installed already installed"
+        return 0
+    fi
+    if [ -n "$installed" ]; then
+        log "Replacing $name $installed with the pinned release $pinned..."
+    else
+        log "Installing $name $pinned..."
+    fi
+
+    temp_dir=$(mktemp -d)
+    if "$SCRIPTS_DIR/install_plugin.sh" "$slug" "$temp_dir" >>"$LOG_FILE" 2>&1; then
+        # Written as www-data, not docker cp + chown -R as root (both
+        # followed links www-data can plant in plugins/).
+        if op_py put-wp-tree --src "$temp_dir/$slug" \
+                --dest "/var/www/html/wp-content/plugins/$slug" 2>>"$LOG_FILE"; then
+            log "✓ $name $pinned installed with verified checksum"
+        else
+            log "Failed to copy $name to container"
+        fi
+    else
+        log "Failed to download and verify $name - check log for details"
+    fi
+    rm -rf "$temp_dir"
+    return 0
+}
+
+# Internet Archive Wayback Machine Link Fixer: points links archive.org
+# finds broken at their Wayback copies. INSTALL_IA_PLUGIN=no leaves it out.
+install_ia_plugin() {
+    if ! plugin_wanted INSTALL_IA_PLUGIN; then
         log "Internet Archive plugin installation disabled in config"
         return 0
     fi
+    install_wp_org_plugin internet-archive-wayback-machine-link-fixer \
+        "Internet Archive Wayback Machine Link Fixer"
+}
 
-    if [ ! -d "$SCRIPTS_DIR" ] || [ ! -f "$SCRIPTS_DIR/install_plugin.sh" ]; then
-        log "Plugin installation scripts not available, skipping"
+# Cache Enabler, a page cache for what Tor visitors see (what it may keep:
+# onionpress-cache-policy.php). INSTALL_CACHE_ENABLER=no leaves it out.
+install_cache_enabler() {
+    if ! plugin_wanted INSTALL_CACHE_ENABLER; then
+        log "Cache Enabler plugin installation disabled in config"
+        return 0
+    fi
+    install_wp_org_plugin cache-enabler "Cache Enabler"
+}
+
+# Configure, then activate, the plugins install_cache_enabler and
+# install_ia_plugin put in place (each while still wanted in the config),
+# and for Cache Enabler then check its settings against OnionPress's cache
+# policy. Configured first: Cache Enabler validates its settings (through
+# onionpress-cache-policy.php) and writes its files when it is activated,
+# and the Link Fixer shows its setup wizard unless it is completed by then.
+# Cache Enabler is network-activated (one drop-in and page cache for the
+# network; the mu-plugin gives every site, also one made later, its
+# settings); the Link Fixer site by site, as it creates its link table only
+# in the site it is activated on. The configure-* steps refuse, and nothing
+# is activated, without the policy mu-plugins, so this runs after
+# provision-post-install. Also run by the setup-bundled-plugins subcommand,
+# which setup_logic.install_fresh_wordpress starts once setup has made the
+# user's site. Idempotent; activation is repeated at every start
+# (INSTALL_*=no stops that, and leaves an active plugin as it is).
+setup_bundled_plugins() {
+    if ! wp_is_installed; then
+        log "WordPress not installed yet — Cache Enabler and the Link Fixer are set up after setup"
         return 0
     fi
 
-    log "Checking Internet Archive Wayback Machine Link Fixer plugin..."
-
-    cd "$DOCKER_DIR"
-
-    if docker compose exec -T wordpress test -f /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php 2>/dev/null; then
-        log "Internet Archive plugin already installed, checking activation status..."
-        if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
-            "internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php" >>"$LOG_FILE" 2>&1; then
-            log "Internet Archive Wayback Machine Link Fixer plugin is active"
+    if plugin_wanted INSTALL_CACHE_ENABLER && wp_plugin_present cache-enabler/cache-enabler.php; then
+        if op_py configure-cache-enabler >>"$LOG_FILE" 2>&1 \
+                && "$SCRIPTS_DIR/activate_plugin.sh" onionpress-wordpress \
+                    cache-enabler/cache-enabler.php --network >>"$LOG_FILE" 2>&1 \
+                && op_py apply-cache-policy >>"$LOG_FILE" 2>&1; then
+            log "✓ Cache Enabler active, cache policy applied"
         else
-            log "Plugin will auto-activate after WordPress setup"
+            log "WARNING: Cache Enabler not set up — see $LOG_FILE"
         fi
-        return 0
     fi
 
-    log "Installing Internet Archive Wayback Machine Link Fixer plugin..."
-
-    local temp_dir=$(mktemp -d)
-
-    if "$SCRIPTS_DIR/install_plugin.sh" "internet-archive-wayback-machine-link-fixer" "$temp_dir" >>"$LOG_FILE" 2>&1; then
-        # Written as www-data, not docker cp + chown -R as root (both
-        # followed links www-data can plant in plugins/).
-        if op_py put-wp-tree --src "$temp_dir/internet-archive-wayback-machine-link-fixer" \
-                --dest /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer 2>>"$LOG_FILE"; then
-            log "Internet Archive Wayback Machine Link Fixer plugin installed"
-
-            if "$SCRIPTS_DIR/activate_plugin.sh" "onionpress-wordpress" \
-                "internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php" >>"$LOG_FILE" 2>&1; then
-                log "Plugin automatically activated"
-            else
-                log "Plugin will auto-activate after WordPress setup"
-            fi
+    if plugin_wanted INSTALL_IA_PLUGIN \
+            && wp_plugin_present internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php; then
+        if op_py configure-ia-plugin >>"$LOG_FILE" 2>&1 \
+                && "$SCRIPTS_DIR/activate_plugin.sh" onionpress-wordpress \
+                    internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php \
+                    --each-site >>"$LOG_FILE" 2>&1; then
+            log "✓ Internet Archive Wayback Machine Link Fixer active on every site"
         else
-            log "Failed to copy plugin to container"
+            log "WARNING: Internet Archive Link Fixer not set up — see $LOG_FILE"
         fi
-    else
-        log "Failed to download and verify plugin - check log for details"
     fi
-
-    rm -rf "$temp_dir"
     return 0
 }
 
@@ -1698,18 +1772,19 @@ start_containers() {
     # monitor + takeover Tor) running (signaled by an activation flag file).
     start_onionheaven_activation_watcher
 
-    # install_ia_plugin stays bash for now — it shells out to two helper
-    # scripts (install_plugin.sh, activate_plugin.sh) that handle the
-    # WordPress.org download + SHA verify + wp-cli activation. That's a
-    # bigger lift to port; tracking as a follow-up.
+    # Put the pinned Internet Archive Link Fixer and Cache Enabler releases
+    # in place (downloaded over Tor, checked against their pins).
+    # setup_bundled_plugins configures and activates them below, once
+    # provision-post-install has installed the mu-plugins that say what
+    # they may do.
     install_ia_plugin
+    install_cache_enabler
 
     # Everything else is now in src/onionpress/multisite.py. Each call
     # used to be a bash function defined later in this file; the bash
     # implementations are kept for now (called from no one but ourselves)
     # and can be deleted in a follow-up once we're confident the Python
     # ports cover every scenario.
-    op_py configure-ia-plugin
     op_py deactivate-wp-statistics
     # provision-post-install handles the wp_is_installed gating
     # internally — the multisite/theme steps short-circuit when WP
@@ -1719,6 +1794,7 @@ start_containers() {
     op_py provision-post-install \
         --themes-dir "$THEMES_DIR" \
         --plugins-dir "$PLUGINS_DIR"
+    setup_bundled_plugins
 
     # Image derivatives (#257): if a restore left resized images to rebuild,
     # do it in the background — niced, detached in a subshell so it is not
@@ -2958,6 +3034,9 @@ main() {
                 op_py provision-post-install \
                     --themes-dir "$THEMES_DIR" \
                     --plugins-dir "$PLUGINS_DIR" >> "$LOG_FILE" 2>&1 || true
+                # Then Cache Enabler and the Link Fixer, which need the
+                # mu-plugins provision-post-install has just installed.
+                setup_bundled_plugins
                 # Fetch archive.org S3 keys now that Tor is up and WP is
                 # installed — same timing as the Mac setup flow.
                 op_py ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 &
@@ -3004,6 +3083,14 @@ sys.exit(0 if provision_interactive() else 1)
             op_py provision-post-install \
                 --themes-dir "$THEMES_DIR" \
                 --plugins-dir "$PLUGINS_DIR"
+            ;;
+
+        setup-bundled-plugins)
+            # Configure and activate Cache Enabler and the Link Fixer
+            # (setup_bundled_plugins). setup_logic.install_fresh_wordpress
+            # starts this in the background once setup has made the user's
+            # site, so a new install has them without waiting for a restart.
+            setup_bundled_plugins
             ;;
 
         import-key)

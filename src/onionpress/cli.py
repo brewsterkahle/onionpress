@@ -942,7 +942,13 @@ def main(argv: list[str] = None) -> int:
         help="Validate a WP admin password (reads from stdin). Exit 0 = match.",
     )
     sub.add_parser("configure-ia-plugin",
-                   help="Configure the IA Wayback Machine Link Fixer plugin")
+                   help="Configure the IA Wayback Machine Link Fixer in every site "
+                        "(before it is activated)")
+    sub.add_parser("configure-cache-enabler",
+                   help="Prepare Cache Enabler's activation (policy mu-plugin, FS_METHOD)")
+    sub.add_parser("apply-cache-policy",
+                   help="Check Cache Enabler's settings against OnionPress's cache "
+                        "policy; clear its stored pages (after activation)")
     sub.add_parser("deactivate-wp-statistics",
                    help="Remove WP-Statistics if present (clearnet leak)")
     sub.add_parser("ensure-archive-s3-keys",
@@ -1224,6 +1230,12 @@ def main(argv: list[str] = None) -> int:
     elif args.command == "configure-ia-plugin":
         from . import multisite
         return 0 if multisite.configure_ia_plugin(log_func=print) else 1
+    elif args.command == "configure-cache-enabler":
+        from . import multisite
+        return 0 if multisite.configure_cache_enabler(log_func=print) else 1
+    elif args.command == "apply-cache-policy":
+        from . import multisite
+        return 0 if multisite.apply_cache_policy(log_func=print) else 1
     elif args.command == "deactivate-wp-statistics":
         from . import multisite
         return 0 if multisite.deactivate_wp_statistics(log_func=print) else 1

@@ -66,6 +66,11 @@ collect_files() {
     if [ -f "$PROJECT_DIR/linux/onionpress-heartbeat.py" ]; then
         cp "$PROJECT_DIR/linux/onionpress-heartbeat.py" "$dest/scripts/"
     fi
+    # The plugin scripts the launcher runs from $SCRIPTS_DIR: install_plugin.sh
+    # (a pinned WordPress.org plugin, downloaded over Tor) and
+    # activate_plugin.sh (wp-cli activation as www-data). Without them the
+    # .deb installed neither Cache Enabler nor the Link Fixer.
+    install -m 0755 "$PROJECT_DIR"/app/Resources/scripts/*.sh "$dest/scripts/"
 
     # Shared Python package — the bash launcher (via `python3 -m
     # onionpress.cli ...`) and the tray app both consume this. Ship the
