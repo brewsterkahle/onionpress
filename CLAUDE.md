@@ -470,6 +470,27 @@
   file O_EXCL|O_NOFOLLOW 0600, fsync, rename, fsync dir.
   `tests/test_hub_stored_keys.py`. All of this ships in the tor image.
 
+## Request Signatures Are Checked by libsodium
+- `onion_auth.verify` is PyNaCl's `VerifyKey(pub).verify` (libsodium's
+  crypto_sign_open): S < L, no small-order or non-canonical key or R. The
+  pure-Python verifier it replaced took R = identity, S = 0 as a signature
+  of anything for a small-order key, so anyone could sign for
+  `aeaaaa…hmjqd.onion`. Signing is still the pure-Python expanded-key
+  signer (libsodium and pyca/cryptography sign only from a seed; an
+  mkp224o key has none); changing that is an open decision for Ivar.
+- The only verifier is the hub's web-server.py: `_verify_signature`
+  (/online, /offline, /unregister), `_signed_peer_claim`, the OnionHome
+  name and log endpoints. `tests/test_onion_auth.py` keeps that census and
+  keeps the three copies of onion_auth.py (src, tor image, tests/stress)
+  identical.
+- Without PyNaCl verify raises `VerificationUnavailable`, never says yes:
+  do_POST answers 503 and nothing is done; a peer claim earns nothing. No
+  /online then gets through, so the heartbeat monitor takes over no site
+  for a missed heartbeat (`stale_takeovers_allowed`) and gives every online
+  site a fresh grace period once verification is back. A recorded /offline
+  is still acted on (it was verified when recorded). The tor image's build
+  imports `nacl.signing`. `tests/test_hub_signature_verification.py`.
+
 ## OnionHome Name Registry Volume
 - OnionHome's `onionnames.db` (onionname → onion address) lives on
   `onionpress-onionnames-data` at `/var/lib/onionnames`, mounted by

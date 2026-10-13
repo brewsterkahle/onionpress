@@ -44,6 +44,7 @@ from onionheaven_common import (
     worker_name_ok, is_onion_address,
     PROPAGATION_DELAY, ONIONHEAVEN_PEER_GRACE, ONIONHEAVEN_DATA_DIR,
 )
+from onion_auth import verification_available
 
 # How many drift repairs to attempt per worker per heartbeat pass.
 # Low cap avoids overwhelming the queue manager when many addresses are stuck.
@@ -146,6 +147,47 @@ def _get_tor_detached(container_name):
         return onions
     except Exception:
         return None
+
+
+def grant_grace_period(conn, now):
+    """Start every online site's heartbeat clock over at `now` (and drop
+    stale audit results), so none is taken over before it has had a full
+    PROPAGATION_DELAY to send an /online."""
+    conn.execute(
+        "UPDATE registry SET last_healthy = ?, audit_result = NULL, audit_at = NULL "
+        "WHERE status = 'online' AND unregistered_at IS NULL",
+        (now,)
+    )
+    db_commit_with_retry(conn)
+
+
+# web-server.py (onionpress-tor, the same tor image) checks every request's
+# signature with libsodium (onion_auth.verify, PyNaCl). Without PyNaCl it
+# refuses them all with 503, so every site's last_healthy stops moving at
+# once: a missed heartbeat then says nothing about the site, and taking them
+# all over would put the archived copy in front of every live site. While
+# signatures cannot be verified here, a stale heartbeat triggers no
+# takeover (no /offline is accepted either); once they can again, every
+# online site gets a fresh grace period before the first stale check.
+_verification_was_unavailable = False
+
+
+def stale_takeovers_allowed(conn):
+    """True if a stale heartbeat may trigger a takeover in this pass."""
+    global _verification_was_unavailable
+    if not verification_available():
+        if not _verification_was_unavailable:
+            log("ERROR: signatures cannot be verified (PyNaCl, python3-nacl, "
+                "is not installed): no site is taken over for a missed "
+                "heartbeat until it is, since the API refuses every /online")
+        _verification_was_unavailable = True
+        return False
+    if _verification_was_unavailable:
+        _verification_was_unavailable = False
+        grant_grace_period(conn, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        log("signatures can be verified again: every online site has a fresh "
+            "grace period before a missed heartbeat counts")
+    return True
 
 
 def startup_reconciliation(conn):
@@ -264,12 +306,7 @@ def startup_reconciliation(conn):
     conn.execute("UPDATE registry SET is_onionheaven = 0 WHERE is_onionheaven != 0")
 
     # Give online entries a fresh grace period
-    conn.execute(
-        "UPDATE registry SET last_healthy = ?, audit_result = NULL, audit_at = NULL "
-        "WHERE status = 'online' AND unregistered_at IS NULL",
-        (now,)
-    )
-    db_commit_with_retry(conn)
+    grant_grace_period(conn, now)
 
     online_count = conn.execute(
         "SELECT COUNT(*) FROM registry WHERE status = 'online' AND unregistered_at IS NULL"
@@ -395,6 +432,10 @@ def main():
             except Exception as e:
                 log(f"RECONCILE error: {e}")
 
+            # No takeover for a missed heartbeat while no /online can be
+            # verified (stale_takeovers_allowed).
+            takeovers_allowed = stale_takeovers_allowed(conn)
+
             # Get list of active entry keys (content_address + healthcheck_address).
             # We only fetch the keys here — each entry is re-queried fresh before
             # acting on it, so we never act on stale data from a snapshot.
@@ -413,6 +454,7 @@ def main():
 
             stale_count = 0
             stale_cleanup_count = 0
+            held_count = 0
 
             for key_row in entry_keys:
                 ca = key_row["content_address"]
@@ -452,7 +494,9 @@ def main():
                         except (ValueError, TypeError):
                             last_healthy_stale = True
 
-                    if last_healthy_stale:
+                    if last_healthy_stale and not takeovers_allowed:
+                        held_count += 1
+                    elif last_healthy_stale:
                         # OnionHeaven peers get a longer grace period before takeover.
                         # They run OnionHeaven themselves, so restarts take longer and
                         # a premature takeover would redirect their hosted sites.
@@ -556,6 +600,9 @@ def main():
                 parts.append(f"{stale_count} takeovers")
             if stale_cleanup_count:
                 parts.append(f"{stale_cleanup_count} stress-test cleanups")
+            if held_count:
+                parts.append(f"{held_count} stale heartbeats not acted on "
+                             f"(signatures cannot be verified)")
             log(f"heartbeat pass complete — {', '.join(parts)} in {elapsed:.1f}s")
 
             conn.close()

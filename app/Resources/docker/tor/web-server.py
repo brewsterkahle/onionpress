@@ -63,7 +63,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from onion_auth import verify_payload, verify_name_payload
+from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function,
@@ -470,6 +470,11 @@ def _verify_signature(handler, data, endpoint):
     Every legitimate caller (Mac menubar app, Linux heartbeat daemon,
     stress-test workers) signs; nothing inside the container posts to
     these endpoints.
+
+    libsodium checks the signature (onion_auth.verify, PyNaCl). Without
+    PyNaCl this raises VerificationUnavailable and do_POST answers 503:
+    an unchecked /offline or /unregister would let anyone release or
+    remove another site's address.
     """
     content_address = data.get("content_address", "")
     healthcheck_address = data.get("healthcheck_address", "")
@@ -498,11 +503,29 @@ def _signed_peer_claim(data):
     """
     if not data.get("is_onionheaven"):
         return False
-    ok, _ = verify_payload(
-        data.get("content_address", ""), PEER_CLAIM_ENDPOINT,
-        data.get("healthcheck_address", ""), data.get("timestamp", ""),
-        data.get("onionheaven_peer_signature", ""))
+    try:
+        ok, _ = verify_payload(
+            data.get("content_address", ""), PEER_CLAIM_ENDPOINT,
+            data.get("healthcheck_address", ""), data.get("timestamp", ""),
+            data.get("onionheaven_peer_signature", ""))
+    except VerificationUnavailable:
+        return False  # a claim nobody could check earns nothing
     return ok
+
+
+_warned_no_verification = False
+
+
+def _note_verification_unavailable(error):
+    """Log, once per process, that signed requests are being refused."""
+    global _warned_no_verification
+    if _warned_no_verification:
+        return
+    _warned_no_verification = True
+    log(f"ERROR: signatures cannot be verified ({error}): every signed "
+        f"request (/online, /offline, /unregister, names, logs) is refused "
+        f"with 503 until python3-nacl is installed. The heartbeat monitor "
+        f"takes over no site for a missed heartbeat meanwhile.")
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +841,12 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
         try:
             handler()
+        except VerificationUnavailable as e:
+            # Every handler verifies before it changes anything, so nothing
+            # was done. 503, not 403: the request may well be genuine.
+            _note_verification_unavailable(e)
+            self._send_json(503, {"error": "signature verification is "
+                                           "unavailable on this server"})
         except Exception as e:
             self.log_message("ERROR in %s: %s", path, e)
             self._send_json(500, {"error": str(e)})

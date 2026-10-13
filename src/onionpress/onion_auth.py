@@ -1,11 +1,25 @@
 """
-Pure-Python Ed25519 signatures for OnionHeaven API authentication.
+Ed25519 signatures for OnionHeaven API authentication.
 
-Implements RFC 8032 Ed25519 with support for Arti's expanded private keys.
-Stdlib only — no external dependencies.
+Verification is libsodium's, through PyNaCl (nacl.signing.VerifyKey, which
+is crypto_sign_open): never computed here. libsodium refuses S >= L, a
+small-order or non-canonical public key or R, and compares R byte for
+byte. Without PyNaCl, verify() raises VerificationUnavailable rather than
+answer: a signature this module cannot check is never taken as good. Only
+the hub verifies (web-server.py, in the tor image, which installs
+python3-nacl); PyNaCl is imported when verify() first runs, so a client
+that only signs never needs it here.
 
-Expanded keys: 64 bytes = scalar a (32, clamped) + nonce prefix (32).
-Standard ed25519 derives these from SHA-512(seed); Arti stores them directly.
+Signing is RFC 8032 Ed25519 in pure Python (stdlib), with a Tor expanded
+private key: 64 bytes = scalar a (32, clamped) + nonce prefix (32).
+Standard ed25519 derives these from SHA-512(seed); Tor (and the
+onionpress-onion-keys volume's PEM) stores them directly, and an mkp224o
+vanity key has no seed at all. libsodium and pyca/cryptography sign only
+from a seed, so neither can sign with these keys as they are.
+
+src/onionpress/onion_auth.py and app/Resources/docker/tor/onion_auth.py
+(and tests/stress/onion_auth.py) are one file; tests/test_onion_auth.py
+keeps them identical.
 """
 
 import base64
@@ -97,21 +111,6 @@ def _encode_point(P):
     return bytes(enc)
 
 
-def _decode_point(s):
-    """Decode 32-byte point encoding (RFC 8032 §5.1.3)."""
-    if len(s) != 32:
-        raise ValueError(f"Point must be 32 bytes, got {len(s)}")
-    y = int.from_bytes(s, 'little')
-    sign = (y >> 255) & 1
-    y &= (1 << 255) - 1
-    if y >= _p:
-        raise ValueError("y >= p")
-    x = _recover_x(y, sign)
-    if (-x * x + y * y - 1 - _d * x * x * y * y) % _p != 0:
-        raise ValueError("Point not on curve")
-    return (x, y, 1, x * y % _p)
-
-
 # ── Ed25519 sign / verify ──
 
 def sign_expanded(expanded_key, public_key, message):
@@ -141,30 +140,58 @@ def sign_expanded(expanded_key, public_key, message):
     return R_enc + S.to_bytes(32, 'little')
 
 
+class VerificationUnavailable(RuntimeError):
+    """PyNaCl (python3-nacl, libsodium) is not installed: no signature can
+    be checked, so none may be accepted."""
+
+
+def _verify_key_class():
+    """(VerifyKey, CryptoError) from PyNaCl, or VerificationUnavailable."""
+    try:
+        from nacl.exceptions import CryptoError
+        from nacl.signing import VerifyKey
+    except ImportError as e:
+        raise VerificationUnavailable(
+            f"PyNaCl (python3-nacl) is not installed: {e}") from e
+    return VerifyKey, CryptoError
+
+
+def verification_available():
+    """True if verify() can run (PyNaCl imports)."""
+    try:
+        _verify_key_class()
+    except VerificationUnavailable:
+        return False
+    return True
+
+
 def verify(public_key, message, signature):
-    """Verify an Ed25519 signature (standard verification).
+    """True if signature is public_key's Ed25519 signature of message.
 
     public_key: 32 bytes
     message:    bytes
-    signature:  64 bytes
+    signature:  64 bytes (R ‖ S)
 
-    Returns True if valid.
+    libsodium decides (crypto_sign_open via nacl.signing.VerifyKey): it
+    refuses S >= L, a non-canonical or small-order public key or R, and
+    any R other than the one it computes, so one message has one valid
+    signature encoding per key. Anything malformed is False.
+
+    Raises VerificationUnavailable without PyNaCl: this never returns True
+    unless libsodium said so.
     """
+    VerifyKey, CryptoError = _verify_key_class()
+    if not all(isinstance(v, (bytes, bytearray, memoryview))
+               for v in (public_key, message, signature)):
+        return False
+    public_key, message, signature = bytes(public_key), bytes(message), bytes(signature)
     if len(signature) != 64 or len(public_key) != 32:
         return False
     try:
-        R_enc = signature[:32]
-        S = int.from_bytes(signature[32:], 'little')
-        if S >= _L:
-            return False
-        R = _decode_point(R_enc)
-        A = _decode_point(public_key)
-        h = int.from_bytes(_sha512(R_enc + public_key + message), 'little') % _L
-        lhs = _scalar_mult(S, _B)
-        rhs = _point_add(R, _scalar_mult(h, A))
-        return _encode_point(lhs) == _encode_point(rhs)
-    except (ValueError, Exception):
+        VerifyKey(public_key).verify(message, signature)
+    except (CryptoError, ValueError, TypeError):
         return False
+    return True
 
 
 # ── Onion address encode / decode ──
@@ -217,6 +244,12 @@ def decode_onion_address(address):
 TIMESTAMP_TOLERANCE = 300  # 5 minutes
 
 
+def _present(timestamp, signature_b64):
+    """Both are non-empty strings (JSON can carry anything there)."""
+    return (isinstance(timestamp, str) and isinstance(signature_b64, str)
+            and bool(timestamp) and bool(signature_b64))
+
+
 def sign_payload(expanded_key, public_key, endpoint, content_address,
                  healthcheck_address, timestamp):
     """Sign an OnionHeaven API payload.
@@ -238,11 +271,12 @@ def verify_payload(content_address, endpoint, healthcheck_address,
     """Verify an OnionHeaven API payload signature.
 
     Extracts public key from content_address, checks timestamp freshness,
-    and verifies the ed25519 signature.
+    and verifies the ed25519 signature (verify(): libsodium).
 
-    Returns (ok, error_message).
+    Returns (ok, error_message). Raises VerificationUnavailable without
+    PyNaCl (web-server.py answers 503): never (True, "") unchecked.
     """
-    if not timestamp or not signature_b64:
+    if not _present(timestamp, signature_b64):
         return False, "Missing timestamp or signature"
 
     # Timestamp freshness
@@ -257,12 +291,12 @@ def verify_payload(content_address, endpoint, healthcheck_address,
     # Decode public key from content_address
     try:
         public_key = decode_onion_address(content_address)
-    except ValueError as e:
+    except (ValueError, TypeError, AttributeError) as e:
         return False, f"Cannot decode public key from content_address: {e}"
 
     # Decode and verify signature
     try:
-        sig = base64.b64decode(signature_b64)
+        sig = base64.b64decode(signature_b64, validate=True)
     except Exception:
         return False, "Invalid signature base64"
 
@@ -290,10 +324,13 @@ def sign_name_payload(expanded_key, public_key, endpoint, onionaddress,
 def verify_name_payload(onionaddress, endpoint, name, timestamp, signature_b64):
     """Verify an onionname-registry payload signature.
 
-    Returns (ok, error_message).
+    Returns (ok, error_message). Raises VerificationUnavailable without
+    PyNaCl, as verify_payload does.
     """
-    if not timestamp or not signature_b64:
+    if not _present(timestamp, signature_b64):
         return False, "Missing timestamp or signature"
+    if not isinstance(name, str):
+        return False, "Invalid name"
 
     try:
         ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -305,11 +342,11 @@ def verify_name_payload(onionaddress, endpoint, name, timestamp, signature_b64):
 
     try:
         public_key = decode_onion_address(onionaddress)
-    except ValueError as e:
+    except (ValueError, TypeError, AttributeError) as e:
         return False, f"Cannot decode public key from onionaddress: {e}"
 
     try:
-        sig = base64.b64decode(signature_b64)
+        sig = base64.b64decode(signature_b64, validate=True)
     except Exception:
         return False, "Invalid signature base64"
 
