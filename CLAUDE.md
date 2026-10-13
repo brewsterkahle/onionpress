@@ -710,7 +710,10 @@
   service id into DEL_ONION on the control port). Only its key files are
   copied and the hostname is written from the key; the Settings page's
   restore takes no healthcheck key at all.
-  `tests/test_backup_healthcheck_key_restore.py`.
+  `tests/test_backup_healthcheck_key_restore.py`. The watchdog checks too
+  (tor image): a service id comes only from one whole v3 address, else the
+  hostname is rewritten from the public key
+  (`tests/test_tor_watchdog_service_ids.py`).
 
 ## Backups Stage Plain Files Only
 - What create_backup copies out of a container (wp-content; a hub's

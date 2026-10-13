@@ -181,6 +181,23 @@ def _derive_onion_address(public_key_path):
     return base64.b32encode(addr_bytes).decode("ascii").lower() + ".onion"
 
 
+def _read_hostname(path):
+    """The one v3 address in the hostname file at path, or None (no file, a
+    link, not a regular file, or anything but one whole address). A file
+    that is there but not an address is logged."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read(128) if stat.S_ISREG(os.fstat(f.fileno()).st_mode) else b""
+    hostname = raw.decode("ascii", "replace").strip()
+    if _ONION_ADDRESS_RE.fullmatch(hostname):
+        return hostname
+    log(f"{path} does not hold one onion address; using the public key's")
+    return None
+
+
 def discover_services():
     """Find onion services from /etc/tor/onion-services.json + keys on disk.
 
@@ -206,26 +223,26 @@ def discover_services():
 
         service_dir = os.path.join(HS_BASE_DIR, name)
 
-        # Read hostname for service_id (or derive from public key)
+        # Read hostname for service_id (or derive from public key). The id
+        # goes into DEL_ONION on the control port, and a restore can put
+        # these files here from a backup: only one whole v3 address is
+        # taken, anything else is replaced by the public key's address.
         hostname_file = os.path.join(service_dir, "hostname")
         public_key_file = os.path.join(service_dir, "hs_ed25519_public_key")
         service_id = None
-        try:
-            with open(hostname_file) as f:
-                hostname = f.read().strip()
-            service_id = hostname.replace(".onion", "")
-        except OSError:
-            # No hostname file — derive from public key (fresh install)
+        hostname = _read_hostname(hostname_file)
+        if hostname is None:
+            # No hostname file (fresh install), or not an address
             try:
                 hostname = _derive_onion_address(public_key_file)
                 # Write it so we don't have to derive again
-                with open(hostname_file, "w") as f:
-                    f.write(hostname + "\n")
+                _write_atomic(hostname_file, (hostname + "\n").encode("ascii"))
                 log(f"Derived hostname for {name}: {hostname}")
-                service_id = hostname.replace(".onion", "")
             except (OSError, ValueError):
                 # No hostname or public key — will generate with NEW:BEST
-                pass
+                hostname = None
+        if hostname:
+            service_id = hostname[:-len(".onion")]
 
         # Read key — if missing, flag for NEW:BEST generation
         secret_key_file = os.path.join(service_dir, "hs_ed25519_secret_key")
