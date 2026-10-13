@@ -469,6 +469,13 @@ class OnionPressCLI:
         another key, everything else is restored and the hub data is not.
         """
         import shutil
+        # The key seed below runs from the stack's pinned tor image; make
+        # sure it is here before anything is changed.
+        image = self.containers.ensure_tor_image()
+        if not image:
+            self.log("Restore failed: the tor image the key seed runs from is "
+                     "not available; nothing was changed")
+            return 1
         hub = {}
         try:
             from . import hub_backup
@@ -524,6 +531,10 @@ class OnionPressCLI:
                         "onionpress-persistent-data"):
                 self.docker.run(["volume", "rm", vol], timeout=20)
                 self.log(f"Removed volume: {vol}")
+            # The restored key replaces whatever a key volume migration was
+            # still copying.
+            from .containers import forget_key_volume_migration
+            forget_key_volume_migration(self.paths.data_dir)
 
             # Seed the fresh key volume from the backup key so Tor serves the
             # restored identity on first start (the entrypoint converts the PEM
@@ -535,6 +546,8 @@ class OnionPressCLI:
                 self.paths.data_dir, "shared", "vanity-keys", addr)
             seed = self.docker.run([
                 "run", "--rm",
+                # The key needs no network, and gets none.
+                "--network", "none",
                 # Root reads the key out of the user's folder, whose
                 # permissions Linux enforces: DAC_OVERRIDE, nothing else.
                 "--cap-drop", "ALL",
@@ -542,7 +555,8 @@ class OnionPressCLI:
                 "--security-opt", "no-new-privileges:true",
                 "-v", "onionpress-onion-keys:/dest",
                 "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
-                "alpine", "sh", "-c",
+                "--entrypoint", "sh",
+                image, "-c",
                 "mkdir -p /dest/wordpress && "
                 "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
                 "chown -R 0:0 /dest && "
@@ -550,8 +564,14 @@ class OnionPressCLI:
                 "chmod 600 /dest/wordpress/*",
             ], timeout=30)
             if not seed.ok:
-                self.log("Restore: WARNING — key volume seed reported a "
-                         "problem; Tor may not adopt the restored identity")
+                # Started without it, Tor would mint a new address under the
+                # restored site. Without the volume, the next start installs
+                # the key from vanity-keys/ and finishes the import.
+                self.docker.run(["volume", "rm", "onionpress-onion-keys"], timeout=20)
+                self.log("Restore failed: the restored key could not be installed "
+                         "in the onionpress-onion-keys volume; not starting Tor "
+                         "under a new address (start OnionPress again to retry)")
+                return 1
 
             # Rebuild: fresh containers adopt the seeded key; import the backup
             # artifacts into them; then bring up Tor with the restored identity.

@@ -54,6 +54,10 @@ docker() {
         printf '%s' "$FAKE_HOSTNAME"
         return 0
     fi
+    # The key helpers' tor image is here; no key volume, so nothing is read.
+    case "$1 $2" in
+        "image inspect"|"volume ls") return 0 ;;
+    esac
     return 1
 }
 '''
@@ -77,7 +81,14 @@ class TestCreateBackupAddress(unittest.TestCase):
 
     def _run(self, hostname):
         text = _read(LINUX)
-        script = (STUBS + _function(text, "is_onion_address") + _function(text, "create_backup")
+        # create_backup reads keys out of the volumes with the launcher's key
+        # helpers (KEY_HELPER_IMAGE, the stack's pinned tor image).
+        helpers = (next(l for l in text.splitlines() if l.startswith("KEY_HELPER_IMAGE="))
+                   + "\n" + "".join(_function(text, name) for name in (
+                       "using_local_images", "docker_volume_state",
+                       "ensure_key_helper_image", "key_volume_cat")))
+        script = (STUBS + helpers + _function(text, "is_onion_address")
+                  + _function(text, "create_backup")
                   + 'rc=0; create_backup pw "$OUT" || rc=$?; echo "rc=$rc"\n')
         with tempfile.TemporaryDirectory() as tmp:
             env = {"PATH": "/usr/bin:/bin", "HOME": tmp, "TMPDIR": tmp,

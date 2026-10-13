@@ -87,6 +87,38 @@ def onionheaven_image(config_file: str | None = None) -> str:
             or ONIONHEAVEN_IMAGE_PIN)
 
 
+def tor_image(config_file: str | None = None) -> str:
+    """The stack's tor image: ONIONPRESS_TOR_IMAGE, else the pin.
+
+    The one-shot helpers that handle the onion service key (the restore's key
+    seed here; the launchers' KEY_HELPER_IMAGE) run from it, never from a
+    floating tag: the pin is one set of bytes, and the image is the one that
+    will run Tor with that key anyway.
+    """
+    return image_override("ONIONPRESS_TOR_IMAGE", config_file) or ONIONHEAVEN_IMAGE_PIN
+
+
+# The onion service key volume, its name until 2026-09-25, and the marker the
+# launchers' migrate_key_volume() keeps beside an unverified copy of the
+# first into the second. Starting Tor mounts the new volume, and Docker
+# creates it, empty, when it is not there: every later start would then
+# take it for the migrated key, and Tor would mint a new address.
+KEY_VOLUME = "onionpress-onion-keys"
+OLD_KEY_VOLUME = "onionpress-arti-state"
+KEY_VOLUME_MIGRATION_PENDING = ".key-volume-migration-pending"
+
+
+def forget_key_volume_migration(data_dir: str) -> None:
+    """Drop the migration marker. Every path that wipes the key volumes for
+    a replaced identity calls this (the launchers `rm -f` it): kept beside
+    an old volume that a wipe failed to remove, the marker would have the
+    next start remove the new key and copy the replaced one back."""
+    try:
+        os.remove(os.path.join(data_dir, KEY_VOLUME_MIGRATION_PENDING))
+    except FileNotFoundError:
+        pass
+
+
 # The OnionHeaven hub data volume (onionheaven_common.HUB_DATA_VOLUME and
 # ONIONHEAVEN_DATA_DIR in the tor image), and the containers that use it.
 HUB_DATA_VOLUME = "onionpress-onionheaven-data"
@@ -228,6 +260,26 @@ class ContainerManager:
             self.paths.config_file, "ONIONHEAVEN_ACCEPT_REGISTRATIONS", "")
 
         return env
+
+    def ensure_tor_image(self) -> str | None:
+        """The tor image (tor_image), made sure to be here before a helper
+        that handles the onion service key runs from it: pulled by its
+        pinned reference when missing, never for a locally built stack
+        (using_local_images). None when it is not here and cannot be.
+        Mirrors ensure_key_helper_image() in both launchers."""
+        image = tor_image(self.paths.config_file)
+        inspect = ["image", "inspect", "--format", "{{.Id}}", image]
+        if self.docker.run(inspect, timeout=30, quiet=True).ok:
+            return image
+        if using_local_images(self.paths.config_file):
+            self._log(f"ERROR: the locally built tor image {image} is not here "
+                      "(build it with build/build-images.sh)")
+            return None
+        self._log(f"Pulling {image}...")
+        if not self.docker.run(["pull", image], timeout=600).ok:
+            self._log(f"ERROR: could not pull {image}")
+            return None
+        return image if self.docker.run(inspect, timeout=30, quiet=True).ok else None
 
     # -- Core lifecycle --
 

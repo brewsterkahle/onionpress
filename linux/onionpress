@@ -374,6 +374,35 @@ using_local_images() {
     return 1
 }
 
+# The image every one-shot helper that handles the onion service key runs
+# from (the key volume migration, the key seeds, the backup's key reads):
+# the stack's own tor image, pinned by digest like the rest, or the locally
+# built one. Never a floating tag such as `alpine`, which a registry or a
+# mirror could swap for an image that reads the key. Each run overrides the
+# entrypoint and joins no network (tests/test_container_capabilities.py).
+KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}"
+
+# Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
+# volume migration and the first-run seed come before any pull. A missing
+# image is pulled by its pinned reference, never when the stack runs locally
+# built images. Returns 1 when it is not here and cannot be. Kept identical
+# in the macOS and Linux launchers; a test enforces that.
+ensure_key_helper_image() {
+    if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
+        return 0
+    fi
+    if using_local_images; then
+        log "ERROR: the locally built tor image $KEY_HELPER_IMAGE is not here (build it with build/build-images.sh)"
+        return 1
+    fi
+    log "Pulling $KEY_HELPER_IMAGE for the onion service key helpers..."
+    if ! docker pull "$KEY_HELPER_IMAGE" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: could not pull $KEY_HELPER_IMAGE"
+        return 1
+    fi
+    docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
+}
+
 # Read config
 CLOUDFLARE_TUNNEL_TOKEN=""
 export CLOUDFLARE_TUNNEL_TOKEN
@@ -702,6 +731,8 @@ HELPEOF
             fi
         done
         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+        # No unfinished key volume migration survives a replaced identity.
+        rm -f "$DATA_DIR/.key-volume-migration-pending"
         rm -rf "$DATA_DIR/shared/vanity-keys/"
         echo "Old keys removed."
     else
@@ -1505,63 +1536,119 @@ wait_for_docker() {
 # onionpress-onion-keys at <name>/. This runs before the first-run check,
 # which keys off the NEW volume's existence — without it an upgraded install
 # would look like a fresh one and mint a new address. For the same reason it
-# refuses to let the start continue when the copy fails, or when Docker cannot
-# say which volumes exist: the old volume is left untouched and the next
-# start retries. Kept identical in the macOS and Linux launchers; a test
-# enforces that.
+# refuses to let the start continue when the copy fails, when the old
+# keystore cannot be read (only a keystore the old volume shows to be absent
+# counts as nothing to copy), or when Docker cannot say which volumes exist:
+# the old volume is left untouched and the next start retries. Until the
+# copy is verified, $DATA_DIR/.key-volume-migration-pending says the new
+# volume is not to be trusted: a start that finds it beside both volumes (an
+# interrupted copy, or a failed one whose volume could not be removed)
+# removes the new volume and copies again. Kept identical in the macOS and
+# Linux launchers; a test enforces that.
 migrate_key_volume() {
-    local state=0
+    local state=0 old_state=0
+    local pending="$DATA_DIR/.key-volume-migration-pending"
     docker_volume_state onionpress-onion-keys || state=$?
-    case "$state" in
-        0) return 0 ;;
-        2) log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
-           return 1 ;;
-    esac
-    state=0
-    docker_volume_state onionpress-arti-state || state=$?
-    case "$state" in
-        1) return 0 ;;   # nothing to migrate: a fresh install, or one that never had a key volume
+    if [ "$state" -eq 2 ]; then
+        log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+        return 1
+    fi
+    if [ "$state" -eq 0 ] && [ ! -e "$pending" ]; then
+        return 0
+    fi
+    docker_volume_state onionpress-arti-state || old_state=$?
+    case "$old_state" in
+        1) # Nothing to copy from: a fresh install, one that never had the
+           # old volume, or one whose volumes a key import or restore wiped.
+           if [ "$state" -eq 0 ]; then
+               log "WARNING: a key volume migration did not finish and onionpress-arti-state is gone; keeping onionpress-onion-keys as it is"
+           fi
+           rm -f "$pending"
+           return 0 ;;
         2) log "ERROR: Docker did not say whether onionpress-arti-state exists; not starting"
            return 1 ;;
     esac
+    if [ "$state" -eq 0 ]; then
+        log "A key volume migration did not finish; removing the unverified onionpress-onion-keys to copy again"
+        if ! docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
+            log "ERROR: could not remove the unverified onionpress-onion-keys; not starting (the old key volume is untouched)"
+            return 1
+        fi
+    fi
+    if ! ensure_key_helper_image; then
+        log "ERROR: no tor image to migrate the key volume with; not starting (the old key volume is untouched)"
+        return 1
+    fi
     log "Migrating the onion service key volume: onionpress-arti-state -> onionpress-onion-keys"
+    if ! : > "$pending"; then
+        log "ERROR: could not write $pending; not starting (the old key volume is untouched)"
+        return 1
+    fi
     if ! docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
         log "ERROR: could not create onionpress-onion-keys; not starting (the old key volume is untouched)"
         return 1
     fi
     # Arti's files are its own user's, in 0700 folders: reading them takes
-    # DAC_OVERRIDE, cp -a keeping their owner CHOWN, and the chmods of what
-    # it made FOWNER. Without DAC_OVERRIDE the script copies nothing and
-    # still exits 0; without FOWNER the chmod fails and the start stops.
+    # DAC_OVERRIDE. The copy is root's, 0700/0600, as the key seeds make
+    # it, so nothing else is needed. The script walks down to the keystore
+    # one listed folder at a time, so a folder it cannot list (without
+    # DAC_OVERRIDE, say) stops it instead of passing for a missing keystore,
+    # as it used to: an empty copy that the next start took for the
+    # migrated key. The keystore may hold folders and files only; every
+    # name in it has to be in the copy and every file the same bytes.
     if ! docker run --rm \
+        --network none \
         --cap-drop ALL \
-        --cap-add CHOWN \
         --cap-add DAC_OVERRIDE \
-        --cap-add FOWNER \
         --security-opt no-new-privileges:true \
         -v onionpress-arti-state:/old:ro \
         -v onionpress-onion-keys:/new \
-        alpine sh -c '
-            set -e
-            if [ -d /old/state/keystore/hss ]; then
-                cp -a /old/state/keystore/hss/. /new/
-            fi
-            chmod 700 /new
-            find /new -mindepth 1 -type d -exec chmod 700 {} +
-            find /new -type f -exec chmod 600 {} +
-            for n in $(ls /old/state/keystore/hss 2>/dev/null); do
-                if [ -f "/old/state/keystore/hss/$n/ks_hs_id.ed25519_expanded_private" ] \
-                   && ! cmp -s "/old/state/keystore/hss/$n/ks_hs_id.ed25519_expanded_private" \
-                              "/new/$n/ks_hs_id.ed25519_expanded_private"; then
-                    echo "key for $n did not copy intact" >&2
+        --entrypoint sh \
+        "$KEY_HELPER_IMAGE" -c '
+            set -eu
+            dir="$1" dest="$2"
+            for name in state keystore hss; do
+                listing=$(ls -A "$dir")
+                if ! printf "%s\n" "$listing" | grep -qxF "$name"; then
+                    echo "the old key volume holds no keystore ($dir has no $name): nothing to copy"
+                    chmod 700 "$dest"
+                    exit 0
+                fi
+                dir="$dir/$name"
+                if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+                    echo "$dir is not a folder" >&2
                     exit 1
                 fi
             done
-        ' >> "$LOG_FILE" 2>&1; then
-        docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1 || true
+            wanted=$(cd "$dir" && find .)
+            odd=$(cd "$dir" && find . ! -type d ! -type f)
+            if [ -n "$odd" ]; then
+                echo "the old keystore holds more than folders and files: $odd" >&2
+                exit 1
+            fi
+            cp -R "$dir/." "$dest/"
+            chmod 700 "$dest"
+            find "$dest" -mindepth 1 -type d -exec chmod 700 {} +
+            find "$dest" -type f -exec chmod 600 {} +
+            got=$(cd "$dest" && find .)
+            if [ "$(printf "%s\n" "$got" | sort)" != "$(printf "%s\n" "$wanted" | sort)" ]; then
+                echo "the copy does not hold what the old keystore holds" >&2
+                exit 1
+            fi
+            differ=$(cd "$dir" && find . -type f ! -exec cmp -s {} "$dest/{}" \; -print)
+            if [ -n "$differ" ]; then
+                echo "did not copy intact: $differ" >&2
+                exit 1
+            fi
+            echo "copied the old keystore: $(find "$dest" -type f | wc -l) files, each compared with its original"
+        ' migrate-key-volume /old /new >> "$LOG_FILE" 2>&1; then
+        if docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
+            rm -f "$pending"
+        fi
         log "ERROR: key volume migration failed; not starting so the old key volume stays intact (see $LOG_FILE)"
         return 1
     fi
+    rm -f "$pending"
     log "Key volume migrated; onionpress-arti-state is kept as a fallback until uninstall sweeps it"
     return 0
 }
@@ -1706,6 +1793,8 @@ start_containers() {
             fi
         done
         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+        # No unfinished key volume migration survives a replaced identity.
+        rm -f "$DATA_DIR/.key-volume-migration-pending"
         rm -f "$DATA_DIR/.import-key-pending"
     fi
 
@@ -1744,11 +1833,12 @@ start_containers() {
     # First-run vanity generation. mkp224o lives in the tor container image
     # (see app/Resources/docker/tor/Dockerfile) so Docker's multi-arch
     # manifest list handles amd64/arm64 transparently — the host .deb stays
-    # Architecture: all. We deliberately do NOT pre-pull the tor image
-    # here: `docker compose pull` with the registry's manifest-list image
-    # would overwrite any locally-built image (the digest differs), which
-    # is the wrong thing during development and harmless but unnecessary
-    # in production (the main container-start pull below covers it).
+    # Architecture: all. No `docker compose pull` here: with the registry's
+    # manifest-list image it would overwrite any locally-built image (the
+    # digest differs), which is the wrong thing during development. The
+    # key seeds below do fetch the tor image when it is missing
+    # (ensure_key_helper_image: by its pinned reference, never over a local
+    # build), but only once there is a key to install, after this step.
     # Strategy: if mkp224o is already in the local image, generate vanity
     # now; otherwise log and continue, the user gets a random address
     # this run and can run `onionpress handle-action regenerate-vanity`
@@ -1779,20 +1869,41 @@ start_containers() {
             && log "Key formats synchronized" \
             || log "WARNING: Failed to synchronize key formats"
 
+        # The seeds below run from the stack's tor image, which a first run
+        # has not pulled yet. Without it Tor cannot start either.
+        if ! ensure_key_helper_image; then
+            log "ERROR: no tor image to install the onion service key with; not starting (the key stays in $VANITY_DIR for the next start)"
+            return 1
+        fi
+
         # Sync imported key to the key volume the entrypoint reads the PEM from
         # (<name>/ks_hs_id.ed25519_expanded_private, read as root)
         docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1 || true
         # Root reads the key out of the user's 0700 folder: DAC_OVERRIDE.
-        if ! docker run --rm \
+        # The key needs no network, and gets none.
+        if docker run --rm \
+            --network none \
             --cap-drop ALL \
             --cap-add DAC_OVERRIDE \
             --security-opt no-new-privileges:true \
             -v onionpress-onion-keys:/dest \
-            --mount type=bind,source="$VANITY_DIR",target=/src \
-            alpine sh -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
-            log "WARNING: Failed to copy address key to the onionpress-onion-keys volume"
+            --mount type=bind,source="$VANITY_DIR",target=/src,readonly \
+            --entrypoint sh \
+            "$KEY_HELPER_IMAGE" -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
+            log "Address key installed to the onionpress-onion-keys volume"
+        elif $FIRST_RUN; then
+            # Left behind, the empty volume would end the first run: the
+            # next start would take it for an installed key. Without it, the
+            # next start tries again.
+            if ! docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
+                log "ERROR: could not remove the onionpress-onion-keys volume the key did not reach; remove it (docker volume rm onionpress-onion-keys) before the next start"
+            fi
+            log "ERROR: Failed to copy address key to the onionpress-onion-keys volume; not starting"
+            return 1
+        else
+            # The volume holds the key from an earlier start.
+            log "WARNING: Failed to copy address key to the onionpress-onion-keys volume (keeping the one installed earlier)"
         fi
-        log "Address key installed to the onionpress-onion-keys volume"
 
         # C Tor keys were already ensured by ensure-formats above
 
@@ -1802,20 +1913,24 @@ start_containers() {
             # Reads the user's key files and writes into Tor's folders,
             # debian-tor's once Tor has run (DAC_OVERRIDE), then chowns
             # (CHOWN) and chmods what is no longer root's (FOWNER).
+            # debian-tor is the tor image's own user.
             if docker run --rm \
+                --network none \
                 --cap-drop ALL \
                 --cap-add CHOWN \
                 --cap-add DAC_OVERRIDE \
                 --cap-add FOWNER \
                 --security-opt no-new-privileges:true \
                 -v onionpress-tor-state:/dest \
-                --mount type=bind,source="$VANITY_DIR",target=/src \
-                alpine sh -c '
+                --mount type=bind,source="$VANITY_DIR",target=/src,readonly \
+                --entrypoint sh \
+                "$KEY_HELPER_IMAGE" -c '
+                    set -e
                     mkdir -p /dest/hidden_service/wordpress/authorized_clients
                     cp /src/hs_ed25519_secret_key /dest/hidden_service/wordpress/
                     cp /src/hs_ed25519_public_key /dest/hidden_service/wordpress/ 2>/dev/null || true
                     cp /src/hostname /dest/hidden_service/wordpress/
-                    chown -R 100:100 /dest/hidden_service
+                    chown -R debian-tor:debian-tor /dest/hidden_service
                     chmod 700 /dest/hidden_service /dest/hidden_service/wordpress
                     chmod 600 /dest/hidden_service/wordpress/hs_ed25519_secret_key
                     chmod 644 /dest/hidden_service/wordpress/hostname
@@ -1834,19 +1949,22 @@ start_containers() {
             docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
             # As for the address key above.
             if docker run --rm \
+                --network none \
                 --cap-drop ALL \
                 --cap-add CHOWN \
                 --cap-add DAC_OVERRIDE \
                 --cap-add FOWNER \
                 --security-opt no-new-privileges:true \
                 -v onionpress-tor-state:/dest \
-                --mount type=bind,source="$hc_keys",target=/src \
-                alpine sh -c '
+                --mount type=bind,source="$hc_keys",target=/src,readonly \
+                --entrypoint sh \
+                "$KEY_HELPER_IMAGE" -c '
+                    set -e
                     mkdir -p /dest/hidden_service/healthcheck
                     cp /src/hs_ed25519_secret_key /dest/hidden_service/healthcheck/
                     cp /src/hs_ed25519_public_key /dest/hidden_service/healthcheck/ 2>/dev/null || true
                     cp /src/hostname /dest/hidden_service/healthcheck/ 2>/dev/null || true
-                    chown -R 100:100 /dest/hidden_service/healthcheck
+                    chown -R debian-tor:debian-tor /dest/hidden_service/healthcheck
                     chmod 700 /dest/hidden_service/healthcheck
                     chmod 600 /dest/hidden_service/healthcheck/hs_ed25519_secret_key
                 ' >> "$LOG_FILE" 2>&1; then
@@ -2334,6 +2452,27 @@ wait_for_services() {
 
 # ─── Backup & Restore ─────────────────────────────────────────────────
 
+# Print file $2 of key volume $1 (a path inside the volume) for a backup:
+# root in a throwaway container from the stack's tor image (KEY_HELPER_IMAGE)
+# with DAC_OVERRIDE alone (the files are debian-tor's, or arti's, in 0700
+# folders), the volume read-only, no network. Fails, without running
+# anything, when the volume does not exist: `docker run -v` would create it,
+# and an empty onionpress-onion-keys passes for an installed key (or, beside
+# onionpress-arti-state, for a migrated one) at the next start.
+key_volume_cat() {
+    local vol="$1" path="$2" state=0
+    docker_volume_state "$vol" || state=$?
+    [ "$state" -eq 0 ] || return 1
+    docker run --rm \
+        --network none \
+        --cap-drop ALL \
+        --cap-add DAC_OVERRIDE \
+        --security-opt no-new-privileges:true \
+        -v "$vol:/src:ro" \
+        --entrypoint cat \
+        "$KEY_HELPER_IMAGE" "/src/$path"
+}
+
 create_backup() {
     # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
     # Usage: create_backup <password> <output_path> [--without-hub-data] [--without-host-secrets]
@@ -2409,12 +2548,19 @@ create_backup() {
         fi
     fi
 
+    # The key reads below run from the stack's tor image; a backup without
+    # the keys it could have held is not made.
+    if ! ensure_key_helper_image; then
+        log "ERROR: Backup: no tor image to read the onion service keys with — no backup made"
+        echo "ERROR: The tor image is not available to read the onion service keys; no backup was made." >&2
+        return 1
+    fi
+
     staging=$(mktemp -d -t onionpress-backup-XXXXXX)
     trap "rm -rf '$staging'" RETURN
 
-    # 1. Extract Tor keys (both PEM and C Tor formats). The volume reads
-    # below run as root in a throwaway container with DAC_OVERRIDE alone:
-    # the files are debian-tor's (or arti's), in 0700 folders.
+    # 1. Extract Tor keys (both PEM and C Tor formats), from the user's
+    # vanity-keys folder or else out of the volumes (key_volume_cat).
     log "Backup: extracting Tor keys..."
     mkdir -p "$staging/tor-keys"
 
@@ -2427,8 +2573,8 @@ create_backup() {
         # Try extracting from the key volume — the current name first, then the
         # pre-2026-09-25 one for an install backed up before its first start
         # on this version migrated it.
-        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/src alpine cat /src/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
-            || docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-arti-state:/src alpine cat /src/state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
+        key_volume_cat onionpress-onion-keys wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
+            || key_volume_cat onionpress-arti-state state/keystore/hss/wordpress/ks_hs_id.ed25519_expanded_private > "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" 2>/dev/null \
             || true
         if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
             rm -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
@@ -2446,12 +2592,12 @@ create_backup() {
         [ -f "$ctor_pub" ] && cp "$ctor_pub" "$staging/tor-keys/"
     else
         # Try extracting from the tor-state volume
-        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_secret_key' > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
+        key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_secret_key > "$staging/tor-keys/hs_ed25519_secret_key" 2>/dev/null || true
         if [ ! -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
             rm -f "$staging/tor-keys/hs_ed25519_secret_key"
             log "WARNING: No C Tor secret key found"
         else
-            docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/wordpress/hs_ed25519_public_key' > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
+            key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
             [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
         fi
     fi
@@ -2467,9 +2613,9 @@ create_backup() {
         log "Backup: healthcheck keys left out of this backup, which is handed to WordPress (a restore makes new ones)"
     else
         mkdir -p "$staging/tor-keys/healthcheck"
-        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_secret_key' > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
-        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hs_ed25519_public_key' > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
-        docker run --rm --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-tor-state:/src alpine sh -c 'cat /src/hidden_service/healthcheck/hostname' > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
+        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hs_ed25519_secret_key > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
+        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hs_ed25519_public_key > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
+        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hostname > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
         # Clean up empty files
         find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
         if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then
@@ -3882,6 +4028,8 @@ sys.exit(0 if provision_interactive() else 1)
                                 stop_containers 2>/dev/null || true
                                 docker volume rm onionpress-onion-keys onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
                                 docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+                                # No unfinished key volume migration survives a replaced identity.
+                                rm -f "$DATA_DIR/.key-volume-migration-pending"
                                 rm -rf "$DATA_DIR/shared/vanity-keys/"
                                 # Run import-key logic inline (without interactive prompt)
                                 import_key_noninteractive "$vanity_b32_key"
@@ -3922,6 +4070,8 @@ sys.exit(0 if provision_interactive() else 1)
                         stop_containers 2>/dev/null || true
                         docker volume rm onionpress-onion-keys onionpress-arti-state >> "$LOG_FILE" 2>&1 || true
                         docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
+                        # No unfinished key volume migration survives a replaced identity.
+                        rm -f "$DATA_DIR/.key-volume-migration-pending"
                         rm -rf "$DATA_DIR/shared/vanity-keys/"
                         if import_key_noninteractive "$key_data"; then
                             start_containers

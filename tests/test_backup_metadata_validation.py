@@ -109,6 +109,21 @@ def _bash_function(text, name):
     return text[start:end + 3]
 
 
+# What linux/onionpress's create_backup calls to read keys out of the
+# volumes: the KEY_HELPER_IMAGE line (the stack's pinned tor image),
+# ensure_key_helper_image and key_volume_cat, and what they use. A harness
+# that runs create_backup loads them from the launcher itself; its docker
+# stub answers `image inspect` (the image is here) and `volume ls`.
+LINUX_KEY_HELPERS = ("using_local_images", "docker_volume_state",
+                     "ensure_key_helper_image", "key_volume_cat")
+
+
+def _linux_key_helpers(text=None):
+    text = _read("linux/onionpress") if text is None else text
+    line = next(l for l in text.splitlines() if l.startswith("KEY_HELPER_IMAGE="))
+    return "\n" + line + "\n" + "".join(_bash_function(text, n) for n in LINUX_KEY_HELPERS)
+
+
 def _cheap_kdf(test):
     for name, value in (("OPSLIMIT", 1), ("MEMLIMIT", 8192)):
         patcher = mock.patch.object(backup_crypto, name, value)

@@ -13,7 +13,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from onionpress.platform import OnionPressPaths
 from onionpress.config import PortConfig
 from onionpress.docker import Docker, DockerResult
-from onionpress.containers import ContainerManager, ContainerStatus, CORE_SERVICES
+from onionpress.containers import (
+    ContainerManager, ContainerStatus, CORE_SERVICES, ONIONHEAVEN_IMAGE_PIN, tor_image,
+)
 
 ONION = "op2" + "x" * 53 + ".onion"
 
@@ -141,6 +143,58 @@ class TestStartTor(unittest.TestCase):
         docker.compose.return_value = _ok()
         cm = ContainerManager(docker, self.paths, self.port_config)
         self.assertTrue(cm.start_tor())
+
+
+class TestEnsureTorImage(unittest.TestCase):
+    """The image the restore's key seed runs from: the stack's tor image,
+    pulled by its pin when missing, never over a locally built one."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+        self.paths = _make_paths(self.tmpdir)
+        self.port_config = PortConfig(offset=0, wp_port=8080, socks_port=9050, proxy_port=9077)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("ONIONPRESS_TOR_IMAGE", None)
+        os.environ.pop("ONIONPRESS_WORDPRESS_IMAGE", None)
+
+    def _cm(self, results):
+        docker = mock.Mock(spec=Docker)
+        docker.run.side_effect = results
+        return ContainerManager(docker, self.paths, self.port_config, log_func=lambda m: None), docker
+
+    def test_the_pin_by_default(self):
+        self.assertEqual(tor_image(self.paths.config_file), ONIONHEAVEN_IMAGE_PIN)
+        self.assertRegex(ONIONHEAVEN_IMAGE_PIN,
+                         r"^ghcr\.io/brewsterkahle/onionpress-tor:latest@sha256:[0-9a-f]{64}$")
+        with open(self.paths.config_file, "w") as f:
+            f.write("ONIONPRESS_TOR_IMAGE=onionpress-tor:dev\n")
+        self.assertEqual(tor_image(self.paths.config_file), "onionpress-tor:dev")
+
+    def test_present(self):
+        cm, docker = self._cm([_ok("sha256:x")])
+        self.assertEqual(cm.ensure_tor_image(), ONIONHEAVEN_IMAGE_PIN)
+        self.assertEqual(docker.run.call_count, 1)
+
+    def test_missing_is_pulled_by_its_pin(self):
+        cm, docker = self._cm([_fail(), _ok(), _ok("sha256:x")])
+        self.assertEqual(cm.ensure_tor_image(), ONIONHEAVEN_IMAGE_PIN)
+        self.assertEqual(docker.run.call_args_list[1].args[0], ["pull", ONIONHEAVEN_IMAGE_PIN])
+
+    def test_unavailable(self):
+        cm, _ = self._cm([_fail(), _fail()])
+        self.assertIsNone(cm.ensure_tor_image())
+
+    def test_a_missing_local_image_is_never_pulled(self):
+        with open(self.paths.config_file, "w") as f:
+            f.write("ONIONPRESS_TOR_IMAGE=onionpress-tor:dev\n")
+        cm, docker = self._cm([_fail()])
+        self.assertIsNone(cm.ensure_tor_image())
+        self.assertEqual(docker.run.call_args_list[0].args[0],
+                         ["image", "inspect", "--format", "{{.Id}}", "onionpress-tor:dev"])
+        self.assertEqual(docker.run.call_count, 1)
 
 
 class TestStop(unittest.TestCase):

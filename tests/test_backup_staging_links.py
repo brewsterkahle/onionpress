@@ -564,6 +564,8 @@ docker() {
     echo "docker $*" >> "$CALLS"
     case "$1 $2" in
         "exec onionpress-tor") echo "$ADDR" ;;
+        "image inspect") return 0 ;;     # the key helpers' tor image is here
+        "volume ls") return 0 ;;         # no key volume: nothing is read
         *) return 1 ;;
     esac
 }
@@ -611,7 +613,8 @@ op_py() { _helper "$@"; }
         # create_backup checks the address the tor container reports.
         is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
         r = subprocess.run(
-            ["bash", "-c", prelude + is_onion + self._create_backup_function()
+            ["bash", "-c", prelude + is_onion + mv._linux_key_helpers()
+             + self._create_backup_function()
              + f'\ncreate_backup "$PW" {out!r}\necho "rc=$?"'],
             capture_output=True, text=True, timeout=120, env=env)
         with open(env["LOG_FILE"]) as f:

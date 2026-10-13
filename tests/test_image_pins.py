@@ -269,7 +269,10 @@ class TestDeliberatelyUnpinned(unittest.TestCase):
         tags `:latest` precisely so this keeps working.
         """
         text = _read("linux/onionpress")
-        match = re.search(r"docker image inspect \"?([^\"\n]+)\"?", text)
+        # The check just before `mkp224o_available="true"`; the key helpers'
+        # ensure_key_helper_image inspects its own (pinned) image earlier on.
+        text = text[:text.index('mkp224o_available="true"')]
+        match = list(re.finditer(r"docker image inspect \"?([^\"\n]+)\"?", text))[-1]
         self.assertIsNotNone(
             match,
             "Could not find the mkp224o presence check in linux/onionpress — "

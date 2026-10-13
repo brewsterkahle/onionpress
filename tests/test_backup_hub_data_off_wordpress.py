@@ -262,6 +262,8 @@ log() { echo "[log] $1" >> "$LOG_FILE"; }
 docker() {
     case "$1 $2" in
         "exec onionpress-tor") echo "$ADDR" ;;
+        "image inspect") return 0 ;;     # the key helpers' tor image is here
+        "volume ls") return 0 ;;         # no key volume: nothing is read
         *) return 1 ;;
     esac
 }
@@ -320,7 +322,8 @@ sys.exit(2)' "$@"
         is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
         call = " ".join(["create_backup", '"$PW"', repr(out)] + list(args))
         r = subprocess.run(
-            ["bash", "-c", self.PRELUDE + is_onion + _linux_create_backup()
+            ["bash", "-c", self.PRELUDE + is_onion + mv._linux_key_helpers()
+             + _linux_create_backup()
              + f'\n{call}\necho "rc=$? refusal=$BACKUP_REFUSAL"'],
             capture_output=True, text=True, timeout=120, env=env)
         try:

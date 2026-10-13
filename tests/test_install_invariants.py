@@ -1388,6 +1388,13 @@ class TestKeyVolumeMigration(unittest.TestCase):
         )
         self.assertIn("onionpress-arti-state:/old:ro", bodies[0])
         self.assertIn("onionpress-onion-keys:/new", bodies[0])
+        # The stack's pinned tor image, made sure of first, no network.
+        self.assertIn('"$KEY_HELPER_IMAGE" -c', bodies[0])
+        self.assertIn("--network none", bodies[0])
+        self.assertLess(bodies[0].index("if ! ensure_key_helper_image"),
+                        bodies[0].index("docker volume create"))
+        self.assertIn('local pending="$DATA_DIR/.key-volume-migration-pending"',
+                      bodies[0])
 
     def test_migration_runs_before_first_run_detection(self):
         for f in self.LAUNCHERS:
@@ -1414,7 +1421,8 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     )
 
     def test_launchers_carry_the_same_docker_helpers(self):
-        for name in ("docker_volume_state", "wait_for_docker"):
+        for name in ("docker_volume_state", "wait_for_docker",
+                     "ensure_key_helper_image"):
             bodies = [self._function_body(_read(f), name) for f in self.LAUNCHERS]
             with self.subTest(function=name):
                 self.assertEqual(
@@ -1457,6 +1465,37 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     "docker_volume_state, which tells an absent volume from "
                     "a Docker that did not answer.",
                 )
+
+    def test_identity_wipes_drop_the_migration_marker(self):
+        """A key import or restore removes both key volumes for a replaced
+        identity. If the old volume survived the removal and an unfinished
+        migration's marker stayed, the next start would remove the new key
+        and copy the replaced one back; so every such wipe drops the marker
+        (migrate_key_volume clears it itself once the old volume is gone)."""
+        marker_rm = 'rm -f "$DATA_DIR/.key-volume-migration-pending"'
+        for f in self.LAUNCHERS:
+            text = _read(f)
+            for m in re.finditer(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\(\) \{$", text):
+                name = m.group(1)
+                if name == "migrate_key_volume":
+                    continue
+                body = self._function_body(text, name)
+                code = [l for l in body.splitlines() if not l.lstrip().startswith("#")]
+                wipes = [l for l in code if "onionpress-arti-state" in l
+                         and ("volume rm" in l or "for vol in" in l)]
+                if wipes:
+                    with self.subTest(launcher=f, function=name):
+                        self.assertGreaterEqual(
+                            sum(marker_rm in l for l in code), len(wipes))
+        for f in ("src/onionpress/cli.py", "src/onionpress/backup.py"):
+            for node in ast.walk(ast.parse(_read(f))):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                strings = {c.value for c in ast.walk(node)
+                           if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+                if "onionpress-arti-state" in strings:
+                    with self.subTest(file=f, function=node.name):
+                        self.assertIn("forget_key_volume_migration", ast.unparse(node))
 
     def test_wipes_remove_both_names(self):
         """A replaced identity (key import, restore) must delete the old-name
@@ -1888,6 +1927,7 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
 
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
+                 "using_local_images", "ensure_key_helper_image",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
     # Without a limactl on PATH they report the VM as not Running, so the
@@ -1899,26 +1939,47 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
                           "vm_shell_bounded", "ensure_vm_fsck_repair",
                           "save_previous_boot_journal")
 
+    # STUB_FAIL: ';'-separated command prefixes that fail. STUB_IMAGE=missing:
+    # `image inspect` fails until a `pull` has run.
     STUB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$STUB_CALLS"
+cmd="$*"
+printf '%s\\n' "$cmd" >> "$STUB_CALLS"
 if [ "$STUB_MODE" = down ]; then
     echo "Cannot connect to the Docker daemon at unix:///stub/docker.sock." >&2
     exit 1
 fi
+old_ifs=$IFS; IFS=';'
+for p in ${STUB_FAIL:-}; do
+    case "$cmd" in "$p"*) IFS=$old_ifs; echo "stub: $cmd fails" >&2; exit 1 ;; esac
+done
+IFS=$old_ifs
+case "$cmd" in
+    pull*) : > "$STUB_CALLS.pulled" ;;
+    "image inspect"*)
+        if [ "${STUB_IMAGE:-}" = missing ] && [ ! -e "$STUB_CALLS.pulled" ]; then
+            exit 1
+        fi ;;
+esac
 if [ "$1 $2" = "volume ls" ]; then
     for v in $STUB_VOLUMES; do echo "$v"; done
 fi
 exit 0
 """
 
-    def _run(self, launcher, snippet, mode="up", volumes="", pending=False):
+    def _run(self, launcher, snippet, mode="up", volumes="", pending=False,
+             migration_pending=False, fail="", image="", env=None, state=None):
         text = _read(launcher)
         names = list(self.FUNCTIONS) + [
             n for n in self.OPTIONAL_FUNCTIONS if f"\n{n}() {{" in text]
         functions = "".join(
             TestKeyVolumeMigration._function_body(text, name) + "\n}\n"
             for name in names)
+        # The launcher's own KEY_HELPER_IMAGE line, evaluated in the run.
+        functions = "".join(l + "\n" for l in text.splitlines()
+                            if l.startswith("KEY_HELPER_IMAGE=")) + functions
         with tempfile.TemporaryDirectory() as tmp:
+            if migration_pending:
+                open(os.path.join(tmp, ".key-volume-migration-pending"), "w").close()
             bin_dir = os.path.join(tmp, "bin")
             os.mkdir(bin_dir)
             stub = os.path.join(bin_dir, "docker")
@@ -1935,14 +1996,23 @@ exit 0
                 'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
                 "sleep() { :; }\n"  # wait_for_docker's 180 s pass instantly
                 + functions + snippet + "\n")
-            env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
-                   "STUB_MODE": mode, "STUB_VOLUMES": volumes,
-                   "STUB_CALLS": calls}
-            out = subprocess.run(["bash", "-c", script], env=env,
+            run_env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
+                       "STUB_MODE": mode, "STUB_VOLUMES": volumes,
+                       "STUB_CALLS": calls, "STUB_FAIL": fail,
+                       "STUB_IMAGE": image}
+            run_env.update(env or {})
+            out = subprocess.run(["bash", "-c", script], env=run_env,
                                  capture_output=True, text=True, timeout=60)
             with open(calls, encoding="utf-8") as f:
                 docker_calls = f.read().splitlines()
             marker_left = os.path.exists(os.path.join(tmp, ".import-key-pending"))
+            if state is not None:
+                state["migration_marker"] = os.path.exists(
+                    os.path.join(tmp, ".key-volume-migration-pending"))
+                state["log"] = ""
+                if os.path.exists(os.path.join(tmp, "log")):
+                    with open(os.path.join(tmp, "log"), encoding="utf-8") as f:
+                        state["log"] = f.read()
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout, docker_calls, marker_left
 
@@ -1984,6 +2054,127 @@ exit 0
                     self.assertEqual(out.strip(), "0")
                     self.assertEqual(
                         "volume create onionpress-onion-keys" in calls, copies, calls)
+
+    TOR_PIN = re.search(r'KEY_HELPER_IMAGE="\$\{ONIONPRESS_TOR_IMAGE:-([^}"]+)\}"',
+                        _read("linux/onionpress")).group(1)
+
+    def _migrate(self, launcher, **kw):
+        state = {}
+        out, calls, _ = self._run(
+            launcher, "rc=0; migrate_key_volume || rc=$?; echo $rc", state=state, **kw)
+        for c in calls:
+            self.assertNotRegex(c, r"^volume rm .*onionpress-arti-state",
+                                "the migration never removes the old volume")
+        return int(out.strip()), calls, state
+
+    def test_migration_runs_the_pinned_tor_image_without_a_network(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(f, volumes="onionpress-arti-state")
+                self.assertEqual(rc, 0)
+                runs = [c for c in calls if c.startswith("run ")]
+                self.assertEqual(len(runs), 1, calls)
+                self.assertTrue(runs[0].startswith(
+                    "run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE "
+                    "--security-opt no-new-privileges:true "
+                    "-v onionpress-arti-state:/old:ro -v onionpress-onion-keys:/new "
+                    f"--entrypoint sh {self.TOR_PIN} -c "), runs[0])
+                # The stub logs the run's multi-line script line by line.
+                self.assertTrue(any(c.endswith(" migrate-key-volume /old /new")
+                                    for c in calls), calls)
+                self.assertLess(calls.index(f"image inspect --format {{{{.Id}}}} {self.TOR_PIN}"),
+                                calls.index("volume create onionpress-onion-keys"))
+                self.assertFalse(state["migration_marker"])
+
+    def test_a_failed_copy_leaves_no_new_volume(self):
+        """The old migration exited 0 with an empty copy when it could not
+        read the keystore; the next start took the empty volume for the key.
+        A failed run now removes the new volume and stops the start."""
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-arti-state", fail="run ")
+                self.assertEqual(rc, 1)
+                run = next(i for i, c in enumerate(calls) if c.startswith("run "))
+                self.assertIn("volume rm onionpress-onion-keys", calls[run:])
+                self.assertFalse(state["migration_marker"])
+                self.assertIn("ERROR: key volume migration failed", state["log"])
+
+    def test_a_failed_copy_that_cannot_be_removed_keeps_the_marker(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-arti-state", fail="run ;volume rm")
+                self.assertEqual(rc, 1)
+                self.assertTrue(state["migration_marker"],
+                                "the next start must not trust the volume")
+
+    def test_an_interrupted_copy_is_made_again(self):
+        """The marker beside both volumes: the new one is unverified, so it
+        is removed and the copy made again."""
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-onion-keys onionpress-arti-state",
+                    migration_pending=True)
+                self.assertEqual(rc, 0)
+                self.assertLess(calls.index("volume rm onionpress-onion-keys"),
+                                calls.index("volume create onionpress-onion-keys"))
+                self.assertEqual(len([c for c in calls if c.startswith("run ")]), 1)
+                self.assertFalse(state["migration_marker"])
+
+    def test_an_interrupted_copy_that_cannot_be_removed_stops_the_start(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-onion-keys onionpress-arti-state",
+                    migration_pending=True, fail="volume rm")
+                self.assertEqual(rc, 1)
+                self.assertFalse([c for c in calls if c.startswith(("run ", "volume create"))])
+                self.assertTrue(state["migration_marker"])
+
+    def test_the_marker_without_the_old_volume_keeps_the_new_one(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-onion-keys", migration_pending=True)
+                self.assertEqual(rc, 0)
+                self.assertEqual(calls, ["volume ls --format {{.Name}}"] * 2)
+                self.assertFalse(state["migration_marker"])
+                self.assertIn("WARNING: a key volume migration did not finish", state["log"])
+
+    def test_without_the_tor_image_nothing_is_changed(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-arti-state", fail="image inspect;pull")
+                self.assertEqual(rc, 1)
+                self.assertIn(f"pull {self.TOR_PIN}", calls)
+                self.assertFalse([c for c in calls
+                                  if c.startswith(("run ", "volume create", "volume rm"))])
+                self.assertFalse(state["migration_marker"])
+
+    def test_a_missing_image_is_pulled_by_its_pin(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, _ = self._migrate(
+                    f, volumes="onionpress-arti-state", image="missing")
+                self.assertEqual(rc, 0)
+                self.assertEqual([c for c in calls if c.startswith("pull")],
+                                 [f"pull {self.TOR_PIN}"])
+
+    def test_a_missing_local_image_is_never_pulled(self):
+        """A locally built stack (ONIONPRESS_TOR_IMAGE not on ghcr.io) runs
+        its helpers from that image, and never pulls over it."""
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                rc, calls, state = self._migrate(
+                    f, volumes="onionpress-arti-state", image="missing",
+                    env={"ONIONPRESS_TOR_IMAGE": "onionpress-tor:dev"})
+                self.assertEqual(rc, 1)
+                self.assertIn("image inspect --format {{.Id}} onionpress-tor:dev", calls)
+                self.assertFalse([c for c in calls if c.startswith(("pull", "run "))])
+                self.assertIn("locally built tor image onionpress-tor:dev", state["log"])
 
     def test_start_stops_before_any_volume_check_when_docker_never_answers(self):
         for f in self.LAUNCHERS:
@@ -2203,3 +2394,147 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
     def test_both_launchers_list_get_in_usage(self):
         self.assertRegex(_read("app/MacOS/onionpress"), r"(?m)^  get\s+Fetch a URL over Tor")
         self.assertIn("|get|", _read("linux/onionpress"))
+
+
+class TestMigrationScriptLocally(unittest.TestCase):
+    """The script migrate_key_volume runs in the tor image, run here by sh
+    against folders standing in for the two volumes (no Docker). It walks
+    down to arti's keystore one listed folder at a time, so "cannot read"
+    stops it where it used to pass for "no keystore" and exit 0 with an
+    empty copy that the next start took for the migrated key."""
+
+    @classmethod
+    def setUpClass(cls):
+        body = TestKeyVolumeMigration._function_body(
+            _read("app/MacOS/onionpress"), "migrate_key_volume")
+        start = body.index("-c '\n") + len("-c '\n")
+        end = body.index("' migrate-key-volume /old /new")
+        cls.script = body[start:end]
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.old = os.path.join(self.tmp, "old")
+        self.new = os.path.join(self.tmp, "new")
+        os.mkdir(self.old)
+        os.mkdir(self.new)
+        self.path = os.environ.get("PATH", "/usr/bin:/bin")
+
+    def keystore(self, names=("wordpress", "healthcheck")):
+        hss = os.path.join(self.old, "state", "keystore", "hss")
+        for name in names:
+            os.makedirs(os.path.join(hss, name))
+            with open(os.path.join(hss, name, "ks_hs_id.ed25519_expanded_private"), "wb") as f:
+                f.write(os.urandom(64) + name.encode())
+        os.makedirs(os.path.join(self.old, "cache"))
+        with open(os.path.join(self.old, "state", "state.json"), "w") as f:
+            f.write("{}")
+        return hss
+
+    def run_script(self):
+        out = subprocess.run(["sh", "-c", self.script, "migrate-key-volume", self.old, self.new],
+                             capture_output=True, text=True, timeout=60,
+                             env={"PATH": self.path})
+        return out.returncode, out.stdout + out.stderr
+
+    def tree(self, root):
+        found = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in dirnames + filenames:
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, root)
+                st = os.lstat(path)
+                with_bytes = None
+                if os.path.isfile(path) and not os.path.islink(path):
+                    with open(path, "rb") as f:
+                        with_bytes = f.read()
+                found[rel] = (oct(st.st_mode & 0o777), with_bytes)
+        return found
+
+    def test_copies_the_keystore_intact_and_private(self):
+        hss = self.keystore()
+        rc, out = self.run_script()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("copied the old keystore", out)
+        old, new = self.tree(hss), self.tree(self.new)
+        self.assertEqual(set(old), set(new))
+        for rel, (mode, data) in new.items():
+            self.assertEqual(data, old[rel][1], rel)
+            self.assertEqual(mode, "0o600" if data is not None else "0o700", rel)
+        self.assertEqual(oct(os.stat(self.new).st_mode & 0o777), "0o700")
+
+    def test_no_keystore_is_nothing_to_copy(self):
+        for layout in ((), ("state",), ("state", "keystore")):
+            with self.subTest(layout=layout):
+                shutil_rmtree_contents(self.old)
+                if layout:
+                    os.makedirs(os.path.join(self.old, *layout))
+                rc, out = self.run_script()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("holds no keystore", out)
+                self.assertEqual(os.listdir(self.new), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root lists any folder")
+    def test_an_unreadable_folder_is_not_a_missing_keystore(self):
+        self.keystore()
+        for blocked in ("state", os.path.join("state", "keystore")):
+            with self.subTest(blocked=blocked):
+                path = os.path.join(self.old, blocked)
+                os.chmod(path, 0)
+                try:
+                    rc, out = self.run_script()
+                finally:
+                    os.chmod(path, 0o755)
+                self.assertNotEqual(rc, 0, out)
+                self.assertNotIn("holds no keystore", out)
+
+    def test_refuses_links_and_odd_files(self):
+        hss = self.keystore()
+        os.symlink("/etc/passwd", os.path.join(hss, "wordpress", "extra"))
+        rc, out = self.run_script()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("more than folders and files", out)
+
+        shutil_rmtree_contents(self.old)
+        os.makedirs(os.path.join(self.old, "state", "keystore"))
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, "wordpress"))
+        os.symlink(elsewhere, os.path.join(self.old, "state", "keystore", "hss"))
+        rc, out = self.run_script()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("is not a folder", out)
+
+    def test_a_short_or_changed_copy_fails(self):
+        """A cp that drops or changes a file (a full disk, say) fails the
+        names or the bytes comparison."""
+        fake_bin = os.path.join(self.tmp, "bin")
+        os.mkdir(fake_bin)
+        real_cp = subprocess.run(["sh", "-c", "command -v cp"], capture_output=True,
+                                 text=True).stdout.strip()
+        for damage, message in (
+                ('rm "$3/wordpress/ks_hs_id.ed25519_expanded_private"',
+                 "does not hold what the old keystore holds"),
+                ('printf x >> "$3/wordpress/ks_hs_id.ed25519_expanded_private"',
+                 "did not copy intact")):
+            with self.subTest(damage=damage):
+                shutil_rmtree_contents(self.old)
+                shutil_rmtree_contents(self.new)
+                self.keystore()
+                with open(os.path.join(fake_bin, "cp"), "w") as f:
+                    f.write(f'#!/bin/sh\n"{real_cp}" "$@" || exit\n{damage}\n')
+                os.chmod(os.path.join(fake_bin, "cp"), 0o755)
+                self.path = fake_bin + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
+                rc, out = self.run_script()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(message, out)
+
+
+def shutil_rmtree_contents(path):
+    import shutil
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        if os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full)
+        else:
+            os.remove(full)

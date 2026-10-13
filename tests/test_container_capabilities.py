@@ -24,7 +24,10 @@ calling setuid() itself (su run as root, gosu, Apache), which it allows.
 
 The census reads every shipped shell script and Python file for `docker
 run`, so a new one without the flags, or with capabilities this file does
-not list for it, fails here.
+not list for it, fails here. The same census holds every one-shot helper
+(the ones that handle the onion service key above all) to the stack's own
+tor image, pinned by digest, with its entrypoint overridden and no network:
+only the takeover workers, which serve onion services, join one.
 
 No PyYAML and no Docker: the compose files are read with a line-based
 splitter (as in test_docker_socket_scope.py), Python sources with ast, and
@@ -83,21 +86,21 @@ COMPOSE_CAPS = {
 
 # Every `docker run` in the shipped code, by (file, enclosing function), and
 # what each one adds back, in source order.
-READ_USER_KEY = {"DAC_OVERRIDE"}             # root reads the user's 0600 key files
+READ_USER_KEY = {"DAC_OVERRIDE"}             # root reads key files it does not own
 COPY_INTO_TOR_STATE = {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
 DOCKER_RUN_SITES = {
     ("app/Resources/docker/tor/onionheaven_common.py", "_spawn_worker"): [WORKER],
     ("src/onionpress/containers.py", "start_farm_worker"): [WORKER],
     ("app/MacOS/onionpress", "_start_takeover_worker"): [WORKER],
-    # cp -a of arti's files (its own user's, 0700) keeping their owner, then
-    # chmods of what it made.
-    ("app/MacOS/onionpress", "migrate_key_volume"): [COPY_INTO_TOR_STATE],
-    ("linux/onionpress", "migrate_key_volume"): [COPY_INTO_TOR_STATE],
+    # Reads arti's files (its own user's, 0700) into a copy root owns.
+    ("app/MacOS/onionpress", "migrate_key_volume"): [READ_USER_KEY],
+    ("linux/onionpress", "migrate_key_volume"): [READ_USER_KEY],
     ("app/MacOS/onionpress", "start_containers"): [READ_USER_KEY],
     ("linux/onionpress", "start_containers"): [
         READ_USER_KEY, COPY_INTO_TOR_STATE, COPY_INTO_TOR_STATE],
-    # Seven reads of debian-tor's (or arti's) key files out of the volumes.
-    ("linux/onionpress", "create_backup"): [READ_USER_KEY] * 7,
+    # create_backup's seven reads of debian-tor's (or arti's) key files out
+    # of the volumes.
+    ("linux/onionpress", "key_volume_cat"): [READ_USER_KEY],
     ("src/onionpress/cli.py", "cmd_restore"): [READ_USER_KEY],
     # `--entrypoint test -x mkp224o`: a file test.
     ("src/onionpress/launcher_ops.py", "tor_image_has_mkp224o"): [set()],
@@ -115,6 +118,35 @@ DOCKER_RUN_SITES = {
 PRIVILEGED_SITES = {
     ("src/onionpress/wordpress_egress.py", "helper_argv"): 1,
 }
+
+# The takeover workers serve onion services: they join onionpress-network
+# and run the image's own entrypoint. Every other run is a one-shot helper
+# with its entrypoint overridden and no network: nothing it does (reading or
+# writing a key, a file test, mkp224o, iptables in the host's namespaces)
+# needs one, and the onion service key never gets the chance to leave.
+WORKER_SITES = {
+    ("app/Resources/docker/tor/onionheaven_common.py", "_spawn_worker"),
+    ("src/onionpress/containers.py", "start_farm_worker"),
+    ("app/MacOS/onionpress", "_start_takeover_worker"),
+}
+
+# The image each run names. The launchers' helpers run KEY_HELPER_IMAGE
+# (the stack's tor image: ONIONPRESS_TOR_IMAGE, else its pin), the macOS
+# takeover worker the compose file's onionheaven reference, and every Python
+# site a variable named `image` (the pinned tor image: launcher_ops's
+# DEFAULT_TOR_IMAGE, ContainerManager.ensure_tor_image, onionheaven_image,
+# and the egress helper's caller; tests elsewhere hold each to that). Never
+# a floating tag such as `alpine`: a registry or a mirror could swap it for
+# an image that copies the key.
+TOR_PIN = r"ghcr\.io/brewsterkahle/onionpress-tor:latest@sha256:[0-9a-f]{64}"
+KEY_HELPER_IMAGE_TOKEN = '"$KEY_HELPER_IMAGE"'
+WORKER_IMAGE_TOKEN = re.compile(
+    r'^"\$\{ONIONHEAVEN_IMAGE:-\$\{ONIONPRESS_TOR_IMAGE:-' + TOR_PIN + r'\}\}"$')
+
+class _Expr(str):
+    """A Python expression in a docker run argv, by its source text: an
+    option's value, or the image, never an option itself."""
+
 
 # docker run options that take no value.
 _BOOLEAN_FLAGS = {"--rm", "-d", "--detach", "-i", "--interactive", "-t",
@@ -171,15 +203,17 @@ def _pairs(argv):
 def _options(tokens):
     """The options of a `docker run` whose arguments are *tokens*, up to the
     image: {"cap_drop": [...], "cap_add": [...], "security_opt": [...],
+    "network": [...], "entrypoint": [...], "volume": [...], "mount": [...],
     "privileged": bool, "image": token, "ended": bool}; "ended" is false
-    when no image followed the options. A token that is not a string (a
-    Python expression) is None."""
+    when no image followed the options. A Python expression is an _Expr."""
     opts = {"cap_drop": [], "cap_add": [], "security_opt": [],
+            "network": [], "entrypoint": [], "volume": [], "mount": [],
             "privileged": False, "image": None, "ended": False}
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if not isinstance(tok, str) or not tok.startswith("-"):
+        if (not isinstance(tok, str) or isinstance(tok, _Expr)
+                or not tok.startswith("-")):
             opts["image"], opts["ended"] = tok, True
             break
         flag, eq, value = tok.partition("=")
@@ -192,7 +226,10 @@ def _options(tokens):
             i += 1
         i += 1
         key = {"--cap-drop": "cap_drop", "--cap-add": "cap_add",
-               "--security-opt": "security_opt"}.get(flag)
+               "--security-opt": "security_opt", "--network": "network",
+               "--net": "network", "--entrypoint": "entrypoint",
+               "-v": "volume", "--volume": "volume",
+               "--mount": "mount"}.get(flag)
         if key:
             opts[key].append(value)
     return opts
@@ -265,6 +302,11 @@ def _python_sites(text):
                 return node.name
         return None
 
+    def token(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return _Expr(ast.unparse(node))
+
     def const(node):
         return node.value if isinstance(node, ast.Constant) else None
 
@@ -282,8 +324,7 @@ def _python_sites(text):
         else:
             continue
         claimed.add(id(elts[start - 1]))
-        tokens = [v if isinstance(v, str) else None
-                  for v in (const(e) for e in elts[start:])]
+        tokens = [token(e) for e in elts[start:]]
         sites.append((enclosing(node), tokens))
     strays = [n.lineno for n in ast.walk(tree)
               if isinstance(n, ast.Constant) and n.value == "run" and id(n) not in claimed]
@@ -317,7 +358,7 @@ class TestDockerRunCensus(unittest.TestCase):
         expected = {site: len(caps) for site, caps in DOCKER_RUN_SITES.items()}
         expected.update(PRIVILEGED_SITES)
         self.assertEqual(found, expected)
-        self.assertGreaterEqual(sum(found.values()), 20)
+        self.assertGreaterEqual(sum(found.values()), 14)
 
     def test_only_the_listed_sites_are_privileged(self):
         for site, runs in self.sites.items():
@@ -373,6 +414,73 @@ class TestDockerRunCensus(unittest.TestCase):
                                          for o in opts["security_opt"]))
                     self.assertFalse(opts["privileged"])
 
+    def test_only_the_takeover_workers_join_a_network(self):
+        """A one-shot helper joins no network: the key it handles, or the
+        file test, mkp224o and iptables run, need none. They ran on Docker's
+        default bridge, from where a swapped image could have sent the key
+        anywhere. The workers serve onion services from onionpress-network."""
+        for site, runs in self.sites.items():
+            for n, opts in enumerate(runs):
+                with self.subTest(site=site, run=n):
+                    expected = (["onionpress-network"] if site in WORKER_SITES
+                                else ["none"])
+                    self.assertEqual(opts["network"], expected)
+        self.assertLessEqual(WORKER_SITES, set(self.sites))
+
+    def test_every_helper_overrides_the_entrypoint(self):
+        """The tor image's own entrypoint starts the tor service's setup;
+        a helper replaces it with exactly the one program it runs."""
+        for site, runs in self.sites.items():
+            for n, opts in enumerate(runs):
+                with self.subTest(site=site, run=n):
+                    if site in WORKER_SITES:
+                        self.assertEqual(opts["entrypoint"], [])
+                    else:
+                        self.assertEqual(len(opts["entrypoint"]), 1)
+
+    def test_every_run_names_a_pinned_image(self):
+        """No `alpine`, `busybox` or other floating tag: each run names the
+        image listed for its kind of site (see TOR_PIN above)."""
+        for (rel, func), runs in self.sites.items():
+            for n, opts in enumerate(runs):
+                image = opts["image"]
+                with self.subTest(site=(rel, func), run=n, image=image):
+                    if rel.endswith(".py"):
+                        self.assertIsInstance(image, _Expr)
+                        self.assertEqual(image, "image")
+                    elif (rel, func) in WORKER_SITES:
+                        self.assertRegex(image, WORKER_IMAGE_TOKEN)
+                    else:
+                        self.assertEqual(image, KEY_HELPER_IMAGE_TOKEN)
+
+    def test_helpers_read_their_sources_read_only(self):
+        """What a helper only reads (the old key volume, the user's key
+        folder, a volume a backup reads from) is mounted read-only."""
+        for site, runs in self.sites.items():
+            if site in WORKER_SITES:
+                continue
+            for n, opts in enumerate(runs):
+                with self.subTest(site=site, run=n):
+                    for volume in opts["volume"]:
+                        volume = volume.strip("'\"")
+                        if re.search(r":/(src|old)(:|$)", volume):
+                            self.assertTrue(volume.endswith(":ro"), volume)
+                    for mount in opts["mount"]:
+                        if "target=/src" in mount:
+                            self.assertRegex(mount, r",readonly['\"]?$")
+
+    def test_parser_reads_python_expressions(self):
+        sites, strays = _python_sites(
+            'def f(image, d):\n'
+            '    run(["run", "--rm", "--network", "none", "-v", f"{d}:/src:ro",\n'
+            '         "--entrypoint", "cat", image, "/src/x"])\n')
+        self.assertEqual(strays, [])
+        opts = _options(sites[0][1])
+        self.assertEqual((opts["image"], opts["network"], opts["entrypoint"]),
+                         ("image", ["none"], ["cat"]))
+        self.assertIsInstance(opts["image"], _Expr)
+        self.assertEqual(opts["volume"], ["f'{d}:/src:ro'"])
+
     def test_allowlists_never_add_the_forbidden(self):
         for site, caps in DOCKER_RUN_SITES.items():
             for c in caps:
@@ -397,6 +505,53 @@ class TestDockerRunCensus(unittest.TestCase):
         self.assertEqual(len(sites), 1)
         self.assertEqual(sites[0][0], "f")
         self.assertEqual(_options(sites[0][1])["cap_drop"], ["ALL"])
+
+
+class TestKeyHelperImage(unittest.TestCase):
+    """KEY_HELPER_IMAGE, the one image the launchers' helpers run."""
+
+    LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+
+    def test_it_is_the_stack_tor_image(self):
+        """ONIONPRESS_TOR_IMAGE (a locally built stack), else exactly the
+        tor pin build/image-pins.env holds, in the `${...:-...}` form
+        build/refresh-image-digests.sh rewrites."""
+        pins = dict(line.split("=", 1) for line in _read("build/image-pins.env").splitlines()
+                    if line and not line.startswith("#") and "=" in line)
+        for rel in self.LAUNCHERS:
+            with self.subTest(launcher=rel):
+                lines = [l for l in _read(rel).splitlines()
+                         if l.startswith("KEY_HELPER_IMAGE=")]
+                self.assertEqual(lines, [
+                    'KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-'
+                    + pins["ONIONPRESS_TOR_IMAGE"].strip() + '}"'])
+
+    def test_it_is_set_after_the_config_is_read(self):
+        """The launchers read ONIONPRESS_TOR_IMAGE from ~/.onionpress/config
+        into the environment; KEY_HELPER_IMAGE must come after that."""
+        for rel in self.LAUNCHERS:
+            text = _read(rel)
+            with self.subTest(launcher=rel):
+                self.assertLess(text.index("for _img_var in ONIONPRESS_TOR_IMAGE"),
+                                text.index("\nKEY_HELPER_IMAGE="))
+
+    def test_no_floating_helper_image_in_shipped_code(self):
+        """`alpine` (or busybox) appears in no shipped code: comments aside,
+        no shell line names it, and no Python string starts with it."""
+        floating = re.compile(r"\b(alpine|busybox)\b")
+        seen = 0
+        for rel, text, is_python in _shipped_files():
+            seen += 1
+            with self.subTest(path=rel):
+                if is_python:
+                    for node in ast.walk(ast.parse(text)):
+                        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                            self.assertNotRegex(node.value, r"^(alpine|busybox)(\b|$)")
+                else:
+                    for line in text.splitlines():
+                        if not line.lstrip().startswith("#"):
+                            self.assertNotRegex(line, floating)
+        self.assertGreater(seen, 20)
 
 
 # ---------------------------------------------------------------------------

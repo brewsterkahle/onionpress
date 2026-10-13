@@ -190,6 +190,8 @@ log() { echo "[log] $1" >> "$LOG_FILE"; }
 docker() {
     case "$*" in
         "exec onionpress-tor "*) echo "$ADDR" ;;
+        "image inspect "*) return 0 ;;   # the key helpers' tor image is here
+        "volume ls "*) echo onionpress-tor-state ;;
         *"hidden_service/healthcheck/hs_ed25519_secret_key"*) printf '%s' "$HC_SECRET" ;;
         *"hidden_service/healthcheck/hostname"*) echo "$ADDR" ;;
         *) return 1 ;;
@@ -249,7 +251,8 @@ sys.exit(2)' "$@"
         is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
         call = " ".join(["create_backup", '"$PW"', repr(out)] + list(args))
         r = subprocess.run(
-            ["bash", "-c", self.PRELUDE + is_onion + hub._linux_create_backup()
+            ["bash", "-c", self.PRELUDE + is_onion + mv._linux_key_helpers()
+             + hub._linux_create_backup()
              + f'\n{call}\necho "rc=$?"'],
             capture_output=True, text=True, timeout=120, env=env)
         try:

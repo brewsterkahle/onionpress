@@ -387,5 +387,92 @@ class TestCmdGet(unittest.TestCase):
         cli.docker.exec.assert_not_called()
 
 
+
+PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:" + "a" * 64
+V3_ONION = "op2" + "a" * 52 + "d.onion"
+
+
+class TestCmdRestoreKeySeed(unittest.TestCase):
+    """cmd_restore seeds onionpress-onion-keys with the restored key from the
+    stack's pinned tor image, with no network; it refuses before changing
+    anything when that image is not here, and a seed that fails stops the
+    restore (and leaves no volume behind) instead of starting Tor, which
+    would mint a new address under the restored site."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+        from onionpress.config import PortConfig, Secrets
+        with mock.patch("onionpress.cli.detect_port_offset",
+                        return_value=PortConfig(0, 8080, 9050, 9077)), \
+             mock.patch("onionpress.cli.ensure_secrets",
+                        return_value=Secrets("p1", "p2", "p3")), \
+             mock.patch("onionpress.cli.Docker"):
+            self.cli = OnionPressCLI(data_dir=self.tmpdir)
+        self.cli.log = mock.Mock()
+        self.cli.docker = mock.Mock()
+        self.calls = []
+        self.seed_ok = True
+
+        def run(args, timeout=30, **kw):
+            self.calls.append(list(args))
+            ok = self.seed_ok or args[0] != "run"
+            return DockerResult(0 if ok else 1, "", "" if ok else "cp: no such file")
+        self.cli.docker.run.side_effect = run
+        self.cli.containers = mock.Mock()
+        self.cli.containers.ensure_tor_image.return_value = PIN
+        self.cli.containers.wait_for_tor.return_value = True
+        self.marker = os.path.join(self.tmpdir, ".key-volume-migration-pending")
+        open(self.marker, "w").close()
+
+    def _restore(self):
+        prepare = mock.patch(
+            "onionpress.backup.prepare_install_from_backup",
+            return_value=(os.path.join(self.tmpdir, "staging"), {"onion_address": V3_ONION}))
+        with prepare as p, \
+             mock.patch("onionpress.backup.read_backup_metadata", return_value={}), \
+             mock.patch.object(OnionPressCLI, "cmd_import_backup_artifacts", return_value=0), \
+             mock.patch("onionpress.derivatives.spawn_regeneration"):
+            rc = self.cli.cmd_restore("pw", "/tmp/b.zip")
+        return rc, p
+
+    def test_refuses_without_the_tor_image_before_changing_anything(self):
+        self.cli.containers.ensure_tor_image.return_value = None
+        rc, prepare = self._restore()
+        self.assertEqual(rc, 1)
+        prepare.assert_not_called()
+        self.assertEqual(self.calls, [])
+        self.cli.containers.stop.assert_not_called()
+        self.assertTrue(os.path.exists(self.marker))
+
+    def test_the_seed_runs_the_pinned_image_without_a_network(self):
+        rc, _ = self._restore()
+        self.assertEqual(rc, 0)
+        seed = next(c for c in self.calls if c[0] == "run")
+        image_at = seed.index(PIN)
+        options = seed[:image_at]
+        pairs = set(zip(options, options[1:]))
+        self.assertIn(("--network", "none"), pairs)
+        self.assertIn(("--entrypoint", "sh"), pairs)
+        self.assertIn(("--cap-drop", "ALL"), pairs)
+        self.assertIn(("-v", "onionpress-onion-keys:/dest"), pairs)
+        mount = options[options.index("--mount") + 1]
+        self.assertTrue(mount.endswith(",target=/src,readonly"), mount)
+        self.assertIn(os.path.join("vanity-keys", V3_ONION), mount)
+        self.assertEqual(seed[image_at + 1], "-c")
+        self.cli.containers.start_tor.assert_called_once()
+        # The restored key replaces an unfinished key volume migration.
+        self.assertFalse(os.path.exists(self.marker))
+
+    def test_a_failed_seed_stops_the_restore_and_removes_the_volume(self):
+        self.seed_ok = False
+        rc, _ = self._restore()
+        self.assertEqual(rc, 1)
+        seed_at = next(i for i, c in enumerate(self.calls) if c[0] == "run")
+        self.assertEqual(self.calls[seed_at + 1:], [["volume", "rm", "onionpress-onion-keys"]])
+        self.cli.containers.start_core.assert_not_called()
+        self.cli.containers.start_tor.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

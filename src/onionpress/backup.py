@@ -2208,6 +2208,9 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
                 ['docker', 'volume', 'rm', 'onionpress-onion-keys', 'onionpress-arti-state'],
                 capture_output=True, timeout=15
             )
+            from .containers import forget_key_volume_migration
+            forget_key_volume_migration(
+                data_dir if data_dir is not None else _default_data_dir())
 
         # Sync vanity-keys directory on host so OnionHeaven detection and
         # prefix mismatch logic can see the restored onion address.

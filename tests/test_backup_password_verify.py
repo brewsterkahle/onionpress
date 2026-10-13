@@ -148,8 +148,10 @@ class _Harness(unittest.TestCase):
     stub answers the verifier's `docker exec -i -u www-data … wp eval`
     like WP-CLI would (an admin login and exit 0 when stdin equals
     $STUB_ACCEPT, exit 1 otherwise), a curl run in a container
-    (`docker exec -i onionheaven curl ...`) like curl, and fails every
-    other command.
+    (`docker exec -i onionheaven curl ...`) like curl, `docker image
+    inspect` (the key helpers' image is here) and `docker volume ls` (no
+    volumes) with exit 0, and fails every other command. LINES are
+    launcher lines, by their start, put before FUNCTIONS.
     """
 
     STUB = r'''
@@ -161,6 +163,8 @@ with open(os.environ["STUB_CALLS"], "a", encoding="utf-8") as f:
     f.write(json.dumps({"tool": tool, "argv": args, "stdin": data}) + "\n")
 if tool == "docker" and args[:2] == ["exec", "-i"] and args[3:4] == ["curl"]:
     tool = "curl"
+if tool == "docker" and args[:2] in (["image", "inspect"], ["volume", "ls"]):
+    sys.exit(0)     # the key helpers' tor image is here; no key volume
 if tool == "docker":
     if args[:9] == ["exec", "-i", "-u", "www-data", "-e",
                     "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
@@ -175,10 +179,14 @@ if tool == "curl":
 '''
 
     FUNCTIONS = ()
+    LINES = ()
 
     def run_bash(self, snippet, env_extra):
         text = _read(LINUX)
-        functions = "".join(_function(text, name) for name in self.FUNCTIONS)
+        functions = "".join(
+            next(l for l in text.splitlines() if l.startswith(start)) + "\n"
+            for start in self.LINES)
+        functions += "".join(_function(text, name) for name in self.FUNCTIONS)
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = os.path.join(tmp, "bin")
             home = os.path.join(tmp, "home")
@@ -229,7 +237,12 @@ if tool == "curl":
 
 class TestCreateBackupHarness(_Harness):
 
-    FUNCTIONS = ("op_py", "verify_wp_admin_password", "create_backup")
+    # create_backup reads keys out of the volumes with the key helpers, from
+    # the stack's pinned tor image (KEY_HELPER_IMAGE).
+    LINES = ("KEY_HELPER_IMAGE=",)
+    FUNCTIONS = ("op_py", "verify_wp_admin_password", "using_local_images",
+                 "docker_volume_state", "ensure_key_helper_image", "key_volume_cat",
+                 "create_backup")
     RUN = 'rc=0; create_backup "$PW" "$OUT" || rc=$?; echo "rc=$rc"'
 
     def _verify_calls(self, made):
