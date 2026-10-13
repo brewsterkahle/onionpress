@@ -909,25 +909,15 @@ build/build-extension.sh          # both
 build/build-extension.sh firefox  # one
 ```
 
-There are **two Firefox manifests in the tree and they are not equivalent**:
-
-| | `extension/manifest.firefox.json` | `extension-firefox/manifest.json` |
-|---|---|---|
-| Version | 1.0.0, min Firefox 109 | 1.2.0, min Firefox 142 |
-| Permissions | + `webRequest`, `webRequestBlocking`, `webNavigation`, `<all_urls>` | narrow |
-| Content script | yes | no |
-| `data_collection_permissions` | **absent** | present |
-
-The build uses `extension-firefox/`. Building from `manifest.firefox.json`
-would re-request four permissions the extension no longer needs and produce a
-package addons.mozilla.org rejects — AMO requires
-`data_collection_permissions` from Firefox 142.
-
-`extension-firefox/` is overlaid on top of `extension/`, so every file it
-contains wins. It holds only `manifest.json`: `background.js`, `offline.html`
-and `offline.js` are shared from `extension/` (issue #318 removed the
-overlay's copies; a fix to `extension/background.js` alone used to miss the
-Firefox package, and `extension/`'s `offline.html` carried an inline
+Firefox is built from `extension/` overlaid with `extension-firefox/`, which
+holds only what Firefox needs to differ: `manifest.json` (v1.2.0, min Firefox
+142, narrow permissions, `data_collection_permissions`, which
+addons.mozilla.org requires from Firefox 142). **Every file in
+`extension-firefox/` wins**, so a copy of a shared file there would silently
+keep a fix to `extension/`'s out of the Firefox package: `background.js`,
+`offline.html` and `offline.js` are shared from `extension/` (issue #318
+removed the overlay's copies; a fix to `extension/background.js` alone used to
+miss the Firefox package, and `extension/`'s `offline.html` carried an inline
 `<script>` the extension CSP refuses). A test fails if any of them comes back
 to the overlay. The build fails if the manifest references a file that is not
 in the package.
@@ -950,14 +940,13 @@ tracked. Ignore rules do not apply to already-tracked files, so the entry was
 inert for those four — but any *new* file added there would have been silently
 untracked, in the directory holding the current manifest. That entry is gone.
 
-**The committed `build/onionpress-firefox.xpi` is not what this script
-produces, and cannot be.** Its inputs no longer exist: its `background.js`
-matches neither current source (it is an older revision), and its
-`manifest.json` appears in **no commit in this repository**. It is v1.0.0
-where the sources are v1.2.0. Nothing in the repo references it. It is left in
-place rather than deleted, because whether to replace a distributable that may
-already be published is the maintainer's call — but it should not be treated
-as the output of any build.
+Removed in issue #321: a committed `build/onionpress-firefox.xpi` (v1.0.0,
+built from a `background.js` revision and a `manifest.json` no commit
+holds, so nothing could rebuild it), the stale
+`extension/manifest.firefox.json` (v1.0.0, min Firefox 109, `webRequest`,
+`webRequestBlocking`, `webNavigation`, `<all_urls>`, a content script, no
+`data_collection_permissions`) and the unused `extension/content.js`.
+`tests/test_generated_assets.py` keeps them out.
 
 ### DMG window assets
 

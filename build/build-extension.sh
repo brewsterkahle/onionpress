@@ -6,40 +6,28 @@
 #   build/dist/onionpress-firefox.xpi   from extension/ + extension-firefox/
 #
 # WHY THIS EXISTS
-#   build/onionpress-firefox.xpi is committed to the repo but nothing
-#   generates it and nothing references it — `grep -r '\.xpi'` matches only
-#   the word "expires". Its exact inputs are gone: its background.js matches
-#   neither extension/ nor extension-firefox/ (it is an older revision), and
-#   its manifest.json appears in NO commit in this repository. So there was no
-#   way to rebuild the shipped extension from source.
+#   A build/onionpress-firefox.xpi used to be committed with nothing to
+#   generate it: its background.js was an older revision and its
+#   manifest.json appeared in no commit. It was removed (issue #321), with
+#   the stale extension/manifest.firefox.json (v1.0.0, webRequest and
+#   <all_urls>, a content script, no data_collection_permissions) and the
+#   unused extension/content.js.
 #
-# WHICH SOURCES, AND WHY
-#   There are two Firefox manifests in the tree and they are not equivalent:
-#
-#     extension/manifest.firefox.json   v1.0.0, min 109.0. Requests
-#         webRequest, webRequestBlocking, webNavigation and <all_urls>, and
-#         declares content_scripts. Has NO data_collection_permissions.
-#
-#     extension-firefox/manifest.json   v1.2.0, min 142.0. Drops all four
-#         broad permissions and the content script, and declares
-#         data_collection_permissions — which addons.mozilla.org REQUIRES
-#         from Firefox 142 onward.
-#
-#   This script builds Firefox from extension-firefox/. Using
-#   manifest.firefox.json would re-request permissions the extension no longer
-#   needs and produce an AMO-rejectable package.
-#
-#   extension-firefox/ holds only the file that differs, manifest.json;
-#   everything else — icons, popup, background.js, offline.html/.js —
-#   comes from extension/, shared by both packages (#318 removed the
-#   overlay's copies of background.js and offline.html/.js: two copies of
-#   one file drift silently, and only the overlay's reached Firefox).
+# WHICH SOURCES
+#   extension-firefox/ holds only the file that differs, manifest.json
+#   (v1.2.0, min 142.0, narrow permissions, data_collection_permissions,
+#   which addons.mozilla.org REQUIRES from Firefox 142 onward); everything
+#   else — icons, popup, background.js, offline.html/.js — comes from
+#   extension/, shared by both packages (#318 removed the overlay's copies
+#   of background.js and offline.html/.js: two copies of one file drift
+#   silently, and only the overlay's reached Firefox). A file in
+#   extension-firefox/ replaces extension/'s, so keep a file there only if
+#   Firefox needs it to differ.
 #
 # REPRODUCIBILITY
 #   Entries are added in sorted order with a fixed timestamp and `zip -X`
 #   (no uid/gid/extra fields), so two builds of the same sources produce
-#   byte-identical archives on any machine. The committed .xpi will NOT match
-#   — see above, its inputs no longer exist.
+#   byte-identical archives on any machine.
 
 set -euo pipefail
 
@@ -52,7 +40,7 @@ TARGETS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         chrome|firefox|all) TARGETS="$TARGETS $1" ;;
-        -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -85,9 +73,6 @@ build_chrome() {
     trap 'rm -rf "$stage"' RETURN
 
     cp -R "$CHROME_SRC/." "$stage/"
-    # The Firefox manifest is a sibling in this directory; it must not ship in
-    # the Chrome package.
-    rm -f "$stage/manifest.firefox.json"
 
     [ -f "$stage/manifest.json" ] || { echo "ERROR: no manifest.json in $CHROME_SRC" >&2; exit 1; }
     pack "$stage" "$DIST_DIR/onionpress-chrome.zip"
@@ -101,7 +86,7 @@ build_firefox() {
 
     # Base: everything shared (icons, popup, background).
     cp -R "$CHROME_SRC/." "$stage/"
-    rm -f "$stage/manifest.json" "$stage/manifest.firefox.json"
+    rm -f "$stage/manifest.json"
 
     # Overlay: the Firefox-specific files, including its manifest.
     if [ ! -f "$FIREFOX_OVERLAY/manifest.json" ]; then
@@ -111,11 +96,6 @@ build_firefox() {
         exit 1
     fi
     cp -R "$FIREFOX_OVERLAY/." "$stage/"
-
-    # content.js is not referenced by the Firefox manifest — the content
-    # script was dropped along with the broad host permissions. Shipping an
-    # unreferenced file just invites AMO review questions.
-    rm -f "$stage/content.js"
 
     # Fail loudly if the manifest references something we did not stage. A
     # missing icon or popup produces an extension that installs and then
@@ -158,7 +138,3 @@ echo ""
 echo "Load unpacked for testing:"
 echo "  Chrome   chrome://extensions -> Developer mode -> Load unpacked -> extension/"
 echo "  Firefox  about:debugging -> This Firefox -> Load Temporary Add-on"
-echo ""
-echo "NOTE: build/onionpress-firefox.xpi (committed, v1.0.0) is NOT this file."
-echo "It was built from sources that no longer exist in git. See this script's"
-echo "header and docs/BUILDING.md."
