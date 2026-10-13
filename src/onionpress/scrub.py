@@ -97,7 +97,7 @@ def _password_env(password: str) -> dict:
 
 
 def _confirm(prompt: str = "Continue? [y/N] ") -> bool:
-    """Y/N prompt mirroring the bash confirm_or_skip helper."""
+    """Y/N prompt; anything but y/yes declines."""
     if not sys.stdin.isatty():
         # Non-interactive: assume no to avoid destroying anything in CI.
         # Set ONIONPRESS_ASSUME_YES=1 in CI to opt in.
