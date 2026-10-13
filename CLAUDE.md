@@ -414,6 +414,26 @@
 - Never call `wp_remote_*`/`fetch_feed` directly for a follow;
   `tests/test_follow_requests.py` fails if one appears.
 
+## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
+- `onionpress_get_aggregated_feed_items()` (sidebar, every page) only reads:
+  the `onionpress_blogroll_items` transient, else each current follow's
+  last good items (`onionpress_following_items`), and schedules
+  `onionpress_blogroll_refresh`. Deleting that transient (any follow
+  change) schedules one too. Never fetch from the serve path.
+- The refresh holds a lock row (`INSERT IGNORE`, expiring value), a
+  180 s budget every follow request is cut to (`onionpress_follow_deadline`
+  in the follow guard), least recently tried follows first, backoff from
+  `last_attempt`, a failing follow keeps its items, and it re-reads the
+  options before writing (only still-followed keys).
+- Follow requests set `onionpress_exact_timeout`; onionpress-tor-proxy then
+  keeps their timeout instead of the 60 s floor (so the follow form's 8 s
+  probe is 8 s). Follow fetches turn SimplePie's cache off; there is no
+  global `wp_feed_cache_transient_lifetime` override.
+- onionpress-tor-proxy's `cron_request` filter sends the wp-cron loopback to
+  `http://localhost/<path>` (WP_SITEURL is the visitor's host, so a Tor
+  view's loopback went out through Tor and never arrived).
+  `tests/test_blogroll_refresh.py` (PHP harness, runs where php is installed).
+
 ## WordPress Resolves No Name Outside Docker
 - Tor resolves every name WordPress fetches (socks5h), so a DNS lookup in
   the wordpress container is only ever a leak: Docker's resolver forwards
