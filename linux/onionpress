@@ -1585,6 +1585,30 @@ warn_if_socks_port_exposed() {
     fi
 }
 
+# Rootless Docker's default port driver (RootlessKit "builtin") does not
+# carry a visitor's address: everyone who opens WordPress's published port,
+# this machine and other devices on the LAN alike, reaches WordPress from
+# its network's gateway (measured on Docker 27.4 / RootlessKit 2.3: a LAN
+# client and 127.0.0.1 both arrived as the gateway). Auto-login's "local"
+# scope admits that address, so with WordPress on every interface (the
+# default here, for a headless setup) a LAN device passes the scope check;
+# it still needs a fresh single-use token, which only this machine's
+# browser is handed. slirp4netns and pasta's drivers carry the address;
+# RootlessKit 3's builtin can, only with Docker's userland proxy off. Said
+# once per start, so whoever reads the log knows; ONIONPRESS_BIND_HOST=
+# 127.0.0.1 is the way out.
+note_if_lan_looks_local() {
+    local pid driver
+    case "$ONIONPRESS_BIND_HOST" in 127.*) return 0 ;; esac
+    pid=$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dockerd-rootless/child_pid" 2>/dev/null) || return 0
+    driver=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | sed -n 's/^--port-driver=//p' | head -1)
+    case "$driver" in
+        slirp4netns|implicit|pesto) return 0 ;;
+    esac
+    log "NOTE: rootless Docker's ${driver:-builtin} port driver hands every visitor of port $ONIONPRESS_WP_PORT to WordPress from one address, so other devices on your network pass auto-login's this-machine check (a fresh one-time token is still needed). ONIONPRESS_BIND_HOST=127.0.0.1 in $DATA_DIR/config keeps the port on this machine."
+    return 0
+}
+
 # WordPress and MariaDB reach nothing outside Docker (issue #144). Their
 # network's bridge (onionpress-wp0, docker-compose.yml) gets the
 # ONIONPRESS-WP chain before anything starts on it: only replies to
@@ -1915,6 +1939,7 @@ start_containers() {
     fi
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     warn_if_socks_port_exposed
+    note_if_lan_looks_local
 
     # OnionHeaven: the API server runs inside the tor container (always on).
     # On a hub, the watcher keeps the onionheaven container (heartbeat

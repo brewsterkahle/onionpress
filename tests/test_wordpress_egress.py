@@ -1199,6 +1199,54 @@ exit 0
                                       [], rm_rc=1)
                 self.assertIn("WARNING: could not recreate onionpress-network", lines)
 
+    # -- Rootless Docker's port driver --
+
+    def test_linux_notes_when_lan_visitors_look_local(self):
+        """RootlessKit's builtin driver (Docker's default) hands every
+        published-port client to WordPress from the gateway; the launcher
+        says so when WordPress is on every interface. Measured on Docker
+        27.4 / RootlessKit 2.3.1: 127.0.0.1 and a LAN client both arrived
+        as the gateway; with the slirp4netns driver, as 10.0.2.2 and as
+        themselves."""
+        fn = _function_body(_read(LINUX_LAUNCHER), "note_if_lan_looks_local") + "\n}\n"
+        tmp = tempfile.mkdtemp(prefix="op-rootless-note-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        proc = os.path.join(tmp, "proc")
+        runtime = os.path.join(tmp, "run")
+        os.makedirs(os.path.join(proc, "4242"))
+        os.makedirs(os.path.join(runtime, "dockerd-rootless"))
+        with open(os.path.join(runtime, "dockerd-rootless", "child_pid"), "w") as f:
+            f.write("4242\n")
+        self.assertIn('"/proc/$pid/cmdline"', fn)
+        fn = fn.replace('"/proc/$pid/cmdline"', f'"{proc}/$pid/cmdline"')
+
+        def note(bind, driver):
+            with open(os.path.join(proc, "4242", "cmdline"), "wb") as f:
+                f.write(b"/proc/self/exe\0--net=slirp4netns\0"
+                        + (f"--port-driver={driver}\0".encode() if driver else b"")
+                        + b"--copy-up=/etc\0")
+            script = ("set -e\nlog() { echo \"$*\"; }\n"
+                      f"DATA_DIR={tmp}\nONIONPRESS_WP_PORT=8080\nONIONPRESS_BIND_HOST={bind}\n"
+                      + fn + "note_if_lan_looks_local\n")
+            out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                 timeout=30, env={"PATH": "/usr/bin:/bin",
+                                                  "XDG_RUNTIME_DIR": runtime})
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return out.stdout
+        self.assertIn("NOTE: rootless Docker's builtin port driver", note("0.0.0.0", "builtin"))
+        self.assertIn("NOTE: rootless Docker's builtin port driver", note("0.0.0.0", None))
+        self.assertIn("ONIONPRESS_BIND_HOST=127.0.0.1", note("192.168.1.5", "builtin"))
+        for bind, driver in (("127.0.0.1", "builtin"), ("0.0.0.0", "slirp4netns"),
+                             ("0.0.0.0", "implicit")):
+            with self.subTest(bind=bind, driver=driver):
+                self.assertEqual(note(bind, driver), "")
+        os.remove(os.path.join(runtime, "dockerd-rootless", "child_pid"))
+        self.assertEqual(note("0.0.0.0", "builtin"), "", "system Docker: DNAT keeps addresses")
+
+    def test_linux_says_it_on_every_start(self):
+        body = _function_body(_read(LINUX_LAUNCHER), "start_containers")
+        self.assertIn("\n    note_if_lan_looks_local\n", body)
+
     def test_mac_no_longer_installs_address_keyed_logging(self):
         text = _read(MAC_LAUNCHER)
         self.assertNotIn("install_clearnet_logging", text)
