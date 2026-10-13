@@ -67,8 +67,9 @@ echo none
 # (excludes_onionheaven_data, with the reason code below) and to the owner.
 # Backups made from the app or the CLI, written to the owner's disk, keep
 # them. The Settings page's restore, whose upload and password came through
-# WordPress too, refuses a backup holding registrants' keys
-# (settings_page_restore_refusal) and never writes the hub data volume.
+# WordPress too, refuses a backup holding registrants' keys or OnionHome's
+# name registry (settings_page_restore_refusal) and never writes either
+# volume.
 HUB_DATA_LEFT_OUT_REASON = "settings-page"
 HUB_DATA_LEFT_OUT_LOG = (
     "Backup: this is an OnionHeaven hub; its registry and registrants' onion "
@@ -89,6 +90,10 @@ HUB_DATA_RESTORE_REFUSED_MSG = (
     "onion service keys, which are never restored through WordPress. Nothing "
     "was restored: restore it from the OnionPress app (Restore... in its "
     "menu) or with onionpress restore.")
+ONIONHOME_RESTORE_REFUSED_MSG = (
+    "This backup holds OnionHome's name registry, which is never restored "
+    "through WordPress. Nothing was restored: restore it from the OnionPress "
+    "app (Restore... in its menu) or with onionpress restore.")
 
 # A tar of the registry, as sqlite3's .backup copies it (one consistent
 # state while the hub writes; a copy of the file could miss its -wal or catch
@@ -1510,22 +1515,30 @@ def settings_page_restore_refusal(staging):
 
     That restore's upload and password both came through WordPress, so
     code running there has already had them, and could have made the file
-    itself. It never writes the OnionHeaven hub data
-    (restore_container_artifacts(hub_volumes=False)): that volume is kept
-    out of WordPress's reach. A backup holding registrants' keys is refused
-    whole rather than restored without them: on a new machine the hub's
-    address would come up with none of its registrants' keys under a
-    "Restored" message, and the full restore from the app would have to
-    follow anyway.
+    itself. It never writes the OnionHeaven hub data or the OnionHome name
+    registry (restore_container_artifacts(hub_volumes=False)): those
+    volumes are kept out of WordPress's reach. A backup holding either is
+    refused whole rather than restored without it: on a new machine the
+    hub's (or OnionHome's) address would come up with no registrants' keys
+    (or an empty registry, every name free to claim) under a "Restored"
+    message, and the full restore from the app would have to follow anyway.
 
     Registrants' keys means any entry in onionheaven/keys/ (a key
     directory, as hub_data_state counts them). A registry alone does not
     count: backups made by Linux through 2.5.2 carry the empty one every
     node has. It is left out of the restore, and the backup goes ahead.
+
+    OnionHome's name registry is no secret (the lookups serve it), and the
+    Settings page's backups keep it. What matters there is who writes it:
+    it left WordPress's volume so that code running there could not point
+    a name at an onion address of its choosing, and restoring an upload
+    WordPress could have made would hand that back.
     """
     keys = os.path.join(_find_dir(staging, 'onionheaven'), 'keys')
     if os.path.isdir(keys) and not os.path.islink(keys) and os.listdir(keys):
         return HUB_DATA_RESTORE_REFUSED_MSG
+    if os.path.lexists(os.path.join(_find_dir(staging, 'onionhome'), 'onionnames.db')):
+        return ONIONHOME_RESTORE_REFUSED_MSG
     return None
 
 
@@ -1718,9 +1731,9 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
         data_dir: OnionPress data directory (defaults to ~/.onionpress). Tests pass a sandbox path.
         through_wordpress: True for the Settings page's restore, whose file
             and password came through WordPress: a backup holding an
-            OnionHeaven hub's registrants' keys is refused before anything
-            is touched (settings_page_restore_refusal), and the hub data
-            volume is not written.
+            OnionHeaven hub's registrants' keys or OnionHome's name registry
+            is refused before anything is touched
+            (settings_page_restore_refusal), and neither volume is written.
 
     Returns:
         metadata dict from the backup
@@ -1905,8 +1918,8 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     install-from-backup path. Requires onionpress-db + onionpress-wordpress up.
 
     hub_volumes=False (the Settings page's restore) never writes the
-    OnionHeaven hub data: what the backup holds for it is left out and
-    logged.
+    OnionHeaven hub data or the OnionHome name registry: what the backup
+    holds for them is left out and logged.
     """
     # docker cp follows a link in the source path (a `wp-content` link to
     # the home folder would copy that folder into the web root) and copies
@@ -2041,8 +2054,15 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     #     Only the registry's own files: an older backup also carries
     #     SQLite's -shm index (rebuilt on open), and nothing else in the
     #     archive belongs on that volume (its move marker among them).
+    #     Not from the Settings page's restore (hub_volumes=False), which
+    #     refuses such a backup first (settings_page_restore_refusal).
     onionhome_dir = _find_dir(staging, 'onionhome')
-    if os.path.isdir(onionhome_dir) and os.path.exists(os.path.join(onionhome_dir, 'onionnames.db')):
+    has_name_registry = (os.path.isdir(onionhome_dir) and os.path.exists(
+        os.path.join(onionhome_dir, 'onionnames.db')))
+    if has_name_registry and not hub_volumes:
+        log_func("Restore: the backup's OnionHome name registry left out: the "
+                 "Settings page's restore never writes it")
+    elif has_name_registry:
         with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
             log_func("Restore: restoring OnionHome name registry...")
             for name in ONIONHOME_REGISTRY_FILES:

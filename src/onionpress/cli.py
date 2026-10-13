@@ -525,7 +525,7 @@ class OnionPressCLI:
         exit 0 when the extracted backup in *staging* may be restored
         through the Settings page; exit 3, printing why on stdout, when it
         must not (backup.settings_page_restore_refusal: an OnionHeaven hub's
-        registrants' keys)."""
+        registrants' keys, or OnionHome's name registry)."""
         from .backup import settings_page_restore_refusal
         refusal = settings_page_restore_refusal(staging)
         if refusal:

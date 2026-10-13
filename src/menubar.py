@@ -5729,8 +5729,8 @@ License: AGPL v3"""
                             backup_manager.check_uploaded_backup(local_zip)
                             # The file and its password came through
                             # WordPress: a backup holding an OnionHeaven
-                            # hub's keys is refused, and the hub data is
-                            # never written.
+                            # hub's keys or OnionHome's name registry is
+                            # refused, and neither volume is written.
                             backup_manager.restore_from_backup(local_zip, password, self.log,
                                                                through_wordpress=True)
                             restored = True

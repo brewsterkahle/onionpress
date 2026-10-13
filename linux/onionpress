@@ -2305,10 +2305,10 @@ restore_backup() {
     # Restores from a password-protected backup zip.
     # Usage: restore_backup <password> <zip_path> [--from-settings-page]
     # --from-settings-page: the file and its password came through
-    # WordPress. A backup holding an OnionHeaven hub's registrants' keys is
-    # refused before anything is touched (return 3, the reason as the last
-    # line of stdout), and the hub data volume is never written
-    # (backup.settings_page_restore_refusal).
+    # WordPress. A backup holding an OnionHeaven hub's registrants' keys or
+    # OnionHome's name registry is refused before anything is touched
+    # (return 3, the reason as the last line of stdout), and the hub data
+    # volume is never written (backup.settings_page_restore_refusal).
     local password="$1"
     local zip_path="$2"
     local from_settings_page="false"
@@ -3648,8 +3648,9 @@ sys.exit(0 if provision_interactive() else 1)
                         local rp_rc=0
                         # The file and its password came through WordPress
                         # (--from-settings-page): a backup holding an
-                        # OnionHeaven hub's keys is refused, and the hub
-                        # data is never written.
+                        # OnionHeaven hub's keys or OnionHome's name
+                        # registry is refused, and the hub data is never
+                        # written.
                         rp_addr=$(restore_backup "$rp_password" "$rp_local" --from-settings-page 2>>"$LOG_FILE") || rp_rc=$?
                         if [ "$rp_rc" -eq 0 ]; then
                             rm -rf "$rp_dir"

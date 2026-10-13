@@ -1437,7 +1437,7 @@ function onionpress_settings_page() {
         ?>
         <p class="description">Restore from an OnionPress backup zip. This will <strong>overwrite</strong> your current database, wp-content, and Tor keys. OnionPress will restart automatically after restore.</p>
         <?php // backup.settings_page_restore_refusal: refused before anything is restored. ?>
-        <p class="description">A backup of an OnionHeaven hub made in the OnionPress app is refused here: restore it from the app (Restore&hellip; in its menu) or with <code>onionpress restore</code>. Do not upload it here at all: it holds the registrants' onion service keys, and this page hands what you upload to WordPress.</p>
+        <p class="description">A backup of an OnionHeaven hub or of OnionHome made in the OnionPress app is refused here: restore it from the app (Restore&hellip; in its menu) or with <code>onionpress restore</code>. Do not upload a hub's backup here at all: it holds the registrants' onion service keys, and this page hands what you upload to WordPress.</p>
         <form method="post" enctype="multipart/form-data" style="margin-top: 8px;">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="restore-backup">

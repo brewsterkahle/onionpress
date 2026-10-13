@@ -14,11 +14,12 @@ file itself.
 - The Settings page's backup (Mac handler, Linux branch) leaves the hub data
   out (create_backup(include_hub_data=False), create_backup
   --without-hub-data), says so in metadata.json and to the owner. Backups
-  made from the app or the CLI keep it.
-- The Settings page's restore refuses a backup holding registrants' keys
-  before anything is touched, and never writes the hub data volume (a
-  registry alone, as every Linux backup through 2.5.2 carries, is left
-  out).
+  made from the app or the CLI keep it. OnionHome's name registry (no
+  secret in it) stays in.
+- The Settings page's restore refuses a backup holding registrants' keys or
+  OnionHome's name registry before anything is touched, and never writes
+  either volume (a registry alone, as every Linux backup through 2.5.2
+  carries, is left out).
 
 No docker: the container side is a stub script on PATH (the onionheaven
 side is the real shell, run on a sandbox folder), a bash function, or
@@ -206,6 +207,14 @@ class TestCreateBackup(unittest.TestCase):
         _assert_no_hub_data(self, members)
         self.assertNotIn("excludes_onionheaven_data", meta)
         self.assertTrue([m for m in self.logs if "did not say whether" in m])
+
+    def test_onionhomes_name_registry_stays_in(self):
+        """Not secret (names and addresses /api/name/lookup serves), and an
+        app restore of a backup without it would bring OnionHome up with an
+        empty registry, every name free to claim."""
+        meta, members = self._backup(include_hub_data=False, hub=False, onionhome=True)
+        self.assertIn("onionhome/onionnames.db", members)
+        self.assertIs(meta["is_onionhome"], True)
 
     def test_the_cli_backup_keeps_it(self):
         """`onionpress backup` (Mac launcher, scrub) writes to the owner's
@@ -493,7 +502,8 @@ class TestMacSettingsPageBackupBranch(unittest.TestCase):
 
     def test_the_note_is_plain_text(self):
         """It goes into JSON by hand (Linux) and into the page."""
-        for text in (backup.HUB_DATA_LEFT_OUT_NOTE, backup.HUB_DATA_RESTORE_REFUSED_MSG):
+        for text in (backup.HUB_DATA_LEFT_OUT_NOTE, backup.HUB_DATA_RESTORE_REFUSED_MSG,
+                     backup.ONIONHOME_RESTORE_REFUSED_MSG):
             self.assertRegex(text, r"\A[A-Za-z0-9 .,:;'()-]+\Z")
 
 
@@ -533,6 +543,7 @@ class TestSettingsPageRestoreRefusal(unittest.TestCase):
         cases = {
             "keys": ({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
             "keys, no registry": ({"keys": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
+            "onionhome": ({"onionhome": True}, backup.ONIONHOME_RESTORE_REFUSED_MSG),
             # Every Linux backup through 2.5.2: the empty registry and keys/
             # every node has. Left out of the restore, not refused.
             "registry alone": ({"registry": True, "empty_keys": True}, None),
@@ -547,6 +558,7 @@ class TestSettingsPageRestoreRefusal(unittest.TestCase):
         import contextlib
         import io
         for kw, rc, want in (({"keys": True}, 3, backup.HUB_DATA_RESTORE_REFUSED_MSG),
+                             ({"onionhome": True}, 3, backup.ONIONHOME_RESTORE_REFUSED_MSG),
                              ({"registry": True}, 0, "")):
             staging = _staging(self.tmp, f"cli-{rc}-{sorted(kw)}", **kw)
             out = io.StringIO()
@@ -592,7 +604,8 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
             self.assertEqual(f.read(), mv.OLD_ADDR + "\n")
 
     def test_a_hubs_backup_is_refused_untouched(self):
-        for kw, want in (({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),):
+        for kw, want in (({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
+                         ({"onionhome": True}, backup.ONIONHOME_RESTORE_REFUSED_MSG)):
             with self.subTest(want):
                 path = self._backup(f"b-{len(self.logs)}.zip", **kw)
                 with self.assertRaises(backup.SettingsPageRestoreRefused) as cm:
@@ -609,7 +622,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
                                       tempfile.gettempdir(), n, "onionheaven"))])
 
     def test_the_apps_restore_goes_ahead(self):
-        path = self._backup("hub.zip", keys=True, registry=True)
+        path = self._backup("hub.zip", keys=True, registry=True, onionhome=True)
         with self.assertRaises(_KeyWritten):
             backup.restore_from_backup(path, PW, self.logs.append, data_dir=self.data_dir)
 
@@ -660,15 +673,18 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
         return touched, logs
 
     def test_left_out_and_logged(self):
-        staging = _staging(self.tmp, "s", keys=True, registry=True)
+        staging = _staging(self.tmp, "s", keys=True, registry=True, onionhome=True)
         touched, logs = self._restore(staging, hub_volumes=False)
         self.assertEqual(touched, [])
         self.assertTrue([m for m in logs if "OnionHeaven data left out" in m], logs)
+        self.assertTrue([m for m in logs if "OnionHome name registry left out" in m], logs)
 
     def test_the_apps_restore_writes_them(self):
-        staging = _staging(self.tmp, "s", keys=True, registry=True)
+        staging = _staging(self.tmp, "s", keys=True, registry=True, onionhome=True)
         touched, _ = self._restore(staging)
         self.assertTrue([c for c in touched if "onionheaven:/var/lib/onionheaven/keys/" in c])
+        self.assertTrue([c for c in touched
+                         if "onionpress-tor:/var/lib/onionnames/onionnames.db" in c])
 
     def test_a_hubs_settings_page_backup_says_what_it_lacks(self):
         staging = _staging(self.tmp, "s")
@@ -747,7 +763,8 @@ sys.exit(cli.OnionPressCLI.cmd_extract_backup(
         return int(rc.strip()), out, data, made
 
     def test_a_hubs_backup_is_refused_untouched(self):
-        for kw, want in (({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),):
+        for kw, want in (({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
+                         ({"onionhome": True}, backup.ONIONHOME_RESTORE_REFUSED_MSG)):
             with self.subTest(want):
                 path = self._backup(f"b{len(kw)}.zip", **kw)
                 rc, out, data, made = self._run(path, "--from-settings-page")

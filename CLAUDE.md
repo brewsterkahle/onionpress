@@ -432,6 +432,14 @@
   via `docker cp` on onionpress-tor and copies only `onionnames.db` and its
   `-wal` (`backup.ONIONHOME_REGISTRY_FILES`); the archive folder is still
   `onionhome/`. `tests/test_onionhome_registry_volume.py`.
+- The Settings page's backups keep `onionhome/` (no secret in it, and an
+  app restore of a backup without it would serve an empty, claimable
+  registry). The page's restore refuses a backup carrying
+  `onionhome/onionnames.db` (`settings_page_restore_refusal`) and never
+  writes the volume (`hub_volumes=False`): that upload is WordPress's to
+  make, and the registry left WordPress's reach so code there could not
+  repoint names. Restore OnionHome from the app or `onionpress restore`.
+  `tests/test_backup_hub_data_off_wordpress.py`.
 - It used to be `onionhome/` on onionpress-persistent-data (www-data owns
   that folder). `onionhome-registry-migrate.py` (onionpress-tor's
   entrypoint, before web-server.py) reads only the db/-wal/-journal there,
