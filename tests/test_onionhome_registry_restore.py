@@ -325,15 +325,16 @@ class TestOnionpressRestore(unittest.TestCase):
             return 0
 
         me.cmd_import_backup_artifacts = imported
-        with mock.patch("onionpress.backup.prepare_install_from_backup",
-                        return_value=(staging, {"onion_address": ALICE})), \
+        with mock.patch("onionpress.backup.read_backup_metadata", return_value={}), \
+                mock.patch("onionpress.backup.prepare_install_from_backup",
+                           return_value=(staging, {"onion_address": ALICE})), \
                 mock.patch("onionpress.backup.restore_staged_name_registry",
                            side_effect=lambda st, log: order.append(("names", st))), \
                 mock.patch("onionpress.derivatives.spawn_regeneration"), \
                 mock.patch("sys.stdout"):
             self.assertEqual(me.cmd_restore("pw", "/tmp/b.zip"), 0)
         self.assertEqual(order, ["stop", "start_core", "wait_for_wordpress",
-                                 ("import", {"name_registry": False}),
+                                 ("import", {"name_registry": False, "hub_data": None}),
                                  "start_tor", "wait_for_tor", ("names", staging)])
 
     def test_an_import_with_tor_running_does_it_inline(self):

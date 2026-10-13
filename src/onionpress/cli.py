@@ -2,7 +2,8 @@
 
 Usage: python -m onionpress.cli <command> [args]
 
-Commands: start, stop, restart, status, address, logs, get, setup, backup, restore, reset
+Commands: start, stop, restart, status, address, logs, get, setup, backup, restore, reset,
+hub-recovery-key
 """
 
 import argparse
@@ -91,6 +92,65 @@ def read_backup_password(positional: str | None = None) -> str:
         return getpass.getpass("Backup password: ")
     except (EOFError, KeyboardInterrupt):
         return ""
+
+
+def read_hub_recovery_key(from_env: str, *, stdin_ok: bool, prompt: str) -> str:
+    """An OnionHeaven hub's backup recovery key (its private half), or "".
+
+    Taken from the first of: *from_env* (main() has already removed
+    $ONIONPRESS_HUB_RECOVERY_KEY from the environment, so docker children
+    never see it), a line on stdin when *stdin_ok* and stdin is not a
+    terminal, or a no-echo prompt when it is. Never from argv.
+    """
+    if from_env:
+        return from_env
+    if sys.stdin is None:
+        return ""
+    try:
+        if not sys.stdin.isatty():
+            return sys.stdin.readline().strip() if stdin_ok else ""
+        return getpass.getpass(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def _hub_key_for_backup(metadata: dict, from_env: str, log) -> bytes | None:
+    """For a restore: the recovery key's private half when *metadata* says
+    the backup's hub data is sealed and the operator supplies its key, else
+    None (said why). Checked against the backup's key id before anything
+    is restored; at a terminal a key that does not fit is asked for again,
+    and an empty answer restores without the hub data."""
+    from . import hub_backup
+    if metadata.get("onionheaven_data") != "sealed":
+        if from_env:
+            log("Restore: a hub recovery key was given, but this backup holds no "
+                "sealed hub data")
+        return None
+    kid = metadata.get("onionheaven_recovery_key_id")
+    kid = kid if hub_backup.is_key_id(kid) else "unknown"
+    interactive = not from_env and sys.stdin is not None and sys.stdin.isatty()
+    if interactive:
+        print(f"This backup holds an OnionHeaven hub's registry and registrants' "
+              f"keys, sealed to recovery key {kid}. Without that key the rest "
+              f"is restored and they are not: online registrants send their "
+              f"keys again within a minute, offline sites cannot be taken over "
+              f"until they come back.", file=sys.stderr)
+    for _ in range(3 if interactive else 1):
+        text = read_hub_recovery_key(
+            from_env, stdin_ok=False,
+            prompt="Recovery key (Enter to restore without the hub data): ")
+        if not text:
+            break
+        try:
+            return hub_backup.check_key_for_backup(text, metadata)
+        except (hub_backup.RecoveryKeyError, hub_backup.SodiumUnavailableError) as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            log(f"Restore: the recovery key given was not used: {e}")
+            if not interactive:
+                break
+    log(f"Restore: no usable recovery key for the hub data sealed to key {kid}; "
+        f"restoring without it")
+    return None
 
 
 def _make_log_func(log_file: str | None = None) -> Callable[[str], None]:
@@ -370,7 +430,7 @@ class OnionPressCLI:
             output_path = os.path.join(
                 backups_dir, backup_filename(addr, username))
         try:
-            create_backup(
+            metadata = create_backup(
                 onion_address=addr,
                 username=username,
                 password=password,
@@ -378,29 +438,58 @@ class OnionPressCLI:
                 version=__version__,
                 log_func=self.log,
                 # Written to the owner's disk, never handed to WordPress: an
-                # OnionHeaven hub's registry and registrants' keys stay in,
-                # and so does the whole config.
+                # OnionHeaven hub's registry and registrants' keys stay in
+                # (sealed to its recovery key when one is set up), and so
+                # does the whole config.
                 include_hub_data=True,
                 include_host_secrets=True,
             )
             print(f"Backup saved to: {output_path}")
+            if isinstance(metadata, dict) and metadata.get("onionheaven_data") == "unsealed":
+                from .backup import HUB_DATA_UNSEALED_NOTE
+                print(f"WARNING: {HUB_DATA_UNSEALED_NOTE}", file=sys.stderr)
             return 0
         except Exception as e:
             self.log(f"Backup failed: {e}")
             return 1
 
-    def cmd_restore(self, password: str, backup_path: str) -> int:
+    def cmd_restore(self, password: str, backup_path: str,
+                    hub_recovery_key: str = "") -> int:
         """Restore from a backup via install-from-backup: tear the install down
         to a clean state and rebuild it directly from the backup (key + DB +
         content), instead of overwriting a live install in place. No vanity
         generation and no onion-service key-swap churn.
+
+        An OnionHeaven hub's backup with sealed hub data: its registry and
+        registrants' keys are restored only with the recovery key
+        (*hub_recovery_key*, from $ONIONPRESS_HUB_RECOVERY_KEY, else asked
+        for at a terminal). It is checked against the backup before
+        anything is restored, and the sealed data is opened into memory,
+        never into a file, right after extraction. Without it, or with
+        another key, everything else is restored and the hub data is not.
         """
         import shutil
+        hub = {}
         try:
-            from .backup import prepare_install_from_backup
+            from . import hub_backup
+            from .backup import (prepare_install_from_backup, read_backup_metadata,
+                                 open_sealed_hub_data)
             from .key_manager import is_valid_onion_address
+            hub_key = _hub_key_for_backup(
+                read_backup_metadata(backup_path, password), hub_recovery_key, self.log)
+
+            def open_hub_data(staging, metadata):
+                if hub_key is None:
+                    return
+                try:
+                    hub["data"] = open_sealed_hub_data(staging, metadata, hub_key, self.log)
+                except (hub_backup.RecoveryKeyError, hub_backup.HubDataError,
+                        hub_backup.SodiumUnavailableError) as e:
+                    self.log(f"Restore: the OnionHeaven hub data will not be restored: {e}")
+
             staging, meta = prepare_install_from_backup(
-                backup_path, password, self.log, data_dir=self.paths.data_dir)
+                backup_path, password, self.log, data_dir=self.paths.data_dir,
+                after_extract=open_hub_data)
             addr = meta.get("onion_address", "")
             # Derived from the backup's key by the seed step; checked again,
             # before the teardown, because it names the directory
@@ -470,7 +559,8 @@ class OnionPressCLI:
             # onionpress-tor, which the teardown removed.
             self.containers.start_core()
             self.containers.wait_for_wordpress()
-            if self.cmd_import_backup_artifacts(staging, name_registry=False) != 0:
+            if self.cmd_import_backup_artifacts(staging, name_registry=False,
+                                                hub_data=hub.get("data")) != 0:
                 self.log("Restore: artifact import failed — staging kept for retry")
                 return 1
             self.containers.start_tor()
@@ -496,13 +586,17 @@ class OnionPressCLI:
             self.log(f"Restore failed: {e}")
             return 1
 
-    def cmd_import_backup_artifacts(self, staging: str, name_registry: bool = True) -> int:
+    def cmd_import_backup_artifacts(self, staging: str, name_registry: bool = True,
+                                    hub_data=None) -> int:
         """Import a backup's container-side artifacts (DB, wp-content,
         OnionHeaven/OnionHome data, multisite constants) into the already-running
         containers, then migrate the DB schema. Used by the launcher's
         install-from-backup marker hook. Operates on an already-extracted staging
         dir, so no password is needed here. name_registry=False leaves
         OnionHome's name registry to the caller (cmd_restore, before Tor runs).
+        *hub_data*: a hub's sealed data, opened by cmd_restore with the
+        recovery key; the launcher's hook has no key, and a sealed backup's
+        hub data is left out there (said so).
         """
         try:
             from .backup import (restore_container_artifacts,
@@ -515,7 +609,8 @@ class OnionPressCLI:
                 with open(meta_path) as f:
                     metadata = validate_backup_metadata(json.load(f))
             restore_container_artifacts(staging, metadata, self.log,
-                                        name_registry=name_registry)
+                                        name_registry=name_registry,
+                                        hub_data=hub_data)
             # Migrate DB schema for cross-version backups (non-fatal).
             res = self.docker.wp("core", "update-db", timeout=120)
             if not res.ok:
@@ -653,6 +748,32 @@ class OnionPressCLI:
             return 1
 
     @staticmethod
+    def cmd_stage_hub_backup(staging: str, data_dir: str) -> int:
+        """Put a hub's registry and registrants' keys into the staged backup
+        *staging* (backup.stage_hub_backup: sealed to the recovery key if
+        one is set up, else a plain onionheaven/ folder with a warning) and
+        print the metadata.json fields that say how, as JSON. Exit 3 when
+        the volume holds no hub data, 4 when the onionheaven container did
+        not answer, 1 when it failed. For the Linux launcher's
+        create_backup; messages go to stderr."""
+        from .backup import hub_data_state, stage_hub_backup
+        log = _make_log_func()
+        state = hub_data_state()
+        if state is None:
+            log("Backup: the onionheaven container did not say whether it holds "
+                "OnionHeaven data")
+            return 4
+        if state != "hub":
+            return 3
+        try:
+            fields = stage_hub_backup(staging, log, data_dir=data_dir)
+        except Exception as e:
+            log(f"Backup: could not back up the OnionHeaven data: {e}")
+            return 1
+        print(json.dumps(fields))
+        return 0
+
+    @staticmethod
     def cmd_settings_page_backup_check(address: str, data_dir: str) -> int:
         """For the Linux launcher's create_backup --without-hub-data (the
         Settings page's backup): exit 0 when this node may be backed up
@@ -665,6 +786,118 @@ class OnionPressCLI:
         if refusal:
             print(refusal)
             return 3
+        return 0
+
+    # ─── An OnionHeaven hub's backup recovery key ───────────────────────
+
+    @staticmethod
+    def cmd_hub_recovery_key_create(data_dir: str, force: bool = False) -> int:
+        """Make the hub's backup recovery key: keep the public half here,
+        print the private half once (hub_backup.create_recovery_key)."""
+        from . import hub_backup
+        try:
+            private_text, kid = hub_backup.create_recovery_key(data_dir, force=force)
+        except (hub_backup.RecoveryKeyError, hub_backup.SodiumUnavailableError) as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        print(f"""OnionHeaven hub backup recovery key created (key id {kid}).
+
+From now on this hub's backups seal its registry and its registrants' onion
+service keys to this key. Here is its private half. It is shown this once
+and is not stored on this computer:
+
+    {private_text}
+
+Keep it off this machine: in a password manager, or printed and stored
+safely. A restore of the hub's data needs it. Without it a restore brings
+back everything else: registrants that are online send their keys again
+within a minute, and sites that are offline cannot be taken over until they
+come back. Nobody loses their address.
+
+Check a copy you kept with: onionpress hub-recovery-key check
+Public half: {hub_backup.public_key_path(data_dir)}""")
+        return 0
+
+    @staticmethod
+    def cmd_hub_recovery_key_show(data_dir: str) -> int:
+        """Say whether a recovery key is set up, and its id (the public
+        half only; the private half is not here)."""
+        from . import hub_backup
+        try:
+            public_raw = hub_backup.load_public_key(data_dir)
+        except hub_backup.RecoveryKeyError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        if public_raw is None:
+            print("No hub backup recovery key is set up: a hub's backups hold its "
+                  "registrants' keys under the backup password only. Set one up "
+                  "with: onionpress hub-recovery-key create")
+            return 3
+        print(f"Hub backup recovery key: key id {hub_backup.key_id(public_raw)}")
+        print(f"Public half: {hub_backup.public_key_path(data_dir)}")
+        return 0
+
+    @staticmethod
+    def cmd_hub_recovery_key_check(data_dir: str, from_env: str = "") -> int:
+        """Check that a recovery key kept off the hub is the one set up
+        here. The key comes from $ONIONPRESS_HUB_RECOVERY_KEY, stdin or a
+        prompt; exit 0 if it is, 1 if not."""
+        from . import hub_backup
+        try:
+            public_raw = hub_backup.load_public_key(data_dir)
+        except hub_backup.RecoveryKeyError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        if public_raw is None:
+            print("ERROR: no hub backup recovery key is set up here.", file=sys.stderr)
+            return 1
+        text = read_hub_recovery_key(from_env, stdin_ok=True, prompt="Recovery key: ")
+        try:
+            given = hub_backup.key_id(hub_backup.public_key_of(
+                hub_backup.parse_private_key(text)))
+        except (hub_backup.RecoveryKeyError, hub_backup.SodiumUnavailableError) as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        wanted = hub_backup.key_id(public_raw)
+        if given != wanted:
+            print(f"That is a different recovery key (key id {given}); the one set "
+                  f"up here is key id {wanted}.")
+            return 1
+        print(f"That is this hub's backup recovery key (key id {wanted}).")
+        return 0
+
+    @staticmethod
+    def cmd_hub_recovery_key_restore(backup_path: str, password: str,
+                                     from_env: str = "") -> int:
+        """Restore only a hub's sealed registry and registrants' keys from a
+        backup (after a restore that did not have the recovery key, such as
+        one from the welcome screen). OnionPress must be running. The
+        backup password and then the key come from the environment, stdin
+        or prompts. The key is checked before anything is written, and
+        every key is checked to be its address's (hub_backup.check)."""
+        from . import hub_backup
+        from .backup import read_sealed_hub_member, write_hub_data
+        log = _make_log_func()
+        try:
+            metadata, blob = read_sealed_hub_member(backup_path, password)
+            hub_backup.check_sealed_format(metadata)
+            kid = metadata.get("onionheaven_recovery_key_id")
+            text = read_hub_recovery_key(
+                from_env, stdin_ok=True,
+                prompt=f"Recovery key (key id "
+                       f"{kid if hub_backup.is_key_id(kid) else 'unknown'}): ")
+            private_raw = hub_backup.check_key_for_backup(text, metadata)
+            hub = hub_backup.check(hub_backup.unpack(hub_backup.unseal(blob, private_raw), log),
+                                   log)
+        except (ValueError, hub_backup.SodiumUnavailableError) as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        try:
+            write_hub_data(hub, log)
+        except Exception as e:
+            log(f"Restore: could not restore the OnionHeaven data: {e}")
+            return 1
+        print("OnionHeaven registry and registrants' keys restored.")
         return 0
 
     @staticmethod
@@ -1222,12 +1455,44 @@ def main(argv: list[str] = None) -> int:
              "data volume (restore helper)")
     p_restore_hub.add_argument("--src", required=True,
                                help="The backup's onionheaven/ folder")
+    p_stage_hub_backup = sub.add_parser(
+        "stage-hub-backup",
+        help="Put a hub's registry and keys into a staged backup, sealed to "
+             "its recovery key if one is set up; print the metadata fields "
+             "(backup helper; exit 3: not a hub, 4: no answer)")
+    p_stage_hub_backup.add_argument("--staging", required=True,
+                                    help="The staged backup folder")
     p_sp_backup = sub.add_parser(
         "settings-page-backup-check",
         help="Exit 3 and say why if this node must not be backed up through "
              "the WordPress Settings page (an OnionHeaven hub or OnionHome)")
     p_sp_backup.add_argument("--address", default="",
                              help="This node's onion address")
+
+    # An OnionHeaven hub's backup recovery key. Its private half is printed
+    # once by create and otherwise read from $ONIONPRESS_HUB_RECOVERY_KEY,
+    # stdin or a prompt, never from argv.
+    p_hrk = sub.add_parser(
+        "hub-recovery-key",
+        help="An OnionHeaven hub's backup recovery key: the hub's registry and "
+             "registrants' keys in its backups are sealed to it",
+        epilog="The private half is read from $ONIONPRESS_HUB_RECOVERY_KEY, "
+               "else stdin, else a prompt; never give it as an argument.")
+    hrk = p_hrk.add_subparsers(dest="hrk_command")
+    p_hrk_create = hrk.add_parser(
+        "create", help="Make the key; keep the public half here and print the "
+                       "private half once, to keep off this machine")
+    p_hrk_create.add_argument("--force", action="store_true",
+                              help="Replace a key already set up (backups sealed "
+                                   "to it still need its private half)")
+    hrk.add_parser("show", help="Say whether a key is set up, and its id")
+    hrk.add_parser("check", help="Check that a private half you kept is the key "
+                                 "set up here")
+    p_hrk_restore = hrk.add_parser(
+        "restore", help="Restore only the hub's sealed registry and registrants' "
+                        "keys from a backup (OnionPress must be running; the "
+                        "backup password, then the key)")
+    p_hrk_restore.add_argument("backup_file", help="Path to the backup .zip file")
     p_put = sub.add_parser(
         "put-wp-tree",
         help="Copy a host folder into the WordPress container, written as "
@@ -1328,6 +1593,32 @@ def main(argv: list[str] = None) -> int:
     if not args.command:
         args.command = "start"
 
+    # A hub's backup recovery key leaves the environment at once, whatever
+    # the command: OnionPressCLI's Docker wrapper hands os.environ to every
+    # docker child. Used by restore and hub-recovery-key only.
+    from .hub_backup import RECOVERY_KEY_ENV
+    hub_recovery_key = os.environ.pop(RECOVERY_KEY_ENV, "")
+    data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+
+    if args.command == "hub-recovery-key":
+        # Needs only the data directory (restore: docker too): no
+        # OnionPressCLI setup.
+        if args.hrk_command == "create":
+            return OnionPressCLI.cmd_hub_recovery_key_create(data_dir, force=args.force)
+        if args.hrk_command == "show":
+            return OnionPressCLI.cmd_hub_recovery_key_show(data_dir)
+        if args.hrk_command == "check":
+            return OnionPressCLI.cmd_hub_recovery_key_check(data_dir, hub_recovery_key)
+        if args.hrk_command == "restore":
+            password = read_backup_password()
+            if not password:
+                print("ERROR: a password is required.", file=sys.stderr)
+                return 1
+            return OnionPressCLI.cmd_hub_recovery_key_restore(
+                args.backup_file, password, hub_recovery_key)
+        p_hrk.print_help()
+        return 1
+
     # Restore helpers, run by the launchers mid-restore: no OnionPressCLI
     # setup (config/secrets creation, port probing).
     if args.command == "backup-address":
@@ -1350,8 +1641,9 @@ def main(argv: list[str] = None) -> int:
         return OnionPressCLI.cmd_wordpress_safe_config(args.config, args.dest)
     if args.command == "restore-hub-data":
         return OnionPressCLI.cmd_restore_hub_data(args.src)
+    if args.command == "stage-hub-backup":
+        return OnionPressCLI.cmd_stage_hub_backup(args.staging, data_dir)
     if args.command == "settings-page-backup-check":
-        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
         return OnionPressCLI.cmd_settings_page_backup_check(args.address, data_dir)
     # Restore and plugin-install helper for the bash launchers: same.
     if args.command == "put-wp-tree":
@@ -1484,7 +1776,10 @@ def main(argv: list[str] = None) -> int:
     elif args.command == "backup":
         return cli.cmd_backup(password, args.output_opt or args.output, args.user)
     elif args.command == "restore":
-        return cli.cmd_restore(password, args.backup_file)
+        # A hub's recovery key, when one was given (cmd_restore asks at a
+        # terminal otherwise).
+        extra = (hub_recovery_key,) if hub_recovery_key else ()
+        return cli.cmd_restore(password, args.backup_file, *extra)
     elif args.command == "import-backup-artifacts":
         return cli.cmd_import_backup_artifacts(args.staging)
     elif args.command == "regenerate-derivatives":

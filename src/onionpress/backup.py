@@ -7,6 +7,7 @@ inside libsodium Argon2id + XChaCha20-Poly1305 secretstream encryption, see
 backup_crypto); format 1 backups (ZipCrypto zips from `zip -P`) still restore.
 """
 
+import io
 import json
 import os
 import re
@@ -22,7 +23,7 @@ import zlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from onionpress import backup_crypto, derivatives, key_manager, wp_files
+from onionpress import backup_crypto, derivatives, hub_backup, key_manager, wp_files
 from onionpress.config import (DEFAULTS, SECRET_CONFIG_KEYS, read_config, read_value,
                                redact_config, write_value)
 
@@ -69,9 +70,10 @@ echo none
 # key, and with it code in WordPress could run a rival hub that collects
 # registrants' keys from their heartbeats, or a rival OnionHome answering
 # name lookups (settings_page_backup_refusal). Backups made from the app or
-# the CLI, written to the owner's disk, keep the hub data. The Settings
-# page's restore, whose upload and password came through WordPress too,
-# refuses a backup holding registrants' keys or OnionHome's name registry
+# the CLI, written to the owner's disk, keep the hub data, sealed to the
+# hub's recovery key (hub_backup). The Settings page's restore, whose upload
+# and password came through WordPress too, refuses a backup holding
+# registrants' keys (sealed or not) or OnionHome's name registry
 # (settings_page_restore_refusal) and never writes either volume.
 #
 # Shown on the Settings page: plain text, safe in JSON and HTML as it stands
@@ -119,6 +121,41 @@ TUNNEL_TOKEN_KEY = "CLOUDFLARE_TUNNEL_TOKEN"
 ONIONHEAVEN_HUB_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
 
+# A hub's backup without a recovery key set up: the hub data goes into the
+# backup as before, under its password only, and the operator hears about it
+# every time (the log; the Mac's finished-backup message and `onionpress
+# backup` print HUB_DATA_UNSEALED_NOTE).
+HUB_DATA_UNSEALED_WARNING = (
+    "Backup: WARNING: this OnionHeaven hub has no backup recovery key, so its "
+    "registry and every registrant's onion service key go into this backup "
+    "protected only by the backup's password. Set one up with: onionpress "
+    "hub-recovery-key create")
+HUB_DATA_UNSEALED_NOTE = (
+    "This hub's registrants' onion service keys are in this backup protected "
+    "only by its password. Set up a recovery key so that they are sealed to "
+    "a key you keep off this machine: in Terminal, run "
+    "/Applications/OnionPress.app/Contents/MacOS/onionpress hub-recovery-key "
+    "create (on Linux: onionpress hub-recovery-key create).")
+# Logged once a restore has put the hub data in place (the menubar's restore
+# summary looks for it in the CLI's output).
+HUB_DATA_RESTORED_LOG = "Restore: OnionHeaven registry and keys restored"
+HUB_DATA_SEALED_SKIPPED_MSG = (
+    "Restore: this backup's OnionHeaven registry and registrants' keys are "
+    "sealed to recovery key {key_id}, and this restore did not have that "
+    "key: they were not restored. "
+    "Registrants that are online send their keys again within a minute; "
+    "sites that are offline cannot be taken over until they come back. To "
+    "restore them later, with the recovery key: onionpress hub-recovery-key "
+    "restore <backup file>")
+# The Mac's restore summary, when they did not come back.
+HUB_DATA_NOT_RESTORED_NOTE = (
+    "OnionHeaven registry and registrants' keys: not restored (they are sealed "
+    "to the hub's recovery key; see the log). Registrants that are online send "
+    "their keys again within a minute; sites that are offline cannot be taken "
+    "over until they come back. To restore them later, with the key: in "
+    "Terminal, /Applications/OnionPress.app/Contents/MacOS/onionpress "
+    "hub-recovery-key restore <backup file>")
+
 # A tar of the registry, as sqlite3's .backup copies it (one consistent
 # state while the hub writes; a copy of the file could miss its -wal or catch
 # a checkpoint half done), and of keys/.
@@ -136,6 +173,33 @@ if [ -d keys ]; then
 fi
 [ "$#" -gt 0 ]
 tar -cf - "$@"
+"""
+
+# Restores a registry from stdin onto the hub data volume, in the onionheaven
+# container, only after checking it there: SQLite's integrity check, nothing
+# in it but the hub's two tables and their primary-key indexes (no trigger,
+# view or other table, which the hub's own writes could set off), a registry
+# table with its address columns, and only rows whose addresses are v3 onion
+# addresses (others are deleted from the copy and counted). Then SQLite's
+# .restore puts it in place under the database's locks; never a copy over
+# the file in use, whose -wal SQLite would apply to it. Prints "restored
+# dropped=<n>", or "refused: <why>" and exits 3. The host bounds the input
+# (hub_backup.MAX_REGISTRY_BYTES).
+_V3_SQL = ("length({col}) = 62 AND substr({col}, 57) = '.onion' "
+           "AND substr({col}, 1, 56) NOT GLOB '*[^a-z2-7]*'")
+REGISTRY_RESTORE_SH = f"""umask 077
+t=$(mktemp) || exit 1
+trap 'rm -f "$t" "$t-journal" "$t-wal" "$t-shm"' EXIT
+cat > "$t" || exit 1
+q() {{ sqlite3 -init /dev/null -batch -bail "$t" "$1" 2>/dev/null; }}
+[ "$(q 'PRAGMA integrity_check')" = ok ] || {{ echo "refused: it fails SQLite's integrity check"; exit 3; }}
+n=$(q "SELECT count(*) FROM sqlite_master WHERE NOT ((type = 'table' AND name IN ('registry', 'takeover_containers')) OR (type = 'index' AND sql IS NULL AND tbl_name IN ('registry', 'takeover_containers')))")
+[ "$n" = 0 ] || {{ echo "refused: it holds more than the hub's tables"; exit 3; }}
+c=$(q "SELECT count(*) FROM pragma_table_info('registry') WHERE name IN ('content_address', 'healthcheck_address')")
+[ "$c" = 2 ] || {{ echo "refused: it has no registry table"; exit 3; }}
+d=$(q "DELETE FROM registry WHERE NOT (coalesce({_V3_SQL.format(col='content_address')}, 0) AND coalesce({_V3_SQL.format(col='healthcheck_address')}, 0)); SELECT changes();") || {{ echo "refused: its rows cannot be checked"; exit 3; }}
+sqlite3 -init /dev/null -batch -bail {ONIONHEAVEN_DATA_DIR}/registry.db ".restore '$t'" || exit 1
+echo "restored dropped=$d"
 """
 
 
@@ -667,44 +731,195 @@ def stage_hub_data(dest, log_func):
     log_func(f"Backup: OnionHeaven registry and {count} registrants' key directories copied")
 
 
-_CONTAINER_TMP_RE = re.compile(r"/tmp/tmp\.[A-Za-z0-9]+")
+def read_hub_data(log_func):
+    """The hub's registry (a consistent copy, HUB_DATA_TAR_SH) and its
+    registrants' keys, read out of the onionheaven container into memory
+    (hub_backup.read_tar: plain files of the expected names only, bounded).
+    For a sealed backup: none of it is written to a file in the clear."""
+    proc = subprocess.Popen(['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+    killer = threading.Timer(_STAGE_COPY_TIMEOUT_S, proc.kill)
+    killer.daemon = True
+    killer.start()
+    try:
+        hub, left_out = hub_backup.read_tar(proc.stdout, stream=True,
+                                            where="Backup: the hub data")
+        # Drain the tar's end padding so the container never blocks on a
+        # full pipe.
+        while proc.stdout.read(_STAGE_BUFSIZE):
+            pass
+    except BaseException:
+        proc.kill()
+        raise
+    finally:
+        proc.stdout.close()
+        rc = proc.wait()
+        killer.cancel()
+    if rc != 0:
+        raise Exception(f"onionheaven tar failed: docker={rc}")
+    hub_backup.log_left_out(log_func, "Backup: the hub data", left_out)
+    return hub
 
 
-def restore_hub_data(src, log_func):
-    """Put a backup's OnionHeaven registry and keys (*src*, its
-    onionheaven/ folder) onto the hub data volume, through the onionheaven
-    container.
+def stage_hub_backup(staging, log_func, *, data_dir=None):
+    """Put this hub's registry and registrants' keys into the staged backup
+    *staging*; return the metadata.json fields that say how.
 
-    The registry goes in through SQLite (.restore, under its locks): a copy
-    over the file in use would leave that one's -wal beside it, and SQLite
-    would apply it to the restored database. Keys go in as root's. Nothing
-    else from the archive goes there (an older backup's master-key files,
-    logs, the move's kept copies).
+    With a recovery key set up (hub_backup.load_public_key): read into
+    memory, packed into one tar, sealed to the key and written as
+    onionheaven.sealed. Without one: a plain onionheaven/ folder
+    (stage_hub_data) under the backup's password only, as before, with a
+    loud warning every time. A recovery key file that is there but cannot
+    be read fails the backup (hub_backup.RecoveryKeyError) rather than
+    leave the keys unsealed. Shared by create_backup and, through
+    `onionpress.cli stage-hub-backup`, the Linux launcher's."""
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    public_raw = hub_backup.load_public_key(_data_dir)
+    if public_raw is None:
+        log_func(HUB_DATA_UNSEALED_WARNING)
+        stage_hub_data(os.path.join(staging, 'onionheaven'), log_func)
+        return {'onionheaven_data': 'unsealed'}
+    hub = read_hub_data(log_func)
+    sealed = hub_backup.seal(hub_backup.pack(hub), public_raw)
+    fd = os.open(os.path.join(staging, hub_backup.SEALED_MEMBER),
+                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as f:
+        f.write(sealed)
+    kid = hub_backup.key_id(public_raw)
+    log_func(f"Backup: the OnionHeaven registry and {len(hub.keys)} registrants' "
+             f"keys sealed to recovery key {kid}")
+    return {'onionheaven_data': 'sealed',
+            'onionheaven_sealed_format': hub_backup.SEALED_FORMAT,
+            'onionheaven_recovery_key_id': kid}
+
+
+def _keys_tar(keys):
+    """A tar of checked registrants' keys for `docker cp -` into keys/:
+    <address>/ (0700), its PEM and a hostname of our own (0600)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w', format=tarfile.PAX_FORMAT) as tf:
+        for address in sorted(keys):
+            info = tarfile.TarInfo(address)
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o700
+            tf.addfile(info)
+            for name, data in ((hub_backup.KEY_FILE, keys[address]),
+                               ('hostname', (address + '\n').encode('ascii'))):
+                info = tarfile.TarInfo(f"{address}/{name}")
+                info.size = len(data)
+                info.mode = 0o600
+                tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def write_hub_data(hub, log_func):
+    """Put checked hub data (hub_backup.check) onto the hub data volume,
+    through the onionheaven container; nothing passes through a host file.
+
+    Keys go in as root's, by `docker cp -` of a tar made here: one
+    directory per address, the PEM and the hostname. The registry goes in
+    through REGISTRY_RESTORE_SH, which checks it in the container and
+    restores it with SQLite's .restore, under its locks; a registry it
+    refuses is left out and logged, and the keys stay restored.
+    HUB_DATA_RESTORED_LOG is logged only when something was written.
     """
-    keys = os.path.join(src, 'keys')
-    if os.path.isdir(keys) and not os.path.islink(keys):
+    wrote = False
+    if hub.keys:
         subprocess.run(['docker', 'exec', 'onionheaven', 'mkdir', '-p',
                         f'{ONIONHEAVEN_DATA_DIR}/keys'],
                        capture_output=True, timeout=30, check=True)
-        subprocess.run(['docker', 'cp', keys + '/.', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'],
-                       capture_output=True, timeout=120, check=True)
-    db = os.path.join(src, 'registry.db')
-    if os.path.isfile(db) and not os.path.islink(db):
-        tmp = subprocess.run(['docker', 'exec', 'onionheaven', 'mktemp'],
-                             capture_output=True, text=True, timeout=30,
-                             check=True).stdout.strip()
-        if not _CONTAINER_TMP_RE.fullmatch(tmp):
-            raise Exception(f"unexpected temporary file name from the container: {tmp!r}")
+        subprocess.run(['docker', 'cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/'],
+                       input=_keys_tar(hub.keys), capture_output=True, timeout=120,
+                       check=True)
+        log_func(f"Restore: {len(hub.keys)} registrants' keys restored")
+        wrote = True
+    if hub.registry is not None:
+        r = subprocess.run(['docker', 'exec', '-i', 'onionheaven', 'sh', '-c',
+                            REGISTRY_RESTORE_SH],
+                           input=hub.registry, capture_output=True, timeout=120)
+        lines = r.stdout.decode('utf-8', errors='replace').strip().splitlines()
+        last = ''.join(ch for ch in (lines[-1] if lines else '') if ch.isprintable())[:200]
+        if r.returncode == 3:
+            log_func(f"Restore: the backup's OnionHeaven registry was not restored: "
+                     f"{last.removeprefix('refused: ')}")
+        elif r.returncode != 0 or not last.startswith('restored'):
+            raise Exception("SQLite could not restore the OnionHeaven registry")
+        else:
+            wrote = True
+            dropped = last.rpartition('dropped=')[2]
+            if dropped not in ('', '0'):
+                log_func(f"Restore: left {dropped} registry rows out (an address "
+                         f"that is not a v3 onion address)")
+    if wrote:
+        log_func(HUB_DATA_RESTORED_LOG)
+    else:
+        log_func("Restore: nothing of the backup's OnionHeaven data passed the "
+                 "checks; the hub data volume was not written")
+
+
+def restore_hub_data(src, log_func):
+    """Put a backup's plain OnionHeaven registry and keys (*src*, its
+    onionheaven/ folder) onto the hub data volume: read within bounds
+    (hub_backup.load_dir), checked (hub_backup.check: each key must be its
+    address's) and written (write_hub_data). Nothing else from the archive
+    goes there (an older backup's master-key files, logs, the move's kept
+    copies, a hostname of the backup's)."""
+    write_hub_data(hub_backup.check(hub_backup.load_dir(src, log_func), log_func),
+                   log_func)
+
+
+def open_sealed_hub_data(staging, metadata, private_raw, log_func):
+    """The hub data sealed in an extracted backup (*staging*), opened with
+    the recovery key's private half; unchecked (restore_container_artifacts
+    checks it before writing). Raises hub_backup.RecoveryKeyError when the
+    key does not open it or it was sealed by a newer OnionPress, and
+    hub_backup.HubDataError when it is not a hub data archive: before
+    anything is written."""
+    hub_backup.check_sealed_format(metadata)
+    blob, why = hub_backup.read_regular(
+        os.path.join(staging, hub_backup.SEALED_MEMBER), hub_backup.MAX_SEALED_BYTES)
+    if blob is None:
+        raise hub_backup.HubDataError(
+            f"The backup's sealed hub data cannot be read ({why or 'missing'}).")
+    return hub_backup.unpack(hub_backup.unseal(blob, private_raw), log_func)
+
+
+def read_sealed_hub_member(zip_path, password):
+    """(metadata, onionheaven.sealed's bytes) from a format-2 backup file,
+    for restoring a hub's sealed data on its own (`onionpress
+    hub-recovery-key restore`): the inner archive is decrypted to a temp
+    file, checked like any restore's (validate_archive_members,
+    check_archive_size), and only that member read, within its bound.
+    Raises ValueError for a backup without sealed hub data."""
+    if not backup_crypto.is_encrypted_backup(zip_path):
+        raise ValueError("This backup holds no sealed hub data.")
+    fd, inner = tempfile.mkstemp(prefix='onionpress-hub-restore-', suffix='.zip')
+    os.close(fd)
+    try:
+        metadata = _check_backup_format(_parse_metadata(
+            backup_crypto.decrypt_archive(zip_path, password, inner)))
         try:
-            subprocess.run(['docker', 'cp', db, f'onionheaven:{tmp}'],
-                           capture_output=True, timeout=120, check=True)
-            subprocess.run(['docker', 'exec', 'onionheaven', 'sqlite3',
-                            f'{ONIONHEAVEN_DATA_DIR}/registry.db', f".restore '{tmp}'"],
-                           capture_output=True, timeout=120, check=True)
-        finally:
-            subprocess.run(['docker', 'exec', 'onionheaven', 'rm', '-f', tmp],
-                           capture_output=True, timeout=30)
-    log_func("Restore: OnionHeaven registry and keys restored")
+            with zipfile.ZipFile(inner) as zf:
+                validate_archive_members(zf)
+                check_archive_size(zf, os.path.getsize(zip_path))
+                names = [n for n in zf.namelist()
+                         if _member_path(n) == hub_backup.SEALED_MEMBER]
+                if not names:
+                    raise ValueError("This backup holds no sealed hub data.")
+                if zf.getinfo(names[0]).file_size > hub_backup.MAX_SEALED_BYTES:
+                    raise ValueError("This backup's sealed hub data is too large.")
+                return metadata, zf.read(names[0])
+        except (zipfile.BadZipFile, zlib.error, EOFError) as e:
+            raise ValueError(MISMATCH_MSG) from e
+    finally:
+        os.unlink(inner)
+
+
+def sealed_skipped_message(metadata):
+    """HUB_DATA_SEALED_SKIPPED_MSG for *metadata*'s recovery key."""
+    kid = metadata.get('onionheaven_recovery_key_id') if isinstance(metadata, dict) else None
+    return HUB_DATA_SEALED_SKIPPED_MSG.format(
+        key_id=kid if hub_backup.is_key_id(kid) else "unknown")
 
 
 def accepts_registrations(data_dir=None):
@@ -774,8 +989,9 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             Settings page's download): refused with SettingsPageBackupRefused
             on an OnionHeaven hub or OnionHome (settings_page_backup_refusal),
             before anything is copied. True for one written to the owner's
-            disk: a hub's registry and registrants' keys go in. Every caller
-            passes it.
+            disk: a hub's registry and registrants' keys go in, sealed to the
+            hub's recovery key when one is set up (stage_hub_backup). Every
+            caller passes it.
         include_host_secrets: False for that backup too: its config is cut
             to what WordPress's status page shows (wordpress_safe_config: no
             Cloudflare tunnel token), and metadata.json says so
@@ -899,9 +1115,12 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    container and not in onionpress-wordpress (docs/DOCKER-SOCKET.md).
         #    This used to wait for a master-key.json that nothing has written
         #    for a long time, so no backup made here held a hub's data.
+        #    Sealed to the hub's recovery key when one is set up, else in
+        #    the clear under the password with a warning (stage_hub_backup).
         #    Never in a backup handed to WordPress (include_hub_data=False),
         #    which a hub refused at 1b.
         is_onionheaven = False
+        hub_fields = {}
         if hub is None:
             log_func("Backup: WARNING: the onionheaven container did not say whether "
                      "it holds OnionHeaven data; this backup does not")
@@ -909,7 +1128,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
                 log_func("Backup: copying the OnionHeaven registry and registrants' keys...")
                 is_onionheaven = True
-                stage_hub_data(os.path.join(staging, 'onionheaven'), log_func)
+                hub_fields = stage_hub_backup(staging, log_func, data_dir=_data_dir)
 
         # 4b. Backup OnionHome name registry if this is an OnionHome instance.
         #     The DB is tiny (KB) but losing it strands every inbound
@@ -983,6 +1202,9 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # pick the decoder from the file itself; this records it.
             'backup_format': backup_crypto.BACKUP_FORMAT,
         }
+        # A hub's: onionheaven_data "sealed" (with the recovery key's id) or
+        # "unsealed" (stage_hub_backup).
+        metadata.update(hub_fields)
         if not include_host_secrets:
             # Which secrets were set and are not in here (names only): a
             # restore says what to enter again (restore_backup_config).
@@ -1009,8 +1231,32 @@ def create_backup(onion_address, username, password, output_path, version, log_f
 # Already-compressed formats that `zip -n` stores without deflating: deflate
 # would only burn CPU on bytes that won't shrink.
 _ZIP_STORE_SUFFIXES = ('.mov:.mp4:.m4v:.webm:.jpg:.jpeg:.png:.gif:.heic:.heif'
-                       ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz')
+                       ':.pdf:.mp3:.m4a:.aac:.ogg:.webp:.zip:.gz:.sealed')
 _ZIP_TIMEOUT_S = 600
+
+
+def _hub_readme_text(metadata):
+    """What README.txt adds for a hub's backup: how its hub data is kept."""
+    if metadata.get('onionheaven_data') == 'sealed':
+        kid = metadata.get('onionheaven_recovery_key_id')
+        return (
+            "\n"
+            "This is a backup of an OnionHeaven hub. Its registry and its\n"
+            "registrants' onion service keys are sealed separately, in\n"
+            f"{hub_backup.SEALED_MEMBER} inside the encrypted data (libsodium\n"
+            "crypto_box_seal), to the hub's backup recovery key, key id\n"
+            f"{kid if hub_backup.is_key_id(kid) else 'unknown'}. The hub's operator "
+            "keeps its private half off the hub.\n"
+            "Restoring them needs that key; everything else restores with the\n"
+            "password alone. OnionPress versions from before sealed hub data\n"
+            "restore the site from this backup and leave the hub data out.\n")
+    if metadata.get('onionheaven_data') == 'unsealed':
+        return (
+            "\n"
+            "This is a backup of an OnionHeaven hub. Its registry and its\n"
+            "registrants' onion service keys are protected by the password\n"
+            "only: no backup recovery key was set up on the hub.\n")
+    return ""
 
 
 def pack_backup(staging, output_path, password, log_func):
@@ -1041,7 +1287,8 @@ def pack_backup(staging, output_path, password, log_func):
             json.dump(metadata, f, indent=2)
     with open(meta_path, 'rb') as f:
         metadata_bytes = f.read()
-    readme = backup_crypto.readme_text(metadata.get('onionpress_version'))
+    readme = (backup_crypto.readme_text(metadata.get('onionpress_version'))
+              + _hub_readme_text(metadata))
 
     # stderr goes to a file, not a pipe: zip can warn once per file, and a
     # full stderr pipe nobody reads while we drain stdout would deadlock.
@@ -1643,7 +1890,8 @@ def settings_page_restore_refusal(staging):
     message, and the full restore from the app would have to follow anyway.
 
     Registrants' keys means any entry in onionheaven/keys/ (a key
-    directory, as hub_data_state counts them). A registry alone does not
+    directory, as hub_data_state counts them), or hub data sealed to a
+    recovery key (onionheaven.sealed). A registry alone does not
     count: backups made by Linux through 2.5.2 carry the empty one every
     node has. It is left out of the restore, and the backup goes ahead.
 
@@ -1655,6 +1903,10 @@ def settings_page_restore_refusal(staging):
     """
     keys = os.path.join(_find_dir(staging, 'onionheaven'), 'keys')
     if os.path.isdir(keys) and not os.path.islink(keys) and os.listdir(keys):
+        return HUB_DATA_RESTORE_REFUSED_MSG
+    # Sealed to the hub's recovery key: never opened here, but a hub
+    # restored without its registrants' keys looks restored all the same.
+    if os.path.lexists(os.path.join(staging, hub_backup.SEALED_MEMBER)):
         return HUB_DATA_RESTORE_REFUSED_MSG
     if os.path.lexists(os.path.join(_find_dir(staging, 'onionhome'), 'onionnames.db')):
         return ONIONHOME_RESTORE_REFUSED_MSG
@@ -1797,7 +2049,8 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
 INSTALL_FROM_BACKUP_MARKER = ".install-from-backup"
 
 
-def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
+def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None,
+                                after_extract=None):
     """Host-side prep for an install-from-backup. Extracts the backup into a
     PERSISTENT staging dir (<data_dir>/restore-staging, survives a container
     restart), seeds the onion key into vanity-keys/, applies config overrides,
@@ -1809,6 +2062,10 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
     container-side import (restore_container_artifacts) runs later, against the
     freshly (re)started containers; the import step removes staging + marker on
     success, so the caller should NOT clean staging up here.
+
+    *after_extract(staging, metadata)*, if given, runs once the backup is
+    extracted and before anything else is written (cmd_restore opens a
+    hub's sealed data there, into memory); if it raises, nothing is.
     """
     _data_dir = data_dir if data_dir is not None else _default_data_dir()
     staging = os.path.join(_data_dir, 'restore-staging')
@@ -1820,6 +2077,8 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None):
         pass
     try:
         _, metadata = extract_backup(zip_path, password, log_func, staging=staging)
+        if after_extract is not None:
+            after_extract(staging, metadata)
         seed_onion_key_for_install(staging, metadata, log_func, data_dir=_data_dir)
     except Exception:
         # Refused (invalid metadata or key) or failed before any marker
@@ -2038,7 +2297,7 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
 
 
 def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True,
-                                name_registry=True):
+                                name_registry=True, hub_data=None):
     """Import a backup's container-side state into the RUNNING db + wordpress
     containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
     and multisite constants. Shared by restore_from_backup (in-place) and the
@@ -2053,6 +2312,12 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     runs: `onionpress restore` imports before Tor starts (the restored
     WordPress must be in place before it is reachable), and the registry
     is rebuilt inside onionpress-tor.
+
+    *hub_data* is a hub's sealed data, opened with its recovery key
+    (open_sealed_hub_data) by a caller that had the key; a backup whose hub
+    data is sealed and no *hub_data* restores everything else and says what
+    it left out. Hub data from either source is checked
+    (hub_backup.check) before anything is written.
     """
     # docker cp follows a link in the source path (a `wp-content` link to
     # the home folder would copy that folder into the web root) and copies
@@ -2167,20 +2432,30 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
 
     # 4. Restore OnionHeaven data if present in backup: its registry and
     #    registrants' keys onto the OnionHeaven data volume, through the
-    #    onionheaven container (restore_hub_data): never into
-    #    onionpress-wordpress, root-owned, the registry through SQLite.
+    #    onionheaven container (restore_hub_data, write_hub_data): never
+    #    into onionpress-wordpress, root-owned, the registry through SQLite,
+    #    each key checked to be its address's first. Sealed hub data only
+    #    when the caller opened it with the recovery key (*hub_data*).
     #    Not from the Settings page's restore (hub_volumes=False).
     onionheaven_dir = _find_dir(staging, 'onionheaven')
     has_hub_data = os.path.isdir(onionheaven_dir) and (
         os.path.isfile(os.path.join(onionheaven_dir, 'registry.db'))
         or os.path.isdir(os.path.join(onionheaven_dir, 'keys')))
-    if has_hub_data and not hub_volumes:
+    sealed = os.path.lexists(os.path.join(staging, hub_backup.SEALED_MEMBER))
+    if (has_hub_data or sealed) and not hub_volumes:
         log_func("Restore: the backup's OnionHeaven data left out: the "
                  "Settings page's restore never writes the hub data")
+    elif hub_data is not None:
+        with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
+            log_func("Restore: restoring the OnionHeaven registry and registrants' "
+                     "keys (unsealed with the recovery key)...")
+            write_hub_data(hub_backup.check(hub_data, log_func), log_func)
     elif has_hub_data:
         with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
             log_func("Restore: restoring the OnionHeaven registry and registrants' keys...")
             restore_hub_data(onionheaven_dir, log_func)
+    elif sealed:
+        log_func(sealed_skipped_message(metadata))
 
     # 4b. Restore OnionHome name registry if present in backup.
     #     Onto its own volume, through onionpress-tor (whose web-server.py
@@ -2234,6 +2509,9 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
 # use, whose -wal SQLite would then apply to the restored one.
 ONIONHOME_MIGRATE_SCRIPT = "/onionhome-registry-migrate.py"
 ONIONHOME_MIGRATE_MARKER = ".migrated-from-persistent-data"
+
+# The names `mktemp -d` gives in onionpress-tor (restore_name_registry).
+_CONTAINER_TMP_RE = re.compile(r"/tmp/tmp\.[A-Za-z0-9]+")
 
 # Run in onionpress-tor: argv[1] is the rebuilt registry, argv[2] the one in
 # use. Prints the names each held (null before: no registry yet).

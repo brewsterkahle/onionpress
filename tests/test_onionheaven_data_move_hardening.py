@@ -1027,27 +1027,39 @@ esac
             with mock.patch("onionpress.backup.stage_hub_data", side_effect=OSError("x")):
                 self.assertEqual(OnionPressCLI.cmd_stage_hub_data(dest + "3"), 1)
         body = _bash_function(hd._read("linux/onionpress"), "create_backup")
-        self.assertIn('op_py stage-hub-data --dest "$staging/onionheaven"', body)
+        # Through stage-hub-backup now, which stages this way only without
+        # a recovery key (tests/test_hub_backup_sealed.py).
+        self.assertIn('op_py --data-dir "$DATA_DIR" stage-hub-backup --staging "$staging"', body)
         self.assertNotIn("docker cp onionheaven:", body)
 
     def test_restore_goes_through_sqlite_and_takes_only_registry_and_keys(self):
-        from onionpress import backup
+        import io
+        import tarfile
+        from onionpress import backup, key_manager
+        priv = b"\x0b" * 64
+        pub = key_manager.derive_public_key(priv)
+        addr = key_manager.derive_onion_address(pub)
         staging = os.path.join(self.tmp, "staging")
         os.makedirs(os.path.join(staging, "database"))
         with open(os.path.join(staging, "database", "wordpress.sql"), "w") as f:
             f.write("SELECT 1;\n")
         src = os.path.join(staging, "onionheaven")
-        for rel in ("registry.db", f"keys/{A}/{KEY}", "master-key.json",
-                    ".master-key-unlocked", "heartbeat.log"):
+        files = {"registry.db": b"SQLite format 3\x00registry",
+                 f"keys/{addr}/{KEY}": key_manager.build_openssh_key(priv, pub),
+                 f"keys/{addr}/hostname": b"evil\n",
+                 f"keys/{A}/{KEY}": b"not a key",
+                 "master-key.json": b"m", ".master-key-unlocked": b"u",
+                 "heartbeat.log": b"log"}
+        for rel, data in files.items():
             path = os.path.join(src, rel)
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
-                f.write(rel)
+            with open(path, "wb") as f:
+                f.write(data)
         calls = []
 
         def run(argv, **kwargs):
-            calls.append(list(argv))
-            out = "/tmp/tmp.Ab12Cd34\n" if argv[-1] == "mktemp" else (
+            calls.append((list(argv), kwargs.get("input")))
+            out = "restored dropped=0\n" if argv[-1] == backup.REGISTRY_RESTORE_SH else (
                 "wordpress\n" if "get" in argv else "")
             return subprocess.CompletedProcess(
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
@@ -1055,18 +1067,25 @@ esac
 
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
             backup.restore_container_artifacts(staging, {}, lambda msg: None)
-        hub_calls = [c for c in calls if any("onionheaven" in a for a in c)]
-        self.assertEqual(hub_calls, [
+        hub_calls = [(c, i) for c, i in calls if any("onionheaven" in a for a in c)]
+        self.assertEqual([c for c, _ in hub_calls], [
             ["docker", "exec", "onionheaven", "mkdir", "-p", "/var/lib/onionheaven/keys"],
-            ["docker", "cp", os.path.join(src, "keys") + "/.",
-             "onionheaven:/var/lib/onionheaven/keys/"],
-            ["docker", "exec", "onionheaven", "mktemp"],
-            ["docker", "cp", os.path.join(src, "registry.db"), "onionheaven:/tmp/tmp.Ab12Cd34"],
-            ["docker", "exec", "onionheaven", "sqlite3", "/var/lib/onionheaven/registry.db",
-             ".restore '/tmp/tmp.Ab12Cd34'"],
-            ["docker", "exec", "onionheaven", "rm", "-f", "/tmp/tmp.Ab12Cd34"],
+            ["docker", "cp", "-", "onionheaven:/var/lib/onionheaven/keys/"],
+            ["docker", "exec", "-i", "onionheaven", "sh", "-c", backup.REGISTRY_RESTORE_SH],
         ])
-
+        # The keys go in from a tar made here: the checked key (a fresh
+        # PEM of it) and a hostname of our own; the key that is no key, the
+        # backup's hostname and everything else stay out.
+        with tarfile.open(fileobj=io.BytesIO(hub_calls[1][1])) as tf:
+            members = {m.name: (tf.extractfile(m).read() if m.isfile() else None)
+                       for m in tf.getmembers()}
+        self.assertEqual(sorted(members), [addr, f"{addr}/hostname", f"{addr}/{KEY}"])
+        self.assertEqual(members[f"{addr}/hostname"], (addr + "\n").encode())
+        self.assertEqual(key_manager.parse_openssh_key(members[f"{addr}/{KEY}"]), (priv, pub))
+        # The registry goes to SQLite's .restore, through the container's
+        # checks, on stdin.
+        self.assertEqual(hub_calls[2][1], files["registry.db"])
+        self.assertIn(".restore '$t'", backup.REGISTRY_RESTORE_SH)
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,13 @@
 
 set -e
 
+# An OnionHeaven hub's backup recovery key, when the app's Restore... (or the
+# operator) passes one in the environment: taken out of it at once and handed
+# only to the commands that use it (restore, hub-recovery-key), so that no
+# other child of this script inherits it.
+_HUB_RECOVERY_KEY="${ONIONPRESS_HUB_RECOVERY_KEY:-}"
+unset ONIONPRESS_HUB_RECOVERY_KEY
+
 # Determine install and data directories
 INSTALL_DIR="${ONIONPRESS_INSTALL_DIR:-/opt/onionpress}"
 DOCKER_DIR="$INSTALL_DIR/docker"
@@ -2244,7 +2251,8 @@ create_backup() {
     # page's download), whose password came from there too. Refused on an
     # OnionHeaven hub or OnionHome (return 3, BACKUP_REFUSAL says why:
     # backup.settings_page_backup_refusal), and never a hub's registry or
-    # registrants' keys.
+    # registrants' keys. Without it, a hub's are in, sealed to its recovery
+    # key when one is set up (backup.stage_hub_backup).
     # --without-host-secrets: for that backup too. Its config is cut to what
     # WordPress's status page shows (no Cloudflare tunnel token, image
     # overrides, bind host...), the healthcheck onion service's key (a start
@@ -2447,24 +2455,35 @@ create_backup() {
     #    else from there (backup.stage_hub_data, shared with the Mac). It
     #    used to take every node with an onionheaven container, and copied
     #    registry.db without its write-ahead log.
+    #    Sealed to the hub's recovery key when one is set up
+    #    (onionheaven.sealed: read into memory, never a file in the clear),
+    #    else a plain onionheaven/ under the password, with a warning every
+    #    time (backup.stage_hub_backup). It prints the metadata fields.
     #    Never in a backup handed to WordPress (--without-hub-data), which a
     #    hub refused above.
-    local hub_rc=0
+    local hub_rc=0 hub_fields=""
     if [ "$with_hub_data" = "yes" ]; then
-        op_py stage-hub-data --dest "$staging/onionheaven" >>"$LOG_FILE" 2>&1 || hub_rc=$?
+        hub_fields=$(op_py --data-dir "$DATA_DIR" stage-hub-backup --staging "$staging" 2>>"$LOG_FILE") || hub_rc=$?
         case "$hub_rc" in
             0) ;;
             3) ;;   # not a hub
             4) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
-            *) log "ERROR: could not copy the OnionHeaven data out of the onionheaven container"
+            *) log "ERROR: could not back up the OnionHeaven data (see above)"
                return 1 ;;
         esac
     fi
-    [ "$with_hub_data" = "yes" ] && [ "$hub_rc" -eq 0 ] || rm -rf "$staging/onionheaven"
+    if [ "$hub_rc" -ne 0 ]; then
+        hub_fields=""
+        rm -rf "$staging/onionheaven" "$staging/onionheaven.sealed"
+    fi
+    case "$hub_fields" in
+        *'"onionheaven_data": "unsealed"'*)
+            echo "WARNING: this OnionHeaven hub has no backup recovery key: its registrants' onion service keys are in this backup protected only by its password. Set one up with: onionpress hub-recovery-key create" >&2 ;;
+    esac
 
     # 6. Write metadata (onion_addr was read and checked at the top)
     local has_onionheaven="false"
-    [ -d "$staging/onionheaven" ] && has_onionheaven="true"
+    { [ -d "$staging/onionheaven" ] || [ -f "$staging/onionheaven.sealed" ]; } && has_onionheaven="true"
 
     log "Backup: writing metadata..."
     python3 -c "
@@ -2478,14 +2497,22 @@ metadata = {
     # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
     'excludes_image_derivatives': sys.argv[6] == 'true'
 }
-if sys.argv[7] == 'no':
+if sys.argv[7]:
+    # A hub's: onionheaven_data sealed (with the recovery key id) or
+    # unsealed, as backup.stage_hub_backup printed them.
+    fields = json.loads(sys.argv[7])
+    for key in ('onionheaven_data', 'onionheaven_sealed_format',
+                'onionheaven_recovery_key_id'):
+        if key in fields:
+            metadata[key] = fields[key]
+if sys.argv[8] == 'no':
     # Handed to WordPress: no host secrets, and the names of those that
     # were set (backup.TUNNEL_TOKEN_KEY).
     metadata['excludes_host_secrets'] = True
-    metadata['secret_config_left_out'] = sys.argv[8].split()
+    metadata['secret_config_left_out'] = sys.argv[9].split()
 with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$with_host_secrets" "$secrets_left_out"
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_fields" "$with_host_secrets" "$secrets_left_out"
 
     # 7. Zip and encrypt — backup format 2, written by the shared Python
     #    helper so both platforms produce the one format (not `zip -P`,
@@ -2717,6 +2744,11 @@ restore_backup() {
             log "WARNING: Backup contains OnionHeaven data but onionheaven container is not running — skipping"
             echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2
         fi
+    fi
+    # A hub's registry and keys sealed to its recovery key: this path has no
+    # key (onionpress restore and the app's Restore... ask for it).
+    if [ -e "$staging/onionheaven.sealed" ]; then
+        log "Restore: this backup's OnionHeaven registry and registrants' keys are sealed to the hub's recovery key and were not restored; restore them with: onionpress hub-recovery-key restore <backup file>"
     fi
 
     log "Restore: complete (from $onion_address)"
@@ -3499,6 +3531,8 @@ sys.exit(0 if provision_interactive() else 1)
                 echo "Usage: $0 restore <backup_file.zip>"
                 echo "Restores from an OnionPress backup. Containers must be running."
                 echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
+                echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
+                echo "ONIONPRESS_HUB_RECOVERY_KEY, or a prompt (see: $0 hub-recovery-key)."
                 exit 1
             fi
             read_backup_password "$restore_legacy_pass"
@@ -3517,13 +3551,25 @@ sys.exit(0 if provision_interactive() else 1)
             # copy (a backup of another address replaces the key), and
             # started again after, with the restored one.
             stop_heartbeat_client
-            if ! ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path"; then
+            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path"; then
                 start_heartbeat_client
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
             fi
             start_heartbeat_client
             echo "Done! OnionPress rebuilt from backup."
+            ;;
+
+        hub-recovery-key)
+            # An OnionHeaven hub's backup recovery key: create, show, check,
+            # restore (src/onionpress/cli.py, hub_backup.py). The hub's
+            # registry and registrants' keys in its backups are sealed to
+            # it. The private half is printed once by create and otherwise
+            # read from ONIONPRESS_HUB_RECOVERY_KEY, stdin or a prompt,
+            # never from argv. The public half goes to
+            # $DATA_DIR/hub-backup-recovery.pub, which no container mounts.
+            ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" \
+                op_py --data-dir "$DATA_DIR" hub-recovery-key "${@:2}"
             ;;
 
         update)
@@ -4243,7 +4289,7 @@ print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|get|setup|onionheaven|reset|reset-onionheaven|import-key|backup|restore|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|get|setup|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac

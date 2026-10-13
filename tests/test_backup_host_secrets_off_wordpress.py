@@ -213,8 +213,8 @@ if cmd == "stage-wp-content":
     sys.exit(C.cmd_stage_wp_content(a[1]))
 if cmd == "settings-page-backup-check":
     sys.exit(C.cmd_settings_page_backup_check(a[1], data_dir))
-if cmd == "stage-hub-data":
-    sys.exit(C.cmd_stage_hub_data(a[1]))
+if cmd == "stage-hub-backup":
+    sys.exit(C.cmd_stage_hub_backup(a[1], data_dir))
 if cmd == "wordpress-safe-config":
     sys.exit(main(args))
 if cmd == "prune-image-derivatives":

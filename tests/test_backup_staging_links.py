@@ -575,11 +575,15 @@ _helper() {
     PYTHONPATH="$SRC" "$PY" -c 'import sys
 from onionpress.cli import OnionPressCLI as C
 cli = object.__new__(C)
-cmd, a = sys.argv[1], sys.argv[2:]
+args = sys.argv[1:]
+data_dir = None
+if args[:1] == ["--data-dir"]:
+    data_dir, args = args[1], args[2:]
+cmd, a = args[0], args[1:]
 if cmd == "stage-wp-content":
     sys.exit(C.cmd_stage_wp_content(a[1]))
-if cmd == "stage-hub-data":
-    sys.exit(C.cmd_stage_hub_data(a[1]))
+if cmd == "stage-hub-backup":
+    sys.exit(C.cmd_stage_hub_backup(a[1], data_dir))
 if cmd == "prune-image-derivatives":
     cli.log = lambda m: print(m, file=sys.stderr)
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))

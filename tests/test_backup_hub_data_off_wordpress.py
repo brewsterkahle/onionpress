@@ -17,9 +17,11 @@ file itself.
   before anything is copied: it would carry the node's own onion service
   key, with which code in WordPress could run a rival hub (or answer name
   lookups). The page shows why. Backups made from the app or the CLI keep
-  the hub data. OnionHome's name registry (no secret in it) stays in those.
+  the hub data (sealed to the hub's recovery key when one is set up:
+  tests/test_hub_backup_sealed.py). OnionHome's name registry (no secret in
+  it) stays in those.
 - The Settings page's restore refuses a backup holding registrants' keys
-  or OnionHome's name registry before anything is
+  (plain or sealed) or OnionHome's name registry before anything is
   touched, and never writes either volume (a registry alone, as every
   Linux backup through 2.5.2 carries, is left out).
 
@@ -51,10 +53,13 @@ import test_backup_metadata_validation as mv  # noqa: E402
 import test_backup_staging_links as bsl  # noqa: E402
 
 PW = mv.PW
-A = "a" * 56 + ".onion"
 KEY = "ks_hs_id.ed25519_expanded_private"
-# A registrant's key as the hub holds it: never in what WordPress gets.
-REGISTRANT_KEY = b"REGISTRANT-PRIVATE-KEY-BYTES"
+# A registrant's key as the hub holds it (a real key pair, so that a
+# restore's checks pass it): never in what WordPress gets.
+REG_PRIV = b"\x09" * 64
+REG_PUB = key_manager.derive_public_key(REG_PRIV)
+A = key_manager.derive_onion_address(REG_PUB)
+REGISTRANT_KEY = key_manager.build_openssh_key(REG_PRIV, REG_PUB)
 DOCKER_HOST = "unix:///var/empty/no-docker-for-tests.sock"
 
 
@@ -200,16 +205,21 @@ class TestCreateBackup(unittest.TestCase):
         self._refused(backup.ONIONHOME_BACKUP_REFUSED_MSG, hub=False, onionhome=True)
 
     def test_a_hub_backup_for_the_owners_disk_keeps_it(self):
+        """No recovery key set up: in the clear under the password, as
+        before, and the operator hears about it."""
         meta, members = self._backup(include_hub_data=True)
         self.assertEqual(members[f"onionheaven/keys/{A}/{KEY}"], REGISTRANT_KEY)
         self.assertIn("onionheaven/registry.db", members)
         self.assertIs(meta["is_onionheaven"], True)
+        self.assertEqual(meta["onionheaven_data"], "unsealed")
         self.assertNotIn("excludes_onionheaven_data", meta)
+        self.assertIn(backup.HUB_DATA_UNSEALED_WARNING, self.logs)
 
     def test_a_node_that_is_no_hub_has_nothing_to_say(self):
         meta, members = self._backup(include_hub_data=False, hub=False)
         _assert_no_hub_data(self, members)
         self.assertNotIn("excludes_onionheaven_data", meta)
+        self.assertNotIn("onionheaven_data", meta)
         self.assertFalse([m for m in self.logs if "refused" in m])
 
     def test_no_answer_from_the_container_leaves_it_out_as_before(self):
@@ -271,8 +281,8 @@ if args[:1] == ["--data-dir"]:
 cmd, a = args[0], args[1:]
 if cmd == "stage-wp-content":
     sys.exit(C.cmd_stage_wp_content(a[1]))
-if cmd == "stage-hub-data":
-    sys.exit(C.cmd_stage_hub_data(a[1]))
+if cmd == "stage-hub-backup":
+    sys.exit(C.cmd_stage_hub_backup(a[1], data_dir))
 if cmd == "settings-page-backup-check":
     sys.exit(C.cmd_settings_page_backup_check(a[1], data_dir))
 if cmd == "prune-image-derivatives":
@@ -288,11 +298,15 @@ sys.exit(2)' "$@"
         self.tmp = tempfile.mkdtemp(prefix="op-hub-off-wp-linux-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def _run(self, *args, **container):
+    def _run(self, *args, recovery_key=False, **container):
         c = _Container(self, self.tmp, **container)
         self.container = c
         out = os.path.join(self.tmp, "backup.zip")
         home = os.path.join(self.tmp, "home")
+        if recovery_key:
+            from onionpress import hub_backup
+            self.private_text, self.key_id = hub_backup.create_recovery_key(
+                os.path.join(home, ".onionpress"))
         tmpdir = os.path.join(self.tmp, "t")
         os.makedirs(tmpdir, exist_ok=True)
         env = {
@@ -330,19 +344,44 @@ sys.exit(2)' "$@"
         self.assertFalse(os.path.exists(out))
 
     def test_the_owners_backup_keeps_it(self):
+        """No recovery key: in the clear under the password, with a
+        warning on the terminal."""
         stdout, log, out = self._run()
         self.assertIn("rc=0 refusal=\n", stdout, log)
         members = bsl._inner_names_and_bytes(out, PW)
         self.assertEqual(members[f"onionheaven/keys/{A}/{KEY}"], REGISTRANT_KEY)
         meta = json.loads(members["metadata.json"])
         self.assertIs(meta["has_onionheaven"], True)
+        self.assertEqual(meta["onionheaven_data"], "unsealed")
         self.assertNotIn("excludes_onionheaven_data", meta)
+        self.assertIn("hub-recovery-key create", self.stderr)
+        self.assertIn(backup.HUB_DATA_UNSEALED_WARNING, log)
+
+    def test_the_owners_backup_seals_it_to_the_recovery_key(self):
+        from onionpress import hub_backup
+        stdout, log, out = self._run(recovery_key=True)
+        self.assertIn("rc=0 refusal=\n", stdout, log)
+        members = bsl._inner_names_and_bytes(out, PW)
+        _assert_no_hub_data(self, {n: d for n, d in members.items()
+                                   if n != hub_backup.SEALED_MEMBER})
+        self.assertNotIn(REGISTRANT_KEY, members[hub_backup.SEALED_MEMBER])
+        meta = json.loads(members["metadata.json"])
+        self.assertIs(meta["has_onionheaven"], True)
+        self.assertEqual(meta["onionheaven_data"], "sealed")
+        self.assertEqual(meta["onionheaven_recovery_key_id"], self.key_id)
+        self.assertEqual(meta["onionheaven_sealed_format"], hub_backup.SEALED_FORMAT)
+        hub = hub_backup.unpack(hub_backup.unseal(
+            members[hub_backup.SEALED_MEMBER],
+            hub_backup.parse_private_key(self.private_text)), lambda m: None)
+        self.assertEqual(hub.keys, {A: REGISTRANT_KEY})
+        self.assertNotIn("hub-recovery-key create", self.stderr)
 
     def test_a_node_that_is_no_hub_has_nothing_to_say(self):
         stdout, log, out = self._run("--without-hub-data", hub=False)
         self.assertIn("rc=0 refusal=\n", stdout, log)
         meta = json.loads(bsl._inner_names_and_bytes(out, PW)["metadata.json"])
         self.assertNotIn("excludes_onionheaven_data", meta)
+        self.assertNotIn("onionheaven_data", meta)
 
     def test_an_unknown_option_is_refused(self):
         stdout, _, out = self._run("--with-hub-data")
@@ -605,7 +644,7 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 def _staging(root, name, *, keys=False, empty_keys=False, registry=False,
-             onionhome=False, metadata=None):
+             onionhome=False, sealed=False, metadata=None):
     staging = mv._make_staging(root, metadata or mv._metadata(), name=name)
     os.makedirs(os.path.join(staging, "database"))
     with open(os.path.join(staging, "database", "wordpress.sql"), "w") as f:
@@ -623,6 +662,10 @@ def _staging(root, name, *, keys=False, empty_keys=False, registry=False,
         os.makedirs(os.path.join(staging, "onionhome"))
         with open(os.path.join(staging, "onionhome", "onionnames.db"), "wb") as f:
             f.write(b"SQLite format 3\x00" + b"\x00" * 100)
+    if sealed:
+        # Hub data sealed to a recovery key (hub_backup): opaque here.
+        with open(os.path.join(staging, "onionheaven.sealed"), "wb") as f:
+            f.write(os.urandom(200))
     return staging
 
 
@@ -637,6 +680,9 @@ class TestSettingsPageRestoreRefusal(unittest.TestCase):
             "keys": ({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
             "keys, no registry": ({"keys": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
             "onionhome": ({"onionhome": True}, backup.ONIONHOME_RESTORE_REFUSED_MSG),
+            # Sealed to the hub's recovery key: never opened through
+            # WordPress, and refused like a hub's plain keys.
+            "sealed": ({"sealed": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
             # Every Linux backup through 2.5.2: the empty registry and keys/
             # every node has. Left out of the restore, not refused.
             "registry alone": ({"registry": True, "empty_keys": True}, None),
@@ -698,6 +744,7 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
 
     def test_a_hubs_backup_is_refused_untouched(self):
         for kw, want in (({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
+                         ({"sealed": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
                          ({"onionhome": True}, backup.ONIONHOME_RESTORE_REFUSED_MSG)):
             with self.subTest(want, **kw):
                 path = self._backup(f"b-{len(self.logs)}-{sorted(kw)[0]}.zip", **kw)
@@ -753,7 +800,8 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
 
         def run(argv, **kwargs):
             calls.append(list(argv))
-            out = "/tmp/tmp.Ab12Cd34\n" if "mktemp" in argv[-2:] else (
+            out = "restored dropped=0\n" if argv[-1] == backup.REGISTRY_RESTORE_SH else (
+                "/tmp/tmp.Ab12Cd34\n" if "mktemp" in argv[-2:] else
                 "wordpress\n" if "get" in argv else "")
             return subprocess.CompletedProcess(
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
@@ -859,6 +907,7 @@ sys.exit(cli.OnionPressCLI.cmd_extract_backup(
 
     def test_a_hubs_backup_is_refused_untouched(self):
         for kw, want in (({"keys": True, "registry": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
+                         ({"sealed": True}, backup.HUB_DATA_RESTORE_REFUSED_MSG),
                          ({"onionhome": True}, backup.ONIONHOME_RESTORE_REFUSED_MSG)):
             with self.subTest(want, **kw):
                 path = self._backup(f"b{len(kw)}-{sorted(kw)[0]}.zip", **kw)
@@ -883,6 +932,13 @@ sys.exit(cli.OnionPressCLI.cmd_extract_backup(
         rc, out, _, made = self._run(path)
         self.assertEqual(rc, 0, out)
         self.assertIn("op_py restore-hub-data --src", made)
+
+    def test_without_the_settings_page_sealed_hub_data_is_named_not_restored(self):
+        path = self._backup("sealed.zip", sealed=True)
+        rc, out, _, made = self._run(path)
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("restore-hub-data", made)
+        self.assertIn("sealed to the hub's recovery key and were not restored", out)
 
     def test_an_unknown_option_is_refused(self):
         path = self._backup("x.zip")

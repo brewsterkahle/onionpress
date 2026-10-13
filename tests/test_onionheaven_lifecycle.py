@@ -629,8 +629,9 @@ class TestCliResetAndRestore(_CliCase):
         obj = self._cli()
         obj.containers.stop.side_effect = RuntimeError("stop here")
         calls = []
-        with mock.patch("onionpress.backup.prepare_install_from_backup",
-                        return_value=(self.tmpdir, {"onion_address": NEW_SITE})), \
+        with mock.patch("onionpress.backup.read_backup_metadata", return_value={}), \
+                mock.patch("onionpress.backup.prepare_install_from_backup",
+                           return_value=(self.tmpdir, {"onion_address": NEW_SITE})), \
                 mock.patch.object(cli, "release_onionheaven",
                                   lambda reason, **kw: calls.append((reason, kw)) or []):
             self.assertEqual(obj.cmd_restore("pw", "/nonexistent.zip"), 1)

@@ -29,6 +29,7 @@ from onionpress import onionheaven
 from onionpress import updater
 from onionpress import key_manager
 from onionpress import backup as backup_manager
+from onionpress import hub_backup
 try:
     from onionpress import setup_window
 except ImportError:
@@ -3356,9 +3357,15 @@ class OnionPressApp(rumps.App):
             try:
                 from onionpress import backup as _backup
                 _rlog("Restore from backup: preparing…")
-                _backup.prepare_install_from_backup(
+                _, restore_meta = _backup.prepare_install_from_backup(
                     sw.restore_zip, sw.restore_password, _rlog,
                     data_dir=self.app_support)
+                # A hub's sealed registry and keys: this path has no
+                # recovery key (the import runs in the launcher later, and
+                # the opened data would have to wait in ~/.onionpress in the
+                # clear). Restored afterwards with the key, on its own.
+                if restore_meta.get("onionheaven_data") == "sealed":
+                    _rlog(_backup.sealed_skipped_message(restore_meta))
                 _rlog("Restore from backup: staged — starting install…")
             except Exception as e:
                 self.log(f"Restore from backup: prepare failed: {e}")
@@ -4266,14 +4273,18 @@ class OnionPressApp(rumps.App):
 
                 # Saved where the owner chose, never handed to WordPress: an
                 # OnionHeaven hub's registry and registrants' keys stay in,
-                # and so does the whole config.
-                backup_manager.create_backup(
+                # sealed to its recovery key when one is set up, and so does
+                # the whole config.
+                metadata = backup_manager.create_backup(
                     self.onion_address, username, password,
                     output_path, self.version, log_and_update,
                     include_hub_data=True, include_host_secrets=True)
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
+                # A hub without a recovery key: said every time.
+                if metadata.get("onionheaven_data") == "unsealed":
+                    msg += "\n\n" + backup_manager.HUB_DATA_UNSEALED_NOTE
                 # Route completion through finish's on_done so on_complete(True)
                 # fires on the main thread AFTER the user dismisses the Done
                 # alert (not from this daemon thread, and not before the alert).
@@ -4286,6 +4297,45 @@ class OnionPressApp(rumps.App):
                     on_done=(lambda: on_complete(False)) if on_complete else None))
 
         threading.Thread(target=do_backup, daemon=True).start()
+
+    def _ask_hub_recovery_key(self, metadata):
+        """For a backup whose OnionHeaven hub data is sealed: the recovery
+        key's private half as typed, "" to restore without the hub data, or
+        None to cancel the restore. A key that is not this backup's is
+        caught here (hub_backup.check_key_for_backup: by its key id) and
+        asked for again."""
+        kid = metadata.get("onionheaven_recovery_key_id")
+        kid = kid if hub_backup.is_key_id(kid) else "unknown"
+        while True:
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Restore the Hub's Registrants' Keys?")
+            alert.setInformativeText_(
+                f"This backup holds an OnionHeaven hub's registry and its "
+                f"registrants' onion service keys, sealed to the hub's recovery "
+                f"key (key id {kid}). Paste that key to restore them.\n\n"
+                f"Without it, everything else is restored: registrants that are "
+                f"online send their keys again within a minute; sites that are "
+                f"offline cannot be taken over until they come back.")
+            key_field = AppKit.NSSecureTextField.alloc().initWithFrame_(
+                AppKit.NSMakeRect(0, 0, 380, 24))
+            alert.setAccessoryView_(key_field)
+            alert.addButtonWithTitle_("Restore With Key").setKeyEquivalent_("\r")
+            alert.addButtonWithTitle_("Restore Without")
+            alert.addButtonWithTitle_("Cancel").setKeyEquivalent_("\x1b")
+            alert.window().setInitialFirstResponder_(key_field)
+            response = alert.runModal()
+            if response == 1001:    # Restore Without
+                self.log("Restore: the hub's sealed data will not be restored "
+                         "(no recovery key given)")
+                return ""
+            if response != 1000:    # Cancel
+                return None
+            text = key_field.stringValue()
+            try:
+                hub_backup.check_key_for_backup(text, metadata)
+                return text
+            except (hub_backup.RecoveryKeyError, hub_backup.SodiumUnavailableError) as e:
+                rumps.alert(title="Recovery Key Not Accepted", message=str(e))
 
     @rumps.clicked("Restore...")
     def restore(self, _):
@@ -4381,6 +4431,16 @@ class OnionPressApp(rumps.App):
         if button_index != 1:
             return
 
+        # An OnionHeaven hub's backup: its registry and registrants' keys
+        # are sealed to the hub's recovery key, which the operator keeps
+        # off this machine. Asked for here and checked against the backup
+        # before anything is restored; without it the rest is restored.
+        hub_recovery_key = ""
+        if metadata.get("onionheaven_data") == "sealed":
+            hub_recovery_key = self._ask_hub_recovery_key(metadata)
+            if hub_recovery_key is None:
+                return
+
         # Show progress window (stored on self to prevent garbage collection)
         self._progress_window = _BackupProgressWindow("Restoring OnionPress")
         self._progress_window.show()
@@ -4400,10 +4460,14 @@ class OnionPressApp(rumps.App):
                 log_and_update("Rebuilding from backup (install-from-backup)…")
                 # The password goes in the environment: argv is readable by
                 # every local user (ps), the environment only by this one.
+                # So does a hub's recovery key (the CLI removes it from its
+                # environment before any docker child could inherit it).
+                hub_key_env = ({hub_backup.RECOVERY_KEY_ENV: hub_recovery_key}
+                               if hub_recovery_key else {})
                 r = subprocess.run(
                     [self.launcher_script, "restore", zip_path],
                     env={**os.environ,
-                         launcher_ops.BACKUP_PASSWORD_ENV: password},
+                         launcher_ops.BACKUP_PASSWORD_ENV: password} | hub_key_env,
                     capture_output=True, text=True, encoding='utf-8',
                     errors='replace', timeout=1800)
                 if r.returncode != 0:
@@ -4457,6 +4521,14 @@ class OnionPressApp(rumps.App):
                         notes.append("OnionHeaven detected — VM memory will increase to 5 GB on relaunch.")
                     else:
                         notes.append(f"OnionHeaven detected — VM memory: {cur_mem} GB.")
+
+                # A hub's sealed registry and registrants' keys: whether they
+                # came back (the CLI logs HUB_DATA_RESTORED_LOG once written).
+                if metadata.get("onionheaven_data") == "sealed":
+                    if backup_manager.HUB_DATA_RESTORED_LOG in (r.stderr or ""):
+                        notes.append("OnionHeaven registry and registrants' keys: restored.")
+                    else:
+                        notes.append(backup_manager.HUB_DATA_NOT_RESTORED_NOTE)
 
                 summary = "Site restored successfully.\n\n" + "\n".join(notes)
                 _main_thread(lambda: pw.finish(summary))

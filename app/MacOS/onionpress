@@ -5,6 +5,13 @@
 
 set -e
 
+# An OnionHeaven hub's backup recovery key, when the app's Restore... (or the
+# operator) passes one in the environment: taken out of it at once and handed
+# only to the commands that use it (restore, hub-recovery-key), so that no
+# other child of this script inherits it.
+_HUB_RECOVERY_KEY="${ONIONPRESS_HUB_RECOVERY_KEY:-}"
+unset ONIONPRESS_HUB_RECOVERY_KEY
+
 # Clear py2app PYTHONPATH so subprocess python calls are not confused.
 unset PYTHONPATH
 
@@ -2741,6 +2748,11 @@ restore_backup() {
             echo "WARNING: OnionHeaven data found in backup but container not running. Start with OnionHeaven enabled to restore." >&2
         fi
     fi
+    # A hub's registry and keys sealed to its recovery key: this path has no
+    # key (onionpress restore and the app's Restore... ask for it).
+    if [ -e "$staging/onionheaven.sealed" ]; then
+        log "Restore: this backup's OnionHeaven registry and registrants' keys are sealed to the hub's recovery key and were not restored; restore them with: onionpress hub-recovery-key restore <backup file>"
+    fi
 
     log "Restore: complete (from $onion_address)"
     echo "Restore complete: $onion_address"
@@ -3116,6 +3128,8 @@ main() {
                 echo "Usage: $0 restore <backup_file.zip>"
                 echo "Restores from an OnionPress backup. Containers must be running."
                 echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
+                echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
+                echo "ONIONPRESS_HUB_RECOVERY_KEY, or a prompt (see: $0 hub-recovery-key)."
                 exit 1
             fi
             read_backup_password "$restore_legacy_pass"
@@ -3129,11 +3143,23 @@ main() {
             # (no .import-key-pending, no manual multisite/Tor dance).
             # The exit status is the caller's only sign of a refused or
             # failed restore (the tray and the menubar check it).
-            if ! ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path"; then
+            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path"; then
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
             fi
             echo "Done! OnionPress rebuilt from backup."
+            ;;
+
+        hub-recovery-key)
+            # An OnionHeaven hub's backup recovery key: create, show, check,
+            # restore (src/onionpress/cli.py, hub_backup.py). The hub's
+            # registry and registrants' keys in its backups are sealed to
+            # it. The private half is printed once by create and otherwise
+            # read from ONIONPRESS_HUB_RECOVERY_KEY, stdin or a prompt,
+            # never from argv. The public half goes to
+            # $DATA_DIR/hub-backup-recovery.pub, outside the VM's mounts.
+            ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" \
+                bundled_python -m onionpress.cli --data-dir "$DATA_DIR" hub-recovery-key "${@:2}"
             ;;
 
         reset)
@@ -3458,6 +3484,9 @@ User commands:
   restore       Restore from an encrypted backup zip
   setup         Run the first-time WordPress setup
   import-key    Import an existing onion service key
+  hub-recovery-key
+                An OnionHeaven hub's backup recovery key
+                (create, show, check, restore)
 
 Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address,
