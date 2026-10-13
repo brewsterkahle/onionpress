@@ -1331,6 +1331,52 @@ retire_old_onionheaven_containers() {
     fi
 }
 
+# onionpress-network's bridge has a fixed name, onionpress-tor0
+# (docker-compose.yml), so the Tor side's rules (onionpress/
+# wordpress_egress.py) can name it before it exists. Docker cannot rename a
+# bridge: an onionpress-network made before has Docker's br-<id>, which the
+# rules miss, so it is removed here and `compose up` makes it anew. Compose
+# 2.40 would try that itself and fail the whole start while a takeover
+# worker (no compose service) is still on it. Every container on it is
+# OnionPress's and is removed (compose recreates its services, the
+# heartbeat its workers), onionheaven first since it starts workers;
+# anything else is only disconnected. Once per install; kept identical in
+# both launchers (ContainerManager.migrate_tor_network does the same), a
+# test enforces it.
+migrate_tor_network() {
+    local options names name pids=""
+    options=$(docker network inspect --format '{{json .Options}}' onionpress-network 2>/dev/null) || return 0
+    case "$options" in
+        *'"com.docker.network.bridge.name":"onionpress-tor0"'*) return 0 ;;
+        "{"*) ;;
+        *) return 0 ;;
+    esac
+    log "Recreating onionpress-network on its own bridge (onionpress-tor0), so the Tor side's rules apply to it"
+    names=$(docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' onionpress-network 2>/dev/null) || names=""
+    case " $names " in
+        *" onionheaven "*)
+            docker rm -f onionheaven >> "$LOG_FILE" 2>&1 || true
+            names=$(docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' onionpress-network 2>/dev/null) || names="" ;;
+    esac
+    for name in $names; do
+        case "$name" in
+            onionpress-tor|onionpress-wordpress|onionpress-db|onionpress-cloudflared|onionheaven|onionheaven-poll-[0-9]*|onionheaven-takeover-[0-9]*)
+                docker rm -f "$name" >> "$LOG_FILE" 2>&1 &
+                pids="$pids $!" ;;
+            *)
+                log "WARNING: $name is on onionpress-network but is not OnionPress's: disconnecting it"
+                docker network disconnect -f onionpress-network "$name" >> "$LOG_FILE" 2>&1 || true ;;
+        esac
+    done
+    if [ -n "$pids" ]; then
+        wait $pids || true
+    fi
+    if ! docker network rm onionpress-network >> "$LOG_FILE" 2>&1; then
+        log "WARNING: could not recreate onionpress-network on onionpress-tor0: until it is, the Tor-side containers can reach this machine and its network (see $LOG_FILE)"
+    fi
+    return 0
+}
+
 # Clean stress-test entries and refresh takeover workers with current code.
 # reset_onionheaven() drives Docker, and only the onionheaven container has
 # the socket — onionpress-tor's /reset-onionheaven answers 503 — so run it
@@ -1554,15 +1600,21 @@ warn_if_socks_port_exposed() {
 #                    group can do that already; this user is not root. The
 #                    .deb's docker.service drop-in does it at boot, before
 #                    Docker restarts the containers.
+# The same call shuts the Tor side (onionpress-network, bridge
+# onionpress-tor0: tor, onionheaven, cloudflared, takeover workers) off from
+# this machine and private addresses (the LAN), and refuses WordPress's
+# published port (ONIONPRESS_WP_PORT) from anything but loopback: a
+# container on any bridge, other projects' too, would otherwise reach it
+# through docker-proxy and arrive as the gateway auto-login trusts.
 # Best effort: without the chain the site still starts (WordPress's own
 # requests still go through Tor) and the log says so.
 block_wordpress_egress() {
     local out rc=0
-    out=$(op_py --data-dir "$DATA_DIR" wordpress-egress 2>>"$LOG_FILE") || rc=$?
+    out=$(op_py --data-dir "$DATA_DIR" wordpress-egress --wp-port "$ONIONPRESS_WP_PORT" 2>>"$LOG_FILE") || rc=$?
     if [ "$rc" -eq 0 ]; then
         log "WordPress network egress block in place: $out"
     else
-        log "WARNING: WordPress network egress block not in place: ${out:-rc=$rc}. WordPress and MariaDB can reach the network directly."
+        log "WARNING: WordPress network egress block not in place: ${out:-rc=$rc}. WordPress and MariaDB can reach the network directly, and the Tor-side containers this machine and its LAN."
     fi
     return 0
 }
@@ -1804,6 +1856,9 @@ start_containers() {
     # Nothing from before the OnionHeaven data volume may run beside the
     # containers about to start (the data move must not race them).
     retire_old_onionheaven_containers
+
+    # The Tor side's network on its fixed bridge, for its rules (once).
+    migrate_tor_network
 
     # Start WordPress, DB, and OnionHeaven first
     local max_attempts=3

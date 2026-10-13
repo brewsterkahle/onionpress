@@ -27,6 +27,9 @@
 // the copy it installs (a new one each time the app starts; the bundled
 // file holds a placeholder that never matches), and has to come from
 // loopback or the gateway, an address no container on the network has.
+// No container reaches the published port to arrive from it either: the
+// launchers refuse that port in the VM from anything but loopback, and the
+// Tor side the VM's gateway, the Mac's loopback (onionpress/wordpress_egress.py).
 const OP_PROXY_TOKEN = '__ONIONPRESS_PROXY_TOKEN__';
 
 // This container's default gateway from the kernel's IPv4 routing table

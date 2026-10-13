@@ -1525,12 +1525,19 @@ def main(argv: list[str] = None) -> int:
     p_egress = sub.add_parser(
         "wordpress-egress",
         help="Shut WordPress's network (onionpress-wp0) off from everything "
-             "but replies to connections made from outside, wherever this "
-             "platform's Docker keeps its bridges (issue #144); prints one "
-             "status line")
+             "but replies to connections made from outside, the Tor side's "
+             "(onionpress-tor0) off from the host and the LAN, and "
+             "WordPress's published port off from every container, wherever "
+             "this platform's Docker keeps its bridges (issue #144); prints "
+             "one status line")
     p_egress.add_argument(
         "--check", action="store_true",
         help="Only say whether the rules are in place")
+    p_egress.add_argument(
+        "--wp-port", type=int, default=None,
+        help="WordPress's published port (default: $ONIONPRESS_WP_PORT, "
+             "which both launchers export; without either the published-"
+             "port rule is left as it is)")
     p_egress.add_argument(
         "--bin-dir", default=None,
         help="Where the app's limactl is (macOS; default: the app bundle's)")
@@ -1708,8 +1715,12 @@ def main(argv: list[str] = None) -> int:
         paths = resolve_paths(data_dir=args.data_dir)
         if args.bin_dir:
             paths = dataclasses.replace(paths, bin_dir=args.bin_dir)
+        wp_port = args.wp_port
+        if wp_port is None and os.environ.get("ONIONPRESS_WP_PORT", "").isdigit():
+            wp_port = int(os.environ["ONIONPRESS_WP_PORT"])
         result = wordpress_egress.ensure(
-            paths, Docker(paths), action="check" if args.check else "apply")
+            paths, Docker(paths), action="check" if args.check else "apply",
+            wp_port=wp_port)
         print(result.line())
         return 0 if result.ok else 1
 

@@ -220,6 +220,13 @@ services:
     # macOS never sets ONIONPRESS_BIND_HOST. The Linux launcher does: 0.0.0.0
     # by default so a headless Pi can be set up from another device on the
     # LAN, or 127.0.0.1 when ~/.onionpress/config says so.
+    #
+    # No container comes in this way. Docker skips its DNAT for anything
+    # from one of its bridges, and docker-proxy would hand a container's
+    # connection to <host address>:<this port> to WordPress from the
+    # gateway; the launchers refuse this port on the Docker host from
+    # anything but loopback (onionpress/wordpress_egress.py). LAN visitors
+    # are DNAT'd (their own address), the publisher's browser is loopback.
     ports:
       - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_WP_PORT:-8080}:80"
 
@@ -431,10 +438,22 @@ volumes:
 networks:
   # The Tor side: tor, onionheaven, cloudflared and the takeover workers
   # (which onionheaven starts with `--network onionpress-network`). Their
-  # way to the internet.
+  # way to the internet, and nothing else: they need public Tor relays and
+  # Cloudflare's edge, never the publisher's LAN, the Docker host's own
+  # services or (through the Colima VM's gateway, which Lima maps to the
+  # Mac's 127.0.0.1) anything on the Mac's loopback. The launchers put the
+  # ONIONPRESS-TOR chain on the Docker host with WordPress's (onionpress/
+  # wordpress_egress.py): from this bridge, the host itself and private,
+  # link-local, CGNAT, loopback and multicast addresses are refused (logged
+  # as CLEARNET-local-blocked), except replies and DNS; the internet is not.
+  # The bridge has a fixed name for the same reason as onionpress-wp0. Docker
+  # cannot rename one: the launchers recreate a network made before, on
+  # Docker's br-<id> (migrate_tor_network), before the first `compose up`.
   onionpress-network:
     name: onionpress-network
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: onionpress-tor0
   # WordPress and MariaDB, and nothing out of it but Tor (issue #144).
   # tor, onionheaven and cloudflared join it to reach wordpress:80 and to
   # serve WordPress their SOCKS ports; no takeover worker does.

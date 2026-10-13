@@ -41,7 +41,11 @@ function onionpress_auto_login_gateway() {
  * browser to this container from the onionpress-wordpress-network gateway,
  * an address no container on the network has: docker-proxy dials out from it (in
  * RootlessKit's namespace too, under rootless Docker on Linux), and without
- * the userland proxy NAT rewrites loopback clients to it. Onion visitors
+ * the userland proxy NAT rewrites loopback clients to it. No container
+ * reaches the published port (the launchers refuse it on the Docker host
+ * from anything but loopback, onionpress/wordpress_egress.py), so none
+ * arrives from it that way; under rootless Docker's default port driver
+ * LAN visitors do (docs/DOCKER-SOCKET.md). Onion visitors
  * arrive from the tor container, Cloudflare Tunnel visitors from cloudflared,
  * so a token that leaks (browser history, a pasted URL) cannot be redeemed
  * by either. This used to refuse the tor container's address only, which

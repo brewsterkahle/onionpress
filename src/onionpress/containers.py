@@ -95,6 +95,28 @@ _HUB_CONTAINER_RE = re.compile(
     r"onionpress-tor|onionheaven|onionheaven-(poll|takeover)-[0-9]+")
 
 
+# What OnionPress puts on onionpress-network: its compose services (wordpress
+# and db too, before issue #144 moved them) and the takeover workers.
+# migrate_tor_network removes these and only disconnects anything else; the
+# launchers' migrate_tor_network matches the same names.
+_TOR_NETWORK_CONTAINER_RE = re.compile(
+    r"onionpress-(tor|wordpress|db|cloudflared)|onionheaven"
+    r"|onionheaven-(poll|takeover)-[0-9].*")
+_BRIDGE_NAME_OPTION = "com.docker.network.bridge.name"
+
+
+def tor_network_is_old(options_json: str) -> bool:
+    """True only if `docker network inspect --format '{{json .Options}}'
+    onionpress-network` is a network whose bridge is not the fixed one (Docker
+    named it br-<id>); no network, or output that is not that, is False."""
+    try:
+        options = json.loads(options_json)
+    except (TypeError, ValueError):
+        return False
+    return (isinstance(options, dict)
+            and options.get(_BRIDGE_NAME_OPTION) != wordpress_egress.TOR_BRIDGE)
+
+
 def mounts_hub_data(mounts_json: str) -> bool:
     """False only if `docker inspect`'s Mounts certainly lack the hub data
     volume at HUB_DATA_DIR; anything unreadable is True (doubt keeps a
@@ -155,10 +177,12 @@ class ContainerManager:
         self.paths = paths
         self.port_config = port_config or detect_port_offset()
         self.log_func = log_func
-        # Shuts WordPress's network before start_core starts anything on it
+        # Shuts WordPress's network, the Tor side's and WordPress's published
+        # port before start_core starts anything on them
         # (wordpress_egress.ensure; injectable for tests).
         self._egress = egress or (
-            lambda: wordpress_egress.ensure(self.paths, self.docker, self._log))
+            lambda: wordpress_egress.ensure(self.paths, self.docker, self._log,
+                                            wp_port=self.port_config.wp_port))
 
     def _log(self, msg: str) -> None:
         if self.log_func:
@@ -239,6 +263,12 @@ class ContainerManager:
             self.retire_old_onionheaven_containers()
         except Exception as e:
             self._log(f"Could not check for containers of an older OnionPress: {e}")
+
+        # The Tor side's network on its fixed bridge, for its rules (once).
+        try:
+            self.migrate_tor_network()
+        except Exception as e:
+            self._log(f"Could not check onionpress-network's bridge: {e}")
 
         env = self._build_env()
         for attempt in range(1, retries + 1):
@@ -520,6 +550,54 @@ class ContainerManager:
         with ThreadPoolExecutor(max_workers=min(len(stale), 10)) as pool:
             list(pool.map(lambda n: self.docker.run(["rm", "-f", n], timeout=30), stale))
         return stale
+
+    def _tor_network_containers(self) -> list[str]:
+        result = self.docker.run(
+            ["network", "inspect", "--format", "{{range .Containers}}{{.Name}} {{end}}",
+             wordpress_egress.TOR_NETWORK], timeout=15, quiet=True)
+        return result.output.split() if result.ok else []
+
+    def migrate_tor_network(self) -> bool:
+        """Recreate an onionpress-network made before its bridge had a fixed
+        name (wordpress_egress.TOR_BRIDGE), which the Tor side's rules name;
+        True when one was removed for compose to make anew.
+
+        Docker cannot rename a bridge, and compose 2.40, which would recreate
+        the network itself, fails the whole start while a takeover worker
+        (no compose service) is still on it. Everything OnionPress put there
+        is removed, onionheaven first since it starts workers (compose
+        recreates its services, the heartbeat its workers); anything else is
+        only disconnected. The launchers' migrate_tor_network does the same.
+        """
+        inspected = self.docker.run(
+            ["network", "inspect", "--format", "{{json .Options}}",
+             wordpress_egress.TOR_NETWORK], timeout=15, quiet=True)
+        if not inspected.ok or not tor_network_is_old(inspected.output):
+            return False
+        self._log(f"Recreating {wordpress_egress.TOR_NETWORK} on its own bridge "
+                  f"({wordpress_egress.TOR_BRIDGE}), so the Tor side's rules apply to it")
+        names = self._tor_network_containers()
+        if "onionheaven" in names:
+            self.docker.run(["rm", "-f", "onionheaven"], timeout=30)
+            names = self._tor_network_containers()
+        ours = [n for n in names if _TOR_NETWORK_CONTAINER_RE.fullmatch(n)]
+        for name in names:
+            if name not in ours:
+                self._log(f"WARNING: {name} is on {wordpress_egress.TOR_NETWORK} but is "
+                          "not OnionPress's: disconnecting it")
+                self.docker.run(["network", "disconnect", "-f",
+                                 wordpress_egress.TOR_NETWORK, name], timeout=30)
+        if ours:
+            with ThreadPoolExecutor(max_workers=min(len(ours), 10)) as pool:
+                list(pool.map(lambda n: self.docker.run(["rm", "-f", n], timeout=30), ours))
+        removed = self.docker.run(["network", "rm", wordpress_egress.TOR_NETWORK],
+                                  timeout=30)
+        if not removed.ok:
+            self._log(f"WARNING: could not recreate {wordpress_egress.TOR_NETWORK} on "
+                      f"{wordpress_egress.TOR_BRIDGE}: until it is, the Tor-side "
+                      f"containers can reach this machine and its network "
+                      f"({removed.stderr.strip()})")
+        return removed.ok
 
     def list_farm_workers(self) -> list[str]:
         """List running farm worker container names."""

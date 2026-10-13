@@ -24,10 +24,12 @@ services:
     restart: unless-stopped
 
 networks:
+  # Both as in docker-compose.yml.
   onionpress-network:
     name: onionpress-network
     driver: bridge
-  # As in docker-compose.yml.
+    driver_opts:
+      com.docker.network.bridge.name: onionpress-tor0
   wordpress-network:
     name: onionpress-wordpress-network
     driver: bridge
