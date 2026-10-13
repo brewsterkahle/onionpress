@@ -294,8 +294,12 @@ def apply_rootless(runtime_dir: str, action: str = "apply", timeout: int = 30,
 def helper_argv(image: str, action: str = "apply",
                 bridge: str = BRIDGE, chain: str = CHAIN) -> list:
     """`docker` arguments for the system-Docker helper: the host's own
-    iptables in PID 1's mount and network namespaces. No network of its own."""
+    iptables in PID 1's mount and network namespaces. No network of its own.
+    The one privileged container OnionPress runs; tests/test_container_capabilities.py
+    holds it to this shape. no-new-privileges as everywhere else: nsenter
+    and iptables run as root and need no setuid binary."""
     return ["run", "--rm", "--privileged", "--pid", "host", "--network", "none",
+            "--security-opt", "no-new-privileges:true",
             "--log-driver", "none", "--label", "onionpress.helper=wordpress-egress",
             "--entrypoint", "nsenter", image,
             "-t", "1", "-m", "-n", "--", "sh", "-c", RULES_SCRIPT,

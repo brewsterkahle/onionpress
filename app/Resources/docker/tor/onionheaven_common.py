@@ -563,8 +563,8 @@ def _spawn_worker(conn):
              "--ulimit", "nofile=10000:10000",
              # As every compose service (docker-compose.yml's header): no
              # capability but what the worker uses, no raw packets on
-             # onionpress-network, where WordPress admits the gateway's
-             # address, and no setuid way back to root. The entrypoint
+             # onionpress-network (forged ones could pose as another
+             # container), and no setuid way back to root. The entrypoint
              # drops to debian-tor with su as root (SETGID, SETUID), which
              # no-new-privileges leaves alone; the watchdog, the queue
              # manager and the tor-manager read the control cookie in

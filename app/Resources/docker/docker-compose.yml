@@ -19,8 +19,9 @@
 # filesystem.
 #
 # NET_RAW: auto-login's "local" scope and /__op_proxy.php admit loopback and
-# the onionpress-network gateway by source address. With NET_RAW, root in
-# any container on the network (the onion-facing tor container, WordPress)
+# the gateway of WordPress's network (onionpress-wordpress-network) by
+# source address. With NET_RAW, root in any container on that network (the
+# onion-facing tor container, WordPress)
 # could ARP-spoof the gateway or forge its packets. Without it, and without
 # NET_ADMIN (Docker does not grant it and no service adds it), a container
 # sends from its own address only: IP_FREEBIND can name another source, but

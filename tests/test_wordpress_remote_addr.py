@@ -4,8 +4,8 @@ The auto-login plugin's local scope and /__op_proxy.php (src/onion-forward.php)
 admit a request by its source address. That means something only if
 REMOTE_ADDR is the TCP peer: the tor container for onion visitors (Tor ->
 socat -> wordpress:80), cloudflared for Cloudflare Tunnel visitors, the
-onionpress-network gateway for the publisher's browser through the
-published port.
+gateway of WordPress's network (onionpress-wordpress-network) for the
+publisher's browser through the published port.
 
   - No PROXY-protocol listener. The image enabled onionpress-proxy-protocol.conf,
     a *:81 vhost with RemoteIPProxyProtocol, for C Tor's

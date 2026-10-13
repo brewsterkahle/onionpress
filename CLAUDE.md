@@ -345,8 +345,11 @@
   into tor or wordpress that touches debian-tor's or www-data's files
   relies on that DAC_OVERRIDE. Change a set only after the same live test.
 - Auto-login's "local" scope and `/__op_proxy.php` admit loopback and the
-  onionpress-network gateway by source address, which is why no container
-  may hold NET_RAW (packet forging on that network).
+  gateway of WordPress's network (onionpress-wordpress-network) by source
+  address, which is why no container may hold NET_RAW (packet forging on
+  that network). The one privileged container is the #144 egress helper on
+  Linux system Docker (`wordpress_egress.helper_argv`: no network, no
+  mounts, `--rm`), held to that shape by the same test.
 - no-new-privileges blocks setuid binaries, not root calling setuid(): the
   tor image starts as root and drops with `su` (from root only), MariaDB
   uses gosu, Apache drops its own children. Never make a non-root process

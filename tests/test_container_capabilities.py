@@ -11,12 +11,13 @@ comment at each service and site say which step needs which); a change to
 a set needs the same live test, then a change here.
 
 Some capabilities are never added: NET_RAW (auto-login's "local" scope and
-/__op_proxy.php admit loopback and the onionpress-network gateway by source
-address, and NET_RAW would let root in a container on that network
+/__op_proxy.php admit loopback and the gateway of WordPress's network by
+source address, and NET_RAW would let root in a container on that network
 ARP-spoof the gateway or forge its packets), NET_ADMIN, SYS_ADMIN,
 SYS_PTRACE, SYS_MODULE, DAC_READ_SEARCH (open_by_handle_at, the "shocker"
 escape: root reads other users' files here with DAC_OVERRIDE) and ALL; and
-nothing runs privileged. no-new-privileges keeps a compromised
+nothing runs privileged but the #144 egress helper (PRIVILEGED_SITES), held
+to its exact shape. no-new-privileges keeps a compromised
 unprivileged process (debian-tor, www-data, mysql) from getting back to
 root through a setuid binary; every privilege drop in these images is root
 calling setuid() itself (su run as root, gosu, Apache), which it allows.
@@ -102,6 +103,17 @@ DOCKER_RUN_SITES = {
     ("src/onionpress/launcher_ops.py", "tor_image_has_mkp224o"): [set()],
     # mkp224o writes into the user's folder.
     ("src/onionpress/launcher_ops.py", "generate_vanity_in_container"): [READ_USER_KEY],
+}
+
+# The privileged exceptions, each held to its exact shape below. Only the
+# WordPress egress helper on Linux system Docker (wordpress_egress.py): it
+# runs the host's own iptables in PID 1's namespaces, which no capability
+# set short of --privileged allows under Docker's default profiles (see its
+# module docstring). The launcher is a docker-group user, already root on
+# the host, so this grants nothing the caller lacks; the container joins no
+# network, mounts nothing and is removed when it exits.
+PRIVILEGED_SITES = {
+    ("src/onionpress/wordpress_egress.py", "helper_argv"): 1,
 }
 
 # docker run options that take no value.
@@ -303,8 +315,40 @@ class TestDockerRunCensus(unittest.TestCase):
         docker-compose.yml's header) and added to DOCKER_RUN_SITES."""
         found = {site: len(opts) for site, opts in self.sites.items()}
         expected = {site: len(caps) for site, caps in DOCKER_RUN_SITES.items()}
+        expected.update(PRIVILEGED_SITES)
         self.assertEqual(found, expected)
-        self.assertGreaterEqual(sum(found.values()), 19)
+        self.assertGreaterEqual(sum(found.values()), 20)
+
+    def test_only_the_listed_sites_are_privileged(self):
+        for site, runs in self.sites.items():
+            for n, opts in enumerate(runs):
+                with self.subTest(site=site, run=n):
+                    self.assertEqual(opts["privileged"], site in PRIVILEGED_SITES)
+
+    def test_the_privileged_helper_keeps_its_shape(self):
+        """--privileged is the whole capability set, so what bounds the
+        egress helper is everything else: removed when done, no network,
+        no mounts, no-new-privileges, its own fixed entrypoint and script."""
+        from onionpress import wordpress_egress
+        argv = wordpress_egress.helper_argv("img@sha256:" + "a" * 64)
+        image_at = argv.index("img@sha256:" + "a" * 64)
+        options = argv[:image_at]
+        self.assertEqual(options[:2], ["run", "--rm"])
+        pairs = _pairs(options)
+        self.assertIn(("--network", "none"), pairs)
+        self.assertIn(("--pid", "host"), pairs)
+        self.assertIn(("--security-opt", NNP), pairs)
+        self.assertIn(("--entrypoint", "nsenter"), pairs)
+        self.assertEqual(options.count("--privileged"), 1)
+        for flag in ("-v", "--volume", "--mount", "--volumes-from", "--device",
+                     "-p", "--publish", "-P", "--publish-all", "--ipc", "--uts",
+                     "--userns", "--cgroupns", "-e", "--env", "--env-file",
+                     "--cap-add", "--security-opt=no-new-privileges:false"):
+            self.assertNotIn(flag, options)
+        self.assertEqual([o for o in options if o.startswith("--network")], ["--network"])
+        self.assertEqual(argv[image_at + 1:image_at + 9],
+                         ["-t", "1", "-m", "-n", "--", "sh", "-c",
+                          wordpress_egress.RULES_SCRIPT])
 
     def test_every_run_string_is_a_docker_run(self):
         """A "run" string the census did not take as a docker run argv is
@@ -390,7 +434,7 @@ class TestComposeServices(unittest.TestCase):
                         f"{name}: `cap_drop: [ALL]` (block style), then "
                         "cap_add only what it needs. With NET_RAW, root in "
                         "the container can forge packets from the "
-                        "onionpress-network gateway, which auto-login and "
+                        "WordPress network's gateway, which auto-login and "
                         "/__op_proxy.php admit.")
 
     def test_every_service_adds_only_its_own(self):
