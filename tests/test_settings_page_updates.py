@@ -523,5 +523,32 @@ class TestOldLogLinesAreScrubbed(unittest.TestCase):
         self.assertIn("CLOUDFLARE_TUNNEL_TOKEN: replaced", out)
 
 
+class TestMacLauncherKeepsTokenPadding(unittest.TestCase):
+    """The Mac launcher read the token with `cut -d= -f2`, which keeps only
+    the text up to the next "=": a base64 token's trailing padding was cut
+    off (#323). It now reads everything after the first "=", the first
+    line only, as config.read_value does."""
+
+    def test_token_read_whole(self):
+        src = _read("app/MacOS/onionpress")
+        m = re.search(r"^# Read Cloudflare Tunnel token.*?^export CLOUDFLARE_TUNNEL_TOKEN$",
+                      src, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(m)
+        with tempfile.TemporaryDirectory() as tmp:
+            for token in (TOKEN, TOKEN + "=", "abc"):
+                with self.subTest(token=token):
+                    with open(os.path.join(tmp, "config"), "w") as f:
+                        f.write(f"VM_CPU=2\nCLOUDFLARE_TUNNEL_TOKEN={token}\n"
+                                "CLOUDFLARE_TUNNEL_TOKEN=second\n")
+                    out = subprocess.run(
+                        ["bash", "-c", m.group(0) + '\nprintf "%s" "$CLOUDFLARE_TUNNEL_TOKEN"'],
+                        capture_output=True, text=True, timeout=30,
+                        env={**os.environ, "DATA_DIR": tmp})
+                    self.assertEqual(out.returncode, 0, out.stderr)
+                    self.assertEqual(out.stdout, token)
+                    self.assertEqual(op_config.read_value(
+                        os.path.join(tmp, "config"), "CLOUDFLARE_TUNNEL_TOKEN"), token)
+
+
 if __name__ == "__main__":
     unittest.main()
