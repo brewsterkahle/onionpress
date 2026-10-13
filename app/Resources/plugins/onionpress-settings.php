@@ -1484,7 +1484,7 @@ function onionpress_settings_page() {
             }
         }
         ?>
-        <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address, forever. Not reversible. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
+        <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address: visitors and links using it stop reaching this site. A key that is not a usable onion service key is refused before anything changes, and a copy of the current key is kept on the computer running OnionPress (<code>~/.onionpress/replaced-keys/</code>), from which the old address can be imported again. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
         <form method="post" enctype="multipart/form-data" style="margin-top: 8px;" id="op-import-key-form">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="import-key-file">

@@ -776,7 +776,24 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         self.assertIn("*([] if remaining else [REGISTRATION_RECORD])", body)
 
     def test_key_imports(self):
-        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
+        for rel in ("linux/onionpress",):
+            with self.subTest(rel=rel):
+                text = _read(rel)
+                # Every import replaces the key in replace_onion_key: the
+                # hubs are asked once, after the current key was kept and
+                # before anything stops or is replaced.
+                body = _shell_function(text, "replace_onion_key")
+                self.assertEqual(body.count("onionheaven_release key-import"), 1)
+                self.assert_before(body, "keep-current",
+                                   "onionheaven_release key-import", rel)
+                self.assert_before(body, "onionheaven_release key-import",
+                                   "stop_containers", rel)
+                self.assert_before(body, "onionheaven_release key-import",
+                                   "touch \"$DATA_DIR/.import-key-pending\"", rel)
+                body = _shell_function(text, "import_key")
+                self.assertNotIn("onionheaven_release", body)
+                self.assert_before(body, 'read -r confirm', "replace_onion_key", rel)
+        for rel in ("app/MacOS/onionpress",):
             with self.subTest(rel=rel):
                 body = _shell_function(_read(rel), "import_key")
                 # Both branches: Docker up (the key volume exists) and not.
@@ -794,8 +811,9 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
             with self.subTest(label=label):
                 start = text.index(f"                {label})\n")
                 branch = text[start:text.index("\n                    ;;\n", start)]
-                self.assert_before(branch, "ONIONPRESS_YES=true onionheaven_release key-import",
-                                   "docker volume rm onionpress-onion-keys", label)
+                # The hubs without a question (the page confirmed), through
+                # replace_onion_key (tests/test_onion_key_replacement.py).
+                self.assertIn("ONIONPRESS_YES=true replace_onion_key", branch)
                 self.assertIn("start_heartbeat_client", branch)
         body = _shell_function(text, "restore_backup")
         self.assert_before(body, 'onionheaven_release restore "$onion_address"',

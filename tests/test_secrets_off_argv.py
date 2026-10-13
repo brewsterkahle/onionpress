@@ -490,26 +490,43 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(
             out_dir, self.addr, "ks_hs_id.ed25519_expanded_private")))
 
+    # The key import's own helpers (replace_onion_key and what it calls),
+    # where the launcher has them.
+    HELPERS = ("is_onion_address", "vanity_key_dir", "docker_volume_state",
+               "replace_onion_key", "set_address_prefix_for")
+
     def _run_import(self, rel, function, wrapper, call):
         data_dir = os.path.join(self.tmpdir, rel.replace("/", "_"))
         argv_log = os.path.join(self.tmpdir, "argv.log")
+        # No Docker: every `docker` (the launcher's and key_manager.py's
+        # own reads of the tor container) is a stub that fails, except the
+        # volume listing, which says there are none.
+        bin_dir = os.path.join(self.tmpdir, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        with open(os.path.join(bin_dir, "docker"), "w") as f:
+            f.write('#!/bin/sh\n[ "$1 $2" = "volume ls" ] && exit 0\nexit 1\n')
+        os.chmod(os.path.join(bin_dir, "docker"), 0o755)
+        text = _read(rel)
+        helpers = "".join(_shell_function(rel, n) + "\n" for n in self.HELPERS
+                          if re.search(r"^" + n + r"\(\)", text, re.M))
         script = (
             "set -e\n"
             "log() { :; }\n"
-            "docker() { return 1; }\n"  # no key volume exists
+            "sed() { :; }\n"  # ADDRESS_PREFIX is test_address_prefix.py's
             "stop_containers() { :; }\n"
             # Nothing registered with an OnionHeaven hub (that path is
             # tests/test_onionheaven_lifecycle.py's).
             "onionheaven_release() { :; }\n"
             "start_heartbeat_client() { :; }\n"
             f'{wrapper}() {{ printf "%s\\n" "$*" >> "$ARGV_LOG"; "$PY" "$@"; }}\n'
-            + _shell_function(rel, function) + "\n" + call + "\n"
+            + helpers + _shell_function(rel, function) + "\n" + call + "\n"
         )
         out = subprocess.run(
             ["bash", "-c", script], input=self.key_b32 + "\n",
             capture_output=True, text=True, timeout=60,
             env={**os.environ, "ARGV_LOG": argv_log, "PY": sys.executable,
                  "KEY": self.key_b32, "DATA_DIR": data_dir,
+                 "PATH": bin_dir + os.pathsep + os.environ["PATH"],
                  "LOG_FILE": os.path.join(self.tmpdir, "log"),
                  "SCRIPTS_DIR": os.path.dirname(KEY_MANAGER)})
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
@@ -529,9 +546,10 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
         self._run_import("linux/onionpress", "import_key", "python3",
                          'import_key "$KEY"')
 
-    def test_linux_launcher_import_key_noninteractive(self):
-        self._run_import("linux/onionpress", "import_key_noninteractive",
-                         "python3", 'import_key_noninteractive "$KEY"')
+    def test_linux_launcher_replace_onion_key(self):
+        """What the Settings page's import-key-file runs."""
+        self._run_import("linux/onionpress", "replace_onion_key",
+                         "python3", 'replace_onion_key "$KEY"')
 
     def test_menubar_passes_key_on_stdin(self):
         src = _read("src/menubar.py")

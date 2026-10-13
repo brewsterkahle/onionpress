@@ -707,6 +707,155 @@ def import_key_b32(key_b32, output_dir):
     return address
 
 
+# ─── The key a replacement retires ─────────────────────────────────────
+#
+# Before a key import (CLI or Settings page) replaces this site's key, a
+# copy of the current one goes to ~/.onionpress/replaced-keys/
+# <address>-<UTC time>/: host only (not under shared/, which the VM and
+# the key helpers mount), 0700, files 0600. Re-importing it (onionpress
+# import-key with its hs_ed25519_secret_key, base32) brings the address
+# back. The launchers refuse the import when no copy could be made.
+
+REPLACED_KEYS_DIR = "replaced-keys"
+
+
+def _write_new_file(dir_fd, name, data, mode=0o600):
+    import os
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                 mode, dir_fd=dir_fd)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def keep_replaced_key(root, private_key, public_key, when=None):
+    """Keep a copy of a key that is about to be replaced: a new folder
+    root/<address>-<YYYYmmddTHHMMSSZ>/ (0700) holding the OpenSSH PEM, C
+    Tor's hs_ed25519_secret_key and hs_ed25519_public_key, and hostname
+    (all 0600), read back and checked before its path is returned.
+
+    *root* is made 0700 if missing and must be a real folder of this
+    user's (not a link). Raises ValueError or OSError when the copy cannot
+    be made, and leaves no half-written folder behind."""
+    import os
+    import shutil
+    import stat
+    import time
+
+    address = key_pair_onion_address(private_key, public_key)
+    try:
+        os.mkdir(root, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(root)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise ValueError(f"{root} is not a folder of this user's")
+    os.chmod(root, 0o700)
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(when))
+    for n in range(1, 100):
+        name = f"{address}-{stamp}" + ("" if n == 1 else f"-{n}")
+        path = os.path.join(root, name)
+        try:
+            os.mkdir(path, 0o700)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise ValueError(f"No free name for a kept key in {root}")
+    try:
+        dir_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            _write_new_file(dir_fd, "ks_hs_id.ed25519_expanded_private",
+                            build_openssh_key(private_key, public_key))
+            _write_new_file(dir_fd, "hs_ed25519_secret_key",
+                            CTOR_HEADER_SECRET + bytes(private_key))
+            _write_new_file(dir_fd, "hs_ed25519_public_key",
+                            CTOR_HEADER_PUBLIC + bytes(public_key))
+            _write_new_file(dir_fd, "hostname", (address + "\n").encode())
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        if staged_key_address(path) != address:
+            raise ValueError("The kept copy does not read back as the same key")
+    except BaseException:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
+    return path
+
+
+def _key_dir_pair(key_dir):
+    """(private, public) of the key files in *key_dir*, after
+    staged_key_address has checked that they agree; None when it holds
+    none."""
+    import os
+    address = staged_key_address(key_dir)
+    if not address:
+        return None
+    pem_path = os.path.join(key_dir, 'ks_hs_id.ed25519_expanded_private')
+    if os.path.isfile(pem_path):
+        with open(pem_path, 'rb') as f:
+            return parse_openssh_key(f.read())
+    with open(os.path.join(key_dir, 'hs_ed25519_secret_key'), 'rb') as f:
+        private_key = _parse_ctor_secret(f.read())
+    return private_key, check_expanded_secret_key(private_key)
+
+
+def served_key_pairs():
+    """The key pairs the tor container holds for the site: the one Tor
+    serves (C Tor's hs_ed25519_secret_key) and the delivered PEM, either
+    missing when it cannot be read (Docker down, tor not running), each
+    once. A file that is there but is no valid key raises ValueError: the
+    caller cannot keep what it cannot read, and must not go on as if
+    there were nothing to keep."""
+    pairs = []
+    ok, data = _docker_cat(CTOR_SECRET_PATH)
+    if ok:
+        try:
+            private_key = _parse_ctor_secret(data)
+        except Exception as e:
+            raise ValueError(f"Tor's key file could not be read: {e}") from e
+        pairs.append((private_key, check_expanded_secret_key(private_key)))
+    ok, data = _docker_cat(DELIVERED_KEY_PATH)
+    if ok:
+        try:
+            pair = parse_openssh_key(data)
+        except Exception as e:
+            raise ValueError(f"The delivered key could not be read: {e}") from e
+        check_expanded_secret_key(*pair)
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
+
+
+def keep_current_keys(root, key_dirs=(), served=True, when=None):
+    """Keep a copy (keep_replaced_key) of every key this install may be
+    using: what the tor container holds (served=True) and the key files in
+    each of *key_dirs* (the imported or generated key in vanity-keys/),
+    once per address. Returns the kept folders; [] when there was nothing
+    to read. Raises when a key that is there cannot be read or kept."""
+    pairs = served_key_pairs() if served else []
+    for key_dir in key_dirs:
+        try:
+            pair = _key_dir_pair(key_dir)
+        except OSError as e:
+            raise ValueError(f"The key in {key_dir} could not be read: {e}") from e
+        if pair is not None and pair not in pairs:
+            pairs.append(pair)
+    kept, seen = [], set()
+    for private_key, public_key in pairs:
+        address = key_pair_onion_address(private_key, public_key)
+        if address in seen:
+            continue
+        seen.add(address)
+        kept.append(keep_replaced_key(root, private_key, public_key, when))
+    return kept
+
+
 if __name__ == "__main__":
     import sys
 
@@ -719,6 +868,8 @@ if __name__ == "__main__":
         print("  key_manager.py write-keys <hex_privkey> <hex_pubkey> <key_dir>")
         print("  key_manager.py import-key <base32_key> <output_dir>")
         print("  key_manager.py decode-key <base32_key>")
+        print("  key_manager.py staged-address <key_dir>")
+        print("  key_manager.py keep-current [--no-served] <replaced_keys_dir> [<key_dir>...]")
         print("  (<base32_key> may be '-' to read the key from stdin)")
         sys.exit(1)
 
@@ -787,6 +938,30 @@ if __name__ == "__main__":
             private_key = decode_base32_key(_key_arg(sys.argv[2]))
             address = derive_onion_address(check_expanded_secret_key(private_key))
             print(address)
+
+        elif cmd == "staged-address":
+            # The address of the key files in a folder (they must agree),
+            # nothing for none: an import confirms what it staged.
+            if len(sys.argv) < 3:
+                _usage()
+            print(staged_key_address(sys.argv[2]))
+
+        elif cmd == "keep-current":
+            # Copy every key this install may be using into
+            # <replaced_keys_dir>/<address>-<time>/ before an import
+            # replaces it. Prints each kept folder. Exit 0: kept; 3:
+            # nothing found to keep; 1: a key is there but could not be
+            # kept (the import must not go on).
+            args = sys.argv[2:]
+            served = True
+            if args and args[0] == "--no-served":
+                served, args = False, args[1:]
+            if not args:
+                _usage()
+            kept = keep_current_keys(args[0], args[1:], served=served)
+            for path in kept:
+                print(path)
+            sys.exit(0 if kept else 3)
 
         else:
             _usage()

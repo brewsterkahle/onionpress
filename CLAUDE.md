@@ -258,6 +258,18 @@
   config. Changing the create-backup filename in `src/menubar.py` or
   `linux/onionpress` means changing that pattern; `tests/test_backup_download.py`
   ties them together.
+- **A key import never loses the current key.** Every one (`onionpress
+  import-key`, the Linux page's import-key-file and generate-vanity) goes
+  through the launcher's `replace_onion_key`: the key is checked
+  (`key_manager.check_expanded_secret_key`: 64 bytes, bit 255 clear,
+  nonzero mod L, PyNaCl's `crypto_scalarmult_ed25519_base_noclamp` agrees)
+  and staged, a copy of every key in use goes to
+  `~/.onionpress/replaced-keys/<address>-<time>/` (host only, 0700; no copy,
+  no import), and only then are the hubs released, OnionPress stopped,
+  the staged folder swapped in as `vanity-keys/` and `.import-key-pending`
+  set (the start removes the old volumes). The page used to remove the
+  volumes and vanity-keys/ before decoding the key: garbage minted a new
+  address. `tests/test_onion_key_replacement.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published, so nothing private may sit there under a name
