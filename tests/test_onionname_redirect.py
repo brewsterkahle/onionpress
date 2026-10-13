@@ -14,7 +14,7 @@ why this survived: the page still rendered, the redirect still fired, and
 nothing in the suite looked at the host. These tests run the real helper
 under the real PHP, and pin the two call sites that must route through it.
 
-php is preinstalled on ubuntu-latest, so this runs in the existing Python CI
+php is preinstalled on ubuntu-24.04, so this runs in the existing Python CI
 job — no separate PHP job to collide with the receiver work in flight.
 """
 

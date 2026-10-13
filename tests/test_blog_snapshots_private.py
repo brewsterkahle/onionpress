@@ -15,7 +15,7 @@ path rule, the multisite .htaccess, the WordPress image's conf). The
 importer moves the old folder there on the owner's next wp-admin request;
 until it has, the same layers refuse the old name too.
 
-php is preinstalled on ubuntu-latest, so the PHP half runs in CI; locally
+php is preinstalled on ubuntu-24.04, so the PHP half runs in CI; locally
 it is skipped when php is missing.
 """
 

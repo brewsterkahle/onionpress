@@ -372,7 +372,7 @@ then; it fails rather than finish a release without them.
 
 The container images are published by `.github/workflows/docker-publish.yml`
 on release, or by hand from the Actions tab ("Run workflow"). It runs entirely
-on GitHub-hosted runners — amd64 on `ubuntu-latest`, arm64 on
+on GitHub-hosted runners — amd64 on `ubuntu-24.04`, arm64 on
 `ubuntu-24.04-arm` — and publishes to the namespace of the repository it runs
 in, so it works unchanged in a fork:
 

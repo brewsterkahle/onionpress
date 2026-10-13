@@ -12,12 +12,14 @@ permissions:
 jobs:
   unit-tests:
     name: Python unit tests
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which becomes Ubuntu 26 from
+    # 2026-10-19: move every workflow together, after a green run there.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
 
