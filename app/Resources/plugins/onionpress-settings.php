@@ -451,13 +451,11 @@ add_action( 'admin_init', function () {
             return $a !== $remove;
         } ) );
         update_option( 'onionpress_following', $following );
-        // Clean up name, feed, title, and stats mappings
-        $names  = get_option( 'onionpress_following_names', array() );
+        // Clean up feed, title, and stats mappings
         $feeds  = get_option( 'onionpress_following_feeds', array() );
         $titles = get_option( 'onionpress_following_titles', array() );
         $stats  = get_option( 'onionpress_following_stats', array() );
-        unset( $names[ $remove ], $feeds[ $remove ], $titles[ $remove ], $stats[ $remove ] );
-        update_option( 'onionpress_following_names', $names );
+        unset( $feeds[ $remove ], $titles[ $remove ], $stats[ $remove ] );
         update_option( 'onionpress_following_feeds', $feeds );
         update_option( 'onionpress_following_titles', $titles );
         update_option( 'onionpress_following_stats', $stats );
@@ -487,11 +485,6 @@ add_action( 'admin_init', function () {
                 return $k === $orig ? $key : $k;
             }, $following ) ) );
             update_option( 'onionpress_following', $following );
-            $names = get_option( 'onionpress_following_names', array() );
-            if ( ! is_array( $names ) ) { $names = array(); }
-            $names[ $key ] = $name;
-            unset( $names[ $orig ] );
-            update_option( 'onionpress_following_names', $names );
             // Stats/feeds/titles under the bare key were placeholders — drop them.
             foreach ( array( 'onionpress_following_stats', 'onionpress_following_feeds', 'onionpress_following_titles' ) as $opt ) {
                 $map = get_option( $opt, array() );
@@ -597,16 +590,6 @@ add_action( 'admin_init', function () {
             if ( ! in_array( $key, $following, true ) ) {
                 $following[] = $key;
                 update_option( 'onionpress_following', $following );
-            }
-            // The onionname is embedded in the key, but record it in the side
-            // map too (keyed by the full key) for direct lookups.
-            if ( $resolved_name ) {
-                $names = get_option( 'onionpress_following_names', array() );
-                if ( ! is_array( $names ) ) { $names = array(); }
-                if ( ! isset( $names[ $key ] ) || $names[ $key ] !== $resolved_name ) {
-                    $names[ $key ] = $resolved_name;
-                    update_option( 'onionpress_following_names', $names );
-                }
             }
             if ( $feed_url ) {
                 $feeds = get_option( 'onionpress_following_feeds', array() );
