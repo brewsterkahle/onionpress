@@ -69,6 +69,19 @@ class TestMenubarSettingsRestore(unittest.TestCase):
         self.assertLess(self.body.index('"docker", "cp"'), check)
         self.assertLess(check, self.body.index("restore_from_backup(local_zip"))
 
+    def test_no_fixed_time_limit_on_the_menu_restore(self):
+        """Issue #317: a fixed 1800 s ended a large site's restore halfway."""
+        src = mv._read("src/menubar.py")
+        start = src.index("    def do_restore():")
+        body = src[start:src.index("threading.Thread(target=do_restore", start)]
+        call = body[body.index("launcher_ops.run_launcher_restore("):]
+        self.assertIn("timeout=None)", call[:call.index("if not ok:")])
+
+    def test_the_copy_is_sized_and_checked(self):
+        self.assertNotIn("timeout=60\n", self.body)
+        self.assertIn("timeout=wp_files.sized_timeout(size, 60)", self.body)
+        self.assertIn("if r.returncode != 0:", self.body)
+
     def test_the_copy_lands_in_a_folder_of_its_own(self):
         self.assertIn("tempfile.mkdtemp(", self.body)
         self.assertNotIn("gettempdir()", self.body)

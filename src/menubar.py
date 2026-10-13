@@ -4449,28 +4449,20 @@ class OnionPressApp(rumps.App):
                     self.launcher_script, zip_path, password,
                     data_dir=self.app_support,
                     log_path=os.path.join(self.app_support, "onionpress.log"),
-                    extra_env=hub_key_env)
+                    extra_env=hub_key_env,
+                    # No time limit (issue #317): a fixed 1800 s ended a
+                    # large site's restore halfway and left the launcher's
+                    # steps running; those steps carry their own limits,
+                    # sized to the backup, and fail it when hit.
+                    timeout=None)
                 if not ok:
                     self.log(f"Restore: launcher restore failed: {failure}")
                     _main_thread(lambda: pw.finish(failure,
                                                    title="Restore Failed"))
                     return
 
-                # The address the restore derived from the backup's key, from
-                # the on-disk cache it wrote — not metadata.onion_address,
-                # which is the backup author's to fill in.
-                restored_addr = None
-                try:
-                    with open(os.path.join(self.app_support,
-                                           "onion_address")) as f:
-                        restored_addr = f.read().strip()
-                except OSError:
-                    pass
-                if key_manager.is_valid_onion_address(restored_addr):
-                    # Refresh the in-memory address so the heartbeat ships
-                    # the matching content_address.
-                    self.onion_address = restored_addr
-                else:
+                restored_addr = self._adopt_restored_address()
+                if not restored_addr:
                     # Shown only; update_status picks the address up from Tor.
                     restored_addr = addr
                 self.log(f"Restore complete (install-from-backup): {restored_addr}")
@@ -4531,6 +4523,22 @@ class OnionPressApp(rumps.App):
         except Exception as e:
             self.log(f"Restore: could not ask OnionHeaven to delete the old "
                      f"key (continuing): {e}")
+
+    def _adopt_restored_address(self):
+        """The address a restore derived from the backup's key, from the
+        on-disk cache it wrote — not metadata.onion_address, which is the
+        backup author's to fill in — or None. A valid one becomes
+        self.onion_address, so the heartbeat ships the matching
+        content_address."""
+        try:
+            with open(os.path.join(self.app_support, "onion_address")) as f:
+                restored_addr = f.read().strip()
+        except OSError:
+            return None
+        if not key_manager.is_valid_onion_address(restored_addr):
+            return None
+        self.onion_address = restored_addr
+        return restored_addr
 
     def _reconcile_archive_s3_keys(self):
         """Ensure the Wayback sweep's archive.org S3 keys exist, retrying
@@ -5854,6 +5862,7 @@ License: AGPL v3"""
                         # docker cp + chown as root: both follow a link
                         # www-data can plant at this predictable name, and
                         # the chown made any file in the container its own.
+                        # The time allowed grows with the backup (#317).
                         try:
                             with open(tmp_path, 'rb') as backup_file:
                                 r = subprocess.run(
@@ -5862,7 +5871,8 @@ License: AGPL v3"""
                                      "sh", "-c", 'umask 077; cat > "$1"', "sh",
                                      f"/var/lib/onionpress/{filename}"],
                                     stdin=backup_file, capture_output=True,
-                                    timeout=300
+                                    timeout=wp_files.sized_timeout(
+                                        os.fstat(backup_file.fileno()).st_size, 300)
                                 )
                         finally:
                             try:
@@ -5912,17 +5922,26 @@ License: AGPL v3"""
                     # file (check_uploaded_backup) before it is read.
                     upload_dir = tempfile.mkdtemp(prefix="onionpress-restore-upload-")
                     local_zip = os.path.join(upload_dir, "restore-upload.zip")
+                    upload = "/var/lib/onionpress/restore-upload.zip"
                     try:
-                        subprocess.run(
-                            ["docker", "cp",
-                             "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip",
-                             local_zip],
+                        # The copy's time limit grows with the upload (#317).
+                        r = subprocess.run(
+                            ["docker"] + wp_files.exec_args("stat", "-c", "%s", upload),
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=60
+                            timeout=5
                         )
+                        size = r.stdout.strip()
+                        size = int(size) if r.returncode == 0 and size.isdigit() else 0
+                        r = subprocess.run(
+                            ["docker", "cp", f"onionpress-wordpress:{upload}", local_zip],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=wp_files.sized_timeout(size, 60)
+                        )
+                        if r.returncode != 0:
+                            self.log(f"Settings page: could not copy the uploaded backup "
+                                     f"(docker cp rc={r.returncode})")
                         subprocess.run(
-                            ["docker"] + wp_files.exec_args(
-                                "rm", "-f", "/var/lib/onionpress/restore-upload.zip"),
+                            ["docker"] + wp_files.exec_args("rm", "-f", upload),
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
                             timeout=5
                         )
