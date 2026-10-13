@@ -72,6 +72,11 @@ services:
       - no-new-privileges:true
     networks:
       - onionpress-network
+      - wordpress-network
+    # onionpress-network is the way out (Tor relays); wordpress-network is
+    # how socat reaches wordpress:80 and WordPress reaches 9050 and 8083
+    # here. See the networks below.
+    #
     # Tor's SOCKS port is for this machine only, on every platform: it is
     # deliberately not ONIONPRESS_BIND_HOST (which only decides WordPress's
     # reach), and not configurable. Long syntax on purpose: older Linux
@@ -143,7 +148,12 @@ services:
     security_opt:
       - no-new-privileges:true
     networks:
-      - onionpress-network
+      - wordpress-network
+    # This network only, and nothing leaves it but replies to connections
+    # made from outside (see the networks below). Its gateway is where the
+    # published port's connections come from: the address auto-login and
+    # /__op_proxy.php admit, which WordPress reads off its default route.
+    #
     # No DNS outside Docker. Docker's resolver (127.0.0.11) still answers for
     # the containers (db, onionpress-tor, onionheaven); any other name it
     # forwards to this server instead of the host's, and a --dns loopback
@@ -183,7 +193,7 @@ services:
     security_opt:
       - no-new-privileges:true
     networks:
-      - onionpress-network
+      - wordpress-network
     # No DNS outside Docker, as for wordpress above: MariaDB has nothing to
     # look up beyond the containers.
     dns:
@@ -303,6 +313,9 @@ services:
       - no-new-privileges:true
     networks:
       - onionpress-network
+      - wordpress-network
+    # wordpress-network: WordPress's bulk fetches (core updates, the Wayback
+    # and social importers) use this container's SOCKS port, 9050.
 
 volumes:
   onion-keys:
@@ -335,6 +348,42 @@ volumes:
     name: onionpress-autoheal-proxy
 
 networks:
+  # The Tor side: tor, onionheaven, cloudflared and the takeover workers
+  # (which onionheaven starts with `--network onionpress-network`). Their
+  # way to the internet.
   onionpress-network:
     name: onionpress-network
     driver: bridge
+  # WordPress and MariaDB, and nothing out of it but Tor (issue #144).
+  # tor, onionheaven and cloudflared join it to reach wordpress:80 and to
+  # serve WordPress their SOCKS ports; no takeover worker does.
+  #
+  # The launchers put the ONIONPRESS-WP chain on the Docker host before any
+  # `compose up` (onionpress/wordpress_egress.py): a packet that comes in
+  # from this bridge and either leaves it or is for the host itself is
+  # refused (and logged as CLEARNET-blocked) unless it answers a connection
+  # made from outside: a browser through the published port, docker-proxy's
+  # connection, the host's own. So the published port, LAN visitors on
+  # Linux (their own addresses, not the gateway's) and everything between
+  # these containers work as before, and WordPress, MariaDB or a plugin
+  # opening a socket to the internet, the LAN or the host gets an error.
+  # The rules name the bridge, which is why it has a fixed name: they are in
+  # place before Docker creates it, and in the Colima VM a docker.service
+  # drop-in reinstalls them before Docker restarts anything after a boot.
+  #
+  # Not `internal: true`: an internal network publishes no ports and gives
+  # WordPress no default route, so neither the published port nor the
+  # gateway auto-login and /__op_proxy.php trust would exist.
+  #
+  # Its name must sort after onionpress-network. A container on two
+  # networks takes its default route from the first in lexical order
+  # (Docker's tie-break; there is no other preference between two plain
+  # IPv4 bridges), so tor, onionheaven and cloudflared keep reaching the
+  # internet. IPv6 stays off for the same reason (a dual-stack network
+  # would win) and because the chain's IPv6 half is best effort.
+  wordpress-network:
+    name: onionpress-wordpress-network
+    driver: bridge
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: onionpress-wp0

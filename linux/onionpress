@@ -1503,6 +1503,43 @@ warn_if_socks_port_exposed() {
     fi
 }
 
+# WordPress and MariaDB reach nothing outside Docker (issue #144). Their
+# network's bridge (onionpress-wp0, docker-compose.yml) gets the
+# ONIONPRESS-WP chain before anything starts on it: only replies to
+# connections made from outside (the published port, LAN browsers,
+# docker-proxy) leave the bridge or reach the host itself. Where the rules
+# go, from onionpress/wordpress_egress.py (shared with macOS):
+#   rootless Docker  RootlessKit's network namespace, entered as its owner
+#                    (nsenter -U --preserve-credentials -n -m), as Docker's
+#                    rootless docs do;
+#   system Docker    the host, through a one-shot helper container
+#                    (--privileged --pid host --network none, the pinned
+#                    tor image) running the host's own iptables. The docker
+#                    group can do that already; this user is not root. The
+#                    .deb's docker.service drop-in does it at boot, before
+#                    Docker restarts the containers.
+# Best effort: without the chain the site still starts (WordPress's own
+# requests still go through Tor) and the log says so.
+block_wordpress_egress() {
+    local out rc=0
+    out=$(op_py --data-dir "$DATA_DIR" wordpress-egress 2>>"$LOG_FILE") || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "WordPress network egress block in place: $out"
+    else
+        log "WARNING: WordPress network egress block not in place: ${out:-rc=$rc}. WordPress and MariaDB can reach the network directly."
+    fi
+    return 0
+}
+
+# Rootless Docker's network namespace, as /proc names it ("" under system
+# Docker). It is new, and holds none of the rules above, each time the
+# rootless daemon starts; the status loop re-applies them when it changes.
+rootless_netns() {
+    local pid
+    pid=$(cat "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dockerd-rootless/child_pid" 2>/dev/null) || return 0
+    readlink "/proc/$pid/ns/net" 2>/dev/null || true
+}
+
 start_containers() {
     log "Starting OnionPress containers..."
 
@@ -1706,6 +1743,9 @@ start_containers() {
             log "WARNING: Failed to pull images (will use cached)"
         fi
     fi
+
+    # WordPress's network is shut before anything starts on it.
+    block_wordpress_egress
 
     # Nothing from before the OnionHeaven data volume may run beside the
     # containers about to start (the data move must not race them).
@@ -1940,9 +1980,21 @@ CONTAINER_LOG_PIDS=""
 _status_poll_loop() {
     # Transient failures (docker hiccup, network blip) must not kill this loop.
     set +e
+    # A rootless daemon that restarts behind our back (crash, a manual
+    # `systemctl --user restart docker`) brings the containers back in a new
+    # namespace without the WordPress network's rules: put them back. One
+    # attempt per namespace, so a lasting failure logs once.
+    local netns now
+    netns=$(rootless_netns)
     while true; do
         sleep 30
         write_status
+        now=$(rootless_netns)
+        if [ -n "$now" ] && [ "$now" != "$netns" ]; then
+            log "Rootless Docker's network namespace changed (daemon restarted); re-applying the WordPress network's egress block"
+            block_wordpress_egress
+            netns=$now
+        fi
     done
 }
 

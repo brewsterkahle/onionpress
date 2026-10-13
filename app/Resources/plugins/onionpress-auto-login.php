@@ -13,7 +13,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 /**
  * This container's default gateway from the kernel's IPv4 routing table
  * (hex in host byte order, hence pack('L')): the Docker host's address on
- * onionpress-network. '' when there is none. The same parser as
+ * onionpress-wordpress-network, the only network this container is on.
+ * '' when there is none. The same parser as
  * op_proxy_gateway() in src/onion-forward.php (tests/test_auto_login_off_argv.py
  * runs both on the same tables).
  */
@@ -37,8 +38,8 @@ function onionpress_auto_login_gateway() {
  * "local": the Host is localhost and the request came through the published
  * port. The Host header is the client's to choose, so the second check is
  * the one that matters. Docker's published port hands the publisher's
- * browser to this container from the onionpress-network gateway, an address
- * no container on the network has: docker-proxy dials out from it (in
+ * browser to this container from the onionpress-wordpress-network gateway,
+ * an address no container on the network has: docker-proxy dials out from it (in
  * RootlessKit's namespace too, under rootless Docker on Linux), and without
  * the userland proxy NAT rewrites loopback clients to it. Onion visitors
  * arrive from the tor container, Cloudflare Tunnel visitors from cloudflared,

@@ -16,6 +16,9 @@ services:
       - no-new-privileges:true
     networks:
       - onionpress-network
+      - wordpress-network
+    # onionpress-network to Cloudflare, wordpress-network to wordpress:80
+    # (docker-compose.yml says why they are two).
     depends_on:
       - wordpress
     restart: unless-stopped
@@ -24,3 +27,10 @@ networks:
   onionpress-network:
     name: onionpress-network
     driver: bridge
+  # As in docker-compose.yml.
+  wordpress-network:
+    name: onionpress-wordpress-network
+    driver: bridge
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: onionpress-wp0

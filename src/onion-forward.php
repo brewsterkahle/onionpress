@@ -15,8 +15,8 @@
 // Who may use it. The one caller is the menubar app's onion proxy
 // (onion_proxy.py), on 127.0.0.1:<wp port> on the Mac. Lima carries that
 // to the VM's loopback, and Docker's published port hands it to this
-// container from the onionpress-network gateway (docker-proxy dials out
-// from it; without the userland proxy, NAT rewrites to it). Onion visitors
+// container from the onionpress-wordpress-network gateway (docker-proxy
+// dials out from it; without the userland proxy, NAT rewrites to it). Onion visitors
 // reach this same Apache too: Tor -> socat in onionpress-tor ->
 // wordpress:80, from the tor container's own address on that network, and
 // Cloudflare Tunnel visitors from cloudflared's. The "172." prefix this
@@ -31,7 +31,8 @@ const OP_PROXY_TOKEN = '__ONIONPRESS_PROXY_TOKEN__';
 
 // This container's default gateway from the kernel's IPv4 routing table
 // (hex in host byte order, hence pack('L')): the Docker host's address on
-// onionpress-network. '' when there is none.
+// onionpress-wordpress-network, the only network this container is on.
+// '' when there is none.
 function op_proxy_gateway() {
     $rows = @file('/proc/net/route', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($rows ?: [] as $row) {

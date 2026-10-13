@@ -1078,6 +1078,18 @@ def main(argv: list[str] = None) -> int:
         "wordpress-status",
         help="Read status JSON on stdin and print the fields the WordPress "
              "container may see")
+    p_egress = sub.add_parser(
+        "wordpress-egress",
+        help="Shut WordPress's network (onionpress-wp0) off from everything "
+             "but replies to connections made from outside, wherever this "
+             "platform's Docker keeps its bridges (issue #144); prints one "
+             "status line")
+    p_egress.add_argument(
+        "--check", action="store_true",
+        help="Only say whether the rules are in place")
+    p_egress.add_argument(
+        "--bin-dir", default=None,
+        help="Where the app's limactl is (macOS; default: the app bundle's)")
     sub.add_parser(
         "apply-settings-updates",
         help="Merge the settings page's config-updates.json (on stdin) into "
@@ -1203,6 +1215,19 @@ def main(argv: list[str] = None) -> int:
         for key in applied.rejected:
             print(f"rejected {key}")
         return 0
+
+    if args.command == "wordpress-egress":
+        # Run by both launchers before they start the containers: no
+        # OnionPressCLI setup (config/secrets creation, port probing).
+        import dataclasses
+        from . import wordpress_egress
+        paths = resolve_paths(data_dir=args.data_dir)
+        if args.bin_dir:
+            paths = dataclasses.replace(paths, bin_dir=args.bin_dir)
+        result = wordpress_egress.ensure(
+            paths, Docker(paths), action="check" if args.check else "apply")
+        print(result.line())
+        return 0 if result.ok else 1
 
     if args.command == "open-login":
         # Needs only docker and a browser: skip OnionPressCLI's setup.

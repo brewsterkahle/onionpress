@@ -127,15 +127,18 @@ class TestComposeKeepsDnsInsideDocker(unittest.TestCase):
         """The loopback upstream only means "the container's own loopback"
         behind Docker's embedded resolver, which a user-defined network has.
         On the default bridge or the host's network it would be the host's
-        resolver, or nothing for the container names."""
+        resolver, or nothing for the container names. (Their network,
+        onionpress-wordpress-network, is also shut to everything but replies:
+        tests/test_wordpress_egress.py.)"""
         for name in ("wordpress", "db"):
             with self.subTest(service=name):
                 block = self.services[name]
-                self.assertEqual(_list_items(block, "networks"), ["onionpress-network"])
+                self.assertEqual(_list_items(block, "networks"), ["wordpress-network"])
                 self.assertNotIn("network_mode", block)
                 self.assertNotIn("dns_search", block)
-        self.assertIn("networks:\n  onionpress-network:\n    name: onionpress-network\n"
-                      "    driver: bridge", _read(COMPOSE))
+        self.assertRegex(_read(COMPOSE),
+                         r"\n  wordpress-network:\n    name: onionpress-wordpress-network\n"
+                         r"    driver: bridge\n")
 
     def test_the_cloudflare_override_leaves_them_alone(self):
         override = _services(_read(CLOUDFLARE_COMPOSE))

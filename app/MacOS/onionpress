@@ -1906,6 +1906,9 @@ start_containers() {
         docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (using cached)"
     fi
 
+    # WordPress's network is shut before anything starts on it.
+    block_wordpress_egress
+
     # Nothing from before the OnionHeaven data volume may run beside the
     # containers about to start (the data move must not race them).
     retire_old_onionheaven_containers
@@ -2103,9 +2106,6 @@ HTEOF
     # social-media timestamps display in local time. Idempotent.
     configure_site_timezones
 
-    # Install iptables rules to log clearnet access from non-Tor containers
-    install_clearnet_logging
-
     # Conditionally start Cloudflare Tunnel
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
         log "Cloudflare Tunnel enabled, starting cloudflared..."
@@ -2116,63 +2116,36 @@ HTEOF
     fi
 }
 
-# Function to add iptables rules that log clearnet access from non-Tor containers.
-# Only the tor containers legitimately need clearnet (for Tor relay connections).
-# WordPress and MariaDB should never touch the internet directly.
-install_clearnet_logging() {
-    local bridge net_id
-    # Bridge name is br-<first 12 chars of network ID> (unless custom name set)
-    bridge=$(docker network inspect onionpress-network --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)
-    if [ -z "$bridge" ]; then
-        net_id=$(docker network inspect onionpress-network --format '{{.Id}}' 2>/dev/null | cut -c1-12 || true)
-        [ -n "$net_id" ] && bridge="br-${net_id}"
-    fi
-    if [ -z "$bridge" ]; then
-        log "WARNING: Could not determine Docker bridge interface for clearnet logging"
-        return
-    fi
-
-    # Get container IPs (skip tor containers — they need clearnet for Tor relays)
-    local wp_ip db_ip
-    wp_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' onionpress-wordpress 2>/dev/null || true)
-    db_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' onionpress-db 2>/dev/null || true)
-
-    local subnet
-    subnet=$(docker network inspect onionpress-network --format '{{(index .IPAM.Config 0).Subnet}}' 2>/dev/null || echo "172.18.0.0/16")
-
-    # Run iptables inside the VM — rules are idempotent (check before insert)
-    "$BIN_DIR/limactl" shell colima -- sh -c "
-        check_and_add() {
-            local src=\"\$1\" prefix=\"\$2\"
-            if ! sudo iptables -C DOCKER-USER -i $bridge ! -o $bridge -s \"\$src\" ! -d $subnet -j LOG --log-prefix \"\$prefix\" --log-level 4 2>/dev/null; then
-                sudo iptables -I DOCKER-USER -i $bridge ! -o $bridge -s \"\$src\" ! -d $subnet -j LOG --log-prefix \"\$prefix\" --log-level 4
-            fi
-        }
-        [ -n \"$wp_ip\" ] && check_and_add \"$wp_ip\" \"CLEARNET-wordpress: \"
-        [ -n \"$db_ip\" ] && check_and_add \"$db_ip\" \"CLEARNET-db: \"
-    " >> "$LOG_FILE" 2>&1 &
-    # limactl shell hangs for good when the VM's sshd is wedged (the state
-    # recover_lima_vm exists for), and this runs after the containers are
-    # up, so `onionpress start` never returned. Bound it; macOS has no
-    # timeout(1). stderr goes to the log so a failure can say why.
-    local _ipt_pid=$! _ipt_waited=0 _ipt_rc=0
-    while kill -0 "$_ipt_pid" 2>/dev/null; do
-        if [ "$_ipt_waited" -ge 60 ]; then
-            kill "$_ipt_pid" 2>/dev/null
-            log "WARNING: clearnet logging rules not installed — limactl shell did not return within 60s (VM ssh wedged?)"
-            START_ERRORS="$START_ERRORS clearnet-logging"
-            return 0
-        fi
-        sleep 1
-        _ipt_waited=$((_ipt_waited + 1))
-    done
-    wait "$_ipt_pid" || _ipt_rc=$?
-    if [ "$_ipt_rc" -eq 0 ]; then
-        log "✓ Clearnet logging rules installed"
+# WordPress and MariaDB reach nothing outside Docker (issue #144). Their
+# network's bridge (onionpress-wp0, docker-compose.yml) gets the
+# ONIONPRESS-WP chain in the Colima VM before anything starts on it: only
+# replies to connections made from outside (the published port,
+# docker-proxy) leave the bridge or reach the VM itself. A docker.service
+# drop-in in the VM puts the chain back before Docker restarts any container
+# after a VM boot. The rules and how they get there: onionpress/
+# wordpress_egress.py (shared with Linux and ContainerManager.start_core).
+#
+# This replaces the clearnet logging that used to run here after the
+# containers were up: LOG rules keyed by WordPress's and MariaDB's
+# addresses on onionpress-network, which only logged. The chain removes
+# them, and logs what it refuses as "CLEARNET-blocked:", which the
+# menubar's dmesg poller still collects.
+#
+# Best effort, like the other start steps: without the chain the site still
+# starts (WordPress's own requests still go through Tor), and the log and
+# the start summary say so. The Python side bounds `limactl shell`, which
+# hangs for good when the VM's sshd is wedged.
+block_wordpress_egress() {
+    local out rc=0
+    out=$(bundled_python -m onionpress.cli --data-dir "$DATA_DIR" wordpress-egress \
+        --bin-dir "$BIN_DIR" 2>>"$LOG_FILE") || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log "✓ WordPress network egress block in place: $out"
     else
-        log "WARNING: Failed to install clearnet logging rules (rc=$_ipt_rc) — see $LOG_FILE"
-        START_ERRORS="$START_ERRORS clearnet-logging"
+        log "WARNING: WordPress network egress block not in place: ${out:-rc=$rc}. WordPress and MariaDB can reach the network directly — see $LOG_FILE"
+        START_ERRORS="$START_ERRORS wordpress-egress"
     fi
+    return 0
 }
 
 # Function to stop containers

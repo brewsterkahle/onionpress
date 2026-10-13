@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import key_manager
+from . import key_manager, wordpress_egress
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, Secrets, ensure_secrets, load_secrets, read_value,
@@ -149,11 +149,16 @@ class ContainerManager:
         paths: OnionPressPaths,
         port_config: PortConfig | None = None,
         log_func: Callable[[str], None] | None = None,
+        egress: Callable[[], object] | None = None,
     ):
         self.docker = docker
         self.paths = paths
         self.port_config = port_config or detect_port_offset()
         self.log_func = log_func
+        # Shuts WordPress's network before start_core starts anything on it
+        # (wordpress_egress.ensure; injectable for tests).
+        self._egress = egress or (
+            lambda: wordpress_egress.ensure(self.paths, self.docker, self._log))
 
     def _log(self, msg: str) -> None:
         if self.log_func:
@@ -222,6 +227,11 @@ class ContainerManager:
         """
         self._log("Starting core services...")
         compose_files = self._compose_files()
+
+        # WordPress and MariaDB reach nothing outside Docker (issue #144):
+        # the rules go on the Docker host before their network has a
+        # container on it. Best effort, as in the launchers; ensure() logs.
+        self._egress()
 
         # Nothing from before the OnionHeaven data volume may run beside the
         # containers about to start (the data move must not race them).

@@ -90,6 +90,18 @@ collect_files() {
         cp -r "$PROJECT_DIR/linux/assets" "$dest/assets"
     fi
 
+    # The WordPress network's egress rules as a plain sh script, for the
+    # docker.service drop-in below (it runs as root before dockerd starts,
+    # so no Python): RULES_SCRIPT, cut out of wordpress_egress.py.
+    # tests/test_wordpress_egress.py checks that this cut is the script.
+    { echo '#!/bin/sh'
+      awk '/^RULES_SCRIPT = r"""$/ { f = 1; next } f && /^"""$/ { exit } f' \
+          "$PROJECT_DIR/src/onionpress/wordpress_egress.py"
+    } > "$dest/onionpress-wordpress-egress"
+    chmod 0755 "$dest/onionpress-wordpress-egress"
+    grep -q '^esac$' "$dest/onionpress-wordpress-egress" \
+        || { echo "ERROR: could not cut RULES_SCRIPT out of wordpress_egress.py" >&2; exit 1; }
+
     # Version
     echo "$VERSION" > "$dest/VERSION"
 }
@@ -126,6 +138,13 @@ cp "$PROJECT_DIR/linux/onionpress-watcher.timer" "$DEB_ROOT/usr/lib/systemd/user
 mkdir -p "$DEB_ROOT/usr/lib/systemd/system-sleep"
 install -m 0755 "$PROJECT_DIR/linux/onionpress-sleep-hook" \
     "$DEB_ROOT/usr/lib/systemd/system-sleep/onionpress"
+
+# System Docker's drop-in: the WordPress network's egress rules before
+# dockerd restarts any container at boot (see the file). A vendor drop-in,
+# so it goes with the package; nothing else in docker.service changes.
+mkdir -p "$DEB_ROOT/usr/lib/systemd/system/docker.service.d"
+install -m 0644 "$PROJECT_DIR/linux/onionpress-wordpress-egress.conf" \
+    "$DEB_ROOT/usr/lib/systemd/system/docker.service.d/onionpress-wordpress-egress.conf"
 
 # CLI symlinks
 mkdir -p "$DEB_ROOT/usr/local/bin"
@@ -289,6 +308,10 @@ fi
 # Reload the user-unit catalog and enable units for any user on next
 # login. --global respects per-user disable preferences.
 systemctl --global enable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
+
+# The system manager reads docker.service's new drop-in (the WordPress
+# network's egress rules at boot) from its next start; nothing restarts now.
+systemctl daemon-reload 2>/dev/null || true
 
 # Self-contained bootstrap. Only runs on first install (not upgrade) and
 # only when we have a real target user. Two-tier strategy:
@@ -499,6 +522,12 @@ cat > "$DEB_ROOT/DEBIAN/postrm" <<'POSTRM'
 set -e
 
 case "$1" in
+    remove)
+        # docker.service's drop-in is gone with the package. The rules it
+        # put in place stay until the next boot; they name only the
+        # WordPress network's bridge, which goes when its containers do.
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
     purge)
         # Don't auto-remove ~/.onionpress/ — it holds the onion key and
         # DB passwords. Tell the user what's still there.
