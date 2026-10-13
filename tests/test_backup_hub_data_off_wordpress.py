@@ -635,7 +635,7 @@ class TestEveryWordPressDeliveredBackupLeavesItOut(unittest.TestCase):
 
     HANDOFF = re.compile(r"""umask 077; cat > "\$1"'""")
     SOURCES = ["src/menubar.py", "linux/onionpress", "app/MacOS/onionpress",
-               "linux/onionpress-tray", "linux/onionpress-service.py"]
+               "linux/onionpress-tray", "linux/onionpress-heartbeat.py"]
 
     def _python_sources(self):
         root = os.path.join(PROJECT_ROOT, "src")

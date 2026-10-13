@@ -116,7 +116,7 @@ class TestDefaultsAreOptIn(unittest.TestCase):
         for rel in ("src/menubar.py", "src/onionpress/config.py",
                     "src/onionpress/settings_ui.py", "src/onionpress/cli.py",
                     "src/onionpress/onionheaven.py", "linux/onionpress-tray",
-                    "linux/onionpress-service.py", "linux/onionpress-heartbeat.py"):
+                    "linux/onionpress-heartbeat.py"):
             text = _read(rel)
             for m in pat.finditer(text):
                 fn = text.rfind("\n    def ", 0, m.start())
@@ -135,7 +135,6 @@ class TestNoCodePathTreatsUnsetAsYes(unittest.TestCase):
         "src/onionpress/onionheaven.py",
         "src/menubar.py",
         "linux/onionpress-heartbeat.py",
-        "linux/onionpress-service.py",
         "linux/onionpress-tray",
         "linux/onionpress",
     )

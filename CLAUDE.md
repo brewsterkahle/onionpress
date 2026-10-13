@@ -174,8 +174,9 @@
 ## Onion Service Recovery (issue #266)
 - **The app's dual probe is the only measure of real reachability.** When it fails
   continuously for 10 min with Tor internally healthy (`RepublishTrigger` in
-  `src/onionpress/health.py`, used by `src/menubar.py` and `linux/onionpress-service.py`),
-  the app writes a request file inside the tor container
+  `src/onionpress/health.py`, used by `src/menubar.py` and, on Linux, by
+  `src/onionpress/reachability.py` in the heartbeat daemon), the app writes a
+  request file inside the tor container
   (`launcher_ops.request_watchdog_republish`) and `tor-watchdog.py` answers with
   DEL_ONION + ADD_ONION — fresh intro points, immediate descriptor upload. Without it,
   C Tor keeps a dead descriptor on the HSDirs until its next scheduled upload (60–120 min).
@@ -183,6 +184,15 @@
   the watchdog, never within 5 min of an HS_DESC UPLOADED event. Takeover codes never
   trigger it (the heartbeat's /online is the reclaim path).
 - `REPUBLISH_ON_UNREACHABLE=no` in `~/.onionpress/config` makes it log-only.
+- **On Linux the loop runs in `onionpress-heartbeat.py`** (issue #310), on every
+  node including the hub and whatever the OnionHeaven opt-in says: until then it
+  lived in `linux/onionpress-service.py`, which no installer shipped and no unit
+  ran (deleted). The loop writes `~/.onionpress/reachability.json`; the bash
+  launcher's `write_status` uses that verdict while it is fresh instead of its
+  own probe through Tor. Wake resets come from the SleepInhibitor's
+  PrepareForSleep(false) and, without D-Bus, from a wall-clock vs monotonic gap.
+  `tests/test_linux_recovery_loop.py` also requires every Python entry point in
+  `linux/` to be installed by both `install.sh` and `build-linux.sh`.
 - **The dual probe fetches `/.onionpress-health`**, a static file Apache serves from
   the WordPress image (`onionpress-health.conf`, no PHP), and checks the body for
   `onionpress-health`; `PROBE_PATH`/`PROBE_BODY_MARKER` in `health.py` and the Alias
