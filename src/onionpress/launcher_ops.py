@@ -558,13 +558,14 @@ def restore_failure_message(output: str, data_dir: str, log_path: str,
 def run_launcher_restore(launcher_script: str, zip_path: str, password: str,
                          *, data_dir: str, log_path: str,
                          extra_env: dict | None = None,
-                         timeout: int = 1800) -> tuple:
+                         timeout: int | None = 1800) -> tuple:
     """`<launcher> restore <zip>` with the password in the environment
     (BACKUP_PASSWORD_ENV: argv is readable by every local user, the
     environment only by this one), and extra_env too (a hub's recovery
     key). (True, "", stderr) on success, else (False,
     restore_failure_message(...), stderr). The exit status is the only
-    sign of a refused or failed restore.
+    sign of a refused or failed restore. timeout=None waits as long as
+    the launcher runs.
     """
     try:
         r = subprocess.run(
