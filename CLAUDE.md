@@ -280,16 +280,42 @@
 - docker-compose.yml: `dns: 127.0.0.1` for wordpress and db. Docker's
   resolver still answers for containers and forwards anything else to the
   container's own loopback, where nothing listens: lookups fail closed
-  (wp-cli's own HTTP client, plugin code). Keep them on onionpress-network;
-  the loopback upstream means the container's own loopback only behind the
-  embedded resolver. Not an `internal: true` network: those publish no
-  ports, and WordPress needs 8080 on the host.
+  (wp-cli's own HTTP client, plugin code). Keep them on a user-defined
+  network (onionpress-wordpress-network): the loopback upstream means the
+  container's own loopback only behind the embedded resolver. Not an
+  `internal: true` network: those publish no ports and give WordPress no
+  default route (no gateway for auto-login), and it needs 8080 on the host.
 - wp-cli's own HTTP client (not WP_Http, so not Tor) now fails at the
   lookup: `wp core update <zip>` exits non-zero after a completed update
   (its checksum-list fetch), so onionpress-security-audit.sh judges the
   update by `wp core version`. Raw `curl_init` in plugins must set a socks5h
   proxy or talk only to a container. `tests/test_no_clearnet_dns.py` (PHP
   harness with the lookup functions disabled; plugin census).
+- **Nor any connection (issue #144).** wordpress and db are on
+  onionpress-wordpress-network only, bridge `onionpress-wp0` (fixed name);
+  tor, onionheaven and cloudflared join it too (wordpress:80, SOCKS 9050,
+  8083), takeover workers never. On the Docker host the ONIONPRESS-WP chain
+  (DOCKER-USER for FORWARD, a jump in INPUT) refuses, and logs as
+  `CLEARNET-blocked:`, every packet from that bridge that leaves it or is
+  for the host, except replies (`RELATED,ESTABLISHED`): the published port,
+  LAN visitors (own address, not the gateway) and docker-proxy still work.
+  `onionpress/wordpress_egress.py` holds the script and puts it in place
+  before every start's first `compose up` (both launchers'
+  `block_wordpress_egress`, `ContainerManager.start_core`): Colima VM via
+  `limactl shell`, plus a docker.service drop-in (`ExecStartPre=-`) so it is
+  there before Docker restarts containers after a VM boot; rootless Linux
+  via `nsenter -U --preserve-credentials -n -m` into RootlessKit (the
+  status loop re-applies when the namespace changes); system Docker via a
+  one-shot `--privileged --pid host --network none` helper (pinned tor
+  image) running the host's iptables, plus the `.deb`'s docker.service
+  vendor drop-in (`linux/onionpress-wordpress-egress.conf`, the script cut
+  from RULES_SCRIPT at build time). Best effort: a failure is a WARNING
+  (Mac: `wordpress-egress` in START SUMMARY), never a stopped start. The
+  network's name must sort after `onionpress-network` (Docker gives a
+  two-network container the lexically first default route) and stay
+  IPv4-only. It replaced the Mac launcher's per-address LOG rules
+  (`install_clearnet_logging`), which the script removes.
+  `tests/test_wordpress_egress.py` (fake iptables).
 
 ## Containers Drop NET_RAW
 - Auto-login's "local" scope and `/__op_proxy.php` admit loopback and the

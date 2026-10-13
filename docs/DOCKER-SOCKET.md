@@ -10,7 +10,7 @@ traffic, and `tests/test_docker_socket_scope.py` fails if that changes.
 | Container | Socket | Uses Docker for | Faces |
 |---|---|---|---|
 | `onionpress-tor` | **no** | — (see below) | Tor: the site, the healthcheck service, the OnionHeaven API on 8083 |
-| `onionheaven` | yes | the heartbeat: `docker run`/`rm` takeover workers, `docker exec` their queue managers and Tor control ports, `docker inspect` them; `reset_onionheaven` adds `ps`, `cp` and exec into itself | no onion service; outbound Tor; 8082/9050 on `onionpress-network` |
+| `onionheaven` | yes | the heartbeat: `docker run`/`rm` takeover workers, `docker exec` their queue managers and Tor control ports, `docker inspect` them; `reset_onionheaven` adds `ps`, `cp` and exec into itself | no onion service; outbound Tor; 8082/9050 on `onionpress-network`, 9050 for WordPress on `onionpress-wordpress-network` |
 | `onionheaven-takeover-N` | no | — | Tor (the redirect for taken-over addresses) |
 | `autoheal` | **no** | restarts unhealthy `autoheal=true` containers, via `autoheal-proxy` | nothing (`network_mode: none`) |
 | `autoheal-proxy` | yes, read-only mount | passes `GET /containers/json` and `POST /containers/<id>/restart`, refuses the rest | nothing (`network_mode: none`), a unix socket on the `onionpress-autoheal-proxy` volume |
@@ -301,11 +301,116 @@ onionpress-tor`: N plus K is the count from before, and the same query on
 `/var/lib/onionnames/onionnames.db` gives N. Never downgrade OnionHome after
 that: an older image would serve the old location, now empty.
 
+## WordPress's network
+
+WordPress is the code visitors reach, and plugins are code anyone can write.
+Everything OnionPress's own code fetches goes through Tor (the
+onionpress-tor-proxy mu-plugin, socks5h in the plugins' raw curl), and
+Docker's resolver answers for the containers only (`dns: 127.0.0.1`). Until
+issue #144 that was all: a socket opened to an address went straight out,
+to the internet from the publisher's own address, to their LAN, and on macOS
+through the Colima VM's gateway to the Mac itself. The iptables clearnet log
+only recorded it.
+
+Now `wordpress` and `db` are on `onionpress-wordpress-network` and nothing
+else. Its bridge has a fixed name, `onionpress-wp0`. `onionpress-tor`,
+`onionheaven` and `onionpress-cloudflared` are on it as well as on
+`onionpress-network`, which stays their way out (socat to `wordpress:80`,
+the SOCKS ports on 9050, the API on 8083); the takeover workers are not.
+
+On the Docker host, the `ONIONPRESS-WP` chain sees every packet that comes in
+from `onionpress-wp0` and either leaves it (`DOCKER-USER`, so `FORWARD`) or is
+addressed to the host itself (a jump at the top of `INPUT`):
+
+| | |
+|---|---|
+| replies (`RELATED,ESTABLISHED`) | pass: the published port, LAN browsers on Linux, docker-proxy's connections, anything the host opened |
+| anything else | logged as `CLEARNET-blocked:` (6/min) and refused (`icmp-admin-prohibited`, so the caller fails at once) |
+| between containers on the bridge | never enters the chain |
+
+So WordPress keeps everything it had: `db:3306`, both SOCKS ports, 8083,
+Docker's resolver, its published port, onion visitors through socat and
+Cloudflare visitors through cloudflared. Its default gateway is
+`onionpress-wp0`'s address, where docker-proxy's connections come from, so
+auto-login's "local" scope and `/__op_proxy.php` admit what they admitted
+before; LAN visitors still arrive from their own addresses. Measured on
+Docker 27.4 (2026-10-13, a throwaway Colima VM): WordPress and MariaDB got
+"No route to host" for 1.1.1.1, the VM, the VM's gateway (the Mac), the
+other bridge's gateway and the VM's own address, UDP went unanswered, and
+everything listed above worked, from the VM, the Mac and a client in a
+separate network namespace standing in for the LAN.
+
+The rules name the bridge, never an address: they hold whatever subnet
+Docker picks, survive container restarts, and can be in place before the
+bridge exists. `onionpress/wordpress_egress.py` has the script (iptables,
+and ip6tables where present, for Dockers before 26 whose containers kept an
+IPv6 link-local address) and runs it before the first `compose up` of every
+start (`block_wordpress_egress` in both launchers,
+`ContainerManager.start_core`):
+
+- **macOS:** in the Colima VM through `limactl shell`. It also installs the
+  script as `/usr/local/sbin/onionpress-wordpress-egress` and a
+  `docker.service` drop-in that runs it (`ExecStartPre=-`) before dockerd
+  starts, so after a VM boot the containers Docker restarts on its own find
+  the rules already there. Closed from the first packet.
+- **Linux, rootless Docker:** in RootlessKit's namespaces, which hold the
+  bridges, entered as their owner (`nsenter -U --preserve-credentials -n -m`
+  into `$XDG_RUNTIME_DIR/dockerd-rootless/child_pid`). The namespace is new
+  each time the rootless daemon starts; the launcher's status loop re-applies
+  the rules within 30 s when it changes. A daemon that restarts on its own
+  (crash, `systemctl --user restart docker`) brings the containers back
+  before that: they are open for up to 30 s. After a clean shutdown there is
+  nothing to bring back (`onionpress stop` removes the containers).
+- **Linux, system Docker:** on the host. The launcher is a docker-group user,
+  and none of the images carries iptables, so a one-shot helper runs the
+  host's own: `docker run --rm --privileged --pid host --network none
+  --entrypoint nsenter <pinned tor image> -t 1 -m -n -- sh -c <script>`.
+  The docker group is root on the host already; the helper joins no network,
+  reads nothing from any container and is gone in a quarter of a second. The
+  rules then live in the kernel until the host reboots. Docker restarts the
+  containers at boot before the user's service runs (the system daemon and
+  the user's service stop in no particular order at shutdown, so they are
+  often still there), so the `.deb` also ships the script as
+  `/opt/onionpress/onionpress-wordpress-egress` and a vendor drop-in,
+  `/usr/lib/systemd/system/docker.service.d/onionpress-wordpress-egress.conf`,
+  that runs it (`ExecStartPre=-`) before dockerd starts, as in the VM. What
+  stays open: a firewall reload that flushes `DOCKER-USER` (firewalld)
+  leaves them out until the next OnionPress start or Docker restart.
+
+Without the rules the site still starts, with a WARNING in the log (and
+`wordpress-egress` in the macOS START SUMMARY): WordPress's own requests
+still go through Tor.
+
+`onionpress-wordpress-network` must sort after `onionpress-network`: a
+container on two plain IPv4 bridges takes its default route from the first
+network name in lexical order (Docker's endpoint ordering; measured on 27.4
+in both connect orders), and tor, onionheaven and cloudflared must keep
+theirs on the network that reaches the internet. It is IPv4-only for the
+same reason. `tests/test_wordpress_egress.py` holds all of this, and runs
+the script against a fake iptables.
+
+**Upgrading** needs nothing by hand and no image publish: the new compose
+file moves `wordpress` and `db` (Compose recreates them), and the first
+start puts the rules in place before it does. The macOS launcher used to
+add `LOG` rules keyed by WordPress's and MariaDB's addresses on
+`onionpress-network`; the script removes them, since those addresses go to
+other containers after the move.
+
+**Checking a live install.** In the VM (macOS) or on the host (Linux system
+Docker), `sudo iptables -S ONIONPRESS-WP` shows the three rules and
+`sudo iptables -S DOCKER-USER` and `sudo iptables -S INPUT` the jumps;
+`docker exec onionpress-wordpress php -r 'var_dump(@fsockopen("1.1.1.1",
+443, $e, $s, 5));'` prints `bool(false)` (error 113), and
+`docker exec onionpress-wordpress curl -s --socks5-hostname
+onionpress-tor:9050 https://check.torproject.org/api/ip` still says
+`"IsTor":true`. `onionpress.cli wordpress-egress --check` asks the same as
+the launchers do.
+
 ## Next: the heartbeat's socket
 
 What remains is the `onionheaven` container. It hosts no onion service, but
 it runs Tor, a shell HTTP responder on 8082 and a SOCKS port reachable from
-`onionpress-network`, and parses output from workers that do face Tor. A path
+`onionpress-network` and `onionpress-wordpress-network`, and parses output from workers that do face Tor. A path
 allowlist is not enough here: container create and exec bodies (privileged,
 binds, devices, user, command) are what matter, and a path-filtering proxy
 such as the one in front of autoheal cannot inspect them.
