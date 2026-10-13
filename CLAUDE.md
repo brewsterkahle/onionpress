@@ -82,6 +82,33 @@
   so skipping the migration would mint a new address. Keep the old name in
   the wipe lists (`.import-key-pending`, restore) so a replaced identity
   cannot be migrated back.
+- **The key volume migration fails loudly, never into an empty copy.** It
+  runs from the stack's pinned tor image (`KEY_HELPER_IMAGE`, which
+  `ensure_key_helper_image` pulls by its pin when missing, never for a
+  locally built stack), `--network none`, `--entrypoint sh`, DAC_OVERRIDE
+  only: the copy is root's, 0700/0600. It walks down to
+  `state/keystore/hss` one listed folder at a time, so a folder it cannot
+  list stops it (unreadable is not absent: it used to pass for a missing
+  keystore and leave an empty copy the next start took for the key),
+  refuses links and anything but folders and files, and checks every name
+  and every file's bytes in the copy. `$DATA_DIR/.key-volume-migration-pending`
+  is written before the copy and removed once it is verified: a start that
+  finds it beside both volumes removes the unverified new volume and
+  copies again; with the old volume gone it keeps the new one and drops
+  the marker. Every identity wipe (key import, `.import-key-pending`, the
+  Linux Settings page's generate-vanity and import-key-file, restores
+  through `containers.forget_key_volume_migration`) drops the marker, or
+  an old volume that survived the wipe would be copied back over the new
+  key.
+  Nothing starts tor before it: `compose up … tor` creates an empty
+  onionpress-onion-keys. `start_containers`, the Mac `start-tor`
+  subcommand and both launchers' `setup` run `if ! migrate_key_volume`
+  first (test-enforced); `onionpress.cli start` and
+  `ContainerManager.start_tor` have no copy of it and refuse while one is
+  due (`key_volume_not_ready`: the old volume there and the new one absent
+  or marked, or `docker volume ls` unanswered). A failed first-run key
+  seed removes the volume it made and stops the start, as does
+  `cli.cmd_restore`'s, so Tor never starts without the key it was given.
 - **All Dockerfile inputs are pinned** as `ARG` defaults in the Dockerfiles
   themselves (images by multi-arch index digest, mkp224o by commit, wp-cli by
   sha256). `MKP224O_VERSION` must match `build/build-dmg-simple.sh`.
@@ -385,11 +412,30 @@
   DAC_OVERRIDE SETGID SETUID (their /var/lib/tor is the image's, so the
   entrypoint's chmod of it logs "Operation not permitted" harmlessly);
   autoheal, autoheal-proxy, cloudflared nothing. Helpers: reads of key
-  files, mkp224o and key seeds DAC_OVERRIDE; migrate_key_volume and the
-  Linux tor-state seeds CHOWN DAC_OVERRIDE FOWNER; the mkp224o probe
-  nothing. `docker exec` runs with the container's set, so a root exec
-  into tor or wordpress that touches debian-tor's or www-data's files
-  relies on that DAC_OVERRIDE. Change a set only after the same live test.
+  files, mkp224o, key seeds and migrate_key_volume (its copy is root's)
+  DAC_OVERRIDE; the Linux tor-state seeds CHOWN DAC_OVERRIDE FOWNER (they
+  chown to debian-tor); the mkp224o probe nothing. `docker exec` runs with
+  the container's set, so a root exec into tor or wordpress that touches
+  debian-tor's or www-data's files relies on that DAC_OVERRIDE. Change a
+  set only after the same live test.
+- Every one-shot helper joins no network (`--network none`) and overrides
+  the image's entrypoint; only the takeover workers join one and keep
+  theirs. The launchers' helpers (key volume migration, key seeds, Linux
+  create_backup's key reads) run `KEY_HELPER_IMAGE`,
+  `${ONIONPRESS_TOR_IMAGE:-<tor pin>}` (the pin equal to
+  build/image-pins.env's, set after the config is read), and the Python
+  ones the pinned tor image (`ContainerManager.ensure_tor_image`,
+  `launcher_ops.DEFAULT_TOR_IMAGE`): never a floating tag such as `alpine`,
+  which a registry or mirror could swap for an image that copies the key.
+  Sources are mounted read-only. Linux create_backup reads keys through
+  `key_volume_cat` (volume read-only, `--entrypoint cat`; it runs nothing
+  when the volume does not exist, since `docker run -v` would create an
+  empty one that passes for an installed or migrated key) and refuses to
+  back up without the image. The census in
+  `tests/test_container_capabilities.py` holds all of it; a test harness
+  running Linux create_backup loads the key helpers from the launcher
+  (`test_backup_metadata_validation._linux_key_helpers`) and has its docker
+  stub answer `image inspect` and `volume ls`.
 - Auto-login's "local" scope and `/__op_proxy.php` admit loopback and the
   gateway of WordPress's network (onionpress-wordpress-network) by source
   address, which is why no container may hold NET_RAW (packet forging on
