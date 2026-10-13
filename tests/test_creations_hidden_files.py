@@ -197,8 +197,10 @@ class TestDirectUrlRefusesHiddenPaths(unittest.TestCase):
 
 class TestThumbnailGeneratorSkipsHiddenFolders(unittest.TestCase):
     def test_walk_prunes_dot_directories(self):
-        self.assertIn("dirs[:] = [d for d in dirs if not d.startswith('.')]",
-                      _read(MENUBAR))
+        self.assertIn("thumbnails.scan(creations_dir)", _read(MENUBAR))
+        self.assertIn('if not d.startswith(".")',
+                      _read(os.path.join(PROJECT_ROOT, "src", "onionpress",
+                                         "thumbnails.py")))
 
 
 if __name__ == "__main__":
