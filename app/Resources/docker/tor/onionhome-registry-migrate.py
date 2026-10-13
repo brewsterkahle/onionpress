@@ -15,11 +15,11 @@ volume (onionnames.registry_in_place).
 Everything at the old location may have been written by WordPress, so:
 
   * Nothing there is walked. Only onionnames.db and its -wal and -journal
-    are read, through O_NOFOLLOW descriptors below the old directory (itself
-    opened without following a link), and only if each is a regular file of
-    at most MAX_BYTES that is not sparse (more than SPARSE_SLACK of it in
-    holes, asked with SEEK_DATA/SEEK_HOLE). The database must start with
-    SQLite's header.
+    are opened, through O_NOFOLLOW descriptors below the old directory
+    (itself opened without following a link), and only if each is a regular
+    file. Each is read only if it is at most MAX_BYTES and not sparse (more
+    than SPARSE_SLACK of it in holes, asked with SEEK_DATA/SEEK_HOLE); before
+    that, nothing but the first bytes, to see whether SQLite wrote it.
   * SQLite never opens a path there. The files are copied into a private,
     root-only folder on the new volume, again until the copy is stable, with
     runs of zeros kept as holes: a copy takes no more room than the file. No
@@ -31,20 +31,32 @@ Everything at the old location may have been written by WordPress, so:
     defensive settings after PRAGMA quick_check, written under a temporary
     name and renamed into place after any stale -wal, -journal or -shm of
     the volume is removed. The private copy is deleted in every case.
-  * What counts as a registry ("at stake"): a regular onionnames.db with
-    SQLite's header and an onionnames table. Anything else there is left
-    alone and never read again.
+  * Not a registry, so nothing is at stake: no onionnames.db, one that is
+    not a regular file (a link, a folder, a device), one that does not start
+    with SQLite's header, or an SQLite database without the registry's
+    onionnames table. That is left alone and never read again.
+  * Possibly a registry: an onionnames.db that starts with SQLite's header,
+    or a -wal or -journal that starts with SQLite's own header for that
+    file, but is too large or too sparse to read. A real registry can look
+    like that (a compressing filesystem keeps zeroed pages as holes, and a
+    registry can grow), and taking it for "not a registry" would start an
+    empty one beside it, every name free to claim. It is treated as a
+    registry that cannot be moved (below). A -wal or -journal without that
+    header holds nothing SQLite would read and is left out.
   * MARKER is written whenever this container is to start on the new
     volume: after a move; with no registry at the old location; when the
     volume already holds one (a restore, or a run interrupted after the
     rename). Only when both /var/lib/onionnames and /var/lib/onionpress are
     mount points: otherwise "nothing there" proves nothing.
-  * A registry that cannot be moved (it keeps changing, or SQLite finds it
-    damaged) stays where it is, nothing is removed and no marker written;
-    the next start tries again. The container starts regardless: the site
-    stays up and /api/name/* answers 503 meanwhile, so nobody can claim a
-    name in an empty registry, and nothing WordPress plants can keep the
-    container from starting.
+  * A registry that cannot be moved (too large or sparse to read, it keeps
+    changing, or SQLite cannot read it or finds it damaged) stays where it
+    is, nothing is removed and no marker written; one ERROR line says why
+    and what an operator can do, and the next start tries again. The
+    container starts regardless: the site stays up and /api/name/* answers
+    503 meanwhile, so nobody can claim a name in an empty registry, and
+    nothing WordPress plants can keep the container from starting. (Before
+    the move, WordPress could rewrite or delete the registry anyway; after
+    it, the old location is never read.)
   * After a move the copied files are removed from the old location if
     they are still the files that were copied. Nothing is kept aside, and
     once the marker exists the old location is never read again.
@@ -87,6 +99,13 @@ STAGING = ".migrating"
 MAX_BYTES = 256 << 20
 SPARSE_SLACK = 1 << 20          # bytes of holes a file may have and still be read
 SQLITE_HEADER = b"SQLite format 3\x00"
+# How SQLite starts each file it may keep names in: the database, its
+# write-ahead log (either checksum byte order) and its rollback journal.
+SQLITE_STARTS = {
+    DB: ("database", (SQLITE_HEADER,)),
+    DB + "-wal": ("write-ahead log", (b"\x37\x7f\x06\x82", b"\x37\x7f\x06\x83")),
+    DB + "-journal": ("rollback journal", (b"\xd9\xd5\x05\xf9\x20\xa1\x63\xd7",)),
+}
 ATTEMPTS = 5
 RETRY_DELAY = 1
 
@@ -295,16 +314,15 @@ def _sparse(fd, size):
 
 
 def _open_member(dir_fd, name):
-    """(fd, None) for a regular file name below dir_fd that may be read, or
-    (None, why not). Nothing but a regular file is ever opened."""
+    """(fd, None) for a regular file name below dir_fd, or (None, "absent"
+    or "not a regular file"). Nothing but a regular file is ever opened, and
+    nothing is read from it here."""
     try:
         st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None, "absent"
     if not stat.S_ISREG(st.st_mode):
         return None, "not a regular file"
-    if st.st_size > MAX_BYTES:
-        return None, f"larger than {MAX_BYTES >> 20} MiB"
     try:
         fd = os.open(name, FILE_FLAGS, dir_fd=dir_fd)
     except OSError as e:
@@ -315,16 +333,27 @@ def _open_member(dir_fd, name):
         fst = os.fstat(fd)
         if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
             raise Unstable(f"{name} changed while being opened")
-        if fst.st_size > MAX_BYTES:
-            raise Unstable(f"{name} grew past the size limit")
-        why = "sparse" if _sparse(fd, fst.st_size) else None
     except BaseException:
         os.close(fd)
         raise
-    if why:
-        os.close(fd)
-        return None, why
     return fd, None
+
+
+def _sqlite_wrote(fd, name):
+    """True if the open file name starts the way SQLite starts that file."""
+    starts = SQLITE_STARTS[name][1]
+    head = os.pread(fd, max(len(s) for s in starts), 0)
+    return head.startswith(starts)
+
+
+def _refusal(fd):
+    """Why the open file may not be read (too large, sparse), or None."""
+    size = os.fstat(fd).st_size
+    if size > MAX_BYTES:
+        return f"larger than {MAX_BYTES >> 20} MiB"
+    if _sparse(fd, size):
+        return "sparse"
+    return None
 
 
 def _signature(dir_fd):
@@ -371,25 +400,31 @@ def _copy_fd(fd, path):
 
 def _snapshot(dir_fd, private):
     """Copy the registry's files into private. Returns (names copied, the
-    signature they had). Raises NotARegistry or Unstable."""
+    signature they had). Raises NotARegistry, Unusable (SQLite wrote a file
+    that may not be read) or Unstable."""
     before = _signature(dir_fd)
-    fd, why = _open_member(dir_fd, DB)
-    if fd is None:
-        raise NotARegistry(f"{DB}: {why}", absent=(why == "absent"))
-    try:
-        if os.pread(fd, len(SQLITE_HEADER), 0) != SQLITE_HEADER:
-            raise NotARegistry(f"{DB} is not an SQLite database")
-        _copy_fd(fd, os.path.join(private, DB))
-    finally:
-        os.close(fd)
-    copied = [DB]
-    for name in READ[1:]:
+    copied = []
+    for name in READ:
         fd, why = _open_member(dir_fd, name)
         if fd is None:
+            if name == DB:
+                raise NotARegistry(f"{DB}: {why}", absent=(why == "absent"))
             if why != "absent":
                 log(f"left {name} at the old location out ({why})")
             continue
         try:
+            sqlites = _sqlite_wrote(fd, name)
+            if name == DB and not sqlites:
+                raise NotARegistry(f"{DB} is not an SQLite database")
+            why = _refusal(fd)
+            if why and sqlites:
+                # It may hold names: never take it for "not a registry".
+                raise Unusable(f"{name} starts with SQLite's "
+                               f"{SQLITE_STARTS[name][0]} header but is {why}, "
+                               f"so it is not read")
+            if why:
+                log(f"left {name} at the old location out ({why})")
+                continue
             _copy_fd(fd, os.path.join(private, name))
         finally:
             os.close(fd)
@@ -635,8 +670,13 @@ def main(argv=None):
         _normalize(args.dest)
         return 0
     except Unusable as e:
+        old = os.path.join(args.legacy_parent, LEGACY_NAME)
         log(f"ERROR: the name registry at the old location cannot be moved: {e}. "
-            f"Nothing was removed; {unavailable}")
+            f"Nothing was moved or removed and no marker written; {unavailable}, "
+            f"and every start tries again. To end this, restore the registry from "
+            f"a backup made before this update, or check {os.path.join(old, DB)} "
+            f"and, only if it holds no names to keep, move {old} aside (the next "
+            f"start then begins an empty registry, every name free to claim)")
         return 1
     except Exception as e:
         log(f"ERROR: {type(e).__name__}: {e}; nothing was removed, {unavailable}")

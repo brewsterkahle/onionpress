@@ -28,6 +28,7 @@ No PyYAML and no Docker: the compose file is read with a line-based
 splitter, subprocess is mocked, and the move runs on temporary directories.
 """
 
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -610,24 +611,47 @@ class TestMove(MoveCase):
         with open(self.secret) as f:
             self.assertEqual(f.read(), SECRET)
 
-    def test_huge_and_sparse_files_are_not_read(self):
+    def _plant_odd(self, head, size):
+        shutil.rmtree(self.legacy, ignore_errors=True)
+        for name in os.listdir(self.dest):
+            os.unlink(os.path.join(self.dest, name))
+        os.makedirs(self.legacy)
+        path = os.path.join(self.legacy, "onionnames.db")
+        with open(path, "wb") as f:
+            f.write(head)
+            f.truncate(size)
+        if not _has_a_hole(path):
+            self.skipTest("this filesystem does not make sparse files")
+
+    def test_huge_and_sparse_files_with_sqlites_header_are_held(self):
+        """They may be the registry: never marked as "not one", never read."""
         for label, size in (("larger than", mig.MAX_BYTES + 1), ("sparse", 32 << 20)):
             with self.subTest(label):
-                shutil.rmtree(self.legacy, ignore_errors=True)
-                for name in os.listdir(self.dest):
-                    os.unlink(os.path.join(self.dest, name))
-                os.makedirs(self.legacy)
-                path = os.path.join(self.legacy, "onionnames.db")
-                with open(path, "wb") as f:
-                    f.write(mig.SQLITE_HEADER)
-                    f.truncate(size)
-                if not _has_a_hole(path):
-                    self.skipTest("this filesystem does not make sparse files")
+                self._plant_odd(mig.SQLITE_HEADER, size)
+                before = self.tree(self.legacy)
+                rc, err = self.run_script()
+                self.assertEqual(rc, 1, err)
+                errors = [line for line in err.splitlines() if "ERROR" in line]
+                self.assertEqual(len(errors), 1, err)
+                self.assertIn("cannot be moved", errors[0])
+                self.assertIn(f"database header but is {label}", errors[0])
+                self.assertFalse(self.in_place())
+                self.assertEqual(self.tree(self.legacy), before)
+                self.assertEqual(self.volume_names(), [".migrate.lock"])
+
+    def test_huge_and_sparse_files_without_it_are_not_a_registry(self):
+        for label, size in (("larger than", mig.MAX_BYTES + 1), ("sparse", 32 << 20)):
+            with self.subTest(label):
+                self._plant_odd(b"not a database", size)
+                before = self.tree(self.legacy)
                 rc, err = self.run_script()
                 self.assertEqual(rc, 0, err)
-                self.assertIn(label, err)
+                self.assertIn("is not an SQLite database", err)
+                self.assertIn("marked this volume as current", err)
+                self.assertNotIn("ERROR", err)
                 self.assertTrue(self.in_place())
                 self.assertFalse(os.path.exists(os.path.join(self.dest, "onionnames.db")))
+                self.assertEqual(self.tree(self.legacy), before)
 
     def test_a_damaged_registry_stays_and_names_stay_unavailable(self):
         self.make_registry(names=[(f"name{i:04d}", ALICE) for i in range(400)])
@@ -841,7 +865,8 @@ class TestHoles(MoveCase):
         self.assertEqual(self.names(), {"alice": ALICE, "brewster": BOB,
                                         "carol": self.CAROL})
 
-    def test_a_registry_with_a_real_hole_is_still_refused(self):
+    def test_a_registry_with_a_real_hole_is_held_not_abandoned(self):
+        """Not read, and not taken for "no registry" either: names stay 503."""
         self.make_registry()
         db = self._db()
         os.truncate(db, os.path.getsize(db) + (32 << 20))
@@ -849,9 +874,27 @@ class TestHoles(MoveCase):
             self.skipTest("this filesystem does not make sparse files")
         before = self.tree(self.legacy)
         rc, err = self.run_script()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("onionnames.db: sparse", err)
-        self.assertFalse(os.path.exists(os.path.join(self.dest, "onionnames.db")))
+        self.assertEqual(rc, 1, err)
+        self.assertIn("onionnames.db starts with SQLite's database header but is "
+                      "sparse, so it is not read", err)
+        self.assertFalse(self.in_place())
+        self.assertEqual(self.volume_names(), [".migrate.lock"])
+        self.assertEqual(self.tree(self.legacy), before)
+
+    def test_a_wal_with_sqlites_header_and_a_real_hole_holds_the_move(self):
+        """Names committed only to the -wal would be lost without it."""
+        self.make_registry(keep_open=True)      # every name is in the -wal
+        wal = self._db() + "-wal"
+        os.truncate(wal, os.path.getsize(wal) + (32 << 20))
+        if not _has_a_hole(wal):
+            self.skipTest("this filesystem does not make sparse files")
+        before = self.tree(self.legacy)
+        rc, err = self.run_script()
+        self.assertEqual(rc, 1, err)
+        self.assertIn("onionnames.db-wal starts with SQLite's write-ahead log header "
+                      "but is sparse", err)
+        self.assertFalse(self.in_place())
+        self.assertEqual(self.volume_names(), [".migrate.lock"])
         self.assertEqual(self.tree(self.legacy), before)
 
     def test_a_journal_with_a_real_hole_is_left_out(self):
@@ -939,6 +982,112 @@ class TestHoles(MoveCase):
                              hashlib.sha256(b.read()).digest())
         self.assertEqual(os.path.getsize(copy), 32 << 20)
         self.assertLess(os.stat(copy).st_blocks * 512, 4 << 20)
+
+
+def _zero_blocks_as_holes(path, block=128 << 10):
+    """The data extents ZFS with compression reports for path: each all-zero
+    record is kept as a hole. Returns (extents, size) for _extents."""
+    data, size = [], os.path.getsize(path)
+    with open(path, "rb") as f:
+        pos = 0
+        while pos < size:
+            chunk = f.read(block)
+            if chunk.count(0) != len(chunk):
+                if data and data[-1][1] == pos:
+                    data[-1] = (data[-1][0], pos + len(chunk))
+                else:
+                    data.append((pos, pos + len(chunk)))
+            pos += len(chunk)
+    return data, size
+
+
+class TestHeldRegistry(MoveCase):
+    """A real registry the safety checks refuse to read is held where it is,
+    with no marker, so its names answer 503; never taken for "no registry",
+    which would start an empty one with every name free to claim."""
+
+    def _db(self):
+        return os.path.join(self.legacy, "onionnames.db")
+
+    def _main(self, lseek=None, **constants):
+        logs = []
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(mig, "log", side_effect=logs.append))
+            for name, value in constants.items():
+                stack.enter_context(mock.patch.object(mig, name, value))
+            if lseek is not None:
+                stack.enter_context(mock.patch("os.lseek", lseek))
+            rc = mig.main(["--legacy-parent", self.parent, "--dest", self.dest,
+                           "--no-mount-check"])
+        return rc, logs
+
+    def assertHeld(self, rc, logs, before, reason):
+        self.assertEqual(rc, 1, logs)
+        errors = [line for line in logs if "ERROR" in line]
+        self.assertEqual(len(errors), 1, logs)
+        error = errors[0]
+        self.assertTrue(error.startswith("ERROR: the name registry at the old location "
+                                         "cannot be moved: onionnames.db starts with "
+                                         "SQLite's database header but is " + reason), error)
+        self.assertNotIn("\n", error)
+        self.assertIn("/api/name/* answers 503", error)
+        self.assertIn("restore the registry from a backup", error)
+        self.assertIn(f"check {self._db()} and, only if it holds no names to keep, "
+                      f"move {self.legacy} aside", error)
+        self.assertFalse([line for line in logs if "marked this volume" in line], logs)
+        self.assertFalse(self.in_place(), "no marker: names stay unavailable")
+        self.assertFalse(os.path.exists(os.path.join(self.dest, MARKER)))
+        self.assertEqual(self.volume_names(), [".migrate.lock"], "no copy, no registry")
+        self.assertEqual(self.tree(self.legacy), before, "nothing was moved or removed")
+
+    def test_an_oversized_registry_is_held_until_it_can_be_read(self):
+        self.make_registry(extra_sql=("CREATE TABLE filler (x)",
+                                      "INSERT INTO filler VALUES (randomblob(64 << 10))"))
+        size = os.path.getsize(self._db())
+        before = self.tree(self.legacy)
+        rc, logs = self._main(MAX_BYTES=size - 1)
+        self.assertHeld(rc, logs, before, "larger than")
+        # Every start tries again; one that may read it moves it, names intact.
+        rc, logs = self._main()
+        self.assertEqual(rc, 0, logs)
+        self.assertTrue(self.marker()["moved"])
+        self.assertEqual(self.names(), {"alice": ALICE, "brewster": BOB})
+
+    def test_a_registry_whose_zeroed_pages_are_holes_is_held(self):
+        """Pages freed under secure_delete are all zeros, and a compressing
+        filesystem keeps those as holes: more than SPARSE_SLACK of them."""
+        self.make_registry(extra_sql=("CREATE TABLE filler (x)",
+                                      "INSERT INTO filler VALUES (randomblob(3 << 20))"))
+        conn = sqlite3.connect(self._db())
+        conn.execute("PRAGMA secure_delete=ON")
+        conn.execute("DELETE FROM filler")
+        conn.commit()
+        conn.close()
+        data, size = _zero_blocks_as_holes(self._db())
+        holes = size - sum(end - start for start, end in data)
+        self.assertGreater(holes, mig.SPARSE_SLACK)
+        before = self.tree(self.legacy)
+        rc, logs = self._main(lseek=_extents(data, size))
+        self.assertHeld(rc, logs, before, "sparse")
+        # Where the same file reads as dense, it moves, names intact.
+        rc, logs = self._main()
+        self.assertEqual(rc, 0, logs)
+        self.assertEqual(self.names(), {"alice": ALICE, "brewster": BOB})
+
+    def test_whatever_is_not_sqlites_still_lets_the_volume_start(self):
+        """The hold needs SQLite's own header: a planted file cannot fake
+        the absence of a registry, and junk cannot hold the volume."""
+        os.makedirs(self.legacy)
+        with open(self._db(), "wb") as f:
+            f.write(b"\0" * 16 + os.urandom(4096))
+        before = self.tree(self.legacy)
+        rc, logs = self._main(MAX_BYTES=1024)
+        self.assertEqual(rc, 0, logs)
+        self.assertFalse([line for line in logs if "ERROR" in line], logs)
+        self.assertTrue(self.in_place())
+        self.assertFalse(self.marker()["moved"])
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "onionnames.db")))
+        self.assertEqual(self.tree(self.legacy), before)
 
 
 # ---------------------------------------------------------------------------
