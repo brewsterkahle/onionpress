@@ -344,5 +344,27 @@ class TestFollowForm(unittest.TestCase):
         self.assertIn("esc_html( $label )", notice)
 
 
+class TestFollowingNamesRetired(unittest.TestCase):
+    """onionpress_following_names was a side map of onionname per follow.
+    Since the schema-2 keys (<addr>.onion/<name>) carry the name, only the
+    pre-v2 migration reads it, which then deletes it (issue #321)."""
+
+    def test_only_the_migration_touches_it(self):
+        for dirpath, _, files in os.walk(os.path.join(ROOT, "app", "Resources")):
+            for name in files:
+                if not name.endswith(".php"):
+                    continue
+                path = os.path.join(dirpath, name)
+                if path == BLOGROLL:
+                    continue
+                with self.subTest(os.path.relpath(path, ROOT)):
+                    self.assertNotIn("onionpress_following_names", _read(path))
+        migrate = _function(_read(BLOGROLL), "onionpress_follow_migrate")
+        rest = _read(BLOGROLL).replace(migrate, "")
+        self.assertNotIn("onionpress_following_names", rest)
+        self.assertNotRegex(migrate, r"update_option\(\s*'onionpress_following_names'")
+        self.assertIn("delete_option( 'onionpress_following_names' )", migrate)
+
+
 if __name__ == "__main__":
     unittest.main()

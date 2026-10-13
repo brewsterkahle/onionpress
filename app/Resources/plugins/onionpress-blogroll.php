@@ -370,7 +370,7 @@ function onionpress_follow_migrate() {
         $stats  = get_option( 'onionpress_following_stats',  array() ); if ( ! is_array( $stats ) )  { $stats  = array(); }
 
         $new_following = array();
-        $new_names = array(); $new_feeds = array(); $new_titles = array(); $new_stats = array();
+        $new_feeds = array(); $new_titles = array(); $new_stats = array();
         foreach ( $following as $old ) {
             $p    = onionpress_follow_parse( $old );
             $name = $p['name'];
@@ -382,13 +382,13 @@ function onionpress_follow_migrate() {
                 continue; // collapse duplicates produced by the re-key
             }
             $new_following[] = $key;
-            if ( '' !== $name ) { $new_names[ $key ] = $name; }
             if ( isset( $feeds[ $old ] ) )  { $new_feeds[ $key ]  = $feeds[ $old ]; }
             if ( isset( $titles[ $old ] ) ) { $new_titles[ $key ] = $titles[ $old ]; }
             if ( isset( $stats[ $old ] ) )  { $new_stats[ $key ]  = $stats[ $old ]; }
         }
         update_option( 'onionpress_following',        $new_following );
-        update_option( 'onionpress_following_names',  $new_names );
+        // The name now lives in the key; nothing reads the side map again.
+        delete_option( 'onionpress_following_names' );
         update_option( 'onionpress_following_feeds',  $new_feeds );
         update_option( 'onionpress_following_titles', $new_titles );
         update_option( 'onionpress_following_stats',  $new_stats );
