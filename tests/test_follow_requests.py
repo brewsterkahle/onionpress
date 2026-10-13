@@ -291,13 +291,26 @@ class TestEveryFollowRequestIsChecked(unittest.TestCase):
         self.assertIn("onionpress_follow_remote_head( $url,", fn)
 
     def test_aggregator_skips_refused_follows_and_drops_their_titles(self):
-        fn = _function(self.blogroll, "onionpress_get_aggregated_feed_items")
+        # The background refresh (tests/test_blogroll_refresh.py) does the
+        # fetching; a page view only reads what it stored.
+        fn = _function(self.blogroll, "onionpress_blogroll_fetch_due")
         skip = fn.index("if ( 'url' === $p['type'] && ! onionpress_follow_url_allowed( $p['url'] ) )")
         block = fn[skip:fn.index("continue;", skip)]
-        self.assertIn("unset( $feeds_map[ $addr ] );", block)
-        self.assertIn("unset( $titles_map[ $addr ] );", block)
+        self.assertIn("$refused[] = $addr;", block)
         self.assertLess(skip, fn.index("onionpress_discover_feed_url("))
-        self.assertLess(skip, fn.index("onionpress_follow_fetch_feed( $feed_url )"))
+        self.assertLess(skip, fn.index("onionpress_follow_fetch_feed( $feed_url,"))
+        store = _function(self.blogroll, "onionpress_blogroll_store")
+        drop = store.index("foreach ( $refused as $addr ) {")
+        self.assertIn("unset( $map[ $addr ] );", store[drop:drop + 80])
+        # Feeds, titles and items go; only the stats stay.
+        self.assertIn("if ( 'stats' !== $field ) {", store[drop - 60:drop])
+        for option in ("onionpress_following_feeds", "onionpress_following_titles",
+                       "onionpress_following_items"):
+            self.assertIn(f"=> '{option}',", store)
+        serve = _function(self.blogroll, "onionpress_get_aggregated_feed_items")
+        for call in ("onionpress_discover_feed_url(", "onionpress_follow_fetch_feed(",
+                     "onionpress_blogroll_refresh(", "onionpress_blogroll_fetch_due("):
+            self.assertNotIn(call, serve)
 
 
 class TestFollowForm(unittest.TestCase):

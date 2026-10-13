@@ -17,10 +17,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 // Re-enable the WordPress Links Manager (hidden since 3.5)
 add_filter( 'pre_option_link_manager_enabled', '__return_true' );
 
-// Override SimplePie cache lifetime: 1 hour instead of default 12 hours.
-add_filter( 'wp_feed_cache_transient_lifetime', function () {
-    return HOUR_IN_SECONDS;
-} );
+// No global SimplePie cache lifetime here: it set every feed's to 1 hour,
+// the aggregate's own TTL, so a follow's cached copy had expired by each
+// refresh anyway. Follow fetches skip SimplePie's cache altogether
+// (onionpress_follow_fetch_feed()); the last good items of each follow
+// are kept in onionpress_following_items instead.
 
 // Invalidate the aggregated cache when the following list changes.
 add_action( 'update_option_onionpress_following', function () {
@@ -210,8 +211,34 @@ function onionpress_follow_guard_args( $args, $url ) {
     if ( onionpress_follow_url_allowed( $url ) ) {
         $args['reject_unsafe_urls'] = false;
         unset( $args['onionpress_check_url'] );
+        // The request keeps the timeout it asked for: onionpress-tor-proxy
+        // otherwise raises every timeout to at least 60 s. Inside a
+        // budgeted run (onionpress_follow_deadline()) it is also cut to
+        // what is left of the budget, so the budget is a real cap and not
+        // a check between follows.
+        $args['onionpress_exact_timeout'] = true;
+        $deadline = onionpress_follow_deadline();
+        if ( $deadline > 0 ) {
+            $left    = max( 1, $deadline - microtime( true ) );
+            $timeout = isset( $args['timeout'] ) ? (float) $args['timeout'] : $left;
+            $args['timeout'] = min( $timeout, $left );
+        }
     }
     return $args;
+}
+
+/**
+ * The wall-clock deadline (microtime) every follow request is held to, or 0
+ * for none. onionpress_blogroll_refresh() sets it for its run and clears it
+ * when done; the follow form's probes run without one, on their own
+ * timeouts.
+ */
+function onionpress_follow_deadline( $set = null ) {
+    static $deadline = 0;
+    if ( null !== $set ) {
+        $deadline = (float) $set;
+    }
+    return $deadline;
 }
 
 /** pre_http_request inside onionpress_follow_guarded(): refuse what a follow may not request. */
@@ -267,14 +294,30 @@ function onionpress_follow_remote_head( $url, $args = array() ) {
     } );
 }
 
-/** fetch_feed() for the Following feature, held to the same rules. */
-function onionpress_follow_fetch_feed( $url ) {
+/**
+ * fetch_feed() for the Following feature, held to the same rules.
+ *
+ * $timeout is SimplePie's per-request timeout (it would be 10 s, raised to
+ * 60 s by onionpress-tor-proxy). SimplePie's cache is off: the refresh
+ * keeps each follow's last good items itself, and a cached copy would only
+ * hide new posts for as long as it lived.
+ */
+function onionpress_follow_fetch_feed( $url, $timeout = 60 ) {
     if ( ! onionpress_follow_url_allowed( $url ) ) {
         return onionpress_follow_refused();
     }
-    return onionpress_follow_guarded( function () use ( $url ) {
-        return fetch_feed( $url );
-    } );
+    $options = function ( $feed ) use ( $timeout ) {
+        $feed->set_timeout( (int) $timeout );
+        $feed->enable_cache( false );
+    };
+    add_action( 'wp_feed_options', $options );
+    try {
+        return onionpress_follow_guarded( function () use ( $url ) {
+            return fetch_feed( $url );
+        } );
+    } finally {
+        remove_action( 'wp_feed_options', $options );
+    }
 }
 
 /**
@@ -371,127 +414,264 @@ function onionpress_discover_feed_url( $addr, $onionname = '', $timeout = 15 ) {
     return '';
 }
 
-/**
- * Fetch and aggregate feed items from all followed sites.
+/*
+ * The followed-feeds aggregate is built in the background.
  *
- * Returns a cached array of items sorted by date (newest first).
- * Each item: title, permalink, date (unix), author, source, source_addr, excerpt.
+ * A page view never fetches a feed: onionpress_get_aggregated_feed_items()
+ * serves the cached aggregate, or, once that has expired or been cleared,
+ * the items each follow last returned (onionpress_following_items), and
+ * asks wp-cron for a refresh. The refresh used to run inside whichever
+ * visitor's page render found the cache expired (the sidebar is on every
+ * page): every follow fetched in turn over Tor, each request raised to at
+ * least 60 s, the 60 s budget checked only between follows, and no lock, so
+ * concurrent visitors each ran the same rebuild and tied up PHP workers and
+ * the tor daemon that serves the site.
+ *
+ * Now one refresh runs at a time per site (onionpress_blogroll_lock()),
+ * within ONIONPRESS_BLOGROLL_BUDGET seconds that every request is held to,
+ * least recently tried follows first, and a follow that keeps failing is
+ * retried 1, 2, 4 ... 24 hours after its last attempt while its last good
+ * items stay on the blogroll.
+ */
+define( 'ONIONPRESS_BLOGROLL_BUDGET', 180 );           // seconds per refresh
+define( 'ONIONPRESS_BLOGROLL_LOCK_TTL', ONIONPRESS_BLOGROLL_BUDGET + 120 );
+define( 'ONIONPRESS_BLOGROLL_MIN_LEFT', 15 );          // don't start a follow with less
+define( 'ONIONPRESS_BLOGROLL_DISCOVER_TIMEOUT', 30 );  // per feed-discovery HEAD
+define( 'ONIONPRESS_BLOGROLL_FETCH_TIMEOUT', 60 );     // per feed request
+define( 'ONIONPRESS_BLOGROLL_ITEMS_PER_FOLLOW', 10 );
+
+/**
+ * Serve the followed-feeds aggregate, newest first. Never fetches.
+ *
+ * Each item: title, permalink, date (unix), author, source, source_addr,
+ * excerpt.
  *
  * @param int $max_items Maximum items to return.
  * @return array
  */
 function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
     $cached = get_transient( 'onionpress_blogroll_items' );
-    if ( false !== $cached ) {
+    if ( is_array( $cached ) ) {
         return array_slice( $cached, 0, $max_items );
     }
+    // Expired, or cleared because the follows changed: serve what each
+    // follow last returned while the refresh runs in the background.
+    onionpress_blogroll_schedule_refresh();
+    return array_slice( onionpress_blogroll_assemble(), 0, $max_items );
+}
 
-    $following  = get_option( 'onionpress_following', array() );
-    $feeds_map  = get_option( 'onionpress_following_feeds', array() );
+/** Ask wp-cron for a refresh, unless one is already waiting. */
+function onionpress_blogroll_schedule_refresh() {
+    if ( ! wp_next_scheduled( 'onionpress_blogroll_refresh' ) ) {
+        wp_schedule_single_event( time(), 'onionpress_blogroll_refresh' );
+    }
+}
+add_action( 'onionpress_blogroll_refresh', 'onionpress_blogroll_refresh' );
+// Every path that clears the aggregate (a follow added, removed or
+// re-keyed) wants the new follows fetched now, not at the next page view.
+add_action( 'delete_transient_onionpress_blogroll_items', 'onionpress_blogroll_schedule_refresh' );
+
+/**
+ * The aggregate from each current follow's last good items, newest first,
+ * at most 50. A follow that is no longer followed contributes nothing.
+ */
+function onionpress_blogroll_assemble() {
+    $following = get_option( 'onionpress_following', array() );
+    $items_map = get_option( 'onionpress_following_items', array() );
     if ( ! is_array( $following ) ) { $following = array(); }
-    if ( ! is_array( $feeds_map ) ) { $feeds_map = array(); }
+    if ( ! is_array( $items_map ) ) { $items_map = array(); }
 
-    $titles_map = get_option( 'onionpress_following_titles', array() );
-    if ( ! is_array( $titles_map ) ) { $titles_map = array(); }
-
-    // Per-follow stats: last_success (unix), last_post (unix), fail_count (int)
-    $stats_map = get_option( 'onionpress_following_stats', array() );
-    if ( ! is_array( $stats_map ) ) { $stats_map = array(); }
-
-    $all_items  = array();
-    $start_time = time();
-    $now        = time();
-    $feeds_changed  = false;
-    $titles_changed = false;
-    $stats_changed  = false;
-
-    foreach ( $following as $addr ) {
-        // Bail if we've spent too long fetching feeds (Tor can be slow).
-        if ( time() - $start_time > 60 ) {
-            break;
-        }
-
-        // A URL follow onionpress_follow_url_allowed() refuses (stored before
-        // it existed) is never fetched. Its feed URL goes, and so does the
-        // title an earlier fetch of it stored, which the sidebar shows.
-        $p = onionpress_follow_parse( $addr );
-        if ( 'url' === $p['type'] && ! onionpress_follow_url_allowed( $p['url'] ) ) {
-            if ( isset( $feeds_map[ $addr ] ) ) {
-                unset( $feeds_map[ $addr ] );
-                $feeds_changed = true;
-            }
-            if ( isset( $titles_map[ $addr ] ) ) {
-                unset( $titles_map[ $addr ] );
-                $titles_changed = true;
-            }
+    $all_items = array();
+    foreach ( $following as $key ) {
+        if ( ! is_string( $key ) || empty( $items_map[ $key ] ) || ! is_array( $items_map[ $key ] ) ) {
             continue;
         }
-
-        // Back off on repeated failures: skip if not enough time has passed.
-        // 0 failures = always try, 1 = 1h, 2 = 2h, 3 = 4h, ... max 24h
-        $st = isset( $stats_map[ $addr ] ) ? $stats_map[ $addr ] : array();
-        $fail_count  = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
-        $last_success = isset( $st['last_success'] ) ? (int) $st['last_success'] : 0;
-        if ( $fail_count > 0 && $last_success > 0 ) {
-            $backoff_hours = min( pow( 2, $fail_count - 1 ), 24 );
-            if ( $now - $last_success < $backoff_hours * HOUR_IN_SECONDS ) {
-                // Use cached items if available, skip fetching
-                continue;
+        foreach ( $items_map[ $key ] as $item ) {
+            if ( is_array( $item ) ) {
+                $item['source_addr'] = $key;
+                $all_items[] = $item;
             }
         }
+    }
+    usort( $all_items, function ( $a, $b ) {
+        return (int) ( $b['date'] ?? 0 ) - (int) ( $a['date'] ?? 0 );
+    } );
+    return array_slice( $all_items, 0, 50 );
+}
+
+/**
+ * Whether a follow is due for a fetch: never failed, or its backoff since
+ * the last attempt is over (1 h after one failure, then 2, 4 ... 24 h).
+ * Stats written before last_attempt existed count from last_success.
+ */
+function onionpress_blogroll_is_due( $st, $now ) {
+    $fail_count = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
+    if ( $fail_count <= 0 ) {
+        return true;
+    }
+    $since = isset( $st['last_attempt'] ) ? (int) $st['last_attempt']
+           : ( isset( $st['last_success'] ) ? (int) $st['last_success'] : 0 );
+    $backoff_hours = min( 1 << min( $fail_count - 1, 5 ), 24 );
+    return $now - $since >= $backoff_hours * HOUR_IN_SECONDS;
+}
+
+/**
+ * Take the per-site refresh lock: a row in the options table, created with
+ * INSERT IGNORE so only one of two concurrent runs gets it (add_option()
+ * would overwrite). Its value carries an expiry, so a run that died still
+ * frees it. Returns the value to hand to onionpress_blogroll_unlock(), or
+ * '' when another refresh holds it.
+ */
+function onionpress_blogroll_lock() {
+    global $wpdb;
+    $value = wp_generate_password( 20, false, false ) . ':' . ( time() + ONIONPRESS_BLOGROLL_LOCK_TTL );
+    for ( $try = 0; $try < 2; $try++ ) {
+        $wpdb->query( $wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} ( option_name, option_value, autoload ) VALUES ( %s, %s, 'off' )",
+            'onionpress_blogroll_lock', $value
+        ) );
+        if ( 1 === (int) $wpdb->rows_affected ) {
+            return $value;
+        }
+        $held  = (string) $wpdb->get_var( $wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", 'onionpress_blogroll_lock'
+        ) );
+        $parts = explode( ':', $held, 2 );
+        if ( isset( $parts[1] ) && (int) $parts[1] > time() ) {
+            return '';
+        }
+        // Expired: remove exactly the row we read (a newer holder's stays).
+        $wpdb->query( $wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s",
+            'onionpress_blogroll_lock', $held
+        ) );
+    }
+    return '';
+}
+
+function onionpress_blogroll_unlock( $value ) {
+    global $wpdb;
+    $wpdb->query( $wpdb->prepare(
+        "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s",
+        'onionpress_blogroll_lock', $value
+    ) );
+}
+
+/**
+ * wp-cron: refresh the aggregate if it has expired or was cleared. Never
+ * runs inside a visitor's page render.
+ */
+function onionpress_blogroll_refresh() {
+    if ( false !== get_transient( 'onionpress_blogroll_items' ) ) {
+        return;   // a refresh already ran since this one was asked for
+    }
+    $lock = onionpress_blogroll_lock();
+    if ( '' === $lock ) {
+        // Another refresh is running. It may have read the follows before
+        // the change that cleared the aggregate, so try again after it.
+        if ( ! wp_next_scheduled( 'onionpress_blogroll_refresh' ) ) {
+            wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'onionpress_blogroll_refresh' );
+        }
+        return;
+    }
+    @set_time_limit( ONIONPRESS_BLOGROLL_LOCK_TTL );
+    @ignore_user_abort( true );
+    onionpress_follow_deadline( microtime( true ) + ONIONPRESS_BLOGROLL_BUDGET );
+    try {
+        $complete = onionpress_blogroll_fetch_due();
+        // Follows left for lack of time get the next run soon, not in an hour.
+        set_transient( 'onionpress_blogroll_items', onionpress_blogroll_assemble(),
+            $complete ? HOUR_IN_SECONDS : 5 * MINUTE_IN_SECONDS );
+    } finally {
+        onionpress_follow_deadline( 0 );
+        onionpress_blogroll_unlock( $lock );
+    }
+}
+
+/**
+ * Fetch every due follow, least recently tried first, until the budget
+ * runs out, and store what came back. Returns false when due follows were
+ * left for lack of time.
+ */
+function onionpress_blogroll_fetch_due() {
+    $following = get_option( 'onionpress_following', array() );
+    $feeds_map = get_option( 'onionpress_following_feeds', array() );
+    $stats_map = get_option( 'onionpress_following_stats', array() );
+    if ( ! is_array( $following ) ) { $following = array(); }
+    if ( ! is_array( $feeds_map ) ) { $feeds_map = array(); }
+    if ( ! is_array( $stats_map ) ) { $stats_map = array(); }
+
+    $now     = time();
+    $due     = array();
+    $refused = array();
+    foreach ( $following as $addr ) {
+        if ( ! is_string( $addr ) ) {
+            continue;
+        }
+        // A URL follow onionpress_follow_url_allowed() refuses (stored before
+        // it existed) is never fetched. Its feed URL goes, and so do the
+        // title and items an earlier fetch of it stored, which the sidebar shows.
+        $p = onionpress_follow_parse( $addr );
+        if ( 'url' === $p['type'] && ! onionpress_follow_url_allowed( $p['url'] ) ) {
+            $refused[] = $addr;
+            continue;
+        }
+        $st = isset( $stats_map[ $addr ] ) && is_array( $stats_map[ $addr ] ) ? $stats_map[ $addr ] : array();
+        if ( onionpress_blogroll_is_due( $st, $now ) ) {
+            $due[ $addr ] = isset( $st['last_attempt'] ) ? (int) $st['last_attempt'] : 0;
+        }
+    }
+    // Least recently tried first (stable, so ties keep the list order): a
+    // dead follow early in the list can no longer use up every run's
+    // budget before the follows after it are reached.
+    asort( $due );
+
+    $deadline = onionpress_follow_deadline();
+    $results  = array();
+    $complete = true;
+    foreach ( array_keys( $due ) as $addr ) {
+        if ( microtime( true ) > $deadline - ONIONPRESS_BLOGROLL_MIN_LEFT ) {
+            $complete = false;
+            break;
+        }
+        $p  = onionpress_follow_parse( $addr );
+        $st = isset( $stats_map[ $addr ] ) && is_array( $stats_map[ $addr ] ) ? $stats_map[ $addr ] : array();
+        $st['last_attempt'] = time();
+        $fail_count = isset( $st['fail_count'] ) ? (int) $st['fail_count'] : 0;
+        $result = array();
 
         $feed_url = isset( $feeds_map[ $addr ] ) ? $feeds_map[ $addr ] : '';
-
         // Auto-discover feed URL if we don't have one yet.
         if ( ! $feed_url ) {
             // $addr is the follow key: a direct URL, or <onion>/<onionname>.
             if ( 'url' === $p['type'] ) {
                 $feed_url = $p['url'];
             } else {
-                $feed_url = onionpress_discover_feed_url( $p['addr'], $p['name'] );
+                $feed_url = onionpress_discover_feed_url( $p['addr'], $p['name'], ONIONPRESS_BLOGROLL_DISCOVER_TIMEOUT );
             }
             if ( $feed_url ) {
-                $feeds_map[ $addr ] = $feed_url;
-                $feeds_changed = true;
-            } else {
-                // Discovery failed — count as a failure
-                $st['fail_count'] = $fail_count + 1;
-                if ( ! $last_success ) { $st['last_success'] = $now; } // seed so backoff works
-                $stats_map[ $addr ] = $st;
-                $stats_changed = true;
-                continue;
+                $result['feed'] = $feed_url;
             }
         }
 
         // Held to the same rules: the stored feed URL, what SimplePie
         // discovers from it, and every redirect.
-        $feed = onionpress_follow_fetch_feed( $feed_url );
-        if ( is_wp_error( $feed ) ) {
+        $feed = $feed_url ? onionpress_follow_fetch_feed( $feed_url, ONIONPRESS_BLOGROLL_FETCH_TIMEOUT ) : null;
+        if ( ! $feed || is_wp_error( $feed ) ) {
+            // Back off from this attempt. Its last good items stay.
             $st['fail_count'] = $fail_count + 1;
-            if ( ! $last_success ) { $st['last_success'] = $now; }
-            $stats_map[ $addr ] = $st;
-            $stats_changed = true;
+            $result['stats']  = $st;
+            $results[ $addr ] = $result;
             continue;
         }
 
-        // Success — reset failure count, record contact time
-        $st['last_success'] = $now;
-        $st['fail_count']   = 0;
-
         $feed_title = $feed->get_title();
-        // Save the feed title for display in settings/sidebar
-        if ( $feed_title && ( ! isset( $titles_map[ $addr ] ) || $titles_map[ $addr ] !== $feed_title ) ) {
-            $titles_map[ $addr ] = $feed_title;
-            $titles_changed = true;
-        }
-        $items = $feed->get_items( 0, 10 );
-        $newest_post = 0;
-        foreach ( $items as $item ) {
+        $items      = array();
+        $newest     = 0;
+        foreach ( $feed->get_items( 0, ONIONPRESS_BLOGROLL_ITEMS_PER_FOLLOW ) as $item ) {
             $item_date = (int) $item->get_date( 'U' );
-            if ( $item_date > $newest_post ) {
-                $newest_post = $item_date;
-            }
-            $all_items[] = array(
+            $newest    = max( $newest, $item_date );
+            $items[] = array(
                 'title'       => $item->get_title(),
                 'permalink'   => $item->get_permalink(),
                 'date'        => $item_date,
@@ -501,32 +681,61 @@ function onionpress_get_aggregated_feed_items( $max_items = 20 ) {
                 'excerpt'     => wp_trim_words( wp_strip_all_tags( $item->get_description() ), 30 ),
             );
         }
-        if ( $newest_post ) {
-            $st['last_post'] = $newest_post;
+        // Success — reset failure count, record contact time
+        $st['last_success'] = time();
+        $st['fail_count']   = 0;
+        if ( $newest ) {
+            $st['last_post'] = $newest;
         }
-        $stats_map[ $addr ] = $st;
-        $stats_changed = true;
+        $result['stats'] = $st;
+        $result['items'] = $items;
+        if ( $feed_title ) {
+            $result['title'] = $feed_title;
+        }
+        $results[ $addr ] = $result;
     }
 
-    // Persist any newly discovered feed URLs, titles, or stats.
-    if ( $feeds_changed ) {
-        update_option( 'onionpress_following_feeds', $feeds_map );
-    }
-    if ( $titles_changed ) {
-        update_option( 'onionpress_following_titles', $titles_map );
-    }
-    if ( $stats_changed ) {
-        update_option( 'onionpress_following_stats', $stats_map );
-    }
+    onionpress_blogroll_store( $results, $refused );
+    return $complete;
+}
 
-    // Sort newest first.
-    usort( $all_items, function ( $a, $b ) {
-        return $b['date'] - $a['date'];
-    } );
+/**
+ * Write a refresh's results. The options are read again here, after the
+ * fetches, and only follows that are still followed are written: the run
+ * takes minutes, and writing back the maps it read at the start would undo
+ * an unfollow (or a follow form's probe) made in the meantime.
+ */
+function onionpress_blogroll_store( $results, $refused ) {
+    $following = get_option( 'onionpress_following', array() );
+    if ( ! is_array( $following ) ) { $following = array(); }
+    $followed = array_flip( array_filter( $following, 'is_string' ) );
 
-    // Store up to 50 items in the cache.
-    $to_cache = array_slice( $all_items, 0, 50 );
-    set_transient( 'onionpress_blogroll_items', $to_cache, HOUR_IN_SECONDS );
-
-    return array_slice( $to_cache, 0, $max_items );
+    $maps = array(
+        'feed'  => 'onionpress_following_feeds',
+        'title' => 'onionpress_following_titles',
+        'stats' => 'onionpress_following_stats',
+        'items' => 'onionpress_following_items',
+    );
+    foreach ( $maps as $field => $option ) {
+        $map = get_option( $option, array() );
+        if ( ! is_array( $map ) ) { $map = array(); }
+        $before = $map;
+        foreach ( $results as $addr => $result ) {
+            if ( isset( $followed[ $addr ] ) && isset( $result[ $field ] ) ) {
+                $map[ $addr ] = $result[ $field ];
+            }
+        }
+        if ( 'stats' !== $field ) {
+            foreach ( $refused as $addr ) {
+                unset( $map[ $addr ] );
+            }
+        }
+        if ( 'items' === $field ) {
+            // Nothing else removes a follow's items: drop the unfollowed.
+            $map = array_intersect_key( $map, $followed );
+        }
+        if ( $map !== $before ) {
+            update_option( $option, $map, 'items' === $field ? false : null );
+        }
+    }
 }
