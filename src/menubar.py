@@ -4370,14 +4370,7 @@ class OnionPressApp(rumps.App):
                 # backup (seeded key + imported DB/content) — no in-place
                 # overwrite and no .import-key-pending key-volume swap churn.
                 log_and_update("Rebuilding from backup (install-from-backup)…")
-                # The password goes in the environment: argv is readable by
-                # every local user (ps), the environment only by this one.
-                r = subprocess.run(
-                    [self.launcher_script, "restore", zip_path],
-                    env={**os.environ,
-                         launcher_ops.BACKUP_PASSWORD_ENV: password},
-                    capture_output=True, text=True, encoding='utf-8',
-                    errors='replace', timeout=1800)
+                r = self._launcher_restore(zip_path, password)
                 if r.returncode != 0:
                     self.log(f"Restore: launcher restore rc={r.returncode}: "
                              f"{(r.stderr or r.stdout or '')[:300]}")
@@ -4386,21 +4379,8 @@ class OnionPressApp(rumps.App):
                         "not be restored. Check the log for details."))
                     return
 
-                # The address the restore derived from the backup's key, from
-                # the on-disk cache it wrote — not metadata.onion_address,
-                # which is the backup author's to fill in.
-                restored_addr = None
-                try:
-                    with open(os.path.join(self.app_support,
-                                           "onion_address")) as f:
-                        restored_addr = f.read().strip()
-                except OSError:
-                    pass
-                if key_manager.is_valid_onion_address(restored_addr):
-                    # Refresh the in-memory address so the heartbeat ships
-                    # the matching content_address.
-                    self.onion_address = restored_addr
-                else:
+                restored_addr = self._adopt_restored_address()
+                if not restored_addr:
                     # Shown only; update_status picks the address up from Tor.
                     restored_addr = addr
                 self.log(f"Restore complete (install-from-backup): {restored_addr}")
@@ -4428,6 +4408,40 @@ class OnionPressApp(rumps.App):
                 _main_thread(lambda: pw.finish(f"Restore failed: {e}"))
 
         threading.Thread(target=do_restore, daemon=True).start()
+
+    def _launcher_restore(self, zip_path, password):
+        """Rebuild this install from the backup at *zip_path* through the
+        launcher's `restore` (install-from-backup: teardown, seeded key,
+        DB and content imported into fresh containers). Shared by the menu's
+        restore and the Settings page's. Returns the CompletedProcess.
+
+        No time limit (issue #317): a fixed 1800 s ended a large site's
+        restore halfway and left the launcher's steps running; those steps
+        carry their own limits, sized to the backup, and fail it when hit.
+        The password goes in the environment: argv is readable by every
+        local user (ps), the environment only by this one.
+        """
+        return subprocess.run(
+            [self.launcher_script, "restore", zip_path],
+            env={**os.environ, launcher_ops.BACKUP_PASSWORD_ENV: password},
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace')
+
+    def _adopt_restored_address(self):
+        """The address a restore derived from the backup's key, from the
+        on-disk cache it wrote — not metadata.onion_address, which is the
+        backup author's to fill in — or None. A valid one becomes
+        self.onion_address, so the heartbeat ships the matching
+        content_address."""
+        try:
+            with open(os.path.join(self.app_support, "onion_address")) as f:
+                restored_addr = f.read().strip()
+        except OSError:
+            return None
+        if not key_manager.is_valid_onion_address(restored_addr):
+            return None
+        self.onion_address = restored_addr
+        return restored_addr
 
     def _reconcile_archive_s3_keys(self):
         """Ensure the Wayback sweep's archive.org S3 keys exist, retrying
@@ -5628,6 +5642,7 @@ License: AGPL v3"""
                         # docker cp + chown as root: both follow a link
                         # www-data can plant at this predictable name, and
                         # the chown made any file in the container its own.
+                        # The time allowed grows with the backup (#317).
                         try:
                             with open(tmp_path, 'rb') as backup_file:
                                 r = subprocess.run(
@@ -5636,7 +5651,8 @@ License: AGPL v3"""
                                      "sh", "-c", 'umask 077; cat > "$1"', "sh",
                                      f"/var/lib/onionpress/{filename}"],
                                     stdin=backup_file, capture_output=True,
-                                    timeout=300
+                                    timeout=wp_files.sized_timeout(
+                                        os.fstat(backup_file.fileno()).st_size, 300)
                                 )
                         finally:
                             try:
@@ -5684,23 +5700,43 @@ License: AGPL v3"""
                     # file (check_uploaded_backup) before it is read.
                     upload_dir = tempfile.mkdtemp(prefix="onionpress-restore-upload-")
                     local_zip = os.path.join(upload_dir, "restore-upload.zip")
+                    upload = "/var/lib/onionpress/restore-upload.zip"
                     try:
-                        subprocess.run(
-                            ["docker", "cp",
-                             "onionpress-wordpress:/var/lib/onionpress/restore-upload.zip",
-                             local_zip],
+                        # The copy's time limit grows with the upload (#317).
+                        r = subprocess.run(
+                            ["docker"] + wp_files.exec_args("stat", "-c", "%s", upload),
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=60
+                            timeout=5
                         )
+                        size = r.stdout.strip()
+                        size = int(size) if r.returncode == 0 and size.isdigit() else 0
+                        r = subprocess.run(
+                            ["docker", "cp", f"onionpress-wordpress:{upload}", local_zip],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace',
+                            timeout=wp_files.sized_timeout(size, 60)
+                        )
+                        if r.returncode != 0:
+                            self.log(f"Settings page: could not copy the uploaded backup "
+                                     f"(docker cp rc={r.returncode})")
                         subprocess.run(
-                            ["docker"] + wp_files.exec_args(
-                                "rm", "-f", "/var/lib/onionpress/restore-upload.zip"),
+                            ["docker"] + wp_files.exec_args("rm", "-f", upload),
                             capture_output=True, text=True, encoding='utf-8', errors='replace',
                             timeout=5
                         )
                         if password and os.path.lexists(local_zip):
                             backup_manager.check_uploaded_backup(local_zip)
-                            backup_manager.restore_from_backup(local_zip, password, self.log)
+                            # A wrong password or an invalid backup is
+                            # refused here, with its own message, before
+                            # anything is torn down.
+                            backup_manager.read_backup_metadata(local_zip, password)
+                            # The menu's restore (install-from-backup), not
+                            # an in-place overwrite of the running site.
+                            r = self._launcher_restore(local_zip, password)
+                            if r.returncode != 0:
+                                self.log(f"Settings page: launcher restore rc={r.returncode}: "
+                                         f"{(r.stderr or r.stdout or '')[:300]}")
+                                raise Exception("The backup could not be restored. "
+                                                "Check the OnionPress log for details.")
                             restored = True
                         else:
                             restored = False
@@ -5713,13 +5749,14 @@ License: AGPL v3"""
                             "restored_at": now_iso
                         })
                     else:
-                        # Restart to pick up restored keys
-                        self.run_command("restart")
+                        # The launcher's restore has started the rebuilt
+                        # containers; wait for the app to see them.
+                        self._adopt_restored_address()
                         import time
                         for _ in range(30):
-                            time.sleep(2)
                             if self.is_running:
                                 break
+                            time.sleep(2)
                         self.write_status_to_volume()
                         new_addr = self.onion_address or ""
                         _write_result("restore-result.json", {

@@ -67,7 +67,33 @@ class TestMenubarSettingsRestore(unittest.TestCase):
     def test_the_copy_is_checked_before_the_restore_reads_it(self):
         check = self.body.index("backup_manager.check_uploaded_backup(local_zip)")
         self.assertLess(self.body.index('"docker", "cp"'), check)
-        self.assertLess(check, self.body.index("restore_from_backup(local_zip"))
+        self.assertLess(check, self.body.index("read_backup_metadata(local_zip"))
+        self.assertLess(check, self.body.index("_launcher_restore(local_zip"))
+
+    def test_it_is_the_menus_restore(self):
+        """Issue #317: the page's restore was an in-place overwrite of its
+        own, separate from the menu's install-from-backup; now both go
+        through _launcher_restore, the password checked before anything is
+        torn down."""
+        self.assertNotIn("restore_from_backup(", self.body)
+        self.assertLess(self.body.index("read_backup_metadata(local_zip, password)"),
+                        self.body.index("self._launcher_restore(local_zip, password)"))
+        src = mv._read("src/menubar.py")
+        start = src.index("    def do_restore():")
+        self.assertIn("self._launcher_restore(zip_path, password)",
+                      src[start:src.index("threading.Thread(target=do_restore", start)])
+
+    def test_no_fixed_time_limit_on_the_restore(self):
+        src = mv._read("src/menubar.py")
+        start = src.index("    def _launcher_restore(self")
+        body = src[start:src.index("\n    def ", start + 10)]
+        call = body[body.index("subprocess.run("):]
+        self.assertNotIn("timeout", call)
+
+    def test_the_copy_is_sized_and_checked(self):
+        self.assertNotIn("timeout=60\n", self.body)
+        self.assertIn("timeout=wp_files.sized_timeout(size, 60)", self.body)
+        self.assertIn("if r.returncode != 0:", self.body)
 
     def test_the_copy_lands_in_a_folder_of_its_own(self):
         self.assertIn("tempfile.mkdtemp(", self.body)
