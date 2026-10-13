@@ -375,15 +375,6 @@ class TestMacMenubar(unittest.TestCase):
             self.assertEqual(self.src.count(f"/var/lib/onionpress/{name}"), 1, name)
 
 
-class TestLinuxService(unittest.TestCase):
-    def test_status_mirror_is_filtered(self):
-        src = _read("linux/onionpress-service.py")
-        body = _between(src, "def write_status(", "\n# ─── 4.")
-        mirror = body[body.index('wp_files.put_file_args("/var/lib/onionpress/status.json")'):]
-        self.assertIn("input=json.dumps(redact.status_for_wordpress(status), indent=2)", mirror)
-        self.assertNotIn("input=payload", mirror)
-
-
 class TestStatusPageIsTheOwners(unittest.TestCase):
     """Both endpoints check the viewer before they read a shared file or
     queue an action; there is no PHP in the test environment, so this reads

@@ -1423,11 +1423,18 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
                           "    def start_status_checker(self):")
         self.assertIn("self._republish_trigger.reset()", body)
 
-    def test_linux_wake_transition_resets_the_trigger(self):
-        body = self._body("linux/onionpress-service.py",
-                          "if _was_sleeping and not is_sleeping_now:",
-                          "_was_sleeping = is_sleeping_now")
-        self.assertIn("monitor.republish.reset()", body)
+    def test_linux_wake_resets_the_trigger(self):
+        body = self._body("src/onionpress/reachability.py",
+                          "    def note_wake(self) -> None:",
+                          "    def _slept_since_last_cycle(self)")
+        self.assertIn("self.monitor.republish.reset()", body)
+
+    def test_linux_heartbeat_wake_handler_calls_note_wake(self):
+        body = self._body("linux/onionpress-heartbeat.py",
+                          "    def _on_prepare_for_sleep(self, going_to_sleep):",
+                          "    def _signal_watchdogs(self, sig):")
+        wake = body[body.index("else:"):]
+        self.assertIn("_reachability.note_wake()", wake)
 
 
 if __name__ == "__main__":

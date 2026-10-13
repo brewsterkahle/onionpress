@@ -65,7 +65,6 @@ class TestNoCodePathTreatsUnsetAsYes(unittest.TestCase):
         "src/onionpress/onionheaven.py",
         "src/menubar.py",
         "linux/onionpress-heartbeat.py",
-        "linux/onionpress-service.py",
         "linux/onionpress-tray",
         "linux/onionpress",
     )
