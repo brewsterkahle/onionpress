@@ -936,13 +936,8 @@ class SetupDialog:
         if name and _setup_logic:
             ok, reason = _setup_logic.validate_onionname(name)
             if not ok:
-                _msgs = {
-                    "too_short": "Too short (min 2 characters)",
-                    "too_long": "Too long (max 63 characters)",
-                    "invalid_chars": "Letters and numbers only",
-                    "all_numeric": "Cannot be all numbers",
-                }
-                self._name_error.set_text(_msgs.get(reason, "Invalid username"))
+                self._name_error.set_text(
+                    _setup_logic.onionname_error_message(reason))
             else:
                 self._name_error.set_text("")
         else:
