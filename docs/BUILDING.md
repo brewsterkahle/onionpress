@@ -331,7 +331,7 @@ that combination up front rather than failing at the end of a long build.
 Cross-building the **tor** image runs its apt steps and the mkp224o compile
 under QEMU — hours back when it also compiled arti, still slow. CI avoids it
 entirely: `docker-publish.yml` builds amd64 on
-`ubuntu-latest` and arm64 on `ubuntu-24.04-arm` — both GitHub-hosted, both
+`ubuntu-24.04` and arm64 on `ubuntu-24.04-arm` — both GitHub-hosted, both
 free for public repositories — then merges the two with
 `docker buildx imagetools create`. Until September 2026 the arm64 half ran on
 the maintainer's own Mac as a self-hosted runner, so every image release

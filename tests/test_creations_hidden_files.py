@@ -20,7 +20,7 @@ cannot reach one either). The one exception is the generated thumbnail,
 `.thumbs/<listed path>.png`, which the pages link to themselves. The
 multisite .htaccess answers 403 for any hidden component of a direct URL.
 
-php is preinstalled on ubuntu-latest, so the PHP half runs in CI; locally
+php is preinstalled on ubuntu-24.04, so the PHP half runs in CI; locally
 it is skipped when php is missing.
 """
 

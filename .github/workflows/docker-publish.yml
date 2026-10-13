@@ -8,7 +8,7 @@
 # into main, that still has it set.
 #
 # Nothing here needs anything outside GitHub. Both architectures build on
-# GitHub-hosted runners — ubuntu-latest for amd64, ubuntu-24.04-arm for
+# GitHub-hosted runners — ubuntu-24.04 for amd64, ubuntu-24.04-arm for
 # arm64, both free for public repositories — and the images go to the
 # namespace of whichever repository the run belongs to, so a fork publishes
 # ghcr.io/<you>/… without editing this file. Until September 2026 the arm64
@@ -55,20 +55,20 @@ jobs:
 
   build-tor-amd64:
     name: Build Tor image (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push (amd64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: app/Resources/docker/tor
           platforms: linux/amd64
@@ -88,15 +88,15 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push (arm64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: app/Resources/docker/tor
           platforms: linux/arm64
@@ -108,18 +108,18 @@ jobs:
 
   merge-tor:
     name: Merge Tor manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build-tor-amd64, build-tor-arm64]
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Create multi-arch manifest
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor"
@@ -141,20 +141,20 @@ jobs:
 
   build-wp-amd64:
     name: Build WordPress image (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push (amd64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: app/Resources/docker/wordpress
           platforms: linux/amd64
@@ -174,15 +174,15 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push (arm64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: app/Resources/docker/wordpress
           platforms: linux/arm64
@@ -194,18 +194,18 @@ jobs:
 
   merge-wp:
     name: Merge WordPress manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build-wp-amd64, build-wp-arm64]
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Create multi-arch manifest
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress"
@@ -227,21 +227,21 @@ jobs:
 
   build-stress-worker-amd64:
     name: Build stress worker image (amd64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [merge-tor]
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push (amd64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tests/stress
           platforms: linux/amd64
@@ -265,15 +265,15 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and push (arm64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: tests/stress
           platforms: linux/arm64
@@ -285,18 +285,18 @@ jobs:
 
   merge-stress-worker:
     name: Merge stress worker manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build-stress-worker-amd64, build-stress-worker-arm64]
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Create multi-arch manifest
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-stress-worker"
