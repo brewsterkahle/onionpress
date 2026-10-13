@@ -566,7 +566,12 @@
   rival OnionHome). Detection: own address is the canonical hub's or
   OnionHome's, `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`, `hub_data_state() ==
   "hub"`, or OnionHome's registry present; never `server_active` (true on
-  every Linux node). Every other `create_backup` caller passes
+  every Linux node). **Fails closed**: no own address, `hub_data_state()`
+  not `"none"` (onionheaven did not answer) or no yes/no from
+  `onionhome_registry_present()` (`sh -c` printing yes/no: a failed exec
+  and a missing file both exit 1) is refused too
+  (`UNVERIFIED_BACKUP_REFUSED_MSG`, same paths, rc 3 on Linux); the owner's
+  backups never ask. Every other `create_backup` caller passes
   `include_hub_data=True` (owner's disk). The page's restore
   (`restore_from_backup(through_wordpress=True)`, Linux `restore_backup
   --from-settings-page`) refuses, before touching anything, a backup with

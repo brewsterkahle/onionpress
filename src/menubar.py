@@ -5823,8 +5823,9 @@ License: AGPL v3"""
                         onion_addr = self.onion_address or "unknown"
                         # Handed to WordPress below, and the password came
                         # from there: refused on an OnionHeaven hub or
-                        # OnionHome (SettingsPageBackupRefused, whose message
-                        # the page shows), and never a hub's registry or
+                        # OnionHome, or a node that could not be checked
+                        # (SettingsPageBackupRefused, whose message the page
+                        # shows), and never a hub's registry or
                         # registrants' keys, nor the Cloudflare tunnel token
                         # or any other config WordPress is not shown
                         # (backup.TUNNEL_TOKEN_KEY).

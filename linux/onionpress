@@ -2589,7 +2589,8 @@ create_backup() {
     # Usage: create_backup <password> <output_path> [--without-hub-data] [--without-host-secrets]
     # --without-hub-data: for a backup handed to WordPress (the Settings
     # page's download), whose password came from there too. Refused on an
-    # OnionHeaven hub or OnionHome (return 3, BACKUP_REFUSAL says why:
+    # OnionHeaven hub or OnionHome, or when that could not be checked
+    # (return 3, BACKUP_REFUSAL says why:
     # backup.settings_page_backup_refusal), and never a hub's registry or
     # registrants' keys. Without it, a hub's are in, sealed to its recovery
     # key when one is set up (backup.stage_hub_backup).
@@ -2647,7 +2648,8 @@ create_backup() {
     # The Settings page's backup carries this node's own onion service key
     # to WordPress: refused on an OnionHeaven hub or OnionHome, before
     # anything is copied (not on status.json's server_active, which is
-    # true on every Linux node).
+    # true on every Linux node). Fails closed: no address, a container
+    # that does not answer, or a helper that fails, and it is refused too.
     if [ "$with_hub_data" = "no" ]; then
         local refusal="" refusal_rc=0
         refusal=$(op_py --data-dir "$DATA_DIR" settings-page-backup-check --address "$onion_addr" 2>>"$LOG_FILE") || refusal_rc=$?
@@ -4278,7 +4280,8 @@ sys.exit(0 if provision_interactive() else 1)
                         bp_path="$bp_dir/$bp_filename"
                         # Handed to WordPress below, and the password came
                         # from there: refused on an OnionHeaven hub or
-                        # OnionHome, and never a hub's registry or
+                        # OnionHome (or a node that could not be checked),
+                        # and never a hub's registry or
                         # registrants' keys (--without-hub-data), nor the
                         # Cloudflare tunnel token or any other config
                         # WordPress is not shown (--without-host-secrets).

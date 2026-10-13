@@ -16,7 +16,9 @@ file itself.
   --without-hub-data), and on a hub or on OnionHome it is refused outright,
   before anything is copied: it would carry the node's own onion service
   key, with which code in WordPress could run a rival hub (or answer name
-  lookups). The page shows why. Backups made from the app or the CLI keep
+  lookups). It fails closed: a node whose containers do not answer the
+  checks, or that has no address to check, is refused too. The page shows
+  why. Backups made from the app or the CLI keep
   the hub data (sealed to the hub's recovery key when one is set up:
   tests/test_hub_backup_sealed.py). OnionHome's name registry (no secret in
   it) stays in those.
@@ -79,9 +81,11 @@ class _Container:
     """A sandbox for the containers a backup reads: a hub data folder
     standing in for /var/lib/onionheaven, OnionHome's registry folder and
     wp-content, and a docker stub on PATH that serves them (onionheaven's
-    scripts run for real against the folder)."""
+    scripts and onionpress-tor's registry check run for real against the
+    folders). The containers named in *unanswered* answer those scripts
+    as a stopped container does: an error from the daemon, exit 1."""
 
-    def __init__(self, test, tmp, *, hub=True, onionhome=False):
+    def __init__(self, test, tmp, *, hub=True, onionhome=False, unanswered=()):
         self.tmp = tmp
         self.hub = os.path.join(tmp, "hub")
         os.makedirs(os.path.join(self.hub, "keys"))
@@ -117,8 +121,17 @@ class _Container:
             f.write(f"""#!/bin/bash
 echo "$*" >> {self.calls!r}
 export COPYFILE_DISABLE=1       # macOS tar: no ._ files
+if [ "$1 $3 $4" = "exec sh -c" ]; then
+    case " {" ".join(unanswered)} " in
+      *" $2 "*) echo "Error response from daemon: container $2 is not running" >&2
+                exit 1 ;;
+    esac
+fi
 if [ "$1 $2 $3 $4" = "exec onionheaven sh -c" ]; then
     exec sh -c "${{5//\\/var\\/lib\\/onionheaven/{self.hub}}}"
+fi
+if [ "$1 $2 $3 $4 $6" = "exec onionpress-tor sh -c sh" ]; then
+    exec sh -c "$5" sh "${{7//\\/var\\/lib\\/onionnames/{self.names}}}"
 fi
 case "$*" in
   "exec onionpress-tor test -f /var/lib/onionnames/onionnames.db")
@@ -222,11 +235,26 @@ class TestCreateBackup(unittest.TestCase):
         self.assertNotIn("onionheaven_data", meta)
         self.assertFalse([m for m in self.logs if "refused" in m])
 
-    def test_no_answer_from_the_container_leaves_it_out_as_before(self):
-        with mock.patch.object(backup, "hub_data_state", return_value=None):
-            meta, members = self._backup(include_hub_data=False)
+    def test_no_answer_from_onionheaven_is_refused_a_backup_for_wordpress(self):
+        """Fails closed: a hub whose onionheaven container does not answer
+        (stopped, restarting, Docker busy) cannot say it is no hub."""
+        self._refused(backup.UNVERIFIED_BACKUP_REFUSED_MSG, unanswered=("onionheaven",))
+        self.assertTrue([m for m in self.logs if "refused (the Settings page's backup)" in m])
+
+    def test_no_answer_about_onionhomes_registry_is_refused_a_backup_for_wordpress(self):
+        """Fails closed: OnionHome is known by its registry, and a tor
+        container that does not answer the check (a failed `docker exec`)
+        cannot say there is none."""
+        self._refused(backup.UNVERIFIED_BACKUP_REFUSED_MSG, hub=False, onionhome=True,
+                      unanswered=("onionpress-tor",))
+        self.assertIn("exec onionpress-tor sh -c", "\n".join(self.container.calls_made()))
+
+    def test_no_answer_from_onionheaven_the_owners_backup_goes_ahead_without_it(self):
+        """The owner's backup is not handed to WordPress: it is made, says
+        the hub data is not in it, and holds none."""
+        meta, members = self._backup(include_hub_data=True, unanswered=("onionheaven",))
         _assert_no_hub_data(self, members)
-        self.assertNotIn("excludes_onionheaven_data", meta)
+        self.assertNotIn("onionheaven_data", meta)
         self.assertTrue([m for m in self.logs if "did not say whether" in m])
 
     def test_onionhomes_name_registry_stays_in(self):
@@ -261,7 +289,7 @@ class TestLinuxCreateBackup(unittest.TestCase):
 log() { echo "[log] $1" >> "$LOG_FILE"; }
 docker() {
     case "$1 $2" in
-        "exec onionpress-tor") echo "$ADDR" ;;
+        "exec onionpress-tor") [ -z "$NO_ADDR" ] || return 1; echo "$ADDR" ;;
         "image inspect") return 0 ;;     # the key helpers' tor image is here
         "volume ls") return 0 ;;         # no key volume: nothing is read
         *) return 1 ;;
@@ -300,7 +328,7 @@ sys.exit(2)' "$@"
         self.tmp = tempfile.mkdtemp(prefix="op-hub-off-wp-linux-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def _run(self, *args, recovery_key=False, **container):
+    def _run(self, *args, recovery_key=False, no_address=False, **container):
         c = _Container(self, self.tmp, **container)
         self.container = c
         out = os.path.join(self.tmp, "backup.zip")
@@ -317,7 +345,7 @@ sys.exit(2)' "$@"
             "LOG_FILE": os.path.join(self.tmp, "log"),
             "SRC": mv.SRC, "PY": sys.executable, "PW": PW, "ADDR": mv.ADDR,
             "WORDPRESS_DB_PASSWORD": "x", "ONIONPRESS_VERSION": "2.5.3",
-            "DOCKER_HOST": DOCKER_HOST,
+            "DOCKER_HOST": DOCKER_HOST, "NO_ADDR": "1" if no_address else "",
         }
         is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
         call = " ".join(["create_backup", '"$PW"', repr(out)] + list(args))
@@ -345,6 +373,35 @@ sys.exit(2)' "$@"
         stdout, log, out = self._run("--without-hub-data", hub=False, onionhome=True)
         self.assertIn(f"rc=3 refusal={backup.ONIONHOME_BACKUP_REFUSED_MSG}\n", stdout, log)
         self.assertFalse(os.path.exists(out))
+
+    def _assert_unverified(self, stdout, log, out):
+        self.assertIn(f"rc=3 refusal={backup.UNVERIFIED_BACKUP_REFUSED_MSG}\n", stdout, log)
+        self.assertFalse(os.path.exists(out))
+        self.assertEqual(self.container.hub_reads(), [])
+        self.assertIn("refused (the Settings page's backup)", log)
+
+    def test_without_hub_data_no_answer_from_onionheaven_is_refused(self):
+        """Fails closed, as on the Mac: a hub whose onionheaven container
+        does not answer cannot say it is no hub."""
+        self._assert_unverified(*self._run("--without-hub-data",
+                                           unanswered=("onionheaven",)))
+
+    def test_without_hub_data_no_answer_about_onionhome_is_refused(self):
+        self._assert_unverified(*self._run("--without-hub-data", hub=False, onionhome=True,
+                                           unanswered=("onionpress-tor",)))
+
+    def test_without_hub_data_no_address_is_refused(self):
+        """No address from the tor container (it stays empty, as for the
+        owner's backup): the canonical hub's and OnionHome's addresses
+        cannot be ruled out."""
+        self._assert_unverified(*self._run("--without-hub-data", hub=False, no_address=True))
+
+    def test_the_owners_backup_needs_no_answer(self):
+        """Without --without-hub-data nothing is asked: the owner's backup
+        is made even when the containers do not answer."""
+        stdout, log, out = self._run(hub=False, unanswered=("onionheaven", "onionpress-tor"))
+        self.assertIn("rc=0 refusal=\n", stdout, log)
+        self.assertTrue(os.path.exists(out))
 
     def test_the_owners_backup_keeps_it(self):
         """No recovery key: in the clear under the password, with a
@@ -511,7 +568,7 @@ docker() {
 }
 '''
 
-    def _run(self, hub):
+    def _run(self, hub, refusal=backup.HUB_BACKUP_REFUSED_MSG):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         sandbox = os.path.join(tmp, "container")
@@ -526,7 +583,7 @@ docker() {
             "TMPDIR": tmp, "LOG_FILE": os.path.join(tmp, "log"),
             "ARGS": os.path.join(tmp, "args"), "SANDBOX": sandbox,
             "ADDR": mv.ADDR, "HUB": "1" if hub else "0", "DOCKER_HOST": DOCKER_HOST,
-            "REFUSAL": backup.HUB_BACKUP_REFUSED_MSG,
+            "REFUSAL": refusal,
         }
         r = subprocess.run(["bash", "-c", self.PRELUDE + helpers
                             + "run_branch() {\n" + branch + "\n}\nrun_branch\n"],
@@ -544,6 +601,12 @@ docker() {
         self.assertEqual(args[2:], ["--without-hub-data", "--without-host-secrets"])
         self.assertEqual(result["success"], False)
         self.assertEqual(result["error"], backup.HUB_BACKUP_REFUSED_MSG)
+        self.assertEqual(self.handed_over, [])
+
+    def test_a_node_that_could_not_be_checked_hears_why(self):
+        args, result = self._run(hub=True, refusal=backup.UNVERIFIED_BACKUP_REFUSED_MSG)
+        self.assertEqual(result["success"], False)
+        self.assertEqual(result["error"], backup.UNVERIFIED_BACKUP_REFUSED_MSG)
         self.assertEqual(self.handed_over, [])
 
     def test_any_other_node_gets_its_backup(self):
@@ -572,6 +635,7 @@ class TestMacSettingsPageBackupBranch(unittest.TestCase):
     def test_the_messages_are_plain_text(self):
         """They go into the page, and Linux's into JSON."""
         for text in (backup.HUB_BACKUP_REFUSED_MSG, backup.ONIONHOME_BACKUP_REFUSED_MSG,
+                     backup.UNVERIFIED_BACKUP_REFUSED_MSG,
                      backup.HUB_DATA_RESTORE_REFUSED_MSG,
                      backup.ONIONHOME_RESTORE_REFUSED_MSG):
             self.assertRegex(text, r"\A[A-Za-z0-9 .,:;'()-]+\Z")
@@ -593,8 +657,22 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
     def test_who_is_refused(self):
         refuse = backup.settings_page_backup_refusal
         hub, home = backup.HUB_BACKUP_REFUSED_MSG, backup.ONIONHOME_BACKUP_REFUSED_MSG
+        unverified = backup.UNVERIFIED_BACKUP_REFUSED_MSG
         self.assertIsNone(refuse(mv.ADDR, "none", data_dir=self.tmp))
-        self.assertIsNone(refuse(mv.ADDR, None, data_dir=self.tmp))
+        # Not checked (a container did not answer, no address): refused,
+        # fail closed.
+        for state in (None, "", "hub?"):
+            with self.subTest(hub_state=state):
+                self.assertEqual(refuse(mv.ADDR, state, data_dir=self.tmp), unverified)
+        for address in ("", None):
+            with self.subTest(address=address):
+                self.assertEqual(refuse(address, "none", data_dir=self.tmp), unverified)
+        self.onionhome.return_value = None
+        self.assertEqual(refuse(mv.ADDR, "none", data_dir=self.tmp), unverified)
+        # What is known still says which it is.
+        self.assertEqual(refuse(mv.ADDR, "hub", data_dir=self.tmp), hub)
+        self.assertEqual(refuse(backup.ONIONHOME_ADDRESS, None, data_dir=self.tmp), home)
+        self.onionhome.return_value = False
         self.assertEqual(refuse(backup.ONIONHEAVEN_HUB_ADDRESS, "none", data_dir=self.tmp), hub)
         self.assertEqual(refuse(mv.ADDR, "hub", data_dir=self.tmp), hub)
         self.assertEqual(refuse(backup.ONIONHOME_ADDRESS, "none", data_dir=self.tmp), home)
@@ -608,14 +686,22 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
         self.assertEqual(refuse(mv.ADDR, "none", data_dir=self.tmp), home)
 
     def test_the_cli_helper_says_why(self):
-        for kw, rc, want in (({"hub_state": "hub"}, 3, backup.HUB_BACKUP_REFUSED_MSG),
-                             ({"hub_state": "none"}, 0, "")):
-            out = io.StringIO()
-            with mock.patch.object(backup, "hub_data_state", return_value=kw["hub_state"]), \
-                    contextlib.redirect_stdout(out):
-                self.assertEqual(OnionPressCLI.cmd_settings_page_backup_check(
-                    mv.ADDR, self.tmp), rc)
-            self.assertEqual(out.getvalue().strip(), want)
+        unverified = backup.UNVERIFIED_BACKUP_REFUSED_MSG
+        for hub_state, onionhome, address, rc, want in (
+                ("hub", False, mv.ADDR, 3, backup.HUB_BACKUP_REFUSED_MSG),
+                ("none", True, mv.ADDR, 3, backup.ONIONHOME_BACKUP_REFUSED_MSG),
+                (None, False, mv.ADDR, 3, unverified),
+                ("none", None, mv.ADDR, 3, unverified),
+                ("none", False, "", 3, unverified),
+                ("none", False, mv.ADDR, 0, "")):
+            with self.subTest(hub_state=hub_state, onionhome=onionhome, address=address):
+                self.onionhome.return_value = onionhome
+                out = io.StringIO()
+                with mock.patch.object(backup, "hub_data_state", return_value=hub_state), \
+                        contextlib.redirect_stdout(out):
+                    self.assertEqual(OnionPressCLI.cmd_settings_page_backup_check(
+                        address, self.tmp), rc)
+                self.assertEqual(out.getvalue().strip(), want)
 
     def test_the_addresses_are_the_tor_images(self):
         tor_dir = os.path.join(PROJECT_ROOT, "app", "Resources", "docker", "tor")
@@ -640,6 +726,48 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
             self.assertNotIn("server_active", text[start:start + 3000].replace(
                 "status.json's onionheaven.server_active", "").replace(
                 "status.json's server_active", ""))
+
+
+class TestOnionHomeRegistryCheck(unittest.TestCase):
+    """backup.onionhome_registry_present, which the refusal asks."""
+
+    def test_onionhomes_registry_check_answers_only_yes_or_no(self):
+        """A failed `docker exec` and a missing file both exit 1: the
+        answer is on stdout, and anything but a plain yes or no is no
+        answer (None), never "not OnionHome"."""
+        cases = (
+            (subprocess.CompletedProcess([], 0, "yes\n", ""), True),
+            (subprocess.CompletedProcess([], 0, "no\n", ""), False),
+            (subprocess.CompletedProcess([], 1, "", "Error response from daemon: "
+                                         "container onionpress-tor is not running"), None),
+            (subprocess.CompletedProcess([], 1, "no\n", ""), None),
+            (subprocess.CompletedProcess([], 0, "", ""), None),
+            (subprocess.CompletedProcess([], 0, "yes no\n", ""), None),
+            (subprocess.TimeoutExpired(["docker"], 10), None),
+            (FileNotFoundError("docker"), None),
+        )
+        for result, want in cases:
+            with self.subTest(result=result):
+                with mock.patch.object(backup.subprocess, "run",
+                                       side_effect=[result]) as fake:
+                    self.assertIs(backup.onionhome_registry_present(), want)
+                argv = fake.call_args.args[0]
+                self.assertEqual(argv[:6], ["docker", "exec", "onionpress-tor", "sh", "-c",
+                                            'if [ -f "$1" ]; then echo yes; else echo no; fi'])
+                self.assertEqual(argv[6:], ["sh", "/var/lib/onionnames/onionnames.db"])
+        # The script itself, on a sandbox folder: yes only for a file.
+        script = argv[5]
+        tmp = tempfile.mkdtemp(prefix="op-onionhome-check-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        f = os.path.join(tmp, "onionnames.db")
+        d = os.path.join(tmp, "a-folder")
+        os.makedirs(d)
+        with open(f, "w") as fh:
+            fh.write("x")
+        for path, want in ((f, "yes"), (d, "no"), (os.path.join(tmp, "none"), "no")):
+            r = subprocess.run(["sh", "-c", script, "sh", path], capture_output=True,
+                               text=True, timeout=10)
+            self.assertEqual((r.returncode, r.stdout.strip()), (0, want), path)
 
 
 # ---------------------------------------------------------------------------

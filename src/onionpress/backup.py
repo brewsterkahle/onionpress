@@ -64,7 +64,8 @@ echo none
 # What never passes through WordPress in a backup. The Settings page's backup
 # is handed to the WordPress container for download, and its password is the
 # admin password WordPress sees in plain text: code running there would have
-# both. On an OnionHeaven hub or on OnionHome that backup is refused
+# both. On an OnionHeaven hub or on OnionHome that backup is refused, and
+# on a node whose checks did not answer, since that could be either
 # (create_backup(include_hub_data=False) raises SettingsPageBackupRefused;
 # Linux: create_backup --without-hub-data returns 3): even without the hub's
 # registry and registrants' keys it carries the node's own onion service
@@ -90,6 +91,12 @@ ONIONHOME_BACKUP_REFUSED_MSG = (
     "through WordPress, and code running there could use it to answer name "
     "lookups in its place. Nothing was backed up: back it up from the "
     "OnionPress app (Backup... in its menu) or with onionpress backup.")
+UNVERIFIED_BACKUP_REFUSED_MSG = (
+    "OnionPress could not check whether this node is an OnionHeaven hub or "
+    "OnionHome (its containers did not answer), and a backup made here goes "
+    "through WordPress. Nothing was backed up: try again once OnionPress is "
+    "running, or back up from the OnionPress app (Backup... in its menu) or "
+    "with onionpress backup.")
 HUB_DATA_RESTORE_REFUSED_MSG = (
     "This backup holds an OnionHeaven hub's registry and its registrants' "
     "onion service keys, which are never restored through WordPress. Nothing "
@@ -935,14 +942,18 @@ def accepts_registrations(data_dir=None):
 
 def onionhome_registry_present():
     """True if OnionHome's name registry is on its volume (only OnionHome
-    has one)."""
+    has one), False if it is not, None if the tor container did not say
+    (a failed `docker exec` and a missing file both exit 1, so the answer
+    comes on stdout)."""
     try:
-        r = subprocess.run(['docker', 'exec', 'onionpress-tor', 'test', '-f',
+        r = subprocess.run(['docker', 'exec', 'onionpress-tor', 'sh', '-c',
+                            'if [ -f "$1" ]; then echo yes; else echo no; fi', 'sh',
                             f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
-                           capture_output=True, timeout=10)
+                           capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
-        return False
-    return r.returncode == 0
+        return None
+    answer = r.stdout.strip() if r.returncode == 0 else ""
+    return {"yes": True, "no": False}.get(answer)
 
 
 class SettingsPageBackupRefused(ValueError):
@@ -965,12 +976,23 @@ def settings_page_backup_refusal(own_address, hub_state, *, data_dir=None):
     hub_data_state); OnionHome's name registry is on its volume. Not
     status.json's onionheaven.server_active: on Linux that is true on every
     node.
+
+    Fails closed: a node any of these could not be asked about (no own
+    address, *hub_state* anything but "none", no answer about OnionHome's
+    registry) is refused too (UNVERIFIED_BACKUP_REFUSED_MSG), since it
+    could be either. This backup needs the containers anyway, so the cost
+    is a retry, never a hub's or OnionHome's key handed to WordPress.
     """
     if (own_address == ONIONHEAVEN_HUB_ADDRESS or hub_state == "hub"
             or accepts_registrations(data_dir)):
         return HUB_BACKUP_REFUSED_MSG
-    if own_address == ONIONHOME_ADDRESS or onionhome_registry_present():
+    if own_address == ONIONHOME_ADDRESS:
         return ONIONHOME_BACKUP_REFUSED_MSG
+    onionhome = onionhome_registry_present()
+    if onionhome:
+        return ONIONHOME_BACKUP_REFUSED_MSG
+    if not own_address or hub_state != "none" or onionhome is None:
+        return UNVERIFIED_BACKUP_REFUSED_MSG
     return None
 
 
@@ -988,8 +1010,9 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         log_func: Callable for progress logging
         include_hub_data: False for a backup that is handed to WordPress (the
             Settings page's download): refused with SettingsPageBackupRefused
-            on an OnionHeaven hub or OnionHome (settings_page_backup_refusal),
-            before anything is copied. True for one written to the owner's
+            on an OnionHeaven hub or OnionHome, or on a node whose checks did
+            not answer (settings_page_backup_refusal), before anything is
+            copied. True for one written to the owner's
             disk: a hub's registry and registrants' keys go in, sealed to the
             hub's recovery key when one is set up (stage_hub_backup). Every
             caller passes it.
@@ -1046,8 +1069,9 @@ def create_backup(onion_address, username, password, output_path, version, log_f
 
         # 1b. Is this an OnionHeaven hub (its volume holds registrants' keys
         #     or registry rows)? A backup handed to WordPress (the Settings
-        #     page's) is refused on a hub or on OnionHome before anything
-        #     else is copied: the key just staged is the node's own.
+        #     page's) is refused on a hub or on OnionHome, or when that could
+        #     not be checked, before anything else is copied: the key just
+        #     staged is the node's own.
         hub = hub_data_state()
         if not include_hub_data:
             refusal = settings_page_backup_refusal(onion_address, hub, data_dir=_data_dir)

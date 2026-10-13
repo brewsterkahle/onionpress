@@ -807,8 +807,9 @@ class OnionPressCLI:
         """For the Linux launcher's create_backup --without-hub-data (the
         Settings page's backup): exit 0 when this node may be backed up
         there; exit 3, printing why on stdout, on an OnionHeaven hub or
-        OnionHome (backup.settings_page_backup_refusal). *address* is the
-        node's onion address, from its tor container."""
+        OnionHome, or when that could not be checked
+        (backup.settings_page_backup_refusal: fails closed). *address* is
+        the node's onion address, from its tor container (empty: refused)."""
         from .backup import hub_data_state, settings_page_backup_refusal
         refusal = settings_page_backup_refusal(address, hub_data_state(),
                                                data_dir=data_dir)
@@ -1494,7 +1495,8 @@ def main(argv: list[str] = None) -> int:
     p_sp_backup = sub.add_parser(
         "settings-page-backup-check",
         help="Exit 3 and say why if this node must not be backed up through "
-             "the WordPress Settings page (an OnionHeaven hub or OnionHome)")
+             "the WordPress Settings page (an OnionHeaven hub or OnionHome, "
+             "or one that could not be checked)")
     p_sp_backup.add_argument("--address", default="",
                              help="This node's onion address")
 
