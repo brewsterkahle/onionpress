@@ -100,7 +100,8 @@ OPTIONS = {
                  'onionpress.auto_login',
                  'onionpress.splash_tips',
                  'onionpress.wp_files',
-                 'onionpress.wordpress_egress'],
+                 'onionpress.wordpress_egress',
+                 'onionpress.thumbnails'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size
