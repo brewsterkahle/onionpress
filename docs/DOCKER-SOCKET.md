@@ -458,16 +458,100 @@ theirs on the network that reaches the internet. It is IPv4-only for the
 same reason. `tests/test_wordpress_egress.py` holds all of this, and runs
 the script against a fake iptables.
 
+**The Tor side.** `tor`, `onionheaven`, `onionpress-cloudflared` and the
+takeover workers need public Tor relays and Cloudflare's edge, nothing
+else. Until this they also reached the publisher's LAN, the Docker host's
+own services and, on macOS, every service on the Mac's loopback: the Colima
+VM's gateway, `192.168.5.2` (`host.lima.internal`, also
+`host.docker.internal` in the containers), is the Mac's `127.0.0.1` to
+Lima. Measured 2026-10-13 from a container on a plain bridge in a throwaway
+VM: a listener on the Mac's `127.0.0.1` answered (as from `127.0.0.1`), and
+so did WordPress's published port through Lima's forward, as the gateway
+auto-login admits. `onionpress-network`'s bridge now has a fixed name,
+`onionpress-tor0`, and the `ONIONPRESS-TOR` chain sees everything that
+comes in from it and leaves it or is for the host:
+
+| | |
+|---|---|
+| replies (`RELATED,ESTABLISHED`) | pass: Tor's published SOCKS port, docker-proxy's connections |
+| DNS (udp/tcp 53), to anywhere | pass: Docker's resolver asks a LAN or on-host DNS server (Pi-hole) from the container's own namespace when the host's `resolv.conf` names one |
+| the host itself (`addrtype LOCAL`), `10/8`, `100.64/10`, `127/8`, `169.254/16`, `172.16/12`, `192.168/16`, `224/4`, `240/4` (IPv6: `fc00::/7`, `fe80::/10`, `ff00::/8`) | `ONIONPRESS-TOR-REFUSE`: logged as `CLEARNET-local-blocked:` (6/min) and refused |
+| anything else (the internet) | pass |
+
+`198.18.0.0/15` stays open: fake-IP proxies on the publisher's machine
+answer public names with it, which cloudflared would then fail to reach. A
+Cloudflare tunnel whose ingress points at a LAN service (not OnionPress's
+`wordpress:80`) stops reaching it. Docker cannot rename a network's
+bridge, so an `onionpress-network` created before has Docker's `br-<id>`,
+which the rules miss: both launchers (`migrate_tor_network`, identical) and
+`ContainerManager.migrate_tor_network` remove it before the first
+`compose up` of a start, and compose creates it on `onionpress-tor0`. They
+remove `onionheaven` first (it starts workers on that network), then every
+OnionPress container on it (compose recreates its services, the heartbeat
+its workers) and only disconnect anything else. Compose 2.40 would itself
+recreate a network whose options changed, but its `network rm` fails
+while a takeover worker, which is no compose service, is attached, and
+the whole `compose up` with it (measured).
+
+**The published port.** On Linux WordPress's port is published on
+`0.0.0.0`. Docker skips its DNAT for anything that comes in from one of its
+bridges (`-A DOCKER -i <bridge> -j RETURN` for each), so a container on
+any bridge, OnionPress's or another project's, that connects to any host
+address on that port reaches `docker-proxy` on `INPUT`, which hands the
+connection to WordPress from the gateway: auto-login's "local" scope and
+`/__op_proxy.php` admitted it (a token is still required; measured from
+another network's container, peer = the gateway). The script adds
+`INPUT ! -i lo -p tcp --dport <ONIONPRESS_WP_PORT> -j ONIONPRESS-WP`: the
+publisher's browser (loopback; Lima's forward on macOS) and LAN visitors
+(DNAT'd to WordPress, so never on `INPUT`, and seen with their own
+address) are unchanged; containers get "No route to host". The port, with
+this user's offset, is the script's last argument (`--wp-port`; both
+launchers pass `$ONIONPRESS_WP_PORT`); a changed port replaces the rule.
+The VM's drop-in carries the port; the `.deb`'s cannot know it and leaves
+the rule alone, so after a reboot of a Linux system-Docker host other
+projects' containers can reach the port until OnionPress starts (the Tor
+side cannot, its chain is back first). With Docker's userland proxy
+turned off (not the default) there is no docker-proxy in the path: a
+container on another bridge is DNAT'd and, on Docker 27, should be dropped
+by Docker's own inter-network isolation; that configuration was not
+measured, and a Docker that forwards it would show the gateway again
+(its source is masqueraded).
+
+**Rootless Docker's port driver.** Docker's rootless default, RootlessKit's
+`builtin` port driver, hands every client of a published port to the
+namespace without its address, and docker-proxy then connects to WordPress
+from the gateway: the publisher's browser and a LAN device look the same
+(measured on Docker 27.4 / RootlessKit 2.3.1: `127.0.0.1` and a client in
+another network namespace both arrived as the gateway). So with the Linux
+default bind (`0.0.0.0`, for a headless setup from another device),
+auto-login's "local" scope admits LAN devices; what remains is the token
+(single use, 2 minutes, handed only to this machine's browser).
+`/__op_proxy.php` is not installed on Linux. The ways out are not
+OnionPress's alone to take: `ONIONPRESS_BIND_HOST=127.0.0.1` (no LAN
+setup), the `slirp4netns` port driver (`DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER`
+in the user's docker.service: LAN clients keep their address, the
+publisher's browser arrives as `10.0.2.2`, which auto-login would then have
+to admit; measured), or RootlessKit 3's builtin driver with Docker's
+userland proxy off. The Linux launcher logs a `NOTE` at every start while
+this holds (`note_if_lan_looks_local`).
+
 **Upgrading** needs nothing by hand and no image publish: the new compose
-file moves `wordpress` and `db` (Compose recreates them), and the first
-start puts the rules in place before it does. The macOS launcher used to
+file moves `wordpress` and `db` (Compose recreates them), the first start
+recreates `onionpress-network` on `onionpress-tor0` (a takeover worker on
+the hub is removed and comes back with the heartbeat), and puts the rules
+in place before either. The macOS launcher used to
 add `LOG` rules keyed by WordPress's and MariaDB's addresses on
 `onionpress-network`; the script removes them, since those addresses go to
 other containers after the move.
 
 **Checking a live install.** In the VM (macOS) or on the host (Linux system
-Docker), `sudo iptables -S ONIONPRESS-WP` shows the three rules and
-`sudo iptables -S DOCKER-USER` and `sudo iptables -S INPUT` the jumps;
+Docker), `sudo iptables -S ONIONPRESS-WP` shows the three rules,
+`sudo iptables -S ONIONPRESS-TOR` and `ONIONPRESS-TOR-REFUSE` the Tor
+side's, and `sudo iptables -S DOCKER-USER` and `sudo iptables -S INPUT` the
+jumps (the port rule among them); `docker network inspect -f '{{json
+.Options}}' onionpress-network` names `onionpress-tor0`;
+`docker exec onionpress-tor curl -s -m 5 http://192.168.5.2:9077/`
+(macOS) or `http://<a LAN address>/` fails at once;
 `docker exec onionpress-wordpress php -r 'var_dump(@fsockopen("1.1.1.1",
 443, $e, $s, 5));'` prints `bool(false)` (error 113), and
 `docker exec onionpress-wordpress curl -s --socks5-hostname

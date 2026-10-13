@@ -328,6 +328,38 @@
   IPv4-only. It replaced the Mac launcher's per-address LOG rules
   (`install_clearnet_logging`), which the script removes.
   `tests/test_wordpress_egress.py` (fake iptables).
+- **The Tor side reaches only the internet.** onionpress-network's bridge
+  is fixed too, `onionpress-tor0`; the same script's ONIONPRESS-TOR chain
+  (DOCKER-USER + INPUT) sends the host itself (`addrtype LOCAL`) and
+  10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.168/16, 224/4, 240/4
+  (fc00::/7, fe80::/10, ff00::/8) to ONIONPRESS-TOR-REFUSE (logged
+  `CLEARNET-local-blocked:`), after replies and DNS (udp/tcp 53: Docker's
+  resolver asks a LAN or on-host server from the container's namespace).
+  Not 198.18/15 (fake-IP proxies). Before, tor, onionheaven, cloudflared
+  and takeover workers reached the LAN, the host's services and, through
+  192.168.5.2 (Lima maps it to the Mac's 127.0.0.1), everything on the
+  Mac's loopback. Docker cannot rename a bridge: both launchers'
+  `migrate_tor_network` (identical, test-enforced) and
+  `ContainerManager.migrate_tor_network` remove an old onionpress-network
+  before the first `compose up` (onionheaven first, then OnionPress's
+  containers on it; anything else is only disconnected). Compose 2.40
+  would recreate it itself, but fails the start while a takeover worker
+  is attached. A Cloudflare tunnel whose ingress names a LAN service
+  stops reaching it.
+- **No container reaches WordPress's published port.** Docker skips its
+  DNAT for anything from one of its bridges, so docker-proxy handed any
+  container's `<host address>:<port>` to WordPress as the gateway (Linux
+  0.0.0.0 bind; on macOS through the Mac's loopback and Lima's forward).
+  INPUT `! -i lo -p tcp --dport $ONIONPRESS_WP_PORT -j ONIONPRESS-WP`
+  closes it for every bridge, other projects' too; loopback and DNAT'd LAN
+  visitors are untouched. The port is the script's 6th argument
+  (`--wp-port`, both launchers pass `$ONIONPRESS_WP_PORT`; a changed port
+  leaves no rule behind; the VM drop-in carries it, the `.deb`'s cannot and
+  leaves the rule as it is). Under rootless Docker's default (RootlessKit
+  "builtin") port driver every client of the port, LAN included, arrives
+  as the gateway anyway (measured); the Linux launcher says so at start
+  (`note_if_lan_looks_local`) unless the bind is 127.0.0.1; the token is
+  the remaining check there.
 
 ## Containers Drop Every Capability
 - Every compose service (both compose files), every takeover worker
