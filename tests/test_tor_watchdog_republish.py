@@ -177,17 +177,22 @@ class TestRepublishRequest(unittest.TestCase):
             self.mod.check_stalls(None, self.state)
         crr.assert_called_once()
 
-    def test_startup_discards_a_stale_request(self):
-        # run() clears any file left from the container's previous life
-        # before its startup ADD_ONION (itself a fresh publish).
+    def test_clear_is_idempotent(self):
         self._request()
         self.mod.clear_republish_request()
         self.assertFalse(os.path.exists(self.path))
-        self.mod.clear_republish_request()  # idempotent
+        self.mod.clear_republish_request()
+
+    def test_a_restarted_watchdog_keeps_a_pending_request(self):
+        # Issue #313: a request written while the watchdog was down waits
+        # for its restart. A file from the container's previous life is
+        # removed by entrypoint.sh's supervisor (test_tor_watchdog_supervised),
+        # not by run().
         with open(_WATCHDOG) as f:
             src = f.read()
         start = src.index("def run():")
-        self.assertIn("clear_republish_request()", src[start:start + 1500])
+        end = src.index("\n    while True:", start)
+        self.assertNotIn("clear_republish_request()", src[start:end])
 
     def test_reason_is_flattened_and_bounded(self):
         self._request("a\nb\t" + "x" * 500)
