@@ -34,7 +34,7 @@ from . import auto_login, key_manager
 # same image the rest of a locally built stack uses.
 DEFAULT_TOR_IMAGE = os.environ.get(
     "ONIONPRESS_TOR_IMAGE",
-    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:6e9906fc953169facd1b6605db4eb9e19b2b56a38254a0305d28e7b224ee59e9",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca",
 )
 
 # How the menubar, the tray, scrub and the launchers hand a backup password
