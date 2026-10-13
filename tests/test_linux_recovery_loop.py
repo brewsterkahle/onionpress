@@ -272,14 +272,17 @@ class TestLinuxEntryPointsAreInstalled(unittest.TestCase):
         self.assertIn("onionpress-tray", self._entry_points())
 
     def test_each_is_installed(self):
-        install = _read("linux/install.sh")
-        deb = _read("build/build-linux.sh")
+        # linux/install-tree.sh is the one list both installers (and
+        # `onionpress update`) install from.
+        tree = _read("linux/install-tree.sh")
+        self.assertIn("linux/install-tree.sh", _read("linux/install.sh"))
+        self.assertIn("linux/install-tree.sh", _read("build/build-linux.sh"))
         for name in self._entry_points():
             if name in self.DEV_ONLY:
                 continue
             with self.subTest(name):
-                self.assertIn(f"linux/{name}", install, "linux/install.sh")
-                self.assertIn(f"linux/{name}", deb, "build/build-linux.sh")
+                self.assertRegex(tree, rf"(?m)^file\s+linux/{re.escape(name)}\s",
+                                 "linux/install-tree.sh")
 
     def test_dev_only_entries_exist(self):
         for name in self.DEV_ONLY:
