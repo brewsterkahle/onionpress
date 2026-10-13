@@ -480,5 +480,30 @@ class TestHtaccessDuplicatesStayInSync(unittest.TestCase):
         )
 
 
+class TestThemeOnionnameIsTheSubsiteOwner(unittest.TestCase):
+    """The theme's onionpress_get_onionname() names the Follow button. It
+    read $blog->user_id, which WP_Site does not have, so a subsite fell
+    through to its lowest-ID administrator: the network owner, whom
+    `wp site create` adds to every site (issue #321). The owner is the
+    user whose login is the subsite's path, /<onionname>/."""
+
+    def test_reads_the_path_not_a_missing_property(self):
+        root = pathlib.Path(__file__).resolve().parent.parent
+        src = (root / "app/Resources/themes/onionpress/functions.php").read_text()
+        start = src.index("function onionpress_get_onionname()")
+        body = src[start:src.index("\n}\n", start)]
+        self.assertNotIn("->user_id", body)
+        path = body.index("trim( (string) $blog->path, '/' )")
+        login = body.index("get_user_by( 'login', $slug )")
+        member = body.index("is_user_member_of_blog( $user->ID, $blog_id )")
+        fallback = body.index("'role'    => 'administrator'")
+        self.assertLess(path, login)
+        self.assertLess(login, member)
+        self.assertLess(member, fallback)
+        # create_primary_subsite names the subsite after the login.
+        logic = (root / "src/onionpress/setup_logic.py").read_text()
+        self.assertIn('f"--slug={onionname}"', logic)
+
+
 if __name__ == "__main__":
     unittest.main()
