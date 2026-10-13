@@ -402,5 +402,23 @@ class TestUpdateSource(unittest.TestCase):
         self.assertLess(branch.index("update_source_checkout"), branch.index("install-tree.sh"))
 
 
+class TestHeartbeatClientBothScopes(unittest.TestCase):
+    """stop, restart and update stopped and started the heartbeat client at
+    system scope only (sudo systemctl), while installs run it as a user
+    unit: it kept beating with the site down."""
+
+    def test_stop_restart_update(self):
+        text = _read(LINUX)
+        for label in ("stop", "restart", "update"):
+            with self.subTest(label):
+                branch = _case_branch(text, label)
+                code = "\n".join(l for l in branch.splitlines() if not l.lstrip().startswith("#"))
+                self.assertNotIn("systemctl", code)
+                self.assertLess(code.index("stop_heartbeat_client"), code.index("stop_containers"))
+                if label != "stop":
+                    self.assertLess(code.index("start_containers"),
+                                    code.index("start_heartbeat_client"))
+
+
 if __name__ == "__main__":
     unittest.main()

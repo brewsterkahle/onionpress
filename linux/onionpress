@@ -2274,8 +2274,8 @@ EOF
 # it loaded at start and sends it with every /online. Before that key goes
 # or is replaced it is stopped, or its next beat would put the key back on
 # the hub after the /unregister. Current installs run it as a user unit,
-# old ones as a system unit: both are stopped. (stop/restart/update below
-# still use the system unit only.)
+# old ones as a system unit: both are stopped (by stop, restart and update
+# too).
 stop_heartbeat_client() {
     if systemctl --user is-active onionpress-heartbeat.service >/dev/null 2>&1; then
         log "Stopping heartbeat client..."
@@ -3706,30 +3706,24 @@ main() {
 
         stop)
             setup_db_passwords
-            # Stop heartbeat client first (sends /offline before containers go down)
-            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Stopping heartbeat client..."
-                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-            fi
+            # Stop heartbeat client first (sends /offline before containers
+            # go down): the user unit current installs run, or an old
+            # install's system unit (stop_heartbeat_client). This used to
+            # stop the system unit only, so a user unit kept beating.
+            stop_heartbeat_client
             stop_containers
             ;;
 
         restart)
             setup_db_passwords
             # Stop heartbeat client first (sends /offline before containers go down)
-            if systemctl is-active onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Stopping heartbeat client..."
-                sudo systemctl stop onionpress-heartbeat 2>>"$LOG_FILE" || true
-            fi
+            stop_heartbeat_client
             stop_containers
             start_containers
             wait_for_services
             write_status
-            # Restart heartbeat client if service exists
-            if systemctl list-unit-files onionpress-heartbeat.service >/dev/null 2>&1; then
-                log "Starting heartbeat client..."
-                sudo systemctl start onionpress-heartbeat 2>>"$LOG_FILE" || log "WARNING: Failed to start heartbeat client"
-            fi
+            # Start it again where its unit is enabled
+            start_heartbeat_client
             ;;
 
         status)
@@ -4072,18 +4066,16 @@ sys.exit(0 if provision_interactive() else 1)
                 docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
             fi
 
-            # Restart
+            # Restart, the heartbeat client too (its script was replaced):
+            # stopped first, so it sends /offline while the site goes down.
             log "Restarting OnionPress..."
             echo "  Restarting OnionPress..."
+            stop_heartbeat_client
             stop_containers
             start_containers
             wait_for_services
             write_status
-
-            # Restart heartbeat client service if it exists
-            if systemctl list-unit-files onionpress-heartbeat.service >/dev/null 2>&1; then
-                sudo systemctl restart onionpress-heartbeat 2>>"$LOG_FILE" || log "WARNING: Failed to restart heartbeat client"
-            fi
+            start_heartbeat_client
 
             log "Update complete: $new_version"
             echo "  Update complete! Now running OnionPress $new_version."
