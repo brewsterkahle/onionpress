@@ -256,20 +256,55 @@ mkdir -p /var/lib/tor
 chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || chown -R tor:tor /var/lib/tor 2>/dev/null || true
 chmod 700 /var/lib/tor
 
-# Convert the delivered PEM key to C Tor's key files when those are missing
-# (first run, key import, restore, or an install that last ran on arti).
+# Derive C Tor's key files from the delivered PEM whenever they are not an
+# exact copy of it: missing (first run, key import, restore, an install that
+# last ran on arti), damaged (a torn write or a damaged filesystem left a
+# secret key that is not 96 bytes) or holding another key. Issue #311: only
+# "missing" was handled, and a damaged secret key made the watchdog mint a
+# NEW onion address and write it over the old one. The PEM is the identity;
+# the old files are moved aside, never deleted.
 for nickname in wordpress healthcheck; do
     PEM_KEY="${KEYS_DIR}/${nickname}/ks_hs_id.ed25519_expanded_private"
     CTOR_DIR="/var/lib/tor/hidden_service/${nickname}"
-    CTOR_SECRET="${CTOR_DIR}/hs_ed25519_secret_key"
-    if [ -f "$PEM_KEY" ] && [ ! -f "$CTOR_SECRET" ]; then
-        echo "Converting delivered key for $nickname to C Tor format..."
-        # Unchecked, a failed conversion left the directory without a secret
-        # key and C Tor minted a NEW onion address; the host only saw a
-        # "hostname mismatch". A visible restart loop beats a silent re-key.
-        python3 /key-convert.py arti-to-ctor "$PEM_KEY" "$CTOR_DIR" \
-            || { echo "ERROR: key conversion failed for $nickname — refusing to start: C Tor would mint a new onion address" >&2; exit 1; }
-    fi
+    [ -f "$PEM_KEY" ] || continue
+    key_state=$(python3 /key-convert.py check-ctor "$PEM_KEY" "$CTOR_DIR" 2>&1)
+    key_rc=$?
+    case "$key_rc" in
+        0) continue ;;
+        3)
+            echo "Key files for $nickname: $key_state — deriving them again from the delivered key"
+            # Move whatever is there aside, so nothing that was a key is lost.
+            aside="/var/lib/tor/key-set-aside/${nickname}-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+            for f in hs_ed25519_secret_key hs_ed25519_public_key hostname; do
+                if [ -e "$CTOR_DIR/$f" ] || [ -L "$CTOR_DIR/$f" ]; then
+                    { mkdir -p "$aside" && chmod 700 /var/lib/tor/key-set-aside "$aside" \
+                        && mv "$CTOR_DIR/$f" "$aside/$f"; } \
+                        || { echo "ERROR: could not move $CTOR_DIR/$f aside — refusing to start rather than overwrite it" >&2; exit 1; }
+                fi
+            done
+            if [ -d "$aside" ]; then
+                echo "WARNING: the previous key files for $nickname are kept in $aside" >&2
+            fi
+            ;;
+        *)
+            # Nothing to compare with or derive from. C Tor's own files
+            # still serve if they are intact; if they are not, the watchdog
+            # refuses to mint a new address for a service that had one.
+            echo "WARNING: $nickname: $key_state — C Tor's key files cannot be checked against it" >&2
+            if [ ! -f "$CTOR_DIR/hs_ed25519_secret_key" ]; then
+                echo "ERROR: no usable key for $nickname — refusing to start: C Tor would mint a new onion address" >&2
+                exit 1
+            fi
+            continue
+            ;;
+    esac
+    # Unchecked, a failed conversion left the directory without a secret
+    # key and C Tor minted a NEW onion address; the host only saw a
+    # "hostname mismatch". A visible restart loop beats a silent re-key.
+    python3 /key-convert.py arti-to-ctor "$PEM_KEY" "$CTOR_DIR" \
+        || { echo "ERROR: key conversion failed for $nickname — refusing to start: C Tor would mint a new onion address" >&2; exit 1; }
+    python3 /key-convert.py check-ctor "$PEM_KEY" "$CTOR_DIR" >/dev/null \
+        || { echo "ERROR: $nickname's key files still differ from the delivered key after conversion — refusing to start" >&2; exit 1; }
 done
 
 # Set ownership on hidden service dirs (C Tor is strict about this)

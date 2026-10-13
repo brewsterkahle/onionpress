@@ -443,11 +443,13 @@ class KeyConvertWritesTest(unittest.TestCase):
             self.assertEqual(f.read(), kc.CTOR_SECRET_HEADER + self.expanded)
         with open(os.path.join(self.out, "hs_ed25519_public_key"), "rb") as f:
             self.assertEqual(f.read(), kc.CTOR_PUBLIC_HEADER + self.public)
+        with open(os.path.join(self.out, "hostname")) as f:
+            self.assertEqual(f.read(), kc._onion_address(self.public) + ".onion\n")
         for name in os.listdir(self.out):
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.out, name)).st_mode),
-                             0o600)
+                             0o644 if name == "hostname" else 0o600, name)
         self.assertEqual(sorted(os.listdir(self.out)),
-                         ["hs_ed25519_public_key", "hs_ed25519_secret_key"])
+                         ["hostname", "hs_ed25519_public_key", "hs_ed25519_secret_key"])
 
     def test_no_short_secret_key_after_a_failure(self):
         """The entrypoint converts only while the secret key is missing: a
@@ -495,7 +497,9 @@ class WatchdogGeneratedKeyTest(unittest.TestCase):
                      f"{base64.b64encode(self.key).decode()}\r\n250 OK\r\n")
 
     def test_saved_whole(self):
-        self.assertEqual(wd._save_generated_key(self.dir, self.resp), self.sid)
+        sid, key_b64 = wd._parse_generated_key(self.resp)
+        self.assertEqual(sid, self.sid)
+        self.assertTrue(wd._save_generated_key(self.dir, sid, key_b64))
         with open(os.path.join(self.dir, "hs_ed25519_secret_key"), "rb") as f:
             self.assertEqual(f.read(), b"== ed25519v1-secret: type0 ==\x00\x00\x00" + self.key)
         with open(os.path.join(self.dir, "hostname")) as f:
@@ -507,7 +511,8 @@ class WatchdogGeneratedKeyTest(unittest.TestCase):
         with open(path, "wb") as f:
             f.write(b"x" * 96)
         with mock.patch.object(wd.os, "fsync", side_effect=OSError(28, "No space")):
-            wd._save_generated_key(self.dir, self.resp)
+            self.assertFalse(wd._save_generated_key(
+                self.dir, *wd._parse_generated_key(self.resp)))
         with open(path, "rb") as f:
             self.assertEqual(f.read(), b"x" * 96)
         self.assertEqual(os.listdir(self.dir), ["hs_ed25519_secret_key"])
