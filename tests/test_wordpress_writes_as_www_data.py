@@ -141,7 +141,10 @@ class TestOwnScript(_Sandbox):
         with open(os.path.join(bin_dir, "chown"), "w") as f:
             f.write(f'#!/bin/sh\necho "$(pwd -P) $*" >> {self.calls!r}\n')
         os.chmod(os.path.join(bin_dir, "chown"), 0o755)
-        self.env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
+        # Absolute entries only: find -execdir refuses a PATH with a
+        # relative one.
+        path = [p for p in os.environ["PATH"].split(os.pathsep) if os.path.isabs(p)]
+        self.env = dict(os.environ, PATH=os.pathsep.join([bin_dir] + path))
 
     def _own(self, path, recursive):
         argv = wp_files.own_args(path, recursive)
@@ -156,15 +159,55 @@ class TestOwnScript(_Sandbox):
         with open(self.calls) as f:
             return f.read().splitlines()
 
+    def _given(self):
+        """(folder relative to the sandbox, name) for every name chown got."""
+        out = set()
+        for line in self._chowns():
+            where, rest = line.split(" -h www-data:www-data -- ")
+            # `-execdir … {} +` may hand one chown several names; the
+            # fixture's names hold no spaces.
+            for name in rest.split(" "):
+                out.add((os.path.relpath(where, self.tmp), name.removeprefix("./")))
+        return out
+
     def test_chowns_the_bare_name_from_inside_the_folder(self):
         wp = os.path.join(self.tmp, "html", "wp-content")
-        os.makedirs(os.path.join(wp, "uploads"))
-        self.assertEqual(self._own(os.path.join(wp, "uploads"), True).returncode, 0)
+        os.makedirs(os.path.join(wp, "uploads", "2026"))
         self.assertEqual(self._own(os.path.join(wp, "mu-plugins"), False).returncode, 0)
-        self.assertEqual(self._chowns(), [
-            f"{wp} -R www-data:www-data -- uploads",
-            f"{wp} -h www-data:www-data -- mu-plugins",
-        ])
+        self.assertEqual(self._chowns(), [f"{wp} -h www-data:www-data -- mu-plugins"])
+        self.assertEqual(self._own(os.path.join(wp, "uploads"), True).returncode, 0)
+        self.assertEqual(self._given(), {
+            ("html/wp-content", "mu-plugins"),
+            ("html/wp-content", "uploads"),
+            ("html/wp-content/uploads", "2026"),
+        })
+
+    def test_recursive_never_enters_my_creations_or_a_link(self):
+        """My Creations is the user's folder, bind-mounted at
+        wp-content/creations: the restore's chown -R of wp-content handed
+        it to www-data (under rootless Docker, a subordinate uid), #317."""
+        wp = os.path.join(self.tmp, "html", "wp-content")
+        for rel in ("uploads/a.jpg", "creations/mine.jpg",
+                    "moved/creations/also-mine.jpg"):
+            os.makedirs(os.path.dirname(os.path.join(wp, rel)), exist_ok=True)
+            open(os.path.join(wp, rel), "w").close()
+        os.makedirs(os.path.join(self.tmp, "outside"))
+        open(os.path.join(self.tmp, "outside", "secret"), "w").close()
+        os.symlink(os.path.join(self.tmp, "outside"), os.path.join(wp, "link"))
+        self.assertEqual(self._own(wp, True).returncode, 0)
+        got = self._given()
+        for expected in (("html", "wp-content"),
+                         ("html/wp-content", "uploads"),
+                         ("html/wp-content/uploads", "a.jpg"),
+                         ("html/wp-content", "moved"),
+                         ("html/wp-content", "link")):   # the link itself (-h)
+            self.assertIn(expected, got)
+        for where, name in got:
+            with self.subTest((where, name)):
+                self.assertNotIn("creations", where.split(os.sep))
+                self.assertNotEqual(name, "creations")
+                self.assertNotIn("outside", where.split(os.sep))
+                self.assertNotEqual(name, "secret")
 
     def test_a_link_among_the_folders_stops_it(self):
         """wp-content swapped for a link: root would chown elsewhere."""
