@@ -49,6 +49,12 @@ class _FakeApp:
     def log(self, msg):
         self.logs.append(msg)
 
+    def read_config_value(self, key, default=""):
+        # Opted in to OnionHeaven: these tests are about what goes out once
+        # the user has said yes (tests/test_onionheaven_opt_out.py covers no
+        # and unset).
+        return "yes" if key == "REGISTER_WITH_ONIONHEAVEN" else default
+
 
 class HeartbeatGuardTest(unittest.TestCase):
     def setUp(self):

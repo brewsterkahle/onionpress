@@ -1372,7 +1372,9 @@ class OnionPressTray:
             "What is shared: a copy of your onion service private key is sent "
             "to the OnionHeaven hub, run by the Internet Archive, so it can "
             "publish your address on your behalf. It is used only to keep your "
-            "site reachable.\n\n"
+            "site reachable. If you later disable OnionHeaven, the heartbeats "
+            "stop at once and OnionPress asks the hub to delete its copy of "
+            "the key.\n\n"
             "We strongly recommend enabling this. You can change it at any time "
             "with: onionpress onionheaven enable|disable"
         )

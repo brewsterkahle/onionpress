@@ -3,7 +3,9 @@
 REGISTER_WITH_ONIONHEAVEN is tri-state: "yes" / "no" / unset. Only an
 explicit "yes" may register, because registering ships the onion private
 key to the hub. These tests pin that no code path treats a missing or
-empty value as consent, on either platform.
+empty value as consent, on either platform. What happens when the choice
+changes while OnionPress runs (heartbeats stop at once; an explicit "no"
+unregisters, unset sends nothing) is in tests/test_onionheaven_opt_out.py.
 """
 
 import os
@@ -87,6 +89,24 @@ class TestNoCodePathTreatsUnsetAsYes(unittest.TestCase):
 
     def test_bash_status_default_is_not_yes(self):
         self.assertNotIn("oh_config_enabled:-yes", _read("linux/onionpress"))
+
+    def test_linux_daemon_reads_the_choice_through_one_normalizer(self):
+        # Registration, the per-cycle re-read, the opt-out and the
+        # system-sleep hook's /offline all gate on _registration_choice.
+        src = _read("linux/onionpress-heartbeat.py")
+        self.assertIn("def _registration_choice(config):", src)
+        self.assertEqual(src.count('config.get("REGISTER_WITH_ONIONHEAVEN"'), 1)
+        self.assertEqual(src.count("_registration_choice(config)"), 4)
+
+    def test_mac_gates_go_through_get_registration_choice(self):
+        # The loop, every /online and every /offline re-read the choice.
+        src = _read("src/onionpress/onionheaven.py")
+        for fn in ("def _heartbeat_loop(", "def _send_heartbeat_locked(",
+                   "def _send_onionheaven_notification("):
+            body = src[src.index(fn):]
+            body = body[:body.index("\ndef ", 1)]
+            self.assertIn('get_registration_choice(app)', body, fn)
+            self.assertIn('!= "yes"', body, fn)
 
 
 class TestPromptsExist(unittest.TestCase):

@@ -400,15 +400,16 @@
 
 ## OnionHeaven Opt-In
 - **`REGISTER_WITH_ONIONHEAVEN` is tri-state and opt-in**: `yes` registers,
-  `no` never registers and never asks, unset/empty = undecided → no
-  registration, and the UI prompts at startup once the site is online
+  `no` never registers and never asks (and unregisters, below), unset/empty
+  = undecided → no registration, and the UI prompts at startup once the site is online
   (Mac: `prompt_enable_onionheaven` in `src/menubar.py`; Linux tray:
   `_maybe_prompt_onionheaven`). "Not Now" leaves it unset (asked again next
   launch); "Don't Ask Again" writes `no`. Only an explicit `yes` may ever
   register — the heartbeat ships the onion private key to the hub, so a
   missing key or typo must never opt a user in. `onionheaven.registration_choice()`
-  is the one normalizer; all three launch paths and the Linux heartbeat daemon
-  use `== "yes"`, never `!= "no"`. `tests/test_onionheaven_opt_in.py` enforces it.
+  is the Mac normalizer, the daemon's `_registration_choice()` the Linux one
+  (exactly yes/no); every gate is `== "yes"`, never `!= "no"`.
+  `tests/test_onionheaven_opt_in.py` enforces it.
 - Installs whose config carries `REGISTER_WITH_ONIONHEAVEN=yes` keep
   registering: Linux (`install.sh` wrote it) and Macs whose config was seeded
   from `config-template.txt`. Mac configs without the line (older installs,
@@ -422,9 +423,25 @@
   Seen on the live install: prompt 1 s after "System fully operational",
   takeover header 12 minutes later. Do not "fix" this by writing `yes`
   for existing installs; it was rejected as an opt-in without consent.
-- Linux CLI: `onionpress onionheaven enable|disable|status`. The heartbeat
-  daemon re-reads the config every cycle, so enabling needs no restart on
-  either platform.
+- Linux CLI: `onionpress onionheaven enable|disable|status`. Both platforms
+  re-read the choice before every request that carries the key (every
+  `/online` does: the hub refuses one without `arti_key_pem`), so enabling
+  and disabling need no restart: the Mac heartbeat loop ends at its next
+  beat and `_send_heartbeat` refuses under `_HUB_LOCK`; the Linux daemon
+  stops in the next cycle. Nothing goes out unless `yes`: no `/online`, no
+  `/offline` (it makes the hub take over at once), on sleep, stop or quit.
+- **An explicit `no` takes the key back**: when the registration record
+  (`~/.onionpress/onionheaven-registration.json`, "registered": the hub may
+  hold the key) says so, one signed `/unregister` for the whole address (no
+  healthcheck_address: every row, so the hub deletes the key dir) goes to
+  the hub the record names, then the record is cleared. Mac:
+  `maybe_unregister_after_opt_out` from check_status (also at startup with
+  `no`), ordered after any heartbeat in flight by `_HUB_LOCK`; Linux:
+  `_maybe_unregister_after_opt_out` in the daemon, which used to send
+  `/offline` on disable (a takeover of a running site, key kept). Retried
+  every 15 min while the hub does not answer; "Entry not found" counts as
+  done. Unset sends nothing, not even this (the 2026-10-11 decision above).
+  `tests/test_onionheaven_opt_out.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - `create_backup` prunes WordPress's regenerable derivatives (`-WxH` sizes,

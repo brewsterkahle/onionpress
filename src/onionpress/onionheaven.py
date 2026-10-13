@@ -66,17 +66,19 @@ def configured_hub_address(value, log_func=None):
     return DEFAULT_ONIONHEAVEN_ADDRESS
 
 
-def _hub_url(path):
-    """http://<hub>:<port>/<path>, or None when ONIONHEAVEN_ADDRESS is not a
-    well-formed onion address.
+def _hub_url(path, hub=None):
+    """http://<hub>:<port>/<path>, or None when the hub is not a well-formed
+    onion address.
 
-    Every request to the hub is built here. ONIONHEAVEN_ADDRESS is a module
-    global that callers assign, so it is checked where it is used, not only
-    where the config is read.
+    *hub* defaults to ONIONHEAVEN_ADDRESS. Every request to a hub is built
+    here. ONIONHEAVEN_ADDRESS is a module global that callers assign, so it
+    is checked where it is used, not only where the config is read.
     """
-    if not key_manager.is_valid_onion_address(ONIONHEAVEN_ADDRESS):
+    if hub is None:
+        hub = ONIONHEAVEN_ADDRESS
+    if not key_manager.is_valid_onion_address(hub):
         return None
-    return f"http://{ONIONHEAVEN_ADDRESS}:{ONIONHEAVEN_API_PORT}/{path}"
+    return f"http://{hub}:{ONIONHEAVEN_API_PORT}/{path}"
 
 
 def _docker_env(app):
@@ -150,12 +152,17 @@ def _run_docker_rc(app, args, timeout=15, input=None):
 
 # REGISTER_WITH_ONIONHEAVEN is tri-state:
 #   "yes"  — the user opted in: register and heartbeat.
-#   "no"   — the user opted out: never register, never ask again.
+#   "no"   — the user opted out: never register, never ask again, and if
+#            this install registered before, ask the hub to delete its copy
+#            of the key (a signed /unregister; see maybe_unregister_after_opt_out).
 #   unset  — the user has not decided yet: do NOT register, and the UI
-#            prompts them to enable it at startup once Tor is up.
+#            prompts them to enable it at startup once Tor is up. Nothing
+#            is sent to the hub, not even an /unregister.
 # Registration is opt-in because enabling it sends the site's onion private
 # key to the hub (see the prompt text below). Only an explicit "yes" turns
-# it on — a missing or empty value must never silently register.
+# it on — a missing or empty value must never silently register. The choice
+# is re-read before every request that carries the key, so turning it off
+# stops the heartbeats at once, without a restart.
 
 REGISTRATION_PROMPT_TITLE = "Keep your site reachable when your computer is off?"
 
@@ -170,7 +177,8 @@ REGISTRATION_PROMPT_MESSAGE = (
     "What is shared: a copy of your onion service private key is sent to the "
     "OnionHeaven hub, run by the Internet Archive, so it can publish your "
     "address on your behalf. The key is used only to keep your site reachable. "
-    "If you later disable OnionHeaven, the hub stops using it.\n\n"
+    "If you later disable OnionHeaven, the heartbeats stop at once and "
+    "OnionPress asks the hub to delete its copy of the key.\n\n"
     "We strongly recommend enabling this. You can change it at any time under "
     "Settings."
 )
@@ -198,12 +206,31 @@ def get_registration_choice(app):
     return registration_choice(app.read_config_value("REGISTER_WITH_ONIONHEAVEN", ""))
 
 
+def _choice_label(choice):
+    """REGISTER_WITH_ONIONHEAVEN as a log line shows it."""
+    return choice if choice in ("yes", "no") else "unset"
+
+
+# Every request that carries the key (/online) and every /unregister holds
+# this lock, and /online re-reads the choice inside it. A heartbeat already
+# on its way when the user opts out therefore lands before the /unregister,
+# never after it: an /online arriving after an /unregister would put the
+# key back on the hub while this install's record says it is gone.
+_HUB_LOCK = threading.RLock()
+
+
 # ---------------------------------------------------------------------------
 # Registration client (runs on normal OnionPress instances)
 # ---------------------------------------------------------------------------
 
 def _registration_status_file(app):
-    """Path to the onionheaven registration status file."""
+    """Path to the onionheaven registration status file.
+
+    "registered": true means the hub may hold this install's key: it is
+    set by the first /online the hub accepts in a session, and cleared
+    only by an /unregister the hub answered (uninstall and reset delete
+    the file).
+    """
     return os.path.join(app.app_support, "onionheaven-registration.json")
 
 
@@ -212,9 +239,12 @@ def _load_registration_status(app):
     path = _registration_status_file(app)
     try:
         with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {"registered": False, "last_attempt": None, "onionheaven_address": ONIONHEAVEN_ADDRESS}
+            status = json.load(f)
+        if isinstance(status, dict):
+            return status
+    except (OSError, ValueError):
+        pass
+    return {"registered": False, "last_attempt": None, "onionheaven_address": ONIONHEAVEN_ADDRESS}
 
 
 def _save_registration_status(app, status):
@@ -231,9 +261,10 @@ def register_with_onionheaven(app):
     """
     Register this instance with OnionHeaven by starting the heartbeat loop.
 
-    The first heartbeat includes the arti_key_pem, effectively combining
-    registration and heartbeat into a single /online call. Called from a
-    background thread.
+    Every /online carries the arti_key_pem (the hub refuses one without
+    it), so the first heartbeat is also the registration. Called from a
+    background thread; returns when the heartbeat loop ends, which it does
+    as soon as REGISTER_WITH_ONIONHEAVEN is no longer "yes".
     Sets app._onionheaven_registration_succeeded on success;
     clears app._onionheaven_registration_in_flight when done.
     """
@@ -282,6 +313,11 @@ def register_with_onionheaven(app):
         for attempt, wait in enumerate(backoff):
             app.log(f"OnionHeaven: registration attempt {attempt + 2} in {wait}s...")
             time.sleep(wait)
+            choice = get_registration_choice(app)
+            if choice != "yes":
+                app.log("OnionHeaven: registration stopped "
+                        f"(REGISTER_WITH_ONIONHEAVEN={_choice_label(choice)})")
+                return
             wp_healthy = _check_wordpress_healthy(app)
             _send_heartbeat(app, wp_healthy)
             if getattr(app, '_onionheaven_registration_succeeded', False):
@@ -303,8 +339,9 @@ def register_with_onionheaven(app):
 def start_registration_thread(app):
     """Start the registration + heartbeat background thread.
 
-    Registration happens via the first /online heartbeat (which includes
-    the arti key). Subsequent heartbeats omit the key.
+    Registration happens via the first /online heartbeat. Every /online,
+    the first and all later ones, carries the arti key: the hub refuses an
+    /online without it.
     """
     thread = threading.Thread(target=register_with_onionheaven, args=(app,), daemon=True)
     thread.start()
@@ -323,7 +360,12 @@ def _heartbeat_loop(app):
 
     Runs in the registration thread after successful registration.
     Sends the same /online payload but adds wordpress_healthy status.
-    Keeps running until the app quits (daemon thread).
+    Re-reads REGISTER_WITH_ONIONHEAVEN before every beat and ends the
+    moment it is not "yes" (_send_heartbeat checks it again under the hub
+    lock): unticking OnionHeaven in either Settings UI stops the key going
+    to the hub without a restart. check_status starts a new loop when the
+    choice is "yes" again. Otherwise it runs until the app quits (daemon
+    thread) or a newer loop supersedes it (wake).
 
     Also emits a ~12h system-metrics snapshot line (issue #238) on
     platforms where the menubar isn't driving its own snapshots (i.e.
@@ -358,6 +400,13 @@ def _heartbeat_loop(app):
             app.log(f"OnionHeaven: heartbeat loop gen={my_generation} exiting (superseded)")
             return
 
+        # Opt-in, every beat: the user may have turned OnionHeaven off
+        # (Mac Settings, the WordPress Settings page) since the last one.
+        choice = get_registration_choice(app)
+        if choice != "yes":
+            _end_heartbeat_loop(app, my_generation, choice)
+            return
+
         try:
             # Don't send /online while sleeping — let the hub detect us as
             # offline and take over. Power Nap keeps the app running but
@@ -378,6 +427,28 @@ def _heartbeat_loop(app):
             _emit_heartbeat_snapshot(app)
 
         time.sleep(HEARTBEAT_INTERVAL)
+
+
+def _end_heartbeat_loop(app, my_generation, choice):
+    """The loop's exit when REGISTER_WITH_ONIONHEAVEN is no longer "yes".
+
+    Clears the session's registration flags, so nothing sends /offline on
+    sleep, stop or quit, and so check_status starts a fresh loop if the
+    user turns OnionHeaven back on. The /unregister for an explicit "no"
+    is maybe_unregister_after_opt_out's, not the loop's: it also covers
+    an install that starts with "no", and undecided sends nothing.
+    """
+    if choice == "no":
+        app.log("OnionHeaven: disabled (REGISTER_WITH_ONIONHEAVEN=no) — "
+                "heartbeats stopped")
+    else:
+        app.log("OnionHeaven: REGISTER_WITH_ONIONHEAVEN is unset — "
+                "heartbeats stopped; nothing is sent to the hub until it is yes")
+    app._onionheaven_registration_succeeded = False
+    app._onionheaven_heartbeat_succeeded = False
+    # Only this loop's own guard: after a wake a newer loop owns the flag.
+    if getattr(app, '_heartbeat_generation', 0) == my_generation:
+        app._heartbeat_loop_running = False
 
 
 def _emit_heartbeat_snapshot(app):
@@ -463,11 +534,22 @@ def _heartbeat_landed(app, content_addr, freshness_seconds=180):
 def _send_heartbeat(app, wordpress_healthy=True):
     """Send a single /online heartbeat to OnionHeaven.
 
-    On the first successful call (or if key hasn't been sent yet), includes
-    the arti_key_pem so OnionHeaven can do takeover if needed. Subsequent
-    calls omit the key to save bandwidth.
+    Every call includes the arti_key_pem (the hub's /online refuses a
+    request without it), so this is the one function that ships the key.
+    It sends nothing unless REGISTER_WITH_ONIONHEAVEN is "yes", read under
+    _HUB_LOCK, whoever calls it (registration, the loop, a wake reclaim).
     """
+    with _HUB_LOCK:
+        return _send_heartbeat_locked(app, wordpress_healthy)
+
+
+def _send_heartbeat_locked(app, wordpress_healthy):
     if getattr(app, 'is_onionheaven', False):
+        return False
+    choice = get_registration_choice(app)
+    if choice != "yes":
+        app.log("OnionHeaven: not sending /online "
+                f"(REGISTER_WITH_ONIONHEAVEN={_choice_label(choice)})")
         return False
 
     content_addr = getattr(app, 'onion_address', None)
@@ -577,16 +659,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
         try:
             resp = json.loads(output)
             if resp.get("online"):
-                # Save registration status on first success
-                if not getattr(app, '_onionheaven_registration_succeeded', False):
-                    app._onionheaven_registration_succeeded = True
-                    _save_registration_status(app, {
-                        "registered": True,
-                        "last_attempt": datetime.now(timezone.utc).isoformat(),
-                        "onionheaven_address": ONIONHEAVEN_ADDRESS,
-                        "content_address": content_addr,
-                    })
-                    app.log(f"OnionHeaven: registered via heartbeat ({content_addr})")
+                _mark_registered(app, content_addr)
                 app._onionheaven_heartbeat_succeeded = True
                 return True  # success
             app.log(f"OnionHeaven: heartbeat rejected: {resp.get('error', 'unknown')}")
@@ -599,6 +672,7 @@ def _send_heartbeat(app, wordpress_healthy=True):
             if _heartbeat_landed(app, content_addr):
                 hub = ONIONHEAVEN_ADDRESS[:12]
                 app.log(f"OnionHeaven: heartbeat /online {hub}...onion delivered (no-ack, response lost on return circuit)")
+                _mark_registered(app, content_addr)
                 app._onionheaven_heartbeat_succeeded = True
                 return True
             return False
@@ -611,42 +685,84 @@ def _send_heartbeat(app, wordpress_healthy=True):
         if _heartbeat_landed(app, content_addr):
             hub = ONIONHEAVEN_ADDRESS[:12]
             app.log(f"OnionHeaven: heartbeat /online {hub}...onion delivered (no-ack, response lost on return circuit)")
+            _mark_registered(app, content_addr)
             app._onionheaven_heartbeat_succeeded = True
             return True
         app.log(f"OnionHeaven: heartbeat failed after retry: curl_rc={rc}, output={repr(output[:200]) if output else 'empty'}")
         return False
 
 
-def unregister_from_onionheaven(app, content_address=None):
+def _mark_registered(app, content_addr):
+    """The hub took an /online: it holds the key now. Recorded on the first
+    such beat of a session (and the first after an /unregister), also when
+    only _heartbeat_landed saw it arrive, so an opt-out knows to unregister."""
+    if getattr(app, '_onionheaven_registration_succeeded', False):
+        return
+    app._onionheaven_registration_succeeded = True
+    _save_registration_status(app, {
+        "registered": True,
+        "last_attempt": datetime.now(timezone.utc).isoformat(),
+        "onionheaven_address": ONIONHEAVEN_ADDRESS,
+        "content_address": content_addr,
+    })
+    app.log(f"OnionHeaven: registered via heartbeat ({content_addr})")
+
+
+# The hub's answer to an /unregister for an address it has no row for
+# (web-server.py _handle_unregister): nothing of ours is left there.
+UNREGISTER_NOT_FOUND = "Entry not found"
+
+# How often an opted-out install retries an /unregister the hub did not
+# answer (hub unreachable, Tor trouble). The hub takes an address over
+# about 10 min after its last heartbeat while it still holds the key, and
+# the /unregister that lands releases that takeover.
+OPT_OUT_RETRY_SECONDS = 15 * 60
+
+
+def unregister_from_onionheaven(app, content_address=None, while_choice=None):
     """
-    Unregister this instance from OnionHeaven.
-    Called during uninstall or address prefix change so OnionHeaven stops
-    monitoring an address that will never come back.
+    Ask the hub to forget this site: a signed /unregister for the whole
+    content address (no healthcheck_address, so every registry row of the
+    address goes, not just the current healthcheck's). The hub then
+    releases any takeover of the address, marks its rows unregistered and
+    deletes its copy of the onion service key.
+
+    Called on uninstall, and by maybe_unregister_after_opt_out when the
+    user turns OnionHeaven off (*while_choice*="no": the request is dropped
+    if the choice changes before an attempt goes out).
+
+    The request goes to the hub this install registered with (from the
+    registration record), or the configured hub when the record names none.
 
     Runs synchronously — caller should invoke from a background thread if needed.
-    Best-effort: logs failures but does not raise.
+    Best-effort: logs failures but does not raise. Returns True when the
+    hub holds nothing for the address any more (unregistered, or it had no
+    entry), False when it may still (retry later), None when there is
+    nothing this install can do (never registered, the key changed, no
+    usable hub address, the choice changed).
     """
     # Don't unregister OnionHeaven from itself
     if getattr(app, 'is_onionheaven', False):
-        return
+        return None
 
     # Check if we ever registered
     status = _load_registration_status(app)
     if not status.get("registered"):
         app.log("OnionHeaven: not registered, skipping unregister")
-        return
+        return None
 
     addr = content_address or status.get("content_address") or getattr(app, 'onion_address', None)
     if not key_manager.is_valid_onion_address(addr):
         app.log("OnionHeaven: no content address for unregister")
-        return
-    unregister_url = _hub_url("unregister")
+        return None
+    recorded_hub = status.get("onionheaven_address")
+    hub = recorded_hub if key_manager.is_valid_onion_address(recorded_hub) else None
+    unregister_url = _hub_url("unregister", hub)
     if unregister_url is None:
         app.log("OnionHeaven: hub address is not a valid onion address, "
                 "not sending /unregister")
-        return
-
-    app.log(f"Unregistering {addr} from OnionHeaven...")
+        return None
+    hub_addr = hub or ONIONHEAVEN_ADDRESS
 
     # Sign the unregister request with ed25519
     try:
@@ -654,7 +770,7 @@ def unregister_from_onionheaven(app, content_address=None):
         secret_key_bytes, public_key_raw = key_manager.extract_keys()
     except Exception as e:
         app.log(f"OnionHeaven: failed to extract keys for unregister: {e}")
-        return
+        return False
 
     # Same staleness guard as _send_heartbeat / _send_onionheaven_notification:
     # refuse to unregister an address that doesn't match the live key. addr
@@ -668,71 +784,144 @@ def unregister_from_onionheaven(app, content_address=None):
     if derived != addr:
         app.log(f"OnionHeaven: ABORT unregister — content_address stale "
                 f"(app={addr}, key_derives_to={derived})")
-        return
+        return None
 
-    hc_addr = getattr(app, 'healthcheck_address', None)
-    hc_addr_val = hc_addr if key_manager.is_valid_onion_address(hc_addr) else ""
-
-    timestamp = onion_auth.make_timestamp()
-    signature = onion_auth.sign_payload(
-        secret_key_bytes, public_key_raw,
-        "unregister", addr, hc_addr_val, timestamp
-    )
-
-    payload_dict = {
-        "content_address": addr,
-        "timestamp": timestamp,
-        "signature": signature,
-    }
-    if hc_addr_val:
-        payload_dict["healthcheck_address"] = hc_addr_val
-    payload = json.dumps(payload_dict)
-
-    # Retry with backoff — uninstall/address-change are one-shot, reliability > speed
+    # Retry with backoff — uninstall and opt-out are one-shot, reliability > speed
     backoff = [5, 15, 30]
     max_attempts = 4
     last_output = ""
 
-    for attempt in range(max_attempts):
-        # Payload on stdin, like the heartbeat's: a signed request stays
-        # out of argv.
-        ok, output = _run_docker(app, [
-            "exec", "-i", "onionpress-tor",
-            "curl", "-s", "-X", "POST",
-            "--socks5-hostname", "127.0.0.1:9050",
-            "-H", "Content-Type: application/json",
-            "--data-binary", "@-",
-            "--max-time", "60",
-            unregister_url
-        ], timeout=75, input=payload)
-        last_output = output
+    # The lock orders this after any heartbeat already on its way (see
+    # _HUB_LOCK): an /online landing after the /unregister would put the
+    # key back.
+    with _HUB_LOCK:
+        app.log(f"Unregistering {addr} from OnionHeaven...")
+        for attempt in range(max_attempts):
+            if while_choice is not None:
+                choice = get_registration_choice(app)
+                if choice != while_choice:
+                    app.log("OnionHeaven: unregister dropped "
+                            f"(REGISTER_WITH_ONIONHEAVEN is now {_choice_label(choice)})")
+                    return None
 
-        if ok and output:
-            try:
-                resp = json.loads(output)
-                if resp.get("unregistered"):
-                    app.log("OnionHeaven: unregistered successfully")
-                    _save_registration_status(app, {
-                        "registered": False,
-                        "unregistered_at": datetime.now(timezone.utc).isoformat(),
-                        "onionheaven_address": ONIONHEAVEN_ADDRESS,
-                        "content_address": addr,
-                    })
-                    return
-                error_msg = resp.get("error", "unknown error")
-                app.log(f"OnionHeaven: unregister rejected: {error_msg}")
-                # Don't retry on auth/validation errors — they won't fix themselves
-                if resp.get("error"):
-                    return
-            except json.JSONDecodeError:
-                pass
+            # Signed per attempt: the hub accepts a timestamp up to 5 min
+            # old, and four attempts with backoff can take longer.
+            timestamp = onion_auth.make_timestamp()
+            signature = onion_auth.sign_payload(
+                secret_key_bytes, public_key_raw,
+                "unregister", addr, "", timestamp
+            )
+            payload = json.dumps({
+                "content_address": addr,
+                "timestamp": timestamp,
+                "signature": signature,
+            })
 
-        if attempt < max_attempts - 1:
-            delay = backoff[min(attempt, len(backoff) - 1)]
-            app.log(f"OnionHeaven: unregister attempt {attempt + 1} failed, retrying in {delay}s...")
-            time.sleep(delay)
+            # Payload on stdin, like the heartbeat's: a signed request stays
+            # out of argv.
+            ok, output = _run_docker(app, [
+                "exec", "-i", "onionpress-tor",
+                "curl", "-s", "-X", "POST",
+                "--socks5-hostname", "127.0.0.1:9050",
+                "-H", "Content-Type: application/json",
+                "--data-binary", "@-",
+                "--max-time", "60",
+                unregister_url
+            ], timeout=75, input=payload)
+            last_output = output
+
+            if ok and output:
+                try:
+                    resp = json.loads(output)
+                except json.JSONDecodeError:
+                    resp = None
+                if isinstance(resp, dict):
+                    error_msg = resp.get("error")
+                    if resp.get("unregistered") or error_msg == UNREGISTER_NOT_FOUND:
+                        if resp.get("unregistered"):
+                            app.log("OnionHeaven: unregistered successfully")
+                        else:
+                            app.log("OnionHeaven: the hub holds no entry for "
+                                    f"{addr}; nothing to unregister")
+                        _save_registration_status(app, {
+                            "registered": False,
+                            "unregistered_at": datetime.now(timezone.utc).isoformat(),
+                            "onionheaven_address": hub_addr,
+                            "content_address": addr,
+                        })
+                        # A later /online (OnionHeaven turned back on) must
+                        # write the record again.
+                        app._onionheaven_registration_succeeded = False
+                        return True
+                    app.log(f"OnionHeaven: unregister rejected: {error_msg or 'unknown error'}")
+                    # Don't retry on auth/validation errors — they won't fix themselves
+                    if error_msg:
+                        return False
+
+            if attempt < max_attempts - 1:
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                app.log(f"OnionHeaven: unregister attempt {attempt + 1} failed, retrying in {delay}s...")
+                time.sleep(delay)
 
     app.log(f"OnionHeaven: unregister failed after {max_attempts} attempts (best-effort, continuing) — last response: {last_output!r}")
+    return False
+
+
+def maybe_unregister_after_opt_out(app, now=None):
+    """Called every status cycle once Tor is up: if the user has explicitly
+    turned OnionHeaven off (REGISTER_WITH_ONIONHEAVEN=no) and this install's
+    record says the hub may hold its key, send one signed /unregister in a
+    background thread, then forget the registration.
+
+    Covers both a "yes" -> "no" change while running (Mac Settings, the
+    WordPress Settings page) and an install that starts with "no" but
+    registered in an earlier session. Unset (undecided) never sends
+    anything: the hub keeps the key and takes the address over while the
+    site is down, as before. A failed attempt is retried every
+    OPT_OUT_RETRY_SECONDS; one that cannot work (key changed, no usable
+    hub) is not retried until the next launch.
+
+    Returns the thread started, or None.
+    """
+    if getattr(app, 'is_onionheaven', False):
+        return None
+    if get_registration_choice(app) != "no":
+        return None
+    if getattr(app, '_onionheaven_opt_out_in_flight', False):
+        return None
+    if getattr(app, '_onionheaven_opt_out_gave_up', False):
+        return None
+    now = time.time() if now is None else now
+    last = getattr(app, '_onionheaven_opt_out_last_attempt', 0)
+    if last and now - last < OPT_OUT_RETRY_SECONDS:
+        return None
+    if not _load_registration_status(app).get("registered"):
+        return None
+
+    app._onionheaven_opt_out_in_flight = True
+    app._onionheaven_opt_out_last_attempt = now
+    thread = threading.Thread(target=_unregister_after_opt_out, args=(app,), daemon=True)
+    thread.start()
+    return thread
+
+
+def _unregister_after_opt_out(app):
+    try:
+        app.log("OnionHeaven: turned off (REGISTER_WITH_ONIONHEAVEN=no) — "
+                "asking the hub to delete its copy of this site's key")
+        result = unregister_from_onionheaven(app, while_choice="no")
+        if get_registration_choice(app) != "no":
+            # Turned back on meanwhile: a later "no" unregisters at once.
+            app._onionheaven_opt_out_last_attempt = 0
+        elif result is None:
+            app._onionheaven_opt_out_gave_up = True
+        elif result is False:
+            app.log("OnionHeaven: will retry the /unregister in "
+                    f"{OPT_OUT_RETRY_SECONDS // 60} min")
+    except Exception as e:
+        app.log(f"OnionHeaven: opt-out unregister error: {e}")
+    finally:
+        app._onionheaven_opt_out_in_flight = False
 
 
 # ---------------------------------------------------------------------------
@@ -745,11 +934,29 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     Builds payload with content_address, healthcheck_address, and ed25519 signature.
     Uses docker exec curl through the Tor SOCKS proxy.
 
+    Sends nothing unless REGISTER_WITH_ONIONHEAVEN is "yes": an /offline
+    makes the hub take the address over at once, which an opted-out or
+    undecided install must not ask for, and /online carries the key.
+    /online also takes _HUB_LOCK, as _send_heartbeat does; /offline does
+    not (it is sent inside the sleep deadline and carries no key).
+
     Returns True on success, False on failure.
     """
     if getattr(app, 'is_onionheaven', False):
         return False
+    if get_registration_choice(app) != "yes":
+        return False
+    if endpoint == "online":
+        with _HUB_LOCK:
+            if get_registration_choice(app) != "yes":
+                return False
+            return _send_onionheaven_notification_unlocked(
+                app, endpoint, log_label, max_attempts, max_time)
+    return _send_onionheaven_notification_unlocked(
+        app, endpoint, log_label, max_attempts, max_time)
 
+
+def _send_onionheaven_notification_unlocked(app, endpoint, log_label, max_attempts, max_time):
     # Check if we ever registered
     status = _load_registration_status(app)
     if not status.get("registered"):

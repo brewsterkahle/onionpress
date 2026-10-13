@@ -83,7 +83,9 @@ SETTINGS_HELP = {
         "What is shared: a copy of your onion service private key is sent "
         "to the OnionHeaven hub, run by the Internet Archive, so it can "
         "publish your address on your behalf. It is used only to keep your "
-        "site reachable."
+        "site reachable.\n\n"
+        "Turning it off stops the heartbeats at once and asks the hub to "
+        "delete its copy of your key."
     ),
     "SHARE_ANALYTICS_WITH_ONIONHOME": (
         "Share Analytics with OnionHome\n\n"
@@ -149,7 +151,9 @@ SETTINGS_CONSEQUENCES = {
     },
     "REGISTER_WITH_ONIONHEAVEN": {
         "yes": "Site will register with OnionHeaven and stay reachable when your Mac is off.",
-        "no": "OnionHeaven disabled. Visitors get an error whenever your Mac is off.",
+        "no": ("OnionHeaven disabled. Heartbeats stop now, and OnionPress asks "
+               "the hub to delete its copy of your onion service key. Visitors "
+               "get an error whenever your Mac is off."),
     },
     "SHARE_ANALYTICS_WITH_ONIONHOME": {
         "yes": "Diagnostic logs will be shared with OnionHome.",

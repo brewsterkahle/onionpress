@@ -451,6 +451,9 @@ class OnionPressApp(rumps.App):
         self._pending_manual_upload = False                # Deferred Share Now click — fires when is_ready
         self._onionheaven_registration_in_flight = False  # Whether registration thread is running
         self._onionheaven_prompt_shown = False            # Startup opt-in prompt shown this session
+        self._onionheaven_opt_out_in_flight = False       # Opt-out /unregister thread running
+        self._onionheaven_opt_out_last_attempt = 0        # When the last opt-out /unregister started
+        self._onionheaven_opt_out_gave_up = False         # Opt-out /unregister cannot work this session
         self._onionname_retry_in_flight = False            # Onionname registration retry thread running
         self._onionname_retry_giveup = False               # Stop retrying (post-collision, etc.)
         self._heartbeat_generation = 0                     # Incremented on wake; stale loops exit
@@ -2079,8 +2082,10 @@ class OnionPressApp(rumps.App):
                         and not self._onionheaven_registration_succeeded
                         and not self._onionheaven_registration_in_flight):
                     # Opt-in: "yes" registers; unset prompts the user once per
-                    # launch; "no" does nothing. Re-read every cycle so a
-                    # change in Settings takes effect without a restart.
+                    # launch; "no" never registers (the opt-out below asks the
+                    # hub to forget an earlier registration). Re-read every
+                    # cycle so a change in Settings takes effect without a
+                    # restart.
                     oh_choice = onionheaven.get_registration_choice(self)
                     if oh_choice == "yes":
                         self._onionheaven_registration_in_flight = True
@@ -2094,6 +2099,18 @@ class OnionPressApp(rumps.App):
                         # loop must keep running while it is open.
                         threading.Thread(target=self.prompt_enable_onionheaven,
                                          daemon=True).start()
+
+                # OnionHeaven opt-out: an explicit "no" (Settings, the
+                # WordPress Settings page, or at startup) with a record that
+                # this install registered sends one signed /unregister, so
+                # the hub deletes its copy of the key and does not take over
+                # a running site. The heartbeat loop stops itself at its
+                # next beat, and any heartbeat already on its way lands
+                # before the /unregister (onionheaven._HUB_LOCK). Unset
+                # (undecided) sends nothing.
+                if (tor_bootstrapped and not self.is_onionheaven
+                        and key_manager.is_valid_onion_address(self.onion_address)):
+                    onionheaven.maybe_unregister_after_opt_out(self)
 
                 # Start analytics sharing (opt-in, checks config each cycle).
                 # Runs for ALL instances including OnionHeaven.

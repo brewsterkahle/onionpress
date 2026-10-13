@@ -1057,7 +1057,7 @@ function onionpress_settings_fields() {
         ),
         'REGISTER_WITH_ONIONHEAVEN' => array(
             'label'       => 'Keep site reachable via OnionHeaven (recommended)',
-            'description' => 'Keeps your .onion address working while this machine is off, asleep, or disconnected: when your heartbeats stop, the OnionHeaven hub takes over your address and sends visitors to the Wayback Machine\'s archived copy of your site; your live site takes over again when you come back online. What is shared: a copy of your onion service private key is sent to the hub (run by the Internet Archive) so it can publish your address on your behalf. It is used only to keep your site reachable. Opt-in; strongly recommended.',
+            'description' => 'Keeps your .onion address working while this machine is off, asleep, or disconnected: when your heartbeats stop, the OnionHeaven hub takes over your address and sends visitors to the Wayback Machine\'s archived copy of your site; your live site takes over again when you come back online. What is shared: a copy of your onion service private key is sent to the hub (run by the Internet Archive) so it can publish your address on your behalf. It is used only to keep your site reachable. Opt-in; strongly recommended. Disabling it stops the heartbeats at once and asks the hub to delete its copy of the key; "Not decided yet" also stops them, but leaves the key with the hub, which then takes your address over.',
             'type'        => 'select',
             'options'     => array( '' => 'Not decided yet (OnionPress will ask)', 'yes' => 'Enabled (recommended)', 'no' => 'Disabled' ),
         ),

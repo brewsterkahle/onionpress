@@ -5,8 +5,12 @@ OnionPress Heartbeat Client (Linux)
 Registers this OnionPress instance with an OnionHeaven hub and sends
 periodic heartbeats. Runs as a systemd service.
 
-Reads config from ~/.onionpress/config:
+Reads config from ~/.onionpress/config (again every cycle):
   REGISTER_WITH_ONIONHEAVEN=yes|no  (default: unset = not enabled; opt-in)
+    yes   - register and heartbeat (every /online carries the onion key)
+    no    - send nothing; if this install registered before, send one
+            signed /unregister so the hub deletes its copy of the key
+    unset - send nothing at all (the tray and the CLI ask the user)
   ONIONHEAVEN_ADDRESS=<hub .onion>  (default: centralized OH)
   SHARE_ANALYTICS_WITH_ONIONHOME=yes  (opt-in; anything else = no upload)
 
@@ -153,6 +157,17 @@ def read_config():
     except FileNotFoundError:
         pass
     return config
+
+
+def _registration_choice(config):
+    """REGISTER_WITH_ONIONHEAVEN from *config*: "yes", "no" or None
+    (undecided). Exactly what `onionpress onionheaven enable|disable`, the
+    tray and the Settings page write, case aside; anything else is
+    undecided, so a typo never registers and never unregisters."""
+    value = (config.get("REGISTER_WITH_ONIONHEAVEN") or "").strip().lower()
+    if value in ("yes", "no"):
+        return value
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +317,10 @@ class HubConnection:
             except OSError:
                 pass
             self._sock = None
+
+    @property
+    def hub_addr(self):
+        return self._hub_addr
 
     def is_open(self):
         with self._lock:
@@ -521,7 +540,10 @@ def sign_and_post(endpoint, hub_addr, content_addr, hc_addr, priv_key, pub_key,
     payload = _build_signed_payload(endpoint, content_addr, hc_addr,
                                     priv_key, pub_key, extra)
 
-    if _hub_conn is not None:
+    # The persistent socket goes to one hub; a request for another (an
+    # /unregister to the hub this install registered with) takes the
+    # docker-exec path.
+    if _hub_conn is not None and _hub_conn.hub_addr == hub_addr:
         ok, resp = _hub_conn.post(endpoint, payload)
         if ok:
             return True, resp
@@ -583,6 +605,11 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
 
     backoff_delays = [10, 30, 30]
     for attempt in range(4):
+        # Every attempt carries the key: stop the moment the user turns
+        # OnionHeaven off, not after the retries.
+        if _registration_choice(read_config()) != "yes":
+            log.info("Registration stopped: REGISTER_WITH_ONIONHEAVEN is no longer yes")
+            return False
         log.info("Registration attempt %d/4 with %s...", attempt + 1, hub_addr)
         ok, resp = sign_and_post("online", hub_addr, content_addr, hc_addr, priv_key, pub_key, extra)
 
@@ -606,11 +633,19 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
             time.sleep(delay)
 
     log.error("Registration failed after 4 attempts")
-    _save_state({
-        "registered": False,
-        "last_attempt": datetime.now(timezone.utc).isoformat(),
-        "onionheaven_address": hub_addr,
-    })
+    # The record says whether the hub may hold the key (the opt-out's
+    # /unregister keys off it), so a failed attempt must not clear one an
+    # earlier session wrote.
+    previous = _load_state()
+    if previous.get("registered"):
+        previous["last_attempt"] = datetime.now(timezone.utc).isoformat()
+        _save_state(previous)
+    else:
+        _save_state({
+            "registered": False,
+            "last_attempt": datetime.now(timezone.utc).isoformat(),
+            "onionheaven_address": hub_addr,
+        })
     return False
 
 
@@ -618,16 +653,48 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
 # Unregister
 # ---------------------------------------------------------------------------
 
-def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key):
-    """Unregister from hub. Retries 4x — critical to avoid false takeover."""
+# The hub's answer to an /unregister for an address it has no row for
+# (web-server.py _handle_unregister): nothing of ours is left there.
+UNREGISTER_NOT_FOUND = "Entry not found"
+
+# How often an opted-out install retries an /unregister the hub did not
+# answer. The hub takes an address over ~10 min after its last heartbeat
+# while it still holds the key; the /unregister that lands releases it.
+OPT_OUT_RETRY_SECONDS = 15 * 60
+
+
+def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key, while_choice=None):
+    """Unregister from hub. Retries 4x — critical to avoid false takeover.
+
+    For the whole content address: the request carries no
+    healthcheck_address (*hc_addr* is not sent), so the hub unregisters
+    every row of the address, releases any takeover and deletes its copy
+    of the key. With *while_choice*, an attempt goes out only while
+    REGISTER_WITH_ONIONHEAVEN still has that value.
+
+    Returns True when the hub holds nothing for the address any more
+    (unregistered, or no entry), False when it may still, None when the
+    choice changed before an attempt.
+    """
     backoff_delays = [5, 15, 30]
     for attempt in range(4):
+        if while_choice is not None:
+            choice = _registration_choice(read_config())
+            if choice != while_choice:
+                log.info("Unregister dropped: REGISTER_WITH_ONIONHEAVEN is now %s",
+                         choice or "unset")
+                return None
         log.info("Unregister attempt %d/4 from %s...", attempt + 1, hub_addr)
-        ok, resp = sign_and_post("unregister", hub_addr, content_addr, hc_addr, priv_key, pub_key)
+        ok, resp = sign_and_post("unregister", hub_addr, content_addr, "", priv_key, pub_key)
 
         if ok and resp:
-            if resp.get("unregistered"):
-                log.info("Unregistered successfully from %s", hub_addr)
+            error = resp.get("error")
+            if resp.get("unregistered") or error == UNREGISTER_NOT_FOUND:
+                if resp.get("unregistered"):
+                    log.info("Unregistered successfully from %s", hub_addr)
+                else:
+                    log.info("Hub %s holds no entry for %s; nothing to unregister",
+                             hub_addr, content_addr)
                 _save_state({
                     "registered": False,
                     "unregistered_at": datetime.now(timezone.utc).isoformat(),
@@ -635,9 +702,8 @@ def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key):
                     "content_address": content_addr,
                 })
                 return True
-            error = resp.get("error", "unknown")
-            log.error("Unregister rejected: %s", error)
-            if resp.get("error"):
+            log.error("Unregister rejected: %s", error or "unknown")
+            if error:
                 return False
 
         if attempt < 3:
@@ -1189,6 +1255,73 @@ class SleepInhibitor:
             log.warning("sleep-inhibitor: /offline POST failed (ok=%s)", ok)
 
 
+# ---------------------------------------------------------------------------
+# Opt-out
+# ---------------------------------------------------------------------------
+
+_opt_out_last_attempt = 0.0   # time.monotonic() of the last opt-out /unregister
+_opt_out_gave_up = False      # the record names an address whose key we lack
+
+
+def _stop_heartbeats(choice):
+    if choice == "no":
+        log.info("OnionHeaven disabled (REGISTER_WITH_ONIONHEAVEN=no) — heartbeats stopped")
+    else:
+        log.info("REGISTER_WITH_ONIONHEAVEN is unset — heartbeats stopped; "
+                 "nothing is sent to the hub until it is yes")
+
+
+def _maybe_unregister_after_opt_out(choice, now=None):
+    """REGISTER_WITH_ONIONHEAVEN=no and a record that this install
+    registered: one signed /unregister to the hub the record names, so it
+    deletes its copy of the key and does not take over a site that is
+    still running, then the record is cleared (unregister() does that).
+
+    Covers a "yes" -> "no" change while running (CLI, tray, Settings page)
+    and a daemon that starts with "no" after an earlier registration.
+    Undecided (unset) sends nothing. A failed attempt is retried every
+    OPT_OUT_RETRY_SECONDS. Returns unregister()'s result, or None when
+    nothing was sent.
+    """
+    global _opt_out_last_attempt, _opt_out_gave_up
+    if choice != "no":
+        # A later "no" acts at once.
+        _opt_out_last_attempt = 0.0
+        return None
+    state = _load_state()
+    if not state.get("registered") or _opt_out_gave_up:
+        return None
+    now = time.monotonic() if now is None else now
+    if _opt_out_last_attempt and now - _opt_out_last_attempt < OPT_OUT_RETRY_SECONDS:
+        return None
+    if _content_addr is None or _priv_key is None or _pub_key is None:
+        return None
+    recorded = state.get("content_address") or _content_addr
+    if recorded != _content_addr:
+        # Only the key of the recorded address can sign its /unregister.
+        log.warning("OnionHeaven: the registration record names %s, but this "
+                    "install's key is %s's; cannot unregister it", recorded,
+                    _content_addr)
+        _opt_out_gave_up = True
+        return None
+    hub = state.get("onionheaven_address")
+    if not key_manager.is_valid_onion_address(hub):
+        hub = _current_hub
+    if hub == _content_addr:
+        return None
+    _opt_out_last_attempt = now
+    log.info("OnionHeaven turned off (REGISTER_WITH_ONIONHEAVEN=no) — asking %s "
+             "to delete its copy of this site's key", hub)
+    result = unregister(hub, _content_addr, _hc_addr, _priv_key, _pub_key,
+                        while_choice="no")
+    if result is None:
+        _opt_out_last_attempt = 0.0  # turned back on meanwhile
+    elif result is False:
+        log.info("OnionHeaven: will retry the /unregister in %d min",
+                 OPT_OUT_RETRY_SECONDS // 60)
+    return result
+
+
 def main():
     global _current_hub, _content_addr, _hc_addr, _priv_key, _pub_key, _running
     global _pending_offline, _pending_online
@@ -1216,7 +1349,8 @@ def main():
     config = read_config()
     # Opt-in: only an explicit "yes" registers. Unset means the user has
     # not decided yet (the tray / `onionpress onionheaven` ask them).
-    enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() == "yes"
+    choice = _registration_choice(config)
+    enabled = choice == "yes"
     _current_hub = _hub_address(config)
 
     # Opt-in analytics upload to OnionHome. Started for every node, hub
@@ -1240,6 +1374,11 @@ def main():
 
     if enabled:
         _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+    elif choice == "no":
+        log.info("OnionHeaven disabled (REGISTER_WITH_ONIONHEAVEN=no; "
+                 "enable with: onionpress onionheaven enable)")
+        # Registered in an earlier session? Ask the hub to forget us.
+        _maybe_unregister_after_opt_out(choice)
     else:
         log.info("Registration not enabled (REGISTER_WITH_ONIONHEAVEN is not 'yes'; "
                  "enable with: onionpress onionheaven enable)")
@@ -1253,8 +1392,10 @@ def main():
     # Open eagerly (rather than lazy on first /online) so a fast lid-close
     # right after daemon restart still has a hot socket — without this,
     # the first 60s of daemon uptime had the SleepInhibitor falling
-    # through to the slow path with no socket to use.
-    if HAVE_PYSOCKS and _content_addr != _current_hub:
+    # through to the slow path with no socket to use. Only once
+    # registered: an install that has not opted in keeps no connection
+    # to the hub.
+    if HAVE_PYSOCKS and _registered and _content_addr != _current_hub:
         _hub_conn = HubConnection(_current_hub)
         if _hub_conn.connect():
             log.info("hub-connection: persistent SOCKS5 socket open")
@@ -1276,6 +1417,25 @@ def main():
         if not _running:
             break
 
+        # Re-read config each cycle, before anything is sent: the choice
+        # gates every request below, the sleep/wake kicks included.
+        config = read_config()
+        choice = _registration_choice(config)
+        new_enabled = choice == "yes"
+        new_hub = _hub_address(config)
+        analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
+
+        # Turned off ("no", or back to unset): stop at once. Nothing that
+        # carries the key goes out from here on, and no /offline either:
+        # it would make the hub take over a site that is still running.
+        if not new_enabled and _registered:
+            _stop_heartbeats(choice)
+            _registered = False
+            enabled = False
+            if _hub_conn is not None:
+                _hub_conn.close()
+                _hub_conn = None
+
         # Async sleep/wake kicks from the system-sleep hook. USR1 means the
         # laptop is about to suspend — flush /offline so the hub takes over
         # without waiting for missed heartbeats to time out. USR2 means we
@@ -1293,11 +1453,14 @@ def main():
                 log.info("USR2: sending immediate /online after wake")
                 heartbeat(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
 
-        # Re-read config each cycle
-        config = read_config()
-        new_enabled = config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() == "yes"
-        new_hub = _hub_address(config)
-        analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
+        # Explicit opt-out: if this install registered, one signed
+        # /unregister (retried while the hub does not answer), so the hub
+        # deletes its copy of the key. Unset sends nothing.
+        _maybe_unregister_after_opt_out(choice)
+        if choice == "no":
+            _current_hub = new_hub
+            enabled = False
+            continue
 
         # Handle hub address change
         if new_hub != _current_hub and _registered:
@@ -1324,14 +1487,6 @@ def main():
             continue
         _current_hub = new_hub
 
-        # Handle enable/disable toggle
-        if not new_enabled and _registered:
-            log.info("Registration disabled — sending /offline")
-            send_offline(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
-            _registered = False
-            enabled = False
-            continue
-
         if new_enabled and not enabled and not _registered:
             log.info("Registration re-enabled — registering")
             if _content_addr == _current_hub:
@@ -1339,6 +1494,8 @@ def main():
                 enabled = True
                 continue
             _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+            if _registered and HAVE_PYSOCKS and _hub_conn is None:
+                _hub_conn = HubConnection(_current_hub)
             enabled = True
             continue
 
@@ -1349,6 +1506,8 @@ def main():
             if _content_addr != _current_hub:
                 log.info("Retrying registration with %s...", _current_hub)
                 _registered = register(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key)
+                if _registered and HAVE_PYSOCKS and _hub_conn is None:
+                    _hub_conn = HubConnection(_current_hub)
             continue
 
         # Send heartbeat if registered
@@ -1412,7 +1571,7 @@ def offline_once():
             root.removeHandler(h)
 
     config = read_config()
-    if config.get("REGISTER_WITH_ONIONHEAVEN", "").strip().lower() != "yes":
+    if _registration_choice(config) != "yes":
         return 0
     hub = _hub_address(config)
 

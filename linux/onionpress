@@ -1855,6 +1855,8 @@ onionheaven_explain() {
       onionpress onionheaven enable
 
   To opt out and stop being asked:  onionpress onionheaven disable
+  (if you had enabled it, that also asks the hub to delete its copy of
+  your key)
 EOF
 }
 
@@ -1882,7 +1884,10 @@ onionheaven_cmd() {
         disable)
             set_onionheaven_choice no
             log "OnionHeaven disabled by user (onionpress onionheaven disable)"
-            echo "OnionHeaven disabled. Visitors will get an error whenever this machine is off."
+            echo "OnionHeaven disabled. The heartbeats stop within a minute, and if this"
+            echo "site was registered, OnionPress asks the hub to delete its copy of your"
+            echo "onion service key (when OnionPress is not running: at its next start)."
+            echo "Visitors will get a connection error whenever this machine is off."
             echo "Re-enable at any time with: onionpress onionheaven enable"
             ;;
         status)
