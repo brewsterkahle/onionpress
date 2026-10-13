@@ -25,6 +25,13 @@ as the Mac menubar app. The daemon is the natural home for it: it already
 runs continuously under systemd and re-reads the config every cycle.
 Before this, nothing on Linux ever ran the upload cycle (issue #207).
 
+It also runs the onion service recovery loop (onionpress.reachability):
+the dual probe and the RepublishTrigger that ask tor-watchdog for a
+forced descriptor republish when the site has been unreachable through
+the Tor network with Tor itself healthy (issue #266). On Linux that loop
+used to live in onionpress-service.py, which nothing installed or ran
+(issue #310).
+
 Imports onion_auth and key_manager from /opt/onionpress/scripts/ and the
 onionpress package from /opt/onionpress/lib/ (both laid down by
 install.sh and the .deb).
@@ -115,6 +122,7 @@ _running = True
 _registered = False  # Set True after first successful registration; read by SleepInhibitor.
 _hub_conn = None     # Persistent HubConnection (set up after first /online).
 _analytics_host = None  # AnalyticsHost once the upload loop has been started.
+_reachability = None    # ReachabilityLoop once the recovery loop has been started.
 
 
 # ---------------------------------------------------------------------------
@@ -1116,6 +1124,43 @@ def _start_analytics_sharing(content_addr, hc_addr):
     return _analytics_host
 
 
+def _start_reachability_loop():
+    """Start the onion service recovery loop (a daemon thread). Idempotent.
+
+    Runs on every node, the hub included, whatever the OnionHeaven opt-in
+    says: it probes our own address and talks only to our own containers.
+    Logs and returns None when the onionpress package is not importable,
+    so an install without lib/ still heartbeats.
+    """
+    global _reachability
+    if _reachability is not None:
+        return _reachability
+    try:
+        from onionpress.docker import Docker
+        from onionpress.platform import resolve_paths
+        from onionpress.reachability import ReachabilityLoop, STATUS_FILENAME
+    except ImportError as e:
+        log.warning("Recovery loop: unavailable on this install "
+                    "(cannot import onionpress.reachability from %s: %s)",
+                    LIB_DIR, e)
+        return None
+
+    def _log(msg):
+        log.info("%s", msg)
+
+    docker = Docker(resolve_paths(data_dir=DATA_DIR, app_bundle=""), log_func=_log)
+    _reachability = ReachabilityLoop(
+        docker, _log,
+        read_config_value=lambda key, default: read_config().get(key, default),
+        status_path=os.path.join(DATA_DIR, STATUS_FILENAME),
+        has_internet=_linux_has_default_route,
+    )
+    _reachability.start(threading.Event())
+    log.info("Recovery loop: started (dual probe every %ds)",
+             _reachability.interval)
+    return _reachability
+
+
 def _poll_analytics_opt_in(previous, config):
     """Per-cycle check of the opt-in flag. Returns its current value.
 
@@ -1262,6 +1307,8 @@ class SleepInhibitor:
     def _on_prepare_for_sleep(self, going_to_sleep):
         if bool(going_to_sleep):
             log.info("sleep-inhibitor: PrepareForSleep(true) — sending /offline + DEL_ONION")
+            if _reachability is not None:
+                _reachability.note_sleep()
             try:
                 self._send_offline_now()
             except Exception as e:
@@ -1282,6 +1329,10 @@ class SleepInhibitor:
             # waits for Tor circuits internally before doing the ADD, so
             # there's no race with WiFi reconnecting.
             self._signal_watchdogs("USR2")
+            # Issue #266: a pre-sleep failure window must not fire DEL+ADD
+            # on the first probe after wake (mirrors src/menubar.py).
+            if _reachability is not None:
+                _reachability.note_wake()
             # Kick the main heartbeat loop awake so it sends /online
             # immediately instead of waiting out the remainder of its
             # time.sleep(HEARTBEAT_INTERVAL). Sending SIGUSR2 to our own
@@ -1600,6 +1651,10 @@ def main():
     # SHARE_ANALYTICS_WITH_ONIONHOME=yes, re-read at every wake.
     _start_analytics_sharing(_content_addr, _hc_addr)
     analytics_opt_in = _poll_analytics_opt_in(None, config)
+
+    # Onion service recovery (issue #266), also for the hub, so before the
+    # self-hub check below.
+    _start_reachability_loop()
 
     # Self-registration check: if our address IS the hub, skip all client activity
     if _content_addr == _current_hub:

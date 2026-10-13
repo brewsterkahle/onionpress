@@ -142,7 +142,7 @@ class HealthResult:
     # gate below is the ONLY place that assigns it. Do not default this to
     # False: an unrun check and a check that came back negative must stay
     # distinguishable all the way out to status.json (see write_status()
-    # in linux/onionpress-service.py and menubar.py's write_status_to_volume).
+    # in onionpress.reachability and menubar.py's write_status_to_volume).
     tor_externally_reachable: Optional[bool] = None
     onion_address: str = ""
     bootstrap_pct: int = 0
