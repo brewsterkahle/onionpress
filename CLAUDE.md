@@ -43,6 +43,7 @@
   - `setup.py` — py2app config. Adding a new submodule to `onionpress` just means one new line in the `includes` list — no build-script change needed. Build scripts only copy the whole `onionpress` package into site-packages.
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - **Cut releases with `build/release.sh`** — it builds BOTH artifacts and uploads both to one release, so the Linux `.deb` can't be forgotten. (It was: v2.4.101–v2.4.106 shipped only the `.dmg`, which 404'd the README's `releases/latest/download/onionpress.deb` link — that link resolves to the *Latest* release's asset of that name.) Bump + commit first, then run it. Cross-platform rule it enforces: the `.dmg` can only be built on macOS, so on **macOS** it builds `.dmg`+`.deb` and creates/updates the release with both; on **Linux** it builds only the `.deb` and *refuses to create* a release (a `.dmg`-less "Latest" would break the Mac link) — it only attaches the `.deb` to an existing release that already carries the matching `.dmg`. Always run the Mac side first.
+- **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
@@ -97,7 +98,7 @@
   ImageMagick), `build/build-extension.sh` (builds Firefox from
   `extension-firefox/`, NOT the stale `extension/manifest.firefox.json`).
 - **`.github/workflows/docker-publish.yml` needs nothing outside GitHub**: amd64
-  on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` (no self-hosted runner), and
+  on `ubuntu-24.04`, arm64 on `ubuntu-24.04-arm` (no self-hosted runner), and
   `IMAGE_NAMESPACE` defaults to the repo owner so a fork's "Run workflow"
   publishes `ghcr.io/<you>/…`. The stress worker gets its base via the
   `TOR_IMAGE` build-arg. `tests/test_publish_workflow.py` enforces all of it.

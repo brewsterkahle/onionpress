@@ -82,8 +82,38 @@ bash "$BUILD_DIR/build-linux.sh"
 if [ "$OS" = "Darwin" ]; then
     echo ""
     echo "── Building macOS .dmg ──────────────────────────────────────────────"
-    bash "$BUILD_DIR/build-dmg-simple.sh"
+    # A release must run on Intel Macs too (the README asks only for macOS
+    # 13). Without python.org's universal2 Python, build-dmg-simple.sh falls
+    # back to uv's single-arch one — fine for a dev build, and how 2.5.2 and
+    # 2.5.3 shipped an Apple-Silicon-only MenubarApp: the fallback printed
+    # "local dev build" and nothing here looked. ONIONPRESS_RELEASE_BUILD
+    # makes the build refuse that fallback up front; the scan below checks
+    # what was actually built.
+    ONIONPRESS_RELEASE_BUILD=1 bash "$BUILD_DIR/build-dmg-simple.sh"
     [ -f "$DMG_PATH" ] || { echo "ERROR: $DMG_PATH was not produced"; exit 1; }
+
+    echo ""
+    echo "── Checking every Mach-O in the bundle is universal ────────────────"
+    # build-dmg-simple.sh leaves the bundle it copied into the .dmg here.
+    # lipo -archs fails on anything that is not Mach-O; those are skipped.
+    APP_PATH="$PROJECT_DIR/OnionPress.app"
+    MENUBAR_PYTHON="$APP_PATH/Contents/Resources/MenubarApp/Contents/MacOS/python"
+    [ -f "$MENUBAR_PYTHON" ] || { echo "ERROR: $MENUBAR_PYTHON not found"; exit 1; }
+    single_arch=()
+    machos=0
+    while IFS= read -r -d '' f; do
+        archs=" $(lipo -archs "$f" 2>/dev/null) " || continue
+        machos=$((machos + 1))
+        if [[ "$archs" != *" arm64 "* || "$archs" != *" x86_64 "* ]]; then
+            single_arch+=("${f#"$APP_PATH/"} ($(echo $archs))")
+        fi
+    done < <(find "$APP_PATH" -type f -print0)
+    if [ "${#single_arch[@]}" -gt 0 ]; then
+        echo "ERROR: not universal (arm64 + x86_64); this release would not run on every Mac:" >&2
+        printf '  %s\n' "${single_arch[@]}" >&2
+        exit 1
+    fi
+    echo "  $machos Mach-O files, all arm64 + x86_64 (MenubarApp python: $(lipo -archs "$MENUBAR_PYTHON"))"
 
     echo ""
     if [ "$release_exists" = "1" ]; then
