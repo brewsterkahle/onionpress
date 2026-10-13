@@ -138,6 +138,79 @@ def check_for_update(current_version, log=None):
 # Download & install
 # ---------------------------------------------------------------------------
 
+STAGING_PREFIX = ".onionpress-update-"
+
+
+def stage_new_bundle(source_app, install_path):
+    """Copy *source_app* (inside the mounted DMG) into a hidden folder beside
+    *install_path* and return the staged bundle's path.
+
+    The copy must never land in install_path itself: the running app
+    executes binaries out of that path (its bin_dir is absolute), and
+    macOS 26/27's Gatekeeper revokes a process's access to a bundle it is
+    writing the moment something executes out of it. A sibling folder is on
+    the same volume as install_path, so the staged bundle can be renamed
+    into place. Quarantine is stripped here, before the bundle is live. On
+    any failure the staging folder is removed and install_path has not been
+    touched.
+    """
+    parent = os.path.dirname(install_path)
+    staging_dir = tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=parent)
+    staged_app = os.path.join(staging_dir, os.path.basename(install_path))
+    try:
+        result = subprocess.run(
+            ["cp", "-R", source_app, staged_app],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Copy failed: {result.stderr.strip()}")
+        # Gatekeeper quarantine flag, should the download carry one
+        subprocess.run(
+            ["xattr", "-dr", "com.apple.quarantine", staged_app],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    return staged_app
+
+
+def swap_in_bundle(staged_app, install_path, log=None):
+    """Rename install_path aside and the staged bundle into its place.
+
+    The old bundle becomes install_path + ".bak-<pid>" (PID-unique, so a
+    stale .bak owned by another user never blocks the swap) and is removed
+    once the new one is in; if the second rename fails, the old bundle is
+    put back. The staging folder goes either way, as do stale .bak and
+    staging folders left by earlier updates.
+    """
+    staging_dir = os.path.dirname(staged_app)
+    backup_path = install_path + f".bak-{os.getpid()}"
+    if os.path.exists(backup_path):
+        shutil.rmtree(backup_path, ignore_errors=True)
+        if os.path.exists(backup_path):
+            subprocess.run(["rm", "-rf", backup_path], capture_output=True, timeout=15)
+
+    try:
+        os.rename(install_path, backup_path)
+        try:
+            os.rename(staged_app, install_path)
+        except Exception:
+            if log:
+                log("Auto-update: swap failed, restoring backup")
+            os.rename(backup_path, install_path)
+            raise
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    shutil.rmtree(backup_path, ignore_errors=True)
+    import glob as _glob
+    for stale in _glob.glob(install_path + ".bak*") + _glob.glob(
+            os.path.join(os.path.dirname(install_path), STAGING_PREFIX + "*")):
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def download_and_install(release_data, latest_version, install_path,
                          log=None, notify=None):
     """Download the DMG from *release_data*, replace the app at *install_path*.
@@ -221,43 +294,18 @@ def download_and_install(release_data, latest_version, install_path,
         if log:
             log(f"Auto-update: replacing {install_path}")
 
-        # Backup current app — use a PID-unique path so a stale .bak
-        # owned by another user doesn't block us with PermissionError
-        backup_path = install_path + f".bak-{os.getpid()}"
-        if os.path.exists(backup_path):
-            shutil.rmtree(backup_path, ignore_errors=True)
-            if os.path.exists(backup_path):
-                subprocess.run(["rm", "-rf", backup_path], capture_output=True, timeout=15)
-
-        os.rename(install_path, backup_path)
-        try:
-            result = subprocess.run(
-                ["cp", "-R", source_app, install_path],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=120,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Copy failed: {result.stderr.strip()}")
-        except Exception:
-            # Restore from backup
-            if log:
-                log("Auto-update: copy failed, restoring backup")
-            if os.path.exists(install_path):
-                shutil.rmtree(install_path)
-            os.rename(backup_path, install_path)
-            raise
-
-        # Remove Gatekeeper quarantine flag
-        subprocess.run(
-            ["xattr", "-dr", "com.apple.quarantine", install_path],
-            capture_output=True, timeout=10,
-        )
-
-        # Remove backup and any stale .bak dirs from previous updates
-        shutil.rmtree(backup_path, ignore_errors=True)
-        import glob as _glob
-        for stale_bak in _glob.glob(install_path + ".bak*"):
-            shutil.rmtree(stale_bak, ignore_errors=True)
+        # Stage the new bundle in a hidden sibling folder, then swap it in
+        # with two renames. It used to be copied straight into install_path
+        # after the old bundle was renamed away — but the running app's
+        # bin_dir is that absolute path, so its next docker call (health
+        # probes every few seconds) executed a binary out of the half-copied
+        # bundle, and macOS 26/27's Gatekeeper answered by revoking the
+        # copy's access to the file cp had open ("fcopyfile failed:
+        # Input/output error", then "Operation not permitted" for the rest;
+        # 2.5.2 → 2.5.3 on 2026-10-13). Nothing executes from the staging
+        # path, and a sibling is on the same volume, so rename(2) works.
+        staged_app = stage_new_bundle(source_app, install_path)
+        swap_in_bundle(staged_app, install_path, log=log)
 
         if log:
             log(f"Auto-update: installed v{latest_version} successfully")
