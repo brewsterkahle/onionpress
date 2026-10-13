@@ -269,7 +269,12 @@
   the staged folder swapped in as `vanity-keys/` and `.import-key-pending`
   set (the start removes the old volumes). The page used to remove the
   volumes and vanity-keys/ before decoding the key: garbage minted a new
-  address. `tests/test_onion_key_replacement.py`.
+  address. On a Mac the page's import needs the person at the Mac: the
+  menubar checks the key, shows a native dialog with the current and new
+  address (Cancel is the default; no answer in 5 minutes is Cancel), and
+  only Replace runs `import-key -` with `ONIONPRESS_IMPORT_KEY_CONFIRMED=yes`
+  (the launcher's terminal question would read the key's end of input and
+  cancel). Linux asks no one yet. `tests/test_onion_key_replacement.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published, so nothing private may sit there under a name

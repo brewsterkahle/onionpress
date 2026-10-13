@@ -486,6 +486,175 @@ class TestLinuxStructure(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
 
+class TestMacImportKey(unittest.TestCase):
+    """app/MacOS/onionpress import_key, run for real: the menubar hands it
+    the page's key on stdin ("import-key -"), so its own question reads the
+    end of the input. It replaces a key only with the menubar's explicit
+    ONIONPRESS_IMPORT_KEY_CONFIRMED=yes, and then in replace_onion_key's
+    order."""
+
+    PRELUDE = r'''
+log() { echo "[log] $*" >> "$LOG_FILE"; }
+bundled_python() { "$PY" "$@"; }
+stop_containers() { echo "stop_containers" >> "$CALLS"; }
+onionheaven_release() {
+    echo "onionheaven_release $* yes=${ONIONPRESS_YES:-}" >> "$CALLS"
+    return "${RELEASE_RC:-0}"
+}
+'''
+    if sys.platform != "darwin":
+        # The Mac launcher's BSD `sed -i ''`, on GNU sed.
+        PRELUDE += ('sed() { if [ "$1" = -i ] && [ -z "$2" ]; then shift 2; '
+                    'command sed -i "$@"; else command sed "$@"; fi; }\n')
+
+    def _import(self, inst, key, **env):
+        text = _read(MAC)
+        funcs = "\n".join(_shell_function(text, n) for n in (
+            "is_onion_address", "vanity_key_dir", "docker_volume_state",
+            "replace_onion_key", "set_address_prefix_for", "import_key"))
+        script = "set -e\n" + self.PRELUDE + funcs + "\nimport_key -\n"
+        return subprocess.run(["bash", "-c", script], input=key + "\n",
+                              capture_output=True, text=True, timeout=120,
+                              env=inst.env(**env))
+
+    def test_without_the_menubars_confirmation_nothing_is_replaced(self):
+        inst = _Install(self, vanity=OLD)
+        before = inst.vanity()
+        r = self._import(inst, b32(NEW))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Cancelled.", r.stdout)
+        self.assertEqual(inst.vanity(), before)
+        self.assertEqual(inst.kept(), {})
+        self.assertNotIn("stop_containers", inst.calls_list())
+        self.assertFalse(inst.pending())
+
+    def test_confirmed_it_keeps_the_old_key_and_replaces_it(self):
+        inst = _Install(self, vanity=OLD)
+        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_CONFIRMED="yes")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Confirmed at this Mac.", r.stdout)
+        self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
+        self.assertEqual(os.listdir(os.path.join(inst.data, "shared", "vanity-keys")), [NEW_ADDR])
+        self.assertTrue(inst.pending())
+        self.assertIn(f"ADDRESS_PREFIX={NEW_ADDR[:3]}\n", inst.config())
+        calls = inst.calls_list()
+        self.assertFalse([c for c in calls if c.startswith("docker volume rm")], calls)
+        self.assertLess(calls.index("onionheaven_release key-import yes="),
+                        calls.index("stop_containers"))
+
+    def test_only_yes_confirms(self):
+        inst = _Install(self, vanity=OLD)
+        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_CONFIRMED="1")
+        self.assertIn("Cancelled.", r.stdout)
+        self.assertEqual(inst.kept(), {})
+
+    def test_a_refused_key_is_refused_before_the_question(self):
+        inst = _Install(self, vanity=OLD)
+        before = inst.vanity()
+        r = self._import(inst, b32(TOP_BIT), ONIONPRESS_IMPORT_KEY_CONFIRMED="yes")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("top bit", r.stderr)
+        self.assertEqual(inst.vanity(), before)
+        self.assertEqual(inst.calls_list(), [])
+
+    def test_the_two_launchers_replace_alike(self):
+        linux = _shell_function(_read(LINUX), "replace_onion_key")
+        mac = _shell_function(_read(MAC), "replace_onion_key")
+        self.assertEqual(mac.replace("bundled_python ", "python3 "), linux)
+        body = _shell_function(_read(MAC), "import_key")
+        self.assertLess(body.index("decode-key -"), body.index("ONIONPRESS_IMPORT_KEY_CONFIRMED"))
+        self.assertLess(body.index("read -r confirm"), body.index("replace_onion_key"))
+        self.assertNotIn("docker volume rm", body)
+        self.assertNotIn("rm -rf", body)
+
+
+def _menubar_method(name):
+    """A method of the menubar's app class, compiled on its own (the module
+    needs AppKit and rumps)."""
+    import ast
+    src = _read("src/menubar.py")
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(src, node)
+    raise AssertionError(f"{name} not found in src/menubar.py")
+
+
+class TestMenubarAsksThePersonAtTheMac(unittest.TestCase):
+    """_settings_page_key_import: the page's key is checked, then the
+    person at the Mac answers a native dialog naming both addresses, and
+    only Replace runs the launcher's import, with the confirmation flag."""
+
+    def _app(self, answer, current=OLD_ADDR, import_rc=0):
+        import textwrap
+        import types
+        ns = {"key_manager": key_manager, "os": os,
+              "time": types.SimpleNamespace(sleep=lambda s: None),
+              "subprocess": mock.Mock()}
+        ns["subprocess"].run.return_value = subprocess.CompletedProcess(
+            [], import_rc, stdout="", stderr="" if import_rc == 0 else "ERROR: no copy")
+        exec(textwrap.dedent(_menubar_method("_settings_page_key_import")), ns)
+        app = types.SimpleNamespace(
+            onion_address=current, is_running=True, launcher_script="/x/onionpress",
+            log=mock.Mock(), run_command=mock.Mock(), write_status_to_volume=mock.Mock(),
+            show_native_alert=mock.Mock(return_value=answer))
+        return app, ns["_settings_page_key_import"], ns["subprocess"].run
+
+    def test_replace_runs_the_import_with_the_flag(self):
+        app, method, run = self._app(answer=1)
+        app.run_command.side_effect = lambda c: setattr(app, "onion_address", NEW_ADDR)
+        result = method(app, b32(NEW))
+        self.assertEqual(result, {"success": True, "address": NEW_ADDR})
+        title, message = app.show_native_alert.call_args.args[:2]
+        self.assertIn(OLD_ADDR, message)
+        self.assertIn(NEW_ADDR, message)
+        kwargs = app.show_native_alert.call_args.kwargs
+        self.assertEqual(kwargs["buttons"][kwargs["default_button"]], "Cancel")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, ["/x/onionpress", "import-key", "-"])
+        self.assertEqual(run.call_args.kwargs["input"], b32(NEW) + "\n")
+        self.assertEqual(run.call_args.kwargs["env"]["ONIONPRESS_IMPORT_KEY_CONFIRMED"], "yes")
+        app.run_command.assert_called_once_with("restart")
+
+    def test_cancel_or_no_answer_imports_nothing(self):
+        for answer in (0, None):
+            with self.subTest(answer=answer):
+                app, method, run = self._app(answer=answer)
+                result = method(app, b32(NEW))
+                self.assertIs(result["success"], False)
+                self.assertIn("click Replace", result["error"])
+                run.assert_not_called()
+                app.run_command.assert_not_called()
+
+    def test_a_refused_key_never_reaches_the_dialog(self):
+        for key in ("garbage", b32(TOP_BIT)):
+            with self.subTest(key=key[:8]):
+                app, method, run = self._app(answer=1)
+                result = method(app, key)
+                self.assertIs(result["success"], False)
+                app.show_native_alert.assert_not_called()
+                run.assert_not_called()
+
+    def test_the_same_address_needs_nothing(self):
+        app, method, run = self._app(answer=1, current=NEW_ADDR)
+        self.assertEqual(method(app, b32(NEW)), {"success": True, "address": NEW_ADDR})
+        app.show_native_alert.assert_not_called()
+        run.assert_not_called()
+
+    def test_a_failed_import_says_why(self):
+        app, method, run = self._app(answer=1, import_rc=1)
+        result = method(app, b32(NEW))
+        self.assertEqual(result, {"success": False, "error": "ERROR: no copy"})
+        app.run_command.assert_not_called()
+
+    def test_the_handler_goes_through_it(self):
+        src = _read("src/menubar.py")
+        start = src.index('elif action == "import-key-file":')
+        branch = src[start:src.index('elif action == "create-backup":', start)]
+        self.assertIn("self._settings_page_key_import(key_data)", branch)
+        # The launcher's import runs only from there, after the dialog.
+        self.assertNotIn("launcher_script", branch)
+
+
 class TestKeepCurrentKeys(unittest.TestCase):
     """key_manager's half, without the launchers."""
 

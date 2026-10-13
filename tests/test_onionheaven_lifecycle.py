@@ -776,7 +776,7 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         self.assertIn("*([] if remaining else [REGISTRATION_RECORD])", body)
 
     def test_key_imports(self):
-        for rel in ("linux/onionpress",):
+        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
             with self.subTest(rel=rel):
                 text = _read(rel)
                 # Every import replaces the key in replace_onion_key: the
@@ -793,17 +793,6 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
                 body = _shell_function(text, "import_key")
                 self.assertNotIn("onionheaven_release", body)
                 self.assert_before(body, 'read -r confirm', "replace_onion_key", rel)
-        for rel in ("app/MacOS/onionpress",):
-            with self.subTest(rel=rel):
-                body = _shell_function(_read(rel), "import_key")
-                # Both branches: Docker up (the key volume exists) and not.
-                self.assertEqual(body.count("onionheaven_release key-import"), 2)
-                self.assert_before(body, "onionheaven_release key-import",
-                                   "stop_containers", rel)
-                self.assert_before(body, 'read -r confirm',
-                                   "onionheaven_release key-import", rel)
-                self.assert_before(body, "onionheaven_release key-import",
-                                   "touch \"$DATA_DIR/.import-key-pending\"", rel)
 
     def test_linux_settings_page_key_changes(self):
         text = _read("linux/onionpress")

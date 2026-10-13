@@ -1113,12 +1113,15 @@ EXAMPLE:
 
 WHAT THIS COMMAND DOES:
 
-  1. Decodes the base32 key and validates it is exactly 64 bytes
-  2. Derives the .onion address from the public key portion
-  3. Writes key files to ~/.onionpress/shared/vanity-keys/<address>/
+  1. Decodes the base32 key and checks it is a usable 64-byte expanded
+     ed25519 key; nothing is changed for a key that is refused
+  2. Derives the .onion address from it
+  3. Keeps a copy of the current key in ~/.onionpress/replaced-keys/
+     <address>-<time>/ (import that key again to go back)
+  4. Writes key files to ~/.onionpress/shared/vanity-keys/<address>/
      - ks_hs_id.ed25519_expanded_private  (OpenSSH PEM, the format the container takes)
      - hostname                           (the .onion address)
-  4. On next start, OnionPress will use this key
+  5. On next start, OnionPress will use this key
 
 NOTE: If an onion address already exists, you will be prompted to
 confirm the replacement. OnionPress will handle stopping and
@@ -1128,11 +1131,10 @@ HELPEOF
         return 0
     fi
 
-    # Decode base32 key and derive .onion address (no files written yet)
+    # Check the key and derive its .onion address before anything is
+    # touched: a key that is refused changes nothing.
     local address
-    address=$(printf '%s\n' "$key_b32" | bundled_python "$SCRIPTS_DIR/key_manager.py" decode-key - 2>&1)
-
-    if [ $? -ne 0 ]; then
+    if ! address=$(printf '%s\n' "$key_b32" | bundled_python "$SCRIPTS_DIR/key_manager.py" decode-key - 2>&1); then
         echo "$address" >&2
         return 1
     fi
@@ -1148,7 +1150,11 @@ HELPEOF
 
     # Check if a key volume already exists (need to replace old key). The old
     # name is checked too: an install that never started on this version has
-    # not migrated yet.
+    # not migrated yet. The question is skipped only for an explicit
+    # ONIONPRESS_IMPORT_KEY_CONFIRMED=yes: the menubar sets it after the
+    # person at this Mac clicked Replace in its own dialog (a Settings-page
+    # import). Its key arrives on stdin, so this read would see the end of
+    # the input and cancel.
     if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx 'onionpress-onion-keys\|onionpress-arti-state'; then
         echo "An onion address key already exists."
         echo ""
@@ -1157,71 +1163,157 @@ HELPEOF
             echo ""
         fi
         echo "Importing a new key will REPLACE your current onion address."
-        echo "Your old address will stop working permanently."
+        echo "A copy of the current key is kept in $DATA_DIR/replaced-keys/."
         echo ""
-        printf "Continue? [y/N] "
-        read -r confirm
-        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-            echo "Cancelled."
-            return 1
-        fi
-
-        # The old key goes: OnionHeaven hubs that may hold a copy are
-        # asked to delete it first, while it can still sign the request.
-        if ! onionheaven_release key-import; then
-            echo "Cancelled."
-            return 1
-        fi
-
-        # Stop OnionPress if running
-        echo "Stopping OnionPress..."
-        stop_containers 2>/dev/null
-        # Remove the old key volume (must verify it's actually gone); the
-        # pre-2026-09-25 name goes too so it cannot be migrated back later.
-        echo "Removing old key volume..."
-        for vol in onionpress-onion-keys onionpress-arti-state; do
-            docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-            if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
-                echo "Volume still in use — force-removing containers..."
-                docker rm -f $(docker ps -aq --filter "volume=$vol") >> "$LOG_FILE" 2>&1 || true
-                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-                if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx "$vol"; then
-                    echo "ERROR: Could not remove old $vol volume. Is another Docker client using it?" >&2
-                    return 1
-                fi
+        if [ "${ONIONPRESS_IMPORT_KEY_CONFIRMED:-}" = "yes" ]; then
+            echo "Confirmed at this Mac."
+        else
+            printf "Continue? [y/N] "
+            local confirm=""
+            read -r confirm || true
+            if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+                echo "Cancelled."
+                return 1
             fi
-        done
-        # Also remove old tor-keys volume if it exists (migration leftover)
-        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
-        # No unfinished key volume migration survives a replaced identity.
-        rm -f "$DATA_DIR/.key-volume-migration-pending"
-        # Remove old vanity-keys directory
-        rm -rf "$DATA_DIR/shared/vanity-keys/"
-        echo "Old keys removed."
-    else
-        # Docker not running: the old key stays in its volume until the
-        # next start swaps it out, and nothing can sign for it until then.
-        # If a hub holds a copy, say so and ask before going on.
-        if ! onionheaven_release key-import; then
-            echo "Cancelled."
-            return 1
-        fi
-        if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-            # Docker not running but old vanity-keys exist — clean them up
-            rm -rf "$DATA_DIR/shared/vanity-keys/"
         fi
     fi
 
-    # Mark that a key was imported so next startup removes the old key volume
-    # (needed when Docker isn't running and we can't remove the volume now)
-    touch "$DATA_DIR/.import-key-pending"
-
-    # Write all key files (PEM + C Tor + hostname)
-    if ! printf '%s\n' "$key_b32" | bundled_python "$SCRIPTS_DIR/key_manager.py" import-key - "$DATA_DIR/shared/vanity-keys" 2>>"$LOG_FILE"; then
-        echo "ERROR: Failed to write key files" >&2
+    # Keep a copy of the current key, ask the OnionHeaven hubs that may hold
+    # it to delete theirs, stop OnionPress and put the new key in place.
+    local rc=0
+    replace_onion_key "$key_b32" || rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "Key already installed for: $address"
+        echo "Nothing to do."
+        return 0
+    elif [ "$rc" -ne 0 ]; then
+        echo "ERROR: $REPLACE_KEY_ERROR" >&2
+        if [ "$REPLACE_KEY_STOPPED" = "yes" ]; then
+            echo "OnionPress was stopped; launch it again." >&2
+        fi
         return 1
     fi
 
+    echo "Imported key for: $address"
+    echo "Key files written to: $DATA_DIR/shared/vanity-keys/$address"
+    if [ -n "$REPLACE_KEY_KEPT" ]; then
+        echo "The replaced key is kept in:"
+        printf '%s\n' "$REPLACE_KEY_KEPT" | sed 's/^/  /'
+    fi
+    echo ""
+    echo "Launch OnionPress to use this address."
+    return 0
+}
+
+# Replace this site's onion service key, in an order that never loses the
+# current one. The Linux launcher's replace_onion_key (see there), run
+# with the bundled Python; a test keeps the two the same.
+replace_onion_key() {
+    local staging new_addr staged rc vdir vol state
+    local vdirs=()
+    REPLACE_KEY_ADDRESS=""
+    REPLACE_KEY_KEPT=""
+    REPLACE_KEY_STOPPED=""
+    REPLACE_KEY_ERROR=""
+    mkdir -p "$DATA_DIR/shared"
+    if ! staging=$(mktemp -d "$DATA_DIR/.key-import-XXXXXX"); then
+        REPLACE_KEY_ERROR="Could not make a staging folder in $DATA_DIR"
+        return 1
+    fi
+    mkdir "$staging/vanity-keys"
+
+    # 1. Check and stage.
+    if ! new_addr=$(printf '%s\n' "$1" | bundled_python "$SCRIPTS_DIR/key_manager.py" import-key - "$staging/vanity-keys" 2>"$staging/error"); then
+        REPLACE_KEY_ERROR=$(head -c 400 "$staging/error" | tr -d '\r' | head -1)
+        REPLACE_KEY_ERROR="${REPLACE_KEY_ERROR#Error: }"
+        REPLACE_KEY_ERROR="${REPLACE_KEY_ERROR:-The key could not be read}"
+        rm -rf "$staging"
+        log "Key import refused: $REPLACE_KEY_ERROR"
+        return 1
+    fi
+    staged=$(bundled_python "$SCRIPTS_DIR/key_manager.py" staged-address "$staging/vanity-keys/$new_addr" 2>>"$LOG_FILE") || staged=""
+    if ! is_onion_address "$new_addr" || [ "$staged" != "$new_addr" ]; then
+        REPLACE_KEY_ERROR="The imported key did not read back as one onion address"
+        rm -rf "$staging"
+        log "Key import refused: $REPLACE_KEY_ERROR"
+        return 1
+    fi
+    REPLACE_KEY_ADDRESS="$new_addr"
+
+    # Already the address Tor serves (or, with Tor not answering, the one in
+    # vanity-keys/): nothing to replace.
+    vdir=$(vanity_key_dir || true)
+    staged=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ') || staged=""
+    if [ "$staged" = "$new_addr" ] \
+            || { [ -z "$staged" ] && [ -n "$vdir" ] && [ "$(basename "$vdir")" = "$new_addr" ]; }; then
+        rm -rf "$staging"
+        log "Key import: $new_addr is already this site's address"
+        return 2
+    fi
+
+    # 2. Keep a copy of the current key.
+    [ -n "$vdir" ] && vdirs=("$vdir")
+    rc=0
+    REPLACE_KEY_KEPT=$(bundled_python "$SCRIPTS_DIR/key_manager.py" keep-current "$DATA_DIR/replaced-keys" "${vdirs[@]}" 2>>"$LOG_FILE") || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        # Nothing could be read. Only Docker's confirmed "no such volume"
+        # for every place a key lives means there is no key to keep.
+        for vol in onionpress-onion-keys onionpress-arti-state onionpress-tor-state; do
+            state=0; docker_volume_state "$vol" || state=$?
+            if [ "$state" -ne 1 ]; then
+                REPLACE_KEY_ERROR="The current onion service key could not be read, so no copy of it could be kept. Start OnionPress and try again; nothing was changed."
+                rm -rf "$staging"
+                log "Key import refused: no copy of the current key (volume $vol: state $state)"
+                return 1
+            fi
+        done
+        REPLACE_KEY_KEPT=""
+        log "Key import: no current key to keep (no key volume)"
+    elif [ "$rc" -ne 0 ]; then
+        REPLACE_KEY_ERROR="A copy of the current onion service key could not be kept (see $LOG_FILE); nothing was changed."
+        rm -rf "$staging"
+        log "Key import refused: keeping the current key failed"
+        return 1
+    else
+        log "Kept a copy of the current onion service key: $(printf '%s' "$REPLACE_KEY_KEPT" | tr '\n' ' ')"
+    fi
+
+    # 3. Only now: the hubs, then OnionPress.
+    if ! onionheaven_release key-import; then
+        REPLACE_KEY_ERROR="Cancelled: an OnionHeaven hub may still hold the current key"
+        rm -rf "$staging"
+        return 1
+    fi
+    REPLACE_KEY_STOPPED=yes
+    stop_containers 2>/dev/null || true
+
+    # 4. The staged key becomes vanity-keys/; the next start does the rest.
+    if [ -e "$DATA_DIR/shared/vanity-keys" ] || [ -L "$DATA_DIR/shared/vanity-keys" ]; then
+        if ! mv "$DATA_DIR/shared/vanity-keys" "$staging/replaced-vanity-keys"; then
+            REPLACE_KEY_ERROR="Could not move the old vanity-keys folder aside; the key was not replaced"
+            rm -rf "$staging/vanity-keys"
+            log "ERROR: $REPLACE_KEY_ERROR (staging folder $staging)"
+            return 1
+        fi
+    fi
+    if ! mv "$staging/vanity-keys" "$DATA_DIR/shared/vanity-keys"; then
+        mv "$staging/replaced-vanity-keys" "$DATA_DIR/shared/vanity-keys" 2>/dev/null || true
+        REPLACE_KEY_ERROR="Could not put the new key in place; the key was not replaced"
+        log "ERROR: $REPLACE_KEY_ERROR (staging folder $staging)"
+        return 1
+    fi
+    touch "$DATA_DIR/.import-key-pending"
+    rm -rf "$staging"
+
+    # 5.
+    set_address_prefix_for "$new_addr"
+    log "Imported key for address: $new_addr"
+    return 0
+}
+
+# ADDRESS_PREFIX follows an imported address.
+set_address_prefix_for() {
+    local address="$1"
     # Update ADDRESS_PREFIX in config to match the imported address
     # so the startup prefix check doesn't flag a mismatch. Keep the user's
     # configured prefix length instead of always truncating to 3 (#116);
@@ -1244,13 +1336,6 @@ HELPEOF
         echo "ADDRESS_PREFIX=$addr_prefix" >> "$DATA_DIR/config"
     fi
     log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
-
-    log "Imported key for address: $address"
-    echo "Imported key for: $address"
-    echo "Key files written to: $DATA_DIR/shared/vanity-keys/$address"
-    echo ""
-    echo "Launch OnionPress to use this address."
-    return 0
 }
 
 # Is a WordPress.org plugin wanted? plugin_wanted INSTALL_CACHE_ENABLER |

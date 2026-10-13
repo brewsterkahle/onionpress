@@ -5512,6 +5512,73 @@ License: AGPL v3"""
         except Exception:
             pass
 
+    def _settings_page_key_import(self, key_data):
+        """Import a key the Settings page sent, if the person at this Mac
+        says so. Returns the page's result: {"success", "address"|"error"}.
+
+        Anything running in WordPress can write the page's request, so the
+        key replaces this site's address only after a native dialog here
+        (current and new address) was answered Replace. The key is checked
+        first (a refused key never reaches the dialog), and the launcher's
+        import then keeps a copy of the current key before anything changes
+        (replace_onion_key). ONIONPRESS_IMPORT_KEY_CONFIRMED=yes is what
+        tells the launcher the question was asked: its own terminal
+        question would read the end of the key on stdin and cancel.
+        """
+        try:
+            new_address = key_manager.derive_onion_address(
+                key_manager.check_expanded_secret_key(
+                    key_manager.decode_base32_key(key_data)))
+        except ValueError as e:
+            self.log(f"Settings page: key import refused: {e}")
+            return {"success": False, "error": str(e)}
+        current = (self.onion_address
+                   if key_manager.is_valid_onion_address(self.onion_address) else "")
+        if new_address == current:
+            return {"success": True, "address": new_address}
+        choice = self.show_native_alert(
+            "Replace this site's onion address?",
+            "The OnionPress Settings page in WordPress asked to replace this "
+            "site's onion service key.\n\n"
+            f"Current address:\n{current or '(not known yet)'}\n\n"
+            f"New address:\n{new_address}\n\n"
+            "Visitors and links using the current address will stop reaching "
+            "this site. OnionPress keeps a copy of the current key in "
+            "~/.onionpress/replaced-keys/, from which it can be imported "
+            "again.\n\nReplace it only if you asked for this yourself.",
+            buttons=["Cancel", "Replace"], default_button=0, cancel_button=0,
+            style="critical")
+        if choice != 1:
+            self.log("Settings page: key import not confirmed at this Mac")
+            return {"success": False,
+                    "error": "Not replaced: the person at the Mac running "
+                             "OnionPress has to click Replace in the dialog "
+                             "OnionPress shows there."}
+        self.log(f"Settings page: key import confirmed at this Mac ({new_address})")
+        # "-" hands the key over on stdin: in argv it would show in `ps` to
+        # every user on this Mac.
+        r = subprocess.run(
+            [self.launcher_script, "import-key", "-"],
+            input=key_data + "\n",
+            env={**os.environ, "ONIONPRESS_IMPORT_KEY_CONFIRMED": "yes"},
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=300
+        )
+        if r.returncode != 0:
+            error_msg = r.stderr.strip() or r.stdout.strip() or "Import failed"
+            self.log(f"Settings page: key import failed: {error_msg}")
+            return {"success": False, "error": error_msg}
+        # Restart to pick up the imported key
+        self.run_command("restart")
+        for _ in range(60):
+            time.sleep(2)
+            if self.is_running and key_manager.is_valid_onion_address(self.onion_address):
+                break
+        self.write_status_to_volume()
+        new_addr = self.onion_address or new_address
+        self.log(f"Settings page: key imported, address: {new_addr}")
+        return {"success": True, "address": new_addr}
+
     def _handle_requested_action(self, action):
         """Execute a requested action from the WordPress settings page."""
         import datetime
@@ -5686,7 +5753,7 @@ License: AGPL v3"""
                 })
 
             elif action == "import-key-file":
-                self.log("Settings page: importing key...")
+                self.log("Settings page: key import requested")
                 try:
                     r = subprocess.run(
                         ["docker"] + wp_files.exec_args(
@@ -5707,37 +5774,9 @@ License: AGPL v3"""
                             "imported_at": now_iso
                         })
                     else:
-                        # Use the onionpress script's import-key command.
-                        # "-" hands it the key on stdin: in argv it would
-                        # show in `ps` to every user on this Mac.
-                        r = subprocess.run(
-                            [self.launcher_script, "import-key", "-"],
-                            input=key_data + "\n",
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=120
-                        )
-                        if r.returncode == 0:
-                            # Restart to pick up the imported key
-                            self.run_command("restart")
-                            import time
-                            for _ in range(60):
-                                time.sleep(2)
-                                if self.is_running and key_manager.is_valid_onion_address(self.onion_address):
-                                    break
-                            self.write_status_to_volume()
-                            new_addr = self.onion_address or ""
-                            _write_result("import-result.json", {
-                                "success": True, "address": new_addr,
-                                "imported_at": now_iso
-                            })
-                            self.log(f"Settings page: key imported, address: {new_addr}")
-                        else:
-                            error_msg = r.stderr.strip() or r.stdout.strip() or "Import failed"
-                            _write_result("import-result.json", {
-                                "success": False, "error": error_msg,
-                                "imported_at": now_iso
-                            })
-                            self.log(f"Settings page: key import failed: {error_msg}")
+                        outcome = self._settings_page_key_import(key_data)
+                        _write_result("import-result.json", {
+                            **outcome, "imported_at": now_iso})
                 except Exception as e:
                     _write_result("import-result.json", {
                         "success": False, "error": str(e),
