@@ -174,19 +174,31 @@ file, so this is no longer something you have to remember.
 ### Refreshing the pins at release time
 
 ```bash
-docker pull ghcr.io/brewsterkahle/onionpress-tor:latest
-docker pull ghcr.io/brewsterkahle/onionpress-wordpress:latest
-build/refresh-image-digests.sh
+build/refresh-image-digests.sh     # pins what GHCR serves as :latest right now
 git diff
 ```
 
-Other modes, none of which need a Docker daemon:
+The digests come from the registry (`build/base-image-digest.sh`, no Docker
+daemon needed). Until issue #327 they came from `docker images --digests`,
+i.e. whatever the release machine had last pulled, and that pinned stale
+images during the 2.5.3 release.
+
+Other modes:
 
 ```bash
 build/refresh-image-digests.sh --check                   # CI / pre-commit: drift is an error
 build/refresh-image-digests.sh --propagate               # repair: re-apply image-pins.env everywhere
 build/refresh-image-digests.sh --tor sha256:… --wordpress sha256:…   # supply digests explicitly
+build/refresh-image-digests.sh --local                   # this machine's pulled images (needs a daemon)
 ```
+
+Publishing the GitHub release does **not** rebuild the images. On
+`release: published`, `docker-publish.yml` only points `:latest` and
+`:<version>` at the digests in the release's `build/image-pins.env`, then
+checks that both tags resolve to exactly those digests. Images are built only
+from "Run workflow". Until #327 a release rebuilt everything and moved both
+tags off the images it pinned and tested (2.5.2 and 2.5.3 both shipped that
+way).
 
 Pins must be **multi-arch index digests** — what
 `docker buildx imagetools inspect <tag>` reports for the tag. A

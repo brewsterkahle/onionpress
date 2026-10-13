@@ -354,9 +354,8 @@ tests skip when a host tool is absent (sips/iconutil, ImageMagick, zip).
 
 ```bash
 build/bump-version.sh X.Y.Z             # updates every version location
-docker pull ghcr.io/brewsterkahle/onionpress-tor:latest
-docker pull ghcr.io/brewsterkahle/onionpress-wordpress:latest
-build/refresh-image-digests.sh          # rewrites build/image-pins.env and every consumer
+gh workflow run docker-publish.yml -f version=X.Y.Z   # if the images changed; wait for it to finish
+build/refresh-image-digests.sh          # asks GHCR for :latest; rewrites build/image-pins.env and every consumer
 git commit -am "Bump version to X.Y.Z; refresh image digests"
 build/release.sh                        # builds .dmg + .deb, creates the GitHub release with both + SHA256SUMS
 ```
@@ -370,8 +369,12 @@ download link. Every release also carries `SHA256SUMS` (the sha256 of the
 downloads `SHA256SUMS` and the `.deb` back to check them, and publishes only
 then; it fails rather than finish a release without them.
 
-The container images are published by `.github/workflows/docker-publish.yml`
-on release, or by hand from the Actions tab ("Run workflow"). It runs entirely
+The container images are built and published by
+`.github/workflows/docker-publish.yml` from the Actions tab ("Run workflow"),
+before the release. Publishing the release runs the workflow too, but builds
+nothing: it points `:latest` and `:X.Y.Z` at the digests the release pins in
+`build/image-pins.env`, so a tag always names the image that release tested.
+The build jobs run entirely
 on GitHub-hosted runners — amd64 on `ubuntu-24.04`, arm64 on
 `ubuntu-24.04-arm` — and publishes to the namespace of the repository it runs
 in, so it works unchanged in a fork:
