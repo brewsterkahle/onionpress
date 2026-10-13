@@ -422,21 +422,57 @@
   `tests/test_onionheaven_data_move_hardening.py`.
 - Backups hold hub data when the volume has a key dir or a registry row
   (`backup.hub_data_state`, not the long-dead `master-key.json`): registry
-  via `sqlite3 .backup` + `keys/`, nothing else (`stage_hub_data`; Linux via
-  `onionpress.cli stage-hub-data`). Restores go through `restore_hub_data`
-  (SQLite `.restore`, never `docker cp` over the live db).
+  via `sqlite3 .backup` + `keys/`, nothing else. **Sealed to the hub's
+  recovery key** (issue #60 O7, `src/onionpress/hub_backup.py`) when
+  `~/.onionpress/hub-backup-recovery.pub` exists: read into memory
+  (`read_hub_data`, never a file in the clear), one tar, PyNaCl `SealedBox`
+  (crypto_box_seal) to the public half, stored as `onionheaven.sealed` in
+  the format-2 archive (no format bump; metadata `onionheaven_data:
+  "sealed"`, `onionheaven_sealed_format: 1`, `onionheaven_recovery_key_id`:
+  16 hex of SHA-256 of the public half). No key: plain `onionheaven/` as
+  before (`stage_hub_data`) with `HUB_DATA_UNSEALED_WARNING` every time
+  (`stage_hub_backup`; Linux `onionpress.cli stage-hub-backup`). A key file
+  that is there but unreadable fails the backup. The private half is
+  printed once by `onionpress hub-recovery-key create` (`create|show|check|
+  restore`, both launchers pass `--data-dir "$DATA_DIR"`), held offline by
+  the operator, and read only from `ONIONPRESS_HUB_RECOVERY_KEY` (popped in
+  `cli.main` before anything else), stdin or a prompt; never argv, never
+  stored. The pub file is never under `shared/` (VM mount) or in config
+  (Settings page). Restores: the Mac's Restore… prompts
+  (`_ask_hub_recovery_key`), `onionpress restore` takes the env var or a
+  tty prompt, checked by key id before anything is restored and opened in
+  memory right after extraction (`prepare_install_from_backup(after_extract=)`);
+  without it everything else is restored and the hub data named as left
+  out (`sealed_skipped_message`); `hub-recovery-key restore <backup>`
+  restores it later (the welcome screen's restore never asks). 2.5.3
+  restores such a backup's site and silently ignores the member.
+- Every hub-data restore, sealed or plain, is checked first
+  (`hub_backup.check`): a key must be a v3 address's own (PEM parses,
+  derives to the name, scalar < 2^255 and scalar·B = public key, as
+  `key-convert.py`'s `keypair_error`; a test holds them to the same
+  verdicts) and is written as a fresh PEM + our own hostname via `docker cp
+  -` of an in-memory tar; the registry goes through `REGISTRY_RESTORE_SH`
+  in onionheaven (integrity check, only `registry`/`takeover_containers`
+  and their autoindexes, rows with v3 addresses only, then `.restore`).
+  Sizes bounded (`MAX_ARCHIVE_BYTES` etc.). `tests/test_hub_backup_sealed.py`.
 - **Never in a backup that goes through WordPress.** The Settings page's
   backup is handed to the WordPress container for download, and its
   password is the admin password WordPress saw in plain text; its restore
   takes an upload and a password from there too. So the page's backup is
   `create_backup(include_hub_data=False)` (Linux `create_backup
-  --without-hub-data`): hub data left out and logged, `metadata.json` gets
-  `excludes_onionheaven_data: true` + `excludes_onionheaven_data_reason:
-  "settings-page"`, the page shows `HUB_DATA_LEFT_OUT_NOTE`. Every other
-  `create_backup` caller passes `include_hub_data=True` (owner's disk).
-  The page's restore (`restore_from_backup(through_wordpress=True)`, Linux
-  `restore_backup --from-settings-page`) refuses, before touching anything,
-  a backup with any entry in `onionheaven/keys/`
+  --without-hub-data`), and on a hub or on OnionHome it is **refused**
+  before anything is copied (`settings_page_backup_refusal`:
+  `SettingsPageBackupRefused`, Linux return 3 + `BACKUP_REFUSAL`, the page
+  shows the message): it carries the node's own onion service key, and code
+  in WordPress could run a rival hub collecting registrants' keys (or a
+  rival OnionHome). Detection: own address is the canonical hub's or
+  OnionHome's, `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`, `hub_data_state() ==
+  "hub"`, or OnionHome's registry present; never `server_active` (true on
+  every Linux node). Every other `create_backup` caller passes
+  `include_hub_data=True` (owner's disk). The page's restore
+  (`restore_from_backup(through_wordpress=True)`, Linux `restore_backup
+  --from-settings-page`) refuses, before touching anything, a backup with
+  any entry in `onionheaven/keys/` or an `onionheaven.sealed`
   (`settings_page_restore_refusal`; refused whole, since a hub restored
   without its registrants' keys looks restored) and never writes the volume
   (`hub_volumes=False`: a registry alone, as every Linux backup through
@@ -703,6 +739,11 @@
   (password on stdin); Linux's inline create_backup no longer zips itself.
 - OnionPress 2.5.2 and older cannot restore a format-2 backup (they report it
   as not a valid OnionPress backup); the README inside the zip says so.
+- A hub's backup may carry one more member inside the encrypted zip,
+  `onionheaven.sealed` (its registry and registrants' keys sealed to the
+  hub's recovery key: "OnionHeaven Hub Data Volume" above). It is an
+  ordinary member: the container format, its bytes and the fixture are
+  unchanged, and the README says the hub data is sealed.
 
 ## Restores Extract Plain Files Only
 - A backup file is its maker's, password or not. `backup.extract_archive`

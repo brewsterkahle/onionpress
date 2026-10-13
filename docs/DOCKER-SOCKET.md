@@ -147,23 +147,87 @@ the image and where its arguments come from.
 **Backups.** A backup holds a hub's data when the volume has any (a key
 directory, or a row in the registry; `backup.hub_data_state`): the registry
 as `sqlite3 .backup` copies it, one consistent state while the hub writes,
-and `keys/`, read out of `onionheaven` as plain files, nothing else from the
-volume (`stage_hub_data`; Linux runs it as `onionpress.cli stage-hub-data`).
-A restore puts the registry back through SQLite's `.restore`, never as a
-copy over the database in use, whose `-wal` SQLite would apply to it, and
-the keys as root's (`restore_hub_data`, all three restore paths). Until this
-release Mac backups held no hub data at all (they waited for a
-`master-key.json` nothing writes any more).
+and `keys/`, nothing else from the volume. With a backup recovery key set
+up (below) they are read out of `onionheaven` into memory, packed into one
+tar, sealed to the key with libsodium's `crypto_box_seal` (PyNaCl's
+`SealedBox`) and stored as `onionheaven.sealed` in the encrypted archive;
+none of it is ever a file in the clear on the host (`stage_hub_backup`;
+Linux runs it as `onionpress.cli stage-hub-backup`), and `metadata.json`
+says `onionheaven_data: "sealed"` with the key's id. Without a key it is as
+before: a plain `onionheaven/` folder under the backup's password only
+(`stage_hub_data`), with a warning in the log, in the app's finished-backup
+message and in `onionpress backup`'s output, every time.
+
+A restore checks whatever it would put on this volume, sealed or not: a
+backup file is whoever made it's, and one made by code in WordPress, under a
+password WordPress knows, could carry anything. Each `keys/<name>` must be a
+v3 onion address whose key parses, has that address and a secret scalar
+that gives its public key (the hub's own check, `key-convert.py`'s
+`keypair_error`); it goes in as a fresh PEM of that key pair with a
+hostname of our own, root's, by `docker cp -` of a tar made in memory. The
+registry is checked in the container (`REGISTRY_RESTORE_SH`: SQLite's
+integrity check, the hub's two tables and their primary-key indexes only,
+rows with v3 addresses only) and put back through SQLite's `.restore`, never
+as a copy over the database in use, whose `-wal` SQLite would apply to it.
+Anything else is left out and logged (`hub_backup.check`,
+`backup.write_hub_data`). Until 2.5.3 Mac backups held no hub data at all
+(they waited for a `master-key.json` nothing writes any more).
 
 None of it goes through WordPress. The Settings page's backup is handed to
 the WordPress container for download, under the admin password WordPress
-saw: it leaves the hub data out (`create_backup(include_hub_data=False)`,
-Linux `create_backup --without-hub-data`), records
-`excludes_onionheaven_data` in `metadata.json` and tells the owner. A hub is
-backed up from the app (Backup…) or with `onionpress backup`. The Settings
-page's restore refuses a backup holding registrants' keys before touching
-anything, and never writes this volume; restore such a backup from the app
-or with `onionpress restore`.
+saw, and it holds the node's own onion service key: with the hub's, code in
+WordPress could run a rival hub that collects registrants' keys from their
+heartbeats (with OnionHome's, answer name lookups). So on a hub or on
+OnionHome that backup is refused before anything is copied
+(`settings_page_backup_refusal`: the node's own address is the canonical
+hub's or OnionHome's, its config has `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`,
+this volume holds registrants' keys or registry rows, or OnionHome's
+registry is on its volume; never `status.json`'s `server_active`, which is
+true on every Linux node), and the page says why. A hub is backed up from
+the app (Backup…) or with `onionpress backup`. The Settings page's restore
+refuses a backup holding registrants' keys, plain or sealed, before
+touching anything, and never writes this volume; restore such a backup
+from the app or with `onionpress restore`.
+
+**The hub's backup recovery key.** Set up once, on the hub: `onionpress
+hub-recovery-key create` (on the Mac,
+`/Applications/OnionPress.app/Contents/MacOS/onionpress hub-recovery-key
+create`). It keeps the public half in `~/.onionpress/hub-backup-recovery.pub`
+(mode 0600; not in `~/.onionpress/shared`, which the VM mounts, and not in
+`config`, which the Settings page can write) and prints the private half
+once, with the key's id. **The operator holds the private half, offline:**
+in a password manager or on paper, never on the hub. `hub-recovery-key
+check` confirms that a kept copy is the key set up here; `show` prints the
+id. Making a backup needs no secret. Restoring the hub data needs the
+private half: the app's Restore… asks for it on a hub's backup, and
+`onionpress restore` takes it from `ONIONPRESS_HUB_RECOVERY_KEY` or a
+prompt (never argv); it is checked against the backup's key id, and the
+seal opened, before anything is restored. Without it, or with another key,
+everything else is restored and the log names the hub data as left out;
+`onionpress hub-recovery-key restore <backup>` restores it later, with
+OnionPress running (also after a restore from the welcome screen, which
+does not ask: its import runs in the launcher, and carrying the opened data
+there would mean writing it in the clear into `~/.onionpress`).
+
+Losing the private half costs the sites that are offline at the time of a
+restore their takeover, until they come back; it never costs anyone their
+address. Registrants that are online send their keys again within a minute,
+and the hub never hands a key back. `create --force` makes a new key for
+later backups; earlier ones still need the old private half. OnionPress
+versions from before sealed hub data restore the site from such a backup
+and leave `onionheaven.sealed` aside without a word; the README in the zip
+says so.
+
+**Checklist for the hub Mac.** The volume itself holds every registrant's
+key in the clear, inside the VM disk (`~/.onionpress/colima/_lima/colima/diffdisk`):
+
+- FileVault on.
+- Time Machine to an encrypted backup disk, or the VM excluded from it:
+  `tmutil addexclusion ~/.onionpress/colima/_lima`.
+- Delete the pre-update `onionheaven-before-update.tar` (step 1 below) and
+  any copy of the VM disk made during a repair (diffdisk clones) once they
+  have served.
+- Set up the backup recovery key, and keep its private half off the Mac.
 
 **Release rule:** compose plus tor-image code again. Publish the tor image,
 refresh the pins, then release the app and the `.deb`. A new compose file with
