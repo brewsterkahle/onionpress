@@ -62,30 +62,31 @@ echo none
 # What never passes through WordPress in a backup. The Settings page's backup
 # is handed to the WordPress container for download, and its password is the
 # admin password WordPress sees in plain text: code running there would have
-# both. So that backup (create_backup(include_hub_data=False); Linux:
-# create_backup --without-hub-data) leaves out a hub's registry and its
-# registrants' onion service keys, and says so in metadata.json
-# (excludes_onionheaven_data, with the reason code below) and to the owner.
-# Backups made from the app or the CLI, written to the owner's disk, keep
-# them. The Settings page's restore, whose upload and password came through
-# WordPress too, refuses a backup holding registrants' keys or OnionHome's
-# name registry (settings_page_restore_refusal) and never writes either
-# volume.
-HUB_DATA_LEFT_OUT_REASON = "settings-page"
-HUB_DATA_LEFT_OUT_LOG = (
-    "Backup: this is an OnionHeaven hub; its registry and registrants' onion "
-    "service keys are left out of this backup, which is handed to WordPress "
-    "(the Settings page's download). Make the hub's backup from the "
-    "OnionPress app or with onionpress backup.")
-# The Settings page shows the note with the finished backup and the refusal
-# with a refused restore. Plain text, safe in JSON and HTML as it stands:
-# linux/onionpress writes the same note into its result file (a test keeps
-# the copies equal).
-HUB_DATA_LEFT_OUT_NOTE = (
-    "This is an OnionHeaven hub: its registry and its registrants' onion "
-    "service keys are not in this backup, so they never pass through "
-    "WordPress. Back the hub up from the OnionPress app (Backup... in its "
-    "menu) or with onionpress backup.")
+# both. On an OnionHeaven hub or on OnionHome that backup is refused
+# (create_backup(include_hub_data=False) raises SettingsPageBackupRefused;
+# Linux: create_backup --without-hub-data returns 3): even without the hub's
+# registry and registrants' keys it carries the node's own onion service
+# key, and with it code in WordPress could run a rival hub that collects
+# registrants' keys from their heartbeats, or a rival OnionHome answering
+# name lookups (settings_page_backup_refusal). Backups made from the app or
+# the CLI, written to the owner's disk, keep the hub data. The Settings
+# page's restore, whose upload and password came through WordPress too,
+# refuses a backup holding registrants' keys or OnionHome's name registry
+# (settings_page_restore_refusal) and never writes either volume.
+#
+# Shown on the Settings page: plain text, safe in JSON and HTML as it stands
+# (a test holds them to that).
+HUB_BACKUP_REFUSED_MSG = (
+    "This is an OnionHeaven hub. A backup made here would carry the hub's own "
+    "onion service key through WordPress, and code running there could use it "
+    "to run a rival hub that collects registrants' keys. Nothing was backed "
+    "up: back the hub up from the OnionPress app (Backup... in its menu) or "
+    "with onionpress backup.")
+ONIONHOME_BACKUP_REFUSED_MSG = (
+    "This is OnionHome. A backup made here would carry its onion service key "
+    "through WordPress, and code running there could use it to answer name "
+    "lookups in its place. Nothing was backed up: back it up from the "
+    "OnionPress app (Backup... in its menu) or with onionpress backup.")
 HUB_DATA_RESTORE_REFUSED_MSG = (
     "This backup holds an OnionHeaven hub's registry and its registrants' "
     "onion service keys, which are never restored through WordPress. Nothing "
@@ -110,6 +111,13 @@ ONIONHOME_RESTORE_REFUSED_MSG = (
 # backup anyway (RESTORABLE_CONFIG): this install's token is kept, and on a
 # new machine the owner enters it again (restore_backup_config says so).
 TUNNEL_TOKEN_KEY = "CLOUDFLARE_TUNNEL_TOKEN"
+
+# The two nodes whose own onion service key is the service, as the tor image
+# knows them (onionheaven_common.ONIONHEAVEN_HUB_ADDRESS, web-server.py's
+# _ONIONHOME_ADDRESS; a test keeps the copies equal). Any node with
+# ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes is a hub too.
+ONIONHEAVEN_HUB_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
+ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
 
 # A tar of the registry, as sqlite3's .backup copies it (one consistent
 # state while the hub writes; a copy of the file could miss its -wal or catch
@@ -699,6 +707,57 @@ def restore_hub_data(src, log_func):
     log_func("Restore: OnionHeaven registry and keys restored")
 
 
+def accepts_registrations(data_dir=None):
+    """True if this node's config opts it in as an OnionHeaven hub
+    (ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes, read as the tor image reads it:
+    onionheaven_common.registrations_opted_in)."""
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
+    value = read_value(os.path.join(_data_dir, 'config'),
+                       'ONIONHEAVEN_ACCEPT_REGISTRATIONS', '')
+    return value.strip().lower() == 'yes'
+
+
+def onionhome_registry_present():
+    """True if OnionHome's name registry is on its volume (only OnionHome
+    has one)."""
+    try:
+        r = subprocess.run(['docker', 'exec', 'onionpress-tor', 'test', '-f',
+                            f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
+                           capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+class SettingsPageBackupRefused(ValueError):
+    """The Settings page's backup is refused on this node (its message says
+    why and where to back it up instead)."""
+
+
+def settings_page_backup_refusal(own_address, hub_state, *, data_dir=None):
+    """Why the Settings page must not back this node up, or None.
+
+    That backup is handed to WordPress, under a password WordPress saw,
+    and it carries the node's own onion service key. On an OnionHeaven hub
+    that key is what registrants send their keys to: code in WordPress
+    holding it could run a rival hub and collect them from heartbeats. On
+    OnionHome it answers name lookups. So a node is refused when it is
+    either, by any of: its own address (*own_address*, derived from the key
+    the backup would carry) is the canonical hub's or OnionHome's; its
+    config opts it in as a hub (accepts_registrations); its hub data volume
+    holds registrants' keys or registry rows (*hub_state* "hub", from
+    hub_data_state); OnionHome's name registry is on its volume. Not
+    status.json's onionheaven.server_active: on Linux that is true on every
+    node.
+    """
+    if (own_address == ONIONHEAVEN_HUB_ADDRESS or hub_state == "hub"
+            or accepts_registrations(data_dir)):
+        return HUB_BACKUP_REFUSED_MSG
+    if own_address == ONIONHOME_ADDRESS or onionhome_registry_present():
+        return ONIONHOME_BACKUP_REFUSED_MSG
+    return None
+
+
 def create_backup(onion_address, username, password, output_path, version, log_func, *,
                   data_dir=None, include_hub_data=True, include_host_secrets=True):
     """Create a full OnionPress backup zip; return its metadata.
@@ -712,15 +771,18 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         version: OnionPress version string
         log_func: Callable for progress logging
         include_hub_data: False for a backup that is handed to WordPress (the
-            Settings page's download): an OnionHeaven hub's registry and
-            registrants' keys are then left out, and metadata.json says so
-            (excludes_onionheaven_data). Every caller passes it.
+            Settings page's download): refused with SettingsPageBackupRefused
+            on an OnionHeaven hub or OnionHome (settings_page_backup_refusal),
+            before anything is copied. True for one written to the owner's
+            disk: a hub's registry and registrants' keys go in. Every caller
+            passes it.
         include_host_secrets: False for that backup too: its config is cut
             to what WordPress's status page shows (wordpress_safe_config: no
             Cloudflare tunnel token), and metadata.json says so
             (excludes_host_secrets). Every caller passes it.
     """
     backup_start = time.monotonic()
+    _data_dir = data_dir if data_dir is not None else _default_data_dir()
     staging = tempfile.mkdtemp(prefix='onionpress-backup-')
     try:
         # 0. Workload stats — log once up front (issue #214). Read DB
@@ -764,6 +826,17 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                          f"rotation / restore / key import but before "
                          f"update_status repolled the container.")
             onion_address = derived_address
+
+        # 1b. Is this an OnionHeaven hub (its volume holds registrants' keys
+        #     or registry rows)? A backup handed to WordPress (the Settings
+        #     page's) is refused on a hub or on OnionHome before anything
+        #     else is copied: the key just staged is the node's own.
+        hub = hub_data_state()
+        if not include_hub_data:
+            refusal = settings_page_backup_refusal(onion_address, hub, data_dir=_data_dir)
+            if refusal:
+                log_func(f"Backup: refused (the Settings page's backup): {refusal}")
+                raise SettingsPageBackupRefused(refusal)
 
         # 2. Dump WordPress database via mariadb-dump in the db container
         # (wp db export uses mysqldump which isn't in the WordPress container)
@@ -826,19 +899,13 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    container and not in onionpress-wordpress (docs/DOCKER-SOCKET.md).
         #    This used to wait for a master-key.json that nothing has written
         #    for a long time, so no backup made here held a hub's data.
-        #    Never in a backup handed to WordPress (include_hub_data=False):
-        #    for that one the container is only asked whether this is a hub,
-        #    to say so.
+        #    Never in a backup handed to WordPress (include_hub_data=False),
+        #    which a hub refused at 1b.
         is_onionheaven = False
-        hub_data_left_out = False
-        hub = hub_data_state()
         if hub is None:
             log_func("Backup: WARNING: the onionheaven container did not say whether "
                      "it holds OnionHeaven data; this backup does not")
-        elif hub == "hub" and not include_hub_data:
-            hub_data_left_out = True
-            log_func(HUB_DATA_LEFT_OUT_LOG)
-        elif hub == "hub":
+        elif hub == "hub" and include_hub_data:
             with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
                 log_func("Backup: copying the OnionHeaven registry and registrants' keys...")
                 is_onionheaven = True
@@ -916,11 +983,6 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # pick the decoder from the file itself; this records it.
             'backup_format': backup_crypto.BACKUP_FORMAT,
         }
-        if hub_data_left_out:
-            # A hub's backup without its registry and registrants' keys, on
-            # purpose and why; restores say so (restore_container_artifacts).
-            metadata['excludes_onionheaven_data'] = True
-            metadata['excludes_onionheaven_data_reason'] = HUB_DATA_LEFT_OUT_REASON
         if not include_host_secrets:
             # Which secrets were set and are not in here (names only): a
             # restore says what to enter again (restore_backup_config).
@@ -2093,7 +2155,9 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
                  "They live in ~/OnionPress/Creations/ — if restoring "
                  "on a new machine, copy that folder across separately.")
 
-    # A hub's backup made from the Settings page: no registry, no keys.
+    # A hub's backup made from the Settings page by a build that left the
+    # hub data out instead of refusing (between a878f59b and the refusal):
+    # no registry, no keys.
     if metadata.get('excludes_onionheaven_data') is True:
         log_func("Restore: NOTE — this backup of an OnionHeaven hub was made "
                  "from the Settings page and holds neither the hub's registry "

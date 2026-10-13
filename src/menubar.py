@@ -5711,11 +5711,13 @@ License: AGPL v3"""
 
                         onion_addr = self.onion_address or "unknown"
                         # Handed to WordPress below, and the password came
-                        # from there: never an OnionHeaven hub's registry or
-                        # registrants' keys (backup.HUB_DATA_LEFT_OUT_LOG),
-                        # nor the Cloudflare tunnel token or any other
-                        # config WordPress is not shown (backup.TUNNEL_TOKEN_KEY).
-                        backup_metadata = backup_manager.create_backup(
+                        # from there: refused on an OnionHeaven hub or
+                        # OnionHome (SettingsPageBackupRefused, whose message
+                        # the page shows), and never a hub's registry or
+                        # registrants' keys, nor the Cloudflare tunnel token
+                        # or any other config WordPress is not shown
+                        # (backup.TUNNEL_TOKEN_KEY).
+                        backup_manager.create_backup(
                             onion_addr, self._get_admin_username(), password,
                             tmp_path, self.version, self.log,
                             include_hub_data=False, include_host_secrets=False
@@ -5744,13 +5746,10 @@ License: AGPL v3"""
                         if r.returncode != 0:
                             raise Exception("Could not hand the backup to the "
                                             "Settings page")
-                        backup_result = {
+                        _write_result("backup-result.json", {
                             "success": True, "filename": filename,
                             "created_at": now_iso
-                        }
-                        if backup_metadata.get("excludes_onionheaven_data"):
-                            backup_result["note"] = backup_manager.HUB_DATA_LEFT_OUT_NOTE
-                        _write_result("backup-result.json", backup_result)
+                        })
                         self.log(f"Settings page: backup created: {filename}")
                 except Exception as e:
                     _write_result("backup-result.json", {

@@ -607,20 +607,6 @@ class OnionPressCLI:
             return 1
 
     @staticmethod
-    def cmd_hub_data_state() -> int:
-        """Print "hub" if the OnionHeaven volume holds a hub's data, "none"
-        if not (backup.hub_data_state); exit 4, printing nothing, when the
-        onionheaven container did not answer. For the Linux launcher's
-        create_backup --without-hub-data, which leaves the data out and
-        only says whether it did. Reads nothing out of the volume."""
-        from .backup import hub_data_state
-        state = hub_data_state()
-        if state is None:
-            return 4
-        print(state)
-        return 0
-
-    @staticmethod
     def cmd_settings_page_restore_check(staging: str) -> int:
         """For the Linux launcher's restore_backup --from-settings-page:
         exit 0 when the extracted backup in *staging* may be restored
@@ -665,6 +651,21 @@ class OnionPressCLI:
         except Exception as e:
             log(f"Restore: could not restore the OnionHeaven data: {e}")
             return 1
+
+    @staticmethod
+    def cmd_settings_page_backup_check(address: str, data_dir: str) -> int:
+        """For the Linux launcher's create_backup --without-hub-data (the
+        Settings page's backup): exit 0 when this node may be backed up
+        there; exit 3, printing why on stdout, on an OnionHeaven hub or
+        OnionHome (backup.settings_page_backup_refusal). *address* is the
+        node's onion address, from its tor container."""
+        from .backup import hub_data_state, settings_page_backup_refusal
+        refusal = settings_page_backup_refusal(address, hub_data_state(),
+                                               data_dir=data_dir)
+        if refusal:
+            print(refusal)
+            return 3
+        return 0
 
     @staticmethod
     def cmd_put_wp_tree(src: str, dest: str, merge: bool = False) -> int:
@@ -1202,10 +1203,6 @@ def main(argv: list[str] = None) -> int:
         help="Copy a hub's OnionHeaven registry and keys out of the "
              "onionheaven container (backup helper; exit 3: not a hub)")
     p_stage_hub.add_argument("--dest", required=True, help="Folder to fill")
-    sub.add_parser(
-        "hub-data-state",
-        help="Print 'hub' or 'none': whether the OnionHeaven volume holds a "
-             "hub's data (backup helper; exit 4: no answer)")
     p_sp_check = sub.add_parser(
         "settings-page-restore-check",
         help="Exit 3 and say why if an extracted backup must not be restored "
@@ -1225,6 +1222,12 @@ def main(argv: list[str] = None) -> int:
              "data volume (restore helper)")
     p_restore_hub.add_argument("--src", required=True,
                                help="The backup's onionheaven/ folder")
+    p_sp_backup = sub.add_parser(
+        "settings-page-backup-check",
+        help="Exit 3 and say why if this node must not be backed up through "
+             "the WordPress Settings page (an OnionHeaven hub or OnionHome)")
+    p_sp_backup.add_argument("--address", default="",
+                             help="This node's onion address")
     p_put = sub.add_parser(
         "put-wp-tree",
         help="Copy a host folder into the WordPress container, written as "
@@ -1341,14 +1344,15 @@ def main(argv: list[str] = None) -> int:
         return OnionPressCLI.cmd_stage_wp_content(args.dest)
     if args.command == "stage-hub-data":
         return OnionPressCLI.cmd_stage_hub_data(args.dest)
-    if args.command == "hub-data-state":
-        return OnionPressCLI.cmd_hub_data_state()
     if args.command == "settings-page-restore-check":
         return OnionPressCLI.cmd_settings_page_restore_check(args.staging)
     if args.command == "wordpress-safe-config":
         return OnionPressCLI.cmd_wordpress_safe_config(args.config, args.dest)
     if args.command == "restore-hub-data":
         return OnionPressCLI.cmd_restore_hub_data(args.src)
+    if args.command == "settings-page-backup-check":
+        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+        return OnionPressCLI.cmd_settings_page_backup_check(args.address, data_dir)
     # Restore and plugin-install helper for the bash launchers: same.
     if args.command == "put-wp-tree":
         return OnionPressCLI.cmd_put_wp_tree(args.src, args.dest, args.merge)

@@ -1399,10 +1399,8 @@ function onionpress_settings_page() {
         <p class="description">Create a password-protected backup of your database, wp-content, Tor keys, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
         <?php // A backup made here is handed to WordPress: no host secrets in it (src/onionpress/backup.py, TUNNEL_TOKEN_KEY). ?>
         <p class="description">A backup made here leaves out your Cloudflare Tunnel token, which never passes through WordPress. After restoring on a new machine, enter it again under Cloudflare Tunnel Token above.</p>
-        <?php if ( $oh_server_active ) : ?>
-        <?php // A backup made here is handed to WordPress for download (src/onionpress/backup.py, HUB_DATA_LEFT_OUT_NOTE). ?>
-        <p class="description">On an OnionHeaven hub, a backup made here leaves out the hub's registry and its registrants' onion service keys, so they never pass through WordPress. Back the hub up from the OnionPress app (Backup&hellip; in its menu) or with <code>onionpress backup</code>.</p>
-        <?php endif; ?>
+        <?php // A backup made here is handed to WordPress for download: refused on a hub or OnionHome (src/onionpress/backup.py, settings_page_backup_refusal), whichever node this page is on. ?>
+        <p class="description">On an OnionHeaven hub or on OnionHome, a backup is refused here: it would carry the node's own onion service key through WordPress. Back such a node up from the OnionPress app (Backup&hellip; in its menu) or with <code>onionpress backup</code>.</p>
         <form method="post" style="margin-top: 8px;">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="create-backup">

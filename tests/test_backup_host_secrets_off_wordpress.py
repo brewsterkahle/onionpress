@@ -60,7 +60,10 @@ CONFIG = {
     "REGISTER_WITH_ONIONHEAVEN": "yes",
     "ONIONPRESS_BIND_HOST": "0.0.0.0",
     "ONIONPRESS_TOR_IMAGE": "ghcr.io/me/onionpress-tor:mine",
-    "ONIONHEAVEN_ACCEPT_REGISTRATIONS": "yes",
+    # Set, but not "yes": a node that accepts registrations is a hub, whose
+    # Settings-page backup is refused outright
+    # (backup.settings_page_backup_refusal).
+    "ONIONHEAVEN_ACCEPT_REGISTRATIONS": "no",
 }
 
 
@@ -201,15 +204,19 @@ op_py() {
 from onionpress.cli import OnionPressCLI as C, main
 cli = object.__new__(C)
 cli.log = lambda m: print(m, file=sys.stderr)
-cmd, a = sys.argv[1], sys.argv[2:]
+args = sys.argv[1:]
+data_dir = None
+if args[:1] == ["--data-dir"]:
+    data_dir, args = args[1], args[2:]
+cmd, a = args[0], args[1:]
 if cmd == "stage-wp-content":
     sys.exit(C.cmd_stage_wp_content(a[1]))
-if cmd == "hub-data-state":
-    sys.exit(C.cmd_hub_data_state())
+if cmd == "settings-page-backup-check":
+    sys.exit(C.cmd_settings_page_backup_check(a[1], data_dir))
 if cmd == "stage-hub-data":
     sys.exit(C.cmd_stage_hub_data(a[1]))
 if cmd == "wordpress-safe-config":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(args))
 if cmd == "prune-image-derivatives":
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))
 if cmd == "pack-backup":

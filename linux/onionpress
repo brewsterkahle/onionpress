@@ -2241,9 +2241,10 @@ create_backup() {
     # Creates a password-protected zip with Tor keys, database, wp-content, and metadata.
     # Usage: create_backup <password> <output_path> [--without-hub-data] [--without-host-secrets]
     # --without-hub-data: for a backup handed to WordPress (the Settings
-    # page's download), whose password came from there too. An OnionHeaven
-    # hub's registry and registrants' keys are left out, metadata.json says
-    # so, and BACKUP_LEFT_OUT_HUB_DATA is set to "true" for the caller.
+    # page's download), whose password came from there too. Refused on an
+    # OnionHeaven hub or OnionHome (return 3, BACKUP_REFUSAL says why:
+    # backup.settings_page_backup_refusal), and never a hub's registry or
+    # registrants' keys.
     # --without-host-secrets: for that backup too. Its config is cut to what
     # WordPress's status page shows (no Cloudflare tunnel token, image
     # overrides, bind host...), the healthcheck onion service's key (a start
@@ -2253,7 +2254,7 @@ create_backup() {
     local output_path="$2"
     local with_hub_data="yes" with_host_secrets="yes"
     local staging
-    BACKUP_LEFT_OUT_HUB_DATA=""
+    BACKUP_REFUSAL=""
 
     local opt
     for opt in "${@:3}"; do
@@ -2293,6 +2294,21 @@ create_backup() {
         log "ERROR: Backup: the tor container's onion address is not a valid v3 address — no backup made"
         echo "ERROR: The onion address the tor container reports is not a valid v3 .onion address; no backup was made." >&2
         return 1
+    fi
+
+    # The Settings page's backup carries this node's own onion service key
+    # to WordPress: refused on an OnionHeaven hub or OnionHome, before
+    # anything is copied (not on status.json's server_active, which is
+    # true on every Linux node).
+    if [ "$with_hub_data" = "no" ]; then
+        local refusal="" refusal_rc=0
+        refusal=$(op_py --data-dir "$DATA_DIR" settings-page-backup-check --address "$onion_addr" 2>>"$LOG_FILE") || refusal_rc=$?
+        if [ "$refusal_rc" -ne 0 ]; then
+            [ -n "$refusal" ] || refusal="Could not check whether this node may be backed up from the Settings page; nothing was backed up. Back it up with onionpress backup."
+            BACKUP_REFUSAL="$refusal"
+            log "Backup: refused (the Settings page's backup): $refusal"
+            return 3
+        fi
     fi
 
     staging=$(mktemp -d -t onionpress-backup-XXXXXX)
@@ -2431,22 +2447,10 @@ create_backup() {
     #    else from there (backup.stage_hub_data, shared with the Mac). It
     #    used to take every node with an onionheaven container, and copied
     #    registry.db without its write-ahead log.
-    #    Never in a backup handed to WordPress (--without-hub-data): for that
-    #    one the container is only asked whether this is a hub, to say so.
-    local hub_rc=0 hub_left_out="false"
-    if [ "$with_hub_data" = "no" ]; then
-        local hub_state
-        hub_state=$(op_py hub-data-state 2>>"$LOG_FILE") || hub_state=""
-        case "$hub_state" in
-            hub)
-                hub_left_out="true"
-                BACKUP_LEFT_OUT_HUB_DATA="true"
-                log "Backup: this is an OnionHeaven hub; its registry and registrants' onion service keys are left out of this backup, which is handed to WordPress (the Settings page's download). Make the hub's backup from the OnionPress app or with onionpress backup."
-                ;;
-            none) ;;
-            *) log "WARNING: the onionheaven container did not say whether it holds OnionHeaven data; this backup does not" ;;
-        esac
-    else
+    #    Never in a backup handed to WordPress (--without-hub-data), which a
+    #    hub refused above.
+    local hub_rc=0
+    if [ "$with_hub_data" = "yes" ]; then
         op_py stage-hub-data --dest "$staging/onionheaven" >>"$LOG_FILE" 2>&1 || hub_rc=$?
         case "$hub_rc" in
             0) ;;
@@ -2474,19 +2478,14 @@ metadata = {
     # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
     'excludes_image_derivatives': sys.argv[6] == 'true'
 }
-if sys.argv[7] == 'true':
-    # A hub's backup handed to WordPress: no registry, no registrants' keys
-    # (backup.HUB_DATA_LEFT_OUT_REASON).
-    metadata['excludes_onionheaven_data'] = True
-    metadata['excludes_onionheaven_data_reason'] = 'settings-page'
-if sys.argv[8] == 'no':
+if sys.argv[7] == 'no':
     # Handed to WordPress: no host secrets, and the names of those that
     # were set (backup.TUNNEL_TOKEN_KEY).
     metadata['excludes_host_secrets'] = True
-    metadata['secret_config_left_out'] = sys.argv[9].split()
+    metadata['secret_config_left_out'] = sys.argv[8].split()
 with open(sys.argv[5], 'w') as f:
     json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_left_out" "$with_host_secrets" "$secrets_left_out"
+" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$with_host_secrets" "$secrets_left_out"
 
     # 7. Zip and encrypt — backup format 2, written by the shared Python
     #    helper so both platforms produce the one format (not `zip -P`,
@@ -3835,11 +3834,23 @@ sys.exit(0 if provision_interactive() else 1)
                         bp_dir=$(mktemp -d -t onionpress-settings-backup-XXXXXX) || bp_dir=/nonexistent
                         bp_path="$bp_dir/$bp_filename"
                         # Handed to WordPress below, and the password came
-                        # from there: never an OnionHeaven hub's registry or
+                        # from there: refused on an OnionHeaven hub or
+                        # OnionHome, and never a hub's registry or
                         # registrants' keys (--without-hub-data), nor the
                         # Cloudflare tunnel token or any other config
                         # WordPress is not shown (--without-host-secrets).
-                        if create_backup "$bp_password" "$bp_path" --without-hub-data --without-host-secrets 2>>"$LOG_FILE"; then
+                        local bp_rc=0
+                        create_backup "$bp_password" "$bp_path" --without-hub-data --without-host-secrets 2>>"$LOG_FILE" || bp_rc=$?
+                        if [ "$bp_rc" -eq 3 ]; then
+                            # Refused before anything was copied; the page
+                            # shows why (JSON written by python3, not by hand).
+                            rm -rf "$bp_dir"
+                            python3 -c 'import json, sys
+print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv[2]}))' \
+                                "$BACKUP_REFUSAL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | \
+                                wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
+                            log "Backup refused: back this node up with onionpress backup"
+                        elif [ "$bp_rc" -eq 0 ]; then
                             # Hand the zip to the WordPress container for
                             # download, written as www-data (the page's own
                             # user). Not docker cp + chown as root: both
@@ -3850,13 +3861,7 @@ sys.exit(0 if provision_interactive() else 1)
                                 sh -c 'umask 077; cat > "$1"' sh "/var/lib/onionpress/$bp_filename" \
                                 < "$bp_path" 2>>"$LOG_FILE"
                             rm -rf "$bp_dir"
-                            # The owner hears that a hub's data is not in
-                            # it (backup.HUB_DATA_LEFT_OUT_NOTE, same text).
-                            local bp_note=""
-                            if [ "${BACKUP_LEFT_OUT_HUB_DATA:-}" = "true" ]; then
-                                bp_note=',"note":"This is an OnionHeaven hub: its registry and its registrants'"'"' onion service keys are not in this backup, so they never pass through WordPress. Back the hub up from the OnionPress app (Backup... in its menu) or with onionpress backup."'
-                            fi
-                            echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"'"$bp_note"'}' | \
+                            echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
                                 wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
                             log "Backup created: $bp_filename"
                         else
