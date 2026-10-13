@@ -690,6 +690,25 @@
 - **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
 - `OnionPress.app/` is gitignored — it is assembled at build time from `app/` source. Never commit build output.
 
+## Browser Extension (issue #318)
+- The extension (`extension/`, shared by both packages; `extension-firefox/`
+  holds only the Firefox manifest, test-enforced) routes `.onion` to the
+  menubar's HTTP proxy (`onion_proxy.py`, `127.0.0.1:<proxy_port>`), never
+  to Tor's SOCKS port (see the Colima gotcha below). The port comes from the
+  native messaging host (`get_proxy_port`, from Docker's published WordPress
+  port: +10000 per extra macOS user); 9077 without it.
+- `~/.onionpress/extension-connected` is JSON `{timestamp, browser}` from
+  both writers (`browser.write_extension_marker`; the native host's own
+  copy, test-tied). The extension polls `/status` every 5 s (not logged).
+- Fallback: `.onion` while OnionPress is down → `offline.html`; onion
+  service not answering → the proxy's `ONION_UNREACHABLE_PAGE`. Both only
+  *link* the Wayback Machine (clearnet, said on the page), never redirect.
+- Not live-tested on a Mac yet. The native host is registered at a `.py`
+  path run by `/usr/bin/env python3`: in a py2app build that file sits in a
+  zip and the system python3 is a shim, so the native host probably never
+  starts on a real install (then the port falls back to 9077).
+  `tests/test_browser_extension.py`.
+
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
 - **For ANY communication over Tor from the Mac, always use `docker exec` into the tor container** — this is reliable

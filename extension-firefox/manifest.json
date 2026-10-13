@@ -1,13 +1,13 @@
 {
   "manifest_version": 2,
   "name": "OnionPress",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Browse .onion sites in any browser. Requires OnionPress to be running.",
   "permissions": [
     "proxy",
     "nativeMessaging",
     "storage",
-    "http://localhost:9077/*",
+    "http://127.0.0.1/*",
     "*://*.onion/*"
   ],
   "browser_specific_settings": {

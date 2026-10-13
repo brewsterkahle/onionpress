@@ -318,7 +318,7 @@ make extension         # → build/dist/onionpress-chrome.zip, build/dist/onionp
 
 Byte-reproducible: sorted entries, fixed timestamps, no uid/gid. Firefox is
 built from `extension/` overlaid with `extension-firefox/` — the latter holds
-the current manifest (v1.1.0, Firefox ≥ 142, `data_collection_permissions`).
+the current manifest (v1.2.0, Firefox ≥ 142, `data_collection_permissions`).
 Do not build from `extension/manifest.firefox.json`; it is stale and would
 request permissions the extension no longer needs.
 
