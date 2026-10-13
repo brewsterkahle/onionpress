@@ -810,9 +810,12 @@ class TestMenubarRestoreDialog(unittest.TestCase):
             self.assertIn(f"backup_manager.metadata_text(metadata, '{field}')", self.body)
 
     def test_a_failed_launcher_restore_is_reported_as_a_failure(self):
-        failed = self.body[self.body.index("if r.returncode != 0:"):]
+        # run_launcher_restore's message starts "Restore failed" and says
+        # why (tests/test_restore_failure_details.py).
+        failed = self.body[self.body.index("if not ok:"):]
         failed = failed[:failed.index("return\n") + 7]
-        self.assertIn("Restore failed", failed)
+        self.assertIn('title="Restore Failed"', failed)
+        self.assertIn("pw.finish(failure,", failed)
 
     def test_the_restored_address_is_not_taken_from_metadata(self):
         self.assertNotIn("metadata.get('onion_address', addr)", self.body)

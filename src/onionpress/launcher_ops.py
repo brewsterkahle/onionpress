@@ -14,10 +14,12 @@ Operations:
 - tor_image_has_mkp224o(image)             — verify the tor image bundles mkp224o
 - generate_vanity_in_container(...)        — docker run mkp224o, write to vanity-keys/
 - get_admin_password(data_dir)             — read ~/.onionpress/wp-admin-password
+- run_launcher_restore(...)                — `onionpress restore`, and why it failed
 """
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -455,3 +457,66 @@ def get_admin_password(data_dir: str) -> Optional[str]:
             return value or None
     except OSError:
         return None
+
+
+# The launcher's `restore` passes on the Python CLI's log lines on stderr
+# ("[2026-10-12 10:30:00] Restore failed during extract/seed: ...") and ends
+# with "ERROR: Restore failed — see <log>". The dialog shows the last few.
+_LOG_STAMP_PREFIX = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+
+
+def restore_failure_message(output: str, data_dir: str, log_path: str,
+                            *, max_lines: int = 6) -> str:
+    """What a failed `onionpress restore` says to the user (#323).
+
+    *output* is the launcher's stdout then stderr. Its last *max_lines*
+    non-empty lines, timestamps dropped, control and other non-printable
+    characters removed (they can carry names from the backup file, which
+    is its maker's), each cut to 200 characters. Then the staging folder
+    kept for the next start's import, if the .install-from-backup marker
+    names one, and the log's path.
+    """
+    lines = []
+    for raw in (output or "").splitlines():
+        text = "".join(ch for ch in _LOG_STAMP_PREFIX.sub("", raw.strip())
+                       if ch.isprintable()).strip()
+        if text and not text.startswith("ERROR: Restore failed — see "):
+            lines.append(text if len(text) <= 200 else text[:200] + "…")
+    parts = ["Restore failed — the backup was refused or could not be restored."]
+    if lines:
+        parts.append("\n".join(lines[-max_lines:]))
+    try:
+        with open(os.path.join(data_dir, ".install-from-backup")) as f:
+            staging = f.readline().strip()
+    except OSError:
+        staging = ""
+    if staging and os.path.isdir(staging):
+        parts.append(f"The unpacked backup is kept in {staging}; OnionPress "
+                     f"imports it again at its next start.")
+    parts.append(f"Full details: {log_path}")
+    return "\n\n".join(parts)
+
+
+def run_launcher_restore(launcher_script: str, zip_path: str, password: str,
+                         *, data_dir: str, log_path: str,
+                         timeout: int = 1800) -> tuple:
+    """`<launcher> restore <zip>` with the password in the environment
+    (BACKUP_PASSWORD_ENV: argv is readable by every local user, the
+    environment only by this one). (True, "") on success, else (False,
+    restore_failure_message(...)). The exit status is the only sign of a
+    refused or failed restore.
+    """
+    try:
+        r = subprocess.run(
+            [launcher_script, "restore", zip_path],
+            env={**os.environ, BACKUP_PASSWORD_ENV: password},
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, restore_failure_message(
+            f"The restore did not finish within {timeout // 60} minutes.",
+            data_dir, log_path)
+    if r.returncode == 0:
+        return True, ""
+    return False, restore_failure_message(
+        (r.stdout or "") + "\n" + (r.stderr or ""), data_dir, log_path)

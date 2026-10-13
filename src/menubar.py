@@ -4372,18 +4372,16 @@ class OnionPressApp(rumps.App):
                 log_and_update("Rebuilding from backup (install-from-backup)…")
                 # The password goes in the environment: argv is readable by
                 # every local user (ps), the environment only by this one.
-                r = subprocess.run(
-                    [self.launcher_script, "restore", zip_path],
-                    env={**os.environ,
-                         launcher_ops.BACKUP_PASSWORD_ENV: password},
-                    capture_output=True, text=True, encoding='utf-8',
-                    errors='replace', timeout=1800)
-                if r.returncode != 0:
-                    self.log(f"Restore: launcher restore rc={r.returncode}: "
-                             f"{(r.stderr or r.stdout or '')[:300]}")
-                    _main_thread(lambda: pw.finish(
-                        "Restore failed — the backup was refused or could "
-                        "not be restored. Check the log for details."))
+                # A failure shows the launcher's last lines, the staging
+                # folder kept for the next start and the log's path (#323).
+                ok, failure = launcher_ops.run_launcher_restore(
+                    self.launcher_script, zip_path, password,
+                    data_dir=self.app_support,
+                    log_path=os.path.join(self.app_support, "onionpress.log"))
+                if not ok:
+                    self.log(f"Restore: launcher restore failed: {failure}")
+                    _main_thread(lambda: pw.finish(failure,
+                                                   title="Restore Failed"))
                     return
 
                 # The address the restore derived from the backup's key, from

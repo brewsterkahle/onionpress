@@ -122,8 +122,9 @@ class BackupProgressWindow:
         if self._status_field:
             self._status_field.setStringValue_(message)
 
-    def finish(self, message, on_done=None):
-        # Close the progress window and show a simple alert. If on_done is given,
+    def finish(self, message, on_done=None, title="Done"):
+        # Close the progress window and show a simple alert headed *title*
+        # (a failure says so instead of "Done"). If on_done is given,
         # run it AFTER the user dismisses this alert — but re-dispatched onto the
         # main queue (not synchronously), so the modal session fully unwinds
         # before any follow-up modal opens (avoids the DELETE/confirm window
@@ -133,7 +134,7 @@ class BackupProgressWindow:
             self._window.orderOut_(None)
             self._window = None
         alert = AppKit.NSAlert.alloc().init()
-        alert.setMessageText_("Done")
+        alert.setMessageText_(title)
         alert.setInformativeText_(message)
         alert.addButtonWithTitle_("OK")
         # Set app icon

@@ -292,11 +292,17 @@ class TestNoPasswordInLauncherArgv(unittest.TestCase):
 
     def test_menubar_restore_passes_env(self):
         # search + assertTrue: assertRegex would print all of menubar.py.
+        # The menubar goes through launcher_ops.run_launcher_restore (#323).
         self.assertTrue(re.search(
-            r'\[self\.launcher_script, "restore", zip_path\],\s*\n\s*'
-            r'env=\{\*\*os\.environ,\s*\n?\s*launcher_ops\.BACKUP_PASSWORD_ENV: password\}',
+            r'launcher_ops\.run_launcher_restore\(\s*\n\s*'
+            r'self\.launcher_script, zip_path, password,',
             _read("src/menubar.py")),
-            "menubar restore must pass the password in the launcher's environment")
+            "menubar restore must go through launcher_ops.run_launcher_restore")
+        self.assertTrue(re.search(
+            r'\[launcher_script, "restore", zip_path\],\s*\n\s*'
+            r'env=\{\*\*os\.environ, BACKUP_PASSWORD_ENV: password\}',
+            _read("src/onionpress/launcher_ops.py")),
+            "run_launcher_restore must pass the password in the launcher's environment")
 
 
 class TestScrubHandoff(unittest.TestCase):
