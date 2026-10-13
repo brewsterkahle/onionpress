@@ -145,6 +145,14 @@
   builds inside one install.
 - Pins must be **multi-arch index digests** (`docker buildx imagetools inspect`),
   never a single-platform manifest digest.
+- **The refresh resolves digests from the registry** (`build/base-image-digest.sh`
+  on `:latest`); the local `docker images` cache only with `--local` (issue
+  #327: the cache pinned stale images in 2.5.3).
+- **A release builds no images** (issue #327). Images are built only by
+  "Run workflow"; on `release: published` the `tag-release` job points
+  `:latest` and `:<version>` at the release's `build/image-pins.env` digests
+  and reads them back. Before, a release rebuilt and moved both tags off the
+  pinned images (2.5.2, 2.5.3). `tests/test_publish_workflow.py`.
 - Exporting `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoints the
   whole stack at locally built images. See `docs/BUILDING.md`.
 

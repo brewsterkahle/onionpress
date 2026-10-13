@@ -22,6 +22,18 @@
 # purpose: the GitHub Actions cache is already isolated per branch, and
 # keeping the scope lets a first dev build start warm from the release cache.
 #
+# Only "Run workflow" (workflow_dispatch) builds anything. A release pins
+# digests from an earlier dispatch run (publish the images, run
+# build/refresh-image-digests.sh, commit, cut the release), so on
+# `release: published` the tag-release job builds nothing: it points
+# :latest and :<version> at the digests in that release's
+# build/image-pins.env and checks they resolve to exactly those. Until
+# issue #327 a release rebuilt everything and moved both tags off the
+# images it pinned and tested (2.5.2 and 2.5.3): pulling by tag got
+# untested images, and the pinned ones survived only as untagged manifests,
+# one prune away from every installed app failing to pull them. The stress
+# worker is not pinned and is not touched on release.
+#
 # GHCR creates a package private by default the first time it is pushed.
 # After the first run in a new namespace, make the packages public in the
 # package settings if anything needs to pull them anonymously.
@@ -55,6 +67,7 @@ jobs:
 
   build-tor-amd64:
     name: Build Tor image (amd64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -83,6 +96,7 @@ jobs:
 
   build-tor-arm64:
     name: Build Tor image (arm64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -108,6 +122,7 @@ jobs:
 
   merge-tor:
     name: Merge Tor manifests
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     needs: [build-tor-amd64, build-tor-arm64]
     permissions:
@@ -141,6 +156,7 @@ jobs:
 
   build-wp-amd64:
     name: Build WordPress image (amd64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -169,6 +185,7 @@ jobs:
 
   build-wp-arm64:
     name: Build WordPress image (arm64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
@@ -194,6 +211,7 @@ jobs:
 
   merge-wp:
     name: Merge WordPress manifests
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     needs: [build-wp-amd64, build-wp-arm64]
     permissions:
@@ -227,6 +245,7 @@ jobs:
 
   build-stress-worker-amd64:
     name: Build stress worker image (amd64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     needs: [merge-tor]
     permissions:
@@ -259,6 +278,7 @@ jobs:
 
   build-stress-worker-arm64:
     name: Build stress worker image (arm64)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04-arm
     needs: [merge-tor]
     permissions:
@@ -285,6 +305,7 @@ jobs:
 
   merge-stress-worker:
     name: Merge stress worker manifests
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     needs: [build-stress-worker-amd64, build-stress-worker-arm64]
     permissions:
@@ -305,3 +326,56 @@ jobs:
             "$IMAGE:build-arm64"
       - name: Show the merged manifest
         run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-stress-worker:latest"
+
+  # --- Release: tag the images the release pins; build nothing ---
+
+  tag-release:
+    name: Tag the release's pinned images
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # Checks out the release's tag, so build/image-pins.env is the one
+      # the release shipped.
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Point :latest and :<version> at the pinned digests
+        run: |
+          VERSION="${{ env.IMAGE_VERSION }}"
+          VERSION="${VERSION#v}"  # strip leading v
+          if [ -z "$VERSION" ]; then
+            echo "::error::the release has no tag name to tag the images with"
+            exit 1
+          fi
+
+          # Copy the exact index the release pins to both tags (with a
+          # single source, imagetools create pushes it unchanged, so the
+          # digest stays the same), then read both tags back.
+          retag() {
+            key="$1"; image="$2"
+            pin=$(grep "^$key=" build/image-pins.env | head -1 | cut -d= -f2- || :)
+            digest="${pin##*@}"
+            if ! printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
+              echo "::error::build/image-pins.env has no digest-pinned $key (got '$pin')"
+              exit 1
+            fi
+            docker buildx imagetools create -t "$image:latest" -t "$image:$VERSION" "$pin"
+            for tag in latest "$VERSION"; do
+              got=$(docker buildx imagetools inspect "$image:$tag" | awk '$1 == "Digest:" {print $2; exit}')
+              if [ "$got" != "$digest" ]; then
+                echo "::error::$image:$tag is '$got', but the release pins $digest"
+                exit 1
+              fi
+              echo "$image:$tag -> $digest"
+            done
+          }
+
+          retag ONIONPRESS_TOR_IMAGE "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor"
+          retag ONIONPRESS_WORDPRESS_IMAGE "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress"

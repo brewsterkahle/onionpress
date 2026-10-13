@@ -3,7 +3,7 @@
 
 The workflow publishes the container images every install pulls, and it only
 runs on a release or a manual dispatch, so a property broken today is found
-on release day. Three of them matter enough to pin here:
+on release day. Four of them matter enough to pin here:
 
 1. It runs anywhere. Every job is on a GitHub-hosted runner, and the image
    namespace is the owner of the repository the run belongs to, so a fork
@@ -29,12 +29,24 @@ on release day. Three of them matter enough to pin here:
    image, which on the development branch or in a fork is a different
    build entirely.
 
+4. A release builds nothing (issue #327). Releases pin digests from an
+   earlier "Run workflow" run; publishing the release used to rebuild every
+   image and move :latest and :<version> off the pinned ones, so a tag
+   named an image no release had tested (2.5.2, 2.5.3). Every build job now
+   runs on workflow_dispatch only, and on a release the tag-release job
+   points both tags at build/image-pins.env's digests and reads them back.
+   Its script is run here against a stub docker.
+
 No PyYAML: CI installs nothing beyond CPython, so the workflow is read with
 regexes, like tests/test_image_pins.py does for docker-compose.yml.
 """
 
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -88,6 +100,22 @@ def _env_value(code, key):
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
         value = value[1:-1]
     return value
+
+
+def _jobs(code):
+    """{job id: its text} for every job under `jobs:`."""
+    body = code.split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  ([A-Za-z0-9_-]+):[ \t]*$", body, flags=re.MULTILINE)
+    return dict(zip(parts[1::2], parts[2::2]))
+
+
+def _run_block(job_text, step_name):
+    """The `run: |` script of the step named step_name, dedented."""
+    m = re.search(
+        r"^\s*- name: " + re.escape(step_name) + r"[ \t]*\n\s*run: \|[ \t]*\n"
+        r"((?:[ \t]*\n|[ \t]{10,}.*\n)+)",
+        job_text + "\n", re.MULTILINE)
+    return textwrap.dedent(m.group(1)) if m else None
 
 
 def _ci_branch():
@@ -199,6 +227,144 @@ class PublishWorkflowTest(unittest.TestCase):
             f"{TOR_BASE!r}; found {self.code.count(TOR_BASE)} of {len(ARCHES)}. "
             f"Without it tests/stress/Dockerfile falls back to its ARG default, "
             f"the published production tor image.")
+
+
+# ── 4. A release builds nothing; it tags the pinned digests ──────────────
+
+RELEASE_JOB = "tag-release"
+RELEASE_STEP = "Point :latest and :<version> at the pinned digests"
+ON_DISPATCH = "if: github.event_name == 'workflow_dispatch'"
+ON_RELEASE = "if: github.event_name == 'release'"
+
+# Stands in for `docker` in the tag-release script. `imagetools create`
+# records which source each tag now names; `imagetools inspect` answers with
+# buildx's text format, Digest taken from the source's @sha256:. STUB_SKEW
+# makes inspect report a different digest, as a create that rewrote the
+# index would.
+STUB_DOCKER = r"""#!/bin/sh
+echo "$*" >> "$STUB_DIR/calls"
+[ "$1 $2" = "buildx imagetools" ] || exit 2
+case "$3" in
+  create)
+    shift 3; tags=""
+    while [ "$1" = "-t" ]; do tags="$tags $2"; shift 2; done
+    for t in $tags; do printf '%s %s\n' "$t" "${1##*@}" >> "$STUB_DIR/tags"; done ;;
+  inspect)
+    d=$(awk -v t="$4" '$1 == t {d = $2} END {print d}' "$STUB_DIR/tags")
+    [ -n "$d" ] || exit 1
+    [ -z "$STUB_SKEW" ] || d="sha256:$(printf '%064d' 7)"
+    printf 'Name:      %s\nMediaType: application/vnd.oci.image.index.v1+json\nDigest:    %s\n' "$4" "$d" ;;
+  *) exit 2 ;;
+esac
+"""
+
+SUBST = {
+    "${{ env.IMAGE_VERSION }}": "v9.9.9",
+    "${{ env.REGISTRY }}": "ghcr.io",
+    "${{ env.IMAGE_NAMESPACE }}": "someone",
+    "${{ env.IMAGE_PREFIX }}": "",
+}
+
+
+class ReleaseTagsPinnedDigestsTest(unittest.TestCase):
+    def setUp(self):
+        self.code = _code(_read(WORKFLOW))
+        self.jobs = _jobs(self.code)
+
+    def test_release_trigger_still_runs_the_workflow(self):
+        # Dropping the trigger was the other option in #327; this one keeps
+        # :<version> appearing at release time, so the job must be reachable.
+        self.assertRegex(self.code, r"(?m)^  release:\n    types: \[published\]")
+        self.assertIn(RELEASE_JOB, self.jobs, f"{WORKFLOW}: no {RELEASE_JOB} job")
+
+    def test_every_build_job_runs_on_dispatch_only(self):
+        offenders = [name for name, text in self.jobs.items()
+                     if name != RELEASE_JOB and ON_DISPATCH not in text]
+        self.assertEqual(
+            offenders, [],
+            f"{WORKFLOW}: jobs not gated with `{ON_DISPATCH}`: {offenders}. "
+            f"On a release they would rebuild the images and move :latest and "
+            f":<version> off the digests the release pinned (issue #327).")
+
+    def test_release_job_builds_nothing(self):
+        text = self.jobs[RELEASE_JOB]
+        self.assertIn(ON_RELEASE, text)
+        self.assertNotIn("build-push-action", text)
+        self.assertNotIn(":build-", text,
+                         f"{RELEASE_JOB} must tag the pinned digests, not this "
+                         f"run's or an earlier run's :build-<arch> images")
+        self.assertIn("build/image-pins.env", text)
+
+    def _run(self, pins=None, skew=False):
+        script = _run_block(self.jobs[RELEASE_JOB], RELEASE_STEP)
+        self.assertIsNotNone(script, f"{RELEASE_JOB}: no step named {RELEASE_STEP!r}")
+        for k, v in SUBST.items():
+            script = script.replace(k, v)
+        self.assertNotIn("${{", script, "unsubstituted expression in the script")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "bin"))
+            os.makedirs(os.path.join(tmp, "build"))
+            stub = os.path.join(tmp, "bin", "docker")
+            with open(stub, "w") as f:
+                f.write(STUB_DOCKER)
+            os.chmod(stub, 0o755)
+            pins_path = os.path.join(tmp, "build", "image-pins.env")
+            if pins is None:
+                shutil.copy(os.path.join(PROJECT_ROOT, "build/image-pins.env"), pins_path)
+            else:
+                with open(pins_path, "w") as f:
+                    f.write(pins)
+            env = dict(os.environ, STUB_DIR=tmp,
+                       PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"])
+            if skew:
+                env["STUB_SKEW"] = "1"
+            # How Actions runs a `run:` step: bash -e -o pipefail.
+            result = subprocess.run(
+                ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+                cwd=tmp, env=env, capture_output=True, text=True, timeout=60)
+            calls = ""
+            if os.path.exists(os.path.join(tmp, "calls")):
+                with open(os.path.join(tmp, "calls")) as f:
+                    calls = f.read()
+        return result, calls
+
+    def _pins(self):
+        pins = {}
+        for line in _read("build/image-pins.env").splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                pins[k] = v
+        return pins
+
+    def test_tags_point_at_the_pinned_digests(self):
+        if not shutil.which("bash"):
+            self.skipTest("bash not available")
+        result, calls = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pins = self._pins()
+        for key, image in (("ONIONPRESS_TOR_IMAGE", "onionpress-tor"),
+                           ("ONIONPRESS_WORDPRESS_IMAGE", "onionpress-wordpress")):
+            target = f"ghcr.io/someone/{image}"
+            self.assertIn(
+                f"buildx imagetools create -t {target}:latest -t {target}:9.9.9 {pins[key]}",
+                calls)
+            for tag in ("latest", "9.9.9"):
+                self.assertIn(f"{target}:{tag} -> {pins[key].split('@', 1)[1]}",
+                              result.stdout)
+
+    def test_fails_when_a_tag_does_not_read_back_as_the_pin(self):
+        if not shutil.which("bash"):
+            self.skipTest("bash not available")
+        result, _ = self._run(skew=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("but the release pins", result.stdout)
+
+    def test_fails_without_a_digest_pin(self):
+        if not shutil.which("bash"):
+            self.skipTest("bash not available")
+        result, calls = self._run(pins="ONIONPRESS_TOR_IMAGE=ghcr.io/x/onionpress-tor:latest\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("imagetools create", calls)
 
 
 if __name__ == "__main__":
