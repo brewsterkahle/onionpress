@@ -39,6 +39,62 @@ migrate_onionhome_registry() {
     fi
 }
 
+# tor-watchdog.py does sleep/wake (DEL_ONION/ADD_ONION), stall recovery and
+# the app's republish requests; nothing else in the container does them, so
+# it must not stay down (issue #313). Every mode starts it through this
+# loop: log each exit, restart with backoff (1 s doubling to 60 s, back to
+# 1 s after 10 min of running), and kill a watchdog that is still running
+# but has not touched its alive file in WATCHDOG_STALE_SECS (a hung loop).
+# A gap in this loop's own clock much longer than its poll means the VM was
+# suspended or frozen: the alive file is old for that reason only, so that
+# round is skipped rather than killing a healthy watchdog at wake, just
+# before its USR2. The run dir's state (sleep marker, pending republish
+# request, alive file) belongs to the previous life of this container and
+# is cleared once, here. WATCHDOG_RUN_DIR must match tor-watchdog.py's
+# ALIVE_PATH/SLEEPING_PATH folder (test-enforced). Runs as a subshell of
+# this script, so `pgrep -f '[t]or-watchdog'` (the host's signal path)
+# never matches it: a USR1 meant for the watchdog would kill a shell.
+WATCHDOG_RUN_DIR="/run/tor-watchdog"
+WATCHDOG_STALE_SECS=300
+WATCHDOG_POLL_SECS=5
+WATCHDOG_MAX_BACKOFF=60
+WATCHDOG_RESET_AFTER=600
+supervise_watchdog() {
+    mkdir -p "$WATCHDOG_RUN_DIR"
+    rm -f "$WATCHDOG_RUN_DIR/alive" "$WATCHDOG_RUN_DIR/sleeping" \
+        "$WATCHDOG_RUN_DIR/republish-requested"
+    backoff=1
+    while true; do
+        started=$(date +%s)
+        python3 /tor-watchdog.py &
+        wd_pid=$!
+        last=$started
+        while kill -0 "$wd_pid" 2>/dev/null; do
+            sleep "$WATCHDOG_POLL_SECS"
+            now=$(date +%s)
+            gap=$(( now - last ))
+            last=$now
+            [ "$gap" -le $(( WATCHDOG_POLL_SECS * 6 )) ] || continue
+            alive_mtime=$(stat -c %Y "$WATCHDOG_RUN_DIR/alive" 2>/dev/null) || continue
+            age=$(( now - alive_mtime ))
+            if [ "$age" -gt "$WATCHDOG_STALE_SECS" ] && kill -0 "$wd_pid" 2>/dev/null; then
+                echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] watchdog supervisor: tor-watchdog PID $wd_pid has not touched its alive file in ${age}s (threshold ${WATCHDOG_STALE_SECS}s) — killing it"
+                kill "$wd_pid" 2>/dev/null
+                sleep 2
+                kill -9 "$wd_pid" 2>/dev/null
+            fi
+        done
+        wait "$wd_pid"
+        status=$?
+        ran=$(( $(date +%s) - started ))
+        [ "$ran" -lt "$WATCHDOG_RESET_AFTER" ] || backoff=1
+        echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] watchdog supervisor: tor-watchdog PID $wd_pid exited with status $status after ${ran}s — restarting in ${backoff}s"
+        sleep "$backoff"
+        backoff=$(( backoff * 2 ))
+        [ "$backoff" -le "$WATCHDOG_MAX_BACKOFF" ] || backoff=$WATCHDOG_MAX_BACKOFF
+    done
+}
+
 # Write a minimal torrc for the SOCKS + control-port modes below.
 write_client_torrc() {
     mkdir -p /var/lib/tor
@@ -76,7 +132,7 @@ if [ "${TAKEOVER_WORKER}" = "1" ]; then
         echo "ERROR: C Tor failed to start"
     fi
     # Start watchdog to monitor Tor health via control port
-    python3 /tor-watchdog.py &
+    supervise_watchdog &
 
     # Start queue manager daemon (rate-limited ADD_ONION pipeline)
     LOG_FILE="/var/lib/onionheaven/queue-manager-${CONTAINER_NAME}.log"
@@ -127,7 +183,7 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
             echo "ERROR: C Tor failed to start"
         fi
         # Start watchdog to monitor Tor health via control port
-        python3 /tor-watchdog.py &
+        supervise_watchdog &
 
         # Start onionheaven heartbeat monitor in background (log on the hub data volume)
         HEARTBEAT_LOG="/var/lib/onionheaven/heartbeat.log"
@@ -202,7 +258,7 @@ if [ "${NO_ONION_SERVICE}" = "1" ]; then
         echo "SOCKS-only mode: starting C Tor SOCKS proxy (no onion services)..."
         write_client_torrc
         # Start watchdog in background (will connect once control port is ready)
-        python3 /tor-watchdog.py &
+        supervise_watchdog &
         su -s /bin/sh debian-tor -c "tor -f /etc/tor/torrc"
         # Tor is this container's job; if it exits, so do we, rather than
         # falling through into the full onion-service mode below.
@@ -346,7 +402,7 @@ if ! kill -0 $TOR_PID 2>/dev/null; then
 fi
 
 # Start watchdog to monitor Tor health and manage onion services
-python3 /tor-watchdog.py &
+supervise_watchdog &
 
 # Wait for hostname files (first run: Tor creates them; subsequent: watchdog ADD_ONION)
 write_ctor_hostnames() {
