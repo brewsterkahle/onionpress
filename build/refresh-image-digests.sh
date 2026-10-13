@@ -28,14 +28,22 @@
 # upstream registries to ship security patches without us tracking digests.
 # See docs/BUILDING.md, "Why some images stay floating".
 #
+# WHERE THE DIGESTS COME FROM
+#   By default, from the registry: build/base-image-digest.sh asks GHCR what
+#   :latest is right now (multi-arch index digest, no Docker daemon needed).
+#   Until issue #327 the default was `docker images --digests`, i.e. whatever
+#   this machine last pulled, and during the 2.5.3 release it wrote stale
+#   digests. The local cache is still available, but only when asked for.
+#
 # USAGE
-#   # Normal release flow — read digests from freshly pulled images:
-#   docker pull ghcr.io/brewsterkahle/onionpress-tor:latest
-#   docker pull ghcr.io/brewsterkahle/onionpress-wordpress:latest
+#   # Normal release flow — pin what GHCR serves as :latest now:
 #   build/refresh-image-digests.sh
 #
-#   # Supply digests explicitly (CI, or a machine with no daemon):
+#   # Supply digests explicitly (either one; the other comes from the registry):
 #   build/refresh-image-digests.sh --tor sha256:aaa… --wordpress sha256:bbb…
+#
+#   # Pin the images this machine's Docker last pulled (offline, or testing):
+#   build/refresh-image-digests.sh --local
 #
 #   # Re-apply build/image-pins.env to every consumer, no daemon needed.
 #   # This is the repair mode for "someone hand-edited one file":
@@ -55,6 +63,7 @@ TOR_IMG="ghcr.io/brewsterkahle/onionpress-tor:latest"
 WP_IMG="ghcr.io/brewsterkahle/onionpress-wordpress:latest"
 
 MODE="refresh"
+SOURCE="registry"
 TOR_DIGEST_ARG=""
 WP_DIGEST_ARG=""
 
@@ -64,7 +73,8 @@ while [ $# -gt 0 ]; do
         --check)     MODE="check" ;;
         --tor)       TOR_DIGEST_ARG="${2:-}"; shift ;;
         --wordpress) WP_DIGEST_ARG="${2:-}";  shift ;;
-        -h|--help)   sed -n '2,46p' "$0"; exit 0 ;;
+        --local)     SOURCE="local" ;;
+        -h|--help)   sed -n '2,53p' "$0"; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -72,10 +82,27 @@ done
 
 # ─── Work out the two pins ──────────────────────────────────────────────
 
-digest_of() {
-    # Read the digest from `docker images --digests` for an exact repo:tag
-    # match. Fail loudly if the image isn't cached locally — we'd rather
-    # noise out than write an empty/wrong digest.
+registry_digest_of() {
+    # Ask the registry what the tag points at now. base-image-digest.sh
+    # prints tag@sha256:… and exits non-zero (with its own message) if the
+    # registry cannot be reached or the tag is a single-platform manifest —
+    # either way we stop rather than write an empty or one-arch pin.
+    local img="$1"
+    local ref
+    ref=$(build/base-image-digest.sh "$img") || {
+        echo "ERROR: could not resolve $img from the registry" \
+             "(pass --tor/--wordpress, or --local to use this machine's cache)" >&2
+        exit 1
+    }
+    echo "${ref##*@}"
+}
+
+local_digest_of() {
+    # --local only. Read the digest from `docker images --digests` for an
+    # exact repo:tag match: whatever this machine last pulled, which is not
+    # necessarily what the registry serves now (issue #327). Fail loudly if
+    # the image isn't cached locally — we'd rather noise out than write an
+    # empty/wrong digest.
     #
     # This reports the digest of whatever manifest was pulled. For these two
     # tags that is the multi-arch INDEX digest (which is what a pin must be,
@@ -105,6 +132,14 @@ read_pin() {
     # the explanatory guard could print, leaving the operator with exit 1 and
     # zero output while doctor.sh told them the pins had "DRIFTED".
     grep "^$1=" "$PINS_FILE" 2>/dev/null | head -1 | cut -d= -f2- || :
+}
+
+digest_of() {
+    if [ "$SOURCE" = "local" ]; then
+        local_digest_of "$1"
+    else
+        registry_digest_of "$1"
+    fi
 }
 
 if [ "$MODE" = "refresh" ]; then
