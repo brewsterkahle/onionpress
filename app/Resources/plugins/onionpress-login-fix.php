@@ -107,7 +107,12 @@ add_action( 'admin_head', function () use ( $onionpress_follow_css ) {
     echo $onionpress_follow_css . "\n";
 } );
 
+// Only for those who can open the page it links to (onionpress-settings
+// needs manage_options); authors and editors got "not allowed".
 add_action( 'admin_bar_menu', function ( $wp_admin_bar ) {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return;
+    }
     $wp_admin_bar->add_node( [
         'id'     => 'onionpress-follow',
         'title'  => '<span class="ab-icon"></span><span class="ab-label">Follow</span>',

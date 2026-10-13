@@ -8,7 +8,8 @@
 
 get_header();
 
-$current_folder = isset($_GET['folder']) ? sanitize_text_field($_GET['folder']) : '';
+// wp_unslash: WordPress adds slashes to request data (Bob's -> Bob\'s).
+$current_folder = isset($_GET['folder']) ? sanitize_text_field(wp_unslash($_GET['folder'])) : '';
 $contents = class_exists('OnionPress_Creations')
     ? OnionPress_Creations::get_folder_contents($current_folder)
     : array('folders' => array(), 'files' => array());

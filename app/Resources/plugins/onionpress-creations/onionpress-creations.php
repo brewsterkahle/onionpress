@@ -136,7 +136,7 @@ class OnionPress_Creations {
 
         $creations_dir = self::CREATIONS_DIR;
         // Support uploading into a subfolder
-        $subfolder = isset($_POST['creations_upload_folder']) ? sanitize_text_field($_POST['creations_upload_folder']) : '';
+        $subfolder = isset($_POST['creations_upload_folder']) ? sanitize_text_field(wp_unslash($_POST['creations_upload_folder'])) : '';
         if ($subfolder && !self::is_public_path($subfolder)) {
             return;
         }
@@ -203,8 +203,17 @@ class OnionPress_Creations {
             );
         }
 
-        // Redirect back to avoid form resubmission
-        wp_redirect(wp_get_referer() ? wp_get_referer() : home_url('/'));
+        // Redirect back to the folder just uploaded into, to avoid form
+        // resubmission. Not wp_get_referer(): the form posts to this page,
+        // so the referer equals the request URI and it returns false.
+        $page_id = get_queried_object_id();
+        $back = $page_id ? get_permalink($page_id) : false;
+        if (!$back) {
+            $back = home_url('/');
+        } elseif ($subfolder) {
+            $back = add_query_arg('folder', urlencode($subfolder), $back);
+        }
+        wp_safe_redirect($back);
         exit;
     }
 
