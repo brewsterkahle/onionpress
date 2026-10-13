@@ -467,13 +467,84 @@ def ensure_key_formats(key_dir):
 def decode_base32_key(key_b32):
     """Decode a base32-encoded ed25519 expanded secret key.
     Accepts 64 raw bytes or 96 bytes (with 32-byte C Tor header).
-    Returns the 64-byte expanded private key."""
-    key_bytes = base64.b32decode(key_b32, casefold=True)
+    Returns the 64-byte expanded private key, after
+    check_expanded_secret_key: an import must refuse a key Tor would not
+    serve as the address derived here before anything is replaced."""
+    try:
+        key_bytes = base64.b32decode(key_b32, casefold=True)
+    except Exception as e:
+        raise ValueError(f"The key is not valid base32 ({e})") from e
     if len(key_bytes) == 96 and key_bytes[:29] == b'== ed25519v1-secret: type0 ==':
         key_bytes = key_bytes[32:]
     elif len(key_bytes) != 64:
         raise ValueError(f"Key must be exactly 64 bytes (or 96 with header), got {len(key_bytes)}")
+    check_expanded_secret_key(key_bytes)
     return key_bytes
+
+
+# The order of ed25519's base point. A secret scalar that is a multiple of
+# it has the neutral element for its public key: no key at all.
+ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493
+
+
+def _nacl_public_key(scalar):
+    """scalar·B by libsodium (PyNaCl), or None where PyNaCl is missing.
+
+    crypto_scalarmult_ed25519_base_noclamp takes the scalar as it is, the
+    way Tor takes an expanded key's first half. It fails for a scalar that
+    is zero mod the order (raised here as ValueError)."""
+    try:
+        import nacl.bindings
+        import nacl.exceptions
+    except ImportError:
+        return None
+    if not getattr(nacl.bindings, "has_crypto_scalarmult_ed25519", False):
+        return None
+    try:
+        return nacl.bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
+    except nacl.exceptions.RuntimeError as e:
+        raise ValueError("The key has no public key (libsodium refused "
+                         "its secret scalar)") from e
+
+
+def check_expanded_secret_key(private_key, public_key=None):
+    """The 32-byte public key of a 64-byte expanded ed25519 secret key
+    (C Tor's hs_ed25519_secret_key without its header), or ValueError for
+    one Tor would not serve as the address derived from it here:
+
+      - not 64 bytes;
+      - bit 255 of the secret scalar set: libsodium clears it, so the
+        address OnionPress derives and the one the key serves part ways;
+        every key Tor or mkp224o makes has it clear;
+      - a secret scalar that is zero mod the group order: its public key
+        is the neutral element, no identity at all;
+      - with PyNaCl present, libsodium's scalar·B
+        (crypto_scalarmult_ed25519_base_noclamp) differs from the public
+        key derive_public_key finds;
+      - public_key given (a key file's stored half) and not that key.
+
+    An import calls this before it touches the current key: what it lets
+    through becomes the site's identity."""
+    if not isinstance(private_key, (bytes, bytearray)) or len(private_key) != 64:
+        size = len(private_key) if isinstance(private_key, (bytes, bytearray)) else "no"
+        raise ValueError(f"The key must be 64 bytes, got {size}")
+    scalar = bytes(private_key[:32])
+    if scalar[31] & 0x80:
+        raise ValueError("The key is not a usable onion service key: the top "
+                         "bit of its secret scalar is set (keys made by Tor "
+                         "or mkp224o never have it)")
+    if int.from_bytes(scalar, "little") % ED25519_ORDER == 0:
+        raise ValueError("The key is not a usable onion service key: its "
+                         "secret scalar is zero")
+    derived = derive_public_key(private_key)
+    by_libsodium = _nacl_public_key(scalar)
+    if by_libsodium is not None and by_libsodium != derived:
+        raise ValueError("The key's public key could not be confirmed "
+                         "(libsodium derives a different one)")
+    if public_key is not None and bytes(public_key) != derived:
+        raise ValueError("Onion service key is inconsistent: its public key "
+                         "does not belong to its private key")
+    return derived
 
 
 def derive_public_key(private_key):
@@ -569,10 +640,7 @@ def key_pair_onion_address(private_key, public_key):
     """
     if len(private_key) != 64 or len(public_key) != 32:
         raise ValueError("Onion service key has the wrong size")
-    if derive_public_key(private_key) != public_key:
-        raise ValueError("Onion service key is inconsistent: its public key "
-                         "does not belong to its private key")
-    return derive_onion_address(public_key)
+    return derive_onion_address(check_expanded_secret_key(private_key, public_key))
 
 
 def staged_key_address(key_dir):
@@ -597,7 +665,7 @@ def staged_key_address(key_dir):
         if os.path.isfile(secret_path):
             with open(secret_path, 'rb') as f:
                 private_key = _parse_ctor_secret(f.read())
-            public_key = derive_public_key(private_key)
+            public_key = check_expanded_secret_key(private_key)
             if os.path.isfile(public_path):
                 with open(public_path, 'rb') as f:
                     if _parse_ctor_public(f.read()) != public_key:
@@ -622,7 +690,7 @@ def import_key_b32(key_b32, output_dir):
     import os
 
     private_key = decode_base32_key(key_b32)
-    public_key = derive_public_key(private_key)
+    public_key = check_expanded_secret_key(private_key)
     address = derive_onion_address(public_key)
 
     addr_dir = os.path.join(output_dir, address)
@@ -717,8 +785,7 @@ if __name__ == "__main__":
             if len(sys.argv) < 3:
                 _usage()
             private_key = decode_base32_key(_key_arg(sys.argv[2]))
-            public_key = derive_public_key(private_key)
-            address = derive_onion_address(public_key)
+            address = derive_onion_address(check_expanded_secret_key(private_key))
             print(address)
 
         else:

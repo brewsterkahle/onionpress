@@ -459,7 +459,12 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="import-argv-test-")
-        priv = secrets.token_bytes(64)
+        # A random key as Tor and mkp224o make one: clamped (an import
+        # refuses a secret scalar with bit 255 set).
+        priv = bytearray(secrets.token_bytes(64))
+        priv[0] &= 248
+        priv[31] = (priv[31] & 127) | 64
+        priv = bytes(priv)
         self.key_b32 = base64.b32encode(priv).decode("ascii")
         self.addr = key_manager.derive_onion_address(
             key_manager.derive_public_key(priv))
