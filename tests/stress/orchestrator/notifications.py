@@ -316,9 +316,9 @@ def flush_client_descriptor_cache(
 ):
     """Flush descriptor cache on all poll clients via NEWNYM + HSFETCH.
 
-    Uses TorControl from src/onionpress/tor.py instead of xxd+nc shell pipes.
+    Uses TorControl (tor_control.py) instead of xxd+nc shell pipes.
     """
-    from onionpress.tor import TorControl
+    from .tor_control import TorControl
 
     addrs = store.get_content_addrs(start, count)
     if not addrs:

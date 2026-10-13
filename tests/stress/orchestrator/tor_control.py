@@ -1,7 +1,10 @@
-"""Tor control port wrapper for OnionPress.
+"""Tor control port wrapper for the OnionHeaven stress test.
 
 Provides a clean Python interface for Tor control protocol operations,
-replacing the fragile xxd/nc/shell patterns used in bash scripts.
+replacing the fragile xxd/nc/shell patterns used in bash scripts. It was
+src/onionpress/tor.py, but the app never used it (its control-port work is
+in tor-watchdog.py and health.py), so it lives with its only caller, the
+stress orchestrator (issue #321; #236 is about adopting Stem instead).
 
 Two transports:
 - TorControl: sends commands via `docker exec` (works everywhere)
@@ -15,7 +18,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from .docker import Docker, DockerResult
+from onionpress.docker import Docker, DockerResult
 
 
 @dataclass
