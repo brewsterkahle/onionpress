@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    _takeover_local, _release_local,
+    _takeover_local, _release_local, onion_address_ok,
     TOR_MANAGER, ONIONHEAVEN_DATA_DIR,
 )
 
@@ -173,8 +173,22 @@ def process_releases(conn):
     return count
 
 
+# audit_result for a row whose healthcheck_address is not an onion address:
+# never fetched, and (like confirmed_dead) never a release.
+AUDIT_INVALID_ADDRESS = "invalid_healthcheck_address"
+
+
 def _check_healthcheck(healthcheck_address):
-    """Check if a healthcheck .onion address is reachable via local Tor SOCKS."""
+    """Check if a healthcheck .onion address is reachable via local Tor SOCKS.
+
+    Only one v3 onion address, whole, is fetched (onion_address_ok). The
+    value comes from the registry, which onionpress-tor and every takeover
+    worker can write as root, and an answer here releases a takeover: a
+    clearnet host (through a Tor exit), a host:port, userinfo or curl's
+    {}/[] URL globbing would let whoever wrote the row decide that answer.
+    """
+    if not onion_address_ok(healthcheck_address, "audit the healthcheck address"):
+        return False
     try:
         result = subprocess.run(
             ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
@@ -203,6 +217,20 @@ def process_audits(conn):
     ca = row["content_address"]
     ha = row["healthcheck_address"]
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if not onion_address_ok(ha, "audit the healthcheck address"):
+        # Not fetched (see _check_healthcheck), and the takeover stays: the
+        # site's own signed /online is what releases it then. The result is
+        # recorded so the heartbeat does not queue this audit again and the
+        # row does not hold up this worker's other audits.
+        conn.execute(
+            "UPDATE registry SET audit_result = ?, audit_at = ?, "
+            "audit_pending = NULL "
+            "WHERE content_address = ? AND healthcheck_address IS ?",
+            (AUDIT_INVALID_ADDRESS, now_str, ca, ha)
+        )
+        db_commit_with_retry(conn)
+        return 1
 
     if _check_healthcheck(ha):
         # False positive — site is actually alive

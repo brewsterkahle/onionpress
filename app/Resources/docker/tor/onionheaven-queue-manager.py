@@ -36,7 +36,20 @@ KEYS_DIR = "/var/lib/onionheaven/keys"
 KEY_CONVERT = "/key-convert.py"
 REDIRECT_PORT = 8082
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "unknown")
-SOCK_PATH = "/tmp/queue-manager.sock"
+# The command socket: root's only. The daemon runs as root and, on a
+# `takeover`, reads that address's key from the hub data volume (every
+# registrant's key is there) and hands it to Tor. Tor runs in this
+# container as debian-tor and faces the network. The socket was
+# /tmp/queue-manager.sock, mode 0666, so debian-tor could command the
+# daemon (a takeover of any registered address put its key into this
+# worker's Tor), and in the world-writable /tmp it could also hold the
+# name before the daemon bound it. /run is writable by root only, and the
+# socket is created 0600 (bind_command_socket). Every client is root:
+# `docker exec` into a worker (the image's USER is root and no call passes
+# -u) from onionheaven_common's _exec_takeover/_exec_release/
+# _has_onion_on_worker/get_queue_status/get_addr_serving_status and
+# check_worker_bootstrap.
+SOCK_PATH = "/run/onionheaven-queue-manager.sock"
 
 # Commands that take an onion address. The heartbeat reads the address from
 # the registry (which onionpress-tor and every takeover worker can write) or
@@ -659,6 +672,34 @@ def handle_command(qm, data):
     return {"error": f"unknown command: {data}"}
 
 
+def bind_command_socket(path=None):
+    """A listening Unix socket at path (SOCK_PATH) that only its owner,
+    root, can connect to.
+
+    A stale socket from the last run is removed first. The umask is 0177
+    while bind() creates the file, so it is 0600 from the start: there is
+    no moment at which another user could connect, as there was between
+    bind() and a later chmod.
+    """
+    path = path or SOCK_PATH
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old_umask = os.umask(0o177)
+    try:
+        server.bind(path)
+    except BaseException:
+        server.close()
+        raise
+    finally:
+        os.umask(old_umask)
+    os.chmod(path, 0o600)
+    server.listen(64)
+    return server
+
+
 def run_daemon():
     """Run as daemon — listen for commands on Unix socket."""
     log("Waiting for Tor control port...")
@@ -681,16 +722,7 @@ def run_daemon():
     evt_conn.connect()
     qm = QueueManager(cmd_conn, evt_conn)
 
-    # Remove stale socket
-    try:
-        os.unlink(SOCK_PATH)
-    except FileNotFoundError:
-        pass
-
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCK_PATH)
-    os.chmod(SOCK_PATH, 0o666)
-    server.listen(64)
+    server = bind_command_socket()
     server.settimeout(2.0)
 
     log(f"Queue manager daemon started (max_in_flight={MAX_IN_FLIGHT})")
@@ -716,12 +748,11 @@ def run_daemon():
 def send_command(cmd):
     """Send a command to the running daemon and print response."""
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(SOCK_PATH)
-        s.sendall(cmd.encode() + b"\n")
-        s.settimeout(30.0)
-        resp = s.recv(4096).decode().strip()
-        s.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(SOCK_PATH)
+            s.sendall(cmd.encode() + b"\n")
+            s.settimeout(30.0)
+            resp = s.recv(4096).decode().strip()
         if resp:
             print(resp)
         else:
@@ -730,7 +761,7 @@ def send_command(cmd):
     except socket.timeout:
         print(json.dumps({"error": "queue manager timed out"}))
         sys.exit(1)
-    except ConnectionRefusedError:
+    except (ConnectionRefusedError, FileNotFoundError):
         print(json.dumps({"error": "queue manager not running"}))
         sys.exit(1)
     except Exception as e:

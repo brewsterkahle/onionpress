@@ -491,6 +491,17 @@
   is still acted on (it was verified when recorded). The tor image's build
   imports `nacl.signing`. `tests/test_hub_signature_verification.py`.
 
+## Inside a Takeover Worker
+- The queue manager's command socket is `/run/onionheaven-queue-manager.sock`,
+  0600 from bind() (`bind_command_socket`, umask 0177). The root daemon loads
+  any registrant's key into Tor on `takeover`; Tor runs there as debian-tor,
+  and the old `/tmp/queue-manager.sock` was 0666. Every client is root
+  (`docker exec` into a worker, image USER root, no `-u`); keep it so.
+- The post-takeover audit fetches `healthcheck_address` only if it is one v3
+  onion address (`onion_address_ok`); anything else is recorded as
+  `invalid_healthcheck_address`: never fetched, never a release.
+  `tests/test_takeover_worker_hardening.py`. Both ship in the tor image.
+
 ## OnionHome Name Registry Volume
 - OnionHome's `onionnames.db` (onionname → onion address) lives on
   `onionpress-onionnames-data` at `/var/lib/onionnames`, mounted by
