@@ -118,6 +118,21 @@
 - Exporting `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoints the
   whole stack at locally built images. See `docs/BUILDING.md`.
 
+## A Damaged Key Never Becomes a New Address (issue #311)
+- The delivered PEM (`<name>/ks_hs_id.ed25519_expanded_private`, onion-keys
+  volume) is the identity; C Tor's `hs_ed25519_*` + `hostname` are a copy.
+  Every start the entrypoint runs `key-convert.py check-ctor` and re-derives
+  the copy unless it matches exactly (size, header, key, public key,
+  hostname); old files go to `/var/lib/tor/key-set-aside/`, never deleted.
+  No usable PEM and no secret key: refuse to start.
+- tor-watchdog.py sends `ADD_ONION NEW:BEST` only when there is no trace of
+  an address (no PEM, secret key, public key or hostname, even damaged),
+  re-checked at ADD time. An unusable C Tor key falls back to the PEM;
+  without one the service stays down with a loud log line. A minted key is
+  kept in memory for the next DEL+ADD (it used to mint again on every
+  wake/republish) and saved with O_EXCL, never over an existing file.
+  `tests/test_onion_key_never_reminted.py`. Tor image change: needs a publish.
+
 ## Onion Service Recovery (issue #266)
 - **The app's dual probe is the only measure of real reachability.** When it fails
   continuously for 10 min with Tor internally healthy (`RepublishTrigger` in

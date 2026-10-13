@@ -14,11 +14,16 @@ C Tor format:
 Usage:
   key-convert.py arti-to-ctor <arti_pem_file> <output_dir>
   key-convert.py ctor-to-arti <ctor_secret_key_file> <output_pem_file>
+  key-convert.py check-ctor <arti_pem_file> <ctor_dir>
+      exit 0: C Tor's files in <ctor_dir> hold exactly the PEM's key
+      exit 3: they are missing, damaged or hold another key (reason printed)
+      exit 4: the PEM itself cannot be read (reason printed)
 """
 
 import base64
 import hashlib
 import os
+import stat
 import struct
 import sys
 
@@ -139,6 +144,34 @@ def build_arti_pem(expanded_key, public_key):
             "-----END OPENSSH PRIVATE KEY-----\n")
 
 
+def _write_file_atomic(path, data, mode=0o600):
+    """Write data to path via a temp file + fsync + rename.
+
+    A torn write of hs_ed25519_secret_key is exactly what issue #311 is
+    about; the rename means a reader sees the old file or the new one.
+    """
+    tmp = f"{path}.tmp-{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def arti_to_ctor(pem_path, output_dir):
     """Convert Arti PEM to C Tor hs_ed25519_secret_key + hs_ed25519_public_key."""
     expanded_key, public_key = parse_arti_pem(pem_path)
@@ -146,17 +179,92 @@ def arti_to_ctor(pem_path, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
     secret_path = os.path.join(output_dir, "hs_ed25519_secret_key")
-    with open(secret_path, "wb") as f:
-        f.write(CTOR_SECRET_HEADER + expanded_key)
-    os.chmod(secret_path, 0o600)
+    _write_file_atomic(secret_path, CTOR_SECRET_HEADER + expanded_key)
 
     public_path = os.path.join(output_dir, "hs_ed25519_public_key")
-    with open(public_path, "wb") as f:
-        f.write(CTOR_PUBLIC_HEADER + public_key)
-    os.chmod(public_path, 0o600)
+    _write_file_atomic(public_path, CTOR_PUBLIC_HEADER + public_key)
+
+    # The hostname too: one left from another key would be published as
+    # the service ID, and the host reads it to learn the address.
+    hostname_path = os.path.join(output_dir, "hostname")
+    _write_file_atomic(hostname_path,
+                       (_onion_address(public_key) + ".onion\n").encode("ascii"),
+                       mode=0o644)
 
     print(f"Wrote {secret_path} ({32 + 64} bytes)")
     print(f"Wrote {public_path} ({32 + 32} bytes)")
+    print(f"Wrote {hostname_path}")
+
+
+def _onion_address(public_key):
+    """v3 onion address (no .onion suffix) of a 32-byte ed25519 public key."""
+    version = b"\x03"
+    checksum = hashlib.sha3_256(b".onion checksum" + public_key + version).digest()[:2]
+    return base64.b32encode(public_key + checksum + version).decode("ascii").lower().rstrip("=")
+
+
+def _read_small(path, limit=4096):
+    """Read at most limit bytes of a regular file, never through a link."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        return f.read(limit + 1)
+
+
+def check_ctor_against_pem(pem_path, ctor_dir):
+    """Does ctor_dir hold exactly the delivered PEM's key? Returns (ok, reason).
+
+    The PEM in the onion-keys volume is the install's identity; C Tor's
+    files are a derived copy. Issue #311: a secret key that was there but
+    not 96 bytes made the watchdog mint a NEW address, because the
+    entrypoint only re-derived the copy when it was missing. So anything
+    short of an exact match (size, header, key bytes, public key, hostname)
+    is reported here and the entrypoint re-derives the copy from the PEM.
+
+    Raises ValueError/OSError if the PEM itself cannot be read: then there
+    is nothing to compare against, and the caller decides.
+    """
+    expanded_key, public_key = parse_arti_pem(pem_path)
+    address = _onion_address(public_key) + ".onion"
+
+    secret_path = os.path.join(ctor_dir, "hs_ed25519_secret_key")
+    try:
+        secret = _read_small(secret_path)
+    except FileNotFoundError:
+        return False, "hs_ed25519_secret_key is missing"
+    except (OSError, ValueError) as e:
+        return False, f"hs_ed25519_secret_key is unreadable ({e})"
+    if len(secret) != 96:
+        return False, f"hs_ed25519_secret_key is {len(secret)} bytes (expected 96)"
+    if secret[:32] != CTOR_SECRET_HEADER:
+        return False, "hs_ed25519_secret_key has an invalid header"
+    if secret[32:] != expanded_key:
+        return False, "hs_ed25519_secret_key holds a different key than the delivered PEM"
+
+    public_path = os.path.join(ctor_dir, "hs_ed25519_public_key")
+    try:
+        public = _read_small(public_path)
+    except FileNotFoundError:
+        return False, "hs_ed25519_public_key is missing"
+    except (OSError, ValueError) as e:
+        return False, f"hs_ed25519_public_key is unreadable ({e})"
+    if public != CTOR_PUBLIC_HEADER + public_key:
+        return False, "hs_ed25519_public_key does not match the delivered PEM"
+
+    # hostname is optional (the watchdog derives it from the public key),
+    # but one naming another address would be published as the service ID.
+    hostname_path = os.path.join(ctor_dir, "hostname")
+    try:
+        hostname = _read_small(hostname_path).decode("ascii", "replace").strip()
+    except FileNotFoundError:
+        hostname = None
+    except (OSError, ValueError) as e:
+        return False, f"hostname is unreadable ({e})"
+    if hostname is not None and hostname != address:
+        return False, "hostname names another address than the delivered PEM"
+
+    return True, address
 
 
 def ctor_to_arti(secret_key_path, output_pem_path):
@@ -223,10 +331,7 @@ def pem_to_onion_address(pem_path):
         version  = b'\\x03'
     """
     _, public_key = parse_arti_pem(pem_path)
-    version = b"\x03"
-    checksum = hashlib.sha3_256(b".onion checksum" + public_key + version).digest()[:2]
-    addr = base64.b32encode(public_key + checksum + version).decode("ascii").lower().rstrip("=")
-    print(addr)
+    print(_onion_address(public_key))
 
 
 def main():
@@ -259,6 +364,18 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
         pem_to_onion_address(sys.argv[2])
+    elif cmd == "check-ctor":
+        if len(sys.argv) != 4:
+            print("Usage: key-convert.py check-ctor <pem_file> <ctor_dir>",
+                  file=sys.stderr)
+            sys.exit(1)
+        try:
+            ok, reason = check_ctor_against_pem(sys.argv[2], sys.argv[3])
+        except (OSError, ValueError, struct.error) as e:
+            print(f"delivered PEM is unreadable ({e})")
+            sys.exit(4)
+        print(reason)
+        sys.exit(0 if ok else 3)
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
