@@ -660,7 +660,7 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
 
         def run(argv, **kwargs):
             calls.append(list(argv))
-            out = "/tmp/tmp.Ab12Cd34\n" if argv[-1] == "mktemp" else (
+            out = "/tmp/tmp.Ab12Cd34\n" if "mktemp" in argv[-2:] else (
                 "wordpress\n" if "get" in argv else "")
             return subprocess.CompletedProcess(
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
@@ -683,8 +683,10 @@ class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
         staging = _staging(self.tmp, "s", keys=True, registry=True, onionhome=True)
         touched, _ = self._restore(staging)
         self.assertTrue([c for c in touched if "onionheaven:/var/lib/onionheaven/keys/" in c])
-        self.assertTrue([c for c in touched
-                         if "onionpress-tor:/var/lib/onionnames/onionnames.db" in c])
+        # The registry goes to onionpress-tor for the image's checks to
+        # rebuild (backup.restore_name_registry).
+        self.assertTrue([c for c in touched if "onionpress-tor:/tmp/tmp.Ab12Cd34/"
+                         "backup/onionhome/onionnames.db" in c])
 
     def test_a_hubs_settings_page_backup_says_what_it_lacks(self):
         staging = _staging(self.tmp, "s")

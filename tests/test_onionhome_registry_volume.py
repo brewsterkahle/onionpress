@@ -22,7 +22,8 @@ Now:
   * web-server.py serves no name until the move's marker is on the volume:
     a registry opened anywhere else would start empty, every name free to
     claim.
-  * Backup and restore copy the registry's own files through onionpress-tor.
+  * Backup and restore copy the registry's own files through onionpress-tor;
+    a restore has the image's checks rebuild them first.
 
 No PyYAML and no Docker: the compose file is read with a line-based
 splitter, subprocess is mocked, and the move runs on temporary directories.
@@ -1112,11 +1113,14 @@ class TestRestore(unittest.TestCase):
                 f.write(rel)
 
     def test_only_the_registry_goes_back_through_onionpress_tor(self):
+        """Into a private folder there, for the image's checks to rebuild
+        (tests/test_onionhome_registry_restore.py): never onto the volume."""
         calls = []
 
         def run(argv, **kwargs):
             calls.append(list(argv))
-            out = "wordpress\n" if "get" in argv else ""
+            out = ("wordpress\n" if "get" in argv
+                   else "/tmp/tmp.Ab12Cd34\n" if argv[-2:] == ["mktemp", "-d"] else "")
             return subprocess.CompletedProcess(
                 argv, 0, stdout=out if kwargs.get("text") else out.encode(),
                 stderr="" if kwargs.get("text") else b"")
@@ -1124,13 +1128,13 @@ class TestRestore(unittest.TestCase):
         with mock.patch.object(backup.subprocess, "run", side_effect=run):
             backup.restore_container_artifacts(self.staging, {}, lambda msg: None)
 
-        mine = [argv for argv in calls
-                if any("onionnames" in a or "onionhome" in a for a in argv)]
-        self.assertEqual(mine, [
+        copies = [argv for argv in calls if argv[:2] == ["docker", "cp"]
+                  and any("onionnames" in a or "onionhome" in a for a in argv)]
+        self.assertEqual(copies, [
             ["docker", "cp", os.path.join(self.names, "onionnames.db"),
-             f"onionpress-tor:{NAMES_DIR}/onionnames.db"],
+             "onionpress-tor:/tmp/tmp.Ab12Cd34/backup/onionhome/onionnames.db"],
             ["docker", "cp", os.path.join(self.names, "onionnames.db-wal"),
-             f"onionpress-tor:{NAMES_DIR}/onionnames.db-wal"],
+             "onionpress-tor:/tmp/tmp.Ab12Cd34/backup/onionhome/onionnames.db-wal"],
         ])
 
 

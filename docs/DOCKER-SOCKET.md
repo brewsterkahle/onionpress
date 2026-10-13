@@ -217,6 +217,11 @@ www-data): code running in WordPress on OnionHome could point any name at an
 onion address of its choosing, or delete the registry. Host-side code reaches
 it through `onionpress-tor`; backup and restore copy `onionnames.db` and its
 `-wal`, nothing else, and the archive still calls the folder `onionhome/`.
+A restore never puts the backup's file on the volume: the image's own
+`onionhome-registry-migrate.py` rebuilds it from a private copy in
+`onionpress-tor`, with the checks described below, and the result replaces
+the registry in use through SQLite's backup API; the log gives the name
+count before and after.
 `tests/test_onionhome_registry_volume.py` enforces all of this. The Settings
 page's backups keep the registry (nothing in it is secret), but its restore
 refuses a backup carrying it and never writes this volume: code running in

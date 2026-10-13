@@ -523,6 +523,21 @@
   via `docker cp` on onionpress-tor and copies only `onionnames.db` and its
   `-wal` (`backup.ONIONHOME_REGISTRY_FILES`); the archive folder is still
   `onionhome/`. `tests/test_onionhome_registry_volume.py`.
+- **A restore never puts the backup's file on the volume** (anyone can make
+  a backup, and a Settings-page download can be swapped in WordPress):
+  `backup.restore_name_registry` copies it into a private `mktemp -d` in
+  onionpress-tor, runs the image's own `onionhome-registry-migrate.py
+  --legacy-parent <tmp>/backup --dest <tmp>/rebuilt --no-mount-check` on it
+  (the move's checks, below), and puts the rebuilt registry in place of the
+  live one through SQLite's backup API (live -wal never applied to it). The
+  name count before/after goes in the log. What the image refuses leaves the
+  live registry alone and logs an ERROR; the rest of the restore goes on.
+  Only install-from-backup restores it: `restore_container_artifacts` in
+  the launcher's start hook (Tor up), and `onionpress restore`/the app's
+  Restore..., which import before Tor starts and so call
+  `restore_staged_name_registry` after `start_tor`. The 2.5.3 image has the
+  script; keep its flags and marker JSON (`moved`, `names`, `left_out`)
+  stable. `tests/test_onionhome_registry_restore.py` runs the real script.
 - The Settings page's backups keep `onionhome/` (no secret in it, and an
   app restore of a backup without it would serve an empty, claimable
   registry). The page's restore refuses a backup carrying

@@ -378,13 +378,17 @@ class OnionPressCLI:
 
             # Rebuild: fresh containers adopt the seeded key; import the backup
             # artifacts into them; then bring up Tor with the restored identity.
+            # OnionHome's name registry last: it is rebuilt inside
+            # onionpress-tor, which the teardown removed.
             self.containers.start_core()
             self.containers.wait_for_wordpress()
-            if self.cmd_import_backup_artifacts(staging) != 0:
+            if self.cmd_import_backup_artifacts(staging, name_registry=False) != 0:
                 self.log("Restore: artifact import failed — staging kept for retry")
                 return 1
             self.containers.start_tor()
             self.containers.wait_for_tor()
+            from .backup import restore_staged_name_registry
+            restore_staged_name_registry(staging, self.log)
 
             # Clean up staging + marker only after a successful import.
             shutil.rmtree(staging, ignore_errors=True)
@@ -404,12 +408,13 @@ class OnionPressCLI:
             self.log(f"Restore failed: {e}")
             return 1
 
-    def cmd_import_backup_artifacts(self, staging: str) -> int:
+    def cmd_import_backup_artifacts(self, staging: str, name_registry: bool = True) -> int:
         """Import a backup's container-side artifacts (DB, wp-content,
         OnionHeaven/OnionHome data, multisite constants) into the already-running
         containers, then migrate the DB schema. Used by the launcher's
         install-from-backup marker hook. Operates on an already-extracted staging
-        dir, so no password is needed here.
+        dir, so no password is needed here. name_registry=False leaves
+        OnionHome's name registry to the caller (cmd_restore, before Tor runs).
         """
         try:
             from .backup import (restore_container_artifacts,
@@ -421,7 +426,8 @@ class OnionPressCLI:
             if os.path.exists(meta_path):
                 with open(meta_path) as f:
                     metadata = validate_backup_metadata(json.load(f))
-            restore_container_artifacts(staging, metadata, self.log)
+            restore_container_artifacts(staging, metadata, self.log,
+                                        name_registry=name_registry)
             # Migrate DB schema for cross-version backups (non-fatal).
             res = self.docker.wp("core", "update-db", timeout=120)
             if not res.ok:

@@ -1941,7 +1941,8 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True):
+def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True,
+                                name_registry=True):
     """Import a backup's container-side state into the RUNNING db + wordpress
     containers: WordPress DB, wp-content, OnionHeaven data, OnionHome registry,
     and multisite constants. Shared by restore_from_backup (in-place) and the
@@ -1950,6 +1951,12 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     hub_volumes=False (the Settings page's restore) never writes the
     OnionHeaven hub data or the OnionHome name registry: what the backup
     holds for them is left out and logged.
+
+    name_registry=False leaves the OnionHome name registry to the caller,
+    who restores it with restore_staged_name_registry once onionpress-tor
+    runs: `onionpress restore` imports before Tor starts (the restored
+    WordPress must be in place before it is reachable), and the registry
+    is rebuilt inside onionpress-tor.
     """
     # docker cp follows a link in the source path (a `wp-content` link to
     # the home folder would copy that folder into the web root) and copies
@@ -2086,25 +2093,22 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     #     archive belongs on that volume (its move marker among them).
     #     Not from the Settings page's restore (hub_volumes=False), which
     #     refuses such a backup first (settings_page_restore_refusal).
+    #     The backup's file is never put there as it is: the tor image's
+    #     own checks rebuild it (restore_name_registry). One they refuse
+    #     leaves the registry in use as it was, and the rest of the restore
+    #     goes on (a failed install-from-backup import is retried at every
+    #     start, the database with it).
     onionhome_dir = _find_dir(staging, 'onionhome')
     has_name_registry = (os.path.isdir(onionhome_dir) and os.path.exists(
         os.path.join(onionhome_dir, 'onionnames.db')))
     if has_name_registry and not hub_volumes:
         log_func("Restore: the backup's OnionHome name registry left out: the "
                  "Settings page's restore never writes it")
+    elif has_name_registry and not name_registry:
+        log_func("Restore: OnionHome's name registry is restored once "
+                 "onionpress-tor runs")
     elif has_name_registry:
-        with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
-            log_func("Restore: restoring OnionHome name registry...")
-            for name in ONIONHOME_REGISTRY_FILES:
-                path = os.path.join(onionhome_dir, name)
-                if not os.path.isfile(path):
-                    continue
-                subprocess.run(
-                    ['docker', 'cp', path,
-                     f'onionpress-tor:{ONIONHOME_REGISTRY_DIR}/{name}'],
-                    capture_output=True, timeout=60, check=True
-                )
-            log_func("Restore: OnionHome name registry restored")
+        restore_staged_name_registry(staging, log_func)
 
     # 5. Re-add multisite constants to wp-config.php
     # WordPress Docker image generates a fresh wp-config.php without multisite
@@ -2112,6 +2116,156 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
     # is-installed --network fails and ensure_multisite skips conversion.
     with _phase_timer(log_func, 'RESTORE', 'multisite_constants'):
         _ensure_multisite_constants(log_func)
+
+
+# ─── Restoring OnionHome's name registry ────────────────────────────────
+# A backup's onionnames.db is whoever made the backup's, as the old
+# location's was WordPress's (a backup the Settings page hands WordPress for
+# download can be swapped before the owner gets it). A crafted SQLite file is
+# a way into what opens it, SQLite itself or code its schema names
+# (triggers, views, virtual tables), and web-server.py opens the registry as
+# root in onionpress-tor, beside the onion keys. So a restore never puts the
+# backup's file on the volume. It gets what the move gives the old
+# location's files, from the same code: the tor image's
+# onionhome-registry-migrate.py, run in onionpress-tor on a private copy,
+# reads the db and its -wal by descriptor, size-capped, under SQLite's
+# defensive settings after quick_check, and builds a new registry with
+# onionnames.py's schema holding only the rows that pass its checks. That
+# one replaces the registry in use through SQLite's backup API, under its
+# locks (web-server.py opens it per request): never a copy over the file in
+# use, whose -wal SQLite would then apply to the restored one.
+ONIONHOME_MIGRATE_SCRIPT = "/onionhome-registry-migrate.py"
+ONIONHOME_MIGRATE_MARKER = ".migrated-from-persistent-data"
+
+# Run in onionpress-tor: argv[1] is the rebuilt registry, argv[2] the one in
+# use. Prints the names each held (null before: no registry yet).
+_ONIONHOME_PUT_IN_PLACE_PY = """\
+import json, os, sqlite3, sys
+new, live = sys.argv[1], sys.argv[2]
+before = None
+if os.path.isfile(live) and os.path.getsize(live) > 0:
+    try:
+        conn = sqlite3.connect(live, timeout=30)
+        before = conn.execute("SELECT COUNT(*) FROM onionnames").fetchone()[0]
+        conn.close()
+    except sqlite3.Error:
+        pass
+src = sqlite3.connect("file:" + new + "?mode=ro", uri=True)
+dst = sqlite3.connect(live, timeout=30)
+src.backup(dst)
+after = dst.execute("SELECT COUNT(*) FROM onionnames").fetchone()[0]
+dst.close()
+src.close()
+os.chmod(live, 0o600)
+print(json.dumps({"before": before, "after": after}))
+"""
+
+
+class NameRegistryNotRestored(Exception):
+    """A backup's OnionHome name registry was not restored (the message says
+    why); the registry in use is as it was."""
+
+
+def restore_staged_name_registry(staging, log_func):
+    """Restore the OnionHome name registry an extracted backup (*staging*)
+    holds, if any, through restore_name_registry. A refusal is logged as an
+    ERROR, the registry in use left as it was; nothing is raised."""
+    onionhome_dir = _find_dir(staging, 'onionhome')
+    if not os.path.lexists(os.path.join(onionhome_dir, 'onionnames.db')):
+        return
+    with _phase_timer(log_func, 'RESTORE', 'onionhome_restore'):
+        log_func("Restore: restoring OnionHome name registry (rebuilt by the "
+                 "tor image's checks)...")
+        try:
+            restore_name_registry(onionhome_dir, log_func)
+        except NameRegistryNotRestored as e:
+            log_func(f"Restore: ERROR — OnionHome's name registry was not "
+                     f"restored: {e}. The registry in use is unchanged.")
+
+
+def _printable(text, limit=300):
+    """Text from the container (or a file it read) for a log line."""
+    text = ''.join(ch if ch.isprintable() else ' ' for ch in str(text)).strip()
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
+def _count(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def restore_name_registry(src, log_func):
+    """Put a backup's OnionHome name registry (*src*, its onionhome/
+    folder) onto the registry's volume, through onionpress-tor, rebuilt by
+    the tor image's own checks (see above). Logs how many names the
+    registry held before and after. Raises NameRegistryNotRestored, the
+    registry in use unchanged, when the image refuses what the backup holds
+    (not a registry, damaged, too large or sparse) or the work in the
+    container fails."""
+    files = []
+    for name in ONIONHOME_REGISTRY_FILES:
+        try:
+            if stat.S_ISREG(os.lstat(os.path.join(src, name)).st_mode):
+                files.append(name)
+        except FileNotFoundError:
+            pass
+    if ONIONHOME_REGISTRY_FILES[0] not in files:
+        raise NameRegistryNotRestored("the backup holds no onionnames.db file")
+    try:
+        tmp = subprocess.run(['docker', 'exec', 'onionpress-tor', 'mktemp', '-d'],
+                             capture_output=True, text=True, timeout=30,
+                             check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as e:
+        raise NameRegistryNotRestored(f"onionpress-tor did not answer ({type(e).__name__})") from e
+    if not _CONTAINER_TMP_RE.fullmatch(tmp):
+        raise NameRegistryNotRestored(
+            f"unexpected temporary folder name from onionpress-tor: {_printable(tmp, 80)!r}")
+    try:
+        subprocess.run(['docker', 'exec', 'onionpress-tor', 'mkdir', '-p',
+                        f'{tmp}/backup/onionhome', f'{tmp}/rebuilt'],
+                       capture_output=True, timeout=30, check=True)
+        for name in files:
+            subprocess.run(['docker', 'cp', os.path.join(src, name),
+                            f'onionpress-tor:{tmp}/backup/onionhome/{name}'],
+                           capture_output=True, timeout=120, check=True)
+        check = subprocess.run(
+            ['docker', 'exec', 'onionpress-tor', 'python3', ONIONHOME_MIGRATE_SCRIPT,
+             '--legacy-parent', f'{tmp}/backup', '--dest', f'{tmp}/rebuilt',
+             '--no-mount-check'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=300)
+        if check.returncode != 0:
+            lines = [line for line in check.stderr.splitlines() if line.strip()]
+            raise NameRegistryNotRestored(
+                "the tor image's checks refused it: "
+                + _printable(lines[-1] if lines else f"exit status {check.returncode}"))
+        marker = subprocess.run(
+            ['docker', 'exec', 'onionpress-tor', 'cat',
+             f'{tmp}/rebuilt/{ONIONHOME_MIGRATE_MARKER}'],
+            capture_output=True, text=True, timeout=30, check=True).stdout
+        info = json.loads(marker)
+        if not isinstance(info, dict) or info.get('moved') is not True:
+            why = info.get('reason') if isinstance(info, dict) else None
+            raise NameRegistryNotRestored(
+                "what the backup holds is not a name registry"
+                + (f" ({_printable(why, 120)})" if why else ""))
+        placed = subprocess.run(
+            ['docker', 'exec', 'onionpress-tor', 'python3', '-c', _ONIONHOME_PUT_IN_PLACE_PY,
+             f'{tmp}/rebuilt/onionnames.db', f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
+            capture_output=True, text=True, timeout=120, check=True).stdout
+        counts = json.loads(placed.strip().splitlines()[-1])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+        raise NameRegistryNotRestored(
+            f"the work in onionpress-tor failed ({type(e).__name__})") from e
+    finally:
+        subprocess.run(['docker', 'exec', 'onionpress-tor', 'rm', '-rf', tmp],
+                       capture_output=True, timeout=30)
+    before = _count(counts.get('before')) if isinstance(counts, dict) else None
+    after = _count(counts.get('after')) if isinstance(counts, dict) else None
+    left_out = _count(info.get('left_out')) or 0
+    log_func(f"Restore: OnionHome name registry restored: {after} names, "
+             f"{left_out} rows in the backup that fail onionnames.py's checks "
+             f"left out; it held "
+             + (f"{before} names before" if before is not None else "no registry before"))
 
 
 def _one_of(*allowed):
