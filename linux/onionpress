@@ -2503,8 +2503,34 @@ print(json.dumps(containers))
     if [ "$tor_state" = "running" ] && [ "$wp_state" = "running" ] && [ "$bootstrap_pct" = "100" ]; then
         # Verify onion service is actually reachable via Tor network
         if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-            local reach_code
-            reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
+            # The heartbeat daemon's recovery loop (onionpress.reachability)
+            # runs the dual probe every 30 s and records its verdict; use it
+            # while it is fresh and for this address. Otherwise probe here,
+            # the static /.onionpress-health first (no PHP) and the front
+            # page only for an image that answers it 404.
+            local reach_verdict reach_code=""
+            reach_verdict=$(python3 -c '
+import json, sys, time
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    if (0 <= time.time() - float(d["checked_at"]) <= 180
+            and d.get("onion_address") == sys.argv[2]
+            and d.get("reachable") in (True, False)):
+        print("yes" if d["reachable"] else "no")
+except Exception:
+    pass
+' "$DATA_DIR/reachability.json" "$onion_addr" 2>/dev/null || true)
+            if [ "$reach_verdict" = "yes" ]; then
+                reach_code=200
+            elif [ "$reach_verdict" = "no" ]; then
+                reach_code=000
+            else
+                reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/.onionpress-health" 2>/dev/null || echo "000")
+                if [ "$reach_code" = "404" ]; then
+                    reach_code=$(docker exec onionheaven curl -s --socks5-hostname 127.0.0.1:9050 --max-time 10 -o /dev/null -w "%{http_code}" "http://${onion_addr}/" 2>/dev/null || echo "000")
+                fi
+            fi
             if [ "$reach_code" = "200" ] || [ "$reach_code" = "301" ] || [ "$reach_code" = "302" ]; then
                 state="running"
             else
