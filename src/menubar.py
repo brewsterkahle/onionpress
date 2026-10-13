@@ -63,6 +63,7 @@ from onionpress.log_rotation import RotatingLog
 from onionpress import analytics_sharing
 from onionpress import redact
 from onionpress import wp_files
+from onionpress import thumbnails
 from onionpress.power import CaffeineManager
 from onionpress import launcher_ops
 from onionpress import auto_login
@@ -526,17 +527,12 @@ class OnionPressApp(rumps.App):
         # Start status checker
         self.start_status_checker()
 
-        # Thumbnail generator is NOT started here. Its 60-second poll
-        # loop stats ~/OnionPress/Creations/My Creations,
-        # which triggers macOS TCC's "Documents access" prompt at every
-        # launch of a newly-signed binary — and earns that prompt zero
-        # context, since the user hasn't asked for anything Creations-
-        # related yet. The launcher (app/MacOS/onionpress) takes the
-        # same lazy approach for the shell side. Call
-        # :meth:`start_thumbnail_generator` lazily from any flow that
-        # has just legitimately created the Documents subtree (e.g.
-        # ``backup()``'s ``os.makedirs(backups_dir)``); the generator
-        # itself is idempotent, so repeated triggers are safe.
+        # Thumbnails for My Creations, from launch. It used to start only
+        # from Backup..., to keep macOS's "Documents access" prompt away
+        # while Creations lived in ~/Documents; ~/OnionPress is not a
+        # protected folder, and without thumbnails every Creations page
+        # loads the full-size originals.
+        self.start_thumbnail_generator()
 
         # Auto-start on launch
         threading.Thread(target=self.auto_start, daemon=True).start()
@@ -2923,58 +2919,33 @@ class OnionPressApp(rumps.App):
     def start_thumbnail_generator(self):
         """Background thread to generate thumbnails for Creations files using qlmanage.
 
-        Idempotent: callers may invoke this from any flow that has
-        just touched ``~/OnionPress/``; the thread is only
-        spawned once per process. See :meth:`__init__` for why this
-        isn't started eagerly at launch.
+        Started at launch; idempotent, the thread is only spawned once
+        per process. Each pass (:func:`thumbnails.scan`) also removes the
+        thumbnails of files that were deleted, renamed or hidden.
         """
         if getattr(self, "_thumbnail_generator_started", False):
             return
         self._thumbnail_generator_started = True
         creations_dir = os.path.expanduser("~/OnionPress/Creations/My Creations")
-        thumbs_dir = os.path.join(creations_dir, ".thumbs")
-
-        # Only attempt thumbnails for media types QuickLook renders usefully.
-        # Data files (blog-archives *.xml.gz, *.zip, *.json, ...) have no useful
-        # QuickLook preview — qlmanage hangs on them for the full timeout, and
-        # because the thumbnail is never produced the loop would retry forever.
-        THUMBNAILABLE_EXTS = {
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif",
-            ".heic", ".heif", ".webp", ".pdf",
-            ".mov", ".mp4", ".m4v", ".avi", ".mkv", ".webm",
-        }
 
         def generator():
-            # Files we've already tried and failed/timed out on this process,
-            # so a non-thumbnailable file that slips the extension filter (or a
-            # corrupt media file) isn't reattempted every pass.
-            failed = set()
+            # Files qlmanage failed or timed out on, with the mtime they had
+            # then: a corrupt or unpreviewable file is not retried every
+            # pass, but is again once it changes.
+            failed = {}
+            # First pass soon after launch, not a minute in.
+            time.sleep(10)
             while True:
-                time.sleep(60)
-                if not os.path.isdir(creations_dir):
-                    continue
                 try:
-                    os.makedirs(thumbs_dir, exist_ok=True)
-                    for root, dirs, files in os.walk(creations_dir):
-                        # Skip the .thumbs directory itself
-                        if '.thumbs' in root:
-                            continue
-                        # ...and every hidden folder (.git/ ...): the
-                        # Creations page neither lists nor serves them.
-                        dirs[:] = [d for d in dirs if not d.startswith('.')]
-                        for fname in files:
-                            if fname.startswith('.'):
+                    if os.path.isdir(creations_dir):
+                        stale, orphans, _complete = thumbnails.scan(creations_dir)
+                        removed = thumbnails.prune(creations_dir, orphans)
+                        if removed:
+                            self.log(f"Removed {removed} thumbnail(s) of deleted Creations files")
+                        for src, rel, mtime in stale:
+                            if failed.get(src) == mtime:
                                 continue
-                            if os.path.splitext(fname)[1].lower() not in THUMBNAILABLE_EXTS:
-                                continue
-                            src = os.path.join(root, fname)
-                            if src in failed:
-                                continue
-                            rel = os.path.relpath(src, creations_dir)
-                            thumb = os.path.join(thumbs_dir, rel + ".png")
-                            # Skip if thumbnail exists and is newer than source
-                            if os.path.exists(thumb) and os.path.getmtime(thumb) >= os.path.getmtime(src):
-                                continue
+                            thumb = thumbnails.thumb_path(creations_dir, rel)
                             # Create subdirectory in .thumbs if needed
                             os.makedirs(os.path.dirname(thumb), exist_ok=True)
                             try:
@@ -2984,18 +2955,21 @@ class OnionPressApp(rumps.App):
                                     capture_output=True, timeout=30,
                                 )
                             except subprocess.TimeoutExpired:
-                                failed.add(src)
+                                failed[src] = mtime
                                 continue
                             # qlmanage outputs filename.ext.png — rename if needed
                             ql_output = os.path.join(os.path.dirname(thumb),
-                                                     fname + ".png")
+                                                     os.path.basename(src) + ".png")
                             if os.path.exists(ql_output) and ql_output != thumb:
                                 os.rename(ql_output, thumb)
                             elif not os.path.exists(thumb):
                                 # qlmanage produced nothing — don't retry forever
-                                failed.add(src)
+                                failed[src] = mtime
+                            else:
+                                failed.pop(src, None)
                 except Exception as e:
                     self.log(f"Thumbnail generation error: {e}")
+                time.sleep(60)
 
         thread = threading.Thread(target=generator, daemon=True)
         thread.start()
@@ -4236,11 +4210,6 @@ class OnionPressApp(rumps.App):
             backup_manager.backup_filename(suggested_address, username))
         backups_dir = os.path.expanduser("~/OnionPress/backups")
         os.makedirs(backups_dir, exist_ok=True)
-        # The backup flow has now earned macOS TCC's Documents grant
-        # (or been denied — either way the prompt has been resolved).
-        # Start the thumbnail generator now so Creations thumbnails
-        # get populated without adding a second TCC prompt later.
-        self.start_thumbnail_generator()
         panel.setDirectoryURL_(
             AppKit.NSURL.fileURLWithPath_(backups_dir))
         panel.setAllowedContentTypes_([
