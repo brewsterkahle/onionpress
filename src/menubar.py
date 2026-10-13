@@ -1697,22 +1697,19 @@ class OnionPressApp(rumps.App):
             self.checking = True
 
         try:
-            # One-shot loud wedge-recovery hint: if we've been yellow for 10+ min,
-            # autoheal should be about to fire (15-min threshold) or already has.
-            # If neither helps, the Colima docker socket is likely wedged. Surface
-            # the manual recovery so a human reading the log knows what to type.
-            # See feedback_colima_wedge_recovery.md for context.
+            # One-shot marker in the log when the site has been yellow for
+            # 10+ min. Yellow means the onion probe fails, and this is when
+            # the RepublishTrigger asks tor-watchdog for a DEL+ADD (issue
+            # #266), so it only points at the lines that say what the app
+            # did; it no longer prescribes a manual VM kill (issue #321).
             if (not self._wedge_warning_fired
                     and self._yellow_since
                     and (time.time() - self._yellow_since) > 600):
                 self.log(
-                    "WEDGE WARNING: WordPress unreachable for 10+ min. "
-                    "Autoheal sidecar will restart wordpress at the 15-min mark. "
-                    "If still wedged after that, the Colima docker socket may be "
-                    "stuck. Manual recovery: "
-                    "`pgrep -fl 'lima.*onionpress' | head -1 | awk '{print $1}' | xargs kill -9` "
-                    "to nuke the Colima VM, then quit and restart OnionPress from the menubar. "
-                    "Recovery takes 40-60s."
+                    "WEDGE WARNING: onion service unreachable for 10+ min. "
+                    "Automatic recovery: see the `probe verdict=` and "
+                    "`descriptor republish` lines (REPUBLISH_ON_UNREACHABLE="
+                    f"{'yes' if self._republish_on_unreachable_enabled() else 'no'})."
                 )
                 self._wedge_warning_fired = True
 
@@ -2345,7 +2342,10 @@ class OnionPressApp(rumps.App):
                     self.menu["Starting..."].title = "Status: Health check stalled (system busy)"
                 else:  # stuck
                     self.icon = self.icon_starting
-                    self.menu["Starting..."].title = "Status: Slow to connect — try Restart"
+                    # Not "try Restart": the app is already retrying (tor
+                    # restart on a stalled bootstrap, descriptor republish
+                    # on a wedge), and a restart throws that away (#321).
+                    self.menu["Starting..."].title = "Status: Slow to connect — still trying..."
                 self.menu["Start"].set_callback(None)
                 self.menu["Stop"].set_callback(self.stop_service)
                 self.menu["Restart"].set_callback(self.restart_service)
