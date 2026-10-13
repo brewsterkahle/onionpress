@@ -474,5 +474,33 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
         self.cli.containers.start_tor.assert_not_called()
 
 
+class TestCmdStartWaitsForTheKeyVolume(unittest.TestCase):
+    """`onionpress.cli start` has no key volume migration of its own: while
+    one is due it starts nothing (starting tor would create an empty
+    onionpress-onion-keys that every later start takes for the key)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+    def test_refuses_before_starting_anything(self):
+        from onionpress.config import PortConfig, Secrets
+        with mock.patch("onionpress.cli.detect_port_offset",
+                        return_value=PortConfig(0, 8080, 9050, 9077)), \
+             mock.patch("onionpress.cli.ensure_secrets",
+                        return_value=Secrets("p1", "p2", "p3")), \
+             mock.patch("onionpress.cli.Docker"):
+            cli = OnionPressCLI(data_dir=self.tmpdir)
+        cli.log = mock.Mock()
+        cli.containers = mock.Mock()
+        cli.containers.key_volume_not_ready.return_value = "the key is still in onionpress-arti-state"
+        with mock.patch("onionpress.cli.detect_os", return_value=None):
+            rc = cli.cmd_start()
+        self.assertEqual(rc, 1)
+        cli.containers.pull_images.assert_not_called()
+        cli.containers.start_core.assert_not_called()
+        cli.containers.start_tor.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

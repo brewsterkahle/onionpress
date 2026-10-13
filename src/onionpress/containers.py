@@ -281,6 +281,27 @@ class ContainerManager:
             return None
         return image if self.docker.run(inspect, timeout=30, quiet=True).ok else None
 
+    def key_volume_not_ready(self) -> str | None:
+        """Why Tor must not start yet, or None.
+
+        The launchers move the key out of OLD_KEY_VOLUME before anything
+        starts Tor (migrate_key_volume); this has no copy of that step and
+        refuses instead while it is still due: the old volume is there and
+        the new one is not, or holds an unverified copy (the marker). An
+        unanswered `docker volume ls` refuses too."""
+        pending = os.path.lexists(
+            os.path.join(self.paths.data_dir, KEY_VOLUME_MIGRATION_PENDING))
+        result = self.docker.run(["volume", "ls", "--format", "{{.Name}}"],
+                                 timeout=30, quiet=True)
+        if not result.ok:
+            return "Docker did not say which volumes exist"
+        names = set(result.stdout.split())
+        if OLD_KEY_VOLUME in names and (KEY_VOLUME not in names or pending):
+            return (f"the onion service key is still in {OLD_KEY_VOLUME}; "
+                    "start OnionPress with its launcher (`onionpress start`), "
+                    f"which moves it to {KEY_VOLUME} first")
+        return None
+
     # -- Core lifecycle --
 
     def pull_images(self, timeout: int = 300) -> bool:
@@ -341,7 +362,12 @@ class ContainerManager:
         return False
 
     def start_tor(self) -> bool:
-        """Start the Tor service."""
+        """Start the Tor service, never before its key volume is in place
+        (key_volume_not_ready)."""
+        why = self.key_volume_not_ready()
+        if why:
+            self._log(f"ERROR: not starting Tor: {why}")
+            return False
         self._log("Starting Tor service...")
         result = self.docker.compose(
             ["up", "-d", "tor"],

@@ -3592,9 +3592,16 @@ main() {
                 wait_for_services
                 start_heartbeat_client
             else
-                # Start Tor if not running
+                # Start Tor if not running. Starting it mounts
+                # onionpress-onion-keys, creating it empty if it is not
+                # there yet: an install that last ran on arti has to have
+                # its key moved there first, as start_containers does.
                 if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
                     echo "  Starting Tor..."
+                    if ! migrate_key_volume; then
+                        echo "  Tor not started: the onion service key volume is not in place (see $LOG_FILE)." >&2
+                        exit 1
+                    fi
                     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1
                 fi
                 # Run post-install provisioning: theme, multisite, plugins.

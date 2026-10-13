@@ -289,6 +289,14 @@ class OnionPressCLI:
                 runtime = detect_container_runtime(self.paths, log_func=self.log)
                 self.log(f"Container runtime: {runtime}")
 
+            # This start has no key volume migration (the launcher's
+            # migrate_key_volume): refuse while one is due, before anything
+            # starts.
+            why = self.containers.key_volume_not_ready()
+            if why:
+                self.log(f"ERROR: not starting: {why}")
+                return 1
+
             # Pull images if configured
             if read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "yes") == "yes":
                 self.containers.pull_images()

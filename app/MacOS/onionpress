@@ -3140,6 +3140,13 @@ main() {
         start-tor)
             setup_db_passwords
             cd "$DOCKER_DIR"
+            # Starting tor mounts onionpress-onion-keys, creating it empty if
+            # it is not there yet; an install that last ran on arti has to
+            # have its key moved there first, as start_containers does.
+            if ! migrate_key_volume; then
+                log "ERROR: Tor not started: the onion service key volume is not in place (see $LOG_FILE)"
+                exit 1
+            fi
             # --pull always force-pulls even when every other pull is
             # skipped, so it has to be dropped for local images too.
             _tor_rc=0
@@ -3264,9 +3271,14 @@ main() {
                 start_containers
                 wait_for_services
             else
-                # Start Tor if not running
+                # Start Tor if not running, its key volume in place first
+                # (see start-tor).
                 if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
                     echo "  Starting Tor..."
+                    if ! migrate_key_volume; then
+                        echo "  Tor not started: the onion service key volume is not in place (see $LOG_FILE)." >&2
+                        exit 1
+                    fi
                     docker compose up -d tor >> "$LOG_FILE" 2>&1
                 fi
             fi

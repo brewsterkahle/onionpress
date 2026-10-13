@@ -14,7 +14,8 @@ from onionpress.platform import OnionPressPaths
 from onionpress.config import PortConfig
 from onionpress.docker import Docker, DockerResult
 from onionpress.containers import (
-    ContainerManager, ContainerStatus, CORE_SERVICES, ONIONHEAVEN_IMAGE_PIN, tor_image,
+    ContainerManager, ContainerStatus, CORE_SERVICES, KEY_VOLUME_MIGRATION_PENDING,
+    ONIONHEAVEN_IMAGE_PIN, tor_image,
 )
 
 ONION = "op2" + "x" * 53 + ".onion"
@@ -141,8 +142,49 @@ class TestStartTor(unittest.TestCase):
     def test_start_tor_success(self):
         docker = mock.Mock(spec=Docker)
         docker.compose.return_value = _ok()
+        docker.run.return_value = _ok("onionpress-onion-keys\nonionpress-tor-state\n")
         cm = ContainerManager(docker, self.paths, self.port_config)
         self.assertTrue(cm.start_tor())
+
+    def _start_tor(self, volumes, pending=False, ls_ok=True):
+        if pending:
+            open(os.path.join(self.paths.data_dir, KEY_VOLUME_MIGRATION_PENDING), "w").close()
+        docker = mock.Mock(spec=Docker)
+        docker.compose.return_value = _ok()
+        docker.run.return_value = _ok("\n".join(volumes) + "\n") if ls_ok else _fail()
+        logs = []
+        cm = ContainerManager(docker, self.paths, self.port_config, log_func=logs.append)
+        return cm.start_tor(), docker, logs
+
+    def test_start_tor_waits_for_the_key_volume_migration(self):
+        """Starting tor creates onionpress-onion-keys, empty, when it is not
+        there; the launchers' migration would then skip it for good, and
+        Tor mint a new address. This path cannot migrate, so it refuses
+        while the key is still in onionpress-arti-state."""
+        cases = [
+            # volumes, unfinished-migration marker, starts
+            ((), False, True),                                            # fresh install
+            (("onionpress-onion-keys",), False, True),                    # current
+            (("onionpress-onion-keys", "onionpress-arti-state"), False, True),  # migrated
+            (("onionpress-onion-keys",), True, True),                     # old volume gone
+            (("onionpress-arti-state",), False, False),                   # not migrated yet
+            (("onionpress-onion-keys", "onionpress-arti-state"), True, False),  # unverified copy
+        ]
+        for volumes, pending, starts in cases:
+            with self.subTest(volumes=volumes, pending=pending):
+                marker = os.path.join(self.paths.data_dir, KEY_VOLUME_MIGRATION_PENDING)
+                if os.path.exists(marker):
+                    os.remove(marker)
+                ok, docker, logs = self._start_tor(volumes, pending)
+                self.assertEqual(ok, starts)
+                self.assertEqual(docker.compose.called, starts)
+                if not starts:
+                    self.assertTrue(any("onionpress-arti-state" in l for l in logs), logs)
+
+    def test_start_tor_refuses_when_docker_does_not_say(self):
+        ok, docker, logs = self._start_tor((), ls_ok=False)
+        self.assertFalse(ok)
+        docker.compose.assert_not_called()
 
 
 class TestEnsureTorImage(unittest.TestCase):

@@ -1466,6 +1466,32 @@ class TestKeyVolumeMigration(unittest.TestCase):
                     "a Docker that did not answer.",
                 )
 
+    def test_every_tor_start_runs_the_migration_first(self):
+        """Starting tor mounts onionpress-onion-keys, and Docker creates it,
+        empty, when it is not there. Every later start would then take it
+        for the migrated key (the migration skips an existing new volume)
+        and Tor would mint a new address from the empty volume, while the
+        real key sat in onionpress-arti-state. So every `compose up ... tor`
+        in the launchers (start_containers, `start-tor`, `setup`) comes
+        after migrate_key_volume in its own function or case branch."""
+        block_start = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\(\) \{|\s*[A-Za-z0-9_|-]+\)\s*)$")
+        tor_up = re.compile(r"\bdocker compose\b.*\bup\b.*\btor\b")
+        for f in self.LAUNCHERS:
+            lines = _read(f).splitlines()
+            found = 0
+            for n, line in enumerate(lines):
+                if line.lstrip().startswith("#") or not tor_up.search(line):
+                    continue
+                found += 1
+                start = max(k for k in range(n) if block_start.match(lines[k]))
+                block = [l for l in lines[start:n] if not l.lstrip().startswith("#")]
+                with self.subTest(launcher=f, line=n + 1):
+                    self.assertTrue(
+                        any(re.search(r"\bif ! migrate_key_volume\b", l) for l in block),
+                        f"{lines[start].strip()!r} starts tor at line {n + 1} "
+                        "without migrate_key_volume before it")
+            self.assertGreaterEqual(found, 2, f)
+
     def test_identity_wipes_drop_the_migration_marker(self):
         """A key import or restore removes both key volumes for a replaced
         identity. If the old volume survived the removal and an unfinished
