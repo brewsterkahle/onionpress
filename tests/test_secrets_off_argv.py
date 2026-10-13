@@ -11,7 +11,7 @@ database password go to their child processes on stdin instead:
     (docker exec -i), on the Mac and in the Linux heartbeat daemon;
   - MariaDB clients in onionpress-db read the password from MYSQL_PWD,
     which a sh prelude fills from the first line of stdin (backup.py and
-    both launchers' db_client);
+    the Linux launcher's db_client);
   - key_manager.py takes "-" for the key and reads it from stdin, and the
     Mac launcher's import-key takes "-" so the menubar can do the same.
 
@@ -407,21 +407,24 @@ exit 0
 
 
 class TestLauncherDbClient(unittest.TestCase):
-    """Both launchers' db_client(), run in bash against a stub `docker`
-    that runs the container side here."""
+    """The Linux launcher's db_client(), run in bash against a stub `docker`
+    that runs the container side here. The Mac launcher has none: its
+    database work goes through onionpress.cli (backup.py)."""
 
     LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+    DB_CLIENT_LAUNCHERS = ("linux/onionpress",)
 
     def test_no_password_flag_left(self):
         for rel in self.LAUNCHERS:
             with self.subTest(rel=rel):
                 self.assertNotRegex(_read(rel), r'"-p\$\{?db_pass')
 
-    def test_both_launchers_share_db_client(self):
-        mac, linux = (_shell_function(r, "db_client") for r in self.LAUNCHERS)
-        self.assertEqual(mac, linux)
-        # The same container-side prelude as backup.py's.
-        self.assertIn(f"sh -c '{backup._DB_PASSWORD_FROM_STDIN}' sh", mac)
+    def test_db_client_uses_backups_prelude(self):
+        for rel in self.DB_CLIENT_LAUNCHERS:
+            with self.subTest(rel=rel):
+                # The same container-side prelude as backup.py's.
+                self.assertIn(f"sh -c '{backup._DB_PASSWORD_FROM_STDIN}' sh",
+                              _shell_function(rel, "db_client"))
 
     def test_db_client_feeds_password_on_stdin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -430,7 +433,7 @@ class TestLauncherDbClient(unittest.TestCase):
             with open(client, "w") as f:
                 f.write('#!/bin/sh\nprintf "pwd=%s args=%s\\n" "$MYSQL_PWD" "$*"\n')
             os.chmod(client, 0o755)
-            for rel in self.LAUNCHERS:
+            for rel in self.DB_CLIENT_LAUNCHERS:
                 with self.subTest(rel=rel):
                     script = (
                         "set -e\n"

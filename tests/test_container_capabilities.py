@@ -91,7 +91,6 @@ COPY_INTO_TOR_STATE = {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
 DOCKER_RUN_SITES = {
     ("app/Resources/docker/tor/onionheaven_common.py", "_spawn_worker"): [WORKER],
     ("src/onionpress/containers.py", "start_farm_worker"): [WORKER],
-    ("app/MacOS/onionpress", "_start_takeover_worker"): [WORKER],
     # Reads arti's files (its own user's, 0700) into a copy root owns.
     ("app/MacOS/onionpress", "migrate_key_volume"): [READ_USER_KEY],
     ("linux/onionpress", "migrate_key_volume"): [READ_USER_KEY],
@@ -127,7 +126,6 @@ PRIVILEGED_SITES = {
 WORKER_SITES = {
     ("app/Resources/docker/tor/onionheaven_common.py", "_spawn_worker"),
     ("src/onionpress/containers.py", "start_farm_worker"),
-    ("app/MacOS/onionpress", "_start_takeover_worker"),
 }
 
 # The image each run names. The launchers' helpers run KEY_HELPER_IMAGE
@@ -358,7 +356,7 @@ class TestDockerRunCensus(unittest.TestCase):
         expected = {site: len(caps) for site, caps in DOCKER_RUN_SITES.items()}
         expected.update(PRIVILEGED_SITES)
         self.assertEqual(found, expected)
-        self.assertGreaterEqual(sum(found.values()), 14)
+        self.assertGreaterEqual(sum(found.values()), 13)
 
     def test_only_the_listed_sites_are_privileged(self):
         for site, runs in self.sites.items():
@@ -694,14 +692,10 @@ class TestTakeoverWorkers(unittest.TestCase):
         self.assertEqual(argv[-1], "img")
         self.assertHardened(argv[:-1])
 
-        mac = _read("app/MacOS/onionpress")
-        fn = mac[mac.index("_start_takeover_worker() {"):]
-        fn = fn[:fn.index("\n}\n")]
-        self.assertRegex(fn, r"(?m)^        --cap-drop ALL \\$")
-        self.assertEqual(sorted(re.findall(r"(?m)^        --cap-add (\S+) \\$", fn)),
-                         sorted(WORKER))
-        self.assertRegex(fn, r"(?m)^        --security-opt no-new-privileges:true \\$")
-        self.assertNotIn("--privileged", fn)
+    def test_mac_launcher_starts_no_worker(self):
+        """Its unused _start_takeover_worker is gone; a worker it started
+        again would have to pass the checks above."""
+        self.assertNotIn("TAKEOVER_WORKER=1", _read("app/MacOS/onionpress"))
 
 
 # ---------------------------------------------------------------------------

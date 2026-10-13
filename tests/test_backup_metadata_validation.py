@@ -584,11 +584,14 @@ class TestBackupAddressCli(unittest.TestCase):
 
 
 class TestLauncherRestorePaths(unittest.TestCase):
-    """The bash restore_backup and setup --from-backup functions of both
-    launchers, run for real against crafted backup files."""
+    """The bash restore_backup (Linux) and setup --from-backup (both
+    launchers) functions, run for real against crafted backup files. The
+    Mac launcher's `restore` goes through onionpress.cli restore."""
 
     SETUP = {"linux/onionpress": "setup_wordpress_interactive",
              "app/MacOS/onionpress": "setup_wordpress_cli"}
+    # Launchers with a bash restore_backup.
+    RESTORE = ("linux/onionpress",)
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -608,8 +611,10 @@ class TestLauncherRestorePaths(unittest.TestCase):
 
     def _run(self, launcher, call):
         text = _read(launcher)
-        funcs = "".join(_bash_function(text, name) for name in
-                        ("is_onion_address", "restore_backup", self.SETUP[launcher]))
+        names = ["is_onion_address", self.SETUP[launcher]]
+        if launcher in self.RESTORE:
+            names.append("restore_backup")
+        funcs = "".join(_bash_function(text, name) for name in names)
         # Stubs. extract-backup goes straight to the Python helper (the CLI
         # entry builds OnionPressCLI, which sets up ~/.onionpress);
         # backup-address is the real CLI. docker only records the call.
@@ -651,6 +656,18 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
         rc = int(r.stdout.rsplit("rc=", 1)[1].strip())
         return rc, r.stdout.rsplit("rc=", 1)[0], r.stderr
 
+    def _restore_functions(self, launcher):
+        """The launcher's bash functions that restore from a backup."""
+        if launcher in self.RESTORE:
+            return ("restore_backup", self.SETUP[launcher])
+        return (self.SETUP[launcher],)
+
+    def test_restore_backup_only_where_listed(self):
+        for launcher in LAUNCHERS:
+            with self.subTest(launcher):
+                self.assertEqual("\nrestore_backup() {" in _read(launcher),
+                                 launcher in self.RESTORE)
+
     def _assert_untouched(self, data):
         self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")), [OLD_ADDR])
         self.assertEqual(sorted(os.listdir(os.path.join(data, "shared"))), ["vanity-keys"])
@@ -682,7 +699,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
 
     def test_restore_backup_refuses_crafted_backups(self):
         backups = list(self._crafted())
-        for launcher in LAUNCHERS:
+        for launcher in self.RESTORE:
             for label, path in backups:
                 with self.subTest(launcher=launcher, case=label):
                     data = self._fresh_data_dir()
@@ -715,7 +732,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
         from onionpress.config import read_config
         want_config = dict(prefs, ONIONNAME="me")
 
-        for launcher in LAUNCHERS:
+        for launcher in self.RESTORE:
             with self.subTest(launcher):
                 data = self._fresh_data_dir()
                 rc, out, _ = self._run(launcher, f'restore_backup "$PW" {path!r}')
@@ -741,7 +758,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
             code = _read(launcher)
             with self.subTest(launcher):
                 self.assertNotIn('cp "$staging/config"', code)
-                for func in ("restore_backup", self.SETUP[launcher]):
+                for func in self._restore_functions(launcher):
                     self.assertIn('restore-config --staging "$staging" '
                                   '--config "$DATA_DIR/config"',
                                   _bash_function(code, func), func)
@@ -751,7 +768,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
             code = _read(launcher)
             with self.subTest(launcher):
                 self.assertNotIn("get('onion_address'", code)
-                for func in ("restore_backup", self.SETUP[launcher]):
+                for func in self._restore_functions(launcher):
                     body = _bash_function(code, func)
                     gate = body.index("backup-address --staging \"$staging\"")
                     self.assertLess(gate, body.index("vanity-keys"), func)
