@@ -534,13 +534,11 @@ def _poll_loop(docker: Docker, manager: ContainerManager) -> None:
                     log(f"reachability: {reason} — would request "
                         f"descriptor republish (REPUBLISH_ON_UNREACHABLE=no, "
                         f"log-only)")
-                elif launcher_ops.request_watchdog_republish(
-                        docker, "onionpress-tor", reason):
-                    log(f"reachability: {reason} — requested "
-                        f"descriptor republish from tor-watchdog")
                 else:
-                    log(f"reachability: {reason} — republish "
-                        f"request to tor-watchdog FAILED (docker exec)")
+                    status = launcher_ops.request_watchdog_republish(
+                        docker, "onionpress-tor", reason)
+                    log(f"reachability: {reason} — "
+                        f"{launcher_ops.describe_republish_request(status)}")
 
             write_status(
                 docker=docker,

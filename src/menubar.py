@@ -2646,18 +2646,12 @@ class OnionPressApp(rumps.App):
                 f"republish (REPUBLISH_ON_UNREACHABLE=no, log-only)"
             )
             return
-        ok = launcher_ops.request_watchdog_republish(
+        status = launcher_ops.request_watchdog_republish(
             self._docker, "onionpress-tor", reason)
-        if ok:
-            self.log(
-                f"reachability: {reason} — requested descriptor "
-                f"republish from tor-watchdog"
-            )
-        else:
-            self.log(
-                f"reachability: {reason} — republish request to "
-                f"tor-watchdog FAILED (docker exec)"
-            )
+        self.log(
+            f"reachability: {reason} — "
+            f"{launcher_ops.describe_republish_request(status)}"
+        )
 
     def _record_suspend_offline(self, ok, elapsed_ms):
         """Log one suspend's /offline outcome as a greppable SUSPEND-RACE line.
