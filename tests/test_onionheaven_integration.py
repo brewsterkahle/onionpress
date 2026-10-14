@@ -121,9 +121,9 @@ class ServerProcess:
         # patching it in the server process. Off by default so the default
         # server still proves the guard rejects loopback.
         self.trust_loopback_as_bridge = trust_loopback_as_bridge
-        # Whether the server process believes it has the Docker socket.
-        # Fixed here rather than read from the machine: CI runners have
-        # /var/run/docker.sock, a developer's Mac usually does not.
+        # Whether the server process believes it can reach the farm
+        # controller (it never can in onionpress-tor). Fixed here rather
+        # than read from the machine.
         self.docker_available = docker_available
 
     def start(self):
@@ -185,7 +185,7 @@ def _stub_reset(conn=None):
     return {{"stress_cleaned": 0, "real_migrated": 0, "old_workers_removed": 0,
              "new_workers_spawned": 0, "duplicate_heartbeats_killed": 0}}
 onionheaven_common.reset_onionheaven = _stub_reset
-onionheaven_common.docker_available = lambda: {self.docker_available!r}
+onionheaven_common.farm_available = lambda: {self.docker_available!r}
 
 # Import web-server.py (dash in filename, can't use normal import)
 spec = importlib.util.spec_from_file_location(

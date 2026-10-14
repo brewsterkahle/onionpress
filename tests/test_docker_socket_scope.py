@@ -13,7 +13,10 @@ onionpress-tor, onionheaven and autoheal. Now:
   * autoheal talks to autoheal-proxy, which passes only the two calls
     autoheal makes, over a unix socket on a volume, with no network.
   * onionheaven (the heartbeat, which creates and drives the takeover
-    workers) keeps it. docs/DOCKER-SOCKET.md has the plan for that one.
+    workers) has no socket either: it asks the farm controller
+    (onionheaven-farm, the second container that holds the socket, with
+    no network and a fixed set of verbs) over a unix socket on a volume.
+    tests/test_onionheaven_farm.py covers the controller itself.
 
 No PyYAML (CI installs nothing beyond CPython), so the compose files are
 read with a small line-based splitter. No Docker either: every subprocess
@@ -107,18 +110,28 @@ def _proxy_allowlist():
 
 class TestSocketMounts(unittest.TestCase):
 
-    def test_only_onionheaven_and_the_proxy_mount_the_socket(self):
+    def test_only_the_two_proxies_mount_the_socket(self):
         services = _services(_read(COMPOSE))
         self.assertIn("tor", services, "compose splitter found no tor service")
         with_socket = {name for name, block in services.items()
                        if _mounts_docker_socket(block)}
         self.assertEqual(
-            with_socket, {"onionheaven", "autoheal-proxy"},
-            "The Docker socket is root on the Docker host. Only the "
-            "OnionHeaven heartbeat (onionheaven) and autoheal's filtering "
-            "proxy may mount it — see docs/DOCKER-SOCKET.md before adding "
+            with_socket, {"onionheaven-farm", "autoheal-proxy"},
+            "The Docker socket is root on the Docker host. Only the two "
+            "proxies may mount it: autoheal's filtering proxy and the "
+            "OnionHeaven farm controller (each with no network and every "
+            "capability dropped) — see docs/DOCKER-SOCKET.md before adding "
             "another.",
         )
+
+    def test_onionheaven_has_no_socket(self):
+        """The heartbeat parses output from workers that face Tor, and it
+        runs Tor, a shell HTTP responder and a SOCKS port on
+        onionpress-network. It drives Docker through onionheaven-farm only."""
+        block = _services(_read(COMPOSE))["onionheaven"]
+        self.assertNotIn("docker.sock", block)
+        self.assertIn("onionheaven-farm:/run/onionheaven-farm", _list_items(block, "volumes"))
+        self.assertIn("onionheaven-farm", _list_items(block, "depends_on"))
 
     def test_tor_service_has_no_socket(self):
         tor = _services(_read(COMPOSE))["tor"]
@@ -260,7 +273,7 @@ def _ts(seconds_ago=0):
 class _RegistryTest(unittest.TestCase):
     """In-memory registry; no Docker, no subprocess, no env-driven modes."""
 
-    have_docker = False
+    have_farm = False
 
     def setUp(self):
         self.conn = sqlite3.connect(":memory:")
@@ -269,7 +282,10 @@ class _RegistryTest(unittest.TestCase):
         self.logs = []
         patches = [
             mock.patch.object(oc, "log", self.logs.append),
-            mock.patch.object(oc, "docker_available", lambda: self.have_docker),
+            mock.patch.object(oc, "farm_available", lambda: self.have_farm),
+            mock.patch.object(
+                oc, "farm_request",
+                side_effect=AssertionError("no farm request — these tests never touch Docker")),
             mock.patch.object(
                 oc.subprocess, "run",
                 side_effect=AssertionError("no subprocess — these tests never touch Docker")),
@@ -362,7 +378,7 @@ class TestHeartbeatActsOnRequest(_RegistryTest):
     """What the heartbeat's online branch does with a recorded /offline:
     takeover_function(force=True), then clear_takeover_request."""
 
-    have_docker = True
+    have_farm = True
 
     def setUp(self):
         super().setUp()
@@ -461,7 +477,7 @@ class TestReleaseWithoutDocker(_RegistryTest):
 class TestReleaseWithDocker(_RegistryTest):
     """The onionheaven container keeps the synchronous path."""
 
-    have_docker = True
+    have_farm = True
 
     def test_exec_release_decrement_and_sweep(self):
         self._add_worker(assigned=1)

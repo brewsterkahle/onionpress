@@ -546,9 +546,48 @@
   (`note_if_lan_looks_local`) unless the bind is 127.0.0.1; the token is
   the remaining check there.
 
+## The Docker Socket Stays Out of onionheaven
+- Only two compose services mount `/var/run/docker.sock`, both with
+  `network_mode: none`, `cap_drop: [ALL]`, `read_only: true` and the mount
+  `:ro`:
+  `autoheal-proxy` (path allowlist for autoheal's two calls) and
+  `onionheaven-farm`, the OnionHeaven farm controller
+  (`app/Resources/docker/tor/onionheaven-farm.py`, entrypoint mode
+  `FARM_CONTROLLER=1`). The `onionheaven` container's heartbeat used to
+  mount the socket read-write: it parses output from Tor-facing workers, so
+  that was `docker run -v $HOME:/x` away. A socket-proxy allowlist would not
+  have helped (`POST /containers/create` with any `Binds` is a path it must
+  allow) and `:ro` on the mount is not a mitigation either (HTTP over the
+  socket).
+- The heartbeat reaches the controller over `/run/onionheaven-farm/farm.sock`
+  on the `onionpress-onionheaven-farm` volume (only those two services mount
+  it) through `onionheaven_common.farm_request/farm_exec/farm_list/
+  farm_inspect/farm_remove`; `farm_available()` replaced `docker_available()`.
+  The controller knows six verbs (`spawn`, `remove`, `list`, `inspect`,
+  `exec` with eight fixed commands, `tor-address`); names must match
+  `onionheaven-takeover-N`, addresses the v3 pattern, and nothing in a
+  request chooses an image, a mount, a capability or a command line. The
+  worker's `docker run` shape and the image (compose's `ONIONHEAVEN_IMAGE`,
+  now passed to the controller, not to `onionheaven`) are the controller's.
+  Spawn is capped at `ONIONHEAVEN_MAX_WORKERS` (64).
+- **Never add a `docker` call to a tor-image script other than
+  onionheaven-farm.py**, and never a new verb that takes a command line or
+  a path; `tests/test_onionheaven_farm.py` holds the census, the validation
+  table and the protocol test. `reset_onionheaven` no longer `docker cp`s
+  code into workers (they run the pinned image) and restarts the heartbeat
+  as a local process.
+- Ships as compose + tor image together (docs/DOCKER-SOCKET.md, "The farm
+  controller"): with either half old, a hub takes nothing over until the
+  other arrives; nothing breaks otherwise. Verified 2026-10-14 in a
+  throwaway Colima VM against the published 2.5.3 tor image with the new
+  scripts bind-mounted (spawn, every exec verb, remove, refusals, SIGTERM,
+  read-only rootfs), not yet on a live hub: on the first hub start after
+  the upgrade, check `docker logs onionheaven-farm` for "listening on" and
+  the first `spawn … -> ok`.
+
 ## Containers Drop Every Capability
 - Every compose service (both compose files), every takeover worker
-  (`_spawn_worker` in onionheaven_common.py and the unused
+  (`worker_run_argv` in onionheaven-farm.py and the unused
   `start_farm_worker`; the Mac launcher starts none) and every one-shot
   `docker run` in the launchers, cli.py and launcher_ops.py has
   `cap_drop: [ALL]` / `--cap-drop ALL`, adds back only the capabilities
@@ -567,7 +606,8 @@
   db CHOWN DAC_OVERRIDE SETGID SETUID; onionheaven and takeover workers
   DAC_OVERRIDE SETGID SETUID (their /var/lib/tor is the image's, so the
   entrypoint's chmod of it logs "Operation not permitted" harmlessly);
-  autoheal, autoheal-proxy, cloudflared nothing. Helpers: reads of key
+  autoheal, autoheal-proxy, onionheaven-farm (the farm controller: the
+  docker CLI over the socket, nothing else), cloudflared nothing. Helpers: reads of key
   files, mkp224o, key seeds and migrate_key_volume (its copy is root's)
   DAC_OVERRIDE; the Linux tor-state seeds CHOWN DAC_OVERRIDE FOWNER (they
   chown to debian-tor); the mkp224o probe nothing. `docker exec` runs with

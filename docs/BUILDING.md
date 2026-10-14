@@ -256,6 +256,12 @@ autoheal also runs with every capability dropped: it reaches the proxy's
 or needed a capability, would fail to reach the proxy (see
 `docker logs onionpress-autoheal`).
 
+The other container with the socket is `onionheaven-farm`, the OnionHeaven
+farm controller: the tor image's own `onionheaven-farm.py`, so it is pinned
+with the tor image. It starts and drives the takeover workers for the
+`onionheaven` container, which has no socket; `docker logs onionheaven-farm`
+shows every request and refusal. See `docs/DOCKER-SOCKET.md`.
+
 Two more references are deliberately left as bare tags, and one carries no
 image reference at all; `tests/test_image_pins.py` asserts they stay that
 way — a blanket "pin everything" sweep breaks each of them quietly at build

@@ -9,16 +9,21 @@ bootstrapped worker container with the fewest addresses and executes takeover/
 release directly via `docker exec`. No polling loops, no DB-mediated IPC.
 Workers are just Tor instances — they receive commands, not requests.
 
-Only the onionheaven container (the heartbeat) has the Docker socket. The
-registration API in onionpress-tor does not, so when it handles /offline or
-/online it records the request in the registry instead: takeover_requested
-for the heartbeat, release_pending for the worker holding the address (see
-docker_available() and docs/DOCKER-SOCKET.md).
+No container on the Tor side has the Docker socket. The onionheaven
+container (the heartbeat) drives the workers through the farm controller
+(onionheaven-farm.py, in its own container with the socket, no network and
+a fixed set of verbs) over a unix socket on a volume only those two mount:
+farm_request() and farm_exec() below. The registration API in onionpress-tor
+has not even that, so when it handles /offline or /online it records the
+request in the registry instead: takeover_requested for the heartbeat,
+release_pending for the worker holding the address (see farm_available()
+and docs/DOCKER-SOCKET.md).
 """
 
 import json
 import os
 import re
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -43,9 +48,13 @@ DB_PATH = os.path.join(ONIONHEAVEN_DATA_DIR, "registry.db")
 KEYS_DIR = os.path.join(ONIONHEAVEN_DATA_DIR, "keys")
 TOR_MANAGER = "/onionheaven-tor-manager.sh"
 
-# Where docker-compose.yml mounts the Docker socket — into the onionheaven
-# service only. onionpress-tor runs this same code without it.
-DOCKER_SOCKET = "/var/run/docker.sock"
+# The farm controller's socket (onionheaven-farm.py), on the
+# onionpress-onionheaven-farm volume that docker-compose.yml mounts into the
+# onionheaven service only. onionpress-tor runs this same code without it.
+FARM_SOCKET = "/run/onionheaven-farm/farm.sock"
+FARM_TIMEOUT = 60          # a reply's deadline; the controller's own docker
+                           # timeouts are all shorter
+FARM_MAX_REPLY = 1 << 20   # bytes
 
 # How long to wait after the last successful healthcheck before considering
 # a node stale enough for takeover. Override via env for testing.
@@ -155,20 +164,17 @@ def read_tor_container_address():
     """Return the onion address of this node's tor container, or None.
 
     For the onionheaven container, which does not mount the tor state
-    volume: it reads the hostname through the Docker socket it already uses
-    for the takeover workers. Any failure reads as unknown, and an unknown
-    address never admits a node.
+    volume: the farm controller reads the hostname file in onionpress-tor
+    (its `tor-address` verb; it validates the address too). Any failure
+    reads as unknown, and an unknown address never admits a node.
     """
     try:
-        result = subprocess.run(
-            ["docker", "exec", "onionpress-tor", "cat", OWN_HOSTNAME_PATH],
-            capture_output=True, text=True, timeout=15
-        )
+        reply = farm_request("tor-address")
     except Exception:
         return None
-    if result.returncode != 0:
+    addr = reply.get("address") if reply.get("ok") else None
+    if not isinstance(addr, str):
         return None
-    addr = result.stdout.strip()
     return addr if _ONION_ADDRESS_RE.fullmatch(addr) else None
 
 
@@ -403,64 +409,127 @@ def drop_unnamed_worker_rows(conn):
     return len(bad)
 
 
-# Image ID of this container, once looked up (see takeover_image()).
-_own_image = None
-
-
-def takeover_image():
-    """The image takeover workers run: the one this container runs.
-
-    docker-compose.yml passes ONIONHEAVEN_IMAGE with the same reference as
-    the onionheaven service's own `image:` (the digest pin from
-    build/image-pins.env, or a local build). Without it, ask Docker which
-    image this container was started from. Never a bare tag: that names
-    whatever is tagged locally (possibly stale) or whatever the registry
-    serves today. A digest literal here would be one image behind, since it
-    ships inside the image it names. None when neither is available.
-    """
-    image = os.environ.get("ONIONHEAVEN_IMAGE", "").strip()
-    if image:
-        return image
-    global _own_image
-    if _own_image is None:
-        try:
-            result = subprocess.run(
-                ["docker", "inspect", "--format", "{{.Image}}",
-                 os.environ.get("HOSTNAME", "")],
-                capture_output=True, text=True, timeout=15,
-            )
-            ref = result.stdout.strip()
-            if result.returncode == 0 and re.fullmatch(r"sha256:[0-9a-f]{64}", ref):
-                _own_image = ref
-        except Exception:
-            pass
-    return _own_image
-
 # Next index for naming new takeover containers
 _next_worker_index = 0
 
 
-def docker_available():
-    """True if this container has the Docker socket.
+# ---------------------------------------------------------------------------
+# The farm controller (onionheaven-farm.py)
+# ---------------------------------------------------------------------------
 
-    The onionheaven container does; onionpress-tor, which runs web-server.py
-    and faces Tor, does not (it did until the compose file stopped mounting
-    it there). Code that both containers run checks this before reaching for
-    `docker`, and without it leaves the work to a process that can.
+class FarmError(Exception):
+    """The farm controller could not be reached, or refused the request."""
+
+
+def farm_available():
+    """True if this container can reach the farm controller.
+
+    The onionheaven container can (docker-compose.yml mounts the controller's
+    socket volume there); onionpress-tor, which runs web-server.py and faces
+    Tor, cannot. Code that both containers run checks this before asking
+    for anything that needs Docker, and without it leaves the work to a
+    process that can.
     """
-    return os.path.exists(DOCKER_SOCKET)
+    return os.path.exists(FARM_SOCKET)
+
+
+def farm_request(op, **fields):
+    """One request to the farm controller; its reply as a dict.
+
+    The request is one JSON line ({"op": ..., **fields}), the reply one JSON
+    line with "ok" true or false (then "error" says why). Raises FarmError
+    when the controller cannot be reached or answers nonsense; a refusal is
+    returned as a reply, not raised, so callers decide what it means.
+    """
+    request = (json.dumps({"op": op, **fields}) + "\n").encode("utf-8")
+    data = b""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(FARM_TIMEOUT)
+            s.connect(FARM_SOCKET)
+            s.sendall(request)
+            while len(data) <= FARM_MAX_REPLY:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+    except OSError as e:
+        raise FarmError(f"farm controller: {e}") from e
+    try:
+        reply = json.loads(data.decode("utf-8"))
+    except ValueError as e:
+        raise FarmError(f"farm controller: unreadable reply ({e})") from e
+    if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
+        raise FarmError("farm controller: malformed reply")
+    return reply
+
+
+def farm_exec(container_name, verb, address=None):
+    """Run one of the controller's exec verbs inside a worker.
+
+    Returns a CompletedProcess (returncode, stdout, stderr) as `docker exec`
+    did, so callers parse the worker's output as before. Raises FarmError
+    when the controller is unreachable or refuses the request (a bad name,
+    an unknown verb, a malformed address: each is logged by the controller
+    too).
+    """
+    fields = {"name": container_name, "verb": verb}
+    if address is not None:
+        fields["address"] = address
+    reply = farm_request("exec", **fields)
+    if not reply["ok"]:
+        raise FarmError(f"farm controller refused exec {verb} on "
+                        f"{container_name}: {reply.get('error')}")
+    return subprocess.CompletedProcess(
+        ["exec", container_name, verb], reply.get("returncode"),
+        reply.get("stdout") or "", reply.get("stderr") or "")
+
+
+def farm_remove(container_name):
+    """`docker rm -f` a worker through the controller; True when removed."""
+    try:
+        reply = farm_request("remove", name=container_name)
+    except FarmError as e:
+        log(f"WARNING: could not remove {container_name}: {e}")
+        return False
+    return bool(reply["ok"] and reply.get("removed"))
+
+
+def farm_list():
+    """Names of the worker containers Docker knows (any state), or None
+    when the controller could not say."""
+    try:
+        reply = farm_request("list")
+    except FarmError:
+        return None
+    names = reply.get("names") if reply["ok"] else None
+    if not isinstance(names, list):
+        return None
+    return [n for n in names if isinstance(n, str)]
+
+
+def farm_inspect(container_name):
+    """{"exists": bool, "running": bool, "mounts": JSON text} for a worker,
+    or None when the controller could not say (not the same as absent)."""
+    try:
+        reply = farm_request("inspect", name=container_name)
+    except FarmError:
+        return None
+    if not reply["ok"] or not isinstance(reply.get("exists"), bool):
+        return None
+    return {"exists": reply["exists"], "running": reply.get("running") is True,
+            "mounts": reply.get("mounts") if isinstance(reply.get("mounts"), str) else ""}
 
 
 def is_farm_mode():
     """True if we can manage takeover containers.
 
-    True when ONIONHEAVEN=1 (heartbeat container) or when the docker
-    socket is available (onionpress-tor, if run from an older compose file
-    that still mounted it there).
+    True when ONIONHEAVEN=1 (heartbeat container) or when the farm
+    controller's socket is available.
     """
     if os.environ.get("ONIONHEAVEN") == "1":
         return True
-    return docker_available()
+    return farm_available()
 
 
 def _init_worker_index(conn):
@@ -537,55 +606,21 @@ def _ensure_capacity(conn):
 
 
 def _spawn_worker(conn):
-    """Start a new takeover worker container via docker run."""
+    """Start a new takeover worker container through the farm controller.
+
+    The controller runs the `docker run`: the image (the stack's pinned
+    one, passed to it by compose), network, volume and hardening are its
+    to decide, and the heartbeat chooses only the name.
+    """
     global _next_worker_index
-    image = takeover_image()
-    if not image:
-        log("WARNING: not spawning a takeover worker: ONIONHEAVEN_IMAGE is "
-            "unset and this container's own image could not be determined")
-        return
     idx = _next_worker_index
     _next_worker_index += 1
     name = f"onionheaven-takeover-{idx}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Remove any existing container with this name
-    subprocess.run(["docker", "rm", "-f", name],
-                   capture_output=True, timeout=15)
-
-    tz = os.environ.get("TZ", "UTC")
-
     try:
-        result = subprocess.run(
-            ["docker", "run", "-d",
-             "--name", name,
-             "--network", "onionpress-network",
-             "--ulimit", "nofile=10000:10000",
-             # As every compose service (docker-compose.yml's header): no
-             # capability but what the worker uses, no raw packets on
-             # onionpress-network (forged ones could pose as another
-             # container), and no setuid way back to root. The entrypoint
-             # drops to debian-tor with su as root (SETGID, SETUID), which
-             # no-new-privileges leaves alone; the watchdog, the queue
-             # manager and the tor-manager read the control cookie in
-             # debian-tor's 0700 /var/lib/tor (DAC_OVERRIDE).
-             "--cap-drop", "ALL",
-             "--cap-add", "DAC_OVERRIDE",
-             "--cap-add", "SETGID",
-             "--cap-add", "SETUID",
-             "--security-opt", "no-new-privileges:true",
-             "-e", f"TZ={tz}",
-             "-e", "TAKEOVER_WORKER=1",
-             "-e", f"CONTAINER_NAME={name}",
-             "-e", f"MAX_TAKEOVER_SERVICES={MAX_SERVICES_PER_WORKER}",
-             # The hub data volume only: workers face Tor and need nothing
-             # from onionpress-persistent-data (WordPress's shared volume).
-             "-v", f"{HUB_DATA_VOLUME}:{ONIONHEAVEN_DATA_DIR}",
-             "--restart", "unless-stopped",
-             image],
-            capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
+        reply = farm_request("spawn", name=name)
+        if reply["ok"]:
             # Insert into DB as not-yet-bootstrapped
             conn.execute(
                 "INSERT OR REPLACE INTO takeover_containers "
@@ -596,7 +631,7 @@ def _spawn_worker(conn):
             db_commit_with_retry(conn)
             log(f"Spawned takeover worker {name} (bootstrapping...)")
         else:
-            log(f"WARNING: Failed to spawn {name}: {result.stderr.strip()}")
+            log(f"WARNING: Failed to spawn {name}: {reply.get('error')}")
             _next_worker_index -= 1  # reuse index
     except Exception as e:
         log(f"ERROR spawning {name}: {e}")
@@ -612,11 +647,7 @@ def _check_worker_process(container_name):
     if not worker_name_ok(container_name, "check the worker process in"):
         return False
     try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "sh", "-c",
-             "ps aux | grep '[o]nionheaven-takeover-worker\\.py' | grep -v grep"],
-            capture_output=True, text=True, timeout=10
-        )
+        result = farm_exec(container_name, "alive")
         return result.returncode == 0 and result.stdout.strip() != ""
     except Exception:
         return False
@@ -660,20 +691,10 @@ def check_worker_bootstrap(conn):
                     pass
 
             try:
-                result = subprocess.run(
-                    ["docker", "exec", name, "sh", "-c",
-                     "COOKIE=$(xxd -p -c 64 /var/lib/tor/control_auth_cookie 2>/dev/null) && "
-                     "printf 'AUTHENTICATE %s\\r\\nGETINFO status/bootstrap-phase\\r\\nQUIT\\r\\n' "
-                     "\"$COOKIE\" | nc -q 1 127.0.0.1 9051 2>/dev/null || true"],
-                    capture_output=True, text=True, timeout=10
-                )
+                result = farm_exec(name, "bootstrap-phase")
                 if "PROGRESS=100" in result.stdout:
                     # Also verify queue manager is accepting commands
-                    qm_result = subprocess.run(
-                        ["docker", "exec", name,
-                         "python3", "/onionheaven-queue-manager.py", "status"],
-                        capture_output=True, text=True, timeout=10
-                    )
+                    qm_result = farm_exec(name, "status")
                     if qm_result.returncode != 0 or not qm_result.stdout.strip():
                         continue
                     try:
@@ -737,30 +758,21 @@ def _retire_unlisted_old_workers(listed):
     it never recorded, is in no row, and would keep serving (and writing)
     the old location. Doubt keeps a container.
     """
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "-a", "--filter", "name=onionheaven-takeover-",
-             "--filter", "name=onionheaven-poll-", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=15
-        )
-    except Exception:
+    names = farm_list()
+    if names is None:
         return
-    if result.returncode != 0:
-        return
-    for name in result.stdout.split():
+    for name in names:
         if name in listed or not is_worker_name(name):
             continue
         try:
-            inspected = subprocess.run(
-                ["docker", "inspect", "--format", "{{json .Mounts}}", name],
-                capture_output=True, text=True, timeout=10
-            )
-            if inspected.returncode != 0 or _mounts_hub_data(inspected.stdout.strip()):
+            inspected = farm_inspect(name)
+            if (inspected is None or not inspected["exists"]
+                    or _mounts_hub_data(inspected["mounts"])):
                 continue
             log(f"Retiring takeover worker {name}: it does not mount "
                 f"{HUB_DATA_VOLUME} at {ONIONHEAVEN_DATA_DIR} (started by an "
                 f"older version; not in the registry)")
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
+            farm_remove(name)
         except Exception:
             pass
 
@@ -795,20 +807,15 @@ def cleanup_dead_workers(conn):
         if not worker_name_ok(name, "inspect or remove container"):
             continue
         try:
-            result = subprocess.run(
-                ["docker", "inspect", "--format",
-                 "{{.State.Running}} {{json .Mounts}}", name],
-                capture_output=True, text=True, timeout=10
-            )
-            state, _, mounts = result.stdout.strip().partition(" ")
-            running = result.returncode == 0 and state.lower() == "true"
-            if running and not _mounts_hub_data(mounts):
+            inspected = farm_inspect(name)
+            if inspected is None:
+                continue  # the controller could not say: look again next pass
+            running = inspected["exists"] and inspected["running"]
+            if running and not _mounts_hub_data(inspected["mounts"]):
                 log(f"Retiring takeover worker {name}: it does not mount "
                     f"{HUB_DATA_VOLUME} at {ONIONHEAVEN_DATA_DIR} (started "
                     f"by an older version)")
-                removed = subprocess.run(["docker", "rm", "-f", name],
-                                         capture_output=True, timeout=30)
-                if removed.returncode != 0:
+                if not farm_remove(name):
                     # Still serving its addresses: leave it registered, so
                     # nothing adds them on a second worker; next pass retries.
                     continue
@@ -836,7 +843,7 @@ def fix_assigned_count_drift(conn, workers):
     `workers` are takeover_containers rows (container_name, assigned_count).
     assigned_count only steers _pick_worker and _ensure_capacity; the
     registry is the truth. A release handed to the worker by the API server
-    (release_function without the Docker socket) is not counted down, so the
+    (release_function without the farm controller) is not counted down, so the
     heartbeat corrects drift each pass instead of only reporting it.
     Compare-and-set on the value read, so a concurrent change wins and is
     looked at again next pass.
@@ -873,11 +880,7 @@ def _exec_takeover(container_name, content_address):
         return False
     log(f"Queuing takeover of {content_address} on {container_name}")
     try:
-        result = subprocess.run(
-            ["docker", "exec", container_name,
-             "python3", "/onionheaven-queue-manager.py", "takeover", content_address],
-            capture_output=True, text=True, timeout=30
-        )
+        result = farm_exec(container_name, "takeover", content_address)
         if result.returncode == 0 and result.stdout.strip():
             try:
                 resp = json.loads(result.stdout.strip())
@@ -927,11 +930,7 @@ def _exec_release(container_name, content_address):
     addr_log(content_address, f"Releasing {content_address} via {container_name}")
 
     try:
-        result = subprocess.run(
-            ["docker", "exec", container_name,
-             "python3", "/onionheaven-queue-manager.py", "release", content_address],
-            capture_output=True, text=True, timeout=30
-        )
+        result = farm_exec(container_name, "release", content_address)
     except Exception as e:
         log(f"Release error for {content_address} on {container_name}: {e}")
         return False
@@ -976,17 +975,13 @@ def _has_onion_on_worker(container_name, content_address):
     """Independently probe whether a worker's Tor still has the onion.
 
     Returns True/False on success, or None if the probe itself fails
-    (e.g. docker exec error, worker on older image without `has`).
+    (e.g. the farm controller unreachable, worker on older image without `has`).
     """
     if not (worker_name_ok(container_name, "ask about onions on")
             and onion_address_ok(content_address, "ask a worker about")):
         return None
     try:
-        result = subprocess.run(
-            ["docker", "exec", container_name,
-             "python3", "/onionheaven-queue-manager.py", "has", content_address],
-            capture_output=True, text=True, timeout=10
-        )
+        result = farm_exec(container_name, "has", content_address)
     except Exception:
         return None
     if result.returncode != 0:
@@ -1004,19 +999,15 @@ def get_queue_status(container_name):
     """Get queue status from a worker's queue manager.
 
     Returns dict with queued/in_flight/active counts, or None on error.
-    None without the Docker socket, without trying: /status is public, and
-    each call would otherwise spawn a `docker` that can only fail.
+    None without the farm controller, without trying: /status is public,
+    and each call would otherwise make a request that can only fail.
     """
-    if not docker_available():
+    if not farm_available():
         return None
     if not worker_name_ok(container_name, "ask for the queue status of"):
         return None
     try:
-        result = subprocess.run(
-            ["docker", "exec", container_name,
-             "python3", "/onionheaven-queue-manager.py", "status"],
-            capture_output=True, text=True, timeout=10
-        )
+        result = farm_exec(container_name, "status")
         if result.returncode == 0:
             return json.loads(result.stdout.strip())
     except Exception:
@@ -1048,7 +1039,7 @@ def get_addr_serving_status(conn, content_address):
     if not container:
         return "queued-to-activate"  # taken-over but no worker assigned yet
 
-    if not docker_available():
+    if not farm_available():
         return "activating"  # same fallback as an unreachable worker, below
 
     if not (worker_name_ok(container, "ask for an address's state on")
@@ -1057,11 +1048,7 @@ def get_addr_serving_status(conn, content_address):
 
     # Ask the worker's queue manager
     try:
-        result = subprocess.run(
-            ["docker", "exec", container,
-             "python3", "/onionheaven-queue-manager.py", "addr_state", content_address],
-            capture_output=True, text=True, timeout=10
-        )
+        result = farm_exec(container, "addr_state", content_address)
         if result.returncode == 0:
             resp = json.loads(result.stdout.strip())
             state = resp.get("serving_status")
@@ -1103,7 +1090,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
        bootstrapped or the queue refuses, the row is left exactly as it was:
        the next heartbeat pass (or /offline) retries, and _ensure_capacity
        has already been asked for more workers.
-       Without the Docker socket (web-server.py in onionpress-tor, handling
+       Without the farm controller (web-server.py in onionpress-tor, handling
        /offline) there is no worker to queue on: record takeover_requested
        and stop. The heartbeat monitor sees it on its next pass
        (takeover_requested_now) and calls this function itself.
@@ -1258,7 +1245,7 @@ def takeover_function(conn, content_address, healthcheck_address, force=False):
 def request_takeover(conn, content_address, healthcheck_address):
     """Record an /offline for the heartbeat monitor to act on.
 
-    Used by takeover_function when it runs without the Docker socket. The
+    Used by takeover_function when it runs without the farm controller. The
     status is untouched — nothing is taken over until a worker has the
     address — and the request only counts while no heartbeat is newer
     (takeover_requested_now), so a publisher who comes straight back is
@@ -1341,7 +1328,7 @@ def release_function(conn, content_address, healthcheck_address):
     decrements assigned_count. If already online, returns early — prevents
     double-release and double-decrement.
 
-    Without the Docker socket (web-server.py in onionpress-tor, handling
+    Without the farm controller (web-server.py in onionpress-tor, handling
     /online and /unregister) it cannot reach the worker. It then sets
     release_pending in the same UPDATE that marks the row online, and the
     worker's own takeover-worker.py loop runs the DEL_ONION within seconds
@@ -1362,8 +1349,8 @@ def release_function(conn, content_address, healthcheck_address):
 
     takeover_container = row["takeover_container"] if "takeover_container" in row.keys() else None
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    have_docker = docker_available()
-    hand_to_worker = bool(takeover_container) and not have_docker
+    have_farm = farm_available()
+    hand_to_worker = bool(takeover_container) and not have_farm
 
     # Mark this row as online — release_function owns this status change.
     # Keep takeover_container so the next takeover reuses the same worker,
@@ -1398,11 +1385,11 @@ def release_function(conn, content_address, healthcheck_address):
     # A takeover can be queued on multiple workers (e.g. during rapid
     # takeover/release cycles), but the DB only tracks one takeover_container.
     # Without this sweep, orphaned services on other workers keep publishing
-    # stale descriptors indefinitely. Without the Docker socket it cannot
+    # stale descriptors indefinitely. Without the farm controller it cannot
     # run here, and the heartbeat's RECONCILE pass does it instead.
     all_workers = conn.execute(
         "SELECT container_name FROM takeover_containers"
-    ).fetchall() if have_docker else []
+    ).fetchall() if have_farm else []
     sweep_problems = []
     for w in all_workers:
         wname = w["container_name"] if isinstance(w, dict) else w[0]
@@ -1727,15 +1714,10 @@ def cleanup_stress_tests(conn=None):
         except sqlite3.OperationalError:
             pass
 
-        result = subprocess.run(
-            ["docker", "ps", "-a", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            for name in result.stdout.strip().splitlines():
-                if (name.startswith("onionheaven-takeover-") and is_worker_name(name)
-                        and name not in db_workers):
-                    to_remove.add(name)
+        for name in farm_list() or []:
+            if (name.startswith("onionheaven-takeover-") and is_worker_name(name)
+                    and name not in db_workers):
+                to_remove.add(name)
     except Exception:
         pass
 
@@ -1752,11 +1734,11 @@ def cleanup_stress_tests(conn=None):
 
 
 def _rm_worker(name):
-    """`docker rm -f` one takeover worker; any other name is refused."""
+    """Remove one takeover worker through the farm controller; any other
+    name is refused. True when it was removed."""
     if not worker_name_ok(name, "remove container"):
         return False
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
-    return True
+    return farm_remove(name)
 
 
 def _remove_workers(names):
@@ -1773,48 +1755,6 @@ def _remove_workers(names):
 # Reset OnionHeaven — clean stress tests + refresh workers with current code
 # ---------------------------------------------------------------------------
 
-# Files to copy from the onionheaven container into takeover workers.
-# These are the Python/shell files that workers execute.
-_WORKER_CODE_FILES = [
-    "/onionheaven_common.py",
-    "/onionheaven-queue-manager.py",
-    "/onionheaven-takeover-worker.py",
-    "/onionheaven-tor-manager.sh",
-    "/onionheaven-redirect.sh",
-    "/onion_auth.py",
-    "/key-convert.py",
-]
-
-
-def _patch_worker_code(container_name):
-    """Copy current code files from this container into a takeover worker.
-
-    Uses docker cp via the host socket. The onionheaven container is the
-    source of truth — it has the latest code (either from the image or from
-    docker cp during development).
-    """
-    # We're running inside the onionheaven container, so we copy from local
-    # filesystem into the target container via `docker cp`.
-    if not worker_name_ok(container_name, "copy code into"):
-        return
-    failed = []
-    for fpath in _WORKER_CODE_FILES:
-        if not os.path.isfile(fpath):
-            continue
-        try:
-            result = subprocess.run(
-                ["docker", "cp", fpath, f"{container_name}:{fpath}"],
-                capture_output=True, text=True, timeout=10
-            )
-            if result.returncode != 0:
-                failed.append(fpath)
-        except Exception:
-            failed.append(fpath)
-
-    if failed:
-        log(f"_patch_worker_code({container_name}): failed to copy: {failed}")
-    else:
-        log(f"_patch_worker_code({container_name}): patched {len(_WORKER_CODE_FILES)} files")
 
 
 def _rotate_logs():
@@ -1876,7 +1816,8 @@ def reset_onionheaven(conn=None):
          (prevents heartbeat from assigning to doomed workers during cleanup)
       2. Remove all stress test entries (registry rows, keys, takeovers)
       3. Collect real taken-over entries that need to be migrated
-      4. Spawn fresh workers, patch them with current code, wait for bootstrap
+      4. Spawn fresh workers (from the pinned image, so they run the
+         current code), wait for bootstrap
       5. Re-assign real taken-over entries to the new workers
 
     Returns a dict summarising what happened.
@@ -1897,19 +1838,17 @@ def reset_onionheaven(conn=None):
     }
 
     # Step 0: always restart the heartbeat so it picks up updated code.
-    # Also eliminates any duplicate heartbeat processes.
+    # Also eliminates any duplicate heartbeat processes. This runs inside
+    # the onionheaven container itself (`onionpress reset-onionheaven`
+    # execs it there), so the heartbeat is a local process.
     try:
-        subprocess.run(
-            ["docker", "exec", "onionheaven", "pkill", "-f", "onionheaven-heartbeat"],
-            capture_output=True, timeout=10
-        )
+        subprocess.run(["pkill", "-f", "onionheaven-heartbeat"],
+                       capture_output=True, timeout=10)
         time.sleep(2)
-        subprocess.run(
-            ["docker", "exec", "-d", "onionheaven", "sh", "-c",
-             "python3 /onionheaven-heartbeat.py "
-             f"2>>{ONIONHEAVEN_DATA_DIR}/heartbeat.log"],
-            capture_output=True, timeout=10
-        )
+        with open(os.path.join(ONIONHEAVEN_DATA_DIR, "heartbeat.log"), "ab") as hb_log:
+            subprocess.Popen(["python3", "/onionheaven-heartbeat.py"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=hb_log, start_new_session=True)
         log("reset_onionheaven: restarted heartbeat process")
     except Exception as e:
         log(f"reset_onionheaven: heartbeat restart error: {e}")
@@ -1931,19 +1870,8 @@ def reset_onionheaven(conn=None):
     db_commit_with_retry(conn)
 
     # Remove all takeover containers (DB-tracked + orphaned)
-    old_workers = set()
-    try:
-        result = subprocess.run(
-            ["docker", "ps", "-a", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            for name in result.stdout.strip().splitlines():
-                if name.startswith("onionheaven-takeover-") and is_worker_name(name):
-                    old_workers.add(name)
-    except Exception:
-        pass
-
+    old_workers = {name for name in farm_list() or []
+                   if name.startswith("onionheaven-takeover-") and is_worker_name(name)}
     if old_workers:
         stats["old_workers_removed"] = _remove_workers(old_workers)
         log(f"reset_onionheaven: removed {stats['old_workers_removed']} workers")
@@ -1970,7 +1898,7 @@ def reset_onionheaven(conn=None):
         log(f"reset_onionheaven complete: {stats}")
         return stats
 
-    # Step 4: spawn fresh workers, patch code, wait for bootstrap
+    # Step 4: spawn fresh workers, wait for bootstrap
     # Figure out how many workers we need
     needed = (len(real_takeovers) + MAX_SERVICES_PER_WORKER - 1) // MAX_SERVICES_PER_WORKER
     needed = max(needed, 1)
@@ -1990,10 +1918,6 @@ def reset_onionheaven(conn=None):
         if row:
             new_worker_names.append(name)
             stats["new_workers_spawned"] += 1
-
-    # Patch code into new workers
-    for name in new_worker_names:
-        _patch_worker_code(name)
 
     # Wait for at least one worker to bootstrap (up to 90s)
     log(f"reset_onionheaven: waiting for {len(new_worker_names)} workers to bootstrap...")
