@@ -2,6 +2,7 @@
 build/*.dmg
 build/temp.dmg
 build/*.deb
+build/SHA256SUMS
 
 # macOS
 .DS_Store

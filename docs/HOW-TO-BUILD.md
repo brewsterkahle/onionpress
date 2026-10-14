@@ -358,13 +358,17 @@ docker pull ghcr.io/brewsterkahle/onionpress-tor:latest
 docker pull ghcr.io/brewsterkahle/onionpress-wordpress:latest
 build/refresh-image-digests.sh          # rewrites build/image-pins.env and every consumer
 git commit -am "Bump version to X.Y.Z; refresh image digests"
-build/release.sh                        # builds .dmg + .deb, creates the GitHub release with both
+build/release.sh                        # builds .dmg + .deb, creates the GitHub release with both + SHA256SUMS
 ```
 
 Requirements beyond §3: the **python.org universal2 Python 3.14** (the `.dmg`
 must run on Intel), and `gh` authenticated. `release.sh` refuses to create a
 release from Linux, because a `.dmg`-less "Latest" would 404 the README's
-download link.
+download link. Every release also carries `SHA256SUMS` (the sha256 of the
+`.deb` and the `.dmg`): Linux's `onionpress update` installs a release's
+`.deb` only when it matches. `release.sh` creates a new release as a draft,
+downloads `SHA256SUMS` and the `.deb` back to check them, and publishes only
+then; it fails rather than finish a release without them.
 
 The container images are published by `.github/workflows/docker-publish.yml`
 on release, or by hand from the Actions tab ("Run workflow"). It runs entirely

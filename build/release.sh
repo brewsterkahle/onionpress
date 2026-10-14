@@ -11,17 +11,31 @@
 #   release's asset of that name) for that whole range. This script makes
 #   the .deb a mandatory part of every release.
 #
+# SHA256SUMS
+#   Every release also carries SHA256SUMS: "<sha256>  <name>" for
+#   onionpress.deb and onionpress.dmg, as sha256sum writes it. Linux's
+#   `onionpress update` installs a release's onionpress.deb only when it
+#   matches its line there, so a release without it cannot be installed
+#   that way. The script refuses to finish without it: after uploading it
+#   lists the release's assets, downloads SHA256SUMS and onionpress.deb back
+#   and checks them as `onionpress update` will. A new release is created
+#   as a draft and published only once that check passes, so a published
+#   release never lacks it (the Docker image workflow runs on "published").
+#
 # THE CROSS-PLATFORM RULE THIS ENFORCES
 #   The .dmg can ONLY be built on macOS (diskutil image/py2app). So:
-#     - On macOS: build .dmg + .deb, create-or-update the release, upload both.
+#     - On macOS: build .dmg + .deb, create-or-update the release, upload
+#       both and SHA256SUMS.
 #     - On Linux: build .deb only. NEVER create a release (it would be
 #       .dmg-less and become "Latest", breaking the Mac download link).
 #       Only attach the .deb to an EXISTING release that already carries the
 #       matching .dmg. This is exactly the failure that motivated the script.
+#       SHA256SUMS is rewritten for the new .deb and the release's own .dmg
+#       (downloaded to hash it).
 #
 # USAGE
 #   build/release.sh              # release the current src/menubar.py version
-#   build/release.sh --draft      # same, but create the GitHub release as a draft
+#   build/release.sh --draft      # same, but leave a new GitHub release a draft
 #
 #   Bump the version FIRST (build/bump-version.sh X.Y.Z, macOS only) and
 #   commit, then run this. This script does not bump — it releases whatever
@@ -53,14 +67,73 @@ fi
 TAG="v$VERSION"
 DEB_PATH="$BUILD_DIR/onionpress.deb"
 DMG_PATH="$BUILD_DIR/onionpress.dmg"
+SUMS_PATH="$BUILD_DIR/SHA256SUMS"
 
 OS="$(uname -s)"
 echo "OnionPress release $TAG  (host: $OS)"
+PUBLISH_AFTER_VERIFY=0
+REQUIRED_ASSETS=""
 
 if ! command -v gh >/dev/null 2>&1; then
     echo "ERROR: gh CLI not found. Install it and run 'gh auth login'."
     exit 1
 fi
+
+fail() {
+    echo "" >&2
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onionpress-release.XXXXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# "<sha256>  <name>" for file $1, as sha256sum writes it.
+sha256_line() {
+    local out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out=$(sha256sum "$1")
+    else
+        out=$(shasum -a 256 "$1")
+    fi
+    printf '%s  %s\n' "${out%% *}" "$(basename "$1")"
+}
+
+# SHA256SUMS for the files given.
+write_sums() {
+    local f
+    : > "$SUMS_PATH.tmp"
+    for f in "$@"; do
+        sha256_line "$f" >> "$SUMS_PATH.tmp"
+    done
+    mv "$SUMS_PATH.tmp" "$SUMS_PATH"
+    echo "  SHA256SUMS:"
+    sed 's/^/    /' "$SUMS_PATH"
+}
+
+# The release carries every asset named in $@, its SHA256SUMS is the one
+# written here, and its onionpress.deb matches it: the check Linux's
+# `onionpress update` makes before installing. Exits on any failure.
+verify_release() {
+    local names need line
+    names=$(gh release view "$TAG" --json assets --jq '.assets[].name') \
+        || fail "could not list the assets of release $TAG."
+    printf '%s\n' "$names" | sed 's/^/  /'
+    for need in "$@"; do
+        grep -qxF "$need" <<< "$names" || fail "release $TAG has no $need."
+    done
+    rm -rf "$WORK_DIR/published"
+    mkdir "$WORK_DIR/published"
+    gh release download "$TAG" --pattern SHA256SUMS --pattern onionpress.deb \
+            --dir "$WORK_DIR/published" \
+        || fail "could not download SHA256SUMS and onionpress.deb of $TAG to check them."
+    cmp -s "$WORK_DIR/published/SHA256SUMS" "$SUMS_PATH" \
+        || fail "the SHA256SUMS published with $TAG is not the one written here ($SUMS_PATH)."
+    line=$(sha256_line "$WORK_DIR/published/onionpress.deb")
+    grep -qxF "$line" "$SUMS_PATH" \
+        || fail "the onionpress.deb published with $TAG does not match SHA256SUMS."
+    echo "  SHA256SUMS and onionpress.deb check out."
+}
 
 # Does the release already exist, and does it already have a .dmg?
 release_exists=0
@@ -86,15 +159,24 @@ if [ "$OS" = "Darwin" ]; then
     [ -f "$DMG_PATH" ] || { echo "ERROR: $DMG_PATH was not produced"; exit 1; }
 
     echo ""
+    write_sums "$DEB_PATH" "$DMG_PATH"
+    REQUIRED_ASSETS="onionpress.dmg onionpress.deb SHA256SUMS"
+
+    echo ""
     if [ "$release_exists" = "1" ]; then
-        echo "── Updating existing release $TAG (uploading both assets) ───────────"
-        gh release upload "$TAG" "$DMG_PATH" "$DEB_PATH" --clobber
+        echo "── Updating existing release $TAG (both assets + SHA256SUMS) ────────"
+        gh release upload "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" --clobber
     else
-        echo "── Creating release $TAG with both assets ───────────────────────────"
-        gh release create "$TAG" "$DMG_PATH" "$DEB_PATH" \
-            $DRAFT \
+        # A draft until verify_release passes; published below unless
+        # --draft was asked for.
+        echo "── Creating release $TAG with both assets + SHA256SUMS ──────────────"
+        gh release create "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" \
+            --draft \
             --title "$TAG" \
             --generate-notes
+        if [ -z "$DRAFT" ]; then
+            PUBLISH_AFTER_VERIFY=1
+        fi
     fi
 
 # ─── Linux: .deb only, and only onto an existing .dmg-bearing release ──────
@@ -119,15 +201,39 @@ EOF
         echo "WARNING: release $TAG exists but has no onionpress.dmg asset." >&2
         echo "         Attaching the .deb anyway; make sure the Mac uploads the .dmg." >&2
     fi
+    # SHA256SUMS for the new .deb, and for the release's own .dmg.
     echo ""
-    echo "── Attaching .deb to existing release $TAG ──────────────────────────"
-    gh release upload "$TAG" "$DEB_PATH" --clobber
+    REQUIRED_ASSETS="onionpress.deb SHA256SUMS"
+    if [ "$release_has_dmg" = "1" ]; then
+        mkdir "$WORK_DIR/dmg"
+        gh release download "$TAG" --pattern onionpress.dmg --dir "$WORK_DIR/dmg" \
+            || fail "could not download the onionpress.dmg of $TAG to hash it for SHA256SUMS."
+        write_sums "$DEB_PATH" "$WORK_DIR/dmg/onionpress.dmg"
+        REQUIRED_ASSETS="onionpress.dmg $REQUIRED_ASSETS"
+    else
+        write_sums "$DEB_PATH"
+    fi
+    echo ""
+    echo "── Attaching .deb + SHA256SUMS to existing release $TAG ─────────────"
+    gh release upload "$TAG" "$DEB_PATH" "$SUMS_PATH" --clobber
 fi
 
-# ─── Verify the download links resolve ─────────────────────────────────────
+# ─── Verify the assets, SHA256SUMS included, then publish ──────────────────
 echo ""
 echo "── Verifying release assets ─────────────────────────────────────────"
-gh release view "$TAG" --json assets --jq '.assets[] | "  " + .name'
+# shellcheck disable=SC2086  # a list of plain asset names
+verify_release $REQUIRED_ASSETS
+
+if [ "$PUBLISH_AFTER_VERIFY" = "1" ]; then
+    echo ""
+    echo "── Publishing $TAG ───────────────────────────────────────────────────"
+    gh release edit "$TAG" --draft=false
+fi
 
 echo ""
-echo "✅ Release $TAG published with the Linux .deb included."
+if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+    echo "✅ Draft release $TAG ready with the Linux .deb and SHA256SUMS (not published)."
+    echo "   Publish it with: gh release edit $TAG --draft=false"
+else
+    echo "✅ Release $TAG published with the Linux .deb and SHA256SUMS included."
+fi
