@@ -24,8 +24,9 @@ Sandbox safety: everything runs on a dedicated subsite
 sweep, and deletes when it finishes. Earlier versions took the first
 non-root subsite — on a live install, the owner's real blog — and
 published and force-deleted posts there and deleted its live sweep lock
-and back-off. The lock and back-off this suite touches are the
-sandbox's own options. The onion address comes from a mock, because the
+and back-off. The lock and back-off are the whole network's (issue #322),
+so this suite never touches them: the onionpress_wayback_net_key filter
+points each eval at keys of its own (_TEST_NET_KEYS). The onion address comes from a mock, because the
 target must not have one: wp_integration.py refuses a container with
 /var/lib/onionpress/onion_address.
 
@@ -52,13 +53,26 @@ _TEST_SUBSITE_SLUG = "op-wayback-test"
 # Stands in for the onion address file the target must not have.
 _MOCK_ONION = "wayback-test-sandbox.onion"
 
+# The network-wide lock and back-off, as this suite sees them: test keys,
+# never the live sweep's.
+_TEST_LOCK = "op_wayback_sweep_lock-test"
+_TEST_BACKOFF = "op_wayback_backoff_until-test"
+_TEST_NET_KEYS = f"""
+add_filter('onionpress_wayback_net_key', function($key) {{
+    $map = array('op_wayback_sweep_lock' => '{_TEST_LOCK}',
+                 'op_wayback_backoff_until' => '{_TEST_BACKOFF}');
+    return isset($map[$key]) ? $map[$key] : $key . '-test';
+}});
+"""
+
 
 class _WaybackSandbox(wp_integration.SandboxTestCase):
     SANDBOX_SLUG = _TEST_SUBSITE_SLUG
     SANDBOX_TITLE = "Wayback Sweep Test Sandbox"
     # The exclusion is what keeps the sandbox out of the live sweep.
     REQUIRED_PHP_FUNCTIONS = ("onionpress_wayback_site_excluded",
-                              "onionpress_wayback_sites")
+                              "onionpress_wayback_sites",
+                              "onionpress_wayback_net_key")
 
 
 class TestWaybackQueueTotals(_WaybackSandbox):
@@ -154,8 +168,7 @@ class TestWaybackSweepIteration(_WaybackSandbox):
     """Sweep iteration behavior with mocked network functions."""
 
     def setUp(self):
-        _wp(["option", "delete", "op_wayback_backoff_until"],
-            url=self.url, timeout=15)
+        _eval(_TEST_NET_KEYS + f"delete_site_option('{_TEST_BACKOFF}');", self.url)
         r = _wp(["post", "create", "--post_type=post", "--post_status=publish",
                  "--post_title=wayback-test-" + self._testMethodName,
                  "--porcelain"], url=self.url, timeout=15)
@@ -178,7 +191,7 @@ class TestWaybackSweepIteration(_WaybackSandbox):
     def _common_mocks(self, available=40):
         """Short-circuit the onion address, reachability + user_status so
         the iteration reaches the poll/submit phases."""
-        return f"""
+        return _TEST_NET_KEYS + f"""
         add_filter('onionpress_wayback_onion_addr_mock',
                    function() {{ return '{_MOCK_ONION}'; }});
         add_filter('onionpress_wayback_self_reachable_mock',
@@ -276,32 +289,38 @@ class TestWaybackSweepLock(_WaybackSandbox):
     """Token-lock mutex semantics for the sweep entry point."""
 
     def setUp(self):
-        _wp(["option", "delete", "op_wayback_sweep_lock"],
-            url=self.url, timeout=15)
+        _eval(f"delete_site_option('{_TEST_LOCK}');", self.url)
 
     def tearDown(self):
-        _wp(["option", "delete", "op_wayback_sweep_lock"],
-            url=self.url, timeout=15)
+        _eval(f"delete_site_option('{_TEST_LOCK}');", self.url)
 
     def test_fresh_lock_blocks_second_invocation(self):
         """A fresh lock (< STALE threshold) rejects a new sweep."""
-        php_seed = """
-        update_option('op_wayback_sweep_lock',
-                      'otherTok:' . time(), false);
+        php_seed = f"""
+        update_site_option('{_TEST_LOCK}', 'otherTok:' . time());
         echo 'seeded';
         """
         _eval(php_seed, self.url)
-        php = """
+        php = _TEST_NET_KEYS + f"""
         add_filter('onionpress_wayback_self_reachable_mock',
-                   function() { return true; });
+                   function() {{ return true; }});
         add_filter('onionpress_wayback_user_status_mock',
-                   function() { return array('available' => 0); });
+                   function() {{ return array('available' => 0); }});
         onionpress_wayback_sweep();
-        echo (string) get_option('op_wayback_sweep_lock', '(empty)');
+        echo (string) get_site_option('{_TEST_LOCK}', '(empty)');
         """
         out = _eval(php, self.url)
         self.assertTrue(out.startswith("otherTok:"),
             f"lock should still belong to otherTok: {out}")
+
+    def test_lock_holds_from_every_site(self):
+        """Issue #322: the lock is the network's, so a sweep started from
+        the sandbox subsite sees the lock written from the main site."""
+        _eval(f"update_site_option('{_TEST_LOCK}', 'mainTok:' . time());", None)
+        php = _TEST_NET_KEYS + """
+        echo (string) onionpress_wayback_net_get('op_wayback_sweep_lock', '(empty)');
+        """
+        self.assertTrue(_eval(php, self.url).startswith("mainTok:"))
 
 
 class TestWaybackCommentResnapshot(_WaybackSandbox):

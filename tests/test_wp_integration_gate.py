@@ -487,8 +487,14 @@ class TestWaybackPluginContract(unittest.TestCase):
 
     def test_every_network_walk_honors_the_exclusion(self):
         """get_sites() appears once, inside onionpress_wayback_sites(); the
-        sweep loop and the queue totals walk that list."""
-        self.assertEqual(self.php.count("get_sites("), 1)
+        sweep loop and the queue totals walk that list. The one other walk
+        removes the per-blog lock and back-off of 2.5.3 and older from every
+        site, excluded or not, and visits no content."""
+        retire = self.php.index("function onionpress_wayback_retire_blog_state()")
+        retire = self.php[retire:self.php.index("\n}\n", retire)]
+        self.assertEqual(retire.count("get_sites("), 1)
+        self.assertNotIn("switch_to_blog(", retire)
+        self.assertEqual(self.php.count("get_sites(") - retire.count("get_sites("), 1)
         body = self.php[self.php.index("function onionpress_wayback_sites()"):]
         body = body[:body.index("\n}\n")]
         self.assertIn("get_sites(", body)

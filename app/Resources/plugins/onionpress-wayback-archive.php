@@ -101,6 +101,13 @@ define( 'OP_WB_OPT_FEED',          'op_wayback_feed_state' );
 // The Wayback Machine's onion mirror; every SPN, status and CDX call goes here
 // through onionheaven's SOCKS proxy. One place to change it.
 define( 'OP_WB_ONION_HOST', 'web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion' );
+// The sweep's lock and back-off are network options (wp_sitemeta), not a
+// blog's: one sweep walks every site, so one lock and one back-off hold it
+// whichever site's request started it. Read and written only through
+// onionpress_wayback_net_get/_set/_delete. Through 2.5.3 they were each
+// blog's own options, so every blog's cron could run a whole-network sweep
+// of its own beside the others (issue #322).
+define( 'OP_WB_NET_LOCK',          'op_wayback_sweep_lock' );
 define( 'OP_WB_OPT_BACKOFF_UNTIL', 'op_wayback_backoff_until' );
 // 'yes' keeps a subsite out of the Wayback Machine entirely: the sweep
 // never visits it, the queue totals leave it out, and it never schedules
@@ -124,9 +131,16 @@ function onionpress_wayback_version() {
     return $ver;
 }
 
+/**
+ * The archive.org S3 keys are the network's one pair, kept in the main
+ * site's options: setup, the per-launch reconcile and Linux's installer
+ * write them there with `wp option update`, and the Settings page saves
+ * them there from any site (onionpress_archive_keys_save).
+ */
 function onionpress_wayback_auth_header() {
-    $access = get_blog_option( 1, 'onionpress_archive_s3_access', '' );
-    $secret = get_blog_option( 1, 'onionpress_archive_s3_secret', '' );
+    $main   = function_exists( 'get_main_site_id' ) ? get_main_site_id() : 1;
+    $access = (string) get_blog_option( $main, 'onionpress_archive_s3_access', '' );
+    $secret = (string) get_blog_option( $main, 'onionpress_archive_s3_secret', '' );
     if ( empty( $access ) || empty( $secret ) ) {
         return '';
     }
@@ -713,6 +727,64 @@ function onionpress_wayback_sitewide_records() {
     return $records;
 }
 
+// ─────────────────────── network-wide sweep state ───────────────────
+
+/**
+ * The network option behind a piece of sweep state. The filter lets one
+ * test process point the lock or back-off at a key of its own, so the
+ * integration tests never touch a live sweep's.
+ */
+function onionpress_wayback_net_key( $key ) {
+    return (string) apply_filters( 'onionpress_wayback_net_key', $key );
+}
+
+/**
+ * Read sweep state as stored now. The sweep is a long-running process and
+ * WordPress caches options for the whole request, so a takeover written
+ * by another process would never be seen: drop the cached copy first.
+ */
+function onionpress_wayback_net_get( $key, $default = '' ) {
+    $key = onionpress_wayback_net_key( $key );
+    if ( is_multisite() ) {
+        $network = get_current_network_id();
+        wp_cache_delete( $network . ':' . $key, 'site-options' );
+        wp_cache_delete( $network . ':notoptions', 'site-options' );
+    } else {
+        wp_cache_delete( $key, 'options' );
+        wp_cache_delete( 'notoptions', 'options' );
+        wp_cache_delete( 'alloptions', 'options' );
+    }
+    return get_site_option( $key, $default );
+}
+
+function onionpress_wayback_net_set( $key, $value ) {
+    update_site_option( onionpress_wayback_net_key( $key ), $value );
+}
+
+function onionpress_wayback_net_delete( $key ) {
+    delete_site_option( onionpress_wayback_net_key( $key ) );
+}
+
+/**
+ * Schedule an immediate sweep in the main site's cron, the only one the
+ * sweep runs from (see the init hook below). The tor container's health
+ * checks load the main site every minute, so its cron fires even when
+ * nobody visits it.
+ */
+function onionpress_wayback_schedule_now() {
+    $switched = is_multisite() && ! is_main_site();
+    if ( $switched ) {
+        switch_to_blog( get_main_site_id() );
+    }
+    try {
+        wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    } finally {
+        if ( $switched ) {
+            restore_current_blog();
+        }
+    }
+}
+
 // ──────────────────────────── sites ─────────────────────────────────
 
 /**
@@ -766,8 +838,7 @@ function onionpress_wayback_sweep() {
     //   on each iteration and gracefully exit if another has taken over.
     // - last_heartbeat_ts: updated every iteration; a stale ts means
     //   the prior process is dead and we take over.
-    $lock_key = 'op_wayback_sweep_lock';
-    $raw      = (string) get_option( $lock_key, '' );
+    $raw      = (string) onionpress_wayback_net_get( OP_WB_NET_LOCK, '' );
     $now      = time();
     if ( $raw !== '' && strpos( $raw, ':' ) !== false ) {
         list( , $lock_ts_str ) = explode( ':', $raw, 2 );
@@ -785,7 +856,7 @@ function onionpress_wayback_sweep() {
 
     // Claim the lock with our own unique token.
     $token = wp_generate_password( 16, false, false );
-    update_option( $lock_key, $token . ':' . $now, false );
+    onionpress_wayback_net_set( OP_WB_NET_LOCK, $token . ':' . $now );
 
     @set_time_limit( 0 );
     @ignore_user_abort( true );
@@ -795,9 +866,9 @@ function onionpress_wayback_sweep() {
     } finally {
         // Only clear the lock if it's still ours — otherwise another
         // daemon has taken over and needs its lock preserved.
-        $cur = (string) get_option( $lock_key, '' );
+        $cur = (string) onionpress_wayback_net_get( OP_WB_NET_LOCK, '' );
         if ( strpos( $cur, $token . ':' ) === 0 ) {
-            delete_option( $lock_key );
+            onionpress_wayback_net_delete( OP_WB_NET_LOCK );
         }
     }
 }
@@ -841,7 +912,6 @@ function onionpress_wayback_queue_totals() {
 }
 
 function onionpress_wayback_sweep_loop( $token ) {
-    $lock_key     = 'op_wayback_sweep_lock';
     $loop_start   = microtime( true );
     $totals       = array( 'submitted' => 0, 'success' => 0, 'cdx' => 0, 'error' => 0 );
     $last_progress = $loop_start;
@@ -853,16 +923,16 @@ function onionpress_wayback_sweep_loop( $token ) {
         // Lock ownership check — if another daemon has claimed the
         // lock (possible if our heartbeat lapsed past stale threshold),
         // exit gracefully. Also heartbeats the ts if we still own it.
-        $cur = (string) get_option( $lock_key, '' );
+        $cur = (string) onionpress_wayback_net_get( OP_WB_NET_LOCK, '' );
         if ( strpos( $cur, $token . ':' ) !== 0 ) {
             onionpress_wayback_log( 'Loop: lock taken by another daemon, exiting (token=' . substr( $token, 0, 6 ) . ', iter=' . $iter . ')' );
             return;
         }
-        update_option( $lock_key, $token . ':' . time(), false );
+        onionpress_wayback_net_set( OP_WB_NET_LOCK, $token . ':' . time() );
 
         // Visit every subsite in the network that isn't excluded. The
-        // daemon may have been invoked from any site's cron; we need to do
-        // work on whichever subsite actually has unarchived posts. Skip
+        // daemon runs from the main site's cron; we need to do work on
+        // whichever subsite actually has unarchived posts. Skip
         // subsites whose queue is fully drained — they exit the iteration
         // for free.
         $any_work = false;
@@ -953,7 +1023,7 @@ function onionpress_wayback_sweep_loop( $token ) {
         // Pace between iterations. Also respect any backoff set by a
         // gate inside the iteration (available=0, 429, etc.).
         $now = time();
-        $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
+        $backoff_until = (int) onionpress_wayback_net_get( OP_WB_OPT_BACKOFF_UNTIL, 0 );
         $sleep = ( $backoff_until > $now )
             ? ( $backoff_until - $now )
             : OP_WB_LOOP_IDLE_SLEEP;
@@ -970,7 +1040,7 @@ function onionpress_wayback_sweep_iteration() {
 
     // Global back-off gate — either we recently saw available=0, failed
     // a self-reachability check, or SPN status was unreachable.
-    $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
+    $backoff_until = (int) onionpress_wayback_net_get( OP_WB_OPT_BACKOFF_UNTIL, 0 );
     if ( $backoff_until > $now ) {
         return;
     }
@@ -992,7 +1062,7 @@ function onionpress_wayback_sweep_iteration() {
         ? OP_WB_SUBMIT_BATCH_MAX // optimistic default
         : (int) ( $user['available'] ?? 0 );
     if ( $user !== null && $available <= 0 ) {
-        update_option( OP_WB_OPT_BACKOFF_UNTIL, $now + OP_WB_BACKOFF_NO_SLOTS, false );
+        onionpress_wayback_net_set( OP_WB_OPT_BACKOFF_UNTIL, $now + OP_WB_BACKOFF_NO_SLOTS );
         onionpress_wayback_log( 'Sweep paused: available=0 processing='
             . ( $user['processing'] ?? '?' ) . ', backing off ' . OP_WB_BACKOFF_NO_SLOTS . 's' );
         return;
@@ -1161,7 +1231,7 @@ function onionpress_wayback_sweep_iteration() {
             }
         }
         if ( $hit_429 ) {
-            update_option( OP_WB_OPT_BACKOFF_UNTIL, time() + OP_WB_BACKOFF_NO_SLOTS, false );
+            onionpress_wayback_net_set( OP_WB_OPT_BACKOFF_UNTIL, time() + OP_WB_BACKOFF_NO_SLOTS );
             onionpress_wayback_log( 'Submit batch hit 429, backing off ' . OP_WB_BACKOFF_NO_SLOTS . 's' );
         }
     }
@@ -1238,16 +1308,15 @@ add_action( 'save_post', function ( $post_id, $post, $update ) {
     }
 
     // An excluded subsite never schedules a sweep: nothing on it is ever
-    // submitted, and a daemon started from its cron would only run
-    // alongside the network's own.
+    // submitted.
     if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
         return;
     }
 
-    // Also clear any site-wide back-off so the immediate sweep runs.
-    delete_option( OP_WB_OPT_BACKOFF_UNTIL );
-
-    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    // The back-off stays: it is the whole network's now, and an import
+    // saves posts by the hundred. A running sweep picks this post up on
+    // its next iteration; a backed-off one, when the back-off ends.
+    onionpress_wayback_schedule_now();
     onionpress_wayback_log( 'save_post ' . $post_id . ': cleared home/feed'
         . ( $update && ! $is_imported ? ' + post meta' : '' ) . ', scheduled immediate sweep' );
 }, 10, 3 );
@@ -1294,11 +1363,31 @@ add_action( 'wp_insert_comment', function ( $comment_id, $comment ) {
     if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
         return; // never schedules a sweep — see save_post above
     }
-    delete_option( OP_WB_OPT_BACKOFF_UNTIL );
-    wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+    onionpress_wayback_schedule_now(); // back-off kept — see save_post above
     onionpress_wayback_log( 'wp_insert_comment ' . $comment_id
         . ' on post ' . $post_id . ': cleared snapshot for re-archive (one-shot)' );
 }, 10, 2 );
+
+/**
+ * Once per network: remove the per-blog lock and back-off that sweeps
+ * through 2.5.3 kept (OP_WB_NET_LOCK). Nothing reads them any more; a
+ * leftover lock would only show on the database. Runs on the main site's
+ * cron and admin requests.
+ */
+function onionpress_wayback_retire_blog_state() {
+    if ( ! is_multisite() || ! ( wp_doing_cron() || is_admin() ) ) {
+        return;
+    }
+    if ( get_site_option( 'op_wayback_blog_state_retired' ) === 'yes' ) {
+        return;
+    }
+    foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0 ) ) as $bid ) {
+        delete_blog_option( (int) $bid, OP_WB_NET_LOCK );
+        delete_blog_option( (int) $bid, OP_WB_OPT_BACKOFF_UNTIL );
+    }
+    update_site_option( 'op_wayback_blog_state_retired', 'yes' );
+    onionpress_wayback_log( 'Per-blog sweep lock and back-off removed; both are network-wide now' );
+}
 
 // ────────────────────────────── cron ────────────────────────────────
 
@@ -1311,25 +1400,31 @@ add_filter( 'cron_schedules', function ( $schedules ) {
 } );
 
 add_action( 'init', function () {
-    if ( onionpress_wayback_site_excluded( get_current_blog_id() ) ) {
-        // An excluded subsite never drives the sweep: drop any watchdog it
-        // scheduled before it was excluded.
+    if ( is_multisite() && ! is_main_site() ) {
+        // The sweep runs from the main site's cron only: one sweep walks
+        // every site, so a subsite's watchdog could only start a second.
+        // Drop any a subsite scheduled through 2.5.3, and any an excluded
+        // subsite scheduled before it was excluded.
         if ( wp_next_scheduled( 'onionpress_wayback_sweep' ) ) {
             wp_clear_scheduled_hook( 'onionpress_wayback_sweep' );
         }
         return;
     }
 
+    onionpress_wayback_retire_blog_state();
+
     // (Re)schedule the sweep on the current watchdog schedule. Unschedule
     // any prior-schedule instances so we don't end up with two cron
-    // entries for the same hook under different intervals.
+    // entries for the same hook under different intervals. A single event
+    // (no schedule: save_post's immediate sweep) is left alone.
     $existing = wp_next_scheduled( 'onionpress_wayback_sweep' );
     if ( $existing ) {
         $cron = _get_cron_array();
         foreach ( (array) $cron as $ts => $hooks ) {
             if ( isset( $hooks['onionpress_wayback_sweep'] ) ) {
                 foreach ( $hooks['onionpress_wayback_sweep'] as $sig => $entry ) {
-                    if ( ( $entry['schedule'] ?? '' ) !== 'onionpress_wayback_watchdog' ) {
+                    $schedule = $entry['schedule'] ?? false;
+                    if ( $schedule && $schedule !== 'onionpress_wayback_watchdog' ) {
                         wp_unschedule_event( $ts, 'onionpress_wayback_sweep', $entry['args'] ?? array() );
                     }
                 }
@@ -1455,31 +1550,40 @@ add_action( 'admin_post_onionpress_wayback_action', function () {
             // lock, the token-ownership check will make this invocation
             // exit cleanly without disrupting it — but clearing the
             // lock first breaks any truly-stuck state.
-            delete_option( 'op_wayback_sweep_lock' );
-            delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+            onionpress_wayback_net_delete( OP_WB_NET_LOCK );
+            onionpress_wayback_net_delete( OP_WB_OPT_BACKOFF_UNTIL );
             // Clear WP's `doing_cron` lock too. If a previous wp-cron
             // spawn died mid-run without cleaning up (container restart,
             // pkill), this transient blocks new wp-cron fires for up to
             // 60s from its timestamp. Each subsequent page load just
             // refreshes it via race, so it can stay stuck for a long
             // time in practice. Clearing it lets cron fire immediately.
+            // It is the main site's cron that runs the sweep, so its
+            // transient and its wp-cron.php, whichever site the page is on.
+            $main = function_exists( 'get_main_site_id' ) ? get_main_site_id() : 1;
+            if ( is_multisite() ) {
+                switch_to_blog( $main );
+            }
             delete_transient( 'doing_cron' );
+            if ( is_multisite() ) {
+                restore_current_blog();
+            }
             // Schedule an immediate cron fire so the sweep starts in a
             // separate request (admin page doesn't hang for the whole
             // daemon run).
-            wp_schedule_single_event( time(), 'onionpress_wayback_sweep' );
+            onionpress_wayback_schedule_now();
             // Also spawn a loopback to wp-cron.php so WP actually runs
             // scheduled events right now (WP-Cron only fires on HTTP).
-            $cron_url = site_url( 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
+            $cron_url = get_site_url( $main, 'wp-cron.php?doing_wp_cron=' . microtime( true ) );
             wp_remote_post( $cron_url, array( 'timeout' => 0.01, 'blocking' => false, 'sslverify' => false ) );
             $msg = 'Daemon kicked — archiving will begin within a few seconds.';
             break;
         case 'clear_backoff':
-            delete_option( OP_WB_OPT_BACKOFF_UNTIL );
+            onionpress_wayback_net_delete( OP_WB_OPT_BACKOFF_UNTIL );
             $msg = 'Backoff cleared.';
             break;
         case 'clear_lock':
-            delete_option( 'op_wayback_sweep_lock' );
+            onionpress_wayback_net_delete( OP_WB_NET_LOCK );
             $msg = 'Lock cleared. A stuck daemon (if any) will exit on its next heartbeat.';
             break;
         default:
@@ -1497,9 +1601,9 @@ function onionpress_wayback_admin_page() {
         wp_die( 'Forbidden', 403 );
     }
     $totals        = onionpress_wayback_queue_totals();
-    $backoff_until = (int) get_option( OP_WB_OPT_BACKOFF_UNTIL, 0 );
+    $backoff_until = (int) onionpress_wayback_net_get( OP_WB_OPT_BACKOFF_UNTIL, 0 );
     $backoff_secs  = max( 0, $backoff_until - time() );
-    $lock_raw      = (string) get_option( 'op_wayback_sweep_lock', '' );
+    $lock_raw      = (string) onionpress_wayback_net_get( OP_WB_NET_LOCK, '' );
     $lock_ts       = 0;
     $lock_token    = '';
     if ( strpos( $lock_raw, ':' ) !== false ) {
@@ -1508,7 +1612,14 @@ function onionpress_wayback_admin_page() {
     }
     $lock_age      = $lock_ts > 0 ? time() - $lock_ts : 0;
     $lock_active   = $lock_age > 0 && $lock_age < OP_WB_LOOP_LOCK_STALE_SEC;
+    // The main site's cron is the one that runs the sweep.
+    if ( is_multisite() ) {
+        switch_to_blog( get_main_site_id() );
+    }
     $next_cron     = wp_next_scheduled( 'onionpress_wayback_sweep' );
+    if ( is_multisite() ) {
+        restore_current_blog();
+    }
     $msg           = isset( $_GET['op_msg'] ) ? wp_unslash( $_GET['op_msg'] ) : '';
     $pct           = $totals['total'] > 0 ? round( $totals['archived'] * 100 / $totals['total'], 1 ) : 0;
 
