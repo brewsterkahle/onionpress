@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""`onionpress update` installs exactly the shipped file set, from a source
-no other user controls.
+"""`onionpress update --from-checkout` installs exactly the shipped file
+set, from a source no other user controls. (Plain `onionpress update`
+installs a release's checked .deb: tests/test_linux_release_update.py.)
 
 linux/install-tree.sh holds the one list of what goes into /opt/onionpress;
 the .deb (build/build-linux.sh), linux/install.sh and `onionpress update`
@@ -119,7 +120,7 @@ class TestEveryWayInUsesIt(unittest.TestCase):
         self.assertNotRegex(code, r'cp (-r )?"\$REPO_DIR/(app|src|linux)/[^"]*" "\$INSTALL_DIR')
 
     def test_update(self):
-        branch = _case_branch(_read(LINUX), "update")
+        branch = _shell_function(_read(LINUX), "update_from_checkout")
         self.assertIn('sudo bash "$repo_dir/linux/install-tree.sh" install "$repo_dir" "$INSTALL_DIR"',
                       branch)
         code = "\n".join(l for l in branch.splitlines() if not l.lstrip().startswith("#"))
@@ -398,7 +399,7 @@ class TestUpdateSource(unittest.TestCase):
                       "    return 0", body)
 
     def test_update_starts_with_it(self):
-        branch = _case_branch(_read(LINUX), "update")
+        branch = _shell_function(_read(LINUX), "update_from_checkout")
         self.assertLess(branch.index("update_source_checkout"), branch.index("install-tree.sh"))
 
 
@@ -411,7 +412,9 @@ class TestHeartbeatClientBothScopes(unittest.TestCase):
         text = _read(LINUX)
         for label in ("stop", "restart", "update"):
             with self.subTest(label):
-                branch = _case_branch(text, label)
+                # update restarts in update_finish, after either install
+                branch = (_shell_function(text, "update_finish") if label == "update"
+                          else _case_branch(text, label))
                 code = "\n".join(l for l in branch.splitlines() if not l.lstrip().startswith("#"))
                 self.assertNotIn("systemctl", code)
                 self.assertLess(code.index("stop_heartbeat_client"), code.index("stop_containers"))

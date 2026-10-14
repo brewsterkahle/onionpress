@@ -1834,7 +1834,8 @@ class OnionPressTray:
                     self.notifier.notify(
                         "update-available",
                         f"OnionPress {data['latest']} is available",
-                        "Open the GitHub release page to download.",
+                        "Run 'onionpress update' in a terminal to install it "
+                        "(it checks the package against the release's SHA256SUMS).",
                         actions=[(
                             "open-release", "View release",
                             lambda url=data.get("release_url"):

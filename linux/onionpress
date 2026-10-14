@@ -3635,17 +3635,421 @@ _validate_oh_address() {
     return 0
 }
 
-# ─── The source `onionpress update` installs from ─────────────────────
+# ─── `onionpress update`: a released package, checked ─────────────────
 
-# The git checkout `onionpress update` installs from, brought up to date:
-# the invoking user's own ($HOME/tmp/onionpress, $HOME/onionpress), else
-# root's /opt/onionpress-src (cloned from GitHub when there is none). Never
-# another account's home: update used to take the first checkout in any
-# /home/*/, so any user on the machine could leave one there for it to
-# install as root. The checkout must pass update_checkout_trusted, have no
-# local changes, and only move forward (git pull --ff-only; it used to
-# reset --hard to whatever origin/main said). Sets UPDATE_REPO_DIR, or
-# UPDATE_ERROR and returns 1.
+# `onionpress update` installs the onionpress.deb of a GitHub release (the
+# latest, or --version X.Y.Z), and only once it matches the sha256 the
+# release publishes for it in SHA256SUMS (build/release.sh writes that file
+# and checks it before a release is published). It used to install
+# whatever a git checkout of main held, as root, with nothing checked
+# beyond TLS to GitHub; that is `update --from-checkout` now, for
+# developers. The Settings page's update button never installs on Linux:
+# code running in WordPress can write requested-action, so handle-action
+# `update` only reports what `update --check` would.
+RELEASE_REPO="brewsterkahle/onionpress"
+RELEASE_DEB="onionpress.deb"
+RELEASE_SUMS="SHA256SUMS"
+# Where the .deb installs; update refuses to put it beside another tree.
+RELEASE_INSTALL_DIR="/opt/onionpress"
+
+# A release version as the tags carry it after the "v": numbers and dots.
+# The digits are spelled out because a range like 0-9 can take in other
+# characters in some locales.
+is_release_version() {
+    [[ "$1" =~ ^[0123456789]{1,9}(\.[0123456789]{1,9}){1,3}$ ]]
+}
+
+# True when release version $1 is newer than release version $2.
+version_newer() {
+    local -a a b
+    local i x y
+    IFS=. read -r -a a <<< "$1"
+    IFS=. read -r -a b <<< "$2"
+    for i in 0 1 2 3; do
+        x=$((10#${a[i]:-0}))
+        y=$((10#${b[i]:-0}))
+        if [ "$x" -gt "$y" ]; then
+            return 0
+        fi
+        if [ "$x" -lt "$y" ]; then
+            return 1
+        fi
+    done
+    return 1
+}
+
+# The version installed in $INSTALL_DIR (empty when unknown).
+installed_version() {
+    local v=""
+    if [ -f "$INSTALL_DIR/VERSION" ]; then
+        v=$(head -n 1 "$INSTALL_DIR/VERSION" 2>/dev/null | tr -d '[:space:]') || v=""
+    fi
+    printf '%s\n' "$v"
+}
+
+# curl for GitHub: HTTPS only, redirects included (release downloads
+# redirect to GitHub's asset host), failing on any HTTP error.
+release_curl() {
+    curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 20 -H "User-Agent: onionpress" "$@"
+}
+
+# The sha256 of file $1, lowercase hex.
+sha256_of() {
+    local out
+    if command -v sha256sum >/dev/null 2>&1; then
+        out=$(sha256sum "$1") || return 1
+    else
+        out=$(shasum -a 256 "$1") || return 1
+    fi
+    printf '%s\n' "${out%% *}"
+}
+
+# Look up a release on GitHub: the latest ($1 empty), or tag v$1. With $2
+# = yes a pre-release may answer (and, without $1, the newest release that
+# is not a draft, pre-release or not). Sets UPDATE_TAG and UPDATE_VERSION,
+# and UPDATE_INSTALLABLE=yes when the release carries both onionpress.deb
+# and SHA256SUMS (else UPDATE_WHY says what is missing); or sets
+# UPDATE_ERROR and returns 1: GitHub not reached, not a release version, a
+# draft, or a pre-release without $2.
+update_find_release() {
+    local want="${1#v}" pre="$2" url json fields tag="" draft="" prerelease="" debs="" sums=""
+    UPDATE_TAG=""
+    UPDATE_VERSION=""
+    UPDATE_INSTALLABLE=no
+    UPDATE_WHY=""
+    UPDATE_ERROR=""
+    if [ -n "$1" ]; then
+        if ! is_release_version "$want"; then
+            UPDATE_ERROR="\"$1\" is not a release version (like 2.5.3)."
+            return 1
+        fi
+        url="https://api.github.com/repos/$RELEASE_REPO/releases/tags/v$want"
+    elif [ "$pre" = "yes" ]; then
+        url="https://api.github.com/repos/$RELEASE_REPO/releases?per_page=30"
+    else
+        url="https://api.github.com/repos/$RELEASE_REPO/releases/latest"
+    fi
+    if ! json=$(release_curl --max-time 30 --max-filesize 4000000 \
+            -H "Accept: application/vnd.github+json" "$url" 2>>"$LOG_FILE"); then
+        if [ -n "$1" ]; then
+            UPDATE_ERROR="could not find release v$want on GitHub (no such release, or GitHub could not be reached; see $LOG_FILE)."
+        else
+            UPDATE_ERROR="could not look up the latest release on GitHub (see $LOG_FILE)."
+        fi
+        return 1
+    fi
+    # One release (from the list: the newest that is not a draft). A
+    # missing draft or prerelease flag counts as set.
+    if ! fields=$(printf '%s' "$json" | python3 -I -c '
+import json, re, sys
+r = json.load(sys.stdin)
+if isinstance(r, list):
+    r = next((x for x in r if isinstance(x, dict) and x.get("draft") is False), None)
+if not isinstance(r, dict):
+    sys.exit(1)
+tag = r.get("tag_name")
+names = [a.get("name") for a in (r.get("assets") or []) if isinstance(a, dict)]
+print(re.sub(r"[^A-Za-z0-9._-]", "?", tag if isinstance(tag, str) else "")[:64])
+print("false" if r.get("draft") is False else "true")
+print("false" if r.get("prerelease") is False else "true")
+print(names.count(sys.argv[1]))
+print(names.count(sys.argv[2]))
+' "$RELEASE_DEB" "$RELEASE_SUMS" 2>>"$LOG_FILE"); then
+        UPDATE_ERROR="GitHub's answer did not describe a release (see $LOG_FILE)."
+        return 1
+    fi
+    { read -r tag && read -r draft && read -r prerelease && read -r debs && read -r sums; } <<< "$fields" || true
+    if [[ "$tag" != v* ]] || ! is_release_version "${tag#v}"; then
+        UPDATE_ERROR="the release's tag \"$tag\" is not a release version."
+        return 1
+    fi
+    if [ -n "$1" ] && [ "$tag" != "v$want" ]; then
+        UPDATE_ERROR="GitHub answered with $tag, not v$want."
+        return 1
+    fi
+    if [ "$draft" != "false" ]; then
+        UPDATE_ERROR="$tag is a draft, not a release."
+        return 1
+    fi
+    if [ "$prerelease" != "false" ] && [ "$pre" != "yes" ]; then
+        UPDATE_ERROR="$tag is a pre-release; add --pre to install it."
+        return 1
+    fi
+    UPDATE_TAG="$tag"
+    UPDATE_VERSION="${tag#v}"
+    if [ "$debs" != "1" ]; then
+        UPDATE_WHY="release $tag has no $RELEASE_DEB."
+    elif [ "$sums" != "1" ]; then
+        UPDATE_WHY="release $tag publishes no $RELEASE_SUMS, so its package cannot be checked."
+    else
+        UPDATE_INSTALLABLE=yes
+    fi
+    return 0
+}
+
+# Download release $UPDATE_TAG's SHA256SUMS and onionpress.deb into folder
+# $1 and check the package: its sha256 is the one SHA256SUMS gives for
+# onionpress.deb (exactly one such line), and it is the onionpress package
+# of version $UPDATE_VERSION. Sets UPDATE_SHA256, or UPDATE_ERROR and
+# returns 1.
+update_fetch_release() {
+    local dir="$1" base n line want got field
+    base="https://github.com/$RELEASE_REPO/releases/download/$UPDATE_TAG"
+    UPDATE_SHA256=""
+    UPDATE_ERROR=""
+    if ! release_curl --max-time 60 --max-filesize 65536 \
+            -o "$dir/$RELEASE_SUMS" "$base/$RELEASE_SUMS" 2>>"$LOG_FILE"; then
+        UPDATE_ERROR="could not download $RELEASE_SUMS of $UPDATE_TAG (see $LOG_FILE)."
+        return 1
+    fi
+    if ! release_curl --max-time 900 --max-filesize 268435456 \
+            -o "$dir/$RELEASE_DEB" "$base/$RELEASE_DEB" 2>>"$LOG_FILE"; then
+        UPDATE_ERROR="could not download $RELEASE_DEB of $UPDATE_TAG (see $LOG_FILE)."
+        return 1
+    fi
+    n=$(grep -cE '^[0123456789abcdefABCDEF]{64} [ *]onionpress\.deb$' "$dir/$RELEASE_SUMS" || true)
+    if [ "$n" != "1" ]; then
+        UPDATE_ERROR="$RELEASE_SUMS of $UPDATE_TAG does not give one sha256 for $RELEASE_DEB."
+        return 1
+    fi
+    line=$(grep -E '^[0123456789abcdefABCDEF]{64} [ *]onionpress\.deb$' "$dir/$RELEASE_SUMS")
+    want=$(printf '%s' "${line:0:64}" | tr 'ABCDEF' 'abcdef')
+    if ! got=$(sha256_of "$dir/$RELEASE_DEB") || [ "$got" != "$want" ]; then
+        UPDATE_ERROR="$RELEASE_DEB of $UPDATE_TAG does not match its $RELEASE_SUMS (sha256 ${got:-unreadable}, published $want)."
+        return 1
+    fi
+    field=$(dpkg-deb --field "$dir/$RELEASE_DEB" Package 2>>"$LOG_FILE") || field=""
+    if [ "$field" != "onionpress" ]; then
+        UPDATE_ERROR="$RELEASE_DEB of $UPDATE_TAG is not the onionpress package."
+        return 1
+    fi
+    field=$(dpkg-deb --field "$dir/$RELEASE_DEB" Version 2>>"$LOG_FILE") || field=""
+    if [ "$field" != "$UPDATE_VERSION" ]; then
+        UPDATE_ERROR="$RELEASE_DEB of $UPDATE_TAG is version ${field:-unknown}, not $UPDATE_VERSION."
+        return 1
+    fi
+    UPDATE_SHA256="$got"
+    return 0
+}
+
+# `onionpress update` from a release: $1 check (yes: report only), $2 the
+# version wanted (empty: the latest), $3 allow a pre-release, $4 force
+# (install even when not newer: a reinstall or a downgrade).
+update_from_release() {
+    local check="$1" want="$2" pre="$3" force="$4" current newer=no tool
+    local -a apt_opts
+    current=$(installed_version)
+    log "Checking for OnionPress updates..."
+    echo "  Checking for updates..."
+    if ! update_find_release "$want" "$pre"; then
+        log "ERROR: update: $UPDATE_ERROR"
+        echo "  ERROR: $UPDATE_ERROR Nothing was installed."
+        return 1
+    fi
+    # An install whose version cannot be read takes any release.
+    if ! is_release_version "$current" || version_newer "$UPDATE_VERSION" "$current"; then
+        newer=yes
+    fi
+
+    if [ "$check" = "yes" ]; then
+        echo "  Installed: ${current:-unknown}"
+        echo "  Release:   $UPDATE_TAG"
+        if [ "$newer" != "yes" ]; then
+            echo "  OnionPress is up to date."
+        elif [ "$UPDATE_INSTALLABLE" = "yes" ]; then
+            echo "  An update is available. Run 'onionpress update' to install it."
+        else
+            echo "  An update is available, but 'onionpress update' cannot install it: $UPDATE_WHY"
+        fi
+        return 0
+    fi
+
+    if [ "$newer" != "yes" ] && [ "$force" != "yes" ]; then
+        log "update: $current is up to date (release $UPDATE_TAG)"
+        echo "  OnionPress $current is up to date (release $UPDATE_TAG). Nothing to install."
+        echo "  To install $UPDATE_TAG anyway: onionpress update --version $UPDATE_VERSION --force"
+        return 0
+    fi
+    if [ "$UPDATE_INSTALLABLE" != "yes" ]; then
+        log "ERROR: update: $UPDATE_WHY"
+        echo "  ERROR: $UPDATE_WHY Nothing was installed."
+        return 1
+    fi
+    if [ "$INSTALL_DIR" != "$RELEASE_INSTALL_DIR" ]; then
+        log "ERROR: update: installed at $INSTALL_DIR, the package installs $RELEASE_INSTALL_DIR"
+        echo "  ERROR: this OnionPress runs from $INSTALL_DIR; the release package installs $RELEASE_INSTALL_DIR. Nothing was installed."
+        return 1
+    fi
+    for tool in dpkg-deb apt-get sudo python3; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            log "ERROR: update: $tool not found"
+            echo "  ERROR: $tool is not installed; it is needed to install a release. Nothing was installed."
+            return 1
+        fi
+    done
+
+    # A folder of this user's own (mktemp: mode 700) for the download.
+    if ! UPDATE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/onionpress-update.XXXXXXXX"); then
+        echo "  ERROR: could not make a temporary folder. Nothing was installed."
+        return 1
+    fi
+    trap 'rm -rf -- "$UPDATE_TMP"' EXIT
+    log "Downloading $RELEASE_DEB and $RELEASE_SUMS of $UPDATE_TAG..."
+    echo "  Downloading OnionPress $UPDATE_VERSION..."
+    if ! update_fetch_release "$UPDATE_TMP"; then
+        log "ERROR: update: $UPDATE_ERROR"
+        echo "  ERROR: $UPDATE_ERROR Nothing was installed."
+        return 1
+    fi
+    log "update: $RELEASE_DEB of $UPDATE_TAG matches its $RELEASE_SUMS (sha256 $UPDATE_SHA256)"
+    echo "  Checked: $RELEASE_DEB matches the sha256 in the release's $RELEASE_SUMS."
+
+    # apt-get, not dpkg -i, so new dependencies come along; never removing
+    # a package to make room.
+    apt_opts=(-y --no-remove)
+    if [ "$force" = "yes" ]; then
+        apt_opts+=(--reinstall --allow-downgrades)
+    fi
+    log "Installing $UPDATE_TAG with apt-get..."
+    echo "  Installing OnionPress $UPDATE_VERSION (sudo apt-get install)..."
+    if ! sudo apt-get install "${apt_opts[@]}" "$UPDATE_TMP/$RELEASE_DEB" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: update: apt-get could not install $UPDATE_TAG"
+        echo "  ERROR: installing the package failed. Check $LOG_FILE for details."
+        return 1
+    fi
+    rm -rf -- "$UPDATE_TMP"
+    update_finish
+}
+
+# The Settings page's update button on Linux: report only. Code running in
+# WordPress can write requested-action, so this never installs anything;
+# it writes what `update --check` reports, and how to install, to
+# update-result.json for the page to show. At most one GitHub lookup per 5
+# minutes, whatever the page asks (it can ask every 10 s): GitHub allows
+# 60 an hour, and running out would leave `onionpress update` unable to
+# find a release. The answer is kept in $DATA_DIR, which no container
+# mounts.
+update_settings_page_check() {
+    local current ok=false available=false installable=false latest="" text result
+    local cache="$DATA_DIR/update-check.json"
+    if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
+        log "Settings page update check: answered with the one from the last 5 minutes"
+        wp_put /var/lib/onionpress/update-result.json < "$cache" 2>/dev/null \
+            || log "WARNING: could not write update-result.json"
+        return 0
+    fi
+    current=$(installed_version)
+    if update_find_release "" no; then
+        ok=true
+        latest="$UPDATE_VERSION"
+        if ! is_release_version "$current" || version_newer "$UPDATE_VERSION" "$current"; then
+            available=true
+            if [ "$UPDATE_INSTALLABLE" = "yes" ]; then
+                installable=true
+                text="OnionPress $UPDATE_VERSION is available. To install it, run \`onionpress update\` on this machine."
+            else
+                text="OnionPress $UPDATE_VERSION is available, but \`onionpress update\` cannot install it: $UPDATE_WHY"
+            fi
+        else
+            text="OnionPress ${current} is up to date (latest release: $UPDATE_TAG)."
+        fi
+        log "Settings page update check: installed ${current:-unknown}, latest $UPDATE_TAG"
+    else
+        text="Could not check for updates: $UPDATE_ERROR"
+        log "Settings page update check failed: $UPDATE_ERROR"
+    fi
+    if ! result=$(python3 -I -c '
+import datetime, json, sys
+ok = sys.argv[1] == "true"
+result = {"success": ok, ("message" if ok else "error"): sys.argv[6],
+          "current": sys.argv[2], "latest": sys.argv[3] or None,
+          "update_available": sys.argv[4] == "true",
+          "installable": sys.argv[5] == "true",
+          "checked_at": datetime.datetime.now(datetime.timezone.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%SZ")}
+print(json.dumps(result))
+' "$ok" "$current" "$latest" "$available" "$installable" "$text"); then
+        log "WARNING: could not write update-result.json"
+        return 0
+    fi
+    rm -f "$cache"
+    printf '%s\n' "$result" > "$cache" 2>/dev/null || true
+    printf '%s\n' "$result" | wp_put /var/lib/onionpress/update-result.json 2>/dev/null \
+        || log "WARNING: could not write update-result.json"
+}
+
+update_usage() {
+    cat <<EOF
+Usage: onionpress update [--check] [--version X.Y.Z] [--pre] [--force]
+       onionpress update --from-checkout
+
+Installs the onionpress.deb of the latest OnionPress release on GitHub (or
+of release X.Y.Z) with sudo apt-get, once it matches the sha256 published
+in that release's SHA256SUMS, then restarts OnionPress.
+
+  --check          say whether a newer release is available; install nothing
+  --version X.Y.Z  that release instead of the latest
+  --pre            allow a pre-release (without --version: the newest
+                   release, pre-release or not)
+  --force          install even when the release is not newer
+                   (a reinstall or a downgrade)
+  --from-checkout  for developers: install a git checkout instead of a
+                   release (\$HOME/tmp/onionpress, \$HOME/onionpress or
+                   /opt/onionpress-src), unchecked beyond git
+EOF
+}
+
+# `onionpress update [options]` (see update_usage).
+update_cmd() {
+    local check=no force=no pre=no from_checkout=no want=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --check) check=yes ;;
+            --force) force=yes ;;
+            --pre) pre=yes ;;
+            --from-checkout) from_checkout=yes ;;
+            --version)
+                if [ $# -lt 2 ] || [ -z "$2" ]; then
+                    update_usage >&2
+                    return 1
+                fi
+                want="$2"
+                shift
+                ;;
+            --version=*) want="${1#--version=}" ;;
+            -h|--help) update_usage; return 0 ;;
+            *)
+                echo "Unknown option for update: $1" >&2
+                update_usage >&2
+                return 1
+                ;;
+        esac
+        shift
+    done
+    if [ "$from_checkout" = "yes" ]; then
+        if [ "$check" = "yes" ] || [ "$force" = "yes" ] || [ "$pre" = "yes" ] || [ -n "$want" ]; then
+            echo "--from-checkout takes no other option." >&2
+            return 1
+        fi
+        update_from_checkout
+        return 0
+    fi
+    update_from_release "$check" "$want" "$pre" "$force"
+}
+
+# ─── `onionpress update --from-checkout`: a developer's git checkout ──
+
+# The git checkout `onionpress update --from-checkout` installs from,
+# brought up to date: the invoking user's own ($HOME/tmp/onionpress,
+# $HOME/onionpress), else root's /opt/onionpress-src (cloned from GitHub
+# when there is none). Never another account's home: update used to take
+# the first checkout in any /home/*/, so any user on the machine could
+# leave one there for it to install as root. The checkout must pass
+# update_checkout_trusted, have no local changes, and only move forward
+# (git pull --ff-only; it used to reset --hard to whatever origin/main
+# said). Sets UPDATE_REPO_DIR, or UPDATE_ERROR and returns 1.
 update_source_checkout() {
     local d uid state git_as=""
     uid=$(id -u)
@@ -3730,6 +4134,82 @@ update_checkout_trusted() {
         return 1
     fi
     return 0
+}
+
+# `onionpress update --from-checkout`: install the checkout's file set (its
+# own linux/install-tree.sh, the list the .deb and install.sh use), staged
+# beside $INSTALL_DIR and renamed into place (a failure leaves the
+# installed files as they were), then update_finish.
+update_from_checkout() {
+    log "Checking for OnionPress updates..."
+    echo "  Checking for updates..."
+
+    # The checkout to install from, brought forward (see
+    # update_source_checkout: never another user's).
+    if ! update_source_checkout; then
+        log "ERROR: update: $UPDATE_ERROR"
+        echo "  ERROR: $UPDATE_ERROR"
+        return 1
+    fi
+    local repo_dir="$UPDATE_REPO_DIR"
+
+    if [ ! -f "$repo_dir/linux/install-tree.sh" ]; then
+        log "ERROR: update: $repo_dir has no linux/install-tree.sh"
+        echo "  ERROR: $repo_dir is too old to update from (no linux/install-tree.sh)."
+        return 1
+    fi
+    log "Installing updated files from $repo_dir..."
+    echo "  Installing updated files..."
+    if ! sudo bash "$repo_dir/linux/install-tree.sh" install "$repo_dir" "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
+        log "ERROR: update: installing from $repo_dir failed; $INSTALL_DIR is unchanged"
+        echo "  ERROR: installing the update failed; nothing was changed. Check $LOG_FILE for details."
+        return 1
+    fi
+    update_finish
+}
+
+# After an update installed new files (a release's package or a checkout):
+# the new plugins into the running WordPress, the images pulled, and
+# OnionPress restarted, the heartbeat client too.
+update_finish() {
+    local new_version plugin
+    new_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
+
+    # Deploy updated plugins to running container
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
+        for plugin in "$INSTALL_DIR/plugins/"*.php; do
+            wp_put "/var/www/html/wp-content/mu-plugins/$(basename "$plugin")" 644 \
+                < "$plugin" 2>>"$LOG_FILE"
+        done
+        log "Updated plugins deployed to WordPress container"
+    fi
+
+    # Pull latest docker images. Unlike the start path this has no
+    # --policy guard, so it would clobber a local build outright.
+    cd "$INSTALL_DIR/docker"
+    setup_db_passwords
+    if using_local_images; then
+        log "Skipping image pull: running locally built images"
+        echo "  Skipping image pull (running locally built images)"
+    else
+        log "Pulling latest Docker images..."
+        echo "  Pulling latest Docker images..."
+        docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+    fi
+
+    # Restart, the heartbeat client too (its script was replaced):
+    # stopped first, so it sends /offline while the site goes down.
+    log "Restarting OnionPress..."
+    echo "  Restarting OnionPress..."
+    stop_heartbeat_client
+    stop_containers
+    start_containers
+    wait_for_services
+    write_status
+    start_heartbeat_client
+
+    log "Update complete: $new_version"
+    echo "  Update complete! Now running OnionPress $new_version."
 }
 
 main() {
@@ -4096,72 +4576,9 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         update)
-            log "Checking for OnionPress updates..."
-            echo "  Checking for updates..."
-
-            # The checkout to install from, brought forward (see
-            # update_source_checkout: never another user's).
-            if ! update_source_checkout; then
-                log "ERROR: update: $UPDATE_ERROR"
-                echo "  ERROR: $UPDATE_ERROR"
-                exit 1
-            fi
-            local repo_dir="$UPDATE_REPO_DIR"
-
-            # Install exactly the checkout's file set (its own
-            # linux/install-tree.sh, the list the .deb and install.sh use),
-            # staged beside $INSTALL_DIR and renamed into place: a failure
-            # leaves the installed files as they were.
-            if [ ! -f "$repo_dir/linux/install-tree.sh" ]; then
-                log "ERROR: update: $repo_dir has no linux/install-tree.sh"
-                echo "  ERROR: $repo_dir is too old to update from (no linux/install-tree.sh)."
-                exit 1
-            fi
-            log "Installing updated files from $repo_dir..."
-            echo "  Installing updated files..."
-            if ! sudo bash "$repo_dir/linux/install-tree.sh" install "$repo_dir" "$INSTALL_DIR" >> "$LOG_FILE" 2>&1; then
-                log "ERROR: update: installing from $repo_dir failed; $INSTALL_DIR is unchanged"
-                echo "  ERROR: installing the update failed; nothing was changed. Check $LOG_FILE for details."
-                exit 1
-            fi
-            local new_version
-            new_version=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
-
-            # Deploy updated plugins to running container
-            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q onionpress-wordpress; then
-                for plugin in "$INSTALL_DIR/plugins/"*.php; do
-                    wp_put "/var/www/html/wp-content/mu-plugins/$(basename "$plugin")" 644 \
-                        < "$plugin" 2>>"$LOG_FILE"
-                done
-                log "Updated plugins deployed to WordPress container"
-            fi
-
-            # Pull latest docker images. Unlike the start path this has no
-            # --policy guard, so it would clobber a local build outright.
-            cd "$INSTALL_DIR/docker"
-            setup_db_passwords
-            if using_local_images; then
-                log "Skipping image pull: running locally built images"
-                echo "  Skipping image pull (running locally built images)"
-            else
-                log "Pulling latest Docker images..."
-                echo "  Pulling latest Docker images..."
-                docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
-            fi
-
-            # Restart, the heartbeat client too (its script was replaced):
-            # stopped first, so it sends /offline while the site goes down.
-            log "Restarting OnionPress..."
-            echo "  Restarting OnionPress..."
-            stop_heartbeat_client
-            stop_containers
-            start_containers
-            wait_for_services
-            write_status
-            start_heartbeat_client
-
-            log "Update complete: $new_version"
-            echo "  Update complete! Now running OnionPress $new_version."
+            # A released package, checked against the release's SHA256SUMS
+            # (update_cmd); a git checkout only with --from-checkout.
+            update_cmd "${@:2}"
             ;;
 
         write-status)
@@ -4396,19 +4813,13 @@ print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv
                     write_status
                     ;;
                 update)
-                    log "Update requested from settings page..."
-                    # Run the update command and capture result
-                    if "$0" update >> "$LOG_FILE" 2>&1; then
-                        local updated_ver
-                        updated_ver=$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo "unknown")
-                        echo '{"success":true,"version":"'"$updated_ver"'","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/update-result.json 2>/dev/null
-                        log "Update complete: $updated_ver"
-                    else
-                        echo '{"success":false,"error":"Update failed — check logs","updated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/update-result.json 2>/dev/null
-                        log "Update failed"
-                    fi
+                    # Report only: anything running in WordPress can ask
+                    # for this, and it used to run `onionpress update`
+                    # (sudo, as root) for it. The page learns whether a
+                    # release is available and that `onionpress update`
+                    # on this machine installs it.
+                    log "Update check requested from settings page..."
+                    update_settings_page_check
                     ;;
                 *)
                     log "Unknown action: $action"

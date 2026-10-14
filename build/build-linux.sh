@@ -31,8 +31,8 @@ echo "Architecture: all (scripts only, works on any platform)"
 
 # ─── Collect source files ──────────────────────────────────────────────
 # These are the files that get installed to /opt/onionpress: the one list
-# in linux/install-tree.sh, which install.sh and `onionpress update` install
-# from too (a test keeps all three on it).
+# in linux/install-tree.sh, which install.sh and `onionpress update
+# --from-checkout` install from too (a test keeps all three on it).
 
 collect_files() {
     bash "$PROJECT_DIR/linux/install-tree.sh" stage "$PROJECT_DIR" "$1"

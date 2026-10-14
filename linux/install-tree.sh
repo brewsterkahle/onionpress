@@ -2,7 +2,8 @@
 
 # The files OnionPress installs into /opt/onionpress on Linux, and how they
 # get there. Every way in uses this one list: the .deb (build/build-linux.sh
-# stages its tree with it), linux/install.sh and `onionpress update` (both
+# stages its tree with it; plain `onionpress update` installs a release's
+# .deb), linux/install.sh and `onionpress update --from-checkout` (both
 # install with it). Before, each kept its own copy commands, and `update`'s
 # had drifted: it copied src/onion_auth.py and src/key_manager.py long after
 # they moved (the cp failed unnoticed), never refreshed lib/onionpress, and

@@ -279,10 +279,11 @@ if [ ! -d "$REPO_DIR/app/Resources/docker" ]; then
 fi
 
 # Install the files: the one list in linux/install-tree.sh (the .deb's and
-# `onionpress update`'s too), staged beside $INSTALL_DIR and renamed into
-# place, so a reinstall replaces the whole tree. The `cp -r` of each folder
-# this replaces copied into docker/docker/ (and plugins/, themes/...) when
-# the folder was already there, and the old compose file stayed in use.
+# `onionpress update --from-checkout`'s too), staged beside $INSTALL_DIR and
+# renamed into place, so a reinstall replaces the whole tree. The `cp -r`
+# of each folder this replaces copied into docker/docker/ (and plugins/,
+# themes/...) when the folder was already there, and the old compose file
+# stayed in use.
 $SUDO bash "$REPO_DIR/linux/install-tree.sh" install "$REPO_DIR" "$INSTALL_DIR"
 
 # Create /usr/local/bin symlinks NOW, before the tray is started below —

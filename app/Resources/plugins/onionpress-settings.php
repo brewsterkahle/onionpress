@@ -358,6 +358,10 @@ add_action( 'admin_init', function () {
         'update' => 'update',
     );
     $cmd = $cmd_map[ $action ];
+    if ( 'update' === $action ) {
+        // The page polls for this file: an earlier answer is not this one.
+        @unlink( '/var/lib/onionpress/update-result.json' );
+    }
     if ( @file_put_contents( $file, $cmd ) === false ) {
         add_action( 'admin_notices', function () {
             echo '<div class="notice notice-error"><p>Failed to write action request. The shared volume may not be mounted.</p></div>';
@@ -365,16 +369,28 @@ add_action( 'admin_init', function () {
         return;
     }
 
+    // On Linux `update` only checks for a release: the host's handle-action
+    // never installs (`onionpress update`, run on the machine, does).
+    // status.json says the platform; WordPress can write it, so it picks
+    // the wording only, never what the host does.
+    $status_raw         = @file_get_contents( '/var/lib/onionpress/status.json' );
+    $status_now         = ( false !== $status_raw ) ? json_decode( $status_raw, true ) : null;
+    $update_checks_only = is_array( $status_now ) && isset( $status_now['platform'] )
+        && 'linux' === $status_now['platform'];
     $label_map = array(
         'stop' => 'Stopping', 'start' => 'Starting', 'restart' => 'Restarting', 'save-restart' => 'Restarting',
         'check-reachability' => 'Testing Tor reachability for',
         'import-key-file' => 'Importing key for',
         'create-backup' => 'Creating backup of',
         'restore-backup' => 'Restoring backup for',
-        'update' => 'Updating',
+        'update' => $update_checks_only ? 'Checking for a new release of' : 'Updating',
     );
     $label = $label_map[ $action ] ?? 'Processing';
-    $causes_downtime = in_array( $action, array( 'restart', 'save-restart', 'stop', 'restore-backup', 'update' ), true );
+    $downtime_actions = array( 'restart', 'save-restart', 'stop', 'restore-backup' );
+    if ( ! $update_checks_only ) {
+        $downtime_actions[] = 'update';
+    }
+    $causes_downtime = in_array( $action, $downtime_actions, true );
     $poll_action = $cmd_map[ $action ] ?? $action;
     add_action( 'admin_notices', function () use ( $label, $causes_downtime, $poll_action ) {
         $msg = esc_html( $label ) . ' OnionPress... This may take a minute.';
@@ -1667,6 +1683,10 @@ function onionpress_settings_page() {
             var el = document.getElementById('op-update-status');
             if (!el) return;
             var nonce = '<?php echo esc_js( wp_create_nonce( "onionpress_action" ) ); ?>';
+            /* On Linux the page cannot install an update: its button asks the
+               host to check the release, and `onionpress update` on the
+               machine installs it. */
+            var updateChecksOnly = <?php echo ( 'linux' === $current_platform ) ? 'true' : 'false'; ?>;
             function vTag(s) {
                 if (!s) return '';
                 return /^v/i.test(s) ? s : 'v' + s;
@@ -1677,7 +1697,16 @@ function onionpress_settings_page() {
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         var cur = vTag(data.current || '<?php echo esc_js( $op_current_display ); ?>');
-                        if (data.update && data.latest) {
+                        if (data.update && data.latest && updateChecksOnly) {
+                            el.innerHTML =
+                                '<span class="description">version: ' + cur + ', update available: ' + vTag(data.latest) +
+                                ' &mdash; install it by running <code>onionpress update</code> on this machine</span>' +
+                                ' <form method="post" style="display:inline;margin-left:8px;">' +
+                                '<input type="hidden" name="onionpress_action_nonce" value="' + nonce + '">' +
+                                '<input type="hidden" name="onionpress_action" value="update">' +
+                                '<button type="submit" class="button button-small">Check Release</button>' +
+                                '</form>';
+                        } else if (data.update && data.latest) {
                             el.innerHTML =
                                 '<span class="description">version: ' + cur + ', update available: ' + vTag(data.latest) + '</span>' +
                                 ' <form method="post" style="display:inline;margin-left:8px;">' +

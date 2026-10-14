@@ -56,6 +56,9 @@ sudo systemctl start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
+To update: `onionpress update` installs the latest release's `.deb` once it
+matches the sha256 the release publishes in `SHA256SUMS` (`onionpress update --check`
+only says whether there is one).
 To check that a site is reachable over Tor: `onionpress get http://<address>.onion/` (fetches through the tor container and prints the page).
 
 On Linux, WordPress (`http://<this machine>:8080`) is open to other devices on
