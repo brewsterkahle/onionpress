@@ -1400,12 +1400,23 @@ update_images() {
     # build/image-pins.env via build/refresh-image-digests.sh, and
     # tests/test_image_pins.py fails if they drift. Exporting
     # ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE points this at a
-    # locally built stack. mariadb stays on :latest by design.
+    # locally built stack.
+    #
+    # Every image is pinned by digest (the third-party ones too, since the
+    # start-time pull stopped refreshing them), so a pull here fetches
+    # something only when a new OnionPress moved a pin; otherwise it is one
+    # manifest check per image. cloudflared only when the tunnel is on:
+    # compose never starts it otherwise, and it is ~60 MB.
     local images=(
         "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}"
         "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:b233e2909e4451ef4745736189d61c703f8957b4b738ee82e5e8b12d6a835055}"
-        "mariadb:latest"
+        "mariadb:13.0.2@sha256:f1bba652ba57bea3099ca2fe1af692af537c27d96e0bcde39dce29e2ba1ec4f3"
+        "willfarrell/autoheal:latest@sha256:da9e926d48f32021c94c2afd9a993f41da76446dc4a5288a9a4c8a69f8d49586"
+        "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
     )
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        images+=("cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07")
+    fi
     local updated=false
 
     for image in "${images[@]}"; do
@@ -2049,14 +2060,20 @@ start_containers() {
     # Update images if enabled in config
     update_images
 
-    # Pull the images compose is about to start. This runs on every start,
-    # regardless of UPDATE_ON_LAUNCH — update_images() above is a separate,
-    # opt-in refresh, so gating only that one changes nothing here.
+    # Pull the images compose is about to start, but only the ones not
+    # already here. This runs on every start, regardless of UPDATE_ON_LAUNCH —
+    # update_images() above is the separate, opt-in refresh. Until 2.5.3 this
+    # was an unconditional `docker compose pull`, so every launch did
+    # clearnet DNS and registry traffic for images it already had, and the
+    # then-floating mariadb and autoheal tags could change under the user
+    # (issue #36). With every image pinned by digest, `--policy missing`
+    # (the Linux launcher's policy since v2.4.99) pulls exactly what a new
+    # OnionPress release moved a pin to, and nothing on an ordinary launch.
     if using_local_images; then
         log "Skipping image pull: running locally built images"
     else
-        log "Pulling pre-built images..."
-        docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (using cached)"
+        log "Pulling pre-built images (missing only)..."
+        docker compose pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to pull images (using cached)"
     fi
 
     # WordPress's network is shut before anything starts on it.
@@ -2921,14 +2938,13 @@ main() {
                 log "ERROR: Tor not started: the onion service key volume is not in place (see $LOG_FILE)"
                 exit 1
             fi
-            # --pull always force-pulls even when every other pull is
-            # skipped, so it has to be dropped for local images too.
+            # No --pull always: the tor image is pinned by digest, so a
+            # forced pull could only re-confirm the bytes already here, at
+            # the price of a registry round trip on every start (issue #36).
+            # Compose's default (missing) still fetches a pin a new release
+            # moved, and leaves a locally built image alone.
             _tor_rc=0
-            if using_local_images; then
-                docker compose up -d tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
-            else
-                docker compose up -d --pull always tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
-            fi
+            docker compose up -d tor >> "$LOG_FILE" 2>&1 || _tor_rc=$?
             if [ "$_tor_rc" -eq 0 ]; then
                 log "Tor containers started"
             else
