@@ -44,6 +44,24 @@
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - **Cut releases with `build/release.sh`** — it builds BOTH artifacts and uploads both to one release, so the Linux `.deb` can't be forgotten. (It was: v2.4.101–v2.4.106 shipped only the `.dmg`, which 404'd the README's `releases/latest/download/onionpress.deb` link — that link resolves to the *Latest* release's asset of that name.) Bump + commit first, then run it. Cross-platform rule it enforces: the `.dmg` can only be built on macOS, so on **macOS** it builds `.dmg`+`.deb` and creates/updates the release with both; on **Linux** it builds only the `.deb` and *refuses to create* a release (a `.dmg`-less "Latest" would break the Mac link) — it only attaches the `.deb` to an existing release that already carries the matching `.dmg`. Always run the Mac side first.
 - **What goes into `/opt/onionpress` is one list: `linux/install-tree.sh`.** The .deb (`collect_files` stages with it), `linux/install.sh` and `onionpress update` (both `install-tree.sh install`: staged beside the install dir, renamed into place, the old tree removed only after) all use it; a new file for Linux goes in its list, nowhere else. It refuses a missing source, a link or a special file before copying anything. `update` installs from the invoking user's own checkout (`$HOME/tmp/onionpress`, `$HOME/onionpress`) or root's `/opt/onionpress-src` (cloned from GitHub when missing), never another user's home; the checkout's files and the folders above it must be that user's or root's and not world-writable, it must be clean, and it only fast-forwards (no `reset --hard`). Nothing checks a tag or a signature yet (undecided: a signed release asset instead of git), and the Settings page can still start an update (`handle-action update`). `tests/test_linux_install_tree.py`.
+- **CI builds and attests the `.deb` on every published release**
+  (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
+  real `dpkg-deb` on `ubuntu-latest`, `build/check-deb.sh --lintian`, then
+  `gh release upload --clobber` over the Mac-built `onionpress.deb` (plus
+  `onionpress_<version>_all.deb`) with an `actions/attest-build-provenance`
+  attestation (`gh attestation verify onionpress.deb --repo brewsterkahle/onionpress`).
+  The Mac keeps uploading its own `.deb` first so "Latest" is never without
+  one if CI fails. The Mac fallback in `build-linux.sh` must keep recording
+  root ownership and `COPYFILE_DISABLE=1`: v2.5.3's package had every file
+  owned by uid 502 and 215 AppleDouble `._` members. Run `build/check-deb.sh`
+  (Linux) on any package before handing it to anyone. The release job
+  refuses a tag that is not `v<src/menubar.py version>`.
+  `tests/test_linux_package_workflow.py` locks the workflow's permissions
+  split (write only in the release job) and the check script's requirements.
+  On PRs touching `linux/` the workflow runs `linux/install.sh` twice on a
+  fresh runner and checks the second run replaced the first (the nested
+  `docker/docker`, `lib/onionpress/onionpress` of issue #316 that
+  `install-tree.sh` ended).
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 

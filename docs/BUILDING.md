@@ -57,7 +57,13 @@ make doctor        # which build tools you have, and what each missing one costs
 `make deb` and `make extension` need no network at all. The `.dmg` is
 macOS-only because it uses `swiftc`, `lipo`, `codesign`, `diskutil image` and
 `PlistBuddy`; note that `.deb` is *not* Linux-only — `build/build-linux.sh`
-hand-assembles the `ar` archive in Python when `dpkg-deb` is absent.
+hand-assembles the `ar` archive in Python when `dpkg-deb` is absent. Either
+way the package records root as the owner of every file (dpkg installs the
+owner it finds in `data.tar`) and, on macOS, `COPYFILE_DISABLE` keeps bsdtar
+from adding an AppleDouble `._` member per file. `build/check-deb.sh` (Linux:
+it reads the package with `dpkg-deb`; `--lintian` runs lintian too) checks a
+built package for exactly the things the Mac fallback got wrong before
+October 2026; CI runs it on every build (see [CI coverage](#ci-coverage)).
 
 ### What has been proven by actually running it
 
@@ -66,7 +72,7 @@ about. So you know what you are trusting:
 
 | Artifact | Proven |
 |---|---|
-| `.deb` | builds on macOS via the pure-Python `ar` fallback; ships 0 stale `.pyc` (was 18) |
+| `.deb` | builds on macOS via the pure-Python `ar` fallback; ships 0 stale `.pyc` (was 18). Rehearsed in a `debian:trixie` container with the real `dpkg-deb` and lintian 2.122 (2026-10-14): `build/check-deb.sh --lintian` passes; the v2.5.3 release's package, built on the Mac before the fixes, had all 430 members owned by uid 502 and 215 AppleDouble `._` files, a `Description` line starting with `.onion`, a folded `Depends` and an unlisted conffile |
 | `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `diskutil image` (and the `hdiutil` fallback, forced with `DMG_TOOL=hdiutil`). 161 MB, version verified; ships 0 stale `.pyc` (was 31 when built right after `make test-unit`). **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
 | `onionpress-wordpress` image | builds with the classic builder; wp-cli 2.12.0 with the pinned sha256 in the image; a wrong `WP_CLI_SHA256` fails at `sha256sum -c` **before** `chmod +x`; a wrong base digest fails at `FROM` |
 | `onionpress-tor` image | builds on the Tor Project's Onimages `tor:trixie` image in under a minute once it is pulled (isolated Colima VM, classic builder — nothing but mkp224o is compiled); baked in: Tor 0.4.9.13, Docker 29.8.1, mkp224o v1.7.0 against the base's libsodium; image user root, `CMD []`; the entrypoint bootstraps Tor in onion-service, SOCKS-only and takeover-worker modes and converts a delivered PEM key to C Tor's files; the stress worker chains off it; 0 `.pyc` under `/wordlists`; a wrong `MKP224O_COMMIT` fails at the post-clone assert |
@@ -74,6 +80,7 @@ about. So you know what you are trusting:
 | menubar PNGs | `running`, `starting` pixel-identical; `stopped` within 2/255 (see [Generated assets](#generated-assets)) |
 | extensions | byte-reproducible across runs |
 | integration tests | all four suites (81 tests) pass against a disposable stack set up as in [What to run them against](#what-to-run-them-against) — image entrypoint, the minute's wait, no tor — on GitHub-hosted runners in a fork (`ivar/onionpress`, run 36817968776), in about 9 min, leaving only the root site behind; the suites as they were before the guard left three sandbox subsites (run 36817057114). With `/var/lib/onionpress/onion_address` in the container, or one extra subsite, the guard refused before creating anything |
+| `linux-package.yml` | ran in a fork (`ivar/onionpress`, run 38631665798, 2026-10-14, `workflow_dispatch`): the `.deb` built with `dpkg-deb` 1.22 and passed `check-deb.sh --lintian` (lintian 2.117) in 38 s; `install.sh` ran twice on `ubuntu-latest` in 7 min 15 s — rootless Docker set up by the installer itself, images pulled, the onion service reachable after the first run, the second run's tree identical to the checkout with no nested folder, all three user units enabled, WordPress answering on the launcher's port (18080: the runner already has a listener on 8080, so the launcher took the next offset, which is also why the installer's own 8080 wait reported no answer). The release job was skipped, as it must be outside a release |
 | `docker-publish.yml` | ran end to end in a fork (`ivar/onionpress`, run 36064530531, 2026-09-24, on the C Tor-only image) on GitHub-hosted runners only — amd64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`. All three images published under the fork's own namespace as OCI indexes carrying `linux/amd64` and `linux/arm64`; the stress worker's `FROM` resolved to the tor index the same run had merged seconds earlier. 2 min 12 s end to end; tor 58 s (amd64) / 55 s (arm64). The previous run on the arti-compiling image (35479901478, 2026-09-20) took 8 min 50 s |
 
 **The disk-image step now uses `diskutil image`.** On macOS 27 the
@@ -391,6 +398,36 @@ namespace or prefix variables, an account name is hardcoded, or the stress
 worker stops receiving its base. GHCR creates a package private on first
 push; make it public in the package settings if anything must pull it
 anonymously.
+
+`.github/workflows/linux-package.yml` builds the `.deb` on `ubuntu-latest`
+with the real `dpkg-deb` on every push and pull request, runs
+`build/check-deb.sh --lintian` on it (root ownership, executable plugin
+scripts, the `python3-nacl (>= 1.5.0)` dependency, no AppleDouble litter,
+lintian errors beyond an accepted list) and keeps it as a run artifact. On a
+*published* release it attaches the package to that release — `onionpress.deb`
+over the Mac-built copy `build/release.sh` uploaded, plus
+`onionpress_<version>_all.deb` — with a build-provenance attestation from
+`actions/attest-build-provenance`, so anyone can check a download:
+
+```bash
+gh attestation verify onionpress.deb --repo brewsterkahle/onionpress
+```
+
+The Mac still creates the release and uploads its own `.deb` first: "Latest"
+must never lack a `.deb` (the README links
+`releases/latest/download/onionpress.deb`), and a CI failure must not leave
+it that way. The deb job also refuses a release whose tag is not
+`v<src/menubar.py version>`. When a pull request touches `linux/`, a second
+job runs `linux/install.sh` twice on the runner, like a user re-running the
+README's `curl | bash` line to update, and checks that the second run
+replaced the first (no `docker/docker` or `lib/onionpress/onionpress`, the
+nested trees of issue #316 that `linux/install-tree.sh` ended), that the
+installed trees match the checkout, that the user units are enabled and that WordPress answers on
+port 8080. Nothing in the workflow names this repository or a secret; the
+attestation signs with the run's OIDC identity and the upload goes to the
+repository the run belongs to, so a fork's release gets its own attested
+`.deb`. Only the release job, which never runs for a pull request, has write
+access. `tests/test_linux_package_workflow.py` enforces all of this.
 
 **`docker-publish.yml` was deliberately not rewired to call `build-images.sh`.**
 The two CI paths differ in ways a shared script would have to absorb

@@ -1,0 +1,284 @@
+# Builds the Linux package (.deb) with the real Debian tools, checks it, and
+# on a published release attaches it to that release with a build-provenance
+# attestation. Also runs linux/install.sh twice on a fresh runner when a
+# pull request touches linux/.
+#
+# WHY
+#   build/release.sh builds the .deb on the maintainer's Mac through
+#   build/build-linux.sh's pure-Python `ar` fallback, where dpkg-deb and
+#   lintian never run. v2.5.3's .deb had every file owned by uid 502 (the
+#   Mac user — dpkg installs the owner recorded in data.tar) and 215 of its
+#   430 members were macOS AppleDouble `._` files. Here the package is built
+#   on ubuntu-latest with dpkg-deb, checked by build/check-deb.sh (root
+#   ownership, executable scripts, the python3-nacl dependency, no `._`
+#   litter, lintian) and, for a published release, uploaded over the
+#   Mac-built asset of the same name together with an attestation from
+#   actions/attest-build-provenance. Anyone can then check what they
+#   downloaded really came out of this workflow at that commit:
+#
+#       gh attestation verify onionpress.deb --repo <owner>/onionpress
+#
+#   The Mac still creates the release and uploads its own .deb first
+#   (build/release.sh): "Latest" must never be without a .deb (the README's
+#   releases/latest/download/onionpress.deb link), and a CI failure must not
+#   leave it that way. This run replaces that .deb within minutes.
+#
+#   The install smoke test is issue #316's: a user who re-runs the README's
+#   curl | bash line to update used to get docker/docker,
+#   lib/onionpress/onionpress and so on, with the launcher still running the
+#   first install's Python package.
+#
+# NOTHING OUTSIDE GITHUB
+#   Every job runs on a GitHub-hosted runner. No secret is used: the
+#   attestation signs with the workflow's OIDC identity, and the upload goes
+#   to the repository the run belongs to, so a fork's release gets its own
+#   attested .deb. tests/test_linux_package_workflow.py enforces this and
+#   the permissions split below.
+#
+# PERMISSIONS
+#   The build and smoke jobs run on pull requests, from forks too, where
+#   they execute contributor code with a read-only token. Only the release
+#   job, which cannot run for a pull request, has write access.
+
+name: Linux package
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    name: Build and check the .deb
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lintian
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lintian
+
+      - name: Read the version
+        id: version
+        run: |
+          VERSION=$(grep 'self\.version *= *"' src/menubar.py | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          [ -n "$VERSION" ] || { echo "no version in src/menubar.py"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "OnionPress $VERSION"
+
+      # A release tag cut from the wrong commit would attach a .deb whose
+      # Version: field disagrees with the tag it hangs on.
+      - name: The release tag must be this version
+        if: github.event_name == 'release'
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ "$TAG" != "v${{ steps.version.outputs.version }}" ]; then
+            echo "release tag is $TAG but src/menubar.py says ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Build with dpkg-deb
+        run: |
+          command -v dpkg-deb
+          bash build/build-linux.sh
+
+      - name: Check the package
+        run: bash build/check-deb.sh build/onionpress.deb --expect-version "${{ steps.version.outputs.version }}" --lintian
+
+      - name: Package contents
+        run: |
+          dpkg-deb --info build/onionpress.deb
+          sha256sum build/onionpress.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onionpress-deb
+          path: build/onionpress.deb
+          if-no-files-found: error
+
+  release:
+    name: Attest and attach to the release
+    if: github.event_name == 'release'
+    needs: deb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # gh release upload
+      id-token: write      # the attestation's Sigstore signing identity
+      attestations: write  # store the attestation with the repository
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: onionpress-deb
+
+      # Signed over the file's digest, so it also verifies the versioned
+      # copy uploaded below, which is byte-identical.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: onionpress.deb
+
+      # onionpress.deb is the name the README links to through
+      # releases/latest/download/; onionpress_<version>_all.deb is the
+      # Debian name an apt repository would carry. --clobber replaces the
+      # Mac-built onionpress.deb build/release.sh uploaded when it created
+      # the release.
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.deb.outputs.version }}"
+          cp onionpress.deb "onionpress_${VERSION}_all.deb"
+          sha256sum onionpress.deb "onionpress_${VERSION}_all.deb"
+          gh release upload "${{ github.event.release.tag_name }}" \
+            onionpress.deb "onionpress_${VERSION}_all.deb" \
+            --clobber --repo "${{ github.repository }}"
+          gh release view "${{ github.event.release.tag_name }}" --repo "${{ github.repository }}" \
+            --json assets --jq '.assets[] | "  " + .name'
+
+  # ─── install.sh twice ────────────────────────────────────────────────
+  # Only when a pull request touches linux/ (or this workflow): the smoke
+  # test pulls the container images and starts the site twice, which no
+  # Python-only change needs to pay for. Never on push or release.
+
+  changes:
+    name: Did linux/ change?
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      linux: ${{ steps.filter.outputs.linux }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "linux=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "Changed files:"; echo "$CHANGED" | sed 's/^/  /'
+          if echo "$CHANGED" | grep -qE '^(linux/|\.github/workflows/linux-package\.yml)'; then
+            echo "linux=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "linux=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  install-twice:
+    name: install.sh twice on a fresh Ubuntu
+    needs: changes
+    if: needs.changes.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner is a fresh Ubuntu with Docker CE from Docker's own
+      # repository, which is what a user who installed Docker first has.
+      # install.sh sets Docker up in rootless mode and manages OnionPress
+      # as systemd user units, so three things a logged-in user has must be
+      # arranged for the runner's service account:
+      #   * the rootless extras (dockerd-rootless-setuptool.sh): install.sh
+      #     installs them only when it installs Docker itself. The runner
+      #     image installs Docker from Docker's apt repository and then
+      #     removes that repository, so it is added back the way install.sh
+      #     adds it;
+      #   * a subordinate uid/gid range, which adduser gives a human user;
+      #   * a running user systemd instance, which a login session starts.
+      #     Lingering starts it without one. install.sh enables lingering
+      #     too, but its first `systemctl --user` call follows immediately.
+      - name: Make the runner look like a user's machine
+        run: |
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+            | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq docker-ce-rootless-extras uidmap dbus-user-session slirp4netns
+          if ! grep -q "^$USER:" /etc/subuid; then
+            sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
+          fi
+          sudo loginctl enable-linger "$USER"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for i in $(seq 1 30); do
+            [ -S "$XDG_RUNTIME_DIR/bus" ] && break
+            sleep 1
+          done
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" systemctl --user --no-pager status || true
+          id; cat /etc/subuid
+
+      - name: First install
+        run: bash linux/install.sh
+
+      - name: Second install
+        run: bash linux/install.sh
+
+      - name: The second install replaced the first
+        run: |
+          status=0
+          fail() { echo "FAIL: $*"; status=1; }
+          for nested in docker/docker plugins/plugins themes/themes scripts/scripts lib/onionpress/onionpress assets/assets; do
+            [ -e "/opt/onionpress/$nested" ] && fail "/opt/onionpress/$nested exists: the second install copied into the first (issue #316)"
+          done
+          diff -r --exclude=__pycache__ src/onionpress /opt/onionpress/lib/onionpress || fail "/opt/onionpress/lib/onionpress differs from src/onionpress"
+          diff -r --exclude=__pycache__ app/Resources/docker /opt/onionpress/docker || fail "/opt/onionpress/docker differs from app/Resources/docker"
+          diff -r app/Resources/plugins /opt/onionpress/plugins || fail "/opt/onionpress/plugins differs from app/Resources/plugins"
+          diff -r app/Resources/themes /opt/onionpress/themes || fail "/opt/onionpress/themes differs from app/Resources/themes"
+          for f in install_plugin.sh activate_plugin.sh; do
+            [ -x "/opt/onionpress/scripts/$f" ] || fail "/opt/onionpress/scripts/$f missing or not executable"
+          done
+          cmp linux/onionpress /opt/onionpress/onionpress || fail "/opt/onionpress/onionpress differs from linux/onionpress"
+          [ -x /usr/local/bin/onionpress ] || fail "/usr/local/bin/onionpress missing"
+          VERSION=$(grep 'self\.version *= *"' src/menubar.py | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          [ "$(cat /opt/onionpress/VERSION)" = "$VERSION" ] || fail "/opt/onionpress/VERSION is '$(cat /opt/onionpress/VERSION)', expected $VERSION"
+          for unit in onionpress.service onionpress-heartbeat.service onionpress-watcher.timer; do
+            systemctl --user is-enabled "$unit" || fail "$unit is not enabled"
+          done
+          find /opt/onionpress -maxdepth 2 -type d | sort
+          exit $status
+
+      # install.sh itself only reports whether WordPress answered; the
+      # smoke test requires it. Local only — no Tor involved — so the only
+      # outside dependency is pulling the pinned images from GHCR. The port
+      # comes from the launcher's status.json: a GitHub runner already has
+      # a listener on 8080, so the launcher takes the next offset (18080),
+      # as it does for a second user on one machine.
+      - name: WordPress answers on its local port
+        run: |
+          PORT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wp_port"])' ~/.onionpress/status.json 2>/dev/null || echo 8080)
+          echo "WordPress port: $PORT"
+          for i in $(seq 1 48); do
+            if curl -fsS -o /dev/null --max-time 5 "http://localhost:$PORT/"; then
+              echo "WordPress answered on :$PORT after the second install"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "WordPress did not answer on :$PORT within 4 minutes of the second install"
+          exit 1
+
+      - name: onionpress status
+        run: /usr/local/bin/onionpress status
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          echo "── systemd user units"; systemctl --user --no-pager list-units 'onionpress*' || true
+          echo "── onionpress.service journal"; journalctl --user -u onionpress --no-pager | tail -150 || true
+          echo "── containers"; DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock" docker ps -a || true
+          echo "── onionpress.log"; tail -100 ~/.onionpress/onionpress.log 2>/dev/null || true
+          echo "── status.json"; cat ~/.onionpress/status.json 2>/dev/null || true
+          echo "── listeners"; ss -ltnp 2>/dev/null || true
