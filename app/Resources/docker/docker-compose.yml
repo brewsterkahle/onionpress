@@ -1,7 +1,7 @@
 # Every service drops every capability, adds back only the ones it was seen
 # to need, and runs with no-new-privileges. So do the takeover workers the
-# onionheaven container starts (onionheaven_common's _spawn_worker) and every
-# one-shot `docker run` in the launchers. tests/test_container_capabilities.py
+# farm controller starts for the onionheaven container (onionheaven-farm.py's
+# worker_run_argv) and every one-shot `docker run` in the launchers. tests/test_container_capabilities.py
 # enforces it, with each service's and each `docker run`'s cap_add held to
 # an allowlist in the test.
 #
@@ -38,8 +38,8 @@
 # debian-tor, www-data or mysql process climbing back to root through su,
 # mount, passwd or any other setuid binary in an image.
 #
-# autoheal, autoheal-proxy and cloudflared add nothing back; none of them
-# uses a capability (see each).
+# autoheal, autoheal-proxy, onionheaven-farm and cloudflared add nothing
+# back; none of them uses a capability (see each).
 services:
   tor:
     image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}
@@ -351,6 +351,57 @@ services:
       - autoheal-proxy:/run/autoheal-proxy
     restart: unless-stopped
 
+  # The OnionHeaven farm controller: the one Tor-side container with the
+  # Docker socket. The onionheaven service's heartbeat used to mount the
+  # socket itself to create and drive the takeover workers; a compromised
+  # heartbeat could then `docker run -v /:/x` (the socket is root on the
+  # Colima VM, the user's own account under rootless Docker). Now the
+  # heartbeat asks this process over a unix socket on the
+  # onionpress-onionheaven-farm volume, which only the two mount, and the
+  # process knows six verbs with validated arguments: spawn a worker (a
+  # fixed `docker run` of the image below), remove, list and inspect
+  # workers, run one of a fixed set of commands inside one, and read the
+  # site's onion address from onionpress-tor (onionheaven-farm.py says what
+  # exactly). Nothing in a request chooses an image, a mount, a
+  # capability or a command line.
+  #
+  # Same image as the rest of the Tor side (entrypoint mode
+  # FARM_CONTROLLER=1), no network, every capability dropped, a read-only
+  # root filesystem: it runs the docker CLI as root, the socket's owner in
+  # the VM and the user's uid under rootless Docker, and nothing else
+  # (python3 writes nothing; /tmp is a tmpfs for the CLI's own temp files).
+  # NO_ONION_SERVICE=1 is for an
+  # older image that does not know FARM_CONTROLLER: it then idles as a
+  # SOCKS-only Tor with no network instead of trying to be the site's Tor.
+  # Refusals and every request are logged (`docker logs onionheaven-farm`).
+  onionheaven-farm:
+    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
+    container_name: onionheaven-farm
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - TZ=${TZ:-UTC}
+      - FARM_CONTROLLER=1
+      - NO_ONION_SERVICE=1
+      # Takeover workers run this, the same reference as `image:` above —
+      # never a floating tag (onionheaven-farm.py's takeover_image).
+      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - onionheaven-farm:/run/onionheaven-farm
+    tmpfs:
+      - /tmp
+    read_only: true
+    network_mode: none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   onionheaven:
     image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
     container_name: onionheaven
@@ -371,17 +422,16 @@ services:
       - ONIONPRESS_VERSION=${ONIONPRESS_VERSION:-unknown}
       - TOR_PROPAGATION_DELAY=${ONIONHEAVEN_PROPAGATION_DELAY:-180}
       - ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD=${ONIONHEAVEN_MAX_SERVICES:-50}
-      # Takeover workers run this, the same reference as `image:` above —
-      # never a floating tag (onionheaven_common.takeover_image).
-      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
-    # The one Tor-side container that keeps the Docker socket: its heartbeat
-    # monitor creates, inspects, execs into and removes the takeover worker
-    # containers. It hosts no onion service. Next step is to put this
-    # behind a narrow orchestrator too — see docs/DOCKER-SOCKET.md.
+    # No Docker socket: its heartbeat monitor creates, inspects, execs into
+    # and removes the takeover worker containers through onionheaven-farm
+    # above, over the socket on the onionheaven-farm volume. It hosts no
+    # onion service. See docs/DOCKER-SOCKET.md.
     volumes:
       - onionpress-data:/var/lib/onionpress
       - onionheaven-data:/var/lib/onionheaven
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - onionheaven-farm:/run/onionheaven-farm
+    depends_on:
+      - onionheaven-farm
     restart: unless-stopped
     # Starts Tor with su (SETGID, SETUID). DAC_OVERRIDE: the data migration
     # reads and clears the old location in /var/lib/onionpress (www-data's,
@@ -435,6 +485,10 @@ volumes:
   # Holds nothing but autoheal-proxy's listening socket.
   autoheal-proxy:
     name: onionpress-autoheal-proxy
+  # Holds nothing but the farm controller's listening socket (farm.sock),
+  # for onionheaven's heartbeat.
+  onionheaven-farm:
+    name: onionpress-onionheaven-farm
 
 networks:
   # The Tor side: tor, onionheaven, cloudflared and the takeover workers

@@ -11,7 +11,7 @@ which updates last_healthy timestamps. This monitor:
 
   1. Scans the DB for stale heartbeats (missed 3+ beats = 180s) → takeover,
      and for /offline requests the API server recorded → takeover now
-     (web-server.py has no Docker socket; this container does)
+     (web-server.py cannot reach the farm controller; this container can)
   2. Audits recent takeovers by pinging the healthcheck address → detect false positives
   3. Manages farm scaling for takeover workers
 
@@ -28,7 +28,6 @@ monitor waits in wait_for_hub_admission and never reads the registry.
 
 import os
 import sqlite3
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -37,6 +36,7 @@ from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
     takeover_function, release_function, unregister_entry,
     check_worker_bootstrap, cleanup_dead_workers, fix_assigned_count_drift,
+    farm_exec,
     takeover_requested_now, clear_takeover_request,
     _init_worker_index, _ensure_capacity, _pick_worker,
     _exec_takeover, _exec_release,
@@ -110,33 +110,13 @@ def _get_tor_detached(container_name):
     Returns a set of content addresses (with .onion suffix), or None on error.
     Only well-formed onion addresses: the RECONCILE pass hands each "extra"
     one back to the worker's queue manager.
+    The control-port exchange runs inside the worker, through the farm
+    controller's `onions-detached` verb.
     """
     if not worker_name_ok(container_name, "list the onions of"):
         return None
     try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "python3", "-c",
-             "import socket, binascii\n"
-             "cookie = open('/var/lib/tor/control_auth_cookie','rb').read()\n"
-             "s = socket.socket()\n"
-             "s.settimeout(10)\n"
-             "s.connect(('127.0.0.1',9051))\n"
-             "s.send(('AUTHENTICATE ' + binascii.hexlify(cookie).decode() + '\\r\\n').encode())\n"
-             "s.recv(256)\n"
-             "s.send(b'GETINFO onions/detached\\r\\n')\n"
-             "data = b''\n"
-             "while True:\n"
-             "    chunk = s.recv(8192)\n"
-             "    if not chunk: break\n"
-             "    data += chunk\n"
-             "    if b'250 OK' in data: break\n"
-             "s.close()\n"
-             "for l in data.decode().strip().split('\\n'):\n"
-             "    l = l.strip()\n"
-             "    if l and not l.startswith('250') and l != '.':\n"
-             "        print(l + '.onion')\n"],
-            capture_output=True, text=True, timeout=15
-        )
+        result = farm_exec(container_name, "onions-detached")
         if result.returncode != 0:
             return None
         onions = set()
@@ -474,7 +454,7 @@ def main():
 
                 if entry["status"] == "online" and takeover_requested_now(entry):
                     # An /offline that the API server (onionpress-tor, no
-                    # Docker socket) recorded instead of acting on. Take
+                    # farm controller) recorded instead of acting on. Take
                     # over now, as it would have: force, no peer grace.
                     stale_count += 1
                     log(f"/offline from {ha} (content: {ca}) — triggering takeover")

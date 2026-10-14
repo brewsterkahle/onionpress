@@ -10,18 +10,20 @@ traffic, and `tests/test_docker_socket_scope.py` fails if that changes.
 | Container | Socket | Uses Docker for | Faces |
 |---|---|---|---|
 | `onionpress-tor` | **no** | — (see below) | Tor: the site, the healthcheck service, the OnionHeaven API on 8083 |
-| `onionheaven` | yes | the heartbeat: `docker run`/`rm` takeover workers, `docker exec` their queue managers and Tor control ports, `docker inspect` them; `reset_onionheaven` adds `ps`, `cp` and exec into itself | no onion service; outbound Tor; 8082/9050 on `onionpress-network`, 9050 for WordPress on `onionpress-wordpress-network` |
+| `onionheaven` | **no** | the heartbeat asks `onionheaven-farm` (below) to start, remove, inspect and run fixed commands in the takeover workers | no onion service; outbound Tor; 8082/9050 on `onionpress-network`, 9050 for WordPress on `onionpress-wordpress-network` |
+| `onionheaven-farm` | yes, read-only mount | the farm controller (`onionheaven-farm.py`): `docker run` a worker with a fixed shape, `rm`, `ps`, `inspect`, `exec` one of eight fixed commands, `cat` the site's address in `onionpress-tor`; refuses everything else | nothing (`network_mode: none`), a unix socket on the `onionpress-onionheaven-farm` volume that only `onionheaven` mounts |
 | `onionheaven-takeover-N` | no | — | Tor (the redirect for taken-over addresses) |
 | `autoheal` | **no** | restarts unhealthy `autoheal=true` containers, via `autoheal-proxy` | nothing (`network_mode: none`) |
 | `autoheal-proxy` | yes, read-only mount | passes `GET /containers/json` and `POST /containers/<id>/restart`, refuses the rest | nothing (`network_mode: none`), a unix socket on the `onionpress-autoheal-proxy` volume |
 
 Every Docker call `onionpress-tor` used to make came from `web-server.py`
 through `onionheaven_common`, and all of it was OnionHeaven hub work. On a
-node nobody registers with, none of it ever ran.
+node nobody registers with, none of it ever ran. `onionheaven` held the
+socket itself until the farm controller (below) took it over.
 
 ## How onionpress-tor works without it
 
-`onionheaven_common.docker_available()` is false there, and the shared code
+`onionheaven_common.farm_available()` is false there, and the shared code
 records the work in the registry (on the `onionpress-onionheaven-data`
 volume, which both containers mount; see "The OnionHeaven hub data" below)
 for a process that has Docker:
@@ -47,8 +49,9 @@ for a process that has Docker:
 - **`/reset-onionheaven`** — answers 503. `onionpress reset-onionheaven`
   (Linux) runs `reset_onionheaven()` in the `onionheaven` container instead.
 
-With an older compose file that still mounts the socket into `onionpress-tor`,
-the same code takes the old synchronous path.
+With an older compose file that mounts no farm socket into `onionheaven`,
+the heartbeat records the same way and nothing acts on it (see the release
+rule under "The farm controller").
 
 **Release rule:** this is compose plus tor-image code. Publish the tor image
 built from the change and refresh the pins before releasing the app and the
@@ -570,42 +573,77 @@ onionpress-tor:9050 https://check.torproject.org/api/ip` still says
 `"IsTor":true`. `onionpress.cli wordpress-egress --check` asks the same as
 the launchers do.
 
-## Next: the heartbeat's socket
+## The farm controller
 
-What remains is the `onionheaven` container. It hosts no onion service, but
-it runs Tor, a shell HTTP responder on 8082 and a SOCKS port reachable from
-`onionpress-network` and `onionpress-wordpress-network`, and parses output from workers that do face Tor. A path
-allowlist is not enough here: container create and exec bodies (privileged,
-binds, devices, user, command) are what matter, and a path-filtering proxy
-such as the one in front of autoheal cannot inspect them.
+`onionheaven` hosts no onion service, but it runs Tor, a shell HTTP
+responder on 8082 and a SOCKS port reachable from `onionpress-network`, and
+its heartbeat parses output from workers that do face Tor, works through a
+registry that anyone on Tor writes to, and fetches registrants' healthcheck
+addresses. It used to mount the Docker socket read-write to create and
+drive the takeover workers, so a bug there was `docker run -v $HOME:/x` on
+the Docker host. A path allowlist such as the one in front of autoheal is no
+help: `POST /containers/create` with any `Binds` and `POST
+/containers/<id>/exec` with any `Cmd` are paths it would have to allow, and
+`:ro` on the mount changes nothing (the API is HTTP over the socket).
 
-1. **A farm controller.** A small new service, same image with its own entrypoint
-   mode, holding the socket, with `network_mode: none`, listening on a unix
-   socket on a dedicated volume that only it and `onionheaven` mount. Fixed
-   verbs with validated arguments: `spawn N`, `remove N`, `running N`,
-   `list`, and `exec N <verb> [address]` for a fixed set of commands (queue
-   manager `takeover`/`release`/`has`/`status`/`addr_state`, Tor bootstrap
-   phase, `onions/detached`, worker liveness). `N` is an integer, the address
-   must match the v3 pattern, and the worker's shape (image, network, volume,
-   ulimit, restart policy, no extra privileges) is built in, not passed.
-   The image should be the stack's pinned one passed in from compose, as
-   `onionheaven` already receives it (`ONIONHEAVEN_IMAGE`).
-   `onionheaven_common`'s `docker` calls become calls to this client, and
-   `onionheaven` loses the socket. Compose and image again ship together.
-2. **Workers without `docker exec`.** Optional, and better: give each worker's
-   queue manager a control socket on a volume shared only with `onionheaven`
-   (never `onionpress-persistent-data`, which `wordpress` also mounts). Then the
+So the socket moved to a container of its own, `onionheaven-farm`, running
+`onionheaven-farm.py` from the same image (entrypoint mode
+`FARM_CONTROLLER=1`) with `network_mode: none`, every capability dropped
+and a read-only root filesystem. It listens on `/run/onionheaven-farm/farm.sock` (mode 0600, root;
+the heartbeat is root too) on the `onionpress-onionheaven-farm` volume,
+which only it and `onionheaven` mount. One JSON line in, one out, per
+connection. The verbs, each with validated arguments:
+
+| Verb | Arguments | Runs |
+|---|---|---|
+| `spawn` | `name` = `onionheaven-takeover-N` | `docker rm -f` then a `docker run` whose every flag is the controller's: the image compose passes it as `ONIONHEAVEN_IMAGE` (else its own image ID, never a tag), `onionpress-network`, the hub data volume at `/var/lib/onionheaven` and nothing else, the nofile ulimit, bounded logs, `--cap-drop ALL` plus the worker's three capabilities, `no-new-privileges`, `TAKEOVER_WORKER=1`, `CONTAINER_NAME`, `MAX_TAKEOVER_SERVICES`, `TZ`, restart unless-stopped. Refused beyond `ONIONHEAVEN_MAX_WORKERS` (64) worker containers. |
+| `remove` | `name` (also the older `onionheaven-poll-N`) | `docker rm -f` |
+| `list` | — | `docker ps -a`, filtered to worker names |
+| `inspect` | `name` | `docker inspect`: exists, running, the `Mounts` JSON (the heartbeat's `_mounts_hub_data` reads it as before) |
+| `exec` | `name` = `onionheaven-takeover-N`, `verb`, `address` (v3, required by `takeover`/`release`/`has`/`addr_state`, refused by the rest) | `docker exec` of one of: the queue manager's `takeover`, `release`, `has`, `addr_state`, `status`; Tor's `bootstrap-phase` or `onions/detached` through the control port; `alive` (is the worker process running). The command lines are the controller's, from the ones the heartbeat used to pass to `docker exec` itself. |
+| `tor-address` | — | `docker exec onionpress-tor cat` of the hostname file, checked against the v3 pattern (hub admission in `onionheaven`, which does not mount the Tor state volume) |
+
+Unknown ops, fields, verbs, and names or addresses that do not match are
+refused and logged, as is every request's outcome (`docker logs
+onionheaven-farm`), without the workers' output. Output returned to the
+heartbeat is capped at 64 KiB per stream; requests at 4 KiB.
+
+On the heartbeat's side `onionheaven_common` has `farm_available()`,
+`farm_request()` (one request), `farm_exec()` (returns a `CompletedProcess`
+so the callers parse the worker's output as they did), `farm_list`,
+`farm_inspect`, `farm_remove`. `reset_onionheaven` restarts the heartbeat
+as a local process (it runs inside `onionheaven`) and no longer copies code
+into workers: they start from the pinned image, which is the current code.
+The `tor-address` verb is the only call that reaches a container other than
+a worker.
+
+`tests/test_onionheaven_farm.py` holds the validation table, the fixed argv
+of every verb, the protocol over a real unix socket, and a census: the
+only compose services that mount the socket are the two proxies (each with
+no network and no capability), and the only script in the tor image that
+calls `docker` is the controller.
+
+**Release rule:** compose plus tor-image code, together. A new compose
+file with an old image: `onionheaven-farm` runs the old entrypoint, which
+knows no `FARM_CONTROLLER` and, thanks to `NO_ONION_SERVICE=1`, idles as a
+SOCKS-only Tor with no network; the old heartbeat has no socket and records
+requests nothing acts on. An old compose file with a new image: the
+heartbeat has the socket but no farm socket, so the same. Either way a hub
+takes nothing over until both arrive. Normal nodes run `onionheaven-farm`
+too (every node runs `onionheaven`, since every node accepts registrations);
+it idles.
+
+## Next
+
+1. **Workers without `docker exec`.** Give each worker's queue manager a
+   control socket on a volume shared only with `onionheaven` (never
+   `onionpress-persistent-data`, which `wordpress` also mounts). Then the
    controller only spawns, inspects and removes, and `exec` disappears.
-3. **Reset without `docker cp`.** `_patch_worker_code` and the heartbeat
-   restart via `docker exec onionheaven` are development conveniences;
-   recreate workers from the current image and signal the heartbeat inside its
-   own container instead.
-4. **Smaller surfaces.** Bind `onionheaven`'s 8082 redirect and SOCKS port to
-   loopback or drop them (takeovers are served by the workers), move workers
-   to a network of their own, and build the tor image without the docker CLI
-   where it is not used.
-5. **Normal nodes.** Every node accepts registrations by design, so every node
-   runs `onionheaven`. If registration becomes hub-only, the controller and
-   `onionheaven` could move behind a compose profile that only a hub enables,
-   and a normal install would run nothing with the socket except
+2. **Smaller surfaces.** Bind `onionheaven`'s 8082 redirect and SOCKS port
+   to loopback or drop them (takeovers are served by the workers), move
+   workers to a network of their own, and build the tor image without the
+   docker CLI where it is not used.
+3. **Normal nodes.** If registration becomes hub-only, the controller and
+   `onionheaven` could move behind a compose profile that only a hub
+   enables, and a normal install would run nothing with the socket except
    `autoheal-proxy`.

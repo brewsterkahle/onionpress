@@ -29,12 +29,17 @@ not list for it, fails here. The same census holds every one-shot helper
 tor image, pinned by digest, with its entrypoint overridden and no network:
 only the takeover workers, which serve onion services, join one.
 
+autoheal, autoheal-proxy, onionheaven-farm (the OnionHeaven farm
+controller, which holds the Docker socket and runs the docker CLI, nothing
+else) and cloudflared add nothing back.
+
 No PyYAML and no Docker: the compose files are read with a line-based
 splitter (as in test_docker_socket_scope.py), Python sources with ast, and
 subprocess is mocked.
 """
 
 import ast
+import importlib.util
 import os
 import re
 import shutil
@@ -51,6 +56,11 @@ sys.path.insert(0, os.path.join(DOCKER_DIR, "tor"))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 import onionheaven_common as oc  # noqa: E402
+
+_farm_spec = importlib.util.spec_from_file_location(
+    "onionheaven_farm", os.path.join(DOCKER_DIR, "tor", "onionheaven-farm.py"))
+farm = importlib.util.module_from_spec(_farm_spec)
+_farm_spec.loader.exec_module(farm)
 
 COMPOSE = "app/Resources/docker/docker-compose.yml"
 CLOUDFLARE_COMPOSE = "app/Resources/docker/docker-compose.cloudflare.yml"
@@ -78,6 +88,7 @@ COMPOSE_CAPS = {
         "onionheaven": WORKER,
         "autoheal": set(),
         "autoheal-proxy": set(),
+        "onionheaven-farm": set(),
     },
     CLOUDFLARE_COMPOSE: {
         "cloudflared": set(),
@@ -89,7 +100,7 @@ COMPOSE_CAPS = {
 READ_USER_KEY = {"DAC_OVERRIDE"}             # root reads key files it does not own
 COPY_INTO_TOR_STATE = {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
 DOCKER_RUN_SITES = {
-    ("app/Resources/docker/tor/onionheaven_common.py", "_spawn_worker"): [WORKER],
+    ("app/Resources/docker/tor/onionheaven-farm.py", "worker_run_argv"): [WORKER],
     ("src/onionpress/containers.py", "start_farm_worker"): [WORKER],
     ("app/MacOS/onionpress", "_start_takeover_worker"): [WORKER],
     # Reads arti's files (its own user's, 0700) into a copy root owns.
@@ -125,7 +136,7 @@ PRIVILEGED_SITES = {
 # writing a key, a file test, mkp224o, iptables in the host's namespaces)
 # needs one, and the onion service key never gets the chance to leave.
 WORKER_SITES = {
-    ("app/Resources/docker/tor/onionheaven_common.py", "_spawn_worker"),
+    ("app/Resources/docker/tor/onionheaven-farm.py", "worker_run_argv"),
     ("src/onionpress/containers.py", "start_farm_worker"),
     ("app/MacOS/onionpress", "_start_takeover_worker"),
 }
@@ -567,7 +578,8 @@ class TestComposeServices(unittest.TestCase):
         """The checks below loop over what the splitter finds; make sure it
         finds them all, so a service it misses cannot slip through."""
         self.assertLessEqual(
-            {"tor", "wordpress", "db", "autoheal", "autoheal-proxy", "onionheaven"},
+            {"tor", "wordpress", "db", "autoheal", "autoheal-proxy",
+             "onionheaven-farm", "onionheaven"},
             set(self.files[COMPOSE]))
         self.assertIn("cloudflared", self.files[CLOUDFLARE_COMPOSE])
         for path, services in self.files.items():
@@ -646,9 +658,10 @@ def _done(stdout="", returncode=0):
 
 
 class TestTakeoverWorkers(unittest.TestCase):
-    """The onionheaven container's heartbeat starts the takeover workers with
-    `docker run`. They serve taken-over onion addresses from
-    onionpress-network, so they get the compose services' hardening."""
+    """The farm controller (onionheaven-farm.py) starts the takeover workers
+    with `docker run` when the onionheaven container's heartbeat asks. They
+    serve taken-over onion addresses from onionpress-network, so they get
+    the compose services' hardening."""
 
     def assertHardened(self, argv):
         pairs = _pairs(argv)
@@ -663,21 +676,22 @@ class TestTakeoverWorkers(unittest.TestCase):
         self.assertLess(argv.index("--security-opt"), len(argv) - 1)
 
     def test_spawn_worker(self):
-        conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE TABLE takeover_containers (container_name TEXT PRIMARY KEY,"
-                     " max_services INTEGER, bootstrapped INTEGER,"
-                     " assigned_count INTEGER, created_at TEXT)")
-        self.addCleanup(conn.close)
-        self.addCleanup(setattr, oc, "_next_worker_index", oc._next_worker_index)
         image = "img@sha256:" + "a" * 64
+        argv = farm.worker_run_argv("onionheaven-takeover-0", image)
+        self.assertEqual(argv[0], "run")
+        self.assertEqual(argv[-1], image)
+        self.assertHardened(argv[:-1])
+
+        # op_spawn runs exactly that argv and nothing else of its own.
+        def fake(argv, timeout):
+            return _done("" if argv[0] == "ps" else "cid\n")
         with mock.patch.dict(os.environ, {"ONIONHEAVEN_IMAGE": image}), \
-                mock.patch.object(oc, "log"), \
-                mock.patch.object(oc.subprocess, "run", return_value=_done("cid\n")) as run:
-            oc._spawn_worker(conn)
-        runs = [c.args[0] for c in run.call_args_list if c.args[0][1] == "run"]
-        self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0][-1], image)
-        self.assertHardened(runs[0][:-1])
+                mock.patch.object(farm, "log"), \
+                mock.patch.object(farm, "docker", side_effect=fake) as run:
+            reply = farm.op_spawn({"op": "spawn", "name": "onionheaven-takeover-0"})
+        self.assertTrue(reply["ok"], reply)
+        runs = [c.args[0] for c in run.call_args_list if c.args[0][0] == "run"]
+        self.assertEqual(runs, [argv])
 
     def test_dead_code_spawners_agree(self):
         """Not called today, but they must not start a worker without it."""

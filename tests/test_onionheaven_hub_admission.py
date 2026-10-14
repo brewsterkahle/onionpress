@@ -141,25 +141,26 @@ class AdmissionRuleTest(unittest.TestCase):
 
 
 class ReadTorContainerAddressTest(unittest.TestCase):
+    """The onionheaven container asks the farm controller, whose
+    `tor-address` verb reads the hostname file in onionpress-tor."""
 
-    def _run(self, **kw):
-        result = subprocess.CompletedProcess(args=[], returncode=kw.get("rc", 0),
-                                             stdout=kw.get("out", ""), stderr="")
-        with mock.patch.object(oc.subprocess, "run", return_value=result) as run:
+    def _run(self, reply):
+        with mock.patch.object(oc, "farm_request", return_value=reply) as req, \
+                mock.patch.object(oc.subprocess, "run", side_effect=_no_docker):
             addr = oc.read_tor_container_address()
-        return addr, run
+        return addr, req
 
-    def test_reads_the_hostname_from_the_tor_container(self):
-        addr, run = self._run(out=HUB + "\n")
+    def test_reads_the_hostname_through_the_controller(self):
+        addr, req = self._run({"ok": True, "address": HUB})
         self.assertEqual(addr, HUB)
-        argv = run.call_args[0][0]
-        self.assertEqual(argv[:3], ["docker", "exec", "onionpress-tor"])
-        self.assertEqual(argv[-1], oc.OWN_HOSTNAME_PATH)
+        req.assert_called_once_with("tor-address")
 
     def test_any_failure_is_unknown(self):
-        self.assertIsNone(self._run(rc=1, out=HUB)[0])
-        self.assertIsNone(self._run(out="not an onion address")[0])
-        with mock.patch.object(oc.subprocess, "run", side_effect=OSError("no docker")):
+        self.assertIsNone(self._run({"ok": False, "error": "no"})[0])
+        self.assertIsNone(self._run({"ok": True, "address": None})[0])
+        self.assertIsNone(self._run({"ok": True, "address": "not an onion address"})[0])
+        self.assertIsNone(self._run({"ok": True, "address": 7})[0])
+        with mock.patch.object(oc, "farm_request", side_effect=oc.FarmError("down")):
             self.assertIsNone(oc.read_tor_container_address())
 
 
@@ -172,7 +173,8 @@ class HeartbeatMonitorAdmissionTest(unittest.TestCase):
     def setUp(self):
         self.logs = []
         for p in (mock.patch.object(hbm, "log", self.logs.append),
-                  mock.patch.object(hbm.subprocess, "run", side_effect=_no_docker),
+                  mock.patch.object(oc, "farm_request", side_effect=_no_docker),
+                  mock.patch.object(oc.subprocess, "run", side_effect=_no_docker),
                   mock.patch.dict(os.environ, {}, clear=False)):
             p.start()
             self.addCleanup(p.stop)

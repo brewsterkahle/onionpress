@@ -163,17 +163,24 @@ class EveryClientIsRootTest(unittest.TestCase):
     """0600 is safe only while every client of the socket is root."""
 
     def test_docker_exec_calls_pass_no_user(self):
-        src = _read("app/Resources/docker/tor/onionheaven_common.py")
-        calls = re.findall(r'\[\s*"docker",\s*"exec",(.*?)\]', src, re.S)
-        qm_calls = [c for c in calls if "/onionheaven-queue-manager.py" in c]
-        self.assertEqual(len(qm_calls), 6)
-        for call in qm_calls:
-            self.assertNotRegex(call, r'"(-u|--user)"|"-u\w')
+        """The farm controller (onionheaven-farm.py) runs every `docker exec`
+        into a worker now: its verb table names the queue manager's
+        commands, and op_exec adds nothing but the worker's name."""
+        src = _read("app/Resources/docker/tor/onionheaven-farm.py")
+        table = src[src.index("EXEC_VERBS = {"):src.index("\n}\n", src.index("EXEC_VERBS = {"))]
+        self.assertIn('QUEUE_MANAGER = "/onionheaven-queue-manager.py"', src)
+        qm_verbs = [line for line in table.splitlines() if "QUEUE_MANAGER," in line]
+        self.assertEqual(len(qm_verbs), 5)
+        for line in qm_verbs:
+            self.assertNotRegex(line, r'"(-u|--user)"|"-u\w')
+        op_exec = src[src.index("def op_exec("):src.index("\ndef ", src.index("def op_exec(") + 1)]
+        self.assertIn('argv = ["exec", req["name"]] + inner', op_exec)
+        self.assertNotRegex(op_exec, r"--user|\"-u\"")
 
     def test_workers_run_as_the_image_user_root(self):
         for rel, pattern in (
-                ("app/Resources/docker/tor/onionheaven_common.py",
-                 r'\["docker", "run", "-d",.*?image\]'),
+                ("app/Resources/docker/tor/onionheaven-farm.py",
+                 r'\[\s*"run", "-d",.*?image,\s*\]'),
                 ("src/onionpress/containers.py", r'\[\s*"run", "-d",.*?image,\s*\]'),
                 ("app/MacOS/onionpress", r'docker run -d \\.*?ONIONHEAVEN_IMAGE')):
             spawns = re.findall(pattern, _read(rel), re.S)

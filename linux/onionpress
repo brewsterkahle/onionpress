@@ -1530,9 +1530,10 @@ migrate_tor_network() {
 }
 
 # Clean stress-test entries and refresh takeover workers with current code.
-# reset_onionheaven() drives Docker, and only the onionheaven container has
-# the socket — onionpress-tor's /reset-onionheaven answers 503 — so run it
-# there. Prints the JSON stats; its log lines go to $LOG_FILE.
+# reset_onionheaven() drives Docker through the farm controller, which only
+# the onionheaven container can reach — onionpress-tor's /reset-onionheaven
+# answers 503 — so run it there. Prints the JSON stats; its log lines go to
+# $LOG_FILE.
 reset_onionheaven_in_container() {
     docker exec onionheaven python3 -c '
 import json, sys

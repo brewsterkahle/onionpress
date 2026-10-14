@@ -45,6 +45,11 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 import onionheaven_common as oc  # noqa: E402
 
+_farm_spec = importlib.util.spec_from_file_location(
+    "onionheaven_farm", os.path.join(DOCKER_TOR_DIR, "onionheaven-farm.py"))
+farm = importlib.util.module_from_spec(_farm_spec)
+_farm_spec.loader.exec_module(farm)
+
 COMPOSE = "app/Resources/docker/docker-compose.yml"
 MIGRATE = os.path.join(DOCKER_TOR_DIR, "onionheaven-data-migrate.py")
 VOLUME = "onionpress-onionheaven-data"
@@ -315,25 +320,23 @@ def _mounts(*pairs):
                        for n, d in pairs])
 
 
+def _inspected(running, mounts):
+    """The farm controller's reply to `inspect` for an existing worker."""
+    return {"ok": True, "exists": True, "running": running, "mounts": mounts}
+
+
 class TestWorkerMounts(unittest.TestCase):
 
     def _volume_args(self, argv):
         return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
 
     def test_spawn_worker(self):
-        conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE TABLE takeover_containers (container_name TEXT PRIMARY KEY,"
-                     " max_services INTEGER, bootstrapped INTEGER,"
-                     " assigned_count INTEGER, created_at TEXT)")
-        self.addCleanup(conn.close)
-        self.addCleanup(setattr, oc, "_next_worker_index", oc._next_worker_index)
-        with mock.patch.dict(os.environ, {"ONIONHEAVEN_IMAGE": "img@sha256:" + "a" * 64}), \
-                mock.patch.object(oc, "log"), \
-                mock.patch.object(oc.subprocess, "run", return_value=_done("cid\n")) as run:
-            oc._spawn_worker(conn)
-        runs = [c.args[0] for c in run.call_args_list if c.args[0][1] == "run"]
-        self.assertEqual(len(runs), 1)
-        self.assertEqual(self._volume_args(runs[0]), [f"{VOLUME}:{HUB_DIR}"])
+        """The farm controller's `docker run` for a worker, which it builds
+        itself for the onionheaven container's spawn request."""
+        self.assertEqual(farm.HUB_DATA_VOLUME, VOLUME)
+        self.assertEqual(farm.ONIONHEAVEN_DATA_DIR, HUB_DIR)
+        argv = farm.worker_run_argv("onionheaven-takeover-0", "img@sha256:" + "a" * 64)
+        self.assertEqual(self._volume_args(argv), [f"{VOLUME}:{HUB_DIR}"])
 
     def test_dead_code_spawners_agree(self):
         """Not called today, but they must not bring the old mount back."""
@@ -376,26 +379,32 @@ class TestRetireOldWorkers(unittest.TestCase):
         self.log = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _run(self, inspect_stdout, inspect_rc=0, rm_rc=0, others=None):
-        """Calls made for the registry's workers. others: {name: mounts
+    def _run(self, inspect, rm_ok=True, others=None):
+        """Farm requests made for the registry's workers. inspect: the
+        controller's reply for the registry's worker; others: {name: mounts
         JSON} of worker containers Docker lists that the registry does not."""
         others = others or {}
 
-        def fake(argv, **kwargs):
-            if argv[:3] == ["docker", "ps", "-a"]:
-                return _done("\n".join(["onionheaven-takeover-0"] + list(others)) + "\n")
-            if argv[:4] == ["docker", "inspect", "--format", "{{json .Mounts}}"]:
-                return _done(others[argv[4]])
-            if argv[:2] == ["docker", "inspect"]:
-                return _done(inspect_stdout, inspect_rc)
-            if argv[:3] == ["docker", "rm", "-f"]:
-                return _done("", rm_rc)
-            raise AssertionError(f"unexpected {argv}")
-        with mock.patch.object(oc.subprocess, "run", side_effect=fake) as run:
+        def fake(op, **fields):
+            name = fields.get("name")
+            if op == "list":
+                return {"ok": True, "names": ["onionheaven-takeover-0"] + list(others)}
+            if op == "inspect" and name in others:
+                return {"ok": True, "exists": True, "running": True, "mounts": others[name]}
+            if op == "inspect":
+                if isinstance(inspect, Exception):
+                    raise inspect
+                return inspect
+            if op == "remove":
+                return {"ok": True, "removed": rm_ok}
+            raise AssertionError(f"unexpected {op} {fields}")
+        with mock.patch.object(oc, "farm_request", side_effect=fake) as req, \
+                mock.patch.object(oc.subprocess, "run",
+                                  side_effect=AssertionError("no subprocess")):
             oc.cleanup_dead_workers(self.conn)
-        self.all_calls = [c.args[0] for c in run.call_args_list]
-        return [argv for argv in self.all_calls
-                if argv[:3] != ["docker", "ps", "-a"] and argv[-1] not in others]
+        self.all_calls = [(c.args[0], c.kwargs.get("name")) for c in req.call_args_list]
+        return [(op, name) for op, name in self.all_calls
+                if op != "list" and name not in others]
 
     def _worker_rows(self):
         return self.conn.execute("SELECT COUNT(*) FROM takeover_containers").fetchone()[0]
@@ -404,38 +413,48 @@ class TestRetireOldWorkers(unittest.TestCase):
         return self.conn.execute("SELECT takeover_container FROM registry").fetchone()[0]
 
     def test_a_current_worker_stays(self):
-        calls = self._run("true " + _mounts((VOLUME, HUB_DIR)))
+        calls = self._run(_inspected(True, _mounts((VOLUME, HUB_DIR))))
         self.assertEqual(len(calls), 1)
         self.assertEqual(self._worker_rows(), 1)
         self.assertEqual(self._assigned(), "onionheaven-takeover-0")
 
     def test_an_old_worker_is_retired(self):
-        calls = self._run("true " + _mounts(("onionpress-persistent-data", "/var/lib/onionpress")))
-        self.assertIn(["docker", "rm", "-f", "onionheaven-takeover-0"], calls)
+        calls = self._run(_inspected(True, _mounts(("onionpress-persistent-data",
+                                                    "/var/lib/onionpress"))))
+        self.assertIn(("remove", "onionheaven-takeover-0"), calls)
         self.assertEqual(self._worker_rows(), 0)
         self.assertIsNone(self._assigned())
 
     def test_doubt_keeps_the_worker(self):
-        for out in ("true", "true not-json", "true {}"):
-            with self.subTest(out=out):
-                calls = self._run(out)
+        for mounts in ("", "not-json", "{}"):
+            with self.subTest(mounts=mounts):
+                calls = self._run(_inspected(True, mounts))
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(self._worker_rows(), 1)
 
+    def test_an_unreachable_controller_changes_nothing(self):
+        for reply in (oc.FarmError("down"), {"ok": False, "error": "refused"},
+                      {"ok": True}):
+            with self.subTest(reply=reply):
+                calls = self._run(reply)
+                self.assertEqual(calls, [("inspect", "onionheaven-takeover-0")])
+                self.assertEqual(self._worker_rows(), 1)
+                self.assertEqual(self._assigned(), "onionheaven-takeover-0")
+
     def test_a_failed_removal_keeps_it_registered(self):
-        self._run("true " + _mounts(("onionpress-persistent-data", "/var/lib/onionpress")),
-                  rm_rc=1)
+        self._run(_inspected(True, _mounts(("onionpress-persistent-data",
+                                            "/var/lib/onionpress"))), rm_ok=False)
         self.assertEqual(self._worker_rows(), 1)
         self.assertEqual(self._assigned(), "onionheaven-takeover-0")
 
     def test_a_dead_worker_is_cleaned_up_as_before(self):
-        calls = self._run("false " + _mounts((VOLUME, HUB_DIR)))
+        calls = self._run(_inspected(False, _mounts((VOLUME, HUB_DIR))))
         self.assertEqual(len(calls), 1)
         self.assertEqual(self._worker_rows(), 0)
         self.assertIsNone(self._assigned())
 
     def test_a_vanished_worker_is_cleaned_up_as_before(self):
-        calls = self._run("", inspect_rc=1)
+        calls = self._run({"ok": True, "exists": False})
         self.assertEqual(len(calls), 1)
         self.assertEqual(self._worker_rows(), 0)
 
@@ -443,14 +462,14 @@ class TestRetireOldWorkers(unittest.TestCase):
         """takeover_containers is the snapshot the data move brought over;
         a worker an older heartbeat started later is in no row."""
         old = _mounts(("onionpress-persistent-data", "/var/lib/onionpress"))
-        self._run("true " + _mounts((VOLUME, HUB_DIR)), others={
+        self._run(_inspected(True, _mounts((VOLUME, HUB_DIR))), others={
             "onionheaven-takeover-7": old,
             "onionheaven-poll-2": old,
             "onionheaven-takeover-9": _mounts((VOLUME, HUB_DIR)),
             "onionheaven-takeover-8": "not-json",
             "onionheaven-takeover-x": old,              # not a worker's name
         })
-        removed = sorted(argv[3] for argv in self.all_calls if argv[:3] == ["docker", "rm", "-f"])
+        removed = sorted(name for op, name in self.all_calls if op == "remove")
         self.assertEqual(removed, ["onionheaven-poll-2", "onionheaven-takeover-7"])
         self.assertEqual(self._worker_rows(), 1)
         self.assertEqual(self._assigned(), "onionheaven-takeover-0")

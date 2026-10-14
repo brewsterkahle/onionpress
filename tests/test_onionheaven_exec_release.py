@@ -37,22 +37,23 @@ def _result(returncode=0, stdout="", stderr=""):
 
 
 def _make_side_effect(release=None, has=None):
-    """Returns a subprocess.run side_effect that dispatches on the CLI verb.
+    """Returns a farm_exec side_effect that dispatches on the verb.
 
     Each arg is either a result built by _result(), an Exception class to
     raise, or None (which makes the call fail the test if it happens).
     """
-    def side_effect(cmd, *args, **kwargs):
-        if "release" in cmd:
+    def side_effect(container, verb, address=None):
+        cmd = (container, verb, address)
+        if verb == "release":
             target = release
             label = "release"
-        elif "has" in cmd:
+        elif verb == "has":
             target = has
             label = "has"
         else:
-            raise AssertionError(f"Unexpected subprocess.run cmd: {cmd}")
+            raise AssertionError(f"Unexpected farm_exec call: {cmd}")
         if target is None:
-            raise AssertionError(f"Unexpected {label} subprocess call: {cmd}")
+            raise AssertionError(f"Unexpected {label} farm_exec call: {cmd}")
         if isinstance(target, type) and issubclass(target, BaseException):
             raise target(f"simulated {label} failure")
         return target
@@ -72,7 +73,7 @@ class HasOnionOnWorkerTest(unittest.TestCase):
 
     def _call(self, **kwargs):
         side = _make_side_effect(has=kwargs.get("has"))
-        with mock.patch.object(onionheaven_common.subprocess, "run",
+        with mock.patch.object(onionheaven_common, "farm_exec",
                                side_effect=side):
             return onionheaven_common._has_onion_on_worker(CONTAINER, ADDR)
 
@@ -124,11 +125,11 @@ class ExecReleaseTest(unittest.TestCase):
 
     def _call(self, release=None, has=None):
         side = _make_side_effect(release=release, has=has)
-        with mock.patch.object(onionheaven_common.subprocess, "run",
+        with mock.patch.object(onionheaven_common, "farm_exec",
                                side_effect=side):
             return onionheaven_common._exec_release(CONTAINER, ADDR)
 
-    # --- subprocess-level failures (no has probe) ---
+    # --- controller-level failures (no has probe) ---
 
     def test_release_subprocess_exception(self):
         # No has probe because the release call itself blew up.

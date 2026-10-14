@@ -154,9 +154,10 @@ RUN git clone --depth 1 --branch "${MKP224O_VERSION}" \
 
 # The docker CLI, as a named stage so it is pinned in one place with the rest.
 # It is effectively privileged where /var/run/docker.sock is mounted: the
-# onionheaven container, whose heartbeat uses it to create and drive the
-# OnionHeaven takeover containers. onionpress-tor and the takeover workers run
-# this image without the socket (docs/DOCKER-SOCKET.md).
+# onionheaven-farm container, whose controller (onionheaven-farm.py) uses it
+# to create and drive the OnionHeaven takeover containers on the heartbeat's
+# behalf. onionpress-tor, onionheaven and the takeover workers run this
+# image without the socket (docs/DOCKER-SOCKET.md).
 FROM ${DOCKER_CLI_IMAGE} AS docker-cli
 
 # Stage 2: Runtime — the Tor Project's C Tor image for Debian trixie.
@@ -205,7 +206,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsodium23 python3-nacl \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -c "from nacl.signing import VerifyKey; from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp, has_crypto_scalarmult_ed25519 as ok; assert ok"
-# Docker CLI for heartbeat to manage takeover containers via docker exec/run
+# Docker CLI for the farm controller to manage takeover containers via docker exec/run
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=mkp224o-builder /build/mkp224o/mkp224o /usr/local/bin/mkp224o
 # Record what the pinned base shipped, in the build log where a digest bump
@@ -224,6 +225,7 @@ COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
 COPY onion_auth.py /onion_auth.py
 COPY onionheaven_common.py /onionheaven_common.py
 COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
+COPY onionheaven-farm.py /onionheaven-farm.py
 COPY web-server.py /web-server.py
 COPY onionheaven-takeover-worker.py /onionheaven-takeover-worker.py
 COPY onionheaven-queue-manager.py /onionheaven-queue-manager.py
@@ -233,7 +235,7 @@ COPY tor-watchdog.py /tor-watchdog.py
 COPY onionnames.py /onionnames.py
 COPY onionheaven-data-migrate.py /onionheaven-data-migrate.py
 COPY wordlists /wordlists
-RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
+RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /onionheaven-farm.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
 # Mount point of the OnionHeaven hub data volume (registry and registrants'
 # keys; onionpress-onionheaven-data). Root-only: a fresh volume takes this
 # directory's owner and mode when Docker first mounts it.
