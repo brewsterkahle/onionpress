@@ -46,6 +46,27 @@
 - **Every release carries `SHA256SUMS`** (`<sha256>  onionpress.deb` / `onionpress.dmg`, sha256sum format), written by `build/release.sh` (on Linux it downloads the release's `.dmg` to hash it). A new release is created as a draft; the script downloads `SHA256SUMS` and the `.deb` back, checks them, and only then publishes. It fails instead of finishing a release without them (`tests/test_release_sha256sums.py`). Linux's `onionpress update` installs **only** a release's `onionpress.deb` whose sha256 is its `SHA256SUMS` line, whose package is `onionpress` of the tag's version, and that is newer than the installed one (`--force` reinstalls/downgrades; drafts never; pre-releases only with `--pre`; `--version X.Y.Z`; `--check` reports only), with `sudo apt-get install -y --no-remove`; a git checkout only with `--from-checkout` (developers). So a release without `SHA256SUMS` cannot be installed that way. The Settings page's update button on Linux only checks: handle-action `update` writes `update-result.json` (one GitHub lookup per 5 min) and never installs, since anything in WordPress can write `requested-action` (`tests/test_linux_release_update.py`). Signing `SHA256SUMS` with a pinned key is the planned next step.
 - **What goes into `/opt/onionpress` is one list: `linux/install-tree.sh`.** The .deb (`collect_files` stages with it), `linux/install.sh` and `onionpress update --from-checkout` (both `install-tree.sh install`: staged beside the install dir, renamed into place, the old tree removed only after) all use it; a new file for Linux goes in its list, nowhere else. It refuses a missing source, a link or a special file before copying anything. `update --from-checkout` installs from the invoking user's own checkout (`$HOME/tmp/onionpress`, `$HOME/onionpress`) or root's `/opt/onionpress-src` (cloned from GitHub when missing), never another user's home; the checkout's files and the folders above it must be that user's or root's and not world-writable, it must be clean, and it only fast-forwards (no `reset --hard`). Plain `onionpress update` installs a release's checked `.deb` instead (previous bullet). `tests/test_linux_install_tree.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
+- **CI builds and attests the `.deb` on every published release**
+  (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
+  real `dpkg-deb` on `ubuntu-24.04`, `build/check-deb.sh --lintian`, then
+  `gh release upload --clobber` over the Mac-built `onionpress.deb` (plus
+  `onionpress_<version>_all.deb`) with an `actions/attest-build-provenance`
+  attestation (`gh attestation verify onionpress.deb --repo brewsterkahle/onionpress`),
+  and rewrites the release's `SHA256SUMS` line for `onionpress.deb` (the
+  `.dmg`'s kept) and reads both back: `onionpress update` installs only a
+  `.deb` matching its `SHA256SUMS` line.
+  The Mac keeps uploading its own `.deb` first so "Latest" is never without
+  one if CI fails. The Mac fallback in `build-linux.sh` must keep recording
+  root ownership and `COPYFILE_DISABLE=1`: v2.5.3's package had every file
+  owned by uid 502 and 215 AppleDouble `._` members. Run `build/check-deb.sh`
+  (Linux) on any package before handing it to anyone. The release job
+  refuses a tag that is not `v<src/menubar.py version>`.
+  `tests/test_linux_package_workflow.py` locks the workflow's permissions
+  split (write only in the release job) and the check script's requirements.
+  On PRs touching `linux/` the workflow runs `linux/install.sh` twice on a
+  fresh runner and checks the second run replaced the first (the nested
+  `docker/docker`, `lib/onionpress/onionpress` of issue #316 that
+  `install-tree.sh` ended).
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 

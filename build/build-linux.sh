@@ -495,7 +495,7 @@ chmod 755 "$DEB_ROOT/DEBIAN/postrm"
 # manual path's tar gets the same: GNU tar spells it --owner/--group, BSD tar
 # (macOS, where dpkg-deb is usually missing) --uid/--gid/--uname/--gname.
 if command -v dpkg-deb >/dev/null 2>&1; then
-    dpkg-deb --root-owner-group --build "$DEB_ROOT" "$DEB_OUT"
+    dpkg-deb --build --root-owner-group "$DEB_ROOT" "$DEB_OUT"
 else
     # dpkg-deb not available (e.g. building on macOS) — assemble manually.
     # A .deb is an ar archive containing: debian-binary, control.tar.gz, data.tar.gz
