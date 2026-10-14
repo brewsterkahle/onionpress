@@ -126,6 +126,11 @@ fi
 # Debian's libsodium23 has). 1.5.0 is what Debian 12 and 13, Ubuntu
 # 22.04 and 24.04 and Raspberry Pi OS Bookworm ship, and what CI tests
 # against besides the latest; it has every binding OnionPress uses.
+# Depends is one line: a binary package's control file may not fold it
+# (lintian: multiline-field). No Description line may start with a dot
+# after the space: " .onion address" read as a control statement, and the
+# only valid one is " ." alone (lintian: description-contains-invalid-
+# control-statement). build/check-deb.sh runs lintian on what this makes.
 mkdir -p "$DEB_ROOT/DEBIAN"
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: onionpress
@@ -133,19 +138,23 @@ Version: $VERSION
 Section: web
 Priority: optional
 Architecture: $DEB_ARCH
-Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose,
- uidmap, dbus-user-session, fuse-overlayfs, slirp4netns,
- jq, python3, python3-nacl (>= 1.5.0), zip, unzip,
- python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
+Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, uidmap, dbus-user-session, fuse-overlayfs, slirp4netns, jq, python3, python3-nacl (>= 1.5.0), zip, unzip, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
 Recommends: torbrowser-launcher
 Maintainer: Brewster Kahle <brewster@archive.org>
 Homepage: https://onionpress.org
 Description: Your Decentralized Social Blog Site
  OnionPress turns your computer into a web server running WordPress,
- accessible via the Tor network. Your site gets its own permanent
- .onion address backed up by the Internet Archive's Wayback Machine.
+ accessible via the Tor network. Your site gets its own permanent onion
+ address, backed up by the Internet Archive's Wayback Machine.
  .
  Built on WordPress + Tor + Wayback Machine.
+EOF
+
+# The autostart entry lives in /etc, so dpkg must treat it as a
+# configuration file: a user's edit survives an upgrade instead of being
+# overwritten (Debian Policy 10.7; lintian: file-in-etc-not-marked-as-conffile).
+cat > "$DEB_ROOT/DEBIAN/conffiles" <<EOF
+/etc/xdg/autostart/onionpress-tray.desktop
 EOF
 
 # Post-install: data dir + secrets (first install only), Docker
@@ -503,6 +512,11 @@ else
 
     # debian-binary
     echo "2.0" > "$DEB_TMP/debian-binary"
+
+    # macOS's bsdtar stores extended attributes as AppleDouble `._name`
+    # members unless told not to: the v2.5.3 .deb was 430 members, 215 of
+    # them `._` files, every one installed into /opt/onionpress.
+    export COPYFILE_DISABLE=1
 
     # control.tar.gz
     (cd "$DEB_ROOT/DEBIAN" && tar "${ROOT_OWNED[@]}" -czf "$DEB_TMP/control.tar.gz" .)
