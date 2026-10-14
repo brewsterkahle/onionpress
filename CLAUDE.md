@@ -263,7 +263,7 @@
   import-key`, and the Mac page's import through the menubar) goes
   through the launcher's `replace_onion_key`: the key is checked
   (`key_manager.check_expanded_secret_key`: 64 bytes, bit 255 clear,
-  nonzero mod L, PyNaCl's `crypto_scalarmult_ed25519_base_noclamp` agrees)
+  nonzero mod L; the public key is libsodium's, `derive_public_key`)
   and staged, a copy of every key in use goes to
   `~/.onionpress/replaced-keys/<address>-<time>/` (host only, 0700; no copy,
   no import), and only then are the hubs released, OnionPress stopped,
@@ -669,14 +669,35 @@
   file O_EXCL|O_NOFOLLOW 0600, fsync, rename, fsync dir.
   `tests/test_hub_stored_keys.py`. All of this ships in the tor image.
 
-## Request Signatures Are Checked by libsodium
+## Request Signatures Are Made and Checked by libsodium
 - `onion_auth.verify` is PyNaCl's `VerifyKey(pub).verify` (libsodium's
   crypto_sign_open): S < L, no small-order or non-canonical key or R. The
   pure-Python verifier it replaced took R = identity, S = 0 as a signature
   of anything for a small-order key, so anyone could sign for
-  `aeaaaa…hmjqd.onion`. Signing is still the pure-Python expanded-key
-  signer (libsodium and pyca/cryptography sign only from a seed; an
-  mkp224o key has none); changing that is an open decision for Ivar.
+  `aeaaaa…hmjqd.onion`.
+- Signing (`sign_expanded`, Tor's expanded key; an mkp224o key has no seed,
+  and libsodium and pyca/cryptography sign only from one) is RFC 8032
+  §5.1.6 composed from libsodium's constant-time primitives, as Tor signs
+  with these keys (Ivar, 2026-10-14): `crypto_core_ed25519_scalar_reduce`,
+  `crypto_scalarmult_ed25519_base_noclamp`, `_scalar_mul`, `_scalar_add`;
+  no arithmetic of our own. It refuses a public key other than a·B (two
+  signatures of one message under two keys give a away). The public key
+  (`onion_auth.derive_public_key`, `key_manager.derive_public_key`) is
+  libsodium's the same way, the scalar taken mod L as Tor takes it. The
+  tests hold the bytes to libsodium's `crypto_sign` for seeded keys, the
+  RFC 8032 vectors, and the pure-Python signer it replaced for every key
+  (the wire format did not change).
+- Without libsodium's ed25519 functions (no PyNaCl, or a minimal build)
+  signing and derivation fall back on the old pure-Python arithmetic
+  (variable-time) and log a warning once, rather than stop: an unsigned
+  heartbeat lets the hub take the site over, and format-1 restores must
+  work without PyNaCl. Nothing shipped should get there:
+  `build/py2app-extensions.sh verify` and the tor Dockerfile fail the build
+  without `has_crypto_core_ed25519` or with signing off libsodium, the
+  .deb depends on python3-nacl, install.sh checks the functions, and the
+  Linux heartbeat logs a warning at start. `onionpress update` from a
+  checkout installs no apt package, so a source install from before 2.5.3
+  can lack python3-nacl.
 - The only verifier is the hub's web-server.py: `_verify_signature`
   (/online, /offline, /unregister), `_signed_peer_claim`, the OnionHome
   name and log endpoints. `tests/test_onion_auth.py` keeps that census and

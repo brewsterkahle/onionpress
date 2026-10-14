@@ -121,9 +121,11 @@ fi
 
 # DEBIAN control
 # python3-nacl (PyNaCl) encrypts backups (backup format 2,
-# src/onionpress/backup_crypto.py). 1.5.0 is what Debian 12 and 13, Ubuntu
+# src/onionpress/backup_crypto.py) and signs OnionHeaven requests
+# (onion_auth.sign_expanded, on libsodium's ed25519 core functions, which
+# Debian's libsodium23 has). 1.5.0 is what Debian 12 and 13, Ubuntu
 # 22.04 and 24.04 and Raspberry Pi OS Bookworm ship, and what CI tests
-# against besides the latest; the bindings used exist since PyNaCl 1.3.0.
+# against besides the latest; it has every binding OnionPress uses.
 mkdir -p "$DEB_ROOT/DEBIAN"
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: onionpress

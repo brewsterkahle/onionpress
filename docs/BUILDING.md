@@ -588,8 +588,11 @@ build runs libsodium's own test suite). It also lipo-merges cffi's
 wheels only — without that a universal2 bundle would fail to make or restore
 a backup on an Intel Mac. `verify` then has the bundled interpreter derive a
 key and encrypt with it, natively and as x86_64 under Rosetta, and prints the
-speed. On Linux, Debian's and Ubuntu's `python3-nacl` link the system
-`libsodium23`.
+speed. It also fails the build unless OnionHeaven request signing runs on
+libsodium's ed25519 core functions (`has_crypto_core_ed25519`; a minimal
+libsodium build lacks them and `onion_auth` would fall back on pure Python)
+and signs byte for byte as libsodium's `crypto_sign`. On Linux, Debian's
+and Ubuntu's `python3-nacl` link the system `libsodium23`, which has them.
 
 ### The two supply-chain fixes
 

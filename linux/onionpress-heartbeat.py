@@ -1569,6 +1569,12 @@ def main():
     signal.signal(signal.SIGUSR2, _usr2_handler)
 
     log.info("heartbeat client starting...")
+    # Signing goes on without libsodium (a heartbeat that cannot be signed
+    # lets the hub take the site over), but on variable-time pure Python.
+    if not onion_auth.signing_uses_libsodium():
+        log.warning("Requests are signed without libsodium (pure-Python "
+                    "ed25519, not constant-time): install python3-nacl "
+                    "(sudo apt install python3-nacl)")
 
     # Wait for addresses and keys
     result = wait_for_ready()

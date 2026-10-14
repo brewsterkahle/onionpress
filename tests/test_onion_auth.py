@@ -546,6 +546,48 @@ class TestSigningFallback(unittest.TestCase):
         self.assertIs(onion_auth._sodium(), sodium)
 
 
+class TestNothingShippedSignsWithoutLibsodium(unittest.TestCase):
+    """The fallback is for an install that lost python3-nacl, never for a
+    build: each one that ships checks the ed25519 core functions."""
+
+    @staticmethod
+    def _read(rel):
+        with open(os.path.join(PROJECT_DIR, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def test_the_mac_bundle(self):
+        helper = self._read("build/py2app-extensions.sh")
+        check = helper[helper.index("\nverify() {"):]
+        check = check[check.index("check='"):check.index("\n'\n")]
+        for needle in ("s.has_crypto_core_ed25519", "s.has_crypto_scalarmult_ed25519",
+                       "onion_auth.signing_uses_libsodium()",
+                       "SigningKey(seed).sign(", "key_manager.derive_public_key("):
+            self.assertIn(needle, check)
+        self.assertNotIn("assert ", check)
+
+    def test_the_tor_image(self):
+        text = self._read("app/Resources/docker/tor/Dockerfile")
+        runtime = text[text.rindex("\nFROM ${TOR_IMAGE}\n"):]
+        install = runtime[runtime.index("RUN apt-get update"):]
+        install = install[:install.index("\n#")]
+        self.assertIn("has_crypto_core_ed25519 as core; assert ok and core", install)
+        after_copy = runtime[runtime.index("COPY onion_auth.py /onion_auth.py"):]
+        self.assertRegex(after_copy, r"\nRUN python3 -c \"[^\n]*a\.signing_uses_libsodium\(\)"
+                                     r"[^\n]*a\.verify\(p, b'x', a\.sign_expanded\(k, p, b'x'\)\)")
+
+    def test_linux(self):
+        install = self._read("linux/install.sh")
+        line = next(l for l in install.splitlines() if "has_crypto_core_ed25519" in l)
+        self.assertIn("has_crypto_scalarmult_ed25519", line)
+        self.assertTrue(line.startswith("if ! python3 -c "), line)
+        heartbeat = self._read("linux/onionpress-heartbeat.py")
+        main = heartbeat[heartbeat.index("\ndef main():"):]
+        self.assertIn("if not onion_auth.signing_uses_libsodium():", main[:main.index("wait_for_ready()")])
+        control = self._read("build/build-linux.sh")
+        self.assertIn("python3-nacl (>= 1.5.0)",
+                      control[control.index("Depends:"):control.index("Recommends:")])
+
+
 class TestCopiesAreOneFile(unittest.TestCase):
 
     def test_identical(self):

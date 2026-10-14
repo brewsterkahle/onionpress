@@ -198,13 +198,14 @@ WORKDIR /
 # request (onion_auth.verify: nacl.signing.VerifyKey; without it the API
 # refuses them all) and checks that a registrant's private key belongs to
 # its address before the hub stores it (web-server.py's private_key_problem,
-# key-convert.py's keypair_error): crypto from an established library,
-# never computed here.
+# key-convert.py's keypair_error), and its ed25519 core functions sign the
+# requests sent from here (onion_auth.sign_expanded: OnionHome name
+# requests): crypto from an established library, never computed here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     socat openssl ca-certificates sqlite3 python3 curl wget procps netcat-openbsd xxd \
     libsodium23 python3-nacl \
     && rm -rf /var/lib/apt/lists/* \
-    && python3 -c "from nacl.signing import VerifyKey; from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp, has_crypto_scalarmult_ed25519 as ok; assert ok"
+    && python3 -c "from nacl.signing import VerifyKey; from nacl.bindings import crypto_scalarmult_ed25519_base_noclamp, crypto_core_ed25519_scalar_mul, has_crypto_scalarmult_ed25519 as ok, has_crypto_core_ed25519 as core; assert ok and core"
 # Docker CLI for heartbeat to manage takeover containers via docker exec/run
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=mkp224o-builder /build/mkp224o/mkp224o /usr/local/bin/mkp224o
@@ -234,6 +235,8 @@ COPY onionnames.py /onionnames.py
 COPY onionheaven-data-migrate.py /onionheaven-data-migrate.py
 COPY wordlists /wordlists
 RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
+# onion_auth signs on libsodium here, never on its pure-Python fallback.
+RUN python3 -c "import sys; sys.path.insert(0, '/'); import onion_auth as a; k = bytes(range(64)); p = a.derive_public_key(k); sys.exit(None if a.signing_uses_libsodium() and a.verify(p, b'x', a.sign_expanded(k, p, b'x')) else 'onion_auth does not sign on libsodium')"
 # Mount point of the OnionHeaven hub data volume (registry and registrants'
 # keys; onionpress-onionheaven-data). Root-only: a fresh volume takes this
 # directory's owner and mode when Docker first mounts it.

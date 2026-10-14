@@ -171,10 +171,12 @@ if ! command -v python3 >/dev/null 2>&1; then
     $SUDO apt-get install -y -qq python3
 fi
 
-# PyNaCl (libsodium) encrypts and decrypts backups (backup format 2). The
-# .deb depends on python3-nacl; a source install needs it just the same.
-if ! python3 -c "from nacl.bindings import crypto_secretstream_xchacha20poly1305_init_push; import nacl.pwhash.argon2id" >/dev/null 2>&1; then
-    echo "  Installing python3-nacl (backup encryption)..."
+# PyNaCl (libsodium) encrypts and decrypts backups (backup format 2) and
+# signs OnionHeaven requests (its ed25519 core functions; without them the
+# heartbeat signs in pure Python, not constant-time). The .deb depends on
+# python3-nacl; a source install needs it just the same.
+if ! python3 -c "import nacl.pwhash.argon2id; from nacl.bindings import crypto_secretstream_xchacha20poly1305_init_push, has_crypto_core_ed25519 as c, has_crypto_scalarmult_ed25519 as s; raise SystemExit(not (c and s))" >/dev/null 2>&1; then
+    echo "  Installing python3-nacl (backup encryption, request signing)..."
     $SUDO apt-get update -qq
     $SUDO apt-get install -y -qq python3-nacl
 fi

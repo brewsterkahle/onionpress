@@ -193,6 +193,29 @@ if mib_s < 150:
     # Optimised: ~470 MiB/s on Apple Silicon, ~340 as x86_64 under Rosetta;
     # PyPI wheel (no -O): ~50.
     print("  WARNING: libsodium looks unoptimised; was PyNaCl built by prepare?")
+# OnionHeaven request signing and key derivation (onion_auth, key_manager)
+# run on libsodium ed25519 core functions; without them they fall back on
+# variable-time pure Python. A minimal libsodium build lacks them.
+import hashlib
+from nacl.signing import SigningKey
+from onionpress import key_manager, onion_auth
+if not (s.has_crypto_core_ed25519 and s.has_crypto_scalarmult_ed25519
+        and onion_auth.signing_uses_libsodium()):
+    raise SystemExit("libsodium in the bundle has no ed25519 core functions: "
+                     "requests would be signed by the pure-Python fallback")
+seed = bytes(range(32))
+expanded = bytearray(hashlib.sha512(seed).digest())
+expanded[0] &= 248
+expanded[31] &= 127
+expanded[31] |= 64
+expanded = bytes(expanded)
+public = SigningKey(seed).verify_key.encode()
+if (onion_auth.derive_public_key(expanded) != public
+        or key_manager.derive_public_key(expanded) != public
+        or onion_auth.sign_expanded(expanded, public, b"onionpress")
+        != SigningKey(seed).sign(b"onionpress").signature):
+    raise SystemExit("request signing in the bundle is not libsodium crypto_sign")
+print("  OnionHeaven request signing runs on libsodium in the bundle")
 '
     # -B: write no __pycache__ into the bundle. -s and no PYTHONPATH: only
     # what the bundle itself carries can satisfy the imports.
