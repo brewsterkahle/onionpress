@@ -590,14 +590,17 @@ class TestRegistrantKeyChecks(unittest.TestCase):
                 self.assertEqual(hub_backup.registrant_key_problem(address, pem), want)
         # keypair_problem gives key-convert.py's verdicts (libsodium), and
         # so does the arithmetic it falls back on without PyNaCl.
+        order = key_manager.ED25519_ORDER.to_bytes(32, "little")
         pairs = [(priv, pub), (other_priv, pub), (bytes(top_bit), pub),
-                 (b"\0" * 32 + priv[32:], pub), (priv, other_pub)]
+                 (b"\0" * 32 + priv[32:], pub), (order + priv[32:], pub),
+                 (priv, other_pub)]
         for expanded, public in pairs:
             with self.subTest(expanded=expanded[:4].hex(), public=public[:4].hex()):
                 mine = hub_backup.keypair_problem(expanded, public)
                 if HAS_SODIUM:
                     self.assertEqual(mine, kc.keypair_error(expanded, public))
-                with mock.patch.object(hub_backup, "_sodium", None):
+                with mock.patch.object(key_manager, "_sodium_ed25519", return_value=None), \
+                        mock.patch.object(key_manager, "_fallback_logged", True):
                     self.assertEqual(hub_backup.keypair_problem(expanded, public), mine)
 
     def test_check_keeps_good_keys_as_fresh_pems_and_logs_the_rest(self):

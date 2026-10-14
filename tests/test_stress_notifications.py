@@ -37,10 +37,8 @@ def _generate_test_keys():
     expanded_key = bytes(expanded)  # 64 bytes
 
     # Derive public key
-    from onion_auth import _scalar_mult, _B, _encode_point, _clamp
-    a = int.from_bytes(expanded_key[:32], "little")
-    A = _scalar_mult(a, _B)
-    public_key = _encode_point(A)
+    from onion_auth import derive_public_key
+    public_key = derive_public_key(expanded_key)
 
     return expanded_key, public_key
 

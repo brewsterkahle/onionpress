@@ -7,15 +7,38 @@ small-order or non-canonical public key or R, and compares R byte for
 byte. Without PyNaCl, verify() raises VerificationUnavailable rather than
 answer: a signature this module cannot check is never taken as good. Only
 the hub verifies (web-server.py, in the tor image, which installs
-python3-nacl); PyNaCl is imported when verify() first runs, so a client
-that only signs never needs it here.
+python3-nacl).
 
-Signing is RFC 8032 Ed25519 in pure Python (stdlib), with a Tor expanded
-private key: 64 bytes = scalar a (32, clamped) + nonce prefix (32).
-Standard ed25519 derives these from SHA-512(seed); Tor (and the
-onionpress-onion-keys volume's PEM) stores them directly, and an mkp224o
-vanity key has no seed at all. libsodium and pyca/cryptography sign only
-from a seed, so neither can sign with these keys as they are.
+Signing is RFC 8032 Ed25519 with a Tor expanded private key: 64 bytes =
+scalar a (32, clamped) + nonce prefix (32). Standard ed25519 derives these
+from SHA-512(seed); Tor (and the onionpress-onion-keys volume's PEM)
+stores them directly, and an mkp224o vanity key has no seed at all.
+libsodium and pyca/cryptography sign only from a seed, so sign_expanded
+puts RFC 8032 §5.1.6 together from libsodium's own primitives (PyNaCl's
+bindings, each constant-time), the way Tor signs with these keys:
+
+    a = a mod L                       crypto_core_ed25519_scalar_reduce
+    r = SHA-512(prefix || M) mod L    crypto_core_ed25519_scalar_reduce
+    R = r·B                           crypto_scalarmult_ed25519_base_noclamp
+    k = SHA-512(R || A || M) mod L    crypto_core_ed25519_scalar_reduce
+    S = r + k·a mod L                 crypto_core_ed25519_scalar_mul, _add
+
+with no curve or scalar arithmetic of its own. For a key that comes from a
+seed, the signature is byte for byte libsodium's crypto_sign; for every
+key it is what the pure-Python signer this replaced made, so the wire
+format is unchanged (tests/test_onion_auth.py holds both). A must be a·B
+(derive_public_key, libsodium's too): two signatures of one message under
+two public keys would give a away, so sign_expanded refuses any other.
+
+Without libsodium's ed25519 functions (no PyNaCl, or a minimal libsodium
+build) signing and derive_public_key fall back to the pure-Python
+arithmetic OnionPress signed with before, and log a warning once: a
+heartbeat that cannot be signed lets the hub take the site over. That
+arithmetic is variable-time (how long a signature takes depends on its
+nonce). Nothing that ships should reach it: the Mac bundle
+(build/py2app-extensions.sh verify) and the tor image (its Dockerfile) are
+checked for the functions when they are built, the .deb depends on
+python3-nacl, and linux/install.sh installs it.
 
 src/onionpress/onion_auth.py and app/Resources/docker/tor/onion_auth.py
 (and tests/stress/onion_auth.py) are one file; tests/test_onion_auth.py
@@ -24,22 +47,148 @@ keeps them identical.
 
 import base64
 import hashlib
-import struct
+import hmac
+import logging
 from datetime import datetime, timezone
 
-# ── Ed25519 curve constants ──
-
-_p = 2**255 - 19  # field prime
-_L = 2**252 + 27742317777372353535851937790883648493  # base point order
-_d = -121665 * pow(121666, _p - 2, _p) % _p  # curve parameter
-_I = pow(2, (_p - 1) // 4, _p)  # sqrt(-1) mod p
+_log = logging.getLogger(__name__)
 
 
 def _sha512(data):
     return hashlib.sha512(data).digest()
 
 
-# ── Field / point arithmetic ──
+# ── libsodium (PyNaCl) ──
+
+# What signing and derivation call (all in PyNaCl 1.5.0, the oldest the
+# .deb takes).
+_SODIUM_FUNCTIONS = (
+    "crypto_core_ed25519_scalar_reduce",
+    "crypto_core_ed25519_scalar_mul",
+    "crypto_core_ed25519_scalar_add",
+    "crypto_scalarmult_ed25519_base_noclamp",
+)
+
+
+def _sodium():
+    """PyNaCl's bindings, when libsodium has its ed25519 scalar and point
+    functions (a minimal build has not), else None.
+
+    Looked up at every call: once python3-nacl is installed, the next
+    signature uses it, without a restart."""
+    try:
+        from nacl import bindings
+    except ImportError:
+        return None
+    if not (getattr(bindings, "has_crypto_core_ed25519", False)
+            and getattr(bindings, "has_crypto_scalarmult_ed25519", False)):
+        return None
+    if not all(hasattr(bindings, name) for name in _SODIUM_FUNCTIONS):
+        return None
+    return bindings
+
+
+def signing_uses_libsodium():
+    """True if sign_expanded and derive_public_key run on libsodium, False
+    if they would use the pure-Python fallback."""
+    return _sodium() is not None
+
+
+_fallback_logged = set()
+
+
+def _fallback(what):
+    """Log, once per process and task, that the fallback is in use."""
+    if what in _fallback_logged:
+        return
+    _fallback_logged.add(what)
+    _log.warning(
+        "%s: libsodium's ed25519 functions are not available (install "
+        "python3-nacl, PyNaCl); using OnionPress's pure-Python ed25519, "
+        "which is not constant-time", what)
+
+
+def _expanded_key_bytes(expanded_key):
+    if len(expanded_key) != 64:
+        raise ValueError(f"Expanded key must be 64 bytes, got {len(expanded_key)}")
+    return bytes(expanded_key)
+
+
+_NO_PUBLIC_KEY = ("The key has no public key: its secret scalar is zero "
+                  "mod the group order")
+_NOT_THE_KEYS = "The public key is not the expanded key's own (a·B)"
+
+
+def _sodium_public_key(sodium, a):
+    """a·B for a reduced scalar *a*: libsodium refuses a = 0 (ValueError)."""
+    try:
+        return sodium.crypto_scalarmult_ed25519_base_noclamp(a)
+    except RuntimeError as e:  # nacl.exceptions.RuntimeError
+        raise ValueError(_NO_PUBLIC_KEY) from e
+
+
+def derive_public_key(expanded_key):
+    """A = a·B, the 32-byte public key of a 64-byte expanded secret key.
+
+    a (the first half) is taken mod L, as Tor takes it, then multiplied by
+    libsodium (crypto_core_ed25519_scalar_reduce,
+    crypto_scalarmult_ed25519_base_noclamp). ValueError for a scalar that
+    is zero mod L: it has no public key.
+    """
+    expanded_key = _expanded_key_bytes(expanded_key)
+    sodium = _sodium()
+    if sodium is None:
+        _fallback("Deriving a public key")
+        return _python_public_key(expanded_key)
+    a = sodium.crypto_core_ed25519_scalar_reduce(expanded_key[:32] + bytes(32))
+    return _sodium_public_key(sodium, a)
+
+
+def sign_expanded(expanded_key, public_key, message):
+    """Sign with a Tor expanded private key (RFC 8032 §5.1.6, libsodium).
+
+    expanded_key: 64 bytes (scalar a ‖ nonce prefix)
+    public_key:   32 bytes (encoded point A); must be a·B
+    message:      bytes
+
+    Returns 64-byte signature (R ‖ S). ValueError for a wrong length, a
+    public key that is not the expanded key's, or a scalar with none.
+    """
+    expanded_key = _expanded_key_bytes(expanded_key)
+    if len(public_key) != 32:
+        raise ValueError(f"Public key must be 32 bytes, got {len(public_key)}")
+    public_key, message = bytes(public_key), bytes(message)
+
+    sodium = _sodium()
+    if sodium is None:
+        _fallback("Signing")
+        return _python_sign(expanded_key, public_key, message)
+
+    reduce = sodium.crypto_core_ed25519_scalar_reduce
+    a = reduce(expanded_key[:32] + bytes(32))
+    if not hmac.compare_digest(_sodium_public_key(sodium, a), public_key):
+        raise ValueError(_NOT_THE_KEYS)
+    r = reduce(_sha512(expanded_key[32:] + message))
+    # r = 0 (probability 2^-252) has no R; libsodium refuses it and this
+    # raises rather than sign.
+    R = sodium.crypto_scalarmult_ed25519_base_noclamp(r)
+    k = reduce(_sha512(R + public_key + message))
+    S = sodium.crypto_core_ed25519_scalar_add(
+        r, sodium.crypto_core_ed25519_scalar_mul(k, a))
+    return R + S
+
+
+# ── Fallback without libsodium: pure-Python ed25519 ──
+#
+# What OnionPress signed with before libsodium did: RFC 8032 in Python
+# integers. Double-and-add over the scalar's bits is variable-time. Only
+# _sodium() returning None leads here (logged once, see _fallback).
+
+_p = 2**255 - 19  # field prime
+_L = 2**252 + 27742317777372353535851937790883648493  # base point order
+_d = -121665 * pow(121666, _p - 2, _p) % _p  # curve parameter
+_I = pow(2, (_p - 1) // 4, _p)  # sqrt(-1) mod p
+
 
 def _inv(x):
     """Modular inverse mod p (Fermat)."""
@@ -89,7 +238,7 @@ def _point_add(P, Q):
 
 
 def _scalar_mult(s, P):
-    """Scalar multiplication via double-and-add."""
+    """Scalar multiplication via double-and-add (variable-time)."""
     Q = _ZERO
     while s > 0:
         if s & 1:
@@ -111,28 +260,21 @@ def _encode_point(P):
     return bytes(enc)
 
 
-# ── Ed25519 sign / verify ──
+def _python_public_key(expanded_key):
+    a = int.from_bytes(expanded_key[:32], 'little') % _L
+    if a == 0:
+        raise ValueError(_NO_PUBLIC_KEY)
+    return _encode_point(_scalar_mult(a, _B))
 
-def sign_expanded(expanded_key, public_key, message):
-    """Sign with an Arti expanded private key.
 
-    expanded_key: 64 bytes (scalar a ‖ nonce prefix)
-    public_key:   32 bytes (encoded point A)
-    message:      bytes
-
-    Returns 64-byte signature (R ‖ S).
-    """
-    if len(expanded_key) != 64:
-        raise ValueError(f"Expanded key must be 64 bytes, got {len(expanded_key)}")
-    if len(public_key) != 32:
-        raise ValueError(f"Public key must be 32 bytes, got {len(public_key)}")
-
+def _python_sign(expanded_key, public_key, message):
+    if _python_public_key(expanded_key) != public_key:
+        raise ValueError(_NOT_THE_KEYS)
     a = int.from_bytes(expanded_key[:32], 'little')
     prefix = expanded_key[32:]
 
     r = int.from_bytes(_sha512(prefix + message), 'little') % _L
-    R = _scalar_mult(r, _B)
-    R_enc = _encode_point(R)
+    R_enc = _encode_point(_scalar_mult(r, _B))
 
     h = int.from_bytes(_sha512(R_enc + public_key + message), 'little') % _L
     S = (r + h * a) % _L

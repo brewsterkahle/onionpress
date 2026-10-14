@@ -34,9 +34,7 @@ def make_test_keypair():
     a_bytes[31] &= 127
     a_bytes[31] |= 64
     expanded = bytes(a_bytes) + h[32:]
-    a = int.from_bytes(a_bytes, 'little')
-    A = onion_auth._scalar_mult(a, onion_auth._B)
-    pub = onion_auth._encode_point(A)
+    pub = onion_auth.derive_public_key(expanded)
     addr = onion_auth.derive_onion_address(pub)
     return expanded, pub, addr
 

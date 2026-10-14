@@ -33,9 +33,7 @@ def _expand_seed(seed_bytes):
     a[31] |= 64
     prefix = h[32:]
     expanded = bytes(a) + prefix
-    A = onion_auth._scalar_mult(int.from_bytes(a, "little"), onion_auth._B)
-    pub = onion_auth._encode_point(A)
-    return expanded, pub
+    return expanded, onion_auth.derive_public_key(expanded)
 
 
 # ---------------------------------------------------------------------------

@@ -122,7 +122,8 @@ class _FakeApp:
 def _patch_keys(test):
     """A key pair whose address is the content address, so the requests get
     as far as curl unless an address check stops them. Returns the address."""
-    priv, pub = os.urandom(64), os.urandom(32)
+    priv = os.urandom(64)
+    pub = onion_auth.derive_public_key(priv)  # sign_expanded takes only a·B
     for name, value in (("extract_keys", (priv, pub)),
                         ("build_openssh_key", b"pem")):
         p = mock.patch.object(key_manager, name, return_value=value)

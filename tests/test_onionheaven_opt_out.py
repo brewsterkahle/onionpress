@@ -69,9 +69,7 @@ def _keypair():
     h[31] &= 127
     h[31] |= 64
     expanded = bytes(h)
-    a = int.from_bytes(expanded[:32], "little")
-    pub = onion_auth._encode_point(onion_auth._scalar_mult(a, onion_auth._B))
-    return expanded, pub
+    return expanded, onion_auth.derive_public_key(expanded)
 
 
 EXPANDED, PUB = _keypair()

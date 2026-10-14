@@ -36,10 +36,7 @@ def _make_keypair(seed_bytes):
     a_bytes[31] |= 64
     prefix = h[32:]
     expanded = bytes(a_bytes) + prefix
-    a = int.from_bytes(a_bytes, "little")
-    A = onion_auth._scalar_mult(a, onion_auth._B)
-    pub = onion_auth._encode_point(A)
-    return expanded, pub
+    return expanded, onion_auth.derive_public_key(expanded)
 
 
 def _make_identity(seed_byte):

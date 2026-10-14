@@ -43,6 +43,12 @@ _DATA_DIR = os.path.join(_HOME, ".onionpress")
 os.makedirs(_DATA_DIR)
 
 
+def _random_keypair():
+    """A random expanded key and its public key (the signer takes no other)."""
+    priv = secrets.token_bytes(64)
+    return priv, onion_auth.derive_public_key(priv)
+
+
 def _load_heartbeat():
     """Import linux/onionpress-heartbeat.py the way systemd runs it, minus
     /opt/onionpress: its flat `import key_manager` / `import onion_auth`
@@ -242,7 +248,7 @@ class TestUploadCycleOnLinux(unittest.TestCase):
                json.dumps({"state": "running", "platform": "linux"}))
 
         self._orig_extract = key_manager.extract_keys
-        key_manager.extract_keys = lambda: (secrets.token_bytes(64), secrets.token_bytes(32))
+        key_manager.extract_keys = _random_keypair
         self._orig_post = analytics_sharing._post_json
         self.posts = []
 
@@ -335,7 +341,7 @@ class TestUploadIsScrubbedOnLinux(unittest.TestCase):
         }))
 
         self._orig_extract = key_manager.extract_keys
-        key_manager.extract_keys = lambda: (secrets.token_bytes(64), secrets.token_bytes(32))
+        key_manager.extract_keys = _random_keypair
         self._orig_post = analytics_sharing._post_json
         self.uploads = {}
 

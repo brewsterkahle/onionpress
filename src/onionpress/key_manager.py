@@ -487,26 +487,6 @@ def decode_base32_key(key_b32):
 ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493
 
 
-def _nacl_public_key(scalar):
-    """scalar·B by libsodium (PyNaCl), or None where PyNaCl is missing.
-
-    crypto_scalarmult_ed25519_base_noclamp takes the scalar as it is, the
-    way Tor takes an expanded key's first half. It fails for a scalar that
-    is zero mod the order (raised here as ValueError)."""
-    try:
-        import nacl.bindings
-        import nacl.exceptions
-    except ImportError:
-        return None
-    if not getattr(nacl.bindings, "has_crypto_scalarmult_ed25519", False):
-        return None
-    try:
-        return nacl.bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
-    except nacl.exceptions.RuntimeError as e:
-        raise ValueError("The key has no public key (libsodium refused "
-                         "its secret scalar)") from e
-
-
 def check_expanded_secret_key(private_key, public_key=None):
     """The 32-byte public key of a 64-byte expanded ed25519 secret key
     (C Tor's hs_ed25519_secret_key without its header), or ValueError for
@@ -518,10 +498,9 @@ def check_expanded_secret_key(private_key, public_key=None):
         every key Tor or mkp224o makes has it clear;
       - a secret scalar that is zero mod the group order: its public key
         is the neutral element, no identity at all;
-      - with PyNaCl present, libsodium's scalar·B
-        (crypto_scalarmult_ed25519_base_noclamp) differs from the public
-        key derive_public_key finds;
       - public_key given (a key file's stored half) and not that key.
+
+    The public key is derive_public_key's (libsodium's scalar·B).
 
     An import calls this before it touches the current key: what it lets
     through becomes the site's identity."""
@@ -537,19 +516,66 @@ def check_expanded_secret_key(private_key, public_key=None):
         raise ValueError("The key is not a usable onion service key: its "
                          "secret scalar is zero")
     derived = derive_public_key(private_key)
-    by_libsodium = _nacl_public_key(scalar)
-    if by_libsodium is not None and by_libsodium != derived:
-        raise ValueError("The key's public key could not be confirmed "
-                         "(libsodium derives a different one)")
     if public_key is not None and bytes(public_key) != derived:
         raise ValueError("Onion service key is inconsistent: its public key "
                          "does not belong to its private key")
     return derived
 
 
+def _sodium_ed25519():
+    """PyNaCl's bindings when libsodium has its ed25519 scalar and point
+    functions (a minimal build has not), else None."""
+    try:
+        import nacl.bindings
+    except ImportError:
+        return None
+    bindings = nacl.bindings
+    if not (getattr(bindings, "has_crypto_core_ed25519", False)
+            and getattr(bindings, "has_crypto_scalarmult_ed25519", False)):
+        return None
+    return bindings
+
+
+_NO_PUBLIC_KEY = ("The key has no public key: its secret scalar is zero mod "
+                  "the group order")
+_fallback_logged = False
+
+
 def derive_public_key(private_key):
-    """Derive ed25519 public key from expanded private key via scalar multiplication.
-    Returns 32-byte public key."""
+    """The 32-byte ed25519 public key of an expanded private key: its
+    secret scalar (the first 32 bytes) mod the group order, as Tor takes
+    it, times the base point.
+
+    libsodium computes it (PyNaCl: crypto_core_ed25519_scalar_reduce, then
+    crypto_scalarmult_ed25519_base_noclamp, both constant-time). Without
+    libsodium's ed25519 functions (a Linux system without python3-nacl
+    restoring an old backup) _python_public_key does, in variable time,
+    with a warning logged once. ValueError for a scalar that is zero mod
+    the group order: it has no public key."""
+    global _fallback_logged
+    scalar = bytes(private_key[:32])
+    if len(scalar) != 32:
+        raise ValueError(f"The key must be 64 bytes, got {len(private_key)}")
+    sodium = _sodium_ed25519()
+    if sodium is None:
+        if not _fallback_logged:
+            _fallback_logged = True
+            import logging
+            logging.getLogger(__name__).warning(
+                "Deriving a public key: libsodium's ed25519 functions are not "
+                "available (install python3-nacl, PyNaCl); using OnionPress's "
+                "pure-Python ed25519, which is not constant-time")
+        return _python_public_key(scalar)
+    reduced = sodium.crypto_core_ed25519_scalar_reduce(scalar + bytes(32))
+    try:
+        return sodium.crypto_scalarmult_ed25519_base_noclamp(reduced)
+    except RuntimeError as e:  # nacl.exceptions.RuntimeError: libsodium refused 0
+        raise ValueError(_NO_PUBLIC_KEY) from e
+
+
+def _python_public_key(scalar):
+    """derive_public_key's fallback without libsodium: scalar·B in Python
+    integers, double-and-add (variable-time)."""
     p = 2**255 - 19
     def inv(x): return pow(x, p - 2, p)
     d = -121665 * inv(121666) % p
@@ -597,9 +623,10 @@ def derive_public_key(private_key):
         r[31] ^= (x & 1) << 7
         return bytes(r)
 
-    import hashlib
-    scalar = int.from_bytes(private_key[:32], 'little')
-    return encode_point(scalar_mult(scalar, B))
+    s = int.from_bytes(scalar, 'little') % ED25519_ORDER
+    if s == 0:
+        raise ValueError(_NO_PUBLIC_KEY)
+    return encode_point(scalar_mult(s, B))
 
 
 def derive_onion_address(public_key):

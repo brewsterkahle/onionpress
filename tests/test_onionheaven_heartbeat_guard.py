@@ -58,10 +58,10 @@ class _FakeApp:
 
 class HeartbeatGuardTest(unittest.TestCase):
     def setUp(self):
-        # Fabricate a key. derive_onion_address only uses the 32-byte public
-        # key, so we don't need a real ed25519 expansion.
+        # Fabricate a key: any 64 bytes, and its public key (the signer
+        # takes no other).
         self.priv_64 = secrets.token_bytes(64)
-        self.pub_32 = secrets.token_bytes(32)
+        self.pub_32 = onion_auth.derive_public_key(self.priv_64)
         self.matching_addr = onion_auth.derive_onion_address(self.pub_32)
 
         # Counter for stubbed curl invocations

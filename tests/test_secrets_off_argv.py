@@ -86,7 +86,7 @@ class _Recorder:
 
 def _keypair():
     priv = secrets.token_bytes(64)
-    pub = secrets.token_bytes(32)
+    pub = key_manager.derive_public_key(priv)  # sign_expanded takes only a·B
     pem_b64 = base64.b64encode(
         key_manager.build_openssh_key(priv, pub)).decode("ascii")
     return priv, pub, pem_b64

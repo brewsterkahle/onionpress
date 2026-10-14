@@ -533,24 +533,18 @@ def keypair_problem(expanded_key, public_key):
     The rule of the hub's own check (key-convert.py's keypair_error, which
     a test holds this to): the secret scalar (the first 32 bytes) must be
     below 2^255 and times the base point give the public key, computed by
-    libsodium (PyNaCl). Without PyNaCl (a Linux system without
-    python3-nacl restoring an old backup) key_manager's own arithmetic
-    computes it.
+    key_manager.derive_public_key: libsodium (PyNaCl), or without it (a
+    Linux system without python3-nacl restoring an old backup) its
+    pure-Python fallback.
     """
     if len(expanded_key) != 64 or len(public_key) != 32:
         return "the key has the wrong length"
-    scalar = expanded_key[:32]
-    if scalar[31] & 0x80:
+    if expanded_key[31] & 0x80:
         return "the secret scalar is not below 2^255"
-    if _sodium is not None and getattr(_sodium, "has_crypto_scalarmult_ed25519", True):
-        try:
-            derived = _sodium.crypto_scalarmult_ed25519_base_noclamp(scalar)
-        except (RuntimeError, TypeError, ValueError):
-            return "the secret scalar is zero or a multiple of the group order"
-    else:
-        if not any(scalar):
-            return "the secret scalar is zero or a multiple of the group order"
+    try:
         derived = key_manager.derive_public_key(expanded_key)
+    except ValueError:
+        return "the secret scalar is zero or a multiple of the group order"
     if not hmac.compare_digest(derived, public_key):
         return "the secret scalar does not give the public key"
     return None

@@ -3,10 +3,11 @@
 
 key_manager.check_expanded_secret_key is the gate every import goes through
 (decode-key, import-key, a restored backup's key files): 64 bytes, bit 255
-of the secret scalar clear, the scalar nonzero mod the group order, and,
-with PyNaCl present, libsodium's scalar·B
-(crypto_scalarmult_ed25519_base_noclamp) the same public key as
-derive_public_key finds. decode_base32_key and import_key_b32 used to take
+of the secret scalar clear, the scalar nonzero mod the group order. The
+public key is derive_public_key's: libsodium's scalar·B
+(crypto_core_ed25519_scalar_reduce, crypto_scalarmult_ed25519_base_noclamp),
+or without PyNaCl the pure-Python arithmetic it replaced, which must agree
+with it. decode_base32_key and import_key_b32 used to take
 a scalar with bit 255 set (libsodium and OnionPress then disagree on the
 address) or a zero scalar (no public key at all), and the Linux Settings
 page removed the current key before the new one was even decoded.
@@ -32,7 +33,8 @@ KEY_MANAGER = os.path.join(PROJECT_DIR, "src", "onionpress", "key_manager.py")
 
 try:
     import nacl.bindings as _nacl_bindings
-    HAVE_NACL = bool(getattr(_nacl_bindings, "has_crypto_scalarmult_ed25519", False))
+    HAVE_NACL = bool(getattr(_nacl_bindings, "has_crypto_scalarmult_ed25519", False)
+                     and getattr(_nacl_bindings, "has_crypto_core_ed25519", False))
 except ImportError:
     HAVE_NACL = False
 
@@ -84,29 +86,68 @@ class TestCheckExpandedSecretKey(unittest.TestCase):
                 self.assertIn(words, str(cm.exception))
 
     def test_without_pynacl_the_checks_still_hold(self):
-        with mock.patch.object(key_manager, "_nacl_public_key", return_value=None):
-            self.assertEqual(key_manager.check_expanded_secret_key(GOOD),
-                             key_manager.derive_public_key(GOOD))
+        with_libsodium = key_manager.check_expanded_secret_key(GOOD)
+        with mock.patch.object(key_manager, "_sodium_ed25519", return_value=None):
+            self.assertEqual(key_manager.check_expanded_secret_key(GOOD), with_libsodium)
             for key in (TOP_BIT, ZERO, ORDER):
                 with self.subTest(key=key[:4].hex()):
                     with self.assertRaises(ValueError):
                         key_manager.check_expanded_secret_key(key)
 
-    def test_pynacl_missing_is_none(self):
+    def test_pynacl_missing_falls_back_with_a_warning(self):
         with mock.patch.dict(sys.modules, {"nacl": None, "nacl.bindings": None,
-                                           "nacl.exceptions": None}):
-            self.assertIsNone(key_manager._nacl_public_key(GOOD[:32]))
-
-    def test_libsodium_disagreeing_is_refused(self):
-        with mock.patch.object(key_manager, "_nacl_public_key", return_value=b"\x01" * 32):
-            with self.assertRaises(ValueError) as cm:
-                key_manager.check_expanded_secret_key(GOOD)
-        self.assertIn("libsodium", str(cm.exception))
+                                           "nacl.exceptions": None}), \
+                mock.patch.object(key_manager, "_fallback_logged", False):
+            self.assertIsNone(key_manager._sodium_ed25519())
+            with self.assertLogs("onionpress.key_manager", "WARNING") as logs:
+                fallback = key_manager.derive_public_key(GOOD)
+                key_manager.derive_public_key(GOOD)
+        self.assertEqual(len(logs.output), 1, logs.output)
+        self.assertIn("python3-nacl", logs.output[0])
+        self.assertEqual(fallback, key_manager.derive_public_key(GOOD))
 
     @unittest.skipUnless(HAVE_NACL, "PyNaCl is not installed")
-    def test_libsodium_refusing_a_scalar_is_a_value_error(self):
-        with self.assertRaises(ValueError):
-            key_manager._nacl_public_key(ORDER[:32])
+    def test_derivation_is_libsodiums(self):
+        calls = []
+
+        class Spy:
+            def __getattr__(self, name):
+                def call(*args):
+                    calls.append(name)
+                    return getattr(_nacl_bindings, name)(*args)
+                return call
+
+        with mock.patch.object(key_manager, "_sodium_ed25519", return_value=Spy()), \
+                mock.patch.object(key_manager, "_python_public_key",
+                                  side_effect=AssertionError("fallback used")):
+            pub = key_manager.derive_public_key(GOOD)
+        self.assertEqual(calls, ["crypto_core_ed25519_scalar_reduce",
+                                 "crypto_scalarmult_ed25519_base_noclamp"])
+        self.assertEqual(pub, _nacl_bindings.crypto_scalarmult_ed25519_base_noclamp(GOOD[:32]))
+
+    @unittest.skipUnless(HAVE_NACL, "PyNaCl is not installed")
+    def test_the_fallback_agrees_with_libsodium(self):
+        """Any 32-byte scalar, bit 255 set or not: both take it mod the
+        group order, as Tor does."""
+        for scalar in [os.urandom(32) for _ in range(40)] + [
+                b"\xff" * 32, TOP_BIT[:32], (key_manager.ED25519_ORDER + 1).to_bytes(32, "little")]:
+            with self.subTest(scalar=scalar.hex()):
+                key = scalar + GOOD[32:]
+                self.assertEqual(key_manager.derive_public_key(key),
+                                 key_manager._python_public_key(scalar))
+
+    def test_no_public_key_is_a_value_error(self):
+        for key in (ZERO, ORDER):
+            with self.subTest("as installed", key=key[:4].hex()):
+                with self.assertRaises(ValueError) as cm:
+                    key_manager.derive_public_key(key)
+                self.assertIn("no public key", str(cm.exception))
+            with self.subTest("fallback", key=key[:4].hex()), \
+                    mock.patch.object(key_manager, "_sodium_ed25519", return_value=None), \
+                    mock.patch.object(key_manager, "_fallback_logged", True):
+                with self.assertRaises(ValueError) as cm:
+                    key_manager.derive_public_key(key)
+                self.assertIn("no public key", str(cm.exception))
 
 
 class TestEveryImportPathChecks(unittest.TestCase):

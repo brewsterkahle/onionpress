@@ -1,19 +1,28 @@
 """Tests for onion_auth — Ed25519 signatures for OnionHeaven API.
 
 Verification is libsodium's (PyNaCl's VerifyKey, crypto_sign_open): the
-RFC 8032 vectors, every signature the pure-Python expanded-key signer makes
-(Tor keys, mkp224o vanity keys that have no seed), and the refusals a
-cofactorless textbook verifier gets wrong (small-order public keys, S >= L)
-are checked here. The pure-Python verifier it replaced accepted R=identity,
-S=0 as a signature of any message for the identity public key: the onion
-address aeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahmjqd.onion could
-be "signed for" by anyone. Without PyNaCl, verify raises; it never says yes.
+RFC 8032 vectors, every signature the expanded-key signer makes (Tor keys,
+mkp224o vanity keys that have no seed), and the refusals a cofactorless
+textbook verifier gets wrong (small-order public keys, S >= L) are checked
+here. The pure-Python verifier it replaced accepted R=identity, S=0 as a
+signature of any message for the identity public key: the onion address
+aeaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaahmjqd.onion could be
+"signed for" by anyone. Without PyNaCl, verify raises; it never says yes.
+
+Signing is RFC 8032 put together from libsodium's constant-time primitives
+(scalar_reduce, scalarmult_ed25519_base_noclamp, scalar_mul, scalar_add):
+byte for byte libsodium's own crypto_sign for a key from a seed, the RFC
+8032 vectors, and byte for byte the pure-Python signer it replaced
+(_reference_sign below) for every key, so the wire format is unchanged.
+Without libsodium's ed25519 functions it falls back to that pure-Python
+arithmetic, with a warning.
 
 PyNaCl must be installed (the CI does; make test-unit uses a venv with it).
 """
 
 import ast
 import base64
+import contextlib
 import hashlib
 import os
 import sys
@@ -24,7 +33,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from onionpress import onion_auth
-from nacl.signing import SigningKey
+from nacl.signing import SigningKey, VerifyKey
 from nacl import bindings as sodium
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,10 +56,7 @@ def _expand_seed(seed_hex):
     prefix = h[32:]
     expanded = bytes(a_bytes) + prefix
     # Derive public key: A = a * B
-    a = int.from_bytes(a_bytes, 'little')
-    A = onion_auth._scalar_mult(a, onion_auth._B)
-    pub = onion_auth._encode_point(A)
-    return expanded, pub
+    return expanded, onion_auth.derive_public_key(expanded)
 
 
 class TestEddsaVerify(unittest.TestCase):
@@ -147,8 +153,7 @@ class TestExpandedKeySignVerify(unittest.TestCase):
         a_bytes[31] &= 127
         a_bytes[31] |= 64
         expanded = bytes(a_bytes) + h[32:]
-        a = int.from_bytes(a_bytes, 'little')
-        pub = onion_auth._encode_point(onion_auth._scalar_mult(a, onion_auth._B))
+        pub = onion_auth.derive_public_key(expanded)
         msg = b"test message for ed25519"
         sig = onion_auth.sign_expanded(expanded, pub, msg)
         self.assertTrue(onion_auth.verify(pub, msg, sig))
@@ -302,6 +307,245 @@ def _mkp224o_style_key(steps):
     return expanded, sodium.crypto_scalarmult_ed25519_base_noclamp(expanded[:32])
 
 
+# ─── Signing is libsodium's primitives ───────────────────────────────────
+
+def _reference_sign(expanded_key, public_key, message):
+    """The arithmetic of the pure-Python signer onion_auth shipped before
+    libsodium signed (RFC 8032 in Python integers, the scalar used as it
+    is), and the public key it gave: what libsodium signs must be byte for
+    byte what it made. Returns (signature, a·B)."""
+    p = 2**255 - 19
+    d = -121665 * pow(121666, p - 2, p) % p
+
+    def add(P, Q):
+        X1, Y1, Z1, T1 = P
+        X2, Y2, Z2, T2 = Q
+        A = (Y1 - X1) * (Y2 - X2) % p
+        B_ = (Y1 + X1) * (Y2 + X2) % p
+        C = T1 * 2 * d * T2 % p
+        D = Z1 * 2 * Z2 % p
+        E, F, G, H = (B_ - A) % p, (D - C) % p, (D + C) % p, (B_ + A) % p
+        return (E * F % p, G * H % p, F * G % p, E * H % p)
+
+    def mult(s):
+        By = 4 * pow(5, p - 2, p) % p
+        Bx = 15112221349535400772501151409588531511454012693041857206046113283949847762202
+        P, Q = (Bx, By, 1, Bx * By % p), (0, 1, 1, 0)
+        while s > 0:
+            if s & 1:
+                Q = add(Q, P)
+            P = add(P, P)
+            s >>= 1
+        X, Y, Z, _ = Q
+        zi = pow(Z, p - 2, p)
+        enc = bytearray((Y * zi % p).to_bytes(32, "little"))
+        if X * zi % p & 1:
+            enc[31] |= 0x80
+        return bytes(enc)
+
+    a = int.from_bytes(expanded_key[:32], "little")
+    r = int.from_bytes(hashlib.sha512(expanded_key[32:] + message).digest(), "little") % _L
+    R = mult(r)
+    h = int.from_bytes(hashlib.sha512(R + public_key + message).digest(), "little") % _L
+    return R + ((r + h * a) % _L).to_bytes(32, "little"), mult(a)
+
+
+def _keys_of_every_kind(count):
+    """(expanded, public) pairs: from seeds (libsodium can sign with these
+    too), mkp224o-style without a seed, and 64 random bytes (scalar bit
+    255 set half the time; the scalar is taken mod L either way)."""
+    keys = []
+    for i in range(count):
+        keys.append(_expand_seed(os.urandom(32).hex()))
+        keys.append(_mkp224o_style_key(i * 997))
+        raw = os.urandom(64)
+        keys.append((raw, _reference_sign(raw, bytes(32), b"")[1]))
+    return keys
+
+
+class _Spy:
+    """Stands in for nacl.bindings and records which functions are called."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        real = getattr(sodium, name)
+        if not callable(real):
+            return real
+
+        def call(*args):
+            self.calls.append(name)
+            return real(*args)
+        return call
+
+
+class TestSigningIsLibsodium(unittest.TestCase):
+
+    def test_rfc8032_vectors_from_the_expanded_key(self):
+        for seed, pub, msg, sig in RFC8032_VECTORS:
+            with self.subTest(pub=pub[:8]):
+                expanded, derived = _expand_seed(seed)
+                pub, msg, sig = map(bytes.fromhex, (pub, msg, sig))
+                self.assertEqual(derived, pub)
+                self.assertEqual(onion_auth.sign_expanded(expanded, pub, msg), sig)
+
+    def test_byte_for_byte_libsodiums_crypto_sign(self):
+        for i in range(200):
+            seed = os.urandom(32)
+            expanded, pub = _expand_seed(seed.hex())
+            self.assertEqual(pub, SigningKey(seed).verify_key.encode())
+            msg = os.urandom(i * 7 % 300)
+            self.assertEqual(onion_auth.sign_expanded(expanded, pub, msg),
+                             SigningKey(seed).sign(msg).signature)
+
+    def test_seedless_keys_verify_with_libsodium(self):
+        for steps in (0, 1, 8, 1000, 2**20, 2**40):
+            expanded, pub = _mkp224o_style_key(steps)
+            self.assertEqual(onion_auth.derive_public_key(expanded), pub)
+            msg = b"online|" + os.urandom(40)
+            sig = onion_auth.sign_expanded(expanded, pub, msg)
+            self.assertEqual(VerifyKey(pub).verify(msg, sig), msg)
+
+    def test_the_wire_format_is_unchanged(self):
+        """Same bytes as the pure-Python signer it replaced, for every kind
+        of key, with libsodium and with the fallback."""
+        with mock.patch.object(onion_auth, "_fallback_logged", {"Signing", "Deriving a public key"}):
+            for expanded, pub in _keys_of_every_kind(25):
+                msg = os.urandom(int.from_bytes(os.urandom(1), "little"))
+                with self.subTest(key=expanded[:8].hex()):
+                    old, old_pub = _reference_sign(expanded, pub, msg)
+                    self.assertEqual(onion_auth.derive_public_key(expanded), old_pub)
+                    self.assertEqual(onion_auth.sign_expanded(expanded, pub, msg), old)
+                    with mock.patch.object(onion_auth, "_sodium", return_value=None):
+                        self.assertEqual(onion_auth.derive_public_key(expanded), old_pub)
+                        self.assertEqual(onion_auth.sign_expanded(expanded, pub, msg), old)
+
+    def test_only_libsodium_does_the_arithmetic(self):
+        expanded, pub = _mkp224o_style_key(5)
+        spy = _Spy()
+        fail = mock.Mock(side_effect=AssertionError("pure-Python arithmetic used"))
+        with mock.patch.object(onion_auth, "_sodium", return_value=spy), \
+                mock.patch.object(onion_auth, "_scalar_mult", fail), \
+                mock.patch.object(onion_auth, "_python_sign", fail), \
+                mock.patch.object(onion_auth, "_python_public_key", fail):
+            sig = onion_auth.sign_expanded(expanded, pub, b"offline|x")
+            self.assertEqual(onion_auth.derive_public_key(expanded), pub)
+        self.assertTrue(onion_auth.verify(pub, b"offline|x", sig))
+        self.assertEqual(spy.calls, [
+            # a mod L, and A = a·B checked against the public key
+            "crypto_core_ed25519_scalar_reduce", "crypto_scalarmult_ed25519_base_noclamp",
+            # r, R = r·B, k, S = r + k·a
+            "crypto_core_ed25519_scalar_reduce", "crypto_scalarmult_ed25519_base_noclamp",
+            "crypto_core_ed25519_scalar_reduce", "crypto_core_ed25519_scalar_mul",
+            "crypto_core_ed25519_scalar_add",
+            # derive_public_key
+            "crypto_core_ed25519_scalar_reduce", "crypto_scalarmult_ed25519_base_noclamp"])
+
+    def test_no_arithmetic_of_its_own_on_the_libsodium_path(self):
+        with open(os.path.join(PROJECT_DIR, COPIES[0]), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for name in ("sign_expanded", "derive_public_key", "_sodium_public_key"):
+            with self.subTest(name):
+                for node in ast.walk(funcs[name]):
+                    if isinstance(node, ast.BinOp):
+                        # Only bytes are put together (+).
+                        self.assertIsInstance(node.op, ast.Add, ast.unparse(node))
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                        self.assertNotIn(node.func.id, {"pow", "int", "_scalar_mult",
+                                                        "_point_add", "_encode_point"})
+                # The fallback is reached only without libsodium.
+                fallback = [n for n in ast.walk(funcs[name]) if isinstance(n, ast.Call)
+                            and isinstance(n.func, ast.Name)
+                            and n.func.id.startswith("_python_")]
+                for call in fallback:
+                    guard = next(n for n in ast.walk(funcs[name]) if isinstance(n, ast.If)
+                                 and call in list(ast.walk(n)))
+                    self.assertEqual(ast.unparse(guard.test), "sodium is None")
+
+    def test_a_public_key_not_its_own_is_refused(self):
+        """Two signatures of one message under two public keys give the
+        secret scalar away; the signer takes only a·B."""
+        expanded, pub = _mkp224o_style_key(3)
+        _, other = _mkp224o_style_key(4)
+        for sodium_present in (True, False):
+            with self.subTest(libsodium=sodium_present), \
+                    mock.patch.object(onion_auth, "_fallback_logged", {"Signing"}):
+                patch = (contextlib.nullcontext() if sodium_present
+                         else mock.patch.object(onion_auth, "_sodium", return_value=None))
+                with patch:
+                    for bad in (other, IDENTITY, bytes(32), pub[:31] + bytes([pub[31] ^ 0x80])):
+                        with self.assertRaises(ValueError) as cm:
+                            onion_auth.sign_expanded(expanded, bad, b"m")
+                        self.assertIn("not the expanded key's", str(cm.exception))
+
+    def test_a_scalar_with_no_public_key(self):
+        prefix = os.urandom(32)
+        for scalar in (bytes(32), _L.to_bytes(32, "little"), (3 * _L).to_bytes(32, "little")):
+            for sodium_present in (True, False):
+                with self.subTest(scalar=scalar.hex(), libsodium=sodium_present), \
+                        mock.patch.object(onion_auth, "_fallback_logged",
+                                          {"Signing", "Deriving a public key"}):
+                    patch = (contextlib.nullcontext() if sodium_present
+                             else mock.patch.object(onion_auth, "_sodium", return_value=None))
+                    with patch:
+                        with self.assertRaises(ValueError) as cm:
+                            onion_auth.derive_public_key(scalar + prefix)
+                        self.assertIn("no public key", str(cm.exception))
+                        with self.assertRaises(ValueError):
+                            onion_auth.sign_expanded(scalar + prefix, IDENTITY, b"m")
+
+    def test_byte_like_arguments(self):
+        expanded, pub = _mkp224o_style_key(9)
+        sig = onion_auth.sign_expanded(expanded, pub, b"hello")
+        self.assertEqual(onion_auth.sign_expanded(bytearray(expanded), memoryview(pub),
+                                                  bytearray(b"hello")), sig)
+        self.assertEqual(onion_auth.derive_public_key(bytearray(expanded)), pub)
+        for bad in (expanded[:63], expanded + b"\0"):
+            with self.assertRaises(ValueError):
+                onion_auth.sign_expanded(bad, pub, b"hello")
+            with self.assertRaises(ValueError):
+                onion_auth.derive_public_key(bad)
+        with self.assertRaises(ValueError):
+            onion_auth.sign_expanded(expanded, pub[:31], b"hello")
+
+
+class TestSigningFallback(unittest.TestCase):
+    """Without libsodium's ed25519 functions, signing goes on (a heartbeat
+    that cannot be signed lets the hub take the site over) on the old
+    arithmetic, and says so once."""
+
+    HIDDEN = {"nacl": None, "nacl.signing": None, "nacl.exceptions": None,
+              "nacl.bindings": None}
+
+    def test_without_pynacl(self):
+        expanded, pub = _mkp224o_style_key(11)
+        sig = onion_auth.sign_expanded(expanded, pub, b"online|x")
+        self.assertTrue(onion_auth.signing_uses_libsodium())
+        with mock.patch.dict(sys.modules, self.HIDDEN), \
+                mock.patch.object(onion_auth, "_fallback_logged", set()):
+            self.assertFalse(onion_auth.signing_uses_libsodium())
+            with self.assertLogs(onion_auth.__name__, "WARNING") as logs:
+                for _ in range(3):
+                    self.assertEqual(onion_auth.sign_expanded(expanded, pub, b"online|x"), sig)
+                    self.assertEqual(onion_auth.derive_public_key(expanded), pub)
+        self.assertEqual(len(logs.output), 2, logs.output)
+        for line in logs.output:
+            self.assertIn("python3-nacl", line)
+            self.assertIn("not constant-time", line)
+        self.assertTrue(onion_auth.signing_uses_libsodium())
+
+    def test_a_minimal_libsodium(self):
+        """PyNaCl on a libsodium built --enable-minimal has no ed25519 core
+        functions (they raise UnavailableError)."""
+        for flag in ("has_crypto_core_ed25519", "has_crypto_scalarmult_ed25519"):
+            with self.subTest(flag), mock.patch.object(sodium, flag, False):
+                self.assertIsNone(onion_auth._sodium())
+                self.assertFalse(onion_auth.signing_uses_libsodium())
+        self.assertIs(onion_auth._sodium(), sodium)
+
+
 class TestCopiesAreOneFile(unittest.TestCase):
 
     def test_identical(self):
@@ -382,10 +626,9 @@ class TestStrictRefusals(unittest.TestCase):
             pub = bytes.fromhex(hexpub)
             for msg in (b"", b"offline|x", os.urandom(32)):
                 self.assertFalse(onion_auth.verify(pub, msg, forged), hexpub)
-                s = int.from_bytes(os.urandom(31), "little")
-                r_enc = onion_auth._encode_point(onion_auth._scalar_mult(s, onion_auth._B))
-                self.assertFalse(onion_auth.verify(
-                    pub, msg, r_enc + s.to_bytes(32, "little")), hexpub)
+                s = os.urandom(31) + b"\0"
+                r_enc = sodium.crypto_scalarmult_ed25519_base_noclamp(s)
+                self.assertFalse(onion_auth.verify(pub, msg, r_enc + s), hexpub)
 
     def test_small_order_onion_address_cannot_be_signed_for(self):
         addr = onion_auth.derive_onion_address(IDENTITY)
@@ -474,14 +717,17 @@ class TestWithoutPyNaCl(unittest.TestCase):
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(expanded, pub, "unregister", addr, "", ts)
         name_sig = onion_auth.sign_name_payload(expanded, pub, "release", addr, "n", ts)
-        with mock.patch.dict(sys.modules, self.HIDDEN):
+        with mock.patch.dict(sys.modules, self.HIDDEN), \
+                mock.patch.object(onion_auth, "_fallback_logged", set()):
             with self.assertRaises(onion_auth.VerificationUnavailable):
                 onion_auth.verify_payload(addr, "unregister", "", ts, sig)
             with self.assertRaises(onion_auth.VerificationUnavailable):
                 onion_auth.verify_name_payload(addr, "release", "n", ts, name_sig)
-            # Signing needs nothing but the standard library.
-            self.assertEqual(onion_auth.sign_payload(expanded, pub, "unregister",
-                                                     addr, "", ts), sig)
+            # Signing falls back on the pure-Python arithmetic: the same
+            # signature, and a warning.
+            with self.assertLogs(onion_auth.__name__, "WARNING"):
+                self.assertEqual(onion_auth.sign_payload(expanded, pub, "unregister",
+                                                         addr, "", ts), sig)
 
     def test_unavailable_is_not_a_value_error(self):
         # Callers that catch ValueError for bad input must not swallow it.

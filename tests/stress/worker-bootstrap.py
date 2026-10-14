@@ -356,10 +356,7 @@ def main_ctor_ramped():
             # Derive keys for registration
             raw_key = base64.b64decode(content_key_b64)
             import onion_auth
-            a_bytes = raw_key[:32]
-            a = int.from_bytes(a_bytes, 'little')
-            A = onion_auth._scalar_mult(a, onion_auth._B)
-            pubkey = onion_auth._encode_point(A)
+            pubkey = onion_auth.derive_public_key(raw_key)
             privkey = raw_key
 
             # Build PEM for registration
