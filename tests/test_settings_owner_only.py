@@ -137,7 +137,7 @@ class TestSettingsPageHandlers(unittest.TestCase):
         body = _block(self.php, "wp_verify_nonce( $_POST['onionpress_settings_nonce']")
         gate = body.index(OWNER_GATE)
         self.assertLess(body.index("'onionpress_settings_save'"), gate)
-        for write in ("config-updates.json", "update_option( 'onionpress_archive_s3_access'"):
+        for write in ("config-updates.json", "onionpress_archive_keys_save("):
             with self.subTest(write=write):
                 self.assertLess(gate, body.index(write))
 
@@ -206,7 +206,7 @@ class TestSettingsPageMenu(unittest.TestCase):
         self.assertIn("onionpress_settings_site_page();", branch)
         self.assertIn("return;", branch)
         self.assertLess(gate, self.page.index(HOST))
-        self.assertLess(gate, self.page.index("get_option( 'onionpress_archive_s3_access'"))
+        self.assertLess(gate, self.page.index("onionpress_archive_keys()"))
 
     def test_owner_page_keeps_following(self):
         self.assertIn("<?php onionpress_settings_render_following(); ?>", self.page)
@@ -273,7 +273,8 @@ class TestWaybackIsTheOwners(unittest.TestCase):
         body = _block(self.php, "add_action( 'admin_post_onionpress_wayback_action'")
         gate = body.index("if ( ! is_super_admin() )")
         self.assertIn("wp_die( 'Forbidden', 403 );", body[gate:gate + 80])
-        for change in ("check_admin_referer(", "delete_option(", "wp_schedule_single_event(",
+        for change in ("check_admin_referer(", "onionpress_wayback_net_delete(",
+                       "onionpress_wayback_schedule_now(", "delete_transient(",
                        "wp_remote_post("):
             with self.subTest(change=change):
                 self.assertLess(gate, body.index(change))

@@ -133,6 +133,73 @@ function onionpress_settings_owner_allowed() {
 }
 
 /**
+ * The archive.org S3 keys the Wayback sweep submits with: one pair for the
+ * whole network, kept in the main site's options. Setup, the per-launch
+ * reconcile (multisite.ensure_archive_s3_keys) and Linux's installer write
+ * them there with `wp option update`, and the sweep reads them there, so
+ * this page saves them there too, from whichever site the owner is on.
+ * Through 2.5.3 it saved them in the current site's options, where a pair
+ * entered on the owner's own /<onionname>/ site was never used
+ * (issue #322; onionpress_archive_keys_move_to_main_site).
+ *
+ * @return array{access:string,secret:string}
+ */
+function onionpress_archive_keys() {
+    $main = function_exists( 'get_main_site_id' ) ? get_main_site_id() : 1;
+    return array(
+        'access' => (string) get_blog_option( $main, 'onionpress_archive_s3_access', '' ),
+        'secret' => (string) get_blog_option( $main, 'onionpress_archive_s3_secret', '' ),
+    );
+}
+
+function onionpress_archive_keys_save( $access, $secret ) {
+    $main = function_exists( 'get_main_site_id' ) ? get_main_site_id() : 1;
+    update_blog_option( $main, 'onionpress_archive_s3_access', (string) $access );
+    update_blog_option( $main, 'onionpress_archive_s3_secret', (string) $secret );
+}
+
+/**
+ * Once per network: move a pair this page saved on a subsite through 2.5.3
+ * to the main site, and remove every subsite's copy. Only the owner could
+ * save one (the form is owner-gated), and only by entering an account by
+ * hand, so it wins over the main site's pair, which is usually the one
+ * setup fetched for the shared OnionPress account. With pairs on several
+ * subsites, the lowest site ID's is moved. Runs on the main site's cron
+ * and admin requests, so the sweep gets the keys without the owner opening
+ * any page.
+ */
+function onionpress_archive_keys_move_to_main_site() {
+    if ( ! is_multisite() || ! is_main_site() || ! ( wp_doing_cron() || is_admin() ) ) {
+        return;
+    }
+    if ( get_site_option( 'onionpress_archive_keys_moved' ) === 'yes' ) {
+        return;
+    }
+    $main  = get_main_site_id();
+    $moved = null;
+    foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0, 'orderby' => 'id' ) ) as $bid ) {
+        $bid = (int) $bid;
+        if ( $bid === $main ) {
+            continue;
+        }
+        $access = (string) get_blog_option( $bid, 'onionpress_archive_s3_access', '' );
+        $secret = (string) get_blog_option( $bid, 'onionpress_archive_s3_secret', '' );
+        if ( $moved === null && $access !== '' && $secret !== '' ) {
+            $moved = $bid;
+            onionpress_archive_keys_save( $access, $secret );
+        }
+        delete_blog_option( $bid, 'onionpress_archive_s3_access' );
+        delete_blog_option( $bid, 'onionpress_archive_s3_secret' );
+    }
+    update_site_option( 'onionpress_archive_keys_moved', 'yes' );
+    if ( $moved !== null ) {
+        error_log( '[OnionPress Settings] archive.org keys saved on site ' . $moved
+            . ' moved to the main site, where the Wayback sweep reads them' );
+    }
+}
+add_action( 'init', 'onionpress_archive_keys_move_to_main_site' );
+
+/**
  * Register the admin menu page.
  *
  * On every site, for its administrators: Following is per-site. What the
@@ -755,8 +822,7 @@ add_action( 'admin_init', function () {
     if ( $ia_account !== '' && $ia_password !== '' ) {
         $s3_keys = onionpress_fetch_ia_s3_keys( $ia_account, $ia_password );
         if ( is_array( $s3_keys ) ) {
-            update_option( 'onionpress_archive_s3_access', $s3_keys['access'] );
-            update_option( 'onionpress_archive_s3_secret', $s3_keys['secret'] );
+            onionpress_archive_keys_save( $s3_keys['access'], $s3_keys['secret'] );
             add_action( 'admin_notices', function () {
                 echo '<div class="notice notice-success"><p>Archive.org credentials saved.</p></div>';
             } );
@@ -765,12 +831,12 @@ add_action( 'admin_init', function () {
                 echo '<div class="notice notice-error"><p>Archive.org login failed: ' . esc_html( $s3_keys ) . '</p></div>';
             } );
         }
-    } elseif ( $ia_account === '' && $ia_password === '' ) {
-        // Both empty — clear credentials
-        $had_creds = get_option( 'onionpress_archive_s3_access', '' ) !== '';
-        if ( $had_creds ) {
-            update_option( 'onionpress_archive_s3_access', '' );
-            update_option( 'onionpress_archive_s3_secret', '' );
+    } elseif ( $ia_account === '' && $ia_password === '' && ! empty( $_POST['op_ia_credentials_remove'] ) ) {
+        // Blank keeps the saved keys: the fields are always empty, so
+        // clearing on blank wiped the network's keys whenever the owner
+        // saved any other setting. Removing them takes the checkbox.
+        if ( onionpress_archive_keys()['access'] !== '' ) {
+            onionpress_archive_keys_save( '', '' );
         }
     }
 
@@ -1131,9 +1197,10 @@ function onionpress_settings_page() {
         }
     }
 
-    // Read Wayback S3 credentials from wp_options
-    $s3_access = get_option( 'onionpress_archive_s3_access', '' );
-    $s3_secret = get_option( 'onionpress_archive_s3_secret', '' );
+    // Read Wayback S3 credentials: the network's, from the main site
+    $s3_keys   = onionpress_archive_keys();
+    $s3_access = $s3_keys['access'];
+    $s3_secret = $s3_keys['secret'];
 
     // Read status for version display
     $status_file = '/var/lib/onionpress/status.json';
@@ -1293,7 +1360,13 @@ function onionpress_settings_page() {
                         <input type="text" name="op_ia_account" id="op_ia_account"
                                value="" class="regular-text" autocomplete="off"
                                placeholder="<?php echo $s3_access ? '(credentials saved)' : ''; ?>">
-                        <p class="description">Used to archive your site on the Wayback Machine, making it more robust and permanent. <?php if ( $s3_access ) echo '<strong>Credentials are configured.</strong> Re-enter to update.'; ?></p>
+                        <p class="description">Used to archive every site on this OnionPress on the Wayback Machine, making it more robust and permanent. <?php if ( $s3_access ) echo '<strong>Credentials are configured.</strong> Re-enter to update; leave blank to keep them.'; ?></p>
+                        <?php if ( $s3_access ) : ?>
+                            <label style="display: block; margin-top: 6px;">
+                                <input type="checkbox" name="op_ia_credentials_remove" value="1">
+                                Remove the saved credentials
+                            </label>
+                        <?php endif; ?>
                     </td>
                 </tr>
                 <tr>
