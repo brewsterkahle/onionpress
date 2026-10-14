@@ -231,7 +231,7 @@ services:
       - "${ONIONPRESS_BIND_HOST:-127.0.0.1}:${ONIONPRESS_WP_PORT:-8080}:80"
 
   db:
-    image: mariadb:latest
+    image: mariadb:13.0.2@sha256:f1bba652ba57bea3099ca2fe1af692af537c27d96e0bcde39dce29e2ba1ec4f3
     container_name: onionpress-db
     logging:
       driver: json-file
@@ -286,7 +286,7 @@ services:
   # over a unix socket on a volume only these two services mount, and has
   # no network at all (no WEBHOOK_URL/APPRISE_URL is configured).
   autoheal:
-    image: willfarrell/autoheal:latest
+    image: willfarrell/autoheal:latest@sha256:da9e926d48f32021c94c2afd9a993f41da76446dc4a5288a9a4c8a69f8d49586
     container_name: onionpress-autoheal
     logging:
       driver: json-file
@@ -324,8 +324,9 @@ services:
   # Runs as root because the socket's owner is root in the Colima VM and
   # the user (root in its namespace) under rootless Docker, with no group
   # we could name portably — but with every capability dropped, a
-  # read-only filesystem and no network. Pinned by multi-arch index digest;
-  # bump with build/base-image-digest.sh (docs/BUILDING.md).
+  # read-only filesystem and no network. Pinned by multi-arch index digest
+  # like every image here, from build/image-pins.env; bump with
+  # build/refresh-image-digests.sh --socket-proxy <ref> (docs/BUILDING.md).
   autoheal-proxy:
     image: ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b
     container_name: onionpress-autoheal-proxy

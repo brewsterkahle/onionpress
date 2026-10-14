@@ -293,17 +293,22 @@ class TestEveryPullIsGuarded(unittest.TestCase):
                     + "\n  ".join(unguarded),
                 )
 
-    def test_start_tor_does_not_force_pull_local_images(self):
-        """`--pull always` force-pulls even when every other pull is skipped,
-        so it needs its own branch rather than just a surrounding guard.
+    def test_start_tor_does_not_force_pull(self):
+        """`--pull always` force-pulled even when every other pull was
+        skipped, so start-tor carried a no-pull branch for local images.
+        The tor image is pinned by digest, so the force-pull could only
+        re-confirm bytes already present (issue #36); start-tor now runs
+        compose's default policy for everyone, which leaves a local image
+        alone. tests/test_image_pins.py keeps `--pull always` out of both
+        launchers.
         """
         text = _read("app/MacOS/onionpress")
         self.assertIn(
             "docker compose up -d tor", text,
-            "The start-tor path must have a no-pull branch for local images.",
+            "The start-tor path must start tor without a pull policy.",
         )
-        self.assertIn("docker compose up -d --pull always tor", text,
-                      "...and keep the force-pull branch for published images.")
+        self.assertEqual(
+            [], [l for _, l in _code_lines(text) if "--pull always" in l])
 
 
 class TestMenubarGatesItsPull(unittest.TestCase):

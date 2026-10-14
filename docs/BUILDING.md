@@ -137,20 +137,26 @@ colima stop                                                    # frees the RAM; 
 ## Container image pins
 
 `build/image-pins.env` is the single source of truth for which
-`ghcr.io/brewsterkahle/onionpress-*` images the stack runs:
+images the stack runs — the two this project builds and the four
+third-party ones:
 
 ```
 ONIONPRESS_TOR_IMAGE=ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:…
 ONIONPRESS_WORDPRESS_IMAGE=ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:…
+MARIADB_IMAGE=mariadb:13.0.2@sha256:…
+AUTOHEAL_IMAGE=willfarrell/autoheal:latest@sha256:…
+CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.10.0@sha256:…
+SOCKET_PROXY_IMAGE=ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:…
 ```
 
-Five files embed those literals, so a bare `docker compose up` with no
+Six files embed those literals, so a bare `docker compose up` with no
 environment set still works:
 
 | Consumer | What it pins |
 |---|---|
-| `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services, and the `ONIONHEAVEN_IMAGE` the last one hands its takeover workers |
-| `app/MacOS/onionpress` | `update_images()`, the OnionHeaven takeover worker |
+| `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services, the `ONIONHEAVEN_IMAGE` the last one hands its takeover workers, and `db`, `autoheal`, `autoheal-proxy` |
+| `app/Resources/docker/docker-compose.cloudflare.yml` | `cloudflared` |
+| `app/MacOS/onionpress` | `update_images()` (cloudflared only when a tunnel token is set), the OnionHeaven takeover worker |
 | `linux/onionpress` | `update_images()` |
 | `src/onionpress/containers.py` | `ONIONHEAVEN_IMAGE` — farm workers |
 | `src/onionpress/launcher_ops.py` | `DEFAULT_TOR_IMAGE` — vanity-key generation |
@@ -183,13 +189,25 @@ daemon needed). Until issue #327 they came from `docker images --digests`,
 i.e. whatever the release machine had last pulled, and that pinned stale
 images during the 2.5.3 release.
 
-Other modes:
+That same run also re-resolves the four third-party tags over the registry
+API (`build/base-image-digest.sh`, no daemon): Docker Hub rebuilds a version
+tag such as `mariadb:13.0.2` for base-OS patches, and this is how those reach
+a release. Moving one to a new tag is an argument:
+
+```bash
+build/refresh-image-digests.sh --mariadb mariadb:13.0.3
+build/refresh-image-digests.sh --cloudflared cloudflare/cloudflared:2026.11.0
+build/refresh-image-digests.sh --socket-proxy ghcr.io/wollomatic/socket-proxy:1.14.0
+build/refresh-image-digests.sh --autoheal willfarrell/autoheal:latest   # it publishes no version tags
+```
+
+Other modes (only `--local` needs a Docker daemon):
 
 ```bash
 build/refresh-image-digests.sh --check                   # CI / pre-commit: drift is an error
 build/refresh-image-digests.sh --propagate               # repair: re-apply image-pins.env everywhere
-build/refresh-image-digests.sh --tor sha256:… --wordpress sha256:…   # supply digests explicitly
-build/refresh-image-digests.sh --local                   # this machine's pulled images (needs a daemon)
+build/refresh-image-digests.sh --tor sha256:… --wordpress sha256:…   # supply the ghcr.io digests explicitly
+build/refresh-image-digests.sh --local                   # this machine's pulled ghcr.io images (needs a daemon)
 ```
 
 Publishing the GitHub release does **not** rebuild the images. On
@@ -201,22 +219,35 @@ tags off the images it pinned and tested (2.5.2 and 2.5.3 both shipped that
 way).
 
 Pins must be **multi-arch index digests** — what
-`docker buildx imagetools inspect <tag>` reports for the tag. A
-single-platform manifest digest resolves on one architecture and 404s on the
-other, which on this project means "works on the maintainer's Mac, breaks on
-every Intel machine".
+`docker buildx imagetools inspect <tag>` and `build/base-image-digest.sh`
+report for the tag. A single-platform manifest digest resolves on one
+architecture and 404s on the other, which on this project means "works on
+the maintainer's Mac, breaks on every Intel machine". The script refuses
+one for any image (with `--local`, the two ghcr.io digests come from
+`docker images --digests`, which is the index for a multi-arch GHCR tag).
 
-### Why some images stay floating
+### The third-party images are pinned too
 
-`mariadb:latest` and `willfarrell/autoheal:latest` are deliberately **not**
-pinned. We rely on their upstream registries shipping security patches
-without us tracking digests, and neither is built by this project.
+`mariadb`, `willfarrell/autoheal`, `cloudflare/cloudflared` and the socket
+proxy used to float on `:latest` (through 2.5.3), on the theory that upstream
+would ship security patches without us tracking digests. What that bought in
+practice: a registry could swap any of them under every install, and every
+macOS launch pulled them over clearnet — DNS and registry traffic naming the
+images, each time, for nothing new ([issue #36](https://github.com/brewsterkahle/onionpress/issues/36)).
+Now a patch reaches users the same way a tor or wordpress change does: a
+release moves the pin, and the next launch's `--policy missing` pull fetches
+it. Re-pin them before every release (the refresh does it).
+
+**mariadb pins move forward only.** The data directory follows whatever
+version has run on it (`MARIADB_AUTO_UPGRADE=1`), and an older server
+refuses a newer directory. The refresh script rejects a lower version. Until
+this pin existed every launch pulled `mariadb:latest`, so the first pin was
+what `:latest` resolved to that day; a release must never pin lower than
+`:latest` was at the previous one.
 
 autoheal no longer holds the Docker socket. It reaches Docker only through
-`autoheal-proxy`, which **is** pinned, in `docker-compose.yml` itself
-(`ghcr.io/wollomatic/socket-proxy:<version>@sha256:…`), because it is the
-container that holds the socket. Bump it like a Dockerfile input:
-`build/base-image-digest.sh ghcr.io/wollomatic/socket-proxy:<version>`. The
+`autoheal-proxy` (`ghcr.io/wollomatic/socket-proxy`), the container that does
+hold the socket — pinned from `build/image-pins.env` like the rest. The
 proxy passes only the two calls autoheal's script makes; if a new autoheal
 calls anything else, the proxy refuses it and logs a WARN line
 (`docker logs onionpress-autoheal-proxy`). See `docs/DOCKER-SOCKET.md`.
@@ -736,6 +767,13 @@ it, and the important one was not the opt-in one:
 
 So you could build an image, launch the app, and silently test someone else's
 build. Nothing failed; the stack just was not running your code.
+
+Since then the start-time pull on both platforms is `docker compose pull
+--policy missing` and `start-tor` has no pull policy at all: with every image
+pinned by digest, a launch fetches exactly the pins a new release moved and
+nothing else, and never touches the registry otherwise. The refresh paths
+(`update_images()`, `onionpress update`, the menubar's Check for Updates)
+are the ones that still pull unconditionally.
 
 All of them now check `using_local_images()` — true when
 `ONIONPRESS_TOR_IMAGE` or `ONIONPRESS_WORDPRESS_IMAGE` points at a reference

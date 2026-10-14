@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Static invariants for container-image pins.
 
-build/image-pins.env is the single source of truth for which
-ghcr.io/brewsterkahle/onionpress-* images the stack runs. Five consumers
-embed those literals so a bare `docker compose up` works with no environment
-set, and build/refresh-image-digests.sh rewrites all of them together.
+build/image-pins.env is the single source of truth for every image the
+stack runs: the two ghcr.io/brewsterkahle/onionpress-* images this project
+builds and the four third-party ones (mariadb, autoheal, cloudflared, the
+autoheal socket proxy). Six consumers embed those literals so a bare
+`docker compose up` works with no environment set, and
+build/refresh-image-digests.sh rewrites all of them together.
 
 This file exists because "rewrites them together" was previously only a
 convention. v2.4.110 (commit 94ce1a36, message "refresh image digests")
@@ -16,13 +18,21 @@ install, two different Tor builds, and an "up to date" log line about an
 image the stack never started. These tests turn that from a thing you must
 remember into a thing you cannot commit.
 
+The third-party images floated on `:latest` through 2.5.3 while every
+macOS launch ran an unconditional `docker compose pull`: a registry could
+swap mariadb or autoheal under every user, and each launch did clearnet DNS
+and registry traffic for images it already had (issue #36). Now they are
+pinned like the rest, and the launch-time pull is `--policy missing`.
+
 Guarded here:
-  1. Every consumer's embedded literal equals build/image-pins.env.
+  1. Every consumer's embedded literal equals build/image-pins.env, and no
+     consumer names a third-party image by a floating tag.
   2. The sites that are deliberately NOT pinned stay that way — a blanket
      "pin everything" sweep would break the vanity-generation presence check
      and the in-container takeover default.
   3. The env-var override that lets a locally built stack take over
-     (build/build-images.sh) is wired up in all five consumers.
+     (build/build-images.sh) is wired up in every consumer that runs them.
+  4. A launch pulls nothing it already has.
 
 No PyYAML: CI installs nothing beyond CPython, so docker-compose.yml is read
 with a regex. Note that the `onionheaven` service wraps its pin in
@@ -44,14 +54,32 @@ PINS_FILE = "build/image-pins.env"
 # asserts they match, so this list cannot silently fall behind.
 CONSUMERS = (
     "app/Resources/docker/docker-compose.yml",
+    "app/Resources/docker/docker-compose.cloudflare.yml",
     "app/MacOS/onionpress",
     "linux/onionpress",
     "src/onionpress/containers.py",
     "src/onionpress/launcher_ops.py",
 )
 
+COMPOSE = "app/Resources/docker/docker-compose.yml"
+CLOUDFLARE_COMPOSE = "app/Resources/docker/docker-compose.cloudflare.yml"
+LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
+
 TOR_REPO = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 WP_REPO = "ghcr.io/brewsterkahle/onionpress-wordpress:latest"
+
+# The third-party pins: key in build/image-pins.env -> (repository, the
+# consumers that must carry it). Linux never starts cloudflared, so only the
+# Mac launcher's update_images() lists it. Keep in sync with
+# THIRD_PARTY_KEYS in build/refresh-image-digests.sh (asserted below).
+THIRD_PARTY = {
+    "MARIADB_IMAGE": ("mariadb", (COMPOSE,) + LAUNCHERS),
+    "AUTOHEAL_IMAGE": ("willfarrell/autoheal", (COMPOSE,) + LAUNCHERS),
+    "CLOUDFLARED_IMAGE": ("cloudflare/cloudflared",
+                          (CLOUDFLARE_COMPOSE, "app/MacOS/onionpress")),
+    "SOCKET_PROXY_IMAGE": ("ghcr.io/wollomatic/socket-proxy",
+                           (COMPOSE,) + LAUNCHERS),
+}
 
 # A reference in "pin context": a quoted string, a ${VAR:-…} default, or end
 # of line. Mirrors the lookahead in build/refresh-image-digests.sh, which
@@ -81,17 +109,56 @@ def _pinned_digests(text, repo):
             for m in re.finditer(_PINNED.format(repo=re.escape(repo)), text)]
 
 
+def _third_party_refs(text, repo):
+    """Every reference to the third-party `repo` in pin context, with
+    whatever tag and digest it carries — so a floating `mariadb:latest`
+    shows up beside the pinned one instead of being filtered out. Mirrors
+    any_tag() in build/refresh-image-digests.sh."""
+    pattern = (r"(?<![\w./-])" + re.escape(repo)
+               + r":[\w][\w.-]*(?:@sha256:[a-f0-9]+)?(?=[\"}\n])")
+    return re.findall(pattern, text)
+
+
 class TestPinsFile(unittest.TestCase):
     """build/image-pins.env itself is well-formed."""
 
-    def test_declares_both_images(self):
+    def test_declares_every_image(self):
         pins = _load_pins()
-        for key in ("ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE"):
+        for key in ("ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE",
+                    *THIRD_PARTY):
             self.assertIn(
                 key, pins,
                 f"{PINS_FILE} must declare {key} — has it been renamed? "
                 "Update this test and build/refresh-image-digests.sh.",
             )
+
+    def test_third_party_pins_name_their_repositories(self):
+        """The refresh script finds a third-party image in a consumer by its
+        repository and rewrites whatever tag it finds, so the pin's own
+        repository must be the one the consumers name."""
+        pins = _load_pins()
+        for key, (repo, _) in THIRD_PARTY.items():
+            with self.subTest(key=key):
+                self.assertRegex(pins[key], r"^" + re.escape(repo) + r":[\w][\w.-]*@sha256:")
+
+    def test_refresh_script_knows_the_same_third_party_keys(self):
+        script = _read("build/refresh-image-digests.sh")
+        match = re.search(r"^THIRD_PARTY_KEYS=\((.*?)\)$", script, re.M)
+        self.assertIsNotNone(match, "THIRD_PARTY_KEYS missing from the refresh script")
+        self.assertEqual(set(match.group(1).split()), set(THIRD_PARTY))
+        for key in THIRD_PARTY:
+            self.assertIn(
+                f'resolve_third_party {key} ', script,
+                f"the refresh script must resolve {key} in refresh mode",
+            )
+
+    def test_third_party_digests_are_resolved_as_multi_arch_indexes(self):
+        """Never `docker images --digests` for these: that reports whatever
+        manifest was pulled, which for a third-party image on a Mac may be
+        the arm64 one. build/base-image-digest.sh refuses anything but an
+        index."""
+        script = _read("build/refresh-image-digests.sh")
+        self.assertIn('pin="$(build/base-image-digest.sh "$ref")"', script)
 
     def test_pins_are_digests_not_bare_tags(self):
         """A bare `:latest` here would silently un-pin the whole stack: the
@@ -182,6 +249,44 @@ class TestConsumersMatchPins(unittest.TestCase):
                     self.wp_digest, text,
                     f"{path} must pull the pinned wordpress image, not a bare tag.",
                 )
+
+    def test_third_party_images_are_pinned_everywhere_they_appear(self):
+        """mariadb, autoheal, cloudflared and the socket proxy floated on
+        `:latest` through 2.5.3. Every reference in pin context must now be
+        the pin itself: a bare tag, another tag or another digest is drift.
+        """
+        pins = _load_pins()
+        for key, (repo, expected_in) in THIRD_PARTY.items():
+            pin = pins[key]
+            for path in CONSUMERS:
+                refs = _third_party_refs(_read(path), repo)
+                with self.subTest(key=key, path=path):
+                    if path in expected_in:
+                        self.assertTrue(
+                            refs,
+                            f"{path} must carry the {repo} pin "
+                            f"(expected {pin}).",
+                        )
+                    self.assertEqual(
+                        sorted(set(refs)), [pin] if refs else [],
+                        f"{path} names {repo} by something other than the "
+                        f"pin {pin}: {sorted(set(refs))}. A floating tag "
+                        "lets the registry swap the image under every user. "
+                        "Fix with: build/refresh-image-digests.sh --propagate",
+                    )
+
+    def test_mac_update_pulls_cloudflared_only_with_a_tunnel(self):
+        """cloudflared is ~60 MB and compose never starts it without a
+        token, so the opt-in updater must not fetch it for everyone."""
+        text = _read("app/MacOS/onionpress")
+        body = text[text.index("\nupdate_images() {"):]
+        body = body[:body.index("\n}\n")]
+        pin = _load_pins()["CLOUDFLARED_IMAGE"]
+        self.assertIn(pin, body)
+        self.assertLess(
+            body.index('if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]'), body.index(pin),
+            "the cloudflared pull must be inside the tunnel-token check",
+        )
 
 
 class TestRefreshScriptOwnsEveryConsumer(unittest.TestCase):
@@ -344,13 +449,48 @@ class TestDeliberatelyUnpinned(unittest.TestCase):
                          "takeover workers must run the onionheaven "
                          "service's own image reference")
 
-    def test_mariadb_and_autoheal_stay_floating(self):
-        """Deliberate: we rely on upstream shipping security patches without
-        us tracking digests. Documented in docs/BUILDING.md.
+
+
+class TestLaunchPullsNothingItHas(unittest.TestCase):
+    """Issue #36: a launch used to do up to three registry passes on macOS
+    before any container started, one of them an unconditional
+    `docker compose pull` that also refreshed the then-floating mariadb and
+    autoheal tags. With every image pinned, the only pull a launch needs is
+    of a pin a new release moved, which `--policy missing` fetches and a
+    plain pull merely re-confirms over the network. The opt-in refresh
+    paths (update_images(), `onionpress update`, the menubar's Check for
+    Updates) keep their unconditional pulls.
+    """
+
+    def test_start_time_compose_pull_is_missing_only(self):
+        for path in LAUNCHERS:
+            text = _read(path)
+            with self.subTest(path=path):
+                self.assertIn("docker compose pull --policy missing", text)
+
+    def test_mac_launcher_has_no_unconditional_compose_pull(self):
+        """The Mac launcher's only `docker compose pull` is the start-time
+        one; its refresh path is update_images()'s per-image `docker pull`.
         """
-        compose = _read("app/Resources/docker/docker-compose.yml")
-        self.assertIn("image: mariadb:latest", compose)
-        self.assertIn("image: willfarrell/autoheal:latest", compose)
+        text = _read("app/MacOS/onionpress")
+        unconditional = [
+            line.strip() for line in text.splitlines()
+            if re.search(r"docker compose pull(?! --policy missing)", line)
+            and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual([], unconditional)
+
+    def test_no_force_pull_in_either_launcher(self):
+        """`docker compose up --pull always tor` re-fetched a digest-pinned
+        image's manifest on every start. Compose's default policy already
+        pulls a moved pin."""
+        for path in LAUNCHERS:
+            with self.subTest(path=path):
+                self.assertEqual([], [
+                    line.strip() for line in _read(path).splitlines()
+                    if "--pull always" in line
+                    and not line.lstrip().startswith("#")
+                ])
 
 
 class TestLocalImageOverride(unittest.TestCase):

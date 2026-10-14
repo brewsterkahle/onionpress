@@ -136,16 +136,30 @@
   reset it to `""` when merging into `main` (the test fails the PR otherwise).
 
 ## Container Image Pins
-- **`build/image-pins.env` is the single source of truth** for the GHCR image
-  digests. Five files embed the literals (docker-compose.yml, app/MacOS/onionpress,
-  linux/onionpress, src/onionpress/containers.py, src/onionpress/launcher_ops.py).
+- **`build/image-pins.env` is the single source of truth** for every image
+  the stack runs: the two GHCR images and the four third-party ones
+  (mariadb, autoheal, cloudflared, the autoheal socket proxy). Six files
+  embed the literals (docker-compose.yml, docker-compose.cloudflare.yml,
+  app/MacOS/onionpress, linux/onionpress, src/onionpress/containers.py,
+  src/onionpress/launcher_ops.py).
 - **Never hand-edit a digest.** Run `build/refresh-image-digests.sh` (or
   `--propagate` to re-apply the pins file without a Docker daemon).
   `tests/test_image_pins.py` fails the build on drift — this exists because
   v2.4.110 refreshed only docker-compose.yml and shipped two different Tor
   builds inside one install.
 - Pins must be **multi-arch index digests** (`docker buildx imagetools inspect`),
-  never a single-platform manifest digest.
+  never a single-platform manifest digest. The third-party ones are resolved
+  by `build/base-image-digest.sh` too, which refuses anything else; a plain
+  refresh re-resolves their tags, `--mariadb <ref>` etc. move one to a new
+  tag. **mariadb pins move forward only** (the datadir follows the newest
+  server that ran on it; the script rejects a lower version).
+- **The third-party images floated on `:latest` through 2.5.3** while the
+  Mac launcher ran an unconditional `docker compose pull` on every start
+  (issue #36). Both launchers now pull `--policy missing` at start and
+  `start-tor` has no `--pull always`: a launch fetches only a pin a new
+  release moved. The opt-in refresh paths (`update_images()`, Linux
+  `onionpress update`, the menubar's Check for Updates) still pull
+  unconditionally. `tests/test_image_pins.py` enforces all of it.
 - **The refresh resolves digests from the registry** (`build/base-image-digest.sh`
   on `:latest`); the local `docker images` cache only with `--local` (issue
   #327: the cache pinned stale images in 2.5.3).
