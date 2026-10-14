@@ -48,6 +48,7 @@ REQUIRED_EXECUTABLES=(
     ./opt/onionpress/scripts/install_plugin.sh
     ./opt/onionpress/scripts/activate_plugin.sh
     ./usr/lib/systemd/system-sleep/onionpress
+    ./opt/onionpress/onionpress-wordpress-egress
 )
 REQUIRED_FILES=(
     ./opt/onionpress/VERSION
@@ -59,6 +60,7 @@ REQUIRED_FILES=(
     ./usr/lib/systemd/user/onionpress-heartbeat.service
     ./usr/lib/systemd/user/onionpress-watcher.service
     ./usr/lib/systemd/user/onionpress-watcher.timer
+    ./usr/lib/systemd/system/docker.service.d/onionpress-wordpress-egress.conf
     ./etc/xdg/autostart/onionpress-tray.desktop
     ./usr/share/applications/onionpress.desktop
     ./usr/share/metainfo/org.onionpress.OnionPress.metainfo.xml

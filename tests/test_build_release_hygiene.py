@@ -41,6 +41,11 @@ NODE24_MAJOR = {
     "docker/setup-buildx-action": 4,
     "docker/build-push-action": 7,
     "crazy-max/ghaction-github-runtime": 4,
+    "actions/upload-artifact": 6,
+    "actions/download-artifact": 7,
+    # A composite action: v4 runs actions/attest v4 (node24), v3 and
+    # earlier node20 versions of it.
+    "actions/attest-build-provenance": 4,
 }
 
 
