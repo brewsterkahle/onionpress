@@ -767,8 +767,8 @@ HELPEOF
 }
 
 # Replace this site's onion service key, in an order that never loses the
-# current one (onionpress import-key and the Settings page's
-# import-key-file and generate-vanity all come here):
+# current one (onionpress import-key comes here; the Settings page never
+# replaces the key on Linux: its import-key-file is refused):
 #   1. check: the key goes to key_manager.py on stdin, which refuses one Tor
 #      would not serve as the address it derives (check_expanded_secret_key)
 #      and writes it to a staging folder; the staged files are read back as
@@ -921,8 +921,8 @@ set_address_prefix_for() {
     log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
 }
 
-# The Settings page's key results (import-result.json, vanity-result.json),
-# built with a JSON encoder: the error text comes from key_manager.
+# The Settings page's key result (import-result.json), built with a JSON
+# encoder.
 # Usage: write_key_result <file> <time field> true <address> |
 #        write_key_result <file> <time field> false <error>
 write_key_result() {
@@ -1248,6 +1248,10 @@ setup_wordpress_interactive() {
         esac
     done
 
+    # Set when --from-backup copied the backup's key in (the setup command
+    # then has the start install it); a backup without one leaves this
+    # install's key alone.
+    SETUP_BACKUP_KEY_RESTORED=""
     # --from-backup mode: extract config and keys from backup, use dummy WP credentials
     # (restore will overwrite the database with real users afterward)
     if [ -n "$from_backup_pass" ]; then
@@ -1294,7 +1298,14 @@ setup_wordpress_interactive() {
                 echo "$onion_address" > "$addr_dir/hostname"
                 log "Setup: restored Tor keys for $onion_address from backup"
                 echo "  Tor keys restored from backup ($onion_address)."
+                SETUP_BACKUP_KEY_RESTORED=yes
             fi
+        fi
+        if [ "$SETUP_BACKUP_KEY_RESTORED" != "yes" ]; then
+            # A backup without an onion service key (a Mac Settings page
+            # backup): this install keeps the key and address it has.
+            log "Setup: the backup holds no onion service key; this install keeps its own"
+            echo "  This backup holds no onion service key: this install keeps its own address."
         fi
         # Use dummy credentials — restore will overwrite the database
         wp_user="admin"
@@ -2897,10 +2908,17 @@ restore_backup() {
     # Restores from a password-protected backup zip.
     # Usage: restore_backup <password> <zip_path> [--from-settings-page]
     # --from-settings-page: the file and its password came through
-    # WordPress. A backup holding an OnionHeaven hub's registrants' keys or
-    # OnionHome's name registry is refused before anything is touched
-    # (return 3, the reason as the last line of stdout), and the hub data
-    # volume is never written (backup.settings_page_restore_refusal).
+    # WordPress. Refused before anything is touched (return 3, the reason
+    # as the last line of stdout): on an OnionHeaven hub or OnionHome, or a
+    # node that could not be checked (backup.settings_page_restore_node_refusal,
+    # before the upload is opened); a backup holding an OnionHeaven hub's
+    # registrants' keys or OnionHome's name registry
+    # (backup.settings_page_restore_refusal); a backup of another onion
+    # address than the one the tor container serves
+    # (backup.ADDRESS_CHANGE_REFUSED_MSG: no one at this host is asked, so
+    # the page never changes the address; onionpress restore does). A
+    # backup without a key (a Mac Settings page backup) keeps this site's
+    # address. The hub data volume is never written.
     local password="$1"
     local zip_path="$2"
     local from_settings_page="false"
@@ -2920,6 +2938,29 @@ restore_backup() {
     if [ ! -f "$zip_path" ]; then
         echo "ERROR: Backup file not found: $zip_path" >&2
         return 1
+    fi
+
+    # The Settings page's restore, before the upload is opened: never on an
+    # OnionHeaven hub or OnionHome, nor on a node whose containers do not
+    # say (fails closed, as the page's backup). The address the tor
+    # container serves is what that check asks about, and what a backup of
+    # another address would replace (refused below). Only exit 3 says why;
+    # any other failure gets backup.UNVERIFIED_RESTORE_REFUSED_MSG's words
+    # (a test keeps them equal).
+    local current_address=""
+    if [ "$from_settings_page" = "true" ]; then
+        current_address=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
+        is_onion_address "$current_address" || current_address=""
+        local node_refusal="" node_rc=0
+        node_refusal=$(op_py --data-dir "$DATA_DIR" settings-page-restore-node-check --address "$current_address" 2>>"$LOG_FILE") || node_rc=$?
+        if [ "$node_rc" -ne 0 ]; then
+            if [ "$node_rc" -ne 3 ] || [ -z "$node_refusal" ]; then
+                node_refusal="OnionPress could not check whether this node is an OnionHeaven hub or OnionHome (its containers did not answer), and a restore made here comes through WordPress. Nothing was restored: try again once OnionPress is running, or restore from the OnionPress app (Restore... in its menu) or with onionpress restore."
+            fi
+            log "Restore: refused (the Settings page's restore): $node_refusal"
+            echo "$node_refusal"
+            return 3
+        fi
     fi
 
     staging=$(mktemp -d -t onionpress-restore-XXXXXX)
@@ -2968,6 +3009,18 @@ restore_backup() {
     fi
     log "Restore: backup from ${onion_address:-a backup without a key}"
 
+    # The Settings page never changes this site's address: a backup of
+    # another one is refused, before anything is touched. Nobody at this
+    # host is asked (the Mac asks the person at the Mac); onionpress
+    # restore on the host does it. A backup without a key keeps this one.
+    if [ "$from_settings_page" = "true" ] && [ -n "$onion_address" ] \
+            && [ "$onion_address" != "$current_address" ]; then
+        local change_refusal="Not restored: this backup is of another onion address, and a restore from this page never replaces this site's address. Restore it on the computer running OnionPress: onionpress restore <backup file>"
+        log "Restore: refused (the Settings page's restore): the backup is of $onion_address, not of this site's $current_address"
+        echo "$change_refusal"
+        return 3
+    fi
+
     # 1. Restore Tor keys — copy whatever formats the backup has to vanity-keys.
     #    start_containers() will derive C Tor keys from the PEM if needed.
     local arti_key="$staging/tor-keys/ks_hs_id.ed25519_expanded_private"
@@ -3004,6 +3057,12 @@ restore_backup() {
             fi
         fi
         log "Restore: Tor keys written for $onion_address"
+    elif [ -n "$current_address" ]; then
+        # A backup without a key (a Mac Settings page backup): the site
+        # keeps its key and address, which the settings below are held to
+        # and the Settings page shows.
+        onion_address="$current_address"
+        log "Restore: the backup holds no onion service key; this site keeps its address $onion_address"
     else
         log "WARNING: No Tor keys in backup — skipping key restore"
     fi
@@ -3798,12 +3857,16 @@ main() {
                 # The backup's key replaces the one Tor serves now: hubs
                 # that may hold a copy of that one are asked to delete it
                 # first (not the backup's own address, which stays).
-                local restored_key_dir=""
-                restored_key_dir=$(vanity_key_dir) || restored_key_dir=""
-                ONIONPRESS_YES=true onionheaven_release restore \
-                    "${restored_key_dir:+$(basename "$restored_key_dir")}"
-                log "Setup --from-backup: flagging key reimport..."
-                touch "$DATA_DIR/.import-key-pending"
+                # A backup without a key restored none: the install keeps
+                # its key, and nothing is released or reimported.
+                if [ "${SETUP_BACKUP_KEY_RESTORED:-}" = "yes" ]; then
+                    local restored_key_dir=""
+                    restored_key_dir=$(vanity_key_dir) || restored_key_dir=""
+                    ONIONPRESS_YES=true onionheaven_release restore \
+                        "${restored_key_dir:+$(basename "$restored_key_dir")}"
+                    log "Setup --from-backup: flagging key reimport..."
+                    touch "$DATA_DIR/.import-key-pending"
+                fi
                 stop_containers
                 start_containers
                 wait_for_services
@@ -4184,89 +4247,18 @@ sys.exit(0 if provision_interactive() else 1)
                         log "Reachability test: $onion_addr_test -> HTTP $http_code (reachable=$reachable)"
                     fi
                     ;;
-                generate-vanity)
-                    log "Starting vanity address generation..."
-                    setup_db_passwords
-                    local vanity_prefix
-                    vanity_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-                    vanity_prefix="${vanity_prefix:-op2}"
-                    local vanity_result_file="/tmp/onionpress-vanity-result.json"
-                    if ! command -v mkp224o >/dev/null 2>&1; then
-                        echo '{"success":false,"error":"mkp224o is not installed. Install it with: sudo apt install -y gcc libsodium-dev autoconf && cd /tmp && git clone https://github.com/cathugger/mkp224o && cd mkp224o && ./autogen.sh && ./configure && make && sudo cp mkp224o /usr/local/bin/","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
-                        log "Vanity generation failed: mkp224o not installed"
-                    else
-                        local vanity_output_dir
-                        vanity_output_dir=$(mktemp -d)
-                        log "Generating vanity address with prefix: $vanity_prefix (this may take a while)..."
-                        if mkp224o -n 1 -d "$vanity_output_dir" "$vanity_prefix" >> "$LOG_FILE" 2>&1; then
-                            local vanity_addr_dir
-                            vanity_addr_dir=$(find "$vanity_output_dir" -maxdepth 1 -type d -name "*.onion" | head -1)
-                            if [ -n "$vanity_addr_dir" ] && [ -f "$vanity_addr_dir/hs_ed25519_secret_key" ]; then
-                                local vanity_b32_key vanity_rc=0
-                                vanity_b32_key=$(python3 -c "import base64, sys; print(base64.b32encode(open(sys.argv[1],'rb').read()).decode())" "$vanity_addr_dir/hs_ed25519_secret_key")
-                                # The import flow without its question (the
-                                # page already confirmed): checked and kept
-                                # before the hubs are asked to delete the old
-                                # key and anything is stopped or replaced.
-                                ONIONPRESS_YES=true replace_onion_key "$vanity_b32_key" || vanity_rc=$?
-                                if [ "$REPLACE_KEY_STOPPED" = "yes" ]; then
-                                    start_containers
-                                    wait_for_services
-                                    write_status
-                                fi
-                                start_heartbeat_client
-                                if [ "$vanity_rc" -eq 1 ]; then
-                                    write_key_result vanity-result.json generated_at false "$REPLACE_KEY_ERROR"
-                                    log "Vanity address not imported: $REPLACE_KEY_ERROR"
-                                else
-                                    write_key_result vanity-result.json generated_at true "$REPLACE_KEY_ADDRESS"
-                                    log "Vanity address generated and imported: $REPLACE_KEY_ADDRESS"
-                                fi
-                            else
-                                echo '{"success":false,"error":"mkp224o did not produce a key","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                    wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
-                                log "Vanity generation failed: no key produced"
-                            fi
-                        else
-                            echo '{"success":false,"error":"mkp224o failed","generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                wp_put /var/lib/onionpress/vanity-result.json 2>/dev/null
-                            log "Vanity generation failed: mkp224o error"
-                        fi
-                        rm -rf "$vanity_output_dir"
-                    fi
-                    ;;
                 import-key-file)
-                    log "Processing key file import from settings page..."
-                    setup_db_passwords
-                    local key_data
-                    key_data=$(wp_exec cat /var/lib/onionpress/import-key-data 2>/dev/null || echo "")
+                    # A key import replaces this site's onion address, and
+                    # anything running in WordPress can ask for one here,
+                    # with no one at this host to ask (the Mac asks the
+                    # person at the Mac). Refused: keys are imported on the
+                    # host, with onionpress import-key, which asks first
+                    # and keeps a copy of the current key.
+                    # The page's generate-vanity, which replaced the key
+                    # the same way, is gone.
                     wp_exec rm -f /var/lib/onionpress/import-key-data 2>/dev/null
-                    if [ -z "$key_data" ]; then
-                        echo '{"success":false,"error":"No key data found","imported_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/import-result.json 2>/dev/null
-                        log "Key import failed: no key data"
-                    else
-                        # The import flow without its question (the page
-                        # already confirmed): the key is checked and the
-                        # current one kept before the hubs are asked to
-                        # delete it and anything is stopped or replaced.
-                        local import_rc=0
-                        ONIONPRESS_YES=true replace_onion_key "$key_data" || import_rc=$?
-                        if [ "$REPLACE_KEY_STOPPED" = "yes" ]; then
-                            start_containers
-                            wait_for_services
-                            write_status
-                        fi
-                        start_heartbeat_client
-                        if [ "$import_rc" -eq 1 ]; then
-                            write_key_result import-result.json imported_at false "$REPLACE_KEY_ERROR"
-                            log "Key import failed: $REPLACE_KEY_ERROR"
-                        else
-                            write_key_result import-result.json imported_at true "$REPLACE_KEY_ADDRESS"
-                            log "Key imported successfully: $REPLACE_KEY_ADDRESS"
-                        fi
-                    fi
+                    write_key_result import-result.json imported_at false "Not imported: a key import replaces this site's onion address, which the Settings page never does on Linux. On the computer running OnionPress, run: onionpress import-key"
+                    log "Key import from the Settings page refused: import a key on this computer with onionpress import-key"
                     ;;
                 create-backup)
                     log "Creating backup from settings page..."

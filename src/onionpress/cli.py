@@ -448,10 +448,11 @@ class OnionPressCLI:
                 log_func=self.log,
                 # Written to the owner's disk, never handed to WordPress: an
                 # OnionHeaven hub's registry and registrants' keys stay in
-                # (sealed to its recovery key when one is set up), and so
-                # does the whole config.
+                # (sealed to its recovery key when one is set up), and so do
+                # the whole config and the site's onion service key.
                 include_hub_data=True,
                 include_host_secrets=True,
+                include_onion_key=True,
             )
             print(f"Backup saved to: {output_path}")
             if isinstance(metadata, dict) and metadata.get("onionheaven_data") == "unsealed":
@@ -480,6 +481,12 @@ class OnionPressCLI:
         anything is restored, and the sealed data is opened into memory,
         never into a file, right after extraction. Without it, or with
         another key, everything else is restored and the hub data is not.
+
+        A backup without an onion service key (the Mac Settings page's)
+        keeps this install's key and address: the key volumes stay, no hub
+        is asked to let go of the key, and nothing is seeded. With no
+        address to keep (OnionPress not running, a new install) it is
+        refused before anything is changed (backup.NO_KEY_TO_KEEP_MSG).
         """
         import shutil
         # The key seed below runs from the stack's pinned tor image; make
@@ -493,7 +500,7 @@ class OnionPressCLI:
         try:
             from . import hub_backup
             from .backup import (prepare_install_from_backup, read_backup_metadata,
-                                 open_sealed_hub_data)
+                                 open_sealed_hub_data, staged_onion_key_address)
             from .key_manager import is_valid_onion_address
             hub_key = _hub_key_for_backup(
                 read_backup_metadata(backup_path, password), hub_recovery_key, self.log)
@@ -511,11 +518,15 @@ class OnionPressCLI:
                 backup_path, password, self.log, data_dir=self.paths.data_dir,
                 after_extract=open_hub_data)
             addr = meta.get("onion_address", "")
-            # Derived from the backup's key by the seed step; checked again,
-            # before the teardown, because it names the directory
-            # bind-mounted below.
+            # Derived from the backup's key by the seed step (or, for a
+            # backup without a key, the address this install keeps);
+            # checked again, before the teardown, because it names the
+            # directory bind-mounted below.
             if not is_valid_onion_address(addr):
                 raise ValueError("the restored onion address is not valid")
+            # A backup without a key (the Mac Settings page's): this
+            # install's key, key volumes and address stay as they are.
+            keeps_key = not staged_onion_key_address(staging, meta)
         except Exception as e:
             self.log(f"Restore failed during extract/seed: {e}")
             return 1
@@ -524,12 +535,14 @@ class OnionPressCLI:
         # copy first, while it is here to sign the request. The restored
         # address's own registration (a backup of this same site) stays.
         # Not a reason to stop: what remains is reported and recorded.
-        try:
-            release_onionheaven("restore", keep_address=addr,
-                                data_dir=self.paths.data_dir)
-        except Exception as e:
-            self.log(f"Restore: could not ask the OnionHeaven hub to delete "
-                     f"the old key ({e}); continuing")
+        # Nothing to ask when the key stays.
+        if not keeps_key:
+            try:
+                release_onionheaven("restore", keep_address=addr,
+                                    data_dir=self.paths.data_dir)
+            except Exception as e:
+                self.log(f"Restore: could not ask the OnionHeaven hub to delete "
+                         f"the old key ({e}); continuing")
         try:
             # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
             # the seeded key and imported backup cleanly (no stale keystore
@@ -537,54 +550,62 @@ class OnionPressCLI:
             self.containers.stop()
             # onionpress-arti-state is the key volume's pre-2026-09-25 name;
             # wiping it too keeps the launcher's migration from bringing the
-            # replaced identity back.
-            for vol in ("onionpress-onion-keys", "onionpress-arti-state",
-                        "onionpress-tor-state",
-                        "onionpress-db-data", "onionpress-wordpress-data",
-                        "onionpress-persistent-data"):
+            # replaced identity back. The key volumes stay when the backup
+            # has no key: they hold the identity this install keeps.
+            key_volumes = () if keeps_key else (
+                "onionpress-onion-keys", "onionpress-arti-state",
+                "onionpress-tor-state")
+            for vol in key_volumes + ("onionpress-db-data", "onionpress-wordpress-data",
+                                      "onionpress-persistent-data"):
                 self.docker.run(["volume", "rm", vol], timeout=20)
                 self.log(f"Removed volume: {vol}")
-            # The restored key replaces whatever a key volume migration was
-            # still copying.
-            from .containers import forget_key_volume_migration
-            forget_key_volume_migration(self.paths.data_dir)
+            if keeps_key:
+                self.log(f"Restore: the backup holds no onion service key; "
+                         f"this install keeps its key volumes and its address {addr}")
+            else:
+                # The restored key replaces whatever a key volume migration
+                # was still copying.
+                from .containers import forget_key_volume_migration
+                forget_key_volume_migration(self.paths.data_dir)
 
-            # Seed the fresh key volume from the backup key so Tor serves the
-            # restored identity on first start (the entrypoint converts the PEM
-            # to C Tor's key files when tor-state is empty). Mirrors the launcher's
-            # first-run key install. Bind-mount the host vanity-keys dir, which
-            # seed_onion_key_for_install wrote under shared/ (inside the Colima
-            # mount, so the bind works on macOS as well as Linux).
-            vanity_addr_dir = os.path.join(
-                self.paths.data_dir, "shared", "vanity-keys", addr)
-            seed = self.docker.run([
-                "run", "--rm",
-                # The key needs no network, and gets none.
-                "--network", "none",
-                # Root reads the key out of the user's folder, whose
-                # permissions Linux enforces: DAC_OVERRIDE, nothing else.
-                "--cap-drop", "ALL",
-                "--cap-add", "DAC_OVERRIDE",
-                "--security-opt", "no-new-privileges:true",
-                "-v", "onionpress-onion-keys:/dest",
-                "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
-                "--entrypoint", "sh",
-                image, "-c",
-                "mkdir -p /dest/wordpress && "
-                "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
-                "chown -R 0:0 /dest && "
-                "chmod 700 /dest /dest/wordpress && "
-                "chmod 600 /dest/wordpress/*",
-            ], timeout=30)
-            if not seed.ok:
-                # Started without it, Tor would mint a new address under the
-                # restored site. Without the volume, the next start installs
-                # the key from vanity-keys/ and finishes the import.
-                self.docker.run(["volume", "rm", "onionpress-onion-keys"], timeout=20)
-                self.log("Restore failed: the restored key could not be installed "
-                         "in the onionpress-onion-keys volume; not starting Tor "
-                         "under a new address (start OnionPress again to retry)")
-                return 1
+            # Seed the fresh key volume from the backup key (a backup with
+            # one) so Tor serves the restored identity on first start.
+            if not keeps_key:
+                # The entrypoint converts the PEM to C Tor's key files when
+                # tor-state is empty. Mirrors the launcher's first-run key
+                # install. Bind-mount the host vanity-keys dir, which
+                # seed_onion_key_for_install wrote under shared/ (inside the
+                # Colima mount, so the bind works on macOS as well as Linux).
+                vanity_addr_dir = os.path.join(
+                    self.paths.data_dir, "shared", "vanity-keys", addr)
+                seed = self.docker.run([
+                    "run", "--rm",
+                    # The key needs no network, and gets none.
+                    "--network", "none",
+                    # Root reads the key out of the user's folder, whose
+                    # permissions Linux enforces: DAC_OVERRIDE, nothing else.
+                    "--cap-drop", "ALL",
+                    "--cap-add", "DAC_OVERRIDE",
+                    "--security-opt", "no-new-privileges:true",
+                    "-v", "onionpress-onion-keys:/dest",
+                    "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
+                    "--entrypoint", "sh",
+                    image, "-c",
+                    "mkdir -p /dest/wordpress && "
+                    "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
+                    "chown -R 0:0 /dest && "
+                    "chmod 700 /dest /dest/wordpress && "
+                    "chmod 600 /dest/wordpress/*",
+                ], timeout=30)
+                if not seed.ok:
+                    # Started without it, Tor would mint a new address under the
+                    # restored site. Without the volume, the next start installs
+                    # the key from vanity-keys/ and finishes the import.
+                    self.docker.run(["volume", "rm", "onionpress-onion-keys"], timeout=20)
+                    self.log("Restore failed: the restored key could not be installed "
+                             "in the onionpress-onion-keys volume; not starting Tor "
+                             "under a new address (start OnionPress again to retry)")
+                    return 1
 
             # Rebuild: fresh containers adopt the seeded key; import the backup
             # artifacts into them; then bring up Tor with the restored identity.
@@ -818,6 +839,22 @@ class OnionPressCLI:
         from .backup import hub_data_state, settings_page_backup_refusal
         refusal = settings_page_backup_refusal(address, hub_data_state(),
                                                data_dir=data_dir)
+        if refusal:
+            print(refusal)
+            return 3
+        return 0
+
+    @staticmethod
+    def cmd_settings_page_restore_node_check(address: str, data_dir: str) -> int:
+        """For the Linux launcher's restore_backup --from-settings-page:
+        exit 0 when the Settings page may restore on this node; exit 3,
+        printing why on stdout, on an OnionHeaven hub or OnionHome, or when
+        that could not be checked (backup.settings_page_restore_node_refusal:
+        fails closed). *address* is the node's onion address, from its tor
+        container (empty: refused)."""
+        from .backup import hub_data_state, settings_page_restore_node_refusal
+        refusal = settings_page_restore_node_refusal(address, hub_data_state(),
+                                                     data_dir=data_dir)
         if refusal:
             print(refusal)
             return 3
@@ -1504,6 +1541,13 @@ def main(argv: list[str] = None) -> int:
              "or one that could not be checked)")
     p_sp_backup.add_argument("--address", default="",
                              help="This node's onion address")
+    p_sp_restore_node = sub.add_parser(
+        "settings-page-restore-node-check",
+        help="Exit 3 and say why if nothing may be restored on this node "
+             "through the WordPress Settings page (an OnionHeaven hub or "
+             "OnionHome, or one that could not be checked)")
+    p_sp_restore_node.add_argument("--address", default="",
+                                   help="This node's onion address")
 
     # An OnionHeaven hub's backup recovery key. Its private half is printed
     # once by create and otherwise read from $ONIONPRESS_HUB_RECOVERY_KEY,
@@ -1688,6 +1732,8 @@ def main(argv: list[str] = None) -> int:
         return OnionPressCLI.cmd_stage_hub_backup(args.staging, data_dir)
     if args.command == "settings-page-backup-check":
         return OnionPressCLI.cmd_settings_page_backup_check(args.address, data_dir)
+    if args.command == "settings-page-restore-node-check":
+        return OnionPressCLI.cmd_settings_page_restore_node_check(args.address, data_dir)
     # Restore and plugin-install helper for the bash launchers: same.
     if args.command == "put-wp-tree":
         return OnionPressCLI.cmd_put_wp_tree(args.src, args.dest, args.merge)

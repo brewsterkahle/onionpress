@@ -132,6 +132,9 @@ class TestLinuxRestore(unittest.TestCase):
             "DATA_DIR": data, "LOG_FILE": os.path.join(self.tmp, "log"),
             "CALLS": os.path.join(self.tmp, "calls"), "SRC": mv.SRC,
             "PY": sys.executable, "PW": PW, "DOCKER_HOST": hub.DOCKER_HOST,
+            # The tor container serves the backup's own address: the
+            # Settings page's restore never changes it.
+            "CURRENT": mv.ADDR,
         }
         text = mv._read("linux/onionpress")
         funcs = "".join(mv._bash_function(text, name)

@@ -429,8 +429,11 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
         prepare = mock.patch(
             "onionpress.backup.prepare_install_from_backup",
             return_value=(os.path.join(self.tmpdir, "staging"), {"onion_address": V3_ONION}))
+        # A backup with a key (V3_ONION's): one without keeps the key
+        # volumes and seeds nothing (tests/test_settings_page_onion_key.py).
         with prepare as p, \
              mock.patch("onionpress.backup.read_backup_metadata", return_value={}), \
+             mock.patch("onionpress.backup.staged_onion_key_address", return_value=V3_ONION), \
              mock.patch.object(OnionPressCLI, "cmd_import_backup_artifacts", return_value=0), \
              mock.patch("onionpress.derivatives.spawn_regeneration"):
             rc = self.cli.cmd_restore("pw", "/tmp/b.zip")

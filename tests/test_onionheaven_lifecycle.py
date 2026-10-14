@@ -632,12 +632,31 @@ class TestCliResetAndRestore(_CliCase):
         with mock.patch("onionpress.backup.read_backup_metadata", return_value={}), \
                 mock.patch("onionpress.backup.prepare_install_from_backup",
                            return_value=(self.tmpdir, {"onion_address": NEW_SITE})), \
+                mock.patch("onionpress.backup.staged_onion_key_address",
+                           return_value=NEW_SITE), \
                 mock.patch.object(cli, "release_onionheaven",
                                   lambda reason, **kw: calls.append((reason, kw)) or []):
             self.assertEqual(obj.cmd_restore("pw", "/nonexistent.zip"), 1)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "restore")
         self.assertEqual(calls[0][1]["keep_address"], NEW_SITE)
+        obj.containers.stop.assert_called_once()
+
+    def test_a_restore_without_a_key_releases_nothing(self):
+        """A backup without an onion service key (the Mac Settings page's)
+        keeps this install's key: no hub is asked to let go of it."""
+        obj = self._cli()
+        obj.containers.stop.side_effect = RuntimeError("stop here")
+        calls = []
+        with mock.patch("onionpress.backup.read_backup_metadata", return_value={}), \
+                mock.patch("onionpress.backup.prepare_install_from_backup",
+                           return_value=(self.tmpdir, {"onion_address": SITE})), \
+                mock.patch("onionpress.backup.staged_onion_key_address",
+                           return_value=""), \
+                mock.patch.object(cli, "release_onionheaven",
+                                  lambda reason, **kw: calls.append((reason, kw)) or []):
+            self.assertEqual(obj.cmd_restore("pw", "/nonexistent.zip"), 1)
+        self.assertEqual(calls, [])
         obj.containers.stop.assert_called_once()
 
 
@@ -796,14 +815,14 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
 
     def test_linux_settings_page_key_changes(self):
         text = _read("linux/onionpress")
-        for label in ("generate-vanity", "import-key-file"):
-            with self.subTest(label=label):
-                start = text.index(f"                {label})\n")
-                branch = text[start:text.index("\n                    ;;\n", start)]
-                # The hubs without a question (the page confirmed), through
-                # replace_onion_key (tests/test_onion_key_replacement.py).
-                self.assertIn("ONIONPRESS_YES=true replace_onion_key", branch)
-                self.assertIn("start_heartbeat_client", branch)
+        # The page's key import is refused, and generate-vanity is gone
+        # (tests/test_settings_page_onion_key.py): no key change from
+        # there reaches the hubs.
+        start = text.index("                import-key-file)\n")
+        branch = text[start:text.index("\n                    ;;\n", start)]
+        self.assertNotIn("replace_onion_key", branch)
+        self.assertNotIn("onionheaven_release", branch)
+        self.assertNotIn("                generate-vanity)\n", text)
         body = _shell_function(text, "restore_backup")
         self.assert_before(body, 'onionheaven_release restore "$onion_address"',
                            'touch "$DATA_DIR/.import-key-pending"', "restore_backup")

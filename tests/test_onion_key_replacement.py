@@ -4,8 +4,9 @@
 The Linux Settings page's import-key-file and generate-vanity released the
 OnionHeaven hubs, stopped OnionPress, removed the key volumes and
 vanity-keys/ and only then decoded the key: garbage meant a first run and
-a new address, the old identity gone for good. Every import now goes
-through the launchers' replace_onion_key:
+a new address, the old identity gone for good. Both are gone from the
+Linux page now (it refuses the import: tests/test_settings_page_onion_key.py),
+and every import goes through the launchers' replace_onion_key:
 
   1. the key is checked (key_manager.check_expanded_secret_key) and staged,
      and the staged files are read back as its address;
@@ -390,7 +391,9 @@ class TestLinuxReplaceOnionKey(unittest.TestCase):
 
 class TestLinuxSettingsPage(unittest.TestCase):
     """The handle-action import-key-file branch, run for real: the page's
-    key in, import-result.json out."""
+    key in, import-result.json out. Anything running in WordPress can ask
+    for it and no one at a Linux host is asked, so it is refused whatever
+    the key: nothing is stopped, kept, released or replaced."""
 
     PRELUDE = LINUX_PRELUDE + r'''
 setup_db_passwords() { :; }
@@ -424,46 +427,46 @@ wp_put() { cat > "$PAGE/$(basename "$1")"; }
         with open(os.path.join(page, "import-result.json")) as f:
             return json.load(f)
 
-    def test_garbage_leaves_the_identity_alone(self):
-        inst = _Install(self, vanity=OLD)
+    def _assert_refused(self, inst, key_data):
         before = inst.vanity()
-        result = self._run(inst, "garbage")
+        result = self._run(inst, key_data)
         self.assertIs(result["success"], False)
-        self.assertIn("base32", result["error"])
+        self.assertIn("onionpress import-key", result["error"])
         self.assertIn("imported_at", result)
         calls = inst.calls_list()
-        self.assertFalse([c for c in calls if c.startswith("docker volume")], calls)
+        self.assertFalse([c for c in calls if c.startswith("docker")], calls)
         self.assertNotIn("stop_containers", calls)
         self.assertNotIn("start_containers", calls)
+        self.assertFalse([c for c in calls if "onionheaven_release" in c], calls)
         self.assertEqual(inst.vanity(), before)
         self.assertEqual(inst.kept(), {})
         self.assertFalse(inst.pending())
 
-    def test_a_valid_key_keeps_the_old_one(self):
-        inst = _Install(self)
-        result = self._run(inst, b32(NEW))
-        self.assertEqual((result["success"], result["address"]), (True, NEW_ADDR))
-        self.assertEqual([n.rsplit("-", 1)[0] for n in inst.kept()], [OLD_ADDR])
-        calls = inst.calls_list()
-        self.assertIn("onionheaven_release key-import yes=true", calls)
-        self.assertLess(calls.index("stop_containers"), calls.index("start_containers"))
-        self.assertIn("start_heartbeat_client", calls)
-        self.assertTrue(inst.pending())
+    def test_garbage_leaves_the_identity_alone(self):
+        self._assert_refused(_Install(self, vanity=OLD), "garbage")
+
+    def test_a_valid_key_is_refused_too(self):
+        self._assert_refused(_Install(self), b32(NEW))
 
 
 class TestLinuxStructure(unittest.TestCase):
 
-    def test_settings_page_paths_go_through_replace_onion_key(self):
+    def test_the_settings_page_never_replaces_the_key(self):
         text = _read(LINUX)
-        for label in ("generate-vanity", "import-key-file"):
-            with self.subTest(label):
-                branch = _settings_branch(text, label)
-                self.assertIn("ONIONPRESS_YES=true replace_onion_key", branch)
-                self.assertNotIn("docker volume rm", branch)
-                self.assertNotIn("vanity-keys", branch)
-                self.assertNotIn("onionheaven_release", branch)
-                self.assertIn("write_key_result", branch)
-                self.assertIn("start_heartbeat_client", branch)
+        branch = _settings_branch(text, "import-key-file")
+        self.assertNotIn("replace_onion_key", branch)
+        self.assertNotIn("docker volume rm", branch)
+        self.assertNotIn("vanity-keys", branch)
+        self.assertNotIn("onionheaven_release", branch)
+        self.assertIn("write_key_result", branch)
+        self.assertNotIn("\n                generate-vanity)\n", text)
+        # replace_onion_key's one caller: the CLI's import, which asks.
+        callers = [line.strip() for line in text.splitlines()
+                   if re.search(r"\breplace_onion_key\b", line)
+                   and not line.lstrip().startswith("#")
+                   and not line.startswith("replace_onion_key()")]
+        self.assertEqual(len(callers), 1, callers)
+        self.assertIn("replace_onion_key", _shell_function(text, "import_key"))
         self.assertNotIn("import_key_noninteractive", text)
 
     def test_the_cli_asks_first(self):
@@ -593,10 +596,12 @@ class TestMenubarAsksThePersonAtTheMac(unittest.TestCase):
         ns["subprocess"].run.return_value = subprocess.CompletedProcess(
             [], import_rc, stdout="", stderr="" if import_rc == 0 else "ERROR: no copy")
         exec(textwrap.dedent(_menubar_method("_settings_page_key_import")), ns)
+        exec(textwrap.dedent(_menubar_method("_ask_to_replace_address")), ns)
         app = types.SimpleNamespace(
             onion_address=current, is_running=True, launcher_script="/x/onionpress",
             log=mock.Mock(), run_command=mock.Mock(), write_status_to_volume=mock.Mock(),
             show_native_alert=mock.Mock(return_value=answer))
+        app._ask_to_replace_address = types.MethodType(ns["_ask_to_replace_address"], app)
         return app, ns["_settings_page_key_import"], ns["subprocess"].run
 
     def test_replace_runs_the_import_with_the_flag(self):

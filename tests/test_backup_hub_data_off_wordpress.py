@@ -804,7 +804,11 @@ class TestMacSettingsPageBackupBranch(unittest.TestCase):
         # the except clause writes str(e) as the page's error.
         self.assertLess(create, body.index('umask 077; cat > "$1"'))
         self.assertIn('"success": False, "error": str(e)', body[create:])
-        self.assertNotIn("note", body)
+        # Its one note says the onion service key is not in it
+        # (tests/test_settings_page_onion_key.py), never a hub's.
+        self.assertEqual(re.findall(r'"note"\]? = ([\w.]+)', body),
+                         ["backup_manager.ONION_KEY_LEFT_OUT_NOTE"])
+        self.assertEqual(body.count('"note"'), 1)
 
     def test_the_messages_are_plain_text(self):
         """They go into the page, and Linux's into JSON."""
@@ -1147,6 +1151,15 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
         p = mock.patch.object(key_manager, "write_private_key", side_effect=_KeyWritten)
         p.start()
         self.addCleanup(p.stop)
+        # A site node serving the backup's own address: the node check
+        # passes and no change of address is asked about
+        # (tests/test_settings_page_onion_key.py has those).
+        for name, value in (("served_onion_address", mv.ADDR),
+                            ("hub_data_state", "none"),
+                            ("onionhome_registry_present", False)):
+            p = mock.patch.object(backup, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
 
     def _backup(self, name, **kw):
         staging = _staging(self.tmp, name + ".staging", **kw)
@@ -1260,14 +1273,27 @@ class TestLinuxRestoreBackup(unittest.TestCase):
     """linux/onionpress restore_backup, run for real against backup files
     (the harness of test_backup_metadata_validation)."""
 
+    # The tor container serves $CURRENT (read, not recorded as a change);
+    # the node check answers $NODE_RC / $NODE_REFUSAL (a site node by
+    # default: tests/test_settings_page_onion_key.py has the others).
     PRELUDE = r'''
 log() { echo "[log] $1" | tee -a "$LOG_FILE"; }
-docker() { echo "docker $*" >> "$CALLS"; return 0; }
+docker() {
+    if [ "$*" = "exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname" ]; then
+        echo "$CURRENT"; return 0
+    fi
+    echo "docker $*" >> "$CALLS"; return 0
+}
 db_client() { echo "db_client $*" >> "$CALLS"; return 0; }
 db_import() { echo "db_import $*" >> "$CALLS"; return 0; }
 setup_db_passwords() { :; }
 python3() { "$PY" "$@"; }
 op_py() {
+    if [ "$1 $2 $3" = "--data-dir $DATA_DIR settings-page-restore-node-check" ]; then
+        [ -n "${NODE_CHECKS:-}" ] && echo "$5" >> "$NODE_CHECKS"
+        [ -n "${NODE_REFUSAL:-}" ] && echo "$NODE_REFUSAL"
+        return "${NODE_RC:-0}"
+    fi
     case "$1" in
         extract-backup)
             PYTHONPATH="$SRC" "$PY" -c 'import sys
@@ -1308,7 +1334,8 @@ sys.exit(cli.OnionPressCLI.cmd_extract_backup(
             "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
             "DATA_DIR": data, "LOG_FILE": os.path.join(self.tmp, "log"),
             "CALLS": calls, "SRC": mv.SRC, "PY": sys.executable, "PW": PW,
-            "DOCKER_HOST": DOCKER_HOST,
+            "DOCKER_HOST": DOCKER_HOST, "CURRENT": mv.ADDR,
+            "NODE_CHECKS": os.path.join(self.tmp, "node-checks"),
         }
         text = mv._read("linux/onionpress")
         funcs = "".join(mv._bash_function(text, name)

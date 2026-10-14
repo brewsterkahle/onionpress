@@ -833,6 +833,23 @@ class SetupProgressWindow(AppKit.NSObject):
             warn.runModal()
             return
 
+        # A Settings page backup holds no onion address key, and a restore
+        # of one keeps the address of the install it goes onto: this one
+        # has none yet (backup.prepare_install_from_backup would refuse it
+        # once the install had started).
+        if meta.get("excludes_onion_key") is True:
+            warn = AppKit.NSAlert.alloc().init()
+            warn.setMessageText_("This backup has no onion address")
+            warn.setInformativeText_(
+                "It was made from the Settings page in WordPress, which leaves "
+                "the onion address's key out, so it cannot set up this "
+                "install. Set up a new site, then restore this backup with "
+                "Restore... in the OnionPress menu (the site keeps its new "
+                "address), or choose a backup made with Backup... in the "
+                "OnionPress menu.")
+            warn.runModal()
+            return
+
         # 4. Stash restore intent + hand off to the same setup callback.
         self.restore_mode = True
         self.restore_zip = zip_path

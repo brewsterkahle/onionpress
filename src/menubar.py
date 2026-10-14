@@ -4273,12 +4273,13 @@ class OnionPressApp(rumps.App):
 
                 # Saved where the owner chose, never handed to WordPress: an
                 # OnionHeaven hub's registry and registrants' keys stay in,
-                # sealed to its recovery key when one is set up, and so does
-                # the whole config.
+                # sealed to its recovery key when one is set up, and so do
+                # the whole config and the site's onion service key.
                 metadata = backup_manager.create_backup(
                     self.onion_address, username, password,
                     output_path, self.version, log_and_update,
-                    include_hub_data=True, include_host_secrets=True)
+                    include_hub_data=True, include_host_secrets=True,
+                    include_onion_key=True)
 
                 size_mb = os.path.getsize(output_path) / (1024 * 1024)
                 msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
@@ -4415,6 +4416,18 @@ class OnionPressApp(rumps.App):
         date = backup_manager.metadata_text(metadata, 'backup_date')
         user = backup_manager.metadata_text(metadata, 'username')
         ver = backup_manager.metadata_text(metadata, 'onionpress_version')
+        # A Settings page backup holds no key: the restore keeps this
+        # site's address (the restore refuses one whose metadata says so
+        # but which holds a key: backup.staged_onion_key_address).
+        if metadata.get('excludes_onion_key') is True:
+            addr += " (its key is not in this backup)"
+            warning = ("WARNING: This will overwrite your current site and "
+                       "database. This backup was made from the Settings "
+                       "page and holds no onion address key, so this site "
+                       "keeps its onion address. This cannot be undone.")
+        else:
+            warning = ("WARNING: This will overwrite your current site, "
+                       "database, and onion address. This cannot be undone.")
 
         button_index = self.show_native_alert(
             title="Confirm Restore",
@@ -4424,8 +4437,7 @@ class OnionPressApp(rumps.App):
                 f"Backup date: {date}\n"
                 f"Username: {user}\n"
                 f"OnionPress version: {ver}\n\n"
-                f"WARNING: This will overwrite your current site, "
-                f"database, and onion address. This cannot be undone."),
+                f"{warning}"),
             buttons=["Cancel", "Restore"],
             default_button=0,
             cancel_button=0,
@@ -5516,6 +5528,45 @@ License: AGPL v3"""
         except Exception:
             pass
 
+    def _ask_to_replace_address(self, current, new_address, request, note, button):
+        """Ask the person at this Mac whether the Settings page may replace
+        this site's onion address *current* with *new_address*; True only
+        for an explicit *button* click. Cancel is the default, and no answer
+        (show_native_alert gives up after 5 minutes) is Cancel too.
+
+        Anything running in WordPress can write the page's requests, so a
+        key import or a restore of another address from there changes the
+        address only after this dialog (_settings_page_key_import,
+        _settings_page_restore_confirmed). *request* finishes "asked to
+        ..."; *note* says what is kept.
+        """
+        choice = self.show_native_alert(
+            "Replace this site's onion address?",
+            f"The OnionPress Settings page in WordPress asked to {request}.\n\n"
+            f"Current address:\n{current or '(not known yet)'}\n\n"
+            f"New address:\n{new_address}\n\n"
+            "Visitors and links using the current address will stop reaching "
+            f"this site. {note}\n\n"
+            f"{button} it only if you asked for this yourself.",
+            buttons=["Cancel", button], default_button=0, cancel_button=0,
+            style="critical")
+        return choice == 1
+
+    def _settings_page_restore_confirmed(self, current, new_address):
+        """backup.restore_from_backup's confirm_address_change for the
+        Settings page's restore: called only for a backup of another
+        address than the one the tor container serves, before anything is
+        restored. True only if the person at this Mac clicks Restore."""
+        confirmed = self._ask_to_replace_address(
+            current, new_address,
+            "restore a backup of another onion address, which replaces this "
+            "site's onion service key and its content",
+            "The current site's content is replaced by the backup's.",
+            "Restore")
+        self.log(f"Settings page: restore of {new_address} "
+                 f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
+        return confirmed
+
     def _settings_page_key_import(self, key_data):
         """Import a key the Settings page sent, if the person at this Mac
         says so. Returns the page's result: {"success", "address"|"error"}.
@@ -5540,19 +5591,13 @@ License: AGPL v3"""
                    if key_manager.is_valid_onion_address(self.onion_address) else "")
         if new_address == current:
             return {"success": True, "address": new_address}
-        choice = self.show_native_alert(
-            "Replace this site's onion address?",
-            "The OnionPress Settings page in WordPress asked to replace this "
-            "site's onion service key.\n\n"
-            f"Current address:\n{current or '(not known yet)'}\n\n"
-            f"New address:\n{new_address}\n\n"
-            "Visitors and links using the current address will stop reaching "
-            "this site. OnionPress keeps a copy of the current key in "
-            "~/.onionpress/replaced-keys/, from which it can be imported "
-            "again.\n\nReplace it only if you asked for this yourself.",
-            buttons=["Cancel", "Replace"], default_button=0, cancel_button=0,
-            style="critical")
-        if choice != 1:
+        if not self._ask_to_replace_address(
+                current, new_address,
+                "replace this site's onion service key",
+                "OnionPress keeps a copy of the current key in "
+                "~/.onionpress/replaced-keys/, from which it can be imported "
+                "again.",
+                "Replace"):
             self.log("Settings page: key import not confirmed at this Mac")
             return {"success": False,
                     "error": "Not replaced: the person at the Mac running "
@@ -5832,11 +5877,14 @@ License: AGPL v3"""
                         # shows), and never a hub's registry or
                         # registrants' keys, nor the Cloudflare tunnel token
                         # or any other config WordPress is not shown
-                        # (backup.TUNNEL_TOKEN_KEY).
-                        backup_manager.create_backup(
+                        # (backup.TUNNEL_TOKEN_KEY), nor the site's own
+                        # onion service key (backup.ONION_KEY_LEFT_OUT_NOTE:
+                        # the app's Backup... has it).
+                        metadata = backup_manager.create_backup(
                             onion_addr, self._get_admin_username(), password,
                             tmp_path, self.version, self.log,
-                            include_hub_data=False, include_host_secrets=False
+                            include_hub_data=False, include_host_secrets=False,
+                            include_onion_key=False
                         )
 
                         # Hand it to the WordPress container for download,
@@ -5862,10 +5910,12 @@ License: AGPL v3"""
                         if r.returncode != 0:
                             raise Exception("Could not hand the backup to the "
                                             "Settings page")
-                        _write_result("backup-result.json", {
-                            "success": True, "filename": filename,
-                            "created_at": now_iso
-                        })
+                        result = {"success": True, "filename": filename,
+                                  "created_at": now_iso}
+                        if metadata.get("excludes_onion_key") is True:
+                            # Shown under the download link.
+                            result["note"] = backup_manager.ONION_KEY_LEFT_OUT_NOTE
+                        _write_result("backup-result.json", result)
                         self.log(f"Settings page: backup created: {filename}")
                 except Exception as e:
                     _write_result("backup-result.json", {
@@ -5917,12 +5967,18 @@ License: AGPL v3"""
                         if password and os.path.lexists(local_zip):
                             backup_manager.check_uploaded_backup(local_zip)
                             # The file and its password came through
-                            # WordPress: a backup holding an OnionHeaven
-                            # hub's keys or OnionHome's name registry is
-                            # refused, and neither volume is written.
+                            # WordPress: refused on an OnionHeaven hub or
+                            # OnionHome (or a node that could not be
+                            # checked), and for a backup holding a hub's
+                            # keys or OnionHome's name registry; neither
+                            # volume is written. A backup of another
+                            # address replaces this one only if the person
+                            # at this Mac says so; one without a key keeps
+                            # it.
                             backup_manager.restore_from_backup(local_zip, password, self.log,
                                                                through_wordpress=True,
-                                                               before_key_change=self._release_onionheaven_before_restore)
+                                                               before_key_change=self._release_onionheaven_before_restore,
+                                                               confirm_address_change=self._settings_page_restore_confirmed)
                             restored = True
                         else:
                             restored = False

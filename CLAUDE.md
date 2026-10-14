@@ -225,8 +225,8 @@
   `SAFE_CONFIG_KEYS` (`backup.wordpress_safe_config`, what status.json
   shows), Linux's healthcheck key is left out, and `metadata.json` gets
   `excludes_host_secrets` + `secret_config_left_out` (names). The site's
-  onion key stays: it is what the backup restores. App and CLI backups keep
-  the whole config. No restore takes the token from any backup
+  onion key stays on Linux; the Mac leaves it out too (next section). App
+  and CLI backups keep the whole config. No restore takes the token from any backup
   (`RESTORABLE_CONFIG`): this install's stays, and `restore_backup_config`
   tells an owner without one to enter it again.
   `tests/test_backup_host_secrets_off_wordpress.py` keeps the census.
@@ -260,7 +260,7 @@
   `linux/onionpress` means changing that pattern; `tests/test_backup_download.py`
   ties them together.
 - **A key import never loses the current key.** Every one (`onionpress
-  import-key`, the Linux page's import-key-file and generate-vanity) goes
+  import-key`, and the Mac page's import through the menubar) goes
   through the launcher's `replace_onion_key`: the key is checked
   (`key_manager.check_expanded_secret_key`: 64 bytes, bit 255 clear,
   nonzero mod L, PyNaCl's `crypto_scalarmult_ed25519_base_noclamp` agrees)
@@ -275,7 +275,37 @@
   address (Cancel is the default; no answer in 5 minutes is Cancel), and
   only Replace runs `import-key -` with `ONIONPRESS_IMPORT_KEY_CONFIRMED=yes`
   (the launcher's terminal question would read the key's end of input and
-  cancel). Linux asks no one yet. `tests/test_onion_key_replacement.py`.
+  cancel). Linux has no one to ask: its page's import-key-file is refused
+  (pointing to `onionpress import-key`), and generate-vanity is gone from
+  the page and from Linux's handle-action. `tests/test_onion_key_replacement.py`.
+- **Code in WordPress never reads or replaces the site's own onion key
+  without the owner at the host** (decided 2026-10-14). The Mac page's
+  backup leaves it out (`create_backup(include_onion_key=False)`: no
+  `tor-keys/`, metadata `excludes_onion_key`, `ONION_KEY_LEFT_OUT_NOTE` as
+  the result's `note` and in README.txt; every `create_backup` call says
+  which, test-enforced). Linux's page backup keeps it for now (headless
+  installs back up there). A backup without a key restores onto the
+  install's own address on every path, never minting one:
+  `staged_onion_key_address` is '' (and refuses a backup whose metadata says
+  no key but which holds one: dialogs word themselves on the flag);
+  `restore_from_backup` writes no key, `prepare_install_from_backup` seeds
+  nothing (`keep_installed_address`: the served key's address, else
+  `NO_KEY_TO_KEEP_MSG`; the welcome screen refuses such a backup up
+  front), `cmd_restore` keeps the key volumes and releases no hub, `setup
+  --from-backup` reimports only when `SETUP_BACKUP_KEY_RESTORED=yes`, and
+  Linux `restore_backup` reports the kept address. A page restore of a
+  backup of another address than the served one (`served_onion_address`):
+  on a Mac, `restore_from_backup(confirm_address_change=)` →
+  `_settings_page_restore_confirmed`, the key import's dialog
+  (`_ask_to_replace_address`: Cancel default, no answer in 5 minutes is
+  Cancel), asked before anything is touched; on Linux refused
+  (`ADDRESS_CHANGE_REFUSED_MSG`, `restore_backup --from-settings-page`,
+  pointing to `onionpress restore <file>`). Same-address restores go
+  ahead. On an OnionHeaven hub or OnionHome, or a node that cannot say,
+  the page restores nothing on either platform
+  (`settings_page_restore_node_refusal`, the backup check's fail-closed
+  logic; Linux `settings-page-restore-node-check`), before the upload is
+  opened. `tests/test_settings_page_onion_key.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published, so nothing private may sit there under a name
@@ -589,7 +619,10 @@
   owner's backups never ask. Every other `create_backup` caller passes
   `include_hub_data=True` (owner's disk). The page's restore
   (`restore_from_backup(through_wordpress=True)`, Linux `restore_backup
-  --from-settings-page`) refuses, before touching anything, a backup with
+  --from-settings-page`) restores nothing at all on a hub or OnionHome, or
+  a node that cannot say (`settings_page_restore_node_refusal`, before the
+  upload is opened: it would replace the node's own key and site), and
+  refuses, before touching anything, a backup with
   any entry in `onionheaven/keys/` or an `onionheaven.sealed`
   (`settings_page_restore_refusal`; refused whole, since a hub restored
   without its registrants' keys looks restored) and never writes the volume
@@ -698,7 +731,9 @@
   `onionhome/onionnames.db` (`settings_page_restore_refusal`) and never
   writes the volume (`hub_volumes=False`): that upload is WordPress's to
   make, and the registry left WordPress's reach so code there could not
-  repoint names. Restore OnionHome from the app or `onionpress restore`.
+  repoint names. On OnionHome itself the page restores nothing
+  (`settings_page_restore_node_refusal`). Restore OnionHome from the app or
+  `onionpress restore`.
   `tests/test_backup_hub_data_off_wordpress.py`.
 - It used to be `onionhome/` on onionpress-persistent-data (www-data owns
   that folder). `onionhome-registry-migrate.py` (onionpress-tor's

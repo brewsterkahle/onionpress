@@ -2740,6 +2740,10 @@ setup_wordpress_cli() {
         esac
     done
 
+    # Set when --from-backup copied the backup's key in (the setup command
+    # then has the start install it); a backup without one leaves this
+    # install's key alone.
+    SETUP_BACKUP_KEY_RESTORED=""
     # --from-backup mode: extract config from backup, use dummy WP credentials
     # (restore will overwrite the database with real users afterward)
     if [ -n "$from_backup_pass" ]; then
@@ -2788,7 +2792,14 @@ setup_wordpress_cli() {
                 echo "$onion_address" > "$addr_dir/hostname"
                 log "Setup: restored Tor keys for $onion_address from backup"
                 echo "  Tor keys restored from backup ($onion_address)."
+                SETUP_BACKUP_KEY_RESTORED=yes
             fi
+        fi
+        if [ "$SETUP_BACKUP_KEY_RESTORED" != "yes" ]; then
+            # A backup without an onion service key (a Mac Settings page
+            # backup): this install keeps the key and address it has.
+            log "Setup: the backup holds no onion service key; this install keeps its own"
+            echo "  This backup holds no onion service key: this install keeps its own address."
         fi
         # Use dummy credentials — restore will overwrite the database
         wp_user="admin"
@@ -3371,12 +3382,16 @@ main() {
                 # The backup's key replaces the one Tor serves now: hubs
                 # that may hold a copy of that one are asked to delete it
                 # first (not the backup's own address, which stays).
-                local restored_key_dir=""
-                restored_key_dir=$(vanity_key_dir) || restored_key_dir=""
-                ONIONPRESS_YES=true onionheaven_release restore \
-                    "${restored_key_dir:+$(basename "$restored_key_dir")}"
-                log "Setup --from-backup: flagging key reimport..."
-                touch "$DATA_DIR/.import-key-pending"
+                # A backup without a key restored none: the install keeps
+                # its key, and nothing is released or reimported.
+                if [ "${SETUP_BACKUP_KEY_RESTORED:-}" = "yes" ]; then
+                    local restored_key_dir=""
+                    restored_key_dir=$(vanity_key_dir) || restored_key_dir=""
+                    ONIONPRESS_YES=true onionheaven_release restore \
+                        "${restored_key_dir:+$(basename "$restored_key_dir")}"
+                    log "Setup --from-backup: flagging key reimport..."
+                    touch "$DATA_DIR/.import-key-pending"
+                fi
                 stop_containers
                 start_containers
                 wait_for_services

@@ -224,7 +224,7 @@ add_action( 'admin_init', function () {
         return;
     }
     $action = sanitize_text_field( $_POST['onionpress_action'] ?? '' );
-    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'generate-vanity', 'import-key-file', 'create-backup', 'restore-backup', 'update' ), true ) ) {
+    if ( ! in_array( $action, array( 'restart', 'stop', 'start', 'save-restart', 'check-reachability', 'import-key-file', 'create-backup', 'restore-backup', 'update' ), true ) ) {
         return;
     }
 
@@ -352,7 +352,7 @@ add_action( 'admin_init', function () {
 
     $cmd_map = array(
         'stop' => 'stop', 'start' => 'start', 'restart' => 'restart', 'save-restart' => 'restart',
-        'check-reachability' => 'check-reachability', 'generate-vanity' => 'generate-vanity',
+        'check-reachability' => 'check-reachability',
         'import-key-file' => 'import-key-file',
         'create-backup' => 'create-backup', 'restore-backup' => 'restore-backup',
         'update' => 'update',
@@ -368,7 +368,6 @@ add_action( 'admin_init', function () {
     $label_map = array(
         'stop' => 'Stopping', 'start' => 'Starting', 'restart' => 'Restarting', 'save-restart' => 'Restarting',
         'check-reachability' => 'Testing Tor reachability for',
-        'generate-vanity' => 'Generating vanity address for',
         'import-key-file' => 'Importing key for',
         'create-backup' => 'Creating backup of',
         'restore-backup' => 'Restoring backup for',
@@ -920,7 +919,6 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
     // Map actions to their result files
     $result_files = array(
         'check-reachability' => '/var/lib/onionpress/reachability-result.json',
-        'generate-vanity'    => '/var/lib/onionpress/vanity-result.json',
         'import-key-file'    => '/var/lib/onionpress/import-result.json',
         'create-backup'      => '/var/lib/onionpress/backup-result.json',
         'restore-backup'     => '/var/lib/onionpress/restore-result.json',
@@ -1396,7 +1394,13 @@ function onionpress_settings_page() {
             }
         }
         ?>
+        <?php // What the host puts in a backup made here: on a Mac never the onion service key (src/onionpress/backup.py, ONION_KEY_LEFT_OUT_NOTE); Linux keeps it for now. ?>
+        <?php if ( $current_platform === 'linux' ) : ?>
         <p class="description">Create a password-protected backup of your database, wp-content, Tor keys, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
+        <?php else : ?>
+        <p class="description">Create a password-protected backup of your database, wp-content, and config. Your WordPress password encrypts the backup — you'll need it to restore.</p>
+        <p class="description">A backup made here does not contain your onion address's key: it passes through WordPress, and the key never does. Restoring it keeps the onion address of the site it is restored onto. To move your address to another machine, use Backup&hellip; in the OnionPress menu.</p>
+        <?php endif; ?>
         <?php // A backup made here is handed to WordPress: no host secrets in it (src/onionpress/backup.py, TUNNEL_TOKEN_KEY). ?>
         <p class="description">A backup made here leaves out your Cloudflare Tunnel token, which never passes through WordPress. After restoring on a new machine, enter it again under Cloudflare Tunnel Token above.</p>
         <?php // A backup made here is handed to WordPress for download: refused on a hub or OnionHome, and on a node that could not be checked (src/onionpress/backup.py, settings_page_backup_refusal), whichever node this page is on. ?>
@@ -1435,9 +1439,15 @@ function onionpress_settings_page() {
             }
         }
         ?>
-        <p class="description">Restore from an OnionPress backup zip. This will <strong>overwrite</strong> your current database, wp-content, and Tor keys. OnionPress will restart automatically after restore.</p>
-        <?php // backup.settings_page_restore_refusal: refused before anything is restored. ?>
-        <p class="description">A backup of an OnionHeaven hub or of OnionHome made in the OnionPress app is refused here: restore it from the app (Restore&hellip; in its menu) or with <code>onionpress restore</code>. Do not upload a hub's backup here at all: it holds the registrants' onion service keys, and this page hands what you upload to WordPress.</p>
+        <p class="description">Restore from an OnionPress backup zip. This will <strong>overwrite</strong> your current database and wp-content. OnionPress will restart automatically after restore.</p>
+        <?php // The host decides (src/onionpress/backup.py: ADDRESS_CHANGE_NOT_CONFIRMED_MSG on a Mac, ADDRESS_CHANGE_REFUSED_MSG on Linux); this only says so. ?>
+        <?php if ( $current_platform === 'linux' ) : ?>
+        <p class="description">A restore here never changes this site's onion address. A backup of this same address restores its Tor keys too, and a backup without a key keeps this site's address. A backup of another address is refused: restore it on the computer running OnionPress with <code>onionpress restore &lt;backup file&gt;</code>.</p>
+        <?php else : ?>
+        <p class="description">A backup of another onion address replaces this site's address only if the person at the Mac running OnionPress clicks Restore in the dialog OnionPress shows there. A backup made here, without its key, keeps this site's address.</p>
+        <?php endif; ?>
+        <?php // backup.settings_page_restore_node_refusal and settings_page_restore_refusal: refused before anything is restored. ?>
+        <p class="description">On an OnionHeaven hub or on OnionHome, nothing is restored here (nor while OnionPress cannot check which kind of node this is), and a backup of a hub or of OnionHome made in the OnionPress app is refused here on any node: restore those from the app (Restore&hellip; in its menu) or with <code>onionpress restore</code>. Do not upload a hub's backup here at all: it holds the registrants' onion service keys, and this page hands what you upload to WordPress.</p>
         <form method="post" enctype="multipart/form-data" style="margin-top: 8px;">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="restore-backup">
@@ -1484,7 +1494,11 @@ function onionpress_settings_page() {
             }
         }
         ?>
-        <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address: visitors and links using it stop reaching this site. A key that is not a usable onion service key is refused before anything changes, and a copy of the current key is kept on the computer running OnionPress (<code>~/.onionpress/replaced-keys/</code>), from which the old address can be imported again. On a Mac, the person at the Mac running OnionPress has to confirm the replacement there. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
+        <?php // Linux refuses the page's key import (linux/onionpress handle-action import-key-file); the Mac asks the person at the Mac (src/menubar.py, _settings_page_key_import). ?>
+        <?php if ( $current_platform === 'linux' ) : ?>
+        <p class="description">Importing a key <strong>replaces</strong> your current onion address, so on Linux it is done on the computer running OnionPress, not here: run <code>onionpress import-key</code> there. It refuses a key that is not a usable onion service key, asks before replacing anything, and keeps a copy of the current key (<code>~/.onionpress/replaced-keys/</code>), from which the old address can be imported again.</p>
+        <?php else : ?>
+        <p class="description">Import a pre-generated ed25519 key. This will <strong>replace</strong> your current onion address: visitors and links using it stop reaching this site. A key that is not a usable onion service key is refused before anything changes, and a copy of the current key is kept on the computer running OnionPress (<code>~/.onionpress/replaced-keys/</code>), from which the old address can be imported again. The person at the Mac running OnionPress has to confirm the replacement there. Paste the base32-encoded key or upload the <code>hs_ed25519_secret_key</code> file.</p>
         <form method="post" enctype="multipart/form-data" style="margin-top: 8px;" id="op-import-key-form">
             <?php wp_nonce_field( 'onionpress_action', 'onionpress_action_nonce' ); ?>
             <input type="hidden" name="onionpress_action" value="import-key-file">
@@ -1506,6 +1520,7 @@ function onionpress_settings_page() {
             </table>
             <?php submit_button( 'Import Key', 'secondary', 'submit', false ); ?>
         </form>
+        <?php endif; ?>
 
     </div>
     <style>
