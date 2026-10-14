@@ -657,6 +657,31 @@
 - Re-pinning either plugin means re-reading these against its internals
   (docs/BUILDING.md). `tests/test_bundled_plugins.py`.
 
+## The Wayback Sweep Is the Network's (issue #322)
+- One sweep walks every site, so its state is the network's, never a blog's:
+  - **archive.org keys** live in the main site's options. Setup, the
+    reconcile and Linux's installer write them with plain `wp option update`
+    (no `--url`); the Settings page saves them there from any site
+    (`onionpress_archive_keys`/`_save`). Blank account/password fields keep
+    the keys; removing them takes the `op_ia_credentials_remove` checkbox.
+    `onionpress_archive_keys_move_to_main_site` moved a pair saved on a
+    subsite through 2.5.3 once (it wins over the main site's).
+  - **lock and back-off** are network options, only through
+    `onionpress_wayback_net_get/_set/_delete` (the get drops the object
+    cache, so a long-running sweep sees a takeover). save_post and comments
+    no longer clear the back-off.
+  - **schedule**: only the main site's cron runs the sweep; subsites clear
+    theirs on init, and `onionpress_wayback_schedule_now` puts immediate
+    sweeps on the main site's cron (the tor healthcheck loads it every
+    minute).
+- **One archive.org login**: `multisite.fetch_archive_s3_keys` (archive.org's
+  onion via onionheaven's Tor, form and cookie on stdin) serves setup
+  (`onion_proxy._fetch_archive_s3_keys`) and `ensure_archive_s3_keys`.
+  Linux's bash `fetch_archive_s3_keys` uses the same onion.
+- `tests/test_wayback_network_state.py`; test_wayback_sweep.py points the
+  lock and back-off at test keys through the `onionpress_wayback_net_key`
+  filter so it never touches a live sweep's.
+
 ## Auto-Update Swaps Bundles by Rename
 - `updater.download_and_install` copies the new bundle from the mounted DMG
   into a hidden sibling folder (`/Applications/.onionpress-update-*`,

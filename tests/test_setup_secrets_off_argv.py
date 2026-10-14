@@ -315,7 +315,20 @@ class TestOnionProxyArchiveLogin(unittest.TestCase):
         logs = []
         with mock.patch.object(onion_proxy.subprocess, "run", boom):
             self.assertIsNone(_handler(logs)._fetch_archive_s3_keys("e", "p"))
-        self.assertEqual(logs, ["archive.org S3 key fetch failed: TimeoutExpired"])
+        self.assertEqual(logs, ["WARNING: archive.org login timed out"])
+
+    def test_setup_logs_in_through_the_onion_like_the_reconcile(self):
+        """Issue #322: setup went to clearnet archive.org while the
+        per-launch reconcile went to its onion. Both are one function now."""
+        rec = _Recorder(lambda argv, stdin: (0, LOGIN_WITH_KEYS))
+        with mock.patch.object(onion_proxy.subprocess, "run", rec):
+            keys = _handler([])._fetch_archive_s3_keys("me@example.org", "pw")
+        self.assertEqual(keys, {"access": "AK", "secret": "S3-SECRET"})
+        [(login, _, _)] = rec.calls
+        self.assertEqual(login[-1], multisite._ARCHIVE_ONION + "/services/xauthn/?op=login")
+        for path in ("src/onionpress/onion_proxy.py", "src/onionpress/multisite.py"):
+            with self.subTest(path=path):
+                self.assertNotIn("https://archive.org", _read(path))
 
 
 class TestOnionProxySetupPost(unittest.TestCase):

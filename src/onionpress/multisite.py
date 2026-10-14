@@ -810,6 +810,107 @@ _ARCHIVE_LOGIN_EMAIL = "onionpress@internetarchive.eu"
 _ARCHIVE_LOGIN_PASS = "aat:aep7"
 
 
+# archive.org's onion service. Every archive.org login goes here, through
+# the onionheaven container's Tor (linux/onionpress's fetch_archive_s3_keys
+# names the same address; a test holds them equal).
+_ARCHIVE_ONION = "https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion"
+
+
+def fetch_archive_s3_keys(
+    email: str,
+    password: str,
+    *,
+    docker_bin: str = "docker",
+    env: Optional[dict] = None,
+    log_func: Optional[Callable[[str], None]] = None,
+) -> Optional[dict]:
+    """Log in to archive.org and return its S3 keys as
+    {"access": ..., "secret": ...}, or None (logged) on any failure.
+
+    The one archive.org login on the Mac: first-run setup (onion_proxy)
+    and the per-launch reconcile (ensure_archive_s3_keys) both come here,
+    so they cannot drift apart again (issue #322: setup went to clearnet
+    archive.org and could fail where the reconcile succeeded).
+
+    POSTs to archive.org's onion (NOT clearnet), from inside the
+    onionheaven container through its Tor SOCKS port: clearnet archive.org
+    via Tor exit nodes is aggressively rate-limited / blocked by their
+    Cloudflare layer (every exit we tried 2026-05-25 returned HTTP 000),
+    and from the host the login would tie the publisher's IP address to
+    the account. -k accepts the onion's self-issued certificate; the
+    onion address itself authenticates it.
+
+    The login form and the session cookie go to curl on stdin
+    (docker exec -i, --data-binary @- / -H @-): argv is visible to every
+    local user (ps), and a TimeoutExpired's message quotes it.
+    """
+    import urllib.parse
+
+    log = log_func or _noop_log
+    try:
+        login = subprocess.run(
+            [docker_bin, "exec", "-i", "onionheaven",
+             "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
+             "--max-time", "60", "-X", "POST",
+             "--data-binary", "@-",
+             _ARCHIVE_ONION + "/services/xauthn/?op=login"],
+            input=urllib.parse.urlencode({"email": email, "password": password}),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=75, env=env,
+        )
+        if login.returncode != 0 or not login.stdout:
+            log("WARNING: Could not reach archive.org onion to fetch S3 keys")
+            return None
+        try:
+            body = json.loads(login.stdout)
+        except json.JSONDecodeError:
+            body = None
+        if not isinstance(body, dict):
+            log("WARNING: archive.org login returned non-JSON")
+            return None
+        values = body.get("values") or {}
+        if not body.get("success"):
+            log(f"WARNING: archive.org login failed: {values.get('reason', 'unknown')}")
+            return None
+
+        s3 = values.get("s3") or {}
+        access = s3.get("access", "")
+        secret = s3.get("secret", "")
+        if access and secret:
+            return {"access": access, "secret": secret}
+
+        # No keys in the login response: fetch them with its session cookie.
+        cookies = values.get("cookies") or {}
+        sig = cookies.get("logged-in-sig", "")
+        user = cookies.get("logged-in-user", "")
+        if sig and user:
+            page = subprocess.run(
+                [docker_bin, "exec", "-i", "onionheaven",
+                 "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
+                 "--max-time", "60",
+                 "-H", "@-",
+                 _ARCHIVE_ONION + "/account/s3.php?output_json=1"],
+                input=f"Cookie: logged-in-sig={sig}; logged-in-user={user}\n",
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=75, env=env,
+            )
+            try:
+                key = json.loads(page.stdout).get("key") if page.returncode == 0 else None
+            except (json.JSONDecodeError, AttributeError):
+                key = None
+            if isinstance(key, dict) and key.get("s3accesskey") and key.get("s3secretkey"):
+                return {"access": key["s3accesskey"], "secret": key["s3secretkey"]}
+        log("WARNING: archive.org login succeeded but S3 keys were empty")
+        return None
+    except subprocess.TimeoutExpired:
+        log("WARNING: archive.org login timed out")
+        return None
+    except (subprocess.SubprocessError, OSError) as e:
+        # Not {e}: a subprocess error's message quotes the argv.
+        log(f"WARNING: archive.org S3 key fetch failed: {type(e).__name__}")
+        return None
+
+
 def ensure_archive_s3_keys(
     *,
     docker_bin: str = "docker",
@@ -821,6 +922,10 @@ def ensure_archive_s3_keys(
     failure (no network, archive.org throttling the Tor exit, etc.)
     logs a warning but doesn't error — the user can set their own
     creds later in Settings.
+
+    The keys are the network's one pair, in the main site's options
+    (`wp option` without --url): where the Wayback sweep reads them and
+    where the Settings page saves them from any site.
     """
     log = log_func or _noop_log
     if not wp_is_installed(docker_bin):
@@ -832,55 +937,18 @@ def ensure_archive_s3_keys(
         return True  # Already configured
 
     log("Fetching archive.org S3 keys for Wayback Machine archiving...")
-    # POST to archive.org's onion (NOT clearnet) — clearnet archive.org
-    # via Tor exit nodes is aggressively rate-limited / blocked by their
-    # Cloudflare layer (every exit we tried 2026-05-25 returned HTTP 000).
-    # The onion service (Onion-Location header advertised on archive.org
-    # itself) routes around that block entirely. -k accepts the onion's
-    # self-issued certificate.
-    #
-    # The login form goes to curl on stdin (docker exec -i, --data-binary
-    # @-), and the keys to wp-cli on stdin below: argv is visible to every
-    # local user (ps), and a TimeoutExpired's message quotes it.
-    try:
-        login = subprocess.run(
-            [docker_bin, "exec", "-i", "onionheaven",
-             "curl", "-sk", "--socks5-hostname", "127.0.0.1:9050",
-             "--max-time", "60", "-X", "POST",
-             "--data-binary", "@-",
-             "https://archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.onion/services/xauthn/?op=login"],
-            input=f"email={_ARCHIVE_LOGIN_EMAIL}&password={_ARCHIVE_LOGIN_PASS}",
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=75,
-        )
-    except subprocess.TimeoutExpired:
-        log("WARNING: archive.org login timed out — "
-            "set the S3 keys manually in Settings if needed.")
-        return False
-    if login.returncode != 0 or not login.stdout:
-        log("WARNING: Could not reach archive.org onion to fetch S3 keys — "
-            "set them manually in Settings if needed.")
+    keys = fetch_archive_s3_keys(_ARCHIVE_LOGIN_EMAIL, _ARCHIVE_LOGIN_PASS,
+                                 docker_bin=docker_bin, log_func=log)
+    if keys is None:
+        log("WARNING: no archive.org S3 keys — set them manually in Settings if needed.")
         return False
 
-    import json as _json
-    try:
-        body = _json.loads(login.stdout)
-    except _json.JSONDecodeError:
-        log("WARNING: archive.org login returned non-JSON")
-        return False
-
-    s3 = (body.get("values") or {}).get("s3") or {}
-    access = s3.get("access", "")
-    secret = s3.get("secret", "")
-    if not access or not secret:
-        log("WARNING: archive.org login succeeded but S3 keys were empty")
-        return False
-
-    # `wp option update <key>` with no value reads it from stdin.
+    # `wp option update <key>` with no value reads it from stdin, so the
+    # keys stay out of argv.
     _wp("option", "update", "onionpress_archive_s3_access",
-        docker_bin=docker_bin, input=access)
+        docker_bin=docker_bin, input=keys["access"])
     _wp("option", "update", "onionpress_archive_s3_secret",
-        docker_bin=docker_bin, input=secret)
+        docker_bin=docker_bin, input=keys["secret"])
     log("Archive.org S3 keys configured for Wayback archiving")
     return True
 

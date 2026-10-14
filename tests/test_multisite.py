@@ -15,6 +15,7 @@ import re
 import subprocess
 import unittest
 from unittest import mock
+from urllib.parse import quote_plus
 
 from onionpress import multisite
 from onionpress.onionnames_client import _NAME_ALLOWED_RE
@@ -334,9 +335,12 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
         argv = srun.call_args.args[0]
         self.assertEqual(argv[1:4], ["exec", "-i", "onionheaven"])
         self.assertEqual(argv[argv.index("--data-binary") + 1], "@-")
-        self.assertIn(multisite._ARCHIVE_LOGIN_PASS, srun.call_args.kwargs["input"])
+        self.assertIn("password=" + quote_plus(multisite._ARCHIVE_LOGIN_PASS),
+                      srun.call_args.kwargs["input"])
         for arg in argv:
             self.assertNotIn(multisite._ARCHIVE_LOGIN_PASS, arg)
+        # archive.org's onion, never clearnet (issue #322).
+        self.assertEqual(argv[-1], multisite._ARCHIVE_ONION + "/services/xauthn/?op=login")
 
     def test_login_timeout_is_a_warning_not_an_exception(self):
         logs = []
