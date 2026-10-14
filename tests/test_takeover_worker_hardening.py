@@ -191,8 +191,12 @@ class EveryClientIsRootTest(unittest.TestCase):
 
     def test_nothing_else_names_the_socket(self):
         for dirpath, dirnames, filenames in os.walk(DOCKER_TOR_DIR):
+            # Sources only: a test run that writes bytecode leaves
+            # __pycache__/onionheaven-queue-manager.*.pyc here, which
+            # names the socket too.
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
             for name in filenames:
-                if name == "onionheaven-queue-manager.py":
+                if name == "onionheaven-queue-manager.py" or name.endswith((".pyc", ".pyo")):
                     continue
                 with open(os.path.join(dirpath, name), encoding="utf-8",
                           errors="replace") as f:
