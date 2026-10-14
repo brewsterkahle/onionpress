@@ -941,12 +941,16 @@ update_images() {
     # propagates here; tests/test_image_pins.py fails the build if they drift.
     # Exporting ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE overrides
     # them, which is how a locally built stack is pulled into this loop
-    # (build/build-images.sh prints the exports). mariadb stays on :latest to
-    # receive upstream security patches automatically.
+    # (build/build-images.sh prints the exports). The third-party images are
+    # pinned too (they floated on :latest through 2.5.3), so a pull here
+    # fetches something only when a new OnionPress moved a pin. No
+    # cloudflared: the Linux launcher never starts it.
     local images=(
         "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}"
         "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:b233e2909e4451ef4745736189d61c703f8957b4b738ee82e5e8b12d6a835055}"
-        "mariadb:latest"
+        "mariadb:13.0.2@sha256:f1bba652ba57bea3099ca2fe1af692af537c27d96e0bcde39dce29e2ba1ec4f3"
+        "willfarrell/autoheal:latest@sha256:da9e926d48f32021c94c2afd9a993f41da76446dc4a5288a9a4c8a69f8d49586"
+        "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
     )
     local pulled=0
 
