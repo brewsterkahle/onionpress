@@ -195,13 +195,16 @@ class TestComposeNetworks(unittest.TestCase):
         sources = {
             "src/onionpress/containers.py": _read(os.path.join(ROOT, "src", "onionpress", "containers.py")),
             "app/MacOS/onionpress": _read(MAC_LAUNCHER),
-            "onionheaven_common.py": _read(os.path.join(DOCKER, "tor", "onionheaven_common.py")),
+            "onionheaven-farm.py": _read(os.path.join(DOCKER, "tor", "onionheaven-farm.py")),
         }
         for name, text in sources.items():
             with self.subTest(source=name):
                 self.assertNotIn(egress.NETWORK, text)
                 self.assertIn('"--network", "onionpress-network"' if name.endswith(".py")
                               else "--network onionpress-network", text)
+        # The heartbeat's side names no network at all any more.
+        self.assertNotIn(egress.NETWORK,
+                         _read(os.path.join(DOCKER, "tor", "onionheaven_common.py")))
 
     def test_only_these_services_join_it(self):
         on_it = {name for name, block in self.services.items()

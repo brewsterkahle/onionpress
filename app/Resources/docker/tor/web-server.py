@@ -35,8 +35,8 @@ Endpoints:
   POST /reset-onionheaven — Clean stress tests + refresh workers with current
                        code. Docker-bridge sources only; Tor-origin callers
                        get 403. One run at a time — a concurrent call gets
-                       409. Hub only. Needs the Docker socket, which this
-                       container no longer has: 503, and the `onionpress
+                       409. Hub only. Needs the farm controller, which this
+                       container cannot reach: 503, and the `onionpress
                        reset-onionheaven` CLI runs the reset in the
                        onionheaven container instead.
   POST /logs/manifest — (OnionHome only) Accept log file manifests for analytics sharing
@@ -1471,26 +1471,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         """Clean stress tests + refresh all takeover workers with current code.
 
         Removes stress test entries, tears down old workers, spawns fresh ones
-        with patched code, and migrates real takeovers. It runs `docker exec`
-        through the mounted socket, so it is restricted to Docker-bridge
-        sources (same guard as the *-local name endpoints) — before #126 it
-        had no gate at all and was callable by anyone over Tor. Serialized
-        by _RESET_LOCK: a second call while one is running gets 409. It
-        spawns takeover workers, so it is hub-only as well.
+        from the current image, and migrates real takeovers. It drives
+        Docker (through the farm controller), so it is restricted to
+        Docker-bridge sources (same guard as the *-local name endpoints) —
+        before #126 it had no gate at all and was callable by anyone over
+        Tor. Serialized by _RESET_LOCK: a second call while one is running
+        gets 409. It spawns takeover workers, so it is hub-only as well.
 
-        This container no longer has the socket, so the reset now runs in the
-        onionheaven container (`onionpress reset-onionheaven`), and here it
-        answers 503 rather than half-run without Docker.
+        This container cannot reach the farm controller (it never had the
+        Docker socket either), so the reset runs in the onionheaven
+        container (`onionpress reset-onionheaven`), and here it answers 503
+        rather than half-run.
         """
         if not self._docker_network_src_ok():
             self._send_json(403, {"error": "local-only endpoint"})
             return
         if self._refuse_unless_hub():
             return
-        from onionheaven_common import docker_available
-        if not docker_available():
+        from onionheaven_common import farm_available
+        if not farm_available():
             self._send_json(503, {
-                "error": "no Docker socket in this container; run "
+                "error": "no farm controller in this container; run "
                          "reset_onionheaven in the onionheaven container "
                          "(onionpress reset-onionheaven)"})
             return

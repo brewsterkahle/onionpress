@@ -110,6 +110,14 @@ TORRC_EOF
     chown -R debian-tor:debian-tor /var/lib/tor 2>/dev/null || true
 }
 
+# Farm controller mode — runs in the onionheaven-farm container, the one
+# Tor-side container with the Docker socket. Nothing else from this script
+# runs there: no Tor, no volumes but the controller's socket and the Docker
+# socket (docs/DOCKER-SOCKET.md, "The farm controller").
+if [ "${FARM_CONTROLLER}" = "1" ]; then
+    exec python3 /onionheaven-farm.py
+fi
+
 # Takeover worker mode — runs in onionheaven-takeover-N containers
 if [ "${TAKEOVER_WORKER}" = "1" ]; then
     echo "Takeover worker mode: starting C Tor (SOCKS + control port), redirect service, and takeover worker..."

@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Names read from the OnionHeaven registry reach Docker only as workers'.
 
-The heartbeat in the onionheaven container holds the Docker socket and takes
-container names from the registry: takeover_containers.container_name and
-registry.takeover_container. The registry lives on the hub data volume,
+The heartbeat in the onionheaven container drives Docker (through the farm
+controller, onionheaven-farm.py, since the socket left its container) and
+takes container names from the registry: takeover_containers.container_name
+and registry.takeover_container. The registry lives on the hub data volume,
 which onionpress-tor (it faces Tor) and every takeover worker write as root.
 A planted row naming onionpress-wordpress used to get `docker inspect` and,
 since it does not mount the hub volume, `docker rm -f` from
 cleanup_dead_workers; check_worker_bootstrap exec'd into whatever a row
 named. Now:
 
-  - every name that reaches a docker call must be a worker's, whole
-    (onionheaven-(takeover|poll)-N), or it is logged and refused;
+  - every name that reaches a farm controller request (and so a docker
+    call) must be a worker's, whole (onionheaven-(takeover|poll)-N), or it
+    is logged and refused — before the controller, which refuses it too
+    (tests/test_onionheaven_farm.py), is even asked;
   - drop_unnamed_worker_rows forgets such rows each heartbeat pass and
     unassigns the addresses assigned to them;
   - the onion addresses handed to a worker's queue manager must be v3
@@ -19,8 +22,10 @@ named. Now:
     and the queue manager refuses anything else itself;
   - key directories are removed only for an onion address (".." or an
     absolute path from the registry would remove another tree);
-  - a census: every docker argv in the tor image's Python is listed below,
-    and each variable in it is checked in its function or reviewed here.
+  - a census: every docker argv in the tor image's Python is listed below
+    (since the farm controller, exactly one: the controller's own `docker`
+    helper, whose arguments its validated verbs build), and each variable
+    in it is checked in its function or reviewed here.
 
 Nothing here talks to Docker: subprocess is mocked, and a test fails if a
 refused name reaches it.
@@ -211,20 +216,22 @@ class CleanupDeadWorkersTest(QuietLog):
     """The reported path: inspect + rm -f of a name a row planted."""
 
     def _run(self, conn):
+        """Farm controller requests made, as (op, name)."""
         calls = []
 
-        def fake(argv, **kwargs):
-            calls.append(argv)
-            if argv[:3] == ["docker", "ps", "-a"]:
-                return _done(WORKER + "\n")
-            if argv[:2] == ["docker", "inspect"]:
+        def fake(op, **fields):
+            calls.append((op, fields.get("name")))
+            if op == "list":
+                return {"ok": True, "names": [WORKER]}
+            if op == "inspect":
                 # Nothing but the worker mounts the hub volume: a planted
                 # name would be "running without it" and removed.
-                return _done("true []")
-            if argv[:3] == ["docker", "rm", "-f"]:
-                return _done()
-            raise AssertionError(f"unexpected {argv}")
-        with mock.patch.object(oc.subprocess, "run", side_effect=fake):
+                return {"ok": True, "exists": True, "running": True, "mounts": "[]"}
+            if op == "remove":
+                return {"ok": True, "removed": True}
+            raise AssertionError(f"unexpected {op} {fields}")
+        with mock.patch.object(oc, "farm_request", side_effect=fake), \
+                mock.patch.object(oc.subprocess, "run", side_effect=_no_subprocess):
             oc.cleanup_dead_workers(conn)
         return calls
 
@@ -235,7 +242,7 @@ class CleanupDeadWorkersTest(QuietLog):
             if name is not None:
                 _add_worker(conn, name)
         calls = self._run(conn)
-        targets = {argv[-1] for argv in calls if argv[1] in ("inspect", "rm")}
+        targets = {name for op, name in calls if op in ("inspect", "remove")}
         self.assertEqual(targets, {WORKER})
         self.assertEqual([r[0] for r in conn.execute(
             "SELECT container_name FROM takeover_containers")], [])  # WORKER retired
@@ -245,18 +252,20 @@ class CleanupDeadWorkersTest(QuietLog):
         _add_worker(conn, WORKER)
         _add_worker(conn, "onionpress-wordpress")
         calls = self._run(conn)
-        self.assertIn(["docker", "rm", "-f", WORKER], calls)
-        self.assertNotIn(["docker", "rm", "-f", "onionpress-wordpress"], calls)
+        self.assertIn(("remove", WORKER), calls)
+        self.assertNotIn(("remove", "onionpress-wordpress"), calls)
 
 
 class GuardedCallsTest(QuietLog):
-    """Each function that aims a docker call at a registry name refuses
-    anything but a worker's name before spawning a process."""
+    """Each function that aims a farm controller request (and so a docker
+    call) at a registry name refuses anything but a worker's name before
+    asking. The controller refuses them too (tests/test_onionheaven_farm.py);
+    this keeps the heartbeat from even asking, and logging why."""
 
     def _refuses(self, call):
         with mock.patch.object(oc.subprocess, "run", side_effect=_no_subprocess), \
-                mock.patch.object(hb.subprocess, "run", side_effect=_no_subprocess), \
-                mock.patch.object(oc, "docker_available", return_value=True):
+                mock.patch.object(oc, "farm_request", side_effect=_no_subprocess), \
+                mock.patch.object(oc, "farm_available", return_value=True):
             return call()
 
     def test_names(self):
@@ -267,7 +276,6 @@ class GuardedCallsTest(QuietLog):
                 self.assertFalse(self._refuses(lambda: oc._exec_release(name, ADDR)))
                 self.assertIsNone(self._refuses(lambda: oc._has_onion_on_worker(name, ADDR)))
                 self.assertIsNone(self._refuses(lambda: oc.get_queue_status(name)))
-                self.assertIsNone(self._refuses(lambda: oc._patch_worker_code(name)))
                 self.assertFalse(self._refuses(lambda: oc._rm_worker(name)))
                 self.assertIsNone(self._refuses(lambda: hb._get_tor_detached(name)))
 
@@ -288,10 +296,11 @@ class GuardedCallsTest(QuietLog):
     def test_remove_workers_counts_only_workers(self):
         removed = []
 
-        def fake(argv, **kwargs):
-            removed.append(argv[3])
-            return _done()
-        with mock.patch.object(oc.subprocess, "run", side_effect=fake):
+        def fake(op, **fields):
+            self.assertEqual(op, "remove")
+            removed.append(fields["name"])
+            return {"ok": True, "removed": True}
+        with mock.patch.object(oc, "farm_request", side_effect=fake):
             n = oc._remove_workers(["onionheaven-takeover-1", "onionpress-db",
                                     "onionheaven-poll-0", None])
         self.assertEqual(n, 2)
@@ -301,7 +310,8 @@ class GuardedCallsTest(QuietLog):
         conn = self.registry()
         _add_worker(conn, "onionpress-tor", bootstrapped=0)
         _add_worker(conn, "onionpress-db", bootstrapped=1)
-        with mock.patch.object(oc.subprocess, "run", side_effect=_no_subprocess):
+        with mock.patch.object(oc.subprocess, "run", side_effect=_no_subprocess), \
+                mock.patch.object(oc, "farm_request", side_effect=_no_subprocess):
             oc.check_worker_bootstrap(conn)
         self.assertEqual(conn.execute(
             "SELECT bootstrapped FROM takeover_containers "
@@ -309,7 +319,7 @@ class GuardedCallsTest(QuietLog):
 
     def test_tor_detached_keeps_only_addresses(self):
         out = "\n".join([ADDR, "garbage.onion", "X" * 56 + ".onion", "1" * 56 + ".onion", ""])
-        with mock.patch.object(hb.subprocess, "run", return_value=_done(out)):
+        with mock.patch.object(hb, "farm_exec", return_value=_done(out)):
             self.assertEqual(hb._get_tor_detached(WORKER), {ADDR})
 
 
@@ -398,15 +408,16 @@ class KeyDirectoriesTest(QuietLog):
         _add_worker(conn, "onionpress-wordpress", assigned=0)
         removed = []
 
-        def fake(argv, **kwargs):
-            if argv[:2] == ["docker", "ps"]:
-                return _done("onionpress-wordpress\nonionheaven-takeover-2\n"
-                             "onionheaven-takeover-x\n")
-            if argv[:3] == ["docker", "rm", "-f"]:
-                removed.append(argv[3])
-                return _done()
-            raise AssertionError(f"unexpected {argv}")
-        with mock.patch.object(oc.subprocess, "run", side_effect=fake):
+        def fake(op, **fields):
+            if op == "list":
+                return {"ok": True, "names": ["onionpress-wordpress", "onionheaven-takeover-2",
+                                              "onionheaven-takeover-x"]}
+            if op == "remove":
+                removed.append(fields["name"])
+                return {"ok": True, "removed": True}
+            raise AssertionError(f"unexpected {op} {fields}")
+        with mock.patch.object(oc, "farm_request", side_effect=fake), \
+                mock.patch.object(oc.subprocess, "run", side_effect=_no_subprocess):
             stats = oc.cleanup_stress_tests(conn)
         self.assertTrue(os.path.exists(os.path.join(self.victim, "precious")))
         self.assertEqual(stats["keys_deleted"], 0)
@@ -461,25 +472,13 @@ class QueueManagerAddressesTest(unittest.TestCase):
 IMAGE_PYTHON = sorted(f for f in os.listdir(DOCKER_TOR_DIR) if f.endswith(".py"))
 
 # Functions that build a docker argv. A new one has to be looked at: where
-# do its names and arguments come from?
+# do its names and arguments come from? Since the farm controller took the
+# socket, the heartbeat's code builds none: onionheaven_common asks the
+# controller (farm_request / farm_exec), and the controller's `docker`
+# helper is the one place an argv is handed to the CLI, with names, verbs
+# and addresses its validate() has already checked.
 DOCKER_CALLERS = {
-    ("onionheaven_common.py", "read_tor_container_address"),
-    ("onionheaven_common.py", "takeover_image"),
-    ("onionheaven_common.py", "_spawn_worker"),
-    ("onionheaven_common.py", "_check_worker_process"),
-    ("onionheaven_common.py", "check_worker_bootstrap"),
-    ("onionheaven_common.py", "_retire_unlisted_old_workers"),
-    ("onionheaven_common.py", "cleanup_dead_workers"),
-    ("onionheaven_common.py", "_exec_takeover"),
-    ("onionheaven_common.py", "_exec_release"),
-    ("onionheaven_common.py", "_has_onion_on_worker"),
-    ("onionheaven_common.py", "get_queue_status"),
-    ("onionheaven_common.py", "get_addr_serving_status"),
-    ("onionheaven_common.py", "cleanup_stress_tests"),
-    ("onionheaven_common.py", "_patch_worker_code"),
-    ("onionheaven_common.py", "_rm_worker"),
-    ("onionheaven_common.py", "reset_onionheaven"),
-    ("onionheaven-heartbeat.py", "_get_tor_detached"),
+    ("onionheaven-farm.py", "docker"),
 }
 
 # Calls that check a value before a docker call may use it.
@@ -487,18 +486,7 @@ GUARDS = {"worker_name_ok", "is_worker_name", "onion_address_ok", "is_onion_addr
 
 # Values in a docker argv that are not checked in their function, and why
 # that is fine. Anything read from the registry or the network is not here.
-REVIEWED = {
-    ("onionheaven_common.py", "takeover_image", "os.environ.get('HOSTNAME', '')"):
-        "this container's own hostname (its ID), set by Docker",
-    ("onionheaven_common.py", "_spawn_worker", "name"):
-        "built in the function from the integer _next_worker_index",
-    ("onionheaven_common.py", "_spawn_worker", "tz"):
-        "the onionheaven container's own TZ (compose)",
-    ("onionheaven_common.py", "_spawn_worker", "image"):
-        "takeover_image(): ONIONHEAVEN_IMAGE from compose, or this container's image ID",
-    ("onionheaven_common.py", "_patch_worker_code", "fpath"):
-        "an entry of the constant _WORKER_CODE_FILES",
-}
+REVIEWED = {}
 
 
 def _docker_argvs():
