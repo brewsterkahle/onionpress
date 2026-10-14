@@ -52,7 +52,7 @@ Or download the [`.deb` package](https://github.com/brewsterkahle/onionpress/rel
 ```bash
 wget https://github.com/brewsterkahle/onionpress/releases/latest/download/onionpress.deb
 sudo apt-get install ./onionpress.deb
-sudo systemctl start onionpress
+systemctl --user start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.

@@ -1785,6 +1785,30 @@ migrate_key_volume() {
 # `wp media regenerate --only-missing`, so an interrupted sweep resumes on the
 # next start, and it clears both markers only when it completes. Kept
 # identical in the macOS and Linux launchers; a test enforces that.
+# Run "$@" in the background so that it outlives this script; its output
+# goes to $LOG_FILE. The settings watcher (onionpress-watcher.service) is a
+# Type=oneshot unit: systemd kills everything left in its cgroup when
+# handle-action returns, a `( cmd & )` included, so there the command goes
+# into a transient user unit of its own (issue #316). Only the environment
+# it needs is passed (systemd-run puts --setenv values on a command line
+# and in the unit's properties, so never a secret). Anywhere else (the
+# long-running onionpress.service, a terminal) a detached subshell lives
+# long enough.
+run_detached() {
+    if [ "${ONIONPRESS_IN_WATCHER:-}" = "true" ] && command -v systemd-run >/dev/null 2>&1; then
+        local setenv=(--setenv=PYTHONDONTWRITEBYTECODE=1)
+        [ -z "${DOCKER_HOST:-}" ] || setenv+=(--setenv=DOCKER_HOST="$DOCKER_HOST")
+        if systemd-run --user --quiet --collect --no-block \
+                --property=StandardOutput=append:"$LOG_FILE" \
+                --property=StandardError=append:"$LOG_FILE" \
+                "${setenv[@]}" -- "$@" 2>>"$LOG_FILE"; then
+            return 0
+        fi
+        log "WARNING: systemd-run failed; running in the background here (it may not finish)"
+    fi
+    ( "$@" >> "$LOG_FILE" 2>&1 & )
+}
+
 regenerate_derivatives_pending() {
     [ -f "$DATA_DIR/.regenerate-derivatives-pending" ] && return 0
     docker exec onionpress-wordpress test -f \
@@ -2225,12 +2249,13 @@ start_containers() {
     setup_bundled_plugins
 
     # Image derivatives (#257): if a restore left resized images to rebuild,
-    # do it in the background — niced, detached in a subshell so it is not
-    # in this script's job table, resumable across restarts. After
+    # do it in the background — niced, detached (run_detached: out of this
+    # script's job table, and out of the settings watcher's cgroup when a
+    # Settings-page restore got here), resumable across restarts. After
     # provision-post-install so the image-fallback mu-plugin is in place.
     if $wp_installed && regenerate_derivatives_pending; then
         log "Image derivatives: rebuild pending — starting in the background"
-        ( op_py regenerate-derivatives >> "$LOG_FILE" 2>&1 & )
+        run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -m onionpress.cli regenerate-derivatives
     fi
 }
 
@@ -3595,9 +3620,9 @@ apply_config_updates() {
         local boot_val
         boot_val=$(grep "^START_ON_BOOT=" "$DATA_DIR/config" | cut -d= -f2)
         if [ "$boot_val" = "yes" ]; then
-            systemctl enable onionpress 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
+            systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
         else
-            systemctl disable onionpress 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
+            systemctl --user disable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
         fi
     fi
 
@@ -4348,7 +4373,7 @@ main() {
             fi
             # Make sure containers are running
             if ! curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
-                echo "WordPress container is not running. Start OnionPress first: sudo systemctl start onionpress"
+                echo "WordPress container is not running. Start OnionPress first: systemctl --user start onionpress"
                 exit 1
             fi
             shift  # remove "setup" from args
@@ -4630,7 +4655,10 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         handle-action)
-            # Process action requests from the WordPress settings page
+            # Process action requests from the WordPress settings page.
+            # This runs as onionpress-watcher.service, a oneshot: whatever
+            # must outlive it goes through run_detached.
+            ONIONPRESS_IN_WATCHER=true
             local action
             action=$(wp_exec cat /var/lib/onionpress/requested-action 2>/dev/null || echo "")
             if [ -z "$action" ]; then
