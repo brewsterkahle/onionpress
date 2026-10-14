@@ -1179,87 +1179,22 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _fetch_archive_s3_keys(self, email, password):
-        """Attempt to log in to archive.org and retrieve S3 API keys.
+        """Log in to archive.org and return its S3 keys as a dict with
+        'access' and 'secret', or None on failure.
 
-        Returns dict with 'access' and 'secret' on success, None on failure.
-        Routes through the onionheaven container's Tor SOCKS proxy to avoid
-        clearnet requests from the host. The login form and the session
-        cookie go to curl on stdin (docker exec -i), never in argv, which
-        `ps` shows to every local user.
+        The same login as the per-launch reconcile
+        (multisite.fetch_archive_s3_keys): archive.org's onion, from the
+        onionheaven container's Tor, form and cookie on curl's stdin. Setup
+        used to log in to clearnet archive.org through a Tor exit, which
+        archive.org turns most exits away from (issue #322).
         """
-        import urllib.parse
-
-        try:
-            docker = self.server.docker_bin
-            denv = self.server.docker_env
-            login_data = urllib.parse.urlencode({
-                'email': email,
-                'password': password,
-            })
-
-            result = subprocess.run(
-                [docker, "exec", "-i", "onionheaven",
-                 "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
-                 "--max-time", "30",
-                 "-X", "POST", "--data-binary", "@-",
-                 "https://archive.org/services/xauthn/?op=login"],
-                input=login_data,
-                capture_output=True, text=True, encoding='utf-8', errors='replace',
-                timeout=45, env=denv,
-            )
-
-            if result.returncode != 0:
-                if self.server.log_func:
-                    self.server.log_func(f"archive.org login curl failed (rc={result.returncode})")
-                return None
-
-            data = json.loads(result.stdout)
-
-            if not data.get('success'):
-                reason = data.get('values', {}).get('reason', 'unknown')
-                if self.server.log_func:
-                    self.server.log_func(f"archive.org login failed: {reason}")
-                return None
-
-            s3_access = data.get('values', {}).get('s3', {}).get('access', '')
-            s3_secret = data.get('values', {}).get('s3', {}).get('secret', '')
-
-            if s3_access and s3_secret:
-                return {'access': s3_access, 'secret': s3_secret}
-
-            # If S3 keys not in login response, fetch separately
-            cookies = data.get('values', {}).get('cookies', {})
-            logged_in_sig = cookies.get('logged-in-sig', '')
-            logged_in_user = cookies.get('logged-in-user', '')
-
-            if logged_in_sig and logged_in_user:
-                # -H @- reads the header lines from stdin.
-                result2 = subprocess.run(
-                    [docker, "exec", "-i", "onionheaven",
-                     "curl", "-s", "--socks5-hostname", "127.0.0.1:9050",
-                     "--max-time", "30",
-                     "-H", "@-",
-                     "https://archive.org/account/s3.php?output_json=1"],
-                    input=f"Cookie: logged-in-sig={logged_in_sig}; logged-in-user={logged_in_user}\n",
-                    capture_output=True, text=True, encoding='utf-8', errors='replace',
-                    timeout=45, env=denv,
-                )
-                if result2.returncode == 0:
-                    s3_data = json.loads(result2.stdout)
-                    access = s3_data.get('key', {}).get('s3accesskey', '')
-                    secret = s3_data.get('key', {}).get('s3secretkey', '')
-                    if access and secret:
-                        return {'access': access, 'secret': secret}
-
-        except subprocess.SubprocessError as e:
-            # Not {e}: a subprocess error's message quotes the argv.
-            if self.server.log_func:
-                self.server.log_func(f"archive.org S3 key fetch failed: {type(e).__name__}")
-        except Exception as e:
-            if self.server.log_func:
-                self.server.log_func(f"archive.org S3 key fetch failed: {e}")
-
-        return None
+        from onionpress import multisite as _multisite
+        return _multisite.fetch_archive_s3_keys(
+            email, password,
+            docker_bin=self.server.docker_bin,
+            env=self.server.docker_env,
+            log_func=self.server.log_func,
+        )
 
     def _handle_status(self):
         """Return proxy status as JSON."""
