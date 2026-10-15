@@ -1050,10 +1050,15 @@
   timeout: killing the launcher stopped only the shell, its docker and
   Python steps ran on) and notify on failure (tray `_notify_failed`).
   `tests/test_backup_timeouts.py`.
-- The Mac Settings page's restore is the menu's: `_launcher_restore`
-  (install-from-backup), after `read_backup_metadata` has checked the
-  password. Linux's Settings-page restore is still bash's in-place
-  `restore_backup`.
+- The Mac Settings page's restore is NOT the menu's: it stays the in-place
+  `restore_from_backup(through_wordpress=True, before_key_change=,
+  confirm_address_change=)`, then a restart. The launcher's `restore`
+  (install-from-backup) has none of that path's checks (hub/OnionHome
+  refusals, address-change dialog, no hub volumes written), so a backup
+  and password uploaded through WordPress must never reach it; #341's
+  switch to it was left out for that reason (fae542dd). Linux's
+  Settings-page restore is still bash's in-place `restore_backup
+  --from-settings-page`.
 - `wp_files.own(recursive=True)` (put_tree's first step, so every restore)
   never enters a folder named `creations` (My Creations' bind mount), and
   follows no link (find -execdir chown -h), like onionpress-web-root-owner.sh.
