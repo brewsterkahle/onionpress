@@ -42,7 +42,7 @@
 # back; none of them uses a capability (see each).
 services:
   tor:
-    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}
+    image: ${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}
     container_name: onionpress-tor
     logging:
       driver: json-file
@@ -122,7 +122,7 @@ services:
         protocol: tcp
 
   wordpress:
-    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:b233e2909e4451ef4745736189d61c703f8957b4b738ee82e5e8b12d6a835055}
+    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:2e3fbc5cc60bf51bc453e32836e05a442c836006e86d06b96c37654a7806d291}
     container_name: onionpress-wordpress
     logging:
       driver: json-file
@@ -286,7 +286,7 @@ services:
   # over a unix socket on a volume only these two services mount, and has
   # no network at all (no WEBHOOK_URL/APPRISE_URL is configured).
   autoheal:
-    image: willfarrell/autoheal:latest@sha256:da9e926d48f32021c94c2afd9a993f41da76446dc4a5288a9a4c8a69f8d49586
+    image: willfarrell/autoheal:latest@sha256:fe88c69806c71ac82fd3a483596011742f5ef319f84744cc3128e5b92b10af77
     container_name: onionpress-autoheal
     logging:
       driver: json-file
@@ -376,7 +376,7 @@ services:
   # SOCKS-only Tor with no network instead of trying to be the site's Tor.
   # Refusals and every request are logged (`docker logs onionheaven-farm`).
   onionheaven-farm:
-    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
+    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}}
     container_name: onionheaven-farm
     logging:
       driver: json-file
@@ -389,7 +389,7 @@ services:
       - NO_ONION_SERVICE=1
       # Takeover workers run this, the same reference as `image:` above —
       # never a floating tag (onionheaven-farm.py's takeover_image).
-      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
+      - ONIONHEAVEN_IMAGE=${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}}
     volumes:
       - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
       - onionheaven-farm:/run/onionheaven-farm
@@ -404,7 +404,7 @@ services:
     restart: unless-stopped
 
   onionheaven:
-    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:2cc73a26b378279a7417cf5539607c8d15df303bd7d792db7783552be2f237ca}}
+    image: ${ONIONHEAVEN_IMAGE:-${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}}
     container_name: onionheaven
     logging:
       driver: json-file
