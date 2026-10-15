@@ -111,12 +111,17 @@ class TestReleaseScript(unittest.TestCase):
         _write(os.path.join(build, "build-linux.sh"),
                '#!/bin/bash\nprintf "the deb built %s" "$BUILD_ID" > "$(dirname "$0")/onionpress.deb"\n',
                0o755)
+        # The bundle release.sh checks is universal (issue #326): one
+        # Mach-O, which the lipo stub reports as arm64 + x86_64.
         _write(os.path.join(build, "build-dmg-simple.sh"),
-               '#!/bin/bash\nprintf "the dmg built %s" "$BUILD_ID" > "$(dirname "$0")/onionpress.dmg"\n',
+               '#!/bin/bash\nprintf "the dmg built %s" "$BUILD_ID" > "$(dirname "$0")/onionpress.dmg"\n'
+               'app="$(dirname "$0")/../OnionPress.app/Contents/Resources/MenubarApp/Contents/MacOS"\n'
+               'mkdir -p "$app" && printf "macho" > "$app/python"\n',
                0o755)
         self.bin = os.path.join(self.tmp, "bin")
         _write(os.path.join(self.bin, "gh"), GH_STUB, 0o755)
         _write(os.path.join(self.bin, "uname"), UNAME_STUB, 0o755)
+        _write(os.path.join(self.bin, "lipo"), '#!/bin/sh\necho "x86_64 arm64"\n', 0o755)
         self.state = os.path.join(self.tmp, "gh-state")
         os.makedirs(os.path.join(self.state, "assets"))
         self.calls_file = os.path.join(self.tmp, "calls")
