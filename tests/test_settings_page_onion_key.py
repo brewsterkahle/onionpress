@@ -435,6 +435,7 @@ class TestLaunchersKeepTheAddress(unittest.TestCase):
     --from-backup of both launchers, run for real."""
 
     SETUP = mv.TestLauncherRestorePaths.SETUP
+    RESTORE = mv.TestLauncherRestorePaths.RESTORE
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

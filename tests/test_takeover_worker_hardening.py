@@ -181,12 +181,13 @@ class EveryClientIsRootTest(unittest.TestCase):
         for rel, pattern in (
                 ("app/Resources/docker/tor/onionheaven-farm.py",
                  r'\[\s*"run", "-d",.*?image,\s*\]'),
-                ("src/onionpress/containers.py", r'\[\s*"run", "-d",.*?image,\s*\]'),
-                ("app/MacOS/onionpress", r'docker run -d \\.*?ONIONHEAVEN_IMAGE')):
+                ("src/onionpress/containers.py", r'\[\s*"run", "-d",.*?image,\s*\]')):
             spawns = re.findall(pattern, _read(rel), re.S)
             self.assertTrue(spawns, rel)
             for spawn in spawns:
                 self.assertNotRegex(spawn, r'--user|"-u"|\s-u\s', rel)
+        # The Mac launcher starts no worker (its _start_takeover_worker is gone).
+        self.assertNotIn("TAKEOVER_WORKER=1", _read("app/MacOS/onionpress"))
         dockerfile = _read("app/Resources/docker/tor/Dockerfile")
         self.assertEqual(re.findall(r"^USER\s+(\S+)", dockerfile, re.M)[-1], "root")
 
