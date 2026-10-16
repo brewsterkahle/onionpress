@@ -408,6 +408,7 @@ docker() {
 }
 systemctl() { echo "systemctl $*" >> "$OUT/calls"; }
 write_status() { echo write_status >> "$OUT/calls"; }
+read_cloudflare_token() { echo read_cloudflare_token >> "$OUT/calls"; }
 log() { echo "$1" >> "$LOG_FILE"; }
 """
 

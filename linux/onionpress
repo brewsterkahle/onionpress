@@ -403,10 +403,6 @@ ensure_key_helper_image() {
     docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
 }
 
-# Read config
-CLOUDFLARE_TUNNEL_TOKEN=""
-export CLOUDFLARE_TUNNEL_TOKEN
-
 # Create default config if it doesn't exist
 if [ ! -f "$DATA_DIR/config" ]; then
     cat > "$DATA_DIR/config" <<EOF
@@ -435,6 +431,30 @@ if [ -f "$DATA_DIR/config" ]; then
     _val=$(grep "^ONIONHEAVEN_HUB_THRESHOLD=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
 fi
+
+# Cloudflare Tunnel token (empty = no tunnel), read as the Mac launcher reads
+# it: everything after the first `=`, since a token can end in `=` padding
+# (#323). It reaches cloudflared only through compose's environment; never
+# log it. docker-compose.cloudflare.yml adds the cloudflared service, so the
+# calls that start or pull it take CF_COMPOSE (that file only with a token),
+# and the ones that stop or remove take COMPOSE_WITH_CF, so a tunnel whose
+# token was just removed still goes down with the rest (#352).
+# apply_config_updates reads it again: the Settings page's Restart applies
+# the page's changes in this same process before start_containers.
+COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
+read_cloudflare_token() {
+    CLOUDFLARE_TUNNEL_TOKEN=""
+    if [ -f "$DATA_DIR/config" ]; then
+        CLOUDFLARE_TUNNEL_TOKEN=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    fi
+    export CLOUDFLARE_TUNNEL_TOKEN
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        CF_COMPOSE=("${COMPOSE_WITH_CF[@]}")
+    else
+        CF_COMPOSE=()
+    fi
+}
+read_cloudflare_token
 
 # Run as an OnionHeaven hub (config-file-only; only an exact "yes" counts,
 # checked in the containers). Kept in step with app/MacOS/onionpress and
@@ -1102,8 +1122,9 @@ update_images() {
     # them, which is how a locally built stack is pulled into this loop
     # (build/build-images.sh prints the exports). The third-party images are
     # pinned too (they floated on :latest through 2.5.3), so a pull here
-    # fetches something only when a new OnionPress moved a pin. No
-    # cloudflared: the Linux launcher never starts it.
+    # fetches something only when a new OnionPress moved a pin. cloudflared
+    # only when the tunnel is on: compose never starts it otherwise, and it
+    # is ~60 MB.
     local images=(
         "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}"
         "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:2e3fbc5cc60bf51bc453e32836e05a442c836006e86d06b96c37654a7806d291}"
@@ -1111,6 +1132,9 @@ update_images() {
         "willfarrell/autoheal:latest@sha256:fe88c69806c71ac82fd3a483596011742f5ef319f84744cc3128e5b92b10af77"
         "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
     )
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        images+=("cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07")
+    fi
     local pulled=0
 
     for image in "${images[@]}"; do
@@ -2137,7 +2161,7 @@ start_containers() {
         log "Skipping image pull: running locally built images"
     else
         log "Pulling pre-built images (missing only)..."
-        docker compose pull --policy missing 2>&1 | tee -a "$LOG_FILE"
+        docker compose "${CF_COMPOSE[@]}" pull --policy missing 2>&1 | tee -a "$LOG_FILE"
         if [ "${PIPESTATUS[0]}" -ne 0 ]; then
             log "WARNING: Failed to pull images (will use cached)"
         fi
@@ -2213,6 +2237,7 @@ start_containers() {
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     warn_if_socks_port_exposed
     note_if_lan_looks_local
+    start_cloudflare_tunnel "$wp_installed"
 
     # OnionHeaven: the API server runs inside the tor container (always on).
     # On a hub, the watcher keeps the onionheaven container (heartbeat
@@ -2254,6 +2279,30 @@ start_containers() {
     fi
 }
 
+# Cloudflare Tunnel (#352): cloudflared runs when the config holds a token,
+# as on the Mac. Only once WordPress is installed: before that its install
+# page would be on the open internet. Without a token the container is
+# removed, not just stopped, so a removed token does not linger in its
+# configuration. Its ingress must point at http://wordpress:80; the
+# ONIONPRESS-TOR chain refuses anything on the LAN or this host.
+start_cloudflare_tunnel() {
+    local wp_installed=$1
+    if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        if docker container inspect onionpress-cloudflared >/dev/null 2>&1; then
+            log "Cloudflare Tunnel token removed, removing cloudflared"
+            docker rm -f onionpress-cloudflared >> "$LOG_FILE" 2>&1 || true
+        fi
+        return 0
+    fi
+    if [ "$wp_installed" != true ]; then
+        log "Cloudflare Tunnel: waiting until WordPress is set up (restart OnionPress afterwards)"
+        return 0
+    fi
+    log "Cloudflare Tunnel enabled, starting cloudflared..."
+    docker compose "${CF_COMPOSE[@]}" up -d cloudflared >> "$LOG_FILE" 2>&1 \
+        || log "ERROR: Failed to start cloudflared container"
+}
+
 stop_containers() {
     log "Stopping OnionPress containers..."
     stop_container_log_capture
@@ -2266,7 +2315,7 @@ stop_containers() {
     # different port number across restarts. Best-effort.
     echo "${ONIONPRESS_PORT_OFFSET:-0}" > "$DATA_DIR/.previous-port-offset" 2>/dev/null || true
     cd "$DOCKER_DIR"
-    docker compose down 2>&1 | tee -a "$LOG_FILE"
+    docker compose "${COMPOSE_WITH_CF[@]}" down 2>&1 | tee -a "$LOG_FILE"
     log "Containers stopped"
     # Write a final stopped status.json so any surviving tray process
     # (the tray runs as its own user process, not under our service)
@@ -3610,6 +3659,10 @@ apply_config_updates() {
     # Clear the updates file
     wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
 
+    # A token set or removed on the page counts from the next start_containers
+    # (the page's Restart runs it in this process).
+    read_cloudflare_token
+
     # Handle START_ON_BOOT (re-applied whenever the page sends it)
     if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
         local boot_val
@@ -4244,7 +4297,7 @@ update_finish() {
     else
         log "Pulling latest Docker images..."
         echo "  Pulling latest Docker images..."
-        docker compose pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+        docker compose "${CF_COMPOSE[@]}" pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
     fi
 
     # Restart, the heartbeat client too (its script was replaced):
@@ -4530,7 +4583,7 @@ sys.exit(0 if provision_interactive() else 1)
 
         logs)
             cd "$DOCKER_DIR"
-            docker compose logs -f
+            docker compose "${CF_COMPOSE[@]}" logs -f
             ;;
 
         backup)
@@ -5074,7 +5127,7 @@ print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv
 
             echo "Removing containers and volumes..."
             setup_db_passwords 2>/dev/null || true
-            cd "$DOCKER_DIR" 2>/dev/null && docker compose down -v 2>/dev/null || true
+            cd "$DOCKER_DIR" 2>/dev/null && docker compose "${COMPOSE_WITH_CF[@]}" down -v 2>/dev/null || true
 
             # `compose down -v` only removes volumes Compose created.
             # Volumes pre-created by the launcher via `docker volume

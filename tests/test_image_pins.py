@@ -69,14 +69,14 @@ TOR_REPO = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 WP_REPO = "ghcr.io/brewsterkahle/onionpress-wordpress:latest"
 
 # The third-party pins: key in build/image-pins.env -> (repository, the
-# consumers that must carry it). Linux never starts cloudflared, so only the
-# Mac launcher's update_images() lists it. Keep in sync with
+# consumers that must carry it). Both launchers' update_images() list
+# cloudflared (only with a tunnel token). Keep in sync with
 # THIRD_PARTY_KEYS in build/refresh-image-digests.sh (asserted below).
 THIRD_PARTY = {
     "MARIADB_IMAGE": ("mariadb", (COMPOSE,) + LAUNCHERS),
     "AUTOHEAL_IMAGE": ("willfarrell/autoheal", (COMPOSE,) + LAUNCHERS),
     "CLOUDFLARED_IMAGE": ("cloudflare/cloudflared",
-                          (CLOUDFLARE_COMPOSE, "app/MacOS/onionpress")),
+                          (CLOUDFLARE_COMPOSE,) + LAUNCHERS),
     "SOCKET_PROXY_IMAGE": ("ghcr.io/wollomatic/socket-proxy",
                            (COMPOSE,) + LAUNCHERS),
 }
@@ -476,7 +476,11 @@ class TestLaunchPullsNothingItHas(unittest.TestCase):
         for path in LAUNCHERS:
             text = _read(path)
             with self.subTest(path=path):
-                self.assertIn("docker compose pull --policy missing", text)
+                # Linux adds the Cloudflare override file with a tunnel token.
+                self.assertRegex(
+                    text,
+                    r'docker compose (?:"\$\{CF_COMPOSE\[@\]\}" )?'
+                    r'pull --policy missing')
 
     def test_mac_launcher_has_no_unconditional_compose_pull(self):
         """The Mac launcher's only `docker compose pull` is the start-time
