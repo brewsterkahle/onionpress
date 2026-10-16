@@ -6,7 +6,8 @@
  * Version: 1.1.1
  * Author: OnionPress
  * Author URI: https://github.com/brewsterkahle/onionpress
- * License: AGPL-3.0
+ * License: AGPL-3.0-or-later
+ * License URI: https://www.gnu.org/licenses/agpl-3.0.html
  * Text Domain: onionpress-hit-counter
  */
 

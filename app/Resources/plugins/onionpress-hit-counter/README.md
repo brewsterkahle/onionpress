@@ -197,7 +197,7 @@ volumes:
 
 ## License
 
-AGPL-3.0 - Same as OnionPress
+AGPL-3.0-or-later - Same as OnionPress
 
 ## Credits
 

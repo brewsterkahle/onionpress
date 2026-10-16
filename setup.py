@@ -13,6 +13,11 @@ _version_match = re.search(
 )
 VERSION = _version_match.group(1) if _version_match else 'unknown'
 
+# Shown in Finder's Get Info and the About box; app/Info.plist carries the
+# same line for the outer bundle (tests/test_license_declarations.py).
+COPYRIGHT = ('Copyright © 2026 Internet Archive and OnionPress contributors. '
+             'Licensed under the GNU AGPL v3 or later.')
+
 # Default build directories if not specified on command line
 # (avoid conflicts with build/ scripts directory)
 if '--dist-dir' not in ' '.join(sys.argv):
@@ -41,7 +46,6 @@ DATA_FILES = [
         'src/onion-forward.php',
     ]),
     ('assets/branding', [
-        'assets/branding/noun-computer-5963091.svg',
         'assets/branding/logo.png',
     ]),
     ('wordlists', _WORDLIST_FILES),
@@ -59,6 +63,7 @@ OPTIONS = {
         'LSUIElement': True,  # Run as menu bar app (no dock icon)
         'NSHighResolutionCapable': True,
         'NSRequiresAquaSystemAppearance': False,
+        'NSHumanReadableCopyright': COPYRIGHT,
         'LSApplicationCategoryType': 'public.app-category.utilities',
         'NSLocalNetworkUsageDescription': 'OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.',
         'NSDocumentsFolderUsageDescription': 'OnionPress is migrating existing files from ~/Documents/OnionPress/ to ~/OnionPress/. After the one-time move, OnionPress no longer accesses your Documents folder.',
@@ -110,6 +115,7 @@ OPTIONS = {
 
 setup(
     name='OnionPress',
+    license='AGPL-3.0-or-later',
     app=APP,
     data_files=DATA_FILES,
     options={'py2app': OPTIONS},

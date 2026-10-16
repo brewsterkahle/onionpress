@@ -4,7 +4,8 @@
  * Description: Routes all outbound WordPress HTTP requests through the Tor SOCKS proxy to prevent clearnet leaks.
  * Version: 1.2.0
  * Author: OnionPress
- * License: AGPL-3.0
+ * License: AGPL-3.0-or-later
+ * License URI: https://www.gnu.org/licenses/agpl-3.0.html
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

@@ -96,6 +96,14 @@ mkdir -p "$DEB_ROOT/usr/share/metainfo"
 cp "$PROJECT_DIR/linux/onionpress.metainfo.xml" \
     "$DEB_ROOT/usr/share/metainfo/org.onionpress.OnionPress.metainfo.xml"
 
+# The package's copyright file, machine-readable (DEP-5): OnionPress's own
+# AGPL-3.0-or-later. The package bundles nothing from another project — the
+# container images are pulled at first start and every other dependency is
+# a Debian package named in Depends.
+mkdir -p "$DEB_ROOT/usr/share/doc/onionpress"
+install -m 0644 "$PROJECT_DIR/linux/copyright" \
+    "$DEB_ROOT/usr/share/doc/onionpress/copyright"
+
 # Desktop entry — gives GUI users (Ubuntu Desktop, KDE) an icon in their
 # app menu that opens http://localhost:8080. xdg-open routes to the
 # default browser, which is the right thing on every modern Linux desktop.

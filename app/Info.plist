@@ -37,6 +37,8 @@
 	<string>OnionPress is migrating existing files from ~/Documents/OnionPress/ to ~/OnionPress/. After the one-time move, OnionPress no longer accesses your Documents folder.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Internet Archive and OnionPress contributors. Licensed under the GNU AGPL v3 or later.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OnionPress uses localhost connections to manage Docker containers and serve a local proxy. It does not access other devices on your network.</string>
 	<key>NSRequiresAquaSystemAppearance</key>

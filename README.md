@@ -196,13 +196,26 @@ and how to point an installed OnionPress at images you built yourself.
 
 ## License
 
-AGPL 3 License - See LICENSE file for details
+Copyright (C) 2026 Internet Archive and OnionPress contributors.
+
+OnionPress is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version (SPDX: `AGPL-3.0-or-later`). The full text is in the [LICENSE](LICENSE)
+file. The WordPress plugins and theme OnionPress installs carry the same
+license in their headers.
+
+The macOS app bundles Colima (MIT), Lima (Apache-2.0), the Docker CLI
+(Apache-2.0), Docker Compose (Apache-2.0), mkp224o (CC0-1.0) and libsodium
+(ISC); the build writes their license texts and notices into the app as
+`Contents/Resources/THIRD-PARTY-NOTICES.txt`. The Linux package bundles nothing
+from other projects; its copyright file is `/usr/share/doc/onionpress/copyright`.
 
 ## Credits
 
 A [Decentralized Web](http://brewster.kahle.org/2015/08/11/locking-the-web-open-a-call-for-a-distributed-web-2/) project.
 
-Free and Open Source (AGPL 3). [Donate to the Tor Project](https://donate.torproject.org/) · [Donate to the Internet Archive](https://archive.org/donate/)
+Free and Open Source (AGPL-3.0-or-later). [Donate to the Tor Project](https://donate.torproject.org/) · [Donate to the Internet Archive](https://archive.org/donate/)
 
 ## Support
 
