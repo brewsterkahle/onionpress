@@ -310,9 +310,31 @@
   tag; a missing or empty text fails the build. Bumping one of those
   versions needs nothing else, but a project that renames its license file
   does. The .deb bundles nothing third-party (images are pulled, the rest
-  is in Depends). The Python packages py2app bundles (PyNaCl, rumps,
-  pyobjc, cffi) are not in the file yet. `tests/test_license_declarations.py`
-  runs the staging and the writer against a curl stub.
+  is in Depends). `tests/test_license_declarations.py` runs the staging and
+  the writer against a curl stub.
+- **And the MenubarApp's Python side**: once py2app has built it, the DMG
+  build runs `build/python-notices.py` under the build venv's interpreter
+  and appends, in the same entry format, the interpreter (the standard
+  library's LICENSE.txt, PSF-2.0) and every installed distribution with a
+  module in the bundle (a package dir under `Contents/Resources/lib/python3.X/`,
+  a module in `lib-dynload/`, a member of `site-packages.zip`), with the
+  texts out of its `*.dist-info` (`License-File` entries, else
+  LICENSE*/COPYING*/NOTICE* there); pip's build-only tools (pip, py2app,
+  macholib, modulegraph, altgraph) have no module in the bundle and are
+  left out by name in the log. A bundled distribution without a text or a
+  declared license, no LICENSE.txt beside the standard library, or a
+  `src/requirements.txt` package the bundle check does not find fails the
+  build; the output is appended whole or not at all. pyobjc-core's wheel
+  ships no text: `LICENSE_URLS` in the script fetches `pyobjc-core/License.txt`
+  from the pyobjc repository at the version's tag into `build/.cache/licenses/`;
+  a new dependency whose wheel carries none needs a row there. PyNaCl's
+  dist-info carries libsodium's ISC too (`licenses/LICENSE.libsodium.txt`),
+  so that comes along. The log's `NOTE:` line names bundled modules
+  belonging to no distribution, the standard library or OnionPress. Run
+  against the real wheels' metadata from Linux (2026-10-15), not yet inside
+  a `make dmg`; `build/rebuild-menubar.sh` does not refresh the file. The
+  tests run the script and the build script's block against a fake build
+  venv and bundle.
 
 ## Security
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
