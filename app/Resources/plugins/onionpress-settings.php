@@ -842,9 +842,10 @@ add_action( 'admin_init', function () {
 
     // Check if a restart is actually needed ($old_values was read before writing updates).
     // Only Linux shows the restart prompt. CLOUDFLARE_TUNNEL_TOKEN (a secret) is
-    // not in config-current.json, so it could never compare equal, and it does
-    // not take effect on Linux.
-    $needs_restart = false;
+    // not in config-current.json, so it cannot be compared: it is in $updates
+    // only when a token was pasted or the remove box ticked, and either takes
+    // a restart to start or remove cloudflared.
+    $needs_restart = isset( $updates['CLOUDFLARE_TUNNEL_TOKEN'] );
     $restart_keys = array( 'ADDRESS_PREFIX', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS' );
     if ( ! empty( $updates ) ) {
         $onion_address = '';
@@ -1117,7 +1118,7 @@ function onionpress_settings_fields() {
         ),
         'CLOUDFLARE_TUNNEL_TOKEN' => array(
             'label'       => 'Cloudflare Tunnel Token',
-            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared on your Mac — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
+            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. In the tunnel's public hostname, set the service to HTTP, URL wordpress:80. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared yourself — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
             'type'        => 'secret',
             'placeholder' => 'Paste a new token, or leave blank',
         ),

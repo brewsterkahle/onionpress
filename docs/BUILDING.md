@@ -164,7 +164,7 @@ environment set still works:
 | `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services, the `ONIONHEAVEN_IMAGE` the last one hands its takeover workers, and `db`, `autoheal`, `autoheal-proxy` |
 | `app/Resources/docker/docker-compose.cloudflare.yml` | `cloudflared` |
 | `app/MacOS/onionpress` | `update_images()` (cloudflared only when a tunnel token is set), the OnionHeaven takeover worker |
-| `linux/onionpress` | `update_images()` |
+| `linux/onionpress` | `update_images()` (cloudflared only when a tunnel token is set) |
 | `src/onionpress/containers.py` | `ONIONHEAVEN_IMAGE` — farm workers |
 | `src/onionpress/launcher_ops.py` | `DEFAULT_TOR_IMAGE` — vanity-key generation |
 
