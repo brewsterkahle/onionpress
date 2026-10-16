@@ -134,6 +134,69 @@ cache_put() {
     [ -f "$src" ] && cp "$src" "$CACHE_DIR/$name"
 }
 
+# ─── Third-party license texts ─────────────────────────────────────────
+# Every program the bundle ships beside OnionPress's own code goes in with
+# its license: Contents/Resources/THIRD-PARTY-NOTICES.txt (written once the
+# binaries are in place, below) holds each project's LICENSE, and its NOTICE
+# where the project has one, verbatim. The text comes out of the release
+# archive when that carries it (Lima's tarball, the libsodium tarball, the
+# mkp224o clone); the bare release binaries (Colima, the Docker CLI, Compose)
+# and an archive that is a cache hit get it from the project's repository at
+# the pinned tag. Cached beside the binaries, under build/.cache/licenses/,
+# keyed by project and version, so a cache-hit build needs no network for
+# them either. The Python interpreter and packages py2app bundles into the
+# MenubarApp join the file once that is built (build/python-notices.py,
+# below).
+LICENSE_CACHE_DIR="$PROJECT_DIR/build/.cache/licenses"
+NOTICES_STAGE="$TEMP_BIN_DIR/licenses"
+mkdir -p "$LICENSE_CACHE_DIR" "$NOTICES_STAGE"
+
+# license_file <project> <version> <file> <path in the extracted archive, or
+# ""> <url at the pinned tag> — stage $NOTICES_STAGE/<project>-<file> from
+# the archive, else the cache, else the URL. A missing or empty text fails
+# the build: a bundle without its notices is not a release.
+license_file() {
+    local project="$1" version="$2" file="$3" archived="$4" url="$5"
+    local cached="$LICENSE_CACHE_DIR/${project}-${version}-${file}"
+    local dest="$NOTICES_STAGE/${project}-${file}"
+    if [ -n "$archived" ] && [ -s "$archived" ]; then
+        cp "$archived" "$dest"
+    elif [ -s "$cached" ]; then
+        cp "$cached" "$dest"
+    else
+        echo "  Fetching $file of $project $version..."
+        if ! curl -fsSL --max-time 120 --retry 3 -o "$dest" "$url"; then
+            echo "ERROR: could not fetch $url" >&2
+            exit 1
+        fi
+    fi
+    if [ ! -s "$dest" ]; then
+        echo "ERROR: $file of $project $version is empty" >&2
+        exit 1
+    fi
+    cp "$dest" "$cached"
+}
+
+# notice_section <name> <version> <license> <source url> <where in the
+# bundle> <project> <file>... — one project's entry for the notices file:
+# a heading, then each of its staged files verbatim.
+notice_section() {
+    local name="$1" version="$2" license="$3" source="$4" where="$5" project="$6" file
+    shift 6
+    printf -- '----------------------------------------------------------------------\n'
+    printf '%s %s\n' "$name" "$version"
+    printf 'License: %s\n' "$license"
+    printf 'Source: %s\n' "$source"
+    printf 'In this bundle: %s\n' "$where"
+    printf -- '----------------------------------------------------------------------\n'
+    for file in "$@"; do
+        printf '\n--- %s (%s) ---\n\n' "$file" "$name"
+        cat "$NOTICES_STAGE/${project}-${file}"
+        printf '\n'
+    done
+    printf '\n'
+}
+
 # Colima universal binary (download both arches, lipo, cache result)
 if cache_get "colima-${COLIMA_VERSION}-universal" "$TEMP_BIN_DIR/colima"; then
     echo "  Colima ${COLIMA_VERSION}: cache hit"
@@ -150,6 +213,8 @@ else
       -output "$TEMP_BIN_DIR/colima"
     cache_put "colima-${COLIMA_VERSION}-universal" "$TEMP_BIN_DIR/colima"
 fi
+license_file colima "$COLIMA_VERSION" LICENSE "" \
+  "https://raw.githubusercontent.com/abiosoft/colima/${COLIMA_VERSION}/LICENSE"
 
 # Lima: two things to cache — the universal limactl binary AND the share/
 # tree (guest agents differ per arch, copied later from both amd64 and
@@ -176,9 +241,14 @@ else
     (cd "$TEMP_BIN_DIR" && tar czf lima-bundle.tar.gz \
         limactl \
         lima-amd64/share/lima \
-        lima-arm64/share/lima)
+        lima-arm64/share/lima \
+        lima-arm64/share/doc/lima/LICENSE)
     cache_put "lima-${LIMA_VERSION}-bundle.tar.gz" "$TEMP_BIN_DIR/lima-bundle.tar.gz"
 fi
+license_file lima "$LIMA_VERSION" LICENSE "$TEMP_BIN_DIR/lima-arm64/share/doc/lima/LICENSE" \
+  "https://raw.githubusercontent.com/lima-vm/lima/v${LIMA_VERSION}/LICENSE"
+license_file lima "$LIMA_VERSION" NOTICE "" \
+  "https://raw.githubusercontent.com/lima-vm/lima/v${LIMA_VERSION}/NOTICE"
 
 # Docker CLI universal binary
 if cache_get "docker-${DOCKER_VERSION}-universal" "$TEMP_BIN_DIR/docker"; then
@@ -199,6 +269,10 @@ else
     rm -rf "$TEMP_BIN_DIR/docker-arm64" "$TEMP_BIN_DIR/docker-amd64"
     cache_put "docker-${DOCKER_VERSION}-universal" "$TEMP_BIN_DIR/docker"
 fi
+license_file docker-cli "$DOCKER_VERSION" LICENSE "" \
+  "https://raw.githubusercontent.com/docker/cli/v${DOCKER_VERSION}/LICENSE"
+license_file docker-cli "$DOCKER_VERSION" NOTICE "" \
+  "https://raw.githubusercontent.com/docker/cli/v${DOCKER_VERSION}/NOTICE"
 
 # Docker Compose universal binary
 if cache_get "docker-compose-${DOCKER_COMPOSE_VERSION}-universal" "$TEMP_BIN_DIR/docker-compose"; then
@@ -216,6 +290,10 @@ else
       -output "$TEMP_BIN_DIR/docker-compose"
     cache_put "docker-compose-${DOCKER_COMPOSE_VERSION}-universal" "$TEMP_BIN_DIR/docker-compose"
 fi
+license_file docker-compose "$DOCKER_COMPOSE_VERSION" LICENSE "" \
+  "https://raw.githubusercontent.com/docker/compose/${DOCKER_COMPOSE_VERSION}/LICENSE"
+license_file docker-compose "$DOCKER_COMPOSE_VERSION" NOTICE "" \
+  "https://raw.githubusercontent.com/docker/compose/${DOCKER_COMPOSE_VERSION}/NOTICE"
 
 # Build mkp224o as a universal binary for custom onion address prefixes.
 # Skip the full source build + cross-compile (~30s + libsodium crosscomp)
@@ -247,6 +325,9 @@ MKP_OPT="-O3 -fomit-frame-pointer"
 MKP_CACHE_KEY="mkp224o-${MKP224O_VERSION}-O3-universal"
 if cache_get "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"; then
     echo "  mkp224o ${MKP224O_VERSION}: cache hit"
+    # The libsodium version it was built against (cached with it below;
+    # absent for entries built before the notices file existed).
+    cache_get "$MKP_CACHE_KEY.libsodium-version" "$TEMP_BIN_DIR/libsodium-version" || true
 elif command -v git >/dev/null 2>&1; then
     echo "  Building mkp224o ${MKP224O_VERSION} for custom onion address prefixes..."
     # Run the entire mkp224o build in a subshell so any failure is isolated
@@ -273,6 +354,7 @@ elif command -v git >/dev/null 2>&1; then
     SODIUM_X86_DIR="$TEMP_BIN_DIR/libsodium-x86_64"
     SODIUM_X86_SRC="$TEMP_BIN_DIR/libsodium-src"
     SODIUM_VERSION=$(pkg-config --modversion libsodium 2>/dev/null || echo "1.0.20")
+    echo "$SODIUM_VERSION" > "$TEMP_BIN_DIR/libsodium-version"
     curl -L -o "$TEMP_BIN_DIR/libsodium.tar.gz" \
       "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz" 2>/dev/null || \
     curl -L -o "$TEMP_BIN_DIR/libsodium.tar.gz" \
@@ -342,6 +424,7 @@ elif command -v git >/dev/null 2>&1; then
             echo "  ✓ mkp224o statically linked (no libsodium dependency)"
         fi
         cache_put "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"
+        cache_put "$MKP_CACHE_KEY.libsodium-version" "$TEMP_BIN_DIR/libsodium-version"
     elif [ -f "$MKP_ARM64_DIR/mkp224o" ]; then
         echo "  WARNING: x86_64 build failed, using arm64-only mkp224o"
         cp "$MKP_ARM64_DIR/mkp224o" "$TEMP_BIN_DIR/mkp224o"
@@ -355,6 +438,18 @@ elif command -v git >/dev/null 2>&1; then
 else
     echo "  WARNING: git not found, skipping mkp224o build"
 fi
+
+# mkp224o's CC0 text ships as COPYING.txt; libsodium (ISC) is statically
+# linked into it, at the version recorded with the binary (a cache entry from
+# before that record: the version pkg-config reports, else the fallback the
+# build uses). The texts come from the clone and the tarball when this build
+# fetched them, else from the repositories at those versions' tags.
+SODIUM_VERSION=$(cat "$TEMP_BIN_DIR/libsodium-version" 2>/dev/null \
+    || pkg-config --modversion libsodium 2>/dev/null || echo "1.0.20")
+license_file mkp224o "$MKP224O_VERSION" COPYING.txt "$TEMP_BIN_DIR/mkp224o-src/COPYING.txt" \
+  "https://raw.githubusercontent.com/cathugger/mkp224o/${MKP224O_VERSION}/COPYING.txt"
+license_file libsodium "$SODIUM_VERSION" LICENSE "$TEMP_BIN_DIR/libsodium-src/LICENSE" \
+  "https://raw.githubusercontent.com/jedisct1/libsodium/${SODIUM_VERSION}-RELEASE/LICENSE"
 
 # Copy to app bundle
 BIN_DIR="$APP_PATH/Contents/Resources/bin"
@@ -431,6 +526,58 @@ SHARE_DIR="$APP_PATH/Contents/Resources/share/lima"
 mkdir -p "$SHARE_DIR"
 cp -R "$TEMP_BIN_DIR/lima-arm64/share/lima"/* "$SHARE_DIR/"
 cp -R "$TEMP_BIN_DIR/lima-amd64/share/lima"/* "$SHARE_DIR/"
+
+# ─── Third-party notices ───────────────────────────────────────────────
+# One file, next to the binaries' own folder, holding every staged license
+# text (license_file above). Each project's entry names what it is, where
+# it sits in the bundle and under which license; a project missing from it
+# is a build error, never a quieter bundle.
+NOTICES_FILE="$APP_PATH/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+echo "Writing $(basename "$NOTICES_FILE")..."
+{
+    cat <<EOF
+Third-party software in OnionPress.app
+======================================
+
+OnionPress is free software, licensed under the GNU Affero General Public
+License, version 3 or (at your option) any later version.
+Copyright (C) 2026 Internet Archive and OnionPress contributors.
+Its source and the full license text are at
+https://github.com/brewsterkahle/onionpress.
+
+Beside its own code, this app bundle ships the following programs, unmodified
+builds of the versions named below, under Contents/Resources/bin and
+Contents/Resources/share, and, in the menubar app under
+Contents/Resources/MenubarApp, the Python interpreter and the Python packages
+listed after them. Each project's license, and its NOTICE file where it has
+one, follows verbatim.
+
+EOF
+    notice_section "Colima" "$COLIMA_VERSION" "MIT" \
+        "https://github.com/abiosoft/colima" \
+        "Contents/Resources/bin/colima" colima LICENSE
+    notice_section "Lima" "v$LIMA_VERSION" "Apache-2.0" \
+        "https://github.com/lima-vm/lima" \
+        "Contents/Resources/bin/limactl and Contents/Resources/share/lima (guest agents, templates)" \
+        lima LICENSE NOTICE
+    notice_section "Docker CLI" "v$DOCKER_VERSION" "Apache-2.0" \
+        "https://github.com/docker/cli" \
+        "Contents/Resources/bin/docker" docker-cli LICENSE NOTICE
+    notice_section "Docker Compose" "$DOCKER_COMPOSE_VERSION" "Apache-2.0" \
+        "https://github.com/docker/compose" \
+        "Contents/Resources/bin/docker-compose" docker-compose LICENSE NOTICE
+    notice_section "mkp224o" "$MKP224O_VERSION" "CC0-1.0" \
+        "https://github.com/cathugger/mkp224o" \
+        "Contents/Resources/bin/mkp224o" mkp224o COPYING.txt
+    notice_section "libsodium" "$SODIUM_VERSION" "ISC" \
+        "https://github.com/jedisct1/libsodium" \
+        "statically linked into Contents/Resources/bin/mkp224o" libsodium LICENSE
+} > "$NOTICES_FILE"
+if [ "$(grep -c '^License: ' "$NOTICES_FILE")" != "6" ]; then
+    echo "ERROR: $NOTICES_FILE does not hold all six third-party entries" >&2
+    exit 1
+fi
+echo "  $(basename "$NOTICES_FILE"): $(grep -c '^License: ' "$NOTICES_FILE") projects"
 
 # Clean up temp directory
 rm -rf "$TEMP_BIN_DIR"
@@ -579,6 +726,36 @@ echo "  Version verified: $BUILT_VERSION"
 
 cd "$PROJECT_DIR"
 echo "Standalone MenubarApp built successfully"
+
+# ─── Third-party notices: the MenubarApp's Python side ─────────────────
+# What py2app put into the MenubarApp — the interpreter and every installed
+# distribution with a module in the bundle — joins the notices file, each
+# with its license texts out of its *.dist-info (build/python-notices.py:
+# a distribution without a text fails the build, like license_file above;
+# pip's build-only tools have no module in the bundle and are left out).
+# Runs under the build venv's interpreter, so the site-packages and the
+# standard library it reads are the ones py2app bundled. Appended whole,
+# or not at all.
+echo "Adding the MenubarApp's Python packages to $(basename "$NOTICES_FILE")..."
+PY_NOTICES=$(mktemp)
+if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/python-notices.py" \
+    --bundle "$MENUBAR_APP_DIR" --where "Contents/Resources/MenubarApp" \
+    --requirements "$SCRIPTS_DIR/requirements.txt" \
+    --license-cache "$LICENSE_CACHE_DIR" > "$PY_NOTICES"; then
+    rm -f "$PY_NOTICES"
+    echo "ERROR: the MenubarApp's Python packages could not be added to $NOTICES_FILE" >&2
+    exit 1
+fi
+cat "$PY_NOTICES" >> "$NOTICES_FILE"
+rm -f "$PY_NOTICES"
+# The six binaries, Python and at least what src/requirements.txt names.
+NOTICES_MIN=$(( 7 + $(grep -c '^[A-Za-z0-9]' "$SCRIPTS_DIR/requirements.txt" || true) ))
+NOTICES_COUNT=$(grep -c '^License: ' "$NOTICES_FILE" || true)
+if [ "$NOTICES_COUNT" -lt "$NOTICES_MIN" ]; then
+    echo "ERROR: $NOTICES_FILE holds $NOTICES_COUNT entries, fewer than the $NOTICES_MIN it must" >&2
+    exit 1
+fi
+echo "  $(basename "$NOTICES_FILE"): $NOTICES_COUNT projects"
 
 # Ad-hoc sign the entire app bundle (inside-out)
 # This ensures macOS treats the app consistently across multiple users.

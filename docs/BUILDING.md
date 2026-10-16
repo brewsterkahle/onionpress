@@ -73,7 +73,7 @@ about. So you know what you are trusting:
 | Artifact | Proven |
 |---|---|
 | `.deb` | builds on macOS via the pure-Python `ar` fallback; ships 0 stale `.pyc` (was 18). Rehearsed in a `debian:trixie` container with the real `dpkg-deb` and lintian 2.122 (2026-10-14): `build/check-deb.sh --lintian` passes; the v2.5.3 release's package, built on the Mac before the fixes, had all 430 members owned by uid 502 and 215 AppleDouble `._` files, a `Description` line starting with `.onion`, a folded `Depends` and an unlisted conffile |
-| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), py2app, signing, `diskutil image` (and the `hdiutil` fallback, forced with `DMG_TOOL=hdiutil`). 161 MB, version verified; ships 0 stale `.pyc` (was 31 when built right after `make test-unit`). **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
+| `.dmg` | full path — pinned binary downloads, libsodium + mkp224o cross-compile (universal), the bundled binaries' license texts into `Contents/Resources/THIRD-PARTY-NOTICES.txt` (out of the release archives or from the pinned tags, cached under `build/.cache/licenses/`; a missing text fails the build), py2app, then the interpreter's and the bundled Python packages' texts into the same file (`build/python-notices.py`, from the build venv's `*.dist-info`; run against the real wheels' metadata from Linux so far, not yet inside a `make dmg`), signing, `diskutil image` (and the `hdiutil` fallback, forced with `DMG_TOOL=hdiutil`). 161 MB, version verified; ships 0 stale `.pyc` (was 31 when built right after `make test-unit`). **Dev-grade**: with `uv` the bundled Python is arm64-only; release-grade needs the python.org universal2 3.14 installer |
 | `onionpress-wordpress` image | builds with the classic builder; wp-cli 2.12.0 with the pinned sha256 in the image; a wrong `WP_CLI_SHA256` fails at `sha256sum -c` **before** `chmod +x`; a wrong base digest fails at `FROM` |
 | `onionpress-tor` image | builds on the Tor Project's Onimages `tor:trixie` image in under a minute once it is pulled (isolated Colima VM, classic builder — nothing but mkp224o is compiled); baked in: Tor 0.4.9.13, Docker 29.8.1, mkp224o v1.7.0 against the base's libsodium; image user root, `CMD []`; the entrypoint bootstraps Tor in onion-service, SOCKS-only and takeover-worker modes and converts a delivered PEM key to C Tor's files; the stress worker chains off it; 0 `.pyc` under `/wordlists`; a wrong `MKP224O_COMMIT` fails at the post-clone assert |
 | `AppIcon.icns`, `app-icon.png` | byte-identical to the committed files |
@@ -683,6 +683,42 @@ libsodium's ed25519 core functions (`has_crypto_core_ed25519`; a minimal
 libsodium build lacks them and `onion_auth` would fall back on pure Python)
 and signs byte for byte as libsodium's `crypto_sign`. On Linux, Debian's
 and Ubuntu's `python3-nacl` link the system `libsodium23`, which has them.
+
+### The third-party notices file
+
+`Contents/Resources/THIRD-PARTY-NOTICES.txt` is written in two halves, both
+by `build/build-dmg-simple.sh`. The first, before py2app runs, is the six
+downloaded binaries (Colima, Lima, the Docker CLI, Compose, mkp224o and the
+libsodium linked into it): `license_file` takes each text out of the release
+archive, else `build/.cache/licenses/`, else the project's repository at the
+pinned tag, and `notice_section` prints one entry per project. The second,
+once the MenubarApp is built and checked, is `build/python-notices.py`, run
+under the build venv's interpreter: the interpreter itself (the standard
+library's `LICENSE.txt`, PSF-2.0) and every installed distribution with a
+module in the bundle — a package directory under
+`Contents/Resources/lib/python3.X/`, a module in `lib-dynload/` or a member
+of `site-packages.zip` — in the same entry format, with the texts out of its
+`*.dist-info` (the `License-File` entries, under `licenses/` in a new wheel
+or beside `METADATA` in an older one, else any `LICENSE*`/`COPYING*`/
+`NOTICE*` there). pip's build-only tools (pip, py2app, macholib, modulegraph,
+altgraph) have no module in the bundle and are left out, by name in the log.
+
+What stops the build: a bundled distribution without a text, one that
+declares no license (no `License-Expression`, `License` field or license
+classifier), no `LICENSE.txt` beside the standard library, a package
+`src/requirements.txt` names that the bundle check does not find (the check
+is wrong, or py2app dropped it), and the script's output is appended whole
+or not at all. A wheel that ships no text at all gets it from the project's
+repository at the installed version's tag through the script's
+`LICENSE_URLS` table and the same cache as the binaries; pyobjc-core's wheel
+is the one case today (its `License.txt` is in the pyobjc repository at
+`v<version>/pyobjc-core/`). A new dependency whose wheel carries no text
+needs a row there. The log also prints a `NOTE:` naming any bundled
+top-level module that belongs to no installed distribution, the standard
+library or OnionPress — look at it when it appears. `build/rebuild-menubar.sh`
+does not rewrite the file; only `make dmg` does.
+`tests/test_license_declarations.py` runs both halves against a curl stub,
+the Python one against a fake build venv and bundle.
 
 ### The two supply-chain fixes
 
