@@ -1436,6 +1436,21 @@
   starts on a real install (then the port falls back to 9077).
   `tests/test_browser_extension.py`.
 
+## Cloudflare Tunnel Runs on Both Platforms (issue #352)
+- A `CLOUDFLARE_TUNNEL_TOKEN` in `~/.onionpress/config` adds
+  `docker-compose.cloudflare.yml` and starts `onionpress-cloudflared`.
+  Both launchers read it with `cut -d= -f2-` (padding, #323); Linux in
+  `read_cloudflare_token`, again after `apply_config_updates` (the page's
+  Restart applies and starts in one process). Through 2.5.4 Linux never
+  read it.
+- Linux starts cloudflared only once WordPress is installed (its install
+  page would be on the open internet), removes the container when the
+  token goes (`docker rm -f`, so the old token leaves its config), and
+  every `down` takes `COMPOSE_WITH_CF` so a tunnel outlives no token.
+  A token set or removed on the Settings page shows Linux's restart prompt.
+- The ingress must be `http://wordpress:80`: the ONIONPRESS-TOR chain
+  refuses the LAN and the host. `tests/test_linux_cloudflare_tunnel.py`.
+
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed
 - **For ANY communication over Tor from the Mac, always use `docker exec` into the tor container** — this is reliable

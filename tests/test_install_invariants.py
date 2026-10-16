@@ -1139,7 +1139,7 @@ class TestStopContainersWritesStoppedStatus(unittest.TestCase):
         body = m.group(1)
         # write_status must be called after the compose down — order matters:
         # the call needs to see the post-down `docker compose ps` (empty).
-        down = re.search(r'docker\s+compose\s+down', body)
+        down = re.search(r'docker\s+compose\s+(?:"\$\{COMPOSE_WITH_CF\[@\]\}"\s+)?down', body)
         ws = re.search(r'\bwrite_status\b', body)
         self.assertIsNotNone(down, "stop_containers must run `docker compose down`")
         self.assertIsNotNone(
