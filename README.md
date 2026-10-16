@@ -207,9 +207,12 @@ license in their headers.
 
 The macOS app bundles Colima (MIT), Lima (Apache-2.0), the Docker CLI
 (Apache-2.0), Docker Compose (Apache-2.0), mkp224o (CC0-1.0) and libsodium
-(ISC); the build writes their license texts and notices into the app as
-`Contents/Resources/THIRD-PARTY-NOTICES.txt`. The Linux package bundles nothing
-from other projects; its copyright file is `/usr/share/doc/onionpress/copyright`.
+(ISC), and its menubar app carries the Python interpreter (PSF-2.0) and the
+Python packages it runs on (PyNaCl, pyobjc, rumps and what they need: Apache-2.0,
+MIT, BSD-3-Clause and ISC); the build writes all their license texts and
+notices into the app as `Contents/Resources/THIRD-PARTY-NOTICES.txt`. The Linux
+package bundles nothing from other projects; its copyright file is
+`/usr/share/doc/onionpress/copyright`.
 
 ## Credits
 

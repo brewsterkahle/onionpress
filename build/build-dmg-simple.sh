@@ -144,7 +144,9 @@ cache_put() {
 # and an archive that is a cache hit get it from the project's repository at
 # the pinned tag. Cached beside the binaries, under build/.cache/licenses/,
 # keyed by project and version, so a cache-hit build needs no network for
-# them either.
+# them either. The Python interpreter and packages py2app bundles into the
+# MenubarApp join the file once that is built (build/python-notices.py,
+# below).
 LICENSE_CACHE_DIR="$PROJECT_DIR/build/.cache/licenses"
 NOTICES_STAGE="$TEMP_BIN_DIR/licenses"
 mkdir -p "$LICENSE_CACHE_DIR" "$NOTICES_STAGE"
@@ -545,8 +547,10 @@ https://github.com/brewsterkahle/onionpress.
 
 Beside its own code, this app bundle ships the following programs, unmodified
 builds of the versions named below, under Contents/Resources/bin and
-Contents/Resources/share. Each project's license, and its NOTICE file where
-it has one, follows verbatim.
+Contents/Resources/share, and, in the menubar app under
+Contents/Resources/MenubarApp, the Python interpreter and the Python packages
+listed after them. Each project's license, and its NOTICE file where it has
+one, follows verbatim.
 
 EOF
     notice_section "Colima" "$COLIMA_VERSION" "MIT" \
@@ -722,6 +726,36 @@ echo "  Version verified: $BUILT_VERSION"
 
 cd "$PROJECT_DIR"
 echo "Standalone MenubarApp built successfully"
+
+# ─── Third-party notices: the MenubarApp's Python side ─────────────────
+# What py2app put into the MenubarApp — the interpreter and every installed
+# distribution with a module in the bundle — joins the notices file, each
+# with its license texts out of its *.dist-info (build/python-notices.py:
+# a distribution without a text fails the build, like license_file above;
+# pip's build-only tools have no module in the bundle and are left out).
+# Runs under the build venv's interpreter, so the site-packages and the
+# standard library it reads are the ones py2app bundled. Appended whole,
+# or not at all.
+echo "Adding the MenubarApp's Python packages to $(basename "$NOTICES_FILE")..."
+PY_NOTICES=$(mktemp)
+if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/python-notices.py" \
+    --bundle "$MENUBAR_APP_DIR" --where "Contents/Resources/MenubarApp" \
+    --requirements "$SCRIPTS_DIR/requirements.txt" \
+    --license-cache "$LICENSE_CACHE_DIR" > "$PY_NOTICES"; then
+    rm -f "$PY_NOTICES"
+    echo "ERROR: the MenubarApp's Python packages could not be added to $NOTICES_FILE" >&2
+    exit 1
+fi
+cat "$PY_NOTICES" >> "$NOTICES_FILE"
+rm -f "$PY_NOTICES"
+# The six binaries, Python and at least what src/requirements.txt names.
+NOTICES_MIN=$(( 7 + $(grep -c '^[A-Za-z0-9]' "$SCRIPTS_DIR/requirements.txt" || true) ))
+NOTICES_COUNT=$(grep -c '^License: ' "$NOTICES_FILE" || true)
+if [ "$NOTICES_COUNT" -lt "$NOTICES_MIN" ]; then
+    echo "ERROR: $NOTICES_FILE holds $NOTICES_COUNT entries, fewer than the $NOTICES_MIN it must" >&2
+    exit 1
+fi
+echo "  $(basename "$NOTICES_FILE"): $NOTICES_COUNT projects"
 
 # Ad-hoc sign the entire app bundle (inside-out)
 # This ensures macOS treats the app consistently across multiple users.
