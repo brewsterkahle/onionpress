@@ -283,6 +283,37 @@
   written, but no `python3 /tor-watchdog.py` process or alive file > 120 s
   old) / `failed`. `tests/test_tor_watchdog_supervised.py`.
 
+## License Declarations
+- OnionPress is **AGPL-3.0-or-later** (that SPDX form everywhere, never a
+  bare "AGPL-3.0"); the copyright line is "Copyright (C) 2026 Internet
+  Archive and OnionPress contributors" (the first commit, 2026-01-31, was
+  version 1.0.0 under MIT; the metainfo said MIT until 2026-10-15). It is
+  at the top of LICENSE (above the FSF text, which stays whole), in
+  README's License section, as `NSHumanReadableCopyright` in app/Info.plist
+  and setup.py (the same string), and in `linux/copyright` (DEP-5, the
+  .deb's `/usr/share/doc/onionpress/copyright`).
+- The entry points carry the GNU short notice after the shebang (SPDX line,
+  copyright, the three paragraphs as LICENSE's "How to Apply" words them):
+  src/menubar.py, src/onionpress/__init__.py, both Mac launcher scripts,
+  linux/onionpress, onionpress-tray, onionpress-heartbeat.py, and the tor
+  and wordpress image entrypoints. A new entry script gets the same block.
+- Every WordPress plugin header and the theme's style.css say
+  `License: AGPL-3.0-or-later` + `License URI:
+  https://www.gnu.org/licenses/agpl-3.0.html`; a new plugin needs both.
+- **The DMG ships the bundled binaries' licenses**:
+  `Contents/Resources/THIRD-PARTY-NOTICES.txt`, written by
+  build/build-dmg-simple.sh from Colima (MIT), Lima (Apache-2.0 + NOTICE),
+  the Docker CLI and Compose (Apache-2.0 + NOTICE), mkp224o (CC0, its
+  COPYING.txt) and the libsodium linked into it (ISC). `license_file` takes
+  each text from the release archive when that carries it, else from
+  `build/.cache/licenses/`, else from the project's repository at the pinned
+  tag; a missing or empty text fails the build. Bumping one of those
+  versions needs nothing else, but a project that renames its license file
+  does. The .deb bundles nothing third-party (images are pulled, the rest
+  is in Depends). The Python packages py2app bundles (PyNaCl, rumps,
+  pyobjc, cffi) are not in the file yet. `tests/test_license_declarations.py`
+  runs the staging and the writer against a curl stub.
+
 ## Security
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
 - Do not commit or log database passwords.
