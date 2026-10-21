@@ -26,8 +26,8 @@ from datetime import datetime, timezone
 
 from onionpress import key_manager
 
-# The hub the opt-in prompt names (run by the Internet Archive): the
-# default, and what a malformed ONIONHEAVEN_ADDRESS falls back to.
+# The default hub (run by the Internet Archive), and what a malformed
+# ONIONHEAVEN_ADDRESS falls back to.
 DEFAULT_ONIONHEAVEN_ADDRESS = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
 
 # OnionHeaven hub address — updated from config at startup, through
@@ -54,8 +54,8 @@ def configured_hub_address(value, log_func=None):
     and /online carries the site's onion private key, so a value such as
     "evil.example/" + 39 characters + ".onion" would send the key to a
     clearnet host through a Tor exit. A malformed value is logged by key
-    name only and the default hub is used, the one the opt-in prompt names,
-    so the key never goes anywhere the user did not agree to.
+    name only and the default hub is used, so the key never goes
+    anywhere the user did not agree to.
     """
     value = (value or "").strip()
     if not value:
@@ -163,57 +163,38 @@ def _run_docker_rc(app, args, timeout=15, input=None):
 
 
 # ---------------------------------------------------------------------------
-# Registration choice (opt-in)
+# Registration choice (on by default)
 # ---------------------------------------------------------------------------
 
-# REGISTER_WITH_ONIONHEAVEN is tri-state:
-#   "yes"  — the user opted in: register and heartbeat.
-#   "no"   — the user opted out: never register, never ask again, and if
-#            this install registered before, ask the hub to delete its copy
-#            of the key (a signed /unregister; see maybe_unregister_after_opt_out).
-#   unset  — the user has not decided yet: do NOT register, and the UI
-#            prompts them to enable it at startup once Tor is up. Nothing
-#            is sent to the hub, not even an /unregister.
+# REGISTER_WITH_ONIONHEAVEN defaults to on:
+#   "yes" or unset — register and heartbeat. Every new install takes part
+#            unless the user turns it off; nothing asks first.
+#   "no"   — the user opted out: never register, and if this install
+#            registered before, ask the hub to delete its copy of the key
+#            (a signed /unregister; see maybe_unregister_after_opt_out).
+#   anything else (a typo) — neither: nothing is sent to the hub, not even
+#            an /unregister, so a mistyped "no" never registers.
 # Whatever the choice, an explicit end of the site's relationship with a
 # hub takes the key back off it while the key is still here to sign the
 # request: uninstall, reset, a key import, a restore to another address
 # (release_registration) and a hub change (maintain_registration).
-# Registration is opt-in because enabling it sends the site's onion private
-# key to the hub (see the prompt text below). Only an explicit "yes" turns
-# it on — a missing or empty value must never silently register. The choice
-# is re-read before every request that carries the key, so turning it off
+# Registering sends the site's onion private key to the hub. The choice is
+# re-read before every request that carries the key, so turning it off
 # stops the heartbeats at once, without a restart.
-
-REGISTRATION_PROMPT_TITLE = "Keep your site reachable when your computer is off?"
-
-REGISTRATION_PROMPT_MESSAGE = (
-    "OnionHeaven keeps your .onion address working while your computer is "
-    "off, asleep, or disconnected. When your heartbeats stop, the OnionHeaven "
-    "hub takes over your address and sends visitors to the Wayback Machine's "
-    "archived copy of your site. When you come back online, your live site "
-    "takes over again automatically.\n\n"
-    "Without it, visitors get a connection error whenever your computer is "
-    "off.\n\n"
-    "What is shared: a copy of your onion service private key is sent to the "
-    "OnionHeaven hub, run by the Internet Archive, so it can publish your "
-    "address on your behalf. The key is used only to keep your site reachable. "
-    "If you later disable OnionHeaven, the heartbeats stop at once and "
-    "OnionPress asks the hub to delete its copy of the key.\n\n"
-    "We strongly recommend enabling this. You can change it at any time under "
-    "Settings."
-)
 
 
 def registration_choice(value):
     """Normalize a REGISTER_WITH_ONIONHEAVEN config value.
 
-    Returns "yes", "no", or None (undecided). Anything other than an
-    explicit yes/no — including an empty string or a missing key — is
-    treated as undecided so a typo can never opt a user in.
+    Returns "yes", "no", or None (unrecognized). A missing or empty value
+    is "yes": OnionHeaven is on by default. Anything else that is not an
+    explicit yes/no is None, so a typo neither registers nor unregisters.
     """
     if value is None:
-        return None
+        return "yes"
     v = str(value).strip().lower()
+    if v == "":
+        return "yes"
     if v in ("yes", "true", "1", "on"):
         return "yes"
     if v in ("no", "false", "0", "off"):
@@ -228,7 +209,7 @@ def get_registration_choice(app):
 
 def _choice_label(choice):
     """REGISTER_WITH_ONIONHEAVEN as a log line shows it."""
-    return choice if choice in ("yes", "no") else "unset"
+    return choice if choice in ("yes", "no") else "unrecognized"
 
 
 # Every request that carries the key (/online), every /unregister and every
@@ -497,12 +478,12 @@ def register_with_onionheaven(app):
     Sets app._onionheaven_registration_succeeded on success;
     clears app._onionheaven_registration_in_flight when done.
     """
-    # Opt-in: only an explicit "yes" registers. Unset means the user has
-    # not decided yet (the menubar prompts them); "no" means they opted out.
+    # "yes" (or unset, which reads as yes) registers; "no" means the user
+    # opted out, and an unrecognized value registers nothing.
     choice = get_registration_choice(app)
     if choice != "yes":
         app.log("OnionHeaven registration not enabled "
-                f"(REGISTER_WITH_ONIONHEAVEN={'no' if choice == 'no' else 'unset'})")
+                f"(REGISTER_WITH_ONIONHEAVEN={_choice_label(choice)})")
         app._onionheaven_registration_in_flight = False
         return
 
@@ -629,7 +610,7 @@ def _heartbeat_loop(app):
             app.log(f"OnionHeaven: heartbeat loop gen={my_generation} exiting (superseded)")
             return
 
-        # Opt-in, every beat: the user may have turned OnionHeaven off
+        # Every beat: the user may have turned OnionHeaven off
         # (Mac Settings, the WordPress Settings page) since the last one.
         choice = get_registration_choice(app)
         if choice != "yes":
@@ -665,13 +646,14 @@ def _end_heartbeat_loop(app, my_generation, choice):
     sleep, stop or quit, and so check_status starts a fresh loop if the
     user turns OnionHeaven back on. The /unregister for an explicit "no"
     is maybe_unregister_after_opt_out's, not the loop's: it also covers
-    an install that starts with "no", and undecided sends nothing.
+    an install that starts with "no", and an unrecognized value sends
+    nothing.
     """
     if choice == "no":
         app.log("OnionHeaven: disabled (REGISTER_WITH_ONIONHEAVEN=no) — "
                 "heartbeats stopped")
     else:
-        app.log("OnionHeaven: REGISTER_WITH_ONIONHEAVEN is unset — "
+        app.log("OnionHeaven: REGISTER_WITH_ONIONHEAVEN is not yes or no — "
                 "heartbeats stopped; nothing is sent to the hub until it is yes")
     app._onionheaven_registration_succeeded = False
     app._onionheaven_heartbeat_succeeded = False

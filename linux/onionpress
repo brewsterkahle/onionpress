@@ -430,9 +430,9 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
-# OnionHeaven is opt-in: unset = not decided (you will be asked), yes = on, no = off.
-# Enable with: onionpress onionheaven enable
-REGISTER_WITH_ONIONHEAVEN=
+# OnionHeaven is on by default: yes (or unset) = on, no = off.
+# Turn off with: onionpress onionheaven disable
+REGISTER_WITH_ONIONHEAVEN=yes
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 # WordPress's local web port (normally 8080) is open to other devices on
 # your network, so a headless machine can be set up from a phone or laptop.
@@ -2299,7 +2299,7 @@ get_status() {
     docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
 }
 
-# ─── OnionHeaven opt-in ──────────────────────────────────────────────
+# ─── OnionHeaven on/off ─────────────────────────────────────────────
 # Prints the explanation shown to the user wherever we ask them to enable
 # OnionHeaven (installer footer, `onionpress onionheaven`, tray prompt).
 onionheaven_explain() {
@@ -2314,13 +2314,12 @@ onionheaven_explain() {
   hub (run by the Internet Archive) so it can publish your address while
   you are away. It is used only to keep your site reachable.
 
-  We strongly recommend enabling it:
+  It is on by default. To turn it back on:
 
       onionpress onionheaven enable
 
-  To opt out and stop being asked:  onionpress onionheaven disable
-  (if you had enabled it, that also asks the hub to delete its copy of
-  your key)
+  To opt out:  onionpress onionheaven disable
+  (that also asks the hub to delete its copy of your key)
 EOF
 }
 
@@ -2417,9 +2416,9 @@ onionheaven_cmd() {
             ;;
         status)
             case "$current" in
-                yes) echo "OnionHeaven: enabled" ;;
+                yes|"") echo "OnionHeaven: enabled" ;;
                 no)  echo "OnionHeaven: disabled (enable with: onionpress onionheaven enable)" ;;
-                *)   echo "OnionHeaven: not enabled yet"; echo ""; onionheaven_explain ;;
+                *)   echo "OnionHeaven: not enabled (REGISTER_WITH_ONIONHEAVEN=$current is not yes or no)"; echo ""; onionheaven_explain ;;
             esac
             # What the registration record says hubs may hold of this
             # install's keys (now or from before a reset, key import,
@@ -3430,8 +3429,8 @@ except: print('false')
         oh_config_enabled=$(grep "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
         oh_client_hub=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     fi
-    # Opt-in: only an explicit "yes" counts as enabled (unset = undecided).
-    oh_config_enabled=${oh_config_enabled:-no}
+    # On by default: "yes" or unset is enabled, anything else is not.
+    oh_config_enabled=${oh_config_enabled:-yes}
     [ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no
     oh_client_hub=${oh_client_hub:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}
 
@@ -4659,7 +4658,7 @@ sys.exit(0 if provision_interactive() else 1)
 
         onionheaven)
             # Opt in to / out of OnionHeaven. REGISTER_WITH_ONIONHEAVEN is
-            # tri-state: yes / no / unset (undecided — the tray asks). The
+            # yes (also when unset: on by default) or no. The
             # heartbeat daemon re-reads the config every cycle, so this
             # takes effect without a restart.
             onionheaven_cmd "${2:-status}"

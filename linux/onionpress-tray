@@ -1195,7 +1195,6 @@ class OnionPressTray:
         self._announced_starting = False
         self._announced_online = False
         self._setup_shown = False
-        self._onionheaven_prompt_shown = False
         self._alert_messages: list = []
 
         # Kick the first alert poll soon (so users coming up with a
@@ -1268,7 +1267,6 @@ class OnionPressTray:
         self._update_status_line()
         self._maybe_announce()
         self._maybe_show_setup()
-        self._maybe_prompt_onionheaven()
 
     def _update_icon(self):
         state = self.status.state
@@ -1345,85 +1343,6 @@ class OnionPressTray:
                      lambda: Launcher.run_async("dashboard")),
                 ],
             )
-
-    # ── OnionHeaven opt-in prompt ────────────────────────────────────
-    # REGISTER_WITH_ONIONHEAVEN is tri-state: "yes" / "no" / unset. Unset
-    # means the user has not decided; we ask once per tray session, after
-    # setup is done and the site is online. The heartbeat daemon re-reads
-    # the config every cycle, so "Enable" needs no restart. Mirrors the Mac
-    # menubar's prompt_enable_onionheaven.
-
-    def _onionheaven_choice(self):
-        value = ""
-        try:
-            from onionpress import config as _op_config  # type: ignore
-            value = _op_config.read_value(
-                os.path.join(DATA_DIR, "config"), "REGISTER_WITH_ONIONHEAVEN", "")
-        except Exception:
-            try:
-                with open(os.path.join(DATA_DIR, "config")) as f:
-                    for line in f:
-                        if line.startswith("REGISTER_WITH_ONIONHEAVEN="):
-                            value = line.split("=", 1)[1].strip()
-            except OSError:
-                pass
-        value = value.strip().lower()
-        if value == "yes":
-            return "yes"
-        if value == "no":
-            return "no"
-        return None
-
-    def _maybe_prompt_onionheaven(self):
-        if self._onionheaven_prompt_shown:
-            return
-        if self.status.state != "running" or not self.status.onion_address:
-            return
-        if not self.status.onboarded:
-            return  # don't stack on top of the setup dialog
-        if self._onionheaven_choice() is not None:
-            return
-        self._onionheaven_prompt_shown = True
-        GLib.idle_add(self._show_onionheaven_prompt)
-
-    def _show_onionheaven_prompt(self):
-        dlg = Gtk.MessageDialog(
-            parent=None, flags=0,
-            message_type=Gtk.MessageType.QUESTION,
-            text="Keep your site reachable when this machine is off?",
-        )
-        dlg.format_secondary_text(
-            "OnionHeaven keeps your .onion address working while this machine "
-            "is off, asleep, or disconnected. When your heartbeats stop, the "
-            "OnionHeaven hub takes over your address and sends visitors to the "
-            "Wayback Machine's archived copy of your site. When you come back "
-            "online, your live site takes over again automatically.\n\n"
-            "Without it, visitors get a connection error whenever this machine "
-            "is off.\n\n"
-            "What is shared: a copy of your onion service private key is sent "
-            "to the OnionHeaven hub, run by the Internet Archive, so it can "
-            "publish your address on your behalf. It is used only to keep your "
-            "site reachable. If you later disable OnionHeaven, the heartbeats "
-            "stop at once and OnionPress asks the hub to delete its copy of "
-            "the key.\n\n"
-            "We strongly recommend enabling this. You can change it at any time "
-            "with: onionpress onionheaven enable|disable"
-        )
-        dlg.add_button("Don't Ask Again", Gtk.ResponseType.REJECT)
-        dlg.add_button("Not Now", Gtk.ResponseType.CANCEL)
-        dlg.add_button("Enable OnionHeaven", Gtk.ResponseType.ACCEPT)
-        dlg.set_default_response(Gtk.ResponseType.ACCEPT)
-        response = dlg.run()
-        dlg.destroy()
-        if response == Gtk.ResponseType.ACCEPT:
-            Launcher.run_async("onionheaven", "enable")
-            log("OnionHeaven: enabled by user at startup prompt")
-        elif response == Gtk.ResponseType.REJECT:
-            Launcher.run_async("onionheaven", "disable")
-            log("OnionHeaven: declined by user (Don't Ask Again)")
-        else:
-            log("OnionHeaven: user chose Not Now; will ask again next tray start")
-        return False  # one-shot idle callback
 
     def _maybe_show_setup(self):
         if self._setup_shown:

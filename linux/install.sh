@@ -373,9 +373,9 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
-# OnionHeaven is opt-in: unset = not decided (you will be asked), yes = on, no = off.
-# Enable with: onionpress onionheaven enable
-REGISTER_WITH_ONIONHEAVEN=
+# OnionHeaven is on by default: yes (or unset) = on, no = off.
+# Turn off with: onionpress onionheaven disable
+REGISTER_WITH_ONIONHEAVEN=yes
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
 # WordPress's local web port (normally 8080) is open to other devices on
 # your network, so a headless machine can be set up from a phone or laptop.
@@ -505,17 +505,16 @@ if [ "$wp_ready" = "true" ]; then
     fi
     echo ""
     echo "  ──────────────────────────────────────────────────────────"
-    echo "  RECOMMENDED: keep your site online when this machine is off"
+    echo "  OnionHeaven keeps your site online when this machine is off"
     echo ""
-    echo "  OnionHeaven is not enabled yet. While it is off, visitors get an"
-    echo "  error whenever this machine is asleep or powered down. Enable it"
-    echo "  (one command, no restart needed):"
+    echo "  OnionHeaven is on: a copy of your onion private key goes to the"
+    echo "  hub, run by the Internet Archive, so it can serve your address"
+    echo "  while this machine is asleep or powered down. To opt out (one"
+    echo "  command, no restart needed; the hub deletes its copy of the key):"
     echo ""
-    echo "      onionpress onionheaven enable"
+    echo "      onionpress onionheaven disable"
     echo ""
     echo "  What it does and what is shared:  onionpress onionheaven status"
-    echo "  (a copy of your onion private key goes to the hub, run by the"
-    echo "  Internet Archive, so it can serve your address while you're away)"
     echo ""
     echo "  ──────────────────────────────────────────────────────────"
     echo "  Useful commands:"

@@ -206,7 +206,7 @@ SETTINGS_KEYS = [
     ("LAUNCH_ON_LOGIN", "yes"),
     ("UPDATE_ON_LAUNCH", "yes"),
     ("INSTALL_IA_PLUGIN", "yes"),
-    ("REGISTER_WITH_ONIONHEAVEN", "no"),  # opt-in; unset shows unchecked
+    ("REGISTER_WITH_ONIONHEAVEN", "yes"),  # on by default; unset shows checked
     ("SHARE_ANALYTICS_WITH_ONIONHOME", "no"),
     ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
     ("CLOUDFLARE_TUNNEL_TOKEN", ""),
@@ -260,6 +260,8 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     for key, default in SETTINGS_KEYS:
         old_values[key] = op_config.read_value(config_path, key, default)
     old_values["PREVENT_SLEEP"] = _normalize_sleep(old_values.get("PREVENT_SLEEP", "normal"))
+    if old_values["REGISTER_WITH_ONIONHEAVEN"].strip() == "":
+        old_values["REGISTER_WITH_ONIONHEAVEN"] = "yes"
 
     # Layout constants
     field_w = 300

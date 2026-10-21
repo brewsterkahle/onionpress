@@ -1063,7 +1063,7 @@ class TestLinuxDaemonLoop(_LinuxCase):
         self.assertEqual(self.left(), [(SITE, HUB, "key replaced")])
 
     def test_nothing_registered_reads_nothing_from_docker(self):
-        m = self._run([dict(REGISTER_WITH_ONIONHEAVEN="")] * 3)
+        m = self._run([dict(REGISTER_WITH_ONIONHEAVEN="no")] * 3)
         m["key_replaced"].assert_not_called()
         m["unregister"].assert_not_called()
 

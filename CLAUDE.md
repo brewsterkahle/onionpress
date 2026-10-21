@@ -1007,40 +1007,29 @@
   OnionHome compare the name count before and after, and never downgrade it
   afterwards (docs/DOCKER-SOCKET.md, "The OnionHome name registry").
 
-## OnionHeaven Opt-In
-- **`REGISTER_WITH_ONIONHEAVEN` is tri-state and opt-in**: `yes` registers,
-  `no` never registers and never asks (and unregisters, below), unset/empty
-  = undecided → no registration, and the UI prompts at startup once the site is online
-  (Mac: `prompt_enable_onionheaven` in `src/menubar.py`; Linux tray:
-  `_maybe_prompt_onionheaven`). "Not Now" leaves it unset (asked again next
-  launch); "Don't Ask Again" writes `no`. Only an explicit `yes` may ever
-  register — the heartbeat ships the onion private key to the hub, so a
-  missing key or typo must never opt a user in. `onionheaven.registration_choice()`
-  is the Mac normalizer, the daemon's `_registration_choice()` the Linux one
-  (exactly yes/no); every gate is `== "yes"`, never `!= "no"`.
+## OnionHeaven Is On by Default
+- **`REGISTER_WITH_ONIONHEAVEN`: `yes` or unset/empty registers, `no` opts
+  out** (and unregisters, below); any other value (a typo) does neither, so
+  a mistyped `no` never registers. Nothing asks: the startup prompts (Mac
+  `prompt_enable_onionheaven`, Linux tray `_maybe_prompt_onionheaven`) were
+  removed 2026-10-21 at Ivar's request, reversing the 2026-10-11 opt-in
+  decision. Fresh configs say `yes` (template, Linux launcher, both
+  installers, `config.DEFAULTS`); the Mac launcher's inline fallback leaves
+  it out, which reads as yes. Installs left undecided by 2.5.x start
+  registering at the upgrade, with no prompt. The heartbeat ships the onion
+  private key to the hub: the README, config template, Settings dialog and
+  page, `onionpress onionheaven status` and install.sh's banner say so and
+  how to turn it off. `onionheaven.registration_choice()` is the Mac
+  normalizer, the daemon's `_registration_choice()` the Linux one; every
+  gate is `== "yes"`, never `!= "no"`. The Settings dialog shows unset as
+  checked; the page offers only Enabled/Disabled.
   `tests/test_onionheaven_opt_in.py` enforces it.
-- Installs whose config carries `REGISTER_WITH_ONIONHEAVEN=yes` keep
-  registering: Linux (`install.sh` wrote it once, the .deb's postinst until
-  2026-10-13) and Macs whose config was seeded from `config-template.txt`.
-  Every config writer now leaves it unset (template, both launchers, both
-  installers, `config.DEFAULTS`); `test_onionheaven_opt_in.py` keeps a
-  census of shipped files. Mac configs without the line (older installs,
-  or ones the launcher's inline fallback created; Ivar's live install is one)
-  used to register via the `yes` default and are now treated as undecided,
-  so they get the startup prompt at next launch. **Decided 2026-10-11
-  (Ivar): no heartbeat without an explicit yes, and no automatic migration.**
-  Such an install goes silent at the upgrade, and the hub takes its address
-  over within ~10 minutes of the last heartbeat, serving the Wayback copy
-  until the user clicks Enable (one click re-registers and reclaims it).
-  Seen on the live install: prompt 1 s after "System fully operational",
-  takeover header 12 minutes later. Do not "fix" this by writing `yes`
-  for existing installs; it was rejected as an opt-in without consent.
 - Linux CLI: `onionpress onionheaven enable|disable|status`. Both platforms
   re-read the choice before every request that carries the key (every
   `/online` does: the hub refuses one without `arti_key_pem`), so enabling
   and disabling need no restart: the Mac heartbeat loop ends at its next
   beat and `_send_heartbeat` refuses under `_HUB_LOCK`; the Linux daemon
-  stops in the next cycle. Nothing goes out unless `yes`: no `/online`, no
+  stops in the next cycle. Nothing goes out unless `yes` (or unset): no `/online`, no
   `/offline` (it makes the hub take over at once), on sleep, stop or quit.
 - **An explicit `no` takes the key back**: when the registration record
   (`~/.onionpress/onionheaven-registration.json`, "registered": the hub may
@@ -1052,7 +1041,7 @@
   `_maybe_unregister_after_opt_out` in the daemon, which used to send
   `/offline` on disable (a takeover of a running site, key kept). Retried
   every 15 min while the hub does not answer; "Entry not found" counts as
-  done. Unset sends nothing, not even this (the 2026-10-11 decision above).
+  done. An unrecognized value sends nothing, not even this.
   `tests/test_onionheaven_opt_out.py`.
 - **Every end of a hub's hold on a key takes the key back, whatever the
   choice** (the user ends it explicitly): uninstall, reset (and scrub's), a

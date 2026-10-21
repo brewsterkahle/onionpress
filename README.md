@@ -89,11 +89,10 @@ to the OnionHeaven hub. If the heartbeats stop, the hub takes over your
 address and redirects visitors to the Wayback Machine's archived copy of
 your site. When you come back online, your live site takes over again.
 
-It is **opt-in**, because enabling it sends a copy of your onion service
+It is **on by default**. It sends a copy of your onion service
 private key to the hub (run by the Internet Archive) so it can publish
 your address while you are away. The key is used only to keep your site
-reachable. OnionPress asks you the first time your site comes online. We
-strongly recommend enabling it; without it, visitors get a connection
+reachable. It is on by default; without it, visitors get a connection
 error whenever your computer is off. Disabling it, uninstalling, resetting,
 importing another key, restoring another site's backup or changing the hub
 asks the hub to delete its copy of the key (OnionPress has to be running for
@@ -102,7 +101,7 @@ that; it tells you if a copy may remain).
 - **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*
 - **Linux:** `onionpress onionheaven enable` (or `disable`, `status`)
 - **Config file:** `REGISTER_WITH_ONIONHEAVEN=yes|no` in `~/.onionpress/config`
-  (unset means "not decided yet", and OnionPress keeps asking at startup)
+  (unset means yes)
 
 ## Viewing Your Site
 
