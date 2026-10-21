@@ -2,16 +2,17 @@
 """Turning OnionHeaven off stops the key going to the hub at once, and an
 explicit opt-out takes the key back off the hub.
 
-REGISTER_WITH_ONIONHEAVEN is tri-state (tests/test_onionheaven_opt_in.py):
+REGISTER_WITH_ONIONHEAVEN is on by default (tests/test_onionheaven_opt_in.py):
 
-  yes    heartbeats, every one of which carries the onion service key;
+  yes    (or unset) heartbeats, every one of which carries the onion
+         service key;
   no     nothing that carries the key, and, when this install's record
          says it registered, one signed /unregister for the whole address
          (the hub releases any takeover, marks the rows unregistered and
          deletes its copy of the key), then the record is cleared;
-  unset  nothing at all: no heartbeat, no /offline, no /unregister. The
-         hub keeps the key and takes the address over while the site is
-         down (decided 2026-10-11; see CLAUDE.md, "OnionHeaven Opt-In").
+  other  (a typo) nothing at all: no heartbeat, no /offline, no
+         /unregister. The hub keeps the key and takes the address over
+         while the site is down.
 
 Mac (src/onionpress/onionheaven.py): the heartbeat loop re-reads the
 choice every beat and ends when it is not yes, _send_heartbeat refuses
@@ -51,7 +52,7 @@ HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
 OTHER_HUB = "hub" + "b" * 53 + ".onion"
 HC = "vipwsi6bjeychxvdo3xjvojr2yvw7ggwagekemekmeccscryuhehp2id.onion"
 ELSEWHERE = "op2" + "c" * 53 + ".onion"
-NOT_YES = ("no", "", "maybe", None)
+NOT_YES = ("no", "maybe", "y")
 
 
 def _read(rel):
@@ -316,7 +317,7 @@ class TestMacOptOutUnregisters(_MacCase):
         self.assertIsNone(thread)
         self.assertEqual(rec.calls, [])
 
-    def test_undecided_and_yes_never_unregister(self):
+    def test_unrecognized_and_yes_never_unregister(self):
         self.registered()
         for choice in ("yes", "", "maybe", None):
             with self.subTest(choice=choice):
@@ -447,7 +448,8 @@ class TestMacOptOutUnregisters(_MacCase):
         # The only place a heartbeat thread starts, and only on yes.
         self.assertEqual(src.count("onionheaven.start_registration_thread(self)"), 1)
         i = src.index("onionheaven.start_registration_thread(self)")
-        self.assertIn('if oh_choice == "yes":', src[i - 200:i])
+        self.assertIn('if onionheaven.get_registration_choice(self) == "yes":',
+                      src[i - 200:i])
         self.assertNotIn("start_online_notification_thread", src)
 
 
@@ -526,9 +528,12 @@ class TestLinuxChoiceAndUnregister(_LinuxCase):
         hb = self.hb
         self.assertEqual(hb._registration_choice({"REGISTER_WITH_ONIONHEAVEN": " Yes "}), "yes")
         self.assertEqual(hb._registration_choice({"REGISTER_WITH_ONIONHEAVEN": "NO"}), "no")
-        for value in ("", "maybe", "y", None):
+        for value in ("", "  ", None):
             cfg = {} if value is None else {"REGISTER_WITH_ONIONHEAVEN": value}
-            self.assertIsNone(hb._registration_choice(cfg), value)
+            self.assertEqual(hb._registration_choice(cfg), "yes", value)
+        for value in ("maybe", "y", "nope"):
+            self.assertIsNone(
+                hb._registration_choice({"REGISTER_WITH_ONIONHEAVEN": value}), value)
 
     def test_unregister_is_signed_for_the_whole_address(self):
         hb = self.hb
@@ -689,8 +694,8 @@ class TestLinuxDaemonLoop(_LinuxCase):
                                                 while_choice="no")
         m["connection"].return_value.close.assert_called()
 
-    def test_yes_then_unset_stops_silently(self):
-        m = self._run(["yes", "yes", "", ""],
+    def test_yes_then_unrecognized_stops_silently(self):
+        m = self._run(["yes", "yes", "maybe", "maybe"],
                       signals_before_cycle={2: ("_pending_offline", "_pending_online")})
         self.assertEqual(m["heartbeat"].call_count, 1)
         m["send_offline"].assert_not_called()
@@ -705,10 +710,22 @@ class TestLinuxDaemonLoop(_LinuxCase):
         # No connection to the hub is kept for an install that is not in.
         m["connection"].assert_not_called()
 
-    def test_unset_at_startup_with_a_record_sends_nothing(self):
-        m = self._run(["", "", ""], record=True)
+    def test_unrecognized_at_startup_with_a_record_sends_nothing(self):
+        m = self._run(["maybe", "maybe", "maybe"], record=True)
         for name in ("register", "heartbeat", "send_offline", "unregister", "connection"):
             m[name].assert_not_called()
+
+    # On by default: an empty value and a config without the key both
+    # register, like "yes".
+    def test_empty_at_startup_registers(self):
+        m = self._run(["", "", ""])
+        m["register"].assert_called_once()
+        m["unregister"].assert_not_called()
+
+    def test_missing_key_at_startup_registers(self):
+        m = self._run([None, None, None])
+        m["register"].assert_called_once()
+        m["unregister"].assert_not_called()
 
     def test_no_then_yes_registers_again(self):
         m = self._run(["no", "yes", "yes"])
@@ -727,7 +744,6 @@ class TestUserFacingText(unittest.TestCase):
             src)
 
     def test_mac_texts(self):
-        self.assertIn("delete its copy of the key", onionheaven.REGISTRATION_PROMPT_MESSAGE)
         settings = _read("src/onionpress/settings_ui.py")
         self.assertIn("delete its copy of your onion service key", settings)
 

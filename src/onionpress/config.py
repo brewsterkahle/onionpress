@@ -28,9 +28,9 @@ DEFAULTS = {
     "VM_MEMORY": "1",
     "VM_CPU": "2",
     "CLOUDFLARE_TUNNEL_TOKEN": "",
-    # Opt-in. Empty = undecided: the app prompts at startup. Only an
-    # explicit "yes" registers (see onionheaven.registration_choice).
-    "REGISTER_WITH_ONIONHEAVEN": "",
+    # On by default; empty reads as "yes" too, only "no" turns it off
+    # (see onionheaven.registration_choice).
+    "REGISTER_WITH_ONIONHEAVEN": "yes",
     "ONIONHEAVEN_ADDRESS": "",
     "ONIONHEAVEN_MAX_SERVICES": "10",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "no",

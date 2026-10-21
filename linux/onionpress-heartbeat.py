@@ -6,11 +6,11 @@ Registers this OnionPress instance with an OnionHeaven hub and sends
 periodic heartbeats. Runs as a systemd service.
 
 Reads config from ~/.onionpress/config (again every cycle):
-  REGISTER_WITH_ONIONHEAVEN=yes|no  (default: unset = not enabled; opt-in)
+  REGISTER_WITH_ONIONHEAVEN=yes|no  (default: unset = yes; on by default)
     yes   - register and heartbeat (every /online carries the onion key)
     no    - send nothing; if this install registered before, send one
             signed /unregister so the hub deletes its copy of the key
-    unset - send nothing at all (the tray and the CLI ask the user)
+    other - an unrecognized value: send nothing at all
   Whatever the choice, a hub this site no longer uses (ONIONHEAVEN_ADDRESS
   changed) and the hubs of a key replaced while the daemon runs (a key
   import or restore) are asked to delete their copy of the key; the
@@ -174,10 +174,13 @@ def read_config():
 
 def _registration_choice(config):
     """REGISTER_WITH_ONIONHEAVEN from *config*: "yes", "no" or None
-    (undecided). Exactly what `onionpress onionheaven enable|disable`, the
-    tray and the Settings page write, case aside; anything else is
-    undecided, so a typo never registers and never unregisters."""
+    (unrecognized). Missing or empty is "yes": OnionHeaven is on by
+    default. Otherwise exactly what `onionpress onionheaven enable|disable`
+    and the Settings page write, case aside; anything else is None, so a
+    typo never registers and never unregisters."""
     value = (config.get("REGISTER_WITH_ONIONHEAVEN") or "").strip().lower()
+    if value == "":
+        return "yes"
     if value in ("yes", "no"):
         return value
     return None
@@ -694,7 +697,7 @@ def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key, while_choice=
             choice = _registration_choice(read_config())
             if choice != while_choice:
                 log.info("Unregister dropped: REGISTER_WITH_ONIONHEAVEN is now %s",
-                         choice or "unset")
+                         choice or "unrecognized")
                 return None
         log.info("Unregister attempt %d/4 from %s...", attempt + 1, hub_addr)
         ok, resp = sign_and_post("unregister", hub_addr, content_addr, "", priv_key, pub_key)
@@ -1441,7 +1444,7 @@ def _stop_heartbeats(choice):
     if choice == "no":
         log.info("OnionHeaven disabled (REGISTER_WITH_ONIONHEAVEN=no) — heartbeats stopped")
     else:
-        log.info("REGISTER_WITH_ONIONHEAVEN is unset — heartbeats stopped; "
+        log.info("REGISTER_WITH_ONIONHEAVEN is not yes or no — heartbeats stopped; "
                  "nothing is sent to the hub until it is yes")
 
 
@@ -1680,7 +1683,7 @@ def main():
         # Registered in an earlier session? Ask the hub to forget us.
         _maybe_unregister_after_opt_out(choice)
     else:
-        log.info("Registration not enabled (REGISTER_WITH_ONIONHEAVEN is not 'yes'; "
+        log.info("Registration not enabled (REGISTER_WITH_ONIONHEAVEN is not yes or no; "
                  "enable with: onionpress onionheaven enable)")
 
     # Establish the persistent HubConnection now that registration has

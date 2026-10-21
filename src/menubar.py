@@ -452,7 +452,6 @@ class OnionPressApp(rumps.App):
         self._onionheaven_heartbeat_succeeded = False     # Suppresses repeat heartbeat logs
         self._pending_manual_upload = False                # Deferred Share Now click — fires when is_ready
         self._onionheaven_registration_in_flight = False  # Whether registration thread is running
-        self._onionheaven_prompt_shown = False            # Startup opt-in prompt shown this session
         self._onionheaven_opt_out_in_flight = False       # Opt-out /unregister thread running
         self._onionheaven_opt_out_last_attempt = 0        # When the last opt-out /unregister started
         self._onionheaven_opt_out_gave_up = False         # Opt-out /unregister cannot work this session
@@ -2075,24 +2074,13 @@ class OnionPressApp(rumps.App):
                         and not self.is_onionheaven
                         and not self._onionheaven_registration_succeeded
                         and not self._onionheaven_registration_in_flight):
-                    # Opt-in: "yes" registers; unset prompts the user once per
-                    # launch; "no" never registers (the opt-out below asks the
-                    # hub to forget an earlier registration). Re-read every
-                    # cycle so a change in Settings takes effect without a
-                    # restart.
-                    oh_choice = onionheaven.get_registration_choice(self)
-                    if oh_choice == "yes":
+                    # On by default: "yes" or unset registers; "no" never
+                    # registers (the opt-out below asks the hub to forget an
+                    # earlier registration). Re-read every cycle so a change
+                    # in Settings takes effect without a restart.
+                    if onionheaven.get_registration_choice(self) == "yes":
                         self._onionheaven_registration_in_flight = True
                         onionheaven.start_registration_thread(self)
-                    elif (oh_choice is None and not self._onionheaven_prompt_shown
-                          and not (setup_window and setup_window._setup_window is not None)):
-                        # Wait until the first-run setup window has closed so
-                        # the prompt isn't stacked on top of it.
-                        self._onionheaven_prompt_shown = True
-                        # Own thread: the dialog is modal and this status
-                        # loop must keep running while it is open.
-                        threading.Thread(target=self.prompt_enable_onionheaven,
-                                         daemon=True).start()
 
                 # OnionHeaven opt-out: an explicit "no" (Settings, the
                 # WordPress Settings page, or at startup) with a record that
@@ -2100,8 +2088,7 @@ class OnionPressApp(rumps.App):
                 # the hub deletes its copy of the key and does not take over
                 # a running site. The heartbeat loop stops itself at its
                 # next beat, and any heartbeat already on its way lands
-                # before the /unregister (onionheaven._HUB_LOCK). Unset
-                # (undecided) sends nothing.
+                # before the /unregister (onionheaven._HUB_LOCK).
                 #
                 # And whatever the choice: a hub this site no longer uses
                 # (ONIONHEAVEN_ADDRESS changed; it is read at startup) is
@@ -4042,38 +4029,6 @@ class OnionPressApp(rumps.App):
     def read_config_value(self, key, default=""):
         """Read a value from the config file."""
         return op_config.read_value(self.config_file, key, default)
-
-    def prompt_enable_onionheaven(self):
-        """Startup opt-in prompt for OnionHeaven (shown while undecided).
-
-        Runs on its own thread; show_native_alert hops to the main thread
-        for the modal and blocks here until the user answers.
-          Enable          -> REGISTER_WITH_ONIONHEAVEN=yes; the next status
-                             tick starts the heartbeat (no restart needed)
-          Not Now         -> nothing written; asked again next launch
-          Don't Ask Again -> REGISTER_WITH_ONIONHEAVEN=no; Settings can
-                             re-enable it later
-        """
-        try:
-            self.log("OnionHeaven: not yet enabled — asking the user")
-            choice = self.show_native_alert(
-                onionheaven.REGISTRATION_PROMPT_TITLE,
-                onionheaven.REGISTRATION_PROMPT_MESSAGE,
-                buttons=["Enable OnionHeaven", "Not Now", "Don't Ask Again"],
-                default_button=0,
-                cancel_button=1,
-            )
-            if choice == 0:
-                self.write_config_value("REGISTER_WITH_ONIONHEAVEN", "yes")
-                self.log("OnionHeaven: enabled by user at startup prompt")
-            elif choice == 2:
-                self.write_config_value("REGISTER_WITH_ONIONHEAVEN", "no")
-                self.log("OnionHeaven: declined by user (Don't Ask Again); "
-                         "can be enabled later in Settings")
-            else:
-                self.log("OnionHeaven: user chose Not Now; will ask again next launch")
-        except Exception as e:
-            self.log(f"OnionHeaven: prompt failed: {e}")
 
     def write_config_value(self, key, value):
         """Write a value to the config file."""
