@@ -122,7 +122,7 @@ services:
         protocol: tcp
 
   wordpress:
-    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:2e3fbc5cc60bf51bc453e32836e05a442c836006e86d06b96c37654a7806d291}
+    image: ${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:66a65eb50cca4f14b2833d6813920fb70427b362ae42013b85cd2432e83c3fef}
     container_name: onionpress-wordpress
     logging:
       driver: json-file
