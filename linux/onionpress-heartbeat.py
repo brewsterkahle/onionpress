@@ -130,6 +130,19 @@ _reachability = None    # ReachabilityLoop once the recovery loop has been start
 # ---------------------------------------------------------------------------
 
 _bad_hub_value_logged = None
+# The ONIONHEAVEN_ADDRESS value the last _hub_address could not use (the
+# default hub stands in for it), or "": register() warns again with it
+# right before the key goes out.
+_rejected_hub_value = ""
+
+
+def _hub_fallback_warning():
+    # By key name only, never the value.
+    log.warning("ONIONHEAVEN_ADDRESS in the config is not a valid onion "
+                "address; using the default hub %s instead, which receives this "
+                "site's onion service key. Fix the address, or set "
+                "REGISTER_WITH_ONIONHEAVEN=no (onionpress onionheaven disable).",
+                DEFAULT_HUB)
 
 
 def _hub_address(config):
@@ -140,18 +153,19 @@ def _hub_address(config):
     onion private key and the address goes into its URL, so "ends in
     .onion" is not enough ("evil.example/" + 39 characters + ".onion"
     passes that). A malformed value is logged by key name, once per value,
-    and the default hub is used, the one the opt-in names.
+    and the default hub is used.
     """
-    global _bad_hub_value_logged
+    global _bad_hub_value_logged, _rejected_hub_value
     value = (config.get("ONIONHEAVEN_ADDRESS") or "").strip()
+    _rejected_hub_value = ""
     if not value:
         return DEFAULT_HUB
     if key_manager.is_valid_onion_address(value):
         return value
+    _rejected_hub_value = value
     if value != _bad_hub_value_logged:
         _bad_hub_value_logged = value
-        log.warning("ONIONHEAVEN_ADDRESS in the config is not a valid onion "
-                    "address; using the default hub")
+        _hub_fallback_warning()
     return DEFAULT_HUB
 
 
@@ -618,6 +632,8 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
     }
     if _is_onionheaven_server():
         extra["is_onionheaven"] = True
+    if _rejected_hub_value and hub_addr == DEFAULT_HUB:
+        _hub_fallback_warning()
 
     backoff_delays = [10, 30, 30]
     for attempt in range(4):
@@ -1130,7 +1146,7 @@ def _start_analytics_sharing(content_addr, hc_addr):
 def _start_reachability_loop():
     """Start the onion service recovery loop (a daemon thread). Idempotent.
 
-    Runs on every node, the hub included, whatever the OnionHeaven opt-in
+    Runs on every node, the hub included, whatever the OnionHeaven setting
     says: it probes our own address and talks only to our own containers.
     Logs and returns None when the onionpress package is not importable,
     so an install without lib/ still heartbeats.
@@ -1642,8 +1658,8 @@ def main():
 
     # Read initial config
     config = read_config()
-    # Opt-in: only an explicit "yes" registers. Unset means the user has
-    # not decided yet (the tray / `onionpress onionheaven` ask them).
+    # "yes" or unset registers; "no" opts out; an unrecognized value
+    # sends nothing.
     choice = _registration_choice(config)
     enabled = choice == "yes"
     _current_hub = _hub_address(config)

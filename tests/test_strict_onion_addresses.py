@@ -154,6 +154,32 @@ class TestConfiguredHubAddress(unittest.TestCase):
                 self.assertEqual(len(logs), 1)
                 self.assertIn("ONIONHEAVEN_ADDRESS", logs[0])
                 self.assertNotIn("evil", logs[0])
+                # A warning that names the hub the key goes to instead.
+                self.assertIn("WARNING", logs[0])
+                self.assertIn(HUB, logs[0])
+                self.assertIn("REGISTER_WITH_ONIONHEAVEN=no", logs[0])
+        onionheaven.configured_hub_address(OTHER_HUB)
+        self.assertEqual(onionheaven.REJECTED_HUB_ADDRESS, "")
+
+    def test_registration_warns_again_before_the_key_goes_out(self):
+        self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS",
+                        onionheaven.ONIONHEAVEN_ADDRESS)
+        self.addCleanup(setattr, onionheaven, "REJECTED_HUB_ADDRESS", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            for value, warned in ((LOOSE[0], True), (OTHER_HUB, False), ("", False)):
+                with self.subTest(value=value):
+                    onionheaven.ONIONHEAVEN_ADDRESS = \
+                        onionheaven.configured_hub_address(value)
+                    app = _FakeApp(tmp)
+                    with mock.patch.object(onionheaven, "_check_wordpress_healthy",
+                                           return_value=True), \
+                            mock.patch.object(onionheaven, "_send_heartbeat"), \
+                            mock.patch.object(onionheaven.time, "sleep"), \
+                            mock.patch.object(onionheaven, "_heartbeat_loop"):
+                        onionheaven.register_with_onionheaven(app)
+                    hits = [m for m in app.logs if "WARNING" in m and HUB in m]
+                    self.assertEqual(bool(hits), warned, app.logs)
+                    self.assertTrue(all("evil" not in m for m in app.logs))
 
     def test_menubar_reads_the_hub_through_it(self):
         src = _read("src/menubar.py")
@@ -294,6 +320,26 @@ class TestLinuxHeartbeat(unittest.TestCase):
                 self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": value}),
                                  hb.DEFAULT_HUB)
             self.assertTrue(all("evil" not in line for line in cm.output))
+            self.assertTrue(any(hb.DEFAULT_HUB in line for line in cm.output))
+
+    def test_register_warns_again_for_a_rejected_hub(self):
+        hb = self.hb
+        priv = os.urandom(64)
+        pub = onion_auth.derive_public_key(priv)
+        hb._bad_hub_value_logged = None
+        for value, warned in ((LOOSE[0], True), (OTHER_HUB, False)):
+            with self.subTest(value=value):
+                with self.assertLogs(hb.log, "WARNING"):
+                    hb._hub_address({"ONIONHEAVEN_ADDRESS": value})
+                    hb.log.warning("marker")
+                hub = hb._hub_address({"ONIONHEAVEN_ADDRESS": value})
+                with self.assertLogs(hb.log, "DEBUG") as cm, \
+                        mock.patch.object(hb, "read_config",
+                                          return_value={"REGISTER_WITH_ONIONHEAVEN": "no"}), \
+                        mock.patch.object(hb, "_is_onionheaven_server", return_value=False):
+                    self.assertFalse(hb.register(hub, SITE, HC, priv, pub))
+                hits = [l for l in cm.output if "WARNING" in l and hb.DEFAULT_HUB in l]
+                self.assertEqual(bool(hits), warned, cm.output)
 
     def test_every_config_read_goes_through_it(self):
         src = _read("linux/onionpress-heartbeat.py")
