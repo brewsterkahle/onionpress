@@ -414,7 +414,7 @@ using_local_images() {
 # built one. Never a floating tag such as `alpine`, which a registry or a
 # mirror could swap for an image that reads the key. Each run overrides the
 # entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}"
+KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:7035842f4aab419948febd7f64c287f937e0a2cb2bbd5ec1a32d42269081d7e7}"
 
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing
@@ -1424,8 +1424,8 @@ update_images() {
     # manifest check per image. cloudflared only when the tunnel is on:
     # compose never starts it otherwise, and it is ~60 MB.
     local images=(
-        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:79b18a6190e3ba8d3c261fd2782ee0a5871cbfebc663cbe12e6ade918e10aa4f}"
-        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:66a65eb50cca4f14b2833d6813920fb70427b362ae42013b85cd2432e83c3fef}"
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:7035842f4aab419948febd7f64c287f937e0a2cb2bbd5ec1a32d42269081d7e7}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:5b26f8a3ef70fa02322666af143750bfafd7b98acfd6e89386ae3aeac0df054c}"
         "mariadb:13.0.2@sha256:f1bba652ba57bea3099ca2fe1af692af537c27d96e0bcde39dce29e2ba1ec4f3"
         "willfarrell/autoheal:latest@sha256:fe88c69806c71ac82fd3a483596011742f5ef319f84744cc3128e5b92b10af77"
         "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
