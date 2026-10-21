@@ -490,6 +490,45 @@ class TestWpCliIsVerified(unittest.TestCase):
         )
 
 
+class TestPhpHasThePhp2ShellFix(unittest.TestCase):
+    """PHP2Shell (CVE-2026-109618, CVE-2026-109619, 2026-10-21): RCE in PHP
+    itself for any unauthenticated request, mod_php the most exposed. 2.5.4
+    shipped PHP 8.3.33 because WORDPRESS_IMAGE was last re-pinned a month
+    before its image publish. The build now refuses a base whose PHP lacks
+    the fix, and turns off session upload progress, the confirmed path of
+    the second CVE, which WordPress never uses.
+    """
+
+    FLOORS = {"8.2": "8.2.35", "8.3": "8.3.36", "8.4": "8.4.27", "8.5": "8.5.12"}
+
+    @staticmethod
+    def _version(v):
+        return tuple(int(x) for x in v.split("."))
+
+    def test_build_refuses_php_without_the_fix(self):
+        code = _strip_comments(_read(WP_DOCKERFILE))
+        m = re.search(r"\$floor = \[([^\]]*)\]", code)
+        self.assertIsNotNone(m, "The PHP version floor check is gone.")
+        floors = dict(re.findall(r'"(\d+\.\d+)" => "([\d.]+)"', m.group(1)))
+        for branch, fixed in self.FLOORS.items():
+            self.assertIn(branch, floors)
+            self.assertGreaterEqual(
+                self._version(floors[branch]), self._version(fixed),
+                f"PHP {branch} floor is below the PHP2Shell fix {fixed}.",
+            )
+        self.assertIn("exit(1)", code[m.start():])
+
+    def test_session_upload_progress_is_off(self):
+        ini = _read("app/Resources/docker/wordpress/onionpress-php-hardening.ini")
+        self.assertRegex(ini, r"(?m)^session\.upload_progress\.enabled\s*=\s*0\s*$")
+        code = _strip_comments(_read(WP_DOCKERFILE))
+        self.assertIn(
+            "COPY onionpress-php-hardening.ini /usr/local/etc/php/conf.d/", code,
+        )
+        self.assertIn('ini_get("session.upload_progress.enabled")', code,
+                      "The build must check the setting took effect.")
+
+
 class TestTorComesFromTheOfficialImage(unittest.TestCase):
     """Tor is whatever the pinned Onimages base carries. The Tor Project's own
     build sets up deb.torproject.org and verifies the archive key's

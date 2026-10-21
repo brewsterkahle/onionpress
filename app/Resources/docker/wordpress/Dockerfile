@@ -31,8 +31,21 @@ RUN curl -fsSL -o /usr/local/bin/wp \
     && echo "${WP_CLI_SHA256}  /usr/local/bin/wp" | sha256sum -c - \
     && chmod +x /usr/local/bin/wp
 
+# PHP2Shell (CVE-2026-109618, CVE-2026-109619, 2026-10-21): unauthenticated
+# RCE in PHP itself, mod_php the most exposed SAPI. Fixed in 8.2.35, 8.3.36,
+# 8.4.27 and 8.5.12; a base image with an older PHP of its branch fails the
+# build, so a stale WORDPRESS_IMAGE pin cannot ship it again (2.5.4 shipped
+# 8.3.33). Raise these floors with the next PHP security release.
+RUN php -r '$floor = ["8.2" => "8.2.35", "8.3" => "8.3.36", "8.4" => "8.4.27", "8.5" => "8.5.12"]; \
+      $branch = PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION; \
+      if (!isset($floor[$branch]) && version_compare(PHP_VERSION, "8.6", "<")) { fwrite(STDERR, "PHP " . PHP_VERSION . " is not a supported branch\n"); exit(1); } \
+      if (isset($floor[$branch]) && version_compare(PHP_VERSION, $floor[$branch], "<")) { fwrite(STDERR, "PHP " . PHP_VERSION . " lacks the PHP2Shell fix (" . $floor[$branch] . ")\n"); exit(1); } \
+      echo "PHP ", PHP_VERSION, "\n";'
+
 # Raise PHP upload limits for large Creations files (videos, HEIC, etc.)
 COPY onionpress-uploads.ini /usr/local/etc/php/conf.d/
+# PHP2Shell mitigation that costs WordPress nothing (see the file).
+COPY onionpress-php-hardening.ini /usr/local/etc/php/conf.d/
 
 # REMOTE_ADDR is the TCP peer, never an address a client names: the
 # auto-login plugin and /__op_proxy.php admit requests by it.
@@ -68,6 +81,7 @@ RUN a2enconf onionpress-xmlrpc-block onionpress-log-format onionpress-health oni
 # peer (above) whatever a new base image enables.
 RUN apache2ctl configtest \
     && apache2ctl -M 2>/dev/null | grep -q ' php_module ' \
+    && [ "$(php -r 'echo var_export((bool) ini_get("session.upload_progress.enabled"), true);')" = false ] \
     && ! apache2ctl -M 2>/dev/null | grep -q ' remoteip_module '
 
 # wp-cli for the scripts below, run as www-data: root never loads
