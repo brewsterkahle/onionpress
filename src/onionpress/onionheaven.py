@@ -45,6 +45,22 @@ WAYBACK_ONION = "web.archivep75mbjunhxc6x4j5mwjmomyxb573v42baldlqu56ruil2oiad.on
 ONIONHEAVEN_DATA_DIR = "/var/lib/onionheaven"
 
 
+# The ONIONHEAVEN_ADDRESS value configured_hub_address could not use, so
+# the default hub stands in for it ("" when the config's value was fine).
+# The registration logs it again right before the key goes out.
+REJECTED_HUB_ADDRESS = ""
+
+
+def hub_fallback_warning():
+    """The log line for an ONIONHEAVEN_ADDRESS that is not an onion address
+    (named by key only, never its value)."""
+    return ("OnionHeaven: WARNING: ONIONHEAVEN_ADDRESS in the config is not a "
+            "valid onion address; using the default hub "
+            f"{DEFAULT_ONIONHEAVEN_ADDRESS} instead, which receives this "
+            "site's onion service key. Fix the address, or set "
+            "REGISTER_WITH_ONIONHEAVEN=no, then restart OnionPress.")
+
+
 def configured_hub_address(value, log_func=None):
     """The hub to register with, for ONIONHEAVEN_ADDRESS=*value*.
 
@@ -57,14 +73,16 @@ def configured_hub_address(value, log_func=None):
     name only and the default hub is used, so the key never goes
     anywhere the user did not agree to.
     """
+    global REJECTED_HUB_ADDRESS
     value = (value or "").strip()
+    REJECTED_HUB_ADDRESS = ""
     if not value:
         return DEFAULT_ONIONHEAVEN_ADDRESS
     if key_manager.is_valid_onion_address(value):
         return value
+    REJECTED_HUB_ADDRESS = value
     if log_func:
-        log_func("OnionHeaven: ONIONHEAVEN_ADDRESS in the config is not a valid "
-                 "onion address; using the default hub")
+        log_func(hub_fallback_warning())
     return DEFAULT_ONIONHEAVEN_ADDRESS
 
 
@@ -504,6 +522,8 @@ def register_with_onionheaven(app):
         app._onionheaven_registration_in_flight = False
         return
 
+    if REJECTED_HUB_ADDRESS and ONIONHEAVEN_ADDRESS == DEFAULT_ONIONHEAVEN_ADDRESS:
+        app.log(hub_fallback_warning())
     app.log("Registering with OnionHeaven via heartbeat...")
 
     try:
@@ -1255,9 +1275,9 @@ def maybe_unregister_after_opt_out(app, now=None):
 
     Covers both a "yes" -> "no" change while running (Mac Settings, the
     WordPress Settings page) and an install that starts with "no" but
-    registered in an earlier session. Unset (undecided) never sends
-    anything: the hub keeps the key and takes the address over while the
-    site is down, as before. A failed attempt is retried every
+    registered in an earlier session. Unset (which reads as yes) and an
+    unrecognized value never send anything: the hub keeps the key and
+    takes the address over while the site is down, as before. A failed attempt is retried every
     OPT_OUT_RETRY_SECONDS; one that cannot work (key changed, no usable
     hub) is not retried until the next launch.
 
@@ -1463,8 +1483,8 @@ def _send_onionheaven_notification(app, endpoint, log_label, max_attempts=1, max
     Uses docker exec curl through the Tor SOCKS proxy.
 
     Sends nothing unless REGISTER_WITH_ONIONHEAVEN is "yes": an /offline
-    makes the hub take the address over at once, which an opted-out or
-    undecided install must not ask for, and /online carries the key.
+    makes the hub take the address over at once, which an opted-out
+    install, or one whose value is unrecognized, must not ask for, and /online carries the key.
     /online also takes the hub lock, as _send_heartbeat does, and is not
     sent while uninstalling or for an address on the record's "released"
     hold; /offline takes no lock (it is sent inside the sleep deadline and

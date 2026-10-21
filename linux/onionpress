@@ -4959,7 +4959,7 @@ print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv
                 log "Resetting OnionHeaven..."
                 reset_onionheaven_in_container >> "$LOG_FILE" || true
             fi
-            # With the new key (and the config back to undecided).
+            # With the new key (and a fresh config, which says yes).
             start_heartbeat_client
 
             log "OnionPress reset and restarted"

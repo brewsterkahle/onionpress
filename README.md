@@ -131,8 +131,10 @@ mkdir -p ~/.onionpress && echo "ONIONHEAVEN_ADDRESS=<hub's 56-character address>
 
 Your key then goes to that hub instead of the default one. The value must
 be one whole v3 onion address. **An address OnionPress cannot read (a
-typo, a missing `.onion`, extra text) falls back to the default hub**, so
-check it before the first start, or add `REGISTER_WITH_ONIONHEAVEN=no`
+typo, a missing `.onion`, extra text) falls back to the default hub**.
+OnionPress then logs a WARNING naming the default hub, at start and again
+before it registers, in `~/.onionpress/onionpress.log`. Check the address
+before the first start, or add `REGISTER_WITH_ONIONHEAVEN=no`
 too and change it to `yes` once the log shows the right hub. Changing the
 hub later asks the old hub to delete its copy of the key.
 
