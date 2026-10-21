@@ -92,8 +92,8 @@ your site. When you come back online, your live site takes over again.
 It is **on by default**. It sends a copy of your onion service
 private key to the hub (run by the Internet Archive) so it can publish
 your address while you are away. The key is used only to keep your site
-reachable. It is on by default; without it, visitors get a connection
-error whenever your computer is off. Disabling it, uninstalling, resetting,
+reachable. Without it, visitors get a connection error whenever your
+computer is off. Disabling it, uninstalling, resetting,
 importing another key, restoring another site's backup or changing the hub
 asks the hub to delete its copy of the key (OnionPress has to be running for
 that; it tells you if a copy may remain).
@@ -102,6 +102,43 @@ that; it tells you if a copy may remain).
 - **Linux:** `onionpress onionheaven enable` (or `disable`, `status`)
 - **Config file:** `REGISTER_WITH_ONIONHEAVEN=yes|no` in `~/.onionpress/config`
   (unset means yes)
+
+#### Preconfiguring OnionHeaven before first run
+
+The first heartbeat, which carries your key, goes out as soon as your
+site has an address, before you can open Settings. Turning OnionHeaven
+off later asks the hub to delete its copy, but by then the hub has had
+one. To make sure your key never reaches the default hub, write
+`~/.onionpress/config` **before you start OnionPress for the first time**
+(before first launch on a Mac, before `install.sh` or `apt install` on
+Linux). OnionPress only creates that file when it is missing, so it keeps
+yours.
+
+To turn OnionHeaven off entirely:
+
+```bash
+mkdir -p ~/.onionpress && echo "REGISTER_WITH_ONIONHEAVEN=no" >> ~/.onionpress/config
+```
+
+With `no`, nothing is sent to any hub: no heartbeats, and no key.
+
+To use another hub instead, such as one you run yourself
+(`ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes` on that node), name its address:
+
+```bash
+mkdir -p ~/.onionpress && echo "ONIONHEAVEN_ADDRESS=<hub's 56-character address>.onion" >> ~/.onionpress/config
+```
+
+Your key then goes to that hub instead of the default one. The value must
+be one whole v3 onion address. **An address OnionPress cannot read (a
+typo, a missing `.onion`, extra text) falls back to the default hub**, so
+check it before the first start, or add `REGISTER_WITH_ONIONHEAVEN=no`
+too and change it to `yes` once the log shows the right hub. Changing the
+hub later asks the old hub to delete its copy of the key.
+
+Both settings go in the config of the user who runs OnionPress (on Linux,
+the user who runs `install.sh` or `sudo apt install`). Settings the file
+leaves out keep their defaults.
 
 ## Viewing Your Site
 
