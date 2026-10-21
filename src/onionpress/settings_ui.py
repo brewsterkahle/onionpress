@@ -263,15 +263,18 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     if old_values["REGISTER_WITH_ONIONHEAVEN"].strip() == "":
         old_values["REGISTER_WITH_ONIONHEAVEN"] = "yes"
 
-    # Layout constants
-    field_w = 300
+    # Layout constants. NSAlert sizes itself to the accessory view, so the
+    # form's width is what keeps the dialog from looking narrow; long fields
+    # (hub address, tunnel token) get room to show their whole value.
+    field_w = 690
     row_h = 30
-    label_w = 170
-    input_x = 175
-    input_w = 100
-    help_x = 280
+    label_w = 195
+    input_x = 200
+    input_w = 450
+    short_w = 140
+    help_x = input_x + input_w + 10
     help_w = 25
-    container_h = 13 * row_h + 10
+    container_h = len(SETTINGS_KEYS) * row_h + 10
 
     # Create help button target (shared across dialog rebuilds)
     help_target = HelpButtonTarget.alloc().init()
@@ -310,12 +313,12 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             container.addSubview_(btn)
             tag_counter[0] += 1
 
-        def add_text_row(y, label_text, key, value):
+        def add_text_row(y, label_text, key, value, width=short_w):
             label = AppKit.NSTextField.labelWithString_(label_text)
             label.setFrame_(AppKit.NSMakeRect(0, y + 3, label_w, 18))
             container.addSubview_(label)
             field = AppKit.NSTextField.alloc().initWithFrame_(
-                AppKit.NSMakeRect(input_x, y, input_w, 24))
+                AppKit.NSMakeRect(input_x, y, width, 24))
             field.setStringValue_(str(value))
             container.addSubview_(field)
             fields[key] = field
@@ -341,7 +344,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             label.setFrame_(AppKit.NSMakeRect(0, y + 3, label_w, 18))
             container.addSubview_(label)
             popup = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
-                AppKit.NSMakeRect(input_x, y, input_w, 24), False)
+                AppKit.NSMakeRect(input_x, y, short_w, 24), False)
             for title, val in options:
                 popup.addItemWithTitle_(title)
             for i, (_, val) in enumerate(options):
@@ -380,13 +383,11 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         y -= row_h
         add_check_row(y, "Share diagnostic logs with OnionHome", "SHARE_ANALYTICS_WITH_ONIONHOME", form_values["SHARE_ANALYTICS_WITH_ONIONHOME"])
         y -= row_h
-        oh_addr_field = add_text_row(y, "OnionHeaven Hub (advanced):", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"])
+        oh_addr_field = add_text_row(y, "OnionHeaven Hub (advanced):", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"], input_w)
         oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
-        oh_addr_field.setFrame_(AppKit.NSMakeRect(input_x, oh_addr_field.frame().origin.y, input_w, 24))
         y -= row_h
-        cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"])
+        cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"], input_w)
         cf_field.setPlaceholderString_("paste tunnel token")
-        cf_field.setFrame_(AppKit.NSMakeRect(input_x, cf_field.frame().origin.y, input_w, 24))
 
         alert.setAccessoryView_(container)
 
