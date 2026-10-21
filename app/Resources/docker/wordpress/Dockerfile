@@ -11,7 +11,7 @@
 #
 # The digest must be the multi-arch INDEX digest — a per-platform manifest
 # digest resolves on amd64 and 404s on the arm64 builder.
-ARG WORDPRESS_IMAGE=wordpress:latest@sha256:74103f21d460e96abdee0dc304852a00823950bef3cb343ba855e19b6983c31d
+ARG WORDPRESS_IMAGE=wordpress:latest@sha256:18b73b2dad9c0cdced35c5200dd6562c937a8e994762b4f2b43b1ece9fb317c9
 FROM ${WORDPRESS_IMAGE}
 
 # wp-cli for WordPress management (setup guard, plugin activation, etc.).
