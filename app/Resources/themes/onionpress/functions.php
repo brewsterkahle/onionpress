@@ -42,7 +42,14 @@ add_action('after_setup_theme', 'onionpress_setup');
  * Enqueue theme styles
  */
 function onionpress_scripts() {
-    wp_enqueue_style('onionpress-style', get_stylesheet_uri(), array(), '1.0.4');
+    wp_enqueue_style('onionpress-style', get_stylesheet_uri(), array(), '1.0.5');
+
+    // Moves the reply form under the reply being answered. Without
+    // JavaScript (Tor Browser's Safest level) the Reply link still works:
+    // it reloads the page with ?replytocom=.
+    if (is_singular() && comments_open() && get_option('thread_comments')) {
+        wp_enqueue_script('comment-reply');
+    }
 }
 add_action('wp_enqueue_scripts', 'onionpress_scripts');
 
