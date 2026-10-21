@@ -9,10 +9,30 @@
 # pin fixes which WordPress this image is *built* on; the running site patches
 # itself regardless of when the pin was last refreshed.
 #
+# A site's WordPress lives in its volume, not in the image (the base copies
+# its files in only on a first start), so a new base alone moves no existing
+# site to a new branch. WORDPRESS_BRANCH below does: the audit takes a site
+# on an older branch up to it, over Tor, and never past it.
+#
 # The digest must be the multi-arch INDEX digest — a per-platform manifest
 # digest resolves on amd64 and 404s on the arm64 builder.
 ARG WORDPRESS_IMAGE=wordpress:latest@sha256:18b73b2dad9c0cdced35c5200dd6562c937a8e994762b4f2b43b1ece9fb317c9
 FROM ${WORDPRESS_IMAGE}
+
+# The WordPress branch this image is built and tested on. The build fails
+# when the base carries another branch, so re-pinning WORDPRESS_IMAGE to a
+# new major (7.2) means raising this too, after checking the multisite setup,
+# the bundled mu-plugins and the pinned plugins on it (docs/BUILDING.md,
+# "Moving to a new WordPress branch"): every existing site follows it at its
+# next start.
+ARG WORDPRESS_BRANCH=7.1
+RUN branch=$(php -r 'include "/usr/src/wordpress/wp-includes/version.php"; echo implode(".", array_slice(explode(".", $wp_version), 0, 2));') \
+    && echo "WordPress $branch (base image)" \
+    && if [ "$branch" != "$WORDPRESS_BRANCH" ]; then \
+         echo "The base image carries WordPress $branch, not WORDPRESS_BRANCH=$WORDPRESS_BRANCH" >&2; exit 1; \
+       fi \
+    && mkdir -p /usr/local/share/onionpress \
+    && printf '%s\n' "$WORDPRESS_BRANCH" > /usr/local/share/onionpress/wordpress-branch
 
 # wp-cli for WordPress management (setup guard, plugin activation, etc.).
 #

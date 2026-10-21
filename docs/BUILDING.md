@@ -718,7 +718,9 @@ consume remains the published image digest in `build/image-pins.env`.
 **WordPress core, in practice.** The base image is pinned, but that does not
 freeze WordPress for users: `onionpress-security-audit.sh` runs on every
 container start and applies pending core security releases over Tor. The pin
-fixes what this image is *built* on; the running site patches itself.
+fixes what this image is *built* on; the running site patches itself. A site's WordPress lives in its volume (the base image copies its files in
+only on a first start), so the audit also moves a site on an older branch up
+to `WORDPRESS_BRANCH`, the branch the image is built on (next section).
 
 ### Bumping a pinned input
 
@@ -748,6 +750,30 @@ Two coupling rules:
   around, not an interface. The Dockerfile asserts the flags it wanted
   actually landed in the generated `GNUmakefile`, so a change upstream fails
   the build loudly instead of quietly shipping an unoptimised miner.
+
+#### Moving to a new WordPress branch
+
+`WORDPRESS_BRANCH` in `app/Resources/docker/wordpress/Dockerfile` names the
+WordPress branch (`7.1`) the image is built on, and the build fails when the
+base image carries another. Every existing site follows it at its next start:
+`onionpress-security-audit.sh` passes it to `onionpress-core-update.php
+check`, which offers the newest release of the site's own branch or, when
+newer, of this one (over Tor, like a security release; then `wp core
+update-db --network` and the checksum audit). Never past it and never down
+(`tests/test_wordpress_branch_upgrade.py`).
+
+So re-pinning `WORDPRESS_IMAGE` to a base on a new branch is a WordPress
+upgrade for every user. Before raising `WORDPRESS_BRANCH`, start a site
+on the old image in a throwaway VM (never the live one; see "Integration
+tests"), provision it as setup does, switch it to the new image, and check
+that the audit logs `core updated to … and DB migrated`, then: every public
+page and every wp-admin page of the main site, the user's subsite and the
+network admin load without PHP errors in the debug log; the block editor
+saves; Cache Enabler stores and serves onion-host pages only and clears on
+edit; the Link Fixer records links and refuses onion/local ones; and the
+docker-backed integration suites pass against it. Read the release's
+dev notes for changes to anything the mu-plugins hook (multisite bootstrap,
+`sunrise.php`, `WP_Http`, `clean_url`, REST permissions).
 
 #### WordPress.org plugins (Cache Enabler, IA Link Fixer)
 

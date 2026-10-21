@@ -15,8 +15,9 @@
  * WordPress HTTP API, which the http_api_curl hook below forces through Tor.
  *
  * Modes (first argument):
- *   check              — force a version check; print the pending same-branch
- *                        release, if any
+ *   check [<branch>]   — force a version check; print the release to update
+ *                        to, if any (op_pick_core_update: this site's branch,
+ *                        or <branch>, the image's, when newer)
  *   download <url>     — fetch a core zip to /tmp, print its path
  *   verify [<version>] — compare every core file against the official
  *                        checksums for that version
@@ -106,6 +107,63 @@ add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
     return $pre;
 }, 10, 3 );
 
+/**
+ * The release to update to from $current, as array( version, full zip URL ),
+ * or array( '', '' ): the newest of $offers (update_core's) on the site's
+ * own branch (7.0.2 -> 7.0.3), where security backports land, or on
+ * $image_branch, the branch this image was built and tested on
+ * (WORDPRESS_BRANCH in the Dockerfile), when that is newer (7.0.x ->
+ * 7.1.3). An unattended major could break the multisite conversion or the
+ * bundled mu-plugins, so a new branch comes only with an image whose
+ * release checked them against it: never past that branch, and an image of
+ * an older branch never moves a site down.
+ */
+function op_pick_core_update( $current, $image_branch, $offers ) {
+    $parts  = explode( '.', $current );
+    $branch = ( count( $parts ) >= 2 ) ? $parts[0] . '.' . $parts[1] : $current;
+
+    $branches = array( $branch . '.' );
+    if ( preg_match( '/^[0-9]+\.[0-9]+$/D', $image_branch ) && version_compare( $image_branch, $branch, '>' ) ) {
+        $branches[] = $image_branch . '.';
+    }
+
+    $target  = '';
+    $package = '';
+    foreach ( $offers as $offer ) {
+        if ( empty( $offer->version ) || ! in_array( $offer->response, array( 'upgrade', 'autoupdate' ), true ) ) {
+            continue;
+        }
+        $allowed = false;
+        foreach ( $branches as $prefix ) {
+            if ( 0 === strpos( $offer->version . '.', $prefix ) ) {
+                $allowed = true;
+            }
+        }
+        if ( ! $allowed ) {
+            continue;   // neither this site's branch nor the image's
+        }
+        if ( version_compare( $offer->version, $current, '<=' ) ) {
+            continue;
+        }
+        // Prefer the full zip: the partial/rollback packages assume a
+        // specific from-version and wp-cli cannot apply them.
+        $full = '';
+        if ( ! empty( $offer->packages->full ) ) {
+            $full = $offer->packages->full;
+        } elseif ( ! empty( $offer->download ) ) {
+            $full = $offer->download;
+        }
+        if ( '' === $full ) {
+            continue;
+        }
+        if ( '' === $target || version_compare( $offer->version, $target, '>' ) ) {
+            $target  = $offer->version;
+            $package = $full;
+        }
+    }
+    return array( $target, $package );
+}
+
 if ( '' === op_socks_proxy() ) {
     op_out( 'status', 'netfail' );
     op_out( 'error', 'no Tor SOCKS proxy reachable (tried onionheaven:9050, onionpress-tor:9050)' );
@@ -134,40 +192,8 @@ if ( 'check' === $mode ) {
         exit( 0 );
     }
 
-    // Same-branch (minor) only: 7.0.2 -> 7.0.3, never 7.0.x -> 7.1/8.0. An
-    // unattended major could break the multisite conversion or the bundled
-    // mu-plugins with nobody watching.
-    $parts  = explode( '.', $current );
-    $branch = ( count( $parts ) >= 2 ) ? $parts[0] . '.' . $parts[1] . '.' : $current . '.';
-
-    $target  = '';
-    $package = '';
-    foreach ( (array) $updates->updates as $offer ) {
-        if ( empty( $offer->version ) || ! in_array( $offer->response, array( 'upgrade', 'autoupdate' ), true ) ) {
-            continue;
-        }
-        if ( 0 !== strpos( $offer->version, $branch ) ) {
-            continue;   // different branch — not a minor update
-        }
-        if ( version_compare( $offer->version, $current, '<=' ) ) {
-            continue;
-        }
-        // Prefer the full zip: the partial/rollback packages assume a
-        // specific from-version and wp-cli cannot apply them.
-        $full = '';
-        if ( ! empty( $offer->packages->full ) ) {
-            $full = $offer->packages->full;
-        } elseif ( ! empty( $offer->download ) ) {
-            $full = $offer->download;
-        }
-        if ( '' === $full ) {
-            continue;
-        }
-        if ( '' === $target || version_compare( $offer->version, $target, '>' ) ) {
-            $target  = $offer->version;
-            $package = $full;
-        }
-    }
+    list( $target, $package ) = op_pick_core_update(
+        $current, isset( $args[1] ) ? (string) $args[1] : '', (array) $updates->updates );
 
     op_out( 'status', 'ok' );
     if ( '' !== $target ) {

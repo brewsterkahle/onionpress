@@ -56,6 +56,10 @@ WPROOT=/var/www/html
 # but the downloaded core zip, checked by name first. The audit's own root
 # work (the hash scan, quarantine, the report) is file operations only.
 WP="onionpress-wp --path=$WPROOT"
+# The WordPress branch this image was built and tested on (WORDPRESS_BRANCH
+# in the Dockerfile). The patch step moves a site on an older branch up to
+# it, never past it.
+IMAGE_WP_BRANCH=$(cat /usr/local/share/onionpress/wordpress-branch 2>/dev/null || true)
 HELPER=/usr/local/lib/onionpress-core-update.php
 
 log()  { echo "[security-audit] $*"; }
@@ -145,9 +149,11 @@ fi
 current=$($WP core version 2>/dev/null || echo unknown)
 log "WordPress core version: $current"
 
-# The helper keeps us on the current branch (7.0.x -> 7.0.3), which is where
-# the security backports land. A major jump unattended could break multisite
-# or the bundled mu-plugins.
+# The helper offers the latest release of the current branch (7.0.x ->
+# 7.0.3), which is where the security backports land, and of the image's
+# branch when that is newer (7.0.x -> 7.1.3): a new branch comes only with
+# an image whose release tested the multisite setup and the bundled plugins
+# on it, never on its own.
 #
 # A failed check must never read as "up to date". The previous version of this
 # block inferred "no update pending" from empty stdout, so any network error —
@@ -163,7 +169,7 @@ else
     status=""
     attempt=1
     while [ "$attempt" -le 3 ]; do
-        check_out=$(helper check)
+        check_out=$(helper check "$IMAGE_WP_BRANCH")
         status=$(field "$check_out" status)
         [ "$status" = "ok" ] && break
         log "version check attempt $attempt/3 did not complete over Tor: $(field "$check_out" error)"
@@ -179,7 +185,7 @@ else
             log "core is up to date ($current)"
         else
             package=$(field "$check_out" package)
-            log "security update available: $current -> $target — downloading over Tor"
+            log "core update available: $current -> $target — downloading over Tor"
             dl_out=$(helper download "$package")
             zip=$(field "$dl_out" path)
             if [ "$(field "$dl_out" status)" != "ok" ]; then

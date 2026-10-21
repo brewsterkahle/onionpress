@@ -287,6 +287,17 @@
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
 - Do not commit or log database passwords.
 
+## WordPress Branch Moves With the Image
+- A site's WordPress core lives in its volume; the base image's copy is used
+  only on a first start. `WORDPRESS_BRANCH` in the wordpress Dockerfile (build
+  fails if the base carries another branch, written to
+  `/usr/local/share/onionpress/wordpress-branch`) is the branch the security
+  audit moves older sites up to at start, over Tor; same-branch releases as
+  before; never past it, never down (`op_pick_core_update`). Raising it means
+  testing the mu-plugins and pinned plugins on the new branch first
+  (docs/BUILDING.md, "Moving to a new WordPress branch").
+  `tests/test_wordpress_branch_upgrade.py`. Needs an image publish.
+
 ## Settings Page Config Writes Are Allowlisted
 - The WordPress Settings page asks for config changes through
   `config-updates.json` in the onionpress-data volume, which anything running
