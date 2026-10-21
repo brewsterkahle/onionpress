@@ -1118,7 +1118,7 @@ function onionpress_settings_fields() {
         ),
         'CLOUDFLARE_TUNNEL_TOKEN' => array(
             'label'       => 'Cloudflare Tunnel Token',
-            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. In the tunnel's public hostname, set the service to HTTP, URL wordpress:80. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared yourself — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
+            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. In the tunnel\'s public hostname, set the service to HTTP, URL wordpress:80. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared yourself — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
             'type'        => 'secret',
             'placeholder' => 'Paste a new token, or leave blank',
         ),
