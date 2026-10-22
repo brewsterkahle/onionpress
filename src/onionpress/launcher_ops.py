@@ -46,6 +46,8 @@ DEFAULT_TOR_IMAGE = os.environ.get(
 # The bash launchers and linux/onionpress-tray spell the name out; a test
 # keeps them in step.
 BACKUP_PASSWORD_ENV = "ONIONPRESS_BACKUP_PASSWORD"
+# An OnionHeaven hub's backup recovery key, for `restore` (hub_backup.RECOVERY_KEY_ENV).
+HUB_RECOVERY_KEY_ENV = "ONIONPRESS_HUB_RECOVERY_KEY"
 
 
 def _tor_browser_lock_paths() -> list:
@@ -523,6 +525,12 @@ def get_admin_password(data_dir: str) -> Optional[str]:
 _LOG_STAMP_PREFIX = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
 
 
+def strip_log_stamp(line: str) -> str:
+    """A CLI log line without its `[YYYY-MM-DD HH:MM:SS] ` stamp (for a
+    progress window)."""
+    return _LOG_STAMP_PREFIX.sub("", line)
+
+
 def restore_failure_message(output: str, data_dir: str, log_path: str,
                             *, max_lines: int = 6) -> str:
     """What a failed `onionpress restore` says to the user (#323).
@@ -558,26 +566,32 @@ def restore_failure_message(output: str, data_dir: str, log_path: str,
 def run_launcher_restore(launcher_script: str, zip_path: str, password: str,
                          *, data_dir: str, log_path: str,
                          extra_env: dict | None = None,
+                         extra_args: list | None = None,
                          timeout: int | None = 1800) -> tuple:
-    """`<launcher> restore <zip>` with the password in the environment
-    (BACKUP_PASSWORD_ENV: argv is readable by every local user, the
-    environment only by this one), and extra_env too (a hub's recovery
-    key). (True, "", stderr) on success, else (False,
-    restore_failure_message(...), stderr). The exit status is the only
-    sign of a refused or failed restore. timeout=None waits as long as
-    the launcher runs.
+    """`<launcher> restore <zip> <extra_args>` with the password in the
+    environment (BACKUP_PASSWORD_ENV: argv is readable by every local
+    user, the environment only by this one), and extra_env too (a hub's
+    recovery key). (True, "", stderr, stdout, answer) on success, else
+    (False, restore_failure_message(...), stderr, stdout, answer); *answer*
+    is the JSON object the CLI prints last with --json (onionpress.confirm),
+    or None. The exit status is the only sign of a refused or failed
+    restore. timeout=None waits as long as the launcher runs.
     """
+    from .confirm import last_json_line
     try:
         r = subprocess.run(
-            [launcher_script, "restore", zip_path],
+            [launcher_script, "restore", zip_path, *(extra_args or [])],
             env={**os.environ, BACKUP_PASSWORD_ENV: password} | (extra_env or {}),
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, restore_failure_message(
             f"The restore did not finish within {timeout // 60} minutes.",
-            data_dir, log_path), ""
+            data_dir, log_path), "", "", None
+    answer = last_json_line(r.stdout)
     if r.returncode == 0:
-        return True, "", r.stderr or ""
+        return True, "", r.stderr or "", r.stdout or "", answer
+    failure = (answer or {}).get("error") or ((r.stdout or "") + "\n" + (r.stderr or ""))
     return False, restore_failure_message(
-        (r.stdout or "") + "\n" + (r.stderr or ""), data_dir, log_path), r.stderr or ""
+        failure, data_dir, log_path), r.stderr or "", r.stdout or "", answer

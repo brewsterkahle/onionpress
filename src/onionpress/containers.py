@@ -306,6 +306,14 @@ class ContainerManager:
 
     def pull_images(self, timeout: int = 300) -> bool:
         """Pull latest container images. Returns True on success."""
+        return self.pull_images_result(timeout).ok
+
+    def pull_images_result(self, timeout: int = 300):
+        """`docker compose pull` of the stack's pinned images: the
+        DockerResult (its stdout says whether anything was downloaded).
+        The opt-in refresh (`onionpress update-images`, the menubar's
+        Check for Updates); a launch pulls `--policy missing` instead.
+        Callers check using_local_images() first."""
         self._log("Pulling container images...")
         result = self.docker.compose(
             ["pull"],
@@ -315,7 +323,7 @@ class ContainerManager:
         )
         if not result.ok:
             self._log(f"Image pull warning: {result.stderr.rstrip()}")
-        return result.ok
+        return result
 
     def start_core(self, retries: int = 3) -> bool:
         """Start core services (WordPress, DB, OnionHeaven). Not Tor yet.

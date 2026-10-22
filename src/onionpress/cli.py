@@ -25,6 +25,7 @@ from .config import (
 from .docker import Docker
 from .containers import ContainerManager
 from .launcher_ops import BACKUP_PASSWORD_ENV
+from .hub_backup import RECOVERY_KEY_ENV
 
 
 # `onionpress get` (issue #70) runs curl inside this container, where Tor's
@@ -250,6 +251,258 @@ def release_onionheaven(reason: str, keep_address: str | None = None,
     return remaining
 
 
+class _LogRecorder:
+    """A log function that remembers what it was given."""
+
+    def __init__(self, log):
+        self._log = log
+        self.seen = []
+
+    def __call__(self, msg):
+        self.seen.append(msg)
+        self._log(msg)
+
+
+def check_for_update_report(current: str, log, json_output: bool = False) -> int:
+    """Check GitHub for a newer release. Always exits 0.
+
+    On any failure (network down, GitHub rate-limited, parse error) the
+    JSON output carries an ``error`` field and ``update_available`` is
+    false — callers render that to the user instead of crashing. The
+    report also names the other macOS users running OnionPress
+    (``other_instances``, ``active_offsets``, this install's
+    ``port_offset``): the shared bundle is replaced for everyone.
+    """
+    from datetime import datetime, timezone
+    from . import updater
+
+    # ``updater.check_for_update`` conflates "up to date" and "error":
+    # both return ``None``. Capture the log to recover the distinction
+    # without touching updater.py.
+    error_msg = None
+
+    def capture_log(msg: str) -> None:
+        nonlocal error_msg
+        if "failed" in msg.lower():
+            error_msg = msg
+        log(msg)
+
+    result = updater.check_for_update(current, log=capture_log)
+
+    if result is not None:
+        release_data, latest = result
+        update_available = True
+        release_url = f"https://github.com/brewsterkahle/onionpress/releases/tag/v{latest}"
+        release_notes = (release_data.get("body") or "").strip()
+        published_at = release_data.get("published_at")
+    else:
+        update_available = False
+        release_url = None
+        release_notes = None
+        published_at = None
+        latest = None if error_msg else current
+
+    others = updater.detect_other_instances()
+    try:
+        port_offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0") or 0)
+    except ValueError:
+        port_offset = 0
+    report = {
+        "current": current,
+        "latest": latest,
+        "update_available": update_available,
+        "release_url": release_url,
+        "release_notes": release_notes,
+        "published_at": published_at,
+        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "error": error_msg,
+        "other_instances": others,
+        "active_offsets": updater.detect_active_offsets() if others else [],
+        "port_offset": port_offset,
+    }
+
+    if json_output:
+        print(json.dumps(report, indent=2))
+        return 0
+
+    print(f"Installed: {current}")
+    if error_msg:
+        print(f"Update check failed: {error_msg}")
+        return 0
+    if update_available:
+        print(f"Update available: {latest}  (published {published_at or '?'})")
+        if release_notes:
+            snippet = (release_notes if len(release_notes) <= 800
+                       else release_notes[:800] + "\n... (truncated)")
+            print()
+            print(snippet)
+    else:
+        print("Already up to date.")
+    if others:
+        print()
+        print("Note: other users are running OnionPress:")
+        for o in others:
+            print(f"  - {o['user']} (pid {o['pid']})")
+        print("Updating replaces the shared app bundle for everyone.")
+    return 0
+
+
+def _bundle_owner_hint(install_path: str) -> str:
+    """Who owns the app bundle another account installed, and the chown
+    that lets this one update it."""
+    try:
+        import pwd
+        owner = pwd.getpwuid(os.stat(install_path).st_uid).pw_name
+    except Exception:
+        return ""
+    hint = f"\n\nThe app is owned by the \"{owner}\" account. "
+    if owner != os.environ.get("USER", ""):
+        hint += ("Either update from that account, or run this in Terminal:\n\n"
+                 f"sudo chown -R $(whoami):admin \"{install_path}\" && "
+                 f"chmod -R g+w \"{install_path}\"")
+    return hint
+
+
+def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
+               json_output: bool = False, app_path: str = None) -> int:
+    """`onionpress update` on a Mac: a new release from GitHub, installed
+    by the staged bundle swap (updater.download_and_install: the new
+    bundle is copied beside the old one and renamed into place last, since
+    this very process runs out of the bundle being replaced). The menubar
+    relaunches after. --check only reports (check_for_update_report, with
+    the other users running OnionPress); without --yes a terminal is asked
+    and a non-terminal refused. The answer: {"ok": true, "version"} or
+    {"error", "permission_denied"} (another account owns the bundle)."""
+    import plistlib
+    from . import confirm as _confirm, updater
+    app_path = app_path or os.environ.get("ONIONPRESS_APP_PATH") or paths.app_bundle
+    current = __version__
+    try:
+        with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
+            current = plistlib.load(f).get("CFBundleShortVersionString", current)
+    except (OSError, ValueError):
+        pass
+    if check:
+        return check_for_update_report(current, log, json_output)
+
+    if not json_output:
+        print(f"Installed: {current}")
+        print("Checking GitHub for updates...")
+    result = updater.check_for_update(current, log=log)
+    if not result:
+        return _confirm.answer_ok(json_output, text="Already up to date.",
+                                  update_available=False, current=current)
+    release_data, latest = result
+    if not json_output:
+        print(f"Update available: {latest}  (published {release_data.get('published_at', '?')})")
+        notes = (release_data.get("body") or "").strip()
+        if notes:
+            print()
+            print(notes if len(notes) <= 800 else notes[:800] + "\n... (truncated)")
+            print()
+        others = updater.detect_other_instances()
+        if others:
+            print("Note: other users are running OnionPress:")
+            for o in others:
+                print(f"  - {o['user']} (pid {o['pid']})")
+            print("Updating replaces the shared app bundle for everyone.")
+            print()
+    if not yes:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return _confirm.answer_error(
+                f"OnionPress v{latest} is available; re-run with --yes to install it.",
+                json_output, code=2)
+        try:
+            reply = input(f"Install v{latest} now? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            reply = ""
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return 0
+
+    log(f"Update: downloading and installing v{latest}...")
+    if not json_output:
+        print(f"Downloading and installing v{latest}...")
+    try:
+        updater.download_and_install(release_data, latest, app_path, log=log)
+    except PermissionError as e:
+        log(f"Auto-update failed (permission denied): {e}")
+        message = (f"OnionPress v{latest} was downloaded but could not be installed "
+                   f"because another user account owns the app bundle."
+                   f"{_bundle_owner_hint(app_path)}")
+        if json_output:
+            print(_confirm.dumps({"error": message, "permission_denied": True,
+                                  "version": latest}))
+        else:
+            print(f"ERROR: {message}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        log(f"Auto-update failed: {e}")
+        return _confirm.answer_error(e, json_output)
+    return _confirm.answer_ok(
+        json_output,
+        text=f"Installed v{latest}. Quit and relaunch OnionPress to use the new version.",
+        version=latest, current=current)
+
+
+def cmd_uninstall(paths, docker, log, launcher, *, check: bool = False,
+                  json_output: bool = False, confirmed=frozenset()) -> int:
+    """`onionpress uninstall` on a Mac (onionpress.uninstall). The questions
+    ("hub-holds-key" when a hub may hold the key and OnionPress is not
+    running, then "uninstall") are answered with --confirmed, or at a
+    terminal here; a non-terminal run without them is refused."""
+    from . import confirm as _confirm, uninstall as _uninstall
+    confirmed = set(confirmed)
+    interactive = sys.stdin is not None and sys.stdin.isatty()
+    while True:
+        try:
+            facts = _uninstall.check(paths, docker, log, confirmed)
+            break
+        except _confirm.NeedsConfirmation as e:
+            if check:
+                return _confirm.answer_confirm(e, json_output)
+            if not interactive:
+                return _confirm.answer_error(_confirm.NOT_CONFIRMED_MSG.format(what=e.what),
+                                             json_output, code=_confirm.EXIT_REFUSED)
+            if e.what == "hub-holds-key":
+                listed = "\n".join(f"  {h['onionheaven_address']} (key of {h['content_address']})"
+                                   for h in e.facts["hubs"])
+                print("These OnionHeaven hubs may hold a copy of your onion service "
+                      f"private key:\n{listed}\nOnionPress asks them to delete it "
+                      "when you uninstall, but only while it is running.")
+                try:
+                    reply = input("Uninstall anyway (the hub keeps the key)? [y/N] ")
+                except (EOFError, KeyboardInterrupt):
+                    reply = ""
+                if reply.strip().lower() not in ("y", "yes"):
+                    print("Cancelled.")
+                    return 1
+            else:
+                print("CRITICAL WARNING: uninstalling PERMANENTLY DELETES:")
+                for item in e.facts["deletes"]:
+                    print(f"  - {item}")
+                print("Your site CANNOT BE RECOVERED unless you have a backup "
+                      "(onionpress backup).")
+                try:
+                    reply = input("Type DELETE to confirm: ")
+                except (EOFError, KeyboardInterrupt):
+                    reply = ""
+                if reply.strip().upper() != "DELETE":
+                    print("Cancelled.")
+                    return 1
+            confirmed.add(e.what)
+    if check:
+        return _confirm.answer_ok(json_output, text="OK: nothing left to ask.", **facts)
+    remaining = _uninstall.run(paths, docker, log, launcher,
+                               out=sys.stderr if json_output else sys.stdout)
+    if not json_output:
+        print("OnionPress has been uninstalled. Move OnionPress.app to the Trash.")
+        if remaining:
+            from . import onionheaven
+            print("Note: " + onionheaven.describe_remaining(remaining))
+    return _confirm.answer_ok(json_output, remaining=remaining)
+
+
 class OnionPressCLI:
     """Wires together all OnionPress modules for CLI use."""
 
@@ -427,22 +680,34 @@ class OnionPressCLI:
             return 124
         return result.returncode
 
-    def cmd_backup(self, password: str, output_path: str = None, username: str = None) -> int:
-        """Create a backup."""
+    def cmd_backup(self, password: str, output_path: str = None, username: str = None,
+                   *, check: bool = False, json_output: bool = False) -> int:
+        """Create a backup. `--check` verifies the credentials and says
+        what the backup would be ({"ok": true, "filename", "output",
+        "address", "username"}) without making one: the menubar's Backup...
+        asks that before its save panel."""
+        from . import confirm as _confirm
         from .backup import (create_backup, backup_filename, verify_wp_admin,
-                             get_admin_username, unchecked_notes)
+                             get_admin_username, unchecked_notes, served_onion_address)
         if not username:
             username = get_admin_username(data_dir=self.paths.data_dir)
         ok, err = verify_wp_admin(username, password)
         if not ok:
-            print(f"ERROR: {err}", file=sys.stderr)
-            return 1
-        addr = self.containers.get_onion_address()
+            return _confirm.answer_error(err, json_output)
+        # The address the live key derives to names the file: the tor
+        # container's hostname can lag it for a while after a key import or
+        # a restore.
+        addr = served_onion_address() or self.containers.get_onion_address()
+        filename = backup_filename(addr, username)
         if not output_path:
             backups_dir = os.path.expanduser("~/OnionPress/backups")
-            os.makedirs(backups_dir, exist_ok=True)
-            output_path = os.path.join(
-                backups_dir, backup_filename(addr, username))
+            if not check:
+                os.makedirs(backups_dir, exist_ok=True)
+            output_path = os.path.join(backups_dir, filename)
+        if check:
+            return _confirm.answer_ok(
+                json_output, text=f"OK: {username} verified; the backup would be {output_path}",
+                filename=filename, output=output_path, address=addr, username=username)
         try:
             metadata = create_backup(
                 onion_address=addr,
@@ -459,21 +724,72 @@ class OnionPressCLI:
                 include_host_secrets=True,
                 include_onion_key=True,
             )
-            print(f"Backup saved to: {output_path}")
-            if isinstance(metadata, dict) and metadata.get("onionheaven_data") == "unsealed":
-                from .backup import HUB_DATA_UNSEALED_NOTE
-                print(f"WARNING: {HUB_DATA_UNSEALED_NOTE}", file=sys.stderr)
-            # A hub or OnionHome check that did not answer: what this
-            # backup may lack.
-            for note in unchecked_notes(metadata):
-                print(f"WARNING: {note}", file=sys.stderr)
-            return 0
         except Exception as e:
             self.log(f"Backup failed: {e}")
-            return 1
+            return _confirm.answer_error(e, json_output)
+        print(f"Backup saved to: {output_path}")
+        notes = []
+        if isinstance(metadata, dict) and metadata.get("onionheaven_data") == "unsealed":
+            from .backup import HUB_DATA_UNSEALED_NOTE
+            notes.append(HUB_DATA_UNSEALED_NOTE)
+        # A hub or OnionHome check that did not answer: what this backup
+        # may lack.
+        notes.extend(unchecked_notes(metadata))
+        for note in notes:
+            print(f"WARNING: {note}", file=sys.stderr)
+        try:
+            size = os.path.getsize(output_path)
+        except OSError:
+            size = 0
+        return _confirm.answer_ok(json_output, output=output_path, bytes=size, notes=notes)
+
+    def cmd_restore_check(self, password: str, backup_path: str, hub_recovery_key: str,
+                          confirmed, json_output: bool) -> int:
+        """`onionpress restore <zip> --check`: the backup's facts for the
+        UI's own summary (address, date, username, version, whether its key
+        is in it), without restoring anything. A hub's backup with sealed
+        hub data asks "sealed-hub-data-left-out" unless a recovery key was
+        given (checked against the backup's key id: a wrong one is the
+        answer's error) or that was confirmed."""
+        from . import confirm as _confirm, hub_backup
+        from .backup import read_backup_metadata, metadata_text
+        try:
+            metadata = read_backup_metadata(backup_path, password)
+        except ValueError as e:
+            return _confirm.answer_error(e, json_output)
+        except Exception as e:
+            return _confirm.answer_error(f"Could not read backup: {e}", json_output)
+        # read_backup_metadata validated the address and username; the other
+        # fields are only shown, so they go through metadata_text.
+        hub_data = metadata.get("onionheaven_data")
+        facts = {
+            "onion_address": metadata.get("onion_address") or "unknown",
+            "backup_date": metadata_text(metadata, "backup_date"),
+            "username": metadata_text(metadata, "username"),
+            "onionpress_version": metadata_text(metadata, "onionpress_version"),
+            "excludes_onion_key": metadata.get("excludes_onion_key") is True,
+            "onionheaven_data": hub_data if hub_data in ("sealed", "unsealed") else None,
+        }
+        if hub_data == "sealed":
+            kid = metadata.get("onionheaven_recovery_key_id")
+            facts["recovery_key_id"] = kid if hub_backup.is_key_id(kid) else "unknown"
+            if hub_recovery_key:
+                try:
+                    hub_backup.check_key_for_backup(hub_recovery_key, metadata)
+                except (hub_backup.RecoveryKeyError, hub_backup.SodiumUnavailableError) as e:
+                    return _confirm.answer_error(e, json_output)
+                facts["recovery_key"] = "accepted"
+            elif "sealed-hub-data-left-out" not in confirmed:
+                return _confirm.answer_confirm(
+                    _confirm.NeedsConfirmation("sealed-hub-data-left-out",
+                                               key_id=facts["recovery_key_id"], **facts),
+                    json_output)
+        return _confirm.answer_ok(
+            json_output, text="\n".join(f"{k}: {v}" for k, v in facts.items()), **facts)
 
     def cmd_restore(self, password: str, backup_path: str,
-                    hub_recovery_key: str = "") -> int:
+                    hub_recovery_key: str = "", *, confirmed=frozenset(),
+                    json_output: bool = False) -> int:
         """Restore from a backup via install-from-backup: tear the install down
         to a clean state and rebuild it directly from the backup (key + DB +
         content), instead of overwriting a live install in place. No vanity
@@ -492,8 +808,17 @@ class OnionPressCLI:
         is asked to let go of the key, and nothing is seeded. With no
         address to keep (OnionPress not running, a new install) it is
         refused before anything is changed (backup.NO_KEY_TO_KEEP_MSG).
+
+        Not at a terminal, a sealed backup without a key is restored
+        without its hub data only with --confirmed sealed-hub-data-left-out
+        (the menubar asks first: cmd_restore_check); refused otherwise.
+        With *json_output* the last line is {"ok": true, "address",
+        "hub_data": "restored"|"left-out"|"plain"|"none", "left_on_hubs"}.
         """
         import shutil
+        from . import confirm as _confirm
+        # What was logged, for the answer (the hub data's fate).
+        self.log = recorder = _LogRecorder(self.log)
         # The key seed below runs from the stack's pinned tor image; make
         # sure it is here before anything is changed.
         image = self.containers.ensure_tor_image()
@@ -507,8 +832,19 @@ class OnionPressCLI:
             from .backup import (prepare_install_from_backup, read_backup_metadata,
                                  open_sealed_hub_data, staged_onion_key_address)
             from .key_manager import is_valid_onion_address
-            hub_key = _hub_key_for_backup(
-                read_backup_metadata(backup_path, password), hub_recovery_key, self.log)
+            metadata = read_backup_metadata(backup_path, password)
+            interactive = sys.stdin is not None and sys.stdin.isatty()
+            if (metadata.get("onionheaven_data") == "sealed" and not hub_recovery_key
+                    and not interactive and "sealed-hub-data-left-out" not in confirmed):
+                from .backup import sealed_skipped_message
+                self.log("Restore refused: the backup's sealed hub data needs the "
+                         "recovery key or --confirmed sealed-hub-data-left-out")
+                return _confirm.answer_error(
+                    sealed_skipped_message(metadata) + " Give the key in "
+                    f"{RECOVERY_KEY_ENV}, or run again with --confirmed "
+                    "sealed-hub-data-left-out to restore everything else.",
+                    json_output, code=_confirm.EXIT_REFUSED)
+            hub_key = _hub_key_for_backup(metadata, hub_recovery_key, self.log)
 
             def open_hub_data(staging, metadata):
                 if hub_key is None:
@@ -640,6 +976,23 @@ class OnionPressCLI:
             derivatives.spawn_regeneration(
                 self.paths.data_dir, self.log, self.paths.log_file)
             print("Restore complete. OnionPress rebuilt from backup.")
+            if json_output:
+                from . import onionheaven
+                from .backup import HUB_DATA_RESTORED_LOG
+                ctx = _hub_context(self.paths.data_dir, self.log)
+                left = [{"content_address": a, "onionheaven_address": h, "why": "no-key"}
+                        for a, h in onionheaven.registrations_left(ctx) if a != addr]
+                answer = {"ok": True, "address": addr, "left_on_hubs": left}
+                if meta.get("onionheaven_data") == "sealed":
+                    if any(HUB_DATA_RESTORED_LOG in m for m in recorder.seen):
+                        answer["hub_data"] = "restored"
+                    else:
+                        from .backup import HUB_DATA_NOT_RESTORED_NOTE
+                        answer["hub_data"] = "left-out"
+                        answer["hub_data_note"] = HUB_DATA_NOT_RESTORED_NOTE
+                else:
+                    answer["hub_data"] = "plain" if meta.get("onionheaven_data") else "none"
+                print(_confirm.dumps(answer))
             return 0
         except Exception as e:
             self.log(f"Restore failed: {e}")
@@ -1088,74 +1441,44 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         return smoke_test_wayback(self.log)
 
     def cmd_check_for_update(self, json_output: bool = False,
-                              current: str = None) -> int:
-        """Check GitHub for a newer release. Always exits 0.
+                             current: str = None) -> int:
+        """Check GitHub for a newer release (check_for_update_report)."""
+        return check_for_update_report(current or __version__, self.log, json_output)
 
-        On any failure (network down, GitHub rate-limited, parse error)
-        the JSON output carries an ``error`` field and ``update_available``
-        is false — callers render that to the user instead of crashing.
-        """
-        from datetime import datetime, timezone
-        from . import updater
-
-        if not current:
-            current = __version__
-
-        # ``updater.check_for_update`` conflates "up to date" and "error":
-        # both return ``None``. Capture the log to recover the distinction
-        # without touching updater.py.
-        error_msg = None
-
-        def capture_log(msg: str) -> None:
-            nonlocal error_msg
-            if "failed" in msg.lower():
-                error_msg = msg
-            self.log(msg)
-
-        result = updater.check_for_update(current, log=capture_log)
-
-        if result is not None:
-            release_data, latest = result
-            update_available = True
-            release_url = f"https://github.com/brewsterkahle/onionpress/releases/tag/v{latest}"
-            release_notes = (release_data.get("body") or "").strip()
-            published_at = release_data.get("published_at")
-        else:
-            update_available = False
-            release_url = None
-            release_notes = None
-            published_at = None
-            latest = None if error_msg else current
-
-        report = {
-            "current": current,
-            "latest": latest,
-            "update_available": update_available,
-            "release_url": release_url,
-            "release_notes": release_notes,
-            "published_at": published_at,
-            "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "error": error_msg,
-        }
-
-        if json_output:
-            print(json.dumps(report, indent=2))
-            return 0
-
-        print(f"Installed: {current}")
-        if error_msg:
-            print(f"Update check failed: {error_msg}")
-            return 0
-        if update_available:
-            print(f"Update available: {latest}  (published {published_at or '?'})")
-            if release_notes:
-                snippet = (release_notes if len(release_notes) <= 800
-                           else release_notes[:800] + "\n... (truncated)")
-                print()
-                print(snippet)
-        else:
-            print("Already up to date.")
-        return 0
+    def cmd_update_images(self, json_output: bool = False) -> int:
+        """`onionpress update-images`: pull the stack's pinned images (the
+        menubar's Check for Updates; a launch pulls only what is missing).
+        Never for locally built images (containers.using_local_images). A
+        fresh download is followed by a prune of dangling images (#230)."""
+        from . import confirm as _confirm
+        from .containers import using_local_images
+        if using_local_images(self.paths.config_file):
+            self.log("Skipping image update: running locally built images")
+            return _confirm.answer_ok(
+                json_output, text="Skipping image update: running locally built images",
+                pulled=False, local_images=True)
+        result = self.containers.pull_images_result(timeout=600)
+        if not result.ok:
+            return _confirm.answer_error(
+                f"image pull failed: {(result.stderr or '').strip()[-400:]}", json_output)
+        pulled = "Downloaded" in result.stdout or "Pulled" in result.stdout
+        reclaimed = ""
+        if pulled:
+            # Issue #230: prune dangling images right after a fresh pull,
+            # exactly when old tags become <none>. Dangling-only (no -a),
+            # so in-use and tagged images are untouched.
+            r = self.docker.run(["image", "prune", "-f"], timeout=60, quiet=True)
+            if r.ok:
+                for line in (r.stdout or "").splitlines():
+                    if line.strip().startswith("Total reclaimed space:"):
+                        reclaimed = line.split(":", 1)[1].strip()
+                self.log(f"Pruned dangling images: {reclaimed}" if reclaimed
+                         else "Pruned dangling images")
+        self.log("Docker images updated successfully" if pulled
+                 else "Docker images are up to date")
+        return _confirm.answer_ok(
+            json_output, text=("Images updated." if pulled else "Images are up to date."),
+            pulled=pulled, local_images=False, reclaimed=reclaimed)
 
     # ─── Vanity address + admin-password (shared with Mac/tray) ─────────
 
@@ -1240,9 +1563,36 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         print(pw)
         return 0
 
-    def cmd_reset(self, yes: bool = False) -> int:
-        """Reset OnionPress — wipe all data and start fresh."""
-        if not yes:
+    def cmd_reset(self, yes: bool = False, *, check: bool = False,
+                  json_output: bool = False, confirmed=frozenset()) -> int:
+        """Reset OnionPress — wipe all data and start fresh.
+
+        The questions ("hub-holds-key" when an OnionHeaven hub may hold the
+        key and OnionPress is not running to ask it, then "reset") are
+        answered with --confirmed, at a terminal here, or by --yes; a
+        non-terminal run without them is refused (onionpress.confirm).
+        """
+        from . import confirm as _confirm, onionheaven
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+        ctx = _hub_context(self.paths.data_dir, self.log)
+        held = onionheaven.registrations_left(ctx)
+        running = self.docker.container_running("onionpress-tor")
+        if check:
+            try:
+                if held and not running:
+                    _confirm.require("hub-holds-key", confirmed, hubs=[
+                        {"content_address": a, "onionheaven_address": h} for a, h in held])
+                _confirm.require("reset", confirmed, deletes=[
+                    "WordPress, database, Tor state", "onion address keys",
+                    "config and secrets"])
+            except _confirm.NeedsConfirmation as e:
+                return _confirm.answer_confirm(e, json_output)
+            return _confirm.answer_ok(json_output, text="OK: nothing left to ask.",
+                                      running=running)
+        if not yes and "reset" not in confirmed:
+            if not interactive:
+                return _confirm.answer_error(_confirm.NOT_CONFIRMED_MSG.format(what="reset"),
+                                             json_output, code=_confirm.EXIT_REFUSED)
             print()
             print("  This will ERASE everything: WordPress, database, Tor state,")
             print("  onion address keys, config, and secrets.")
@@ -1258,8 +1608,15 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         # The key goes with the reset: ask the OnionHeaven hubs that may
         # hold a copy to delete it first, while the key is here to sign
         # the request.
-        remaining = release_onionheaven("reset", data_dir=self.paths.data_dir)
-        if (not yes and any(i["why"] in _RETRYABLE for i in remaining)):
+        remaining = release_onionheaven("reset", data_dir=self.paths.data_dir,
+                                        out=sys.stderr if json_output else sys.stdout)
+        if (not yes and "hub-holds-key" not in confirmed
+                and any(i["why"] in _RETRYABLE for i in remaining)):
+            if not interactive:
+                return _confirm.answer_error(
+                    "Not reset: an OnionHeaven hub keeps the key (start OnionPress "
+                    "and try again, or run again with --confirmed hub-holds-key).",
+                    json_output, code=_confirm.EXIT_REFUSED)
             try:
                 answer = input("  Reset anyway? The hub keeps the key listed "
                                "above. [y/N] ")
@@ -1311,7 +1668,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         self.log("Removed keys, config, secrets, and logs")
         print("\n  Reset complete. Run 'onionpress start' to start fresh.")
         self._remove_pid_lock()
-        return 0
+        return _confirm.answer_ok(json_output, remaining=remaining)
 
     # -- PID lock --
 
@@ -1431,6 +1788,7 @@ def main(argv: list[str] = None) -> int:
     parser.add_argument("--data-dir", help="Override data directory (default: ~/.onionpress/)")
 
     sub = parser.add_subparsers(dest="command", help="Command to run")
+    from . import confirm as _confirm
 
     sub.add_parser("start", help="Start OnionPress")
     sub.add_parser("stop", help="Stop OnionPress")
@@ -1468,6 +1826,7 @@ def main(argv: list[str] = None) -> int:
         "-o", "--output", dest="output_opt", metavar="OUTPUT",
         help="Output path, for use without the positional password")
     p_backup.add_argument("--user", help="WP admin username (default: auto-resolve)")
+    _confirm.add_arguments(p_backup)
 
     p_restore = sub.add_parser(
         "restore", help="Restore from backup",
@@ -1477,9 +1836,31 @@ def main(argv: list[str] = None) -> int:
         "password", nargs="?",
         help="Deprecated: visible to other local users; leave it out")
     p_restore.add_argument("backup_file", help="Path to backup .zip file")
+    _confirm.add_arguments(p_restore)
 
     p_reset = sub.add_parser("reset", help="Wipe all data and start fresh")
     p_reset.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    _confirm.add_arguments(p_reset)
+
+    p_update = sub.add_parser(
+        "update",
+        help="(macOS) Check GitHub for a new release and install it, replacing "
+             "the app bundle (--check to only check, --yes to skip the prompt)")
+    p_update.add_argument("--check", action="store_true", help="Only check; install nothing")
+    p_update.add_argument("--yes", "-y", action="store_true",
+                          help="Install without prompting (scripts, the menubar)")
+    p_update.add_argument("--json", action="store_true",
+                          help="Answer with one JSON object on the last line")
+    p_upimg = sub.add_parser(
+        "update-images",
+        help="Pull the stack's pinned container images (the opt-in refresh)")
+    p_upimg.add_argument("--json", action="store_true",
+                         help="Answer with one JSON object on the last line")
+    p_uninst = sub.add_parser(
+        "uninstall",
+        help="(macOS) Remove OnionPress: the onion address and key, the site, "
+             "the container VM and ~/.onionpress (asks first)")
+    _confirm.add_arguments(p_uninst)
 
     p_ohu = sub.add_parser(
         "onionheaven-unregister",
@@ -1799,7 +2180,6 @@ def main(argv: list[str] = None) -> int:
     # The WordPress Settings page's requests (issue #366): one handler for
     # both platforms, run by onionpress-watcher.timer on Linux and by the
     # menubar's status loop on a Mac.
-    from . import confirm as _confirm
     p_ha = sub.add_parser(
         "handle-action",
         help="Handle the WordPress Settings page's request (requested-action "
@@ -1881,6 +2261,27 @@ def main(argv: list[str] = None) -> int:
         if args.json:
             print(_confirm.dumps(result))
         return 0
+
+    if args.command == "update" and detect_os() == OS.MACOS:
+        # Replaces the bundle this process runs from: no OnionPressCLI
+        # setup, nothing but the updater.
+        paths = resolve_paths(data_dir=args.data_dir)
+        return cmd_update(paths, _make_log_func(paths.log_file), check=args.check,
+                          yes=args.yes, json_output=args.json)
+
+    if args.command == "uninstall":
+        # About to remove the data directory: no OnionPressCLI setup (it
+        # would create config and secrets there).
+        from . import handle_action as _ha
+        paths = resolve_paths(data_dir=args.data_dir)
+        log = _make_log_func(paths.log_file)
+        os_name = detect_os().value
+        if os_name != "macos":
+            return _confirm.answer_error(
+                "onionpress uninstall is the Linux launcher's own command", args.json)
+        return cmd_uninstall(paths, Docker(paths, log_func=log), log,
+                             _ha.default_launcher(paths, os_name), check=args.check,
+                             json_output=args.json, confirmed=_confirm.given(args))
 
     if args.command in ("settings-page-backup", "settings-page-restore"):
         # The page's own backup and restore, run by handle-action through
@@ -2054,8 +2455,14 @@ def main(argv: list[str] = None) -> int:
     if args.command in ("backup", "restore"):
         password = read_backup_password(args.password)
         if not password:
-            print("ERROR: a password is required.", file=sys.stderr)
-            return 1
+            if args.command == "restore" and args.check:
+                # The UI asks for the password next, worded with the login
+                # the file's name carries (for the prompt only).
+                from .backup import backup_filename_username
+                return _confirm.answer_ask(
+                    "password", args.json,
+                    backup_user=backup_filename_username(args.backup_file))
+            return _confirm.answer_error("a password is required", args.json)
 
     cli = OnionPressCLI(data_dir=args.data_dir)
 
@@ -2073,12 +2480,17 @@ def main(argv: list[str] = None) -> int:
     elif args.command == "get":
         return cli.cmd_get(args.url, headers=args.headers, max_time=args.max_time)
     elif args.command == "backup":
-        return cli.cmd_backup(password, args.output_opt or args.output, args.user)
+        return cli.cmd_backup(password, args.output_opt or args.output, args.user,
+                              check=args.check, json_output=args.json)
     elif args.command == "restore":
         # A hub's recovery key, when one was given (cmd_restore asks at a
         # terminal otherwise).
-        extra = (hub_recovery_key,) if hub_recovery_key else ()
-        return cli.cmd_restore(password, args.backup_file, *extra)
+        confirmed = _confirm.given(args)
+        if args.check:
+            return cli.cmd_restore_check(password, args.backup_file, hub_recovery_key,
+                                         confirmed, args.json)
+        return cli.cmd_restore(password, args.backup_file, hub_recovery_key,
+                               confirmed=confirmed, json_output=args.json)
     elif args.command == "import-backup-artifacts":
         return cli.cmd_import_backup_artifacts(args.staging)
     elif args.command == "regenerate-derivatives":
@@ -2094,7 +2506,10 @@ def main(argv: list[str] = None) -> int:
             return cli.cmd_pack_backup(args.staging, args.output, pw)
         return cli.cmd_extract_backup(args.archive, args.dest, pw)
     elif args.command == "reset":
-        return cli.cmd_reset(yes=args.yes)
+        return cli.cmd_reset(yes=args.yes, check=args.check, json_output=args.json,
+                             confirmed=_confirm.given(args))
+    elif args.command == "update-images":
+        return cli.cmd_update_images(json_output=args.json)
     elif args.command == "smoke-test-wayback":
         return cli.cmd_smoke_test_wayback()
     elif args.command == "check-for-update":

@@ -43,11 +43,8 @@ sys.path.insert(0, script_dir)
 from onionpress import onion_proxy
 from onionpress import install_native_messaging
 from onionpress import onionheaven
-from onionpress import updater
 from onionpress import key_manager
 from onionpress import login_item
-from onionpress import backup as backup_manager
-from onionpress import hub_backup
 try:
     from onionpress import setup_window
 except ImportError:
@@ -4051,18 +4048,33 @@ class OnionPressApp(rumps.App):
             stdin = f"{value}\n"
         else:
             argv.append(value)
-        try:
-            result = subprocess.run(
-                argv, input=stdin, capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=120)
-        except (OSError, subprocess.SubprocessError) as e:
-            self.log(f"config set {key} failed to run: {e}")
-            return False
+        argv.append("--json")
+        confirmed = []
+        while True:
+            try:
+                result = subprocess.run(
+                    argv + [f for w in confirmed for f in ("--confirmed", w)],
+                    input=stdin, capture_output=True, text=True,
+                    **({} if stdin is not None else {"stdin": subprocess.DEVNULL}),
+                    encoding="utf-8", errors="replace", timeout=120)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(f"config set {key} failed to run: {e}")
+                return False
+            answer = op_confirm.last_json_line(result.stdout) or {}
+            # A question the CLI stops at (an ADDRESS_PREFIX the live
+            # address does not start with: "prefix-change"), asked here.
+            if result.returncode == op_confirm.EXIT_CONFIRM and answer.get("confirm"):
+                if not self._ask_cli_question(answer["confirm"], answer, action="Change"):
+                    self.log(f"config set {key}: not confirmed ({answer['confirm']})")
+                    return False
+                confirmed.append(answer["confirm"])
+                continue
+            break
         if result.returncode != 0:
             # The CLI prints no secret value; a refusal names the key and
             # what it must be.
             self.log(f"config set {key} refused (rc {result.returncode}): "
-                     f"{(result.stderr or result.stdout).strip()}")
+                     f"{answer.get('error') or (result.stderr or result.stdout).strip()}")
             return False
         self.apply_config_changes(op_config.take_config_changes(self.app_support))
         return True
@@ -4119,9 +4131,73 @@ class OnionPressApp(rumps.App):
             callbacks={'write_config': self.write_config_value},
         )
 
+    def _run_launcher_json(self, args, env=None, input=None, timeout=None, on_line=None):
+        """Run `onionpress <args>` and read the JSON object the CLI prints
+        last (onionpress.confirm). Returns (rc, answer or None, stdout,
+        stderr). *env* is merged into the environment: a password or key
+        goes there, never on argv. With *on_line*, every line the CLI logs
+        on stderr is handed over as it arrives (a progress window), its
+        time stamp removed. The CLI gets no terminal: stdin is /dev/null
+        unless *input* is given."""
+        full_env = {**os.environ, **(env or {})}
+        argv = [self.launcher_script, *args]
+        try:
+            if on_line is None:
+                r = subprocess.run(
+                    argv, env=full_env, input=input,
+                    **({} if input is not None else {"stdin": subprocess.DEVNULL}),
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=timeout)
+                return r.returncode, op_confirm.last_json_line(r.stdout), r.stdout, r.stderr
+            proc = subprocess.Popen(
+                argv, env=full_env,
+                stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace")
+            if input is not None:
+                proc.stdin.write(input)
+                proc.stdin.close()
+            err_lines = []
+
+            def drain():
+                for line in proc.stderr:
+                    line = line.rstrip("\n")
+                    err_lines.append(line)
+                    try:
+                        on_line(launcher_ops.strip_log_stamp(line))
+                    except Exception:
+                        pass
+            t = threading.Thread(target=drain, daemon=True)
+            t.start()
+            out = proc.stdout.read()
+            rc = proc.wait(timeout=timeout)
+            t.join(5)
+            return rc, op_confirm.last_json_line(out), out, "\n".join(err_lines)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(f"onionpress {' '.join(args[:2])}: could not run: {e}")
+            return -1, None, "", str(e)
+
+    @staticmethod
+    def _launcher_failure(stdout, stderr, default):
+        """What a failed `onionpress` run said: its last ERROR line, else
+        its last line, else *default*."""
+        lines = [ln.strip() for ln in (stderr or "").splitlines() + (stdout or "").splitlines()
+                 if ln.strip()]
+        errors = [ln for ln in lines if ln.startswith("ERROR")]
+        if errors:
+            return launcher_ops.strip_log_stamp(errors[-1])[len("ERROR:"):].strip() or default
+        return launcher_ops.strip_log_stamp(lines[-1]) if lines else default
+
     @rumps.clicked("Backup...")
     def backup(self, _, on_complete=None):
-        """Create a full backup of OnionPress (Tor keys, database, wp-content).
+        """Create a full backup through `onionpress backup` (cli.cmd_backup:
+        saved where the owner chooses, never handed to WordPress, so with an
+        OnionHeaven hub's registry and registrants' keys, sealed to its
+        recovery key when one is set up, the whole config and the site's
+        onion service key). The dialogs are this process's; the CLI
+        verifies the credentials and names the file (backup --check --json),
+        then makes the backup, its log lines shown as progress. The
+        password goes in the environment, never on argv.
 
         on_complete, if given, is called with True after a successful backup
         (once the user dismisses the "Done" alert) or False on any cancel /
@@ -4185,12 +4261,19 @@ class OnionPressApp(rumps.App):
                 on_complete(False)
             return
 
-        # Verify credentials
+        # The CLI verifies the credentials and names the file after the
+        # address the live key derives to (the cached one can lag a key
+        # import or a restore).
         self.log("Backup: verifying credentials...")
-        ok, err = backup_manager.verify_wp_admin(username, password)
-        if not ok:
-            self.log(f"Backup: credential verification failed: {err}")
-            rumps.alert(title="Verification Failed", message=err)
+        password_env = {launcher_ops.BACKUP_PASSWORD_ENV: password}
+        rc, ans, out, err = self._run_launcher_json(
+            ["backup", "--check", "--json", "--user", username], env=password_env,
+            timeout=120)
+        if not ans or not ans.get("ok"):
+            failure = (ans or {}).get("error") or self._launcher_failure(
+                out, err, "Could not verify the credentials")
+            self.log(f"Backup: credential verification failed: {failure}")
+            rumps.alert(title="Verification Failed", message=failure)
             if on_complete:
                 on_complete(False)
             return
@@ -4198,19 +4281,7 @@ class OnionPressApp(rumps.App):
         # Show NSSavePanel for output location
         panel = AppKit.NSSavePanel.savePanel()
         panel.setTitle_("Save Backup")
-        # Build the suggested filename from the address the live key derives
-        # to, not self.onion_address. The cached value can lag the keystore
-        # by up to ~30s after a vanity rotation / restore / key import — a
-        # backup opened in that window would otherwise be labeled with the
-        # PRIOR address while its contents are the NEW identity. Falls back
-        # to the cached value if the key can't be read.
-        try:
-            _, _pub = key_manager.extract_keys()
-            suggested_address = key_manager.derive_onion_address(_pub)
-        except Exception:
-            suggested_address = self.onion_address
-        panel.setNameFieldStringValue_(
-            backup_manager.backup_filename(suggested_address, username))
+        panel.setNameFieldStringValue_(ans.get("filename") or "OnionPress-backup.zip")
         backups_dir = os.path.expanduser("~/OnionPress/backups")
         os.makedirs(backups_dir, exist_ok=True)
         panel.setDirectoryURL_(
@@ -4231,52 +4302,46 @@ class OnionPressApp(rumps.App):
 
         def do_backup():
             pw = self._progress_window
-            try:
-                def log_and_update(msg):
-                    self.log(msg)
-                    display = msg.replace("Backup: ", "") if msg.startswith("Backup: ") else msg
-                    _main_thread(lambda: pw.update(display))
 
-                # Saved where the owner chose, never handed to WordPress: an
-                # OnionHeaven hub's registry and registrants' keys stay in,
-                # sealed to its recovery key when one is set up, and so do
-                # the whole config and the site's onion service key.
-                metadata = backup_manager.create_backup(
-                    self.onion_address, username, password,
-                    output_path, self.version, log_and_update,
-                    include_hub_data=True, include_host_secrets=True,
-                    include_onion_key=True)
+            def log_and_update(msg):
+                self.log(msg)
+                display = msg.replace("Backup: ", "") if msg.startswith("Backup: ") else msg
+                _main_thread(lambda: pw.update(display))
 
-                size_mb = os.path.getsize(output_path) / (1024 * 1024)
-                msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
-                # A hub without a recovery key: said every time.
-                if metadata.get("onionheaven_data") == "unsealed":
-                    msg += "\n\n" + backup_manager.HUB_DATA_UNSEALED_NOTE
-                # A hub or OnionHome check that did not answer: what this
-                # backup may lack, said every time.
-                for note in backup_manager.unchecked_notes(metadata):
-                    msg += "\n\n" + note
-                # Route completion through finish's on_done so on_complete(True)
-                # fires on the main thread AFTER the user dismisses the Done
-                # alert (not from this daemon thread, and not before the alert).
+            rc, ans, out, err = self._run_launcher_json(
+                ["backup", "--json", "-o", output_path, "--user", username],
+                env=password_env, on_line=log_and_update)
+            if rc != 0 or not ans or not ans.get("ok"):
+                failure = (ans or {}).get("error") or self._launcher_failure(
+                    out, err, "see the OnionPress log")
+                self.log(f"Backup failed: {failure}")
                 _main_thread(lambda: pw.finish(
-                    msg, on_done=(lambda: on_complete(True)) if on_complete else None))
-            except Exception as e:
-                self.log(f"Backup failed: {e}")
-                _main_thread(lambda: pw.finish(
-                    f"Backup failed: {e}",
+                    f"Backup failed: {failure}",
                     on_done=(lambda: on_complete(False)) if on_complete else None))
+                return
+            size_mb = (ans.get("bytes") or 0) / (1024 * 1024)
+            msg = f"Backup saved to {os.path.basename(output_path)} ({size_mb:.1f} MB)"
+            # What the CLI says every time: a hub without a recovery key,
+            # a hub or OnionHome check that did not answer (what this
+            # backup may lack).
+            for note in ans.get("notes") or []:
+                msg += "\n\n" + note
+            # Route completion through finish's on_done so on_complete(True)
+            # fires on the main thread AFTER the user dismisses the Done
+            # alert (not from this daemon thread, and not before the alert).
+            _main_thread(lambda: pw.finish(
+                msg, on_done=(lambda: on_complete(True)) if on_complete else None))
 
         threading.Thread(target=do_backup, daemon=True).start()
 
-    def _ask_hub_recovery_key(self, metadata):
-        """For a backup whose OnionHeaven hub data is sealed: the recovery
-        key's private half as typed, "" to restore without the hub data, or
-        None to cancel the restore. A key that is not this backup's is
-        caught here (hub_backup.check_key_for_backup: by its key id) and
-        asked for again."""
-        kid = metadata.get("onionheaven_recovery_key_id")
-        kid = kid if hub_backup.is_key_id(kid) else "unknown"
+    def _ask_hub_recovery_key(self, facts, zip_path, env):
+        """For a backup whose OnionHeaven hub data is sealed (the CLI's
+        "sealed-hub-data-left-out" question): the recovery key's private
+        half as typed, "" to restore without the hub data, or None to
+        cancel the restore. A typed key is checked by the CLI against the
+        backup (restore --check with the key in the environment: by its
+        key id) and asked for again when it is not this backup's."""
+        kid = facts.get("recovery_key_id") or "unknown"
         while True:
             alert = AppKit.NSAlert.alloc().init()
             alert.setMessageText_("Restore the Hub's Registrants' Keys?")
@@ -4301,16 +4366,25 @@ class OnionPressApp(rumps.App):
                 return ""
             if response != 1000:    # Cancel
                 return None
-            text = key_field.stringValue()
-            try:
-                hub_backup.check_key_for_backup(text, metadata)
+            text = key_field.stringValue().strip()
+            rc, ans, out, err = self._run_launcher_json(
+                ["restore", zip_path, "--check", "--json"],
+                env={**env, launcher_ops.HUB_RECOVERY_KEY_ENV: text}, timeout=300)
+            if ans and ans.get("ok"):
                 return text
-            except (hub_backup.RecoveryKeyError, hub_backup.SodiumUnavailableError) as e:
-                rumps.alert(title="Recovery Key Not Accepted", message=str(e))
+            rumps.alert(title="Recovery Key Not Accepted",
+                        message=(ans or {}).get("error") or self._launcher_failure(
+                            out, err, "The key could not be checked."))
 
     @rumps.clicked("Restore...")
     def restore(self, _):
-        """Restore OnionPress from a backup zip"""
+        """Restore OnionPress from a backup zip through `onionpress restore`
+        (install-from-backup: cli.cmd_restore tears the install down and
+        rebuilds it from the backup). The CLI is asked first what the
+        backup is (restore --check --json): the password it needs, the
+        facts for the confirmation dialog, and whether a hub's sealed data
+        needs the recovery key. The dialogs are this process's; the
+        password and the key go in the environment, never on argv."""
         # File picker for .zip
         panel = AppKit.NSOpenPanel.openPanel()
         panel.setTitle_("Select OnionPress Backup")
@@ -4325,10 +4399,12 @@ class OnionPressApp(rumps.App):
 
         zip_path = panel.URL().path()
 
-        # The username backup_filename() put in the file's name, to word the
-        # prompt. The name is the file's, not the backup's: shown only if it
-        # looks like a login, and used for nothing else.
-        backup_user = backup_manager.backup_filename_username(zip_path)
+        # What the CLI needs first: the password, its prompt worded with
+        # the login the file's name carries (for the prompt only; the name
+        # is the file's, not the backup's).
+        rc, ans, out, err = self._run_launcher_json(
+            ["restore", zip_path, "--check", "--json"], timeout=120)
+        backup_user = (ans or {}).get("backup_user") if (ans or {}).get("ask") == "password" else None
 
         # Prompt for password
         alert = AppKit.NSAlert.alloc().init()
@@ -4363,29 +4439,28 @@ class OnionPressApp(rumps.App):
             rumps.alert(title="No Password", message="A password is required.")
             return
 
-        # Validate zip by reading metadata
-        try:
-            metadata = backup_manager.read_backup_metadata(zip_path, password)
-        except ValueError as e:
-            rumps.alert(title="Invalid Backup", message=str(e))
-            return
-        except Exception as e:
-            self.log(f"Restore: failed to read backup metadata: {e}")
-            rumps.alert(title="Invalid Backup",
-                        message=f"Could not read backup: {e}")
+        # The backup's facts, read by the CLI (a wrong password or an
+        # invalid backup is its error).
+        restore_env = {launcher_ops.BACKUP_PASSWORD_ENV: password}
+        rc, facts, out, err = self._run_launcher_json(
+            ["restore", zip_path, "--check", "--json"], env=restore_env, timeout=300)
+        if not facts or facts.get("error") or not (facts.get("ok") or facts.get("confirm")):
+            failure = (facts or {}).get("error") or self._launcher_failure(
+                out, err, "Could not read backup")
+            self.log(f"Restore: failed to read backup metadata: {failure}")
+            rumps.alert(title="Invalid Backup", message=failure)
             return
 
-        # Show confirmation with backup details. read_backup_metadata has
-        # validated the address and username; the other fields are only
-        # shown, so they go through metadata_text (printable, short).
-        addr = metadata.get('onion_address') or 'unknown'
-        date = backup_manager.metadata_text(metadata, 'backup_date')
-        user = backup_manager.metadata_text(metadata, 'username')
-        ver = backup_manager.metadata_text(metadata, 'onionpress_version')
+        # Show confirmation with backup details (the CLI validated the
+        # address and username and sanitized the rest).
+        addr = facts.get('onion_address') or 'unknown'
+        date = facts.get('backup_date') or 'unknown'
+        user = facts.get('username') or 'unknown'
+        ver = facts.get('onionpress_version') or 'unknown'
         # A Settings page backup holds no key: the restore keeps this
         # site's address (the restore refuses one whose metadata says so
         # but which holds a key: backup.staged_onion_key_address).
-        if metadata.get('excludes_onion_key') is True:
+        if facts.get('excludes_onion_key') is True:
             addr += " (its key is not in this backup)"
             warning = ("WARNING: This will overwrite your current site and "
                        "database. This backup was made from the Settings "
@@ -4415,13 +4490,22 @@ class OnionPressApp(rumps.App):
 
         # An OnionHeaven hub's backup: its registry and registrants' keys
         # are sealed to the hub's recovery key, which the operator keeps
-        # off this machine. Asked for here and checked against the backup
-        # before anything is restored; without it the rest is restored.
-        hub_recovery_key = ""
-        if metadata.get("onionheaven_data") == "sealed":
-            hub_recovery_key = self._ask_hub_recovery_key(metadata)
+        # off this machine. The CLI stops at that question
+        # ("sealed-hub-data-left-out"); asked here and checked against the
+        # backup before anything is restored; without it the rest is
+        # restored, with --confirmed sealed-hub-data-left-out.
+        confirmed_flags = []
+        if facts.get("confirm") == "sealed-hub-data-left-out":
+            hub_recovery_key = self._ask_hub_recovery_key(facts, zip_path, restore_env)
             if hub_recovery_key is None:
                 return
+            if hub_recovery_key:
+                restore_env[launcher_ops.HUB_RECOVERY_KEY_ENV] = hub_recovery_key
+            else:
+                confirmed_flags = ["--confirmed", "sealed-hub-data-left-out"]
+        elif facts.get("confirm"):
+            self.log(f"Restore: unexpected question '{facts.get('confirm')}' (cancelled)")
+            return
 
         # Show progress window (stored on self to prevent garbage collection)
         self._progress_window = _BackupProgressWindow("Restoring OnionPress")
@@ -4435,10 +4519,9 @@ class OnionPressApp(rumps.App):
                     display = msg.replace("Restore: ", "") if msg.startswith("Restore: ") else msg
                     _main_thread(lambda: pw.update(display))
 
-                # install-from-backup: delegate to the launcher's `restore`,
-                # which now tears down + rebuilds the install directly from the
-                # backup (seeded key + imported DB/content) — no in-place
-                # overwrite and no .import-key-pending key-volume swap churn.
+                # install-from-backup: the launcher's `restore` tears down +
+                # rebuilds the install directly from the backup (seeded key
+                # + imported DB/content).
                 log_and_update("Rebuilding from backup (install-from-backup)…")
                 # The password goes in the environment: argv is readable by
                 # every local user (ps), the environment only by this one.
@@ -4446,13 +4529,14 @@ class OnionPressApp(rumps.App):
                 # environment before any docker child could inherit it).
                 # A failure shows the launcher's last lines, the staging
                 # folder kept for the next start and the log's path (#323).
-                hub_key_env = ({hub_backup.RECOVERY_KEY_ENV: hub_recovery_key}
-                               if hub_recovery_key else {})
-                ok, failure, restore_stderr = launcher_ops.run_launcher_restore(
+                hub_key_env = {k: v for k, v in restore_env.items()
+                               if k == launcher_ops.HUB_RECOVERY_KEY_ENV}
+                ok, failure, restore_stderr, _out, answer = launcher_ops.run_launcher_restore(
                     self.launcher_script, zip_path, password,
                     data_dir=self.app_support,
                     log_path=os.path.join(self.app_support, "onionpress.log"),
                     extra_env=hub_key_env,
+                    extra_args=["--json", *confirmed_flags],
                     # No time limit (issue #317): a fixed 1800 s ended a
                     # large site's restore halfway and left the launcher's
                     # steps running; those steps carry their own limits,
@@ -4463,11 +4547,12 @@ class OnionPressApp(rumps.App):
                     _main_thread(lambda: pw.finish(failure,
                                                    title="Restore Failed"))
                     return
+                answer = answer or {}
 
                 restored_addr = self._adopt_restored_address()
                 if not restored_addr:
                     # Shown only; update_status picks the address up from Tor.
-                    restored_addr = addr
+                    restored_addr = answer.get("address") or addr
                 self.log(f"Restore complete (install-from-backup): {restored_addr}")
 
                 # Build summary of what was restored and what will happen
@@ -4476,9 +4561,7 @@ class OnionPressApp(rumps.App):
                 # The restore asked OnionHeaven to delete its copy of the
                 # replaced key (onionpress.cli restore); say what a hub may
                 # still hold of a key this install no longer has.
-                left = [{"content_address": a, "onionheaven_address": h, "why": "no-key"}
-                        for a, h in onionheaven.registrations_left(self)
-                        if a != restored_addr]
+                left = answer.get("left_on_hubs") or []
                 if left:
                     notes.append(onionheaven.describe_remaining(left))
 
@@ -4496,12 +4579,14 @@ class OnionPressApp(rumps.App):
                         notes.append(f"OnionHeaven detected — VM memory: {cur_mem} GB.")
 
                 # A hub's sealed registry and registrants' keys: whether they
-                # came back (the CLI logs HUB_DATA_RESTORED_LOG once written).
-                if metadata.get("onionheaven_data") == "sealed":
-                    if backup_manager.HUB_DATA_RESTORED_LOG in restore_stderr:
+                # came back (the CLI's answer says).
+                if facts.get("onionheaven_data") == "sealed":
+                    if answer.get("hub_data") == "restored":
                         notes.append("OnionHeaven registry and registrants' keys: restored.")
+                    elif answer.get("hub_data_note"):
+                        notes.append(answer["hub_data_note"])
                     else:
-                        notes.append(backup_manager.HUB_DATA_NOT_RESTORED_NOTE)
+                        notes.append("OnionHeaven registry and registrants' keys: not restored.")
 
                 summary = "Site restored successfully.\n\n" + "\n".join(notes)
                 _main_thread(lambda: pw.finish(summary))
@@ -4550,73 +4635,28 @@ class OnionPressApp(rumps.App):
                  "(Settings, or next launch retries)")
 
     def update_docker_images(self, show_notifications=True):
-        """Update Docker images (WordPress, MariaDB, Tor)"""
-        try:
-            # A pull would overwrite a locally built tag with the registry's
-            # copy — see containers.using_local_images(). The bash launchers
-            # gate their pulls the same way.
-            if containers.using_local_images(self._paths.config_file):
-                self.log("Skipping image update: running locally built images")
-                if show_notifications:
-                    self.show_native_alert(
-                        "Running Locally Built Images",
-                        "Image updates are skipped because ONIONPRESS_TOR_IMAGE "
-                        "or ONIONPRESS_WORDPRESS_IMAGE points at a locally built "
-                        "image.\nUnset it to resume updates from the registry.",
-                    )
-                return False
-
-            self.log("Checking for Docker image updates...")
-            docker_compose_file = os.path.join(self.parent_resources_dir, "docker", "docker-compose.yml")
-
-            self.log("Pulling latest Docker images...")
-            result = self._docker.compose(
-                ["pull"],
-                compose_files=[docker_compose_file],
-                timeout=300,
-            )
-
-            if result.ok:
-                self.log("Docker images updated successfully")
-                pulled = "Downloaded" in result.stdout or "Pulled" in result.stdout
-                # Issue #230: prune dangling images immediately after pull.
-                # Only fires when there's been a fresh download — otherwise no
-                # new <none> tags to clean up. Dangling-only (no -a) so we
-                # never touch images that aren't in use but are still tagged.
-                if pulled:
-                    self._prune_dangling_images()
-                return pulled
-            else:
-                self.log(f"Failed to update Docker images: {result.stderr}")
-                return False
-
-        except Exception as e:
-            self.log(f"Error updating Docker images: {e}")
+        """Pull the stack's container images through `onionpress
+        update-images` (cli.cmd_update_images: never for locally built
+        images, a prune of dangling images after a fresh download, #230).
+        True when something was downloaded."""
+        rc, ans, out, err = self._run_launcher_json(["update-images", "--json"], timeout=900)
+        if not ans:
+            self.log(f"Error updating Docker images: {self._launcher_failure(out, err, 'no answer')}")
             return False
-
-    def _prune_dangling_images(self):
-        """Reclaim disk by removing dangling images (issue #230).
-
-        Called right after a successful image pull, since that's exactly
-        when old tags become <none>. Safe: docker image prune (no -a)
-        only removes untagged images, never in-use or freshly-tagged ones.
-        """
-        try:
-            r = self._docker.run(
-                ["image", "prune", "-f"],
-                timeout=60,
-                quiet=True,
-            )
-            if r.ok:
-                # Output looks like: "Total reclaimed space: 1.234GB"
-                for line in (r.stdout or "").splitlines():
-                    line = line.strip()
-                    if line.startswith("Total reclaimed space:"):
-                        self.log(f"Pruned dangling images: {line.split(':', 1)[1].strip()}")
-                        return
-                self.log("Pruned dangling images")
-        except Exception as e:
-            self.log(f"Image prune skipped: {e}")
+        if ans.get("local_images"):
+            self.log("Skipping image update: running locally built images")
+            if show_notifications:
+                self.show_native_alert(
+                    "Running Locally Built Images",
+                    "Image updates are skipped because ONIONPRESS_TOR_IMAGE "
+                    "or ONIONPRESS_WORDPRESS_IMAGE points at a locally built "
+                    "image.\nUnset it to resume updates from the registry.",
+                )
+            return False
+        if ans.get("error"):
+            self.log(f"Failed to update Docker images: {ans['error']}")
+            return False
+        return bool(ans.get("pulled"))
 
     def _fix_app_bundle_permissions(self):
         """Make app bundle group-writable so any admin user can update it.
@@ -4663,90 +4703,88 @@ class OnionPressApp(rumps.App):
 
     @rumps.clicked("Check for Updates...")
     def check_for_updates(self, _):
-        """Check GitHub for newer versions and update Docker images"""
+        """Check GitHub for newer versions (`onionpress update --check
+        --json`: cli.check_for_update_report, with the other macOS users
+        running OnionPress) and update Docker images. The dialogs are this
+        process's."""
         app_update_available = False
-        try:
-            update_info = updater.check_for_update(self.version, log=self.log)
-
-            if update_info:
-                release_data, latest_version = update_info
-                app_update_available = True
-
-                # Multi-user check: are other users running OnionPress?
-                others = updater.detect_other_instances()
-                if others:
-                    our_offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0"))
-                    other_users = ", ".join(
-                        f"{o['user']}" for o in others
-                    )
-
-                    if our_offset != 0:
-                        # We're not the primary user — tell them to switch
-                        primary_user = others[0]["user"]
-                        self.show_native_alert(
-                            "Update Available",
-                            f"OnionPress v{latest_version} is available.\n\n"
-                            f"To keep port assignments stable, please install "
-                            f"the update from the primary account "
-                            f"(\"{primary_user}\", port 8080).\n\n"
-                            f"1. Quit OnionPress from this account first\n"
-                            f"2. Log in as {primary_user}\n"
-                            f"3. Click Check for Updates from their OnionPress menubar",
-                        )
-                        return
-                    else:
-                        # We're primary but others are still running
-                        active_offsets = updater.detect_active_offsets()
-                        user_lines = []
-                        for o in others:
-                            # Find the offset that isn't ours (0)
-                            other_offsets = [off for off in active_offsets if off != 0]
-                            port = 8080 + (other_offsets[0] if other_offsets else 10000)
-                            user_lines.append(f"  \u2022 {o['user']} (port {port})")
-                        user_list = "\n".join(user_lines)
-
-                        self.show_native_alert(
-                            "Update Available \u2014 Other Users Running",
-                            f"OnionPress v{latest_version} is available.\n\n"
-                            f"Other users are also running OnionPress:\n"
-                            f"{user_list}\n\n"
-                            f"To update safely:\n"
-                            f"1. Ask each user to Quit OnionPress from their menubar\n"
-                            f"2. Come back here and click Check for Updates again\n"
-                            f"3. After the update, each user can relaunch OnionPress\n\n"
-                            f"Their onion sites will be briefly offline during the update.",
-                        )
-                        return
-
-                # Single user (or primary and others have quit) — proceed
-                response = self.show_native_alert(
-                    "App Update Available",
-                    f"A new version of OnionPress is available!\n\nCurrent: v{self.version}\nLatest: v{latest_version}\n\nInstall will download and replace the app, then restart.",
-                    buttons=["Install Update", "Later"],
-                    cancel_button=1
-                )
-                if response == 0:  # Install Update clicked
-                    threading.Thread(
-                        target=self._install_update,
-                        args=(release_data, latest_version),
-                        daemon=True
-                    ).start()
-                    return  # Skip Docker update check — we're about to restart
-
-        except Exception as e:
-            self.log(f"Update check failed: {e}")
-            import traceback
-            self.log(traceback.format_exc())
+        rc, ans, out, err = self._run_launcher_json(["update", "--check", "--json"], timeout=120)
+        if not ans or ans.get("error"):
+            self.log(f"Update check failed: {(ans or {}).get('error') or self._launcher_failure(out, err, 'no answer')}")
             rumps.alert(
                 title="Update Check Failed",
                 message=f"Could not check for app updates.\n\nPlease visit:\nhttps://github.com/brewsterkahle/onionpress/releases"
             )
+        elif ans.get("update_available"):
+            app_update_available = True
+            latest_version = ans.get("latest") or "?"
+
+            # Multi-user check: are other users running OnionPress?
+            others = ans.get("other_instances") or []
+            if others:
+                our_offset = int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0"))
+
+                if our_offset != 0:
+                    # We're not the primary user — tell them to switch
+                    primary_user = others[0]["user"]
+                    self.show_native_alert(
+                        "Update Available",
+                        f"OnionPress v{latest_version} is available.\n\n"
+                        f"To keep port assignments stable, please install "
+                        f"the update from the primary account "
+                        f"(\"{primary_user}\", port 8080).\n\n"
+                        f"1. Quit OnionPress from this account first\n"
+                        f"2. Log in as {primary_user}\n"
+                        f"3. Click Check for Updates from their OnionPress menubar",
+                    )
+                    return
+                else:
+                    # We're primary but others are still running
+                    active_offsets = ans.get("active_offsets") or []
+                    user_lines = []
+                    for o in others:
+                        # Find the offset that isn't ours (0)
+                        other_offsets = [off for off in active_offsets if off != 0]
+                        port = 8080 + (other_offsets[0] if other_offsets else 10000)
+                        user_lines.append(f"  \u2022 {o['user']} (port {port})")
+                    user_list = "\n".join(user_lines)
+
+                    self.show_native_alert(
+                        "Update Available \u2014 Other Users Running",
+                        f"OnionPress v{latest_version} is available.\n\n"
+                        f"Other users are also running OnionPress:\n"
+                        f"{user_list}\n\n"
+                        f"To update safely:\n"
+                        f"1. Ask each user to Quit OnionPress from their menubar\n"
+                        f"2. Come back here and click Check for Updates again\n"
+                        f"3. After the update, each user can relaunch OnionPress\n\n"
+                        f"Their onion sites will be briefly offline during the update.",
+                    )
+                    return
+
+            # Single user (or primary and others have quit) — proceed
+            response = self.show_native_alert(
+                "App Update Available",
+                f"A new version of OnionPress is available!\n\nCurrent: v{self.version}\nLatest: v{latest_version}\n\nInstall will download and replace the app, then restart.",
+                buttons=["Install Update", "Later"],
+                cancel_button=1
+            )
+            if response == 0:  # Install Update clicked
+                threading.Thread(
+                    target=self._install_update,
+                    args=(latest_version,),
+                    daemon=True
+                ).start()
+                return  # Skip Docker update check — we're about to restart
 
         # Check for Docker image updates
         threading.Thread(target=self._check_docker_updates_async, args=(app_update_available,), daemon=True).start()
 
-    def _install_update(self, release_data, latest_version):
-        """Download DMG, replace app bundle, prompt restart."""
+    def _install_update(self, latest_version):
+        """`onionpress update --yes --json`: the CLI downloads the DMG and
+        swaps the bundle in (updater.download_and_install's staged copy and
+        rename; the swap is its last step, since the CLI itself runs out of
+        the bundle being replaced), then this process asks to relaunch."""
         install_path = os.path.dirname(self.contents_dir)
 
         # No notification toasts — the download-progress splash and the
@@ -4756,56 +4794,32 @@ class OnionPressApp(rumps.App):
         # newer macOS can trigger an unsolicited "Would you like to
         # allow notifications?" prompt the very first time the app
         # launches — confusing during setup.
-        try:
-            updater.download_and_install(
-                release_data, latest_version, install_path,
-                log=self.log, notify=None,
-            )
-
+        rc, ans, out, err = self._run_launcher_json(["update", "--yes", "--json"], on_line=self.log)
+        if rc == 0 and ans and ans.get("ok"):
+            installed = ans.get("version") or latest_version
             # Prompt user to restart. Button text is explicitly
             # "Restart OnionPress" (not "Restart Now") so it doesn't
             # read as "restart the Mac" in the modal.
             response = self.show_native_alert(
                 "Update Installed",
-                f"OnionPress v{latest_version} has been installed.\n\nRestart OnionPress to use the new version.\n\nThis will briefly stop and restart all containers to pick up any changes. Your onion address stays the same.",
+                f"OnionPress v{installed} has been installed.\n\nRestart OnionPress to use the new version.\n\nThis will briefly stop and restart all containers to pick up any changes. Your onion address stays the same.",
                 buttons=["Restart OnionPress", "Later"]
             )
             if response == 0:  # Restart OnionPress
                 self._relaunch_app(install_path)
+            return
 
-        except PermissionError as e:
-            self.log(f"Auto-update failed (permission denied): {e}")
-            import traceback
-            self.log(traceback.format_exc())
-
-            # Determine who owns the app bundle
-            owner_hint = ""
-            try:
-                import pwd
-                st = os.stat(install_path)
-                owner_name = pwd.getpwuid(st.st_uid).pw_name
-                owner_hint = f"\n\nThe app is owned by the \"{owner_name}\" account. "
-                if owner_name != os.environ.get("USER", ""):
-                    owner_hint += f"Either update from that account, or run this in Terminal:\n\nsudo chown -R $(whoami):admin \"{install_path}\" && chmod -R g+w \"{install_path}\""
-            except Exception:
-                pass
-
+        failure = (ans or {}).get("error") or self._launcher_failure(out, err, "see the OnionPress log")
+        self.log(f"Auto-update failed: {failure}")
+        if ans and ans.get("permission_denied"):
             self.show_native_alert(
-                "Update Failed \u2014 Permission Denied",
-                f"OnionPress v{latest_version} was downloaded but could not be installed because another user account owns the app bundle.{owner_hint}",
-                style="warning"
-            )
-
-        except Exception as e:
-            self.log(f"Auto-update failed: {e}")
-            import traceback
-            self.log(traceback.format_exc())
-
-            self.show_native_alert(
-                "Update Failed",
-                f"Could not install the update automatically.\n\n{e}\n\nYou can update manually from:\nhttps://github.com/brewsterkahle/onionpress/releases",
-                style="warning"
-            )
+                "Update Failed \u2014 Permission Denied", failure, style="warning")
+            return
+        self.show_native_alert(
+            "Update Failed",
+            f"Could not install the update automatically.\n\n{failure}\n\nYou can update manually from:\nhttps://github.com/brewsterkahle/onionpress/releases",
+            style="warning"
+        )
 
     def _relaunch_app(self, app_path):
         """Full quit (stop containers + VM) then launch the new app"""
@@ -5056,60 +5070,38 @@ License: AGPL v3 or later"""
         self._proceed_with_uninstall()
 
     def _proceed_with_uninstall(self):
-        """Final 'DELETE' confirmation + teardown. Invoked directly for
-        "Delete Everything", or as the backup on_complete callback (success
-        only) so the destructive work never races an in-progress backup (#258)."""
-        # An OnionHeaven hub may hold a copy of the key. Only the key can
-        # sign the request that makes the hub delete it, and the key lives
-        # in the tor container: with OnionPress stopped, say so first.
-        hubs_holding = [] if self.is_onionheaven else onionheaven.registrations_left(self)
-        if hubs_holding and not self.is_running:
-            listed = "\n".join(f"• {hub} (key of {addr})" for addr, hub in hubs_holding)
-            button_index = self.show_native_alert(
-                title="OnionHeaven Holds Your Key",
-                message=("These OnionHeaven hubs may hold a copy of your onion "
-                         f"service private key:\n\n{listed}\n\n"
-                         "OnionPress asks them to delete it when you uninstall, "
-                         "but only while it is running. Start OnionPress and "
-                         "uninstall again, or uninstall anyway and the hub "
-                         "keeps the key."),
-                buttons=["Cancel", "Uninstall Anyway"],
-                default_button=0,
-                cancel_button=0,
-                style="critical"
-            )
-            if button_index != 1:
-                self.log("Uninstall cancelled - OnionHeaven hub holds the key, "
-                         "OnionPress not running")
+        """The questions, then the teardown. Invoked directly for "Delete
+        Everything", or as the backup on_complete callback (success only)
+        so the destructive work never races an in-progress backup (#258).
+
+        `onionpress uninstall --check --json` says what to ask
+        (onionpress.confirm): "hub-holds-key" when an OnionHeaven hub may
+        hold a copy of the key and OnionPress is not running to ask it to
+        let go, then "uninstall" (the typed DELETE); each is answered here
+        and given back as --confirmed. The run itself is the CLI's
+        (onionpress.uninstall): the hubs, the stop, the Colima VM, the
+        login item, ~/.onionpress."""
+        confirmed = []
+        while True:
+            flags = [f for what in confirmed for f in ("--confirmed", what)]
+            rc, ans, out, err = self._run_launcher_json(
+                ["uninstall", "--check", "--json", *flags], timeout=300)
+            if not ans or ans.get("error"):
+                failure = (ans or {}).get("error") or self._launcher_failure(
+                    out, err, "see the OnionPress log")
+                self.log(f"Uninstall: check failed: {failure}")
+                self.show_native_alert(title="Uninstall Error",
+                                       message=f"OnionPress could not check what to ask:\n\n{failure}",
+                                       buttons=["OK"], style="warning")
                 return
-
-        # Step 2: Final confirmation with explicit acknowledgment
-        # Use rumps.Window for text input (no osascript, no permissions needed)
-        window = rumps.Window(
-            message="FINAL CONFIRMATION\n\nType 'DELETE' below to confirm permanent deletion of all data:",
-            title="Confirm Uninstall",
-            default_text="",
-            ok="Confirm Deletion",
-            cancel="Cancel",
-            dimensions=(320, 24)
-        )
-
-        response = window.run()
-        self.log(f"Final confirmation: button={response.clicked}, text='{response.text}'")
-
-        # Check if user clicked OK and typed "DELETE" (case insensitive)
-        if response.clicked != 1:  # User clicked Cancel
-            self.log("Uninstall cancelled - user clicked Cancel")
-            return
-
-        user_input = response.text.strip().upper() if response.text else ""
-        if user_input != "DELETE":
-            self.log(f"Uninstall cancelled - user input was: '{response.text.strip()}' (expected 'DELETE')")
-            rumps.alert(
-                title="Uninstall Cancelled",
-                message=f"Uninstall cancelled. Type 'DELETE' to confirm.\n\n(You typed: '{response.text.strip()}')"
-            )
-            return
+            what = ans.get("confirm")
+            if not what:
+                break
+            if not self._ask_cli_question(what, ans, action="Uninstall"):
+                self.log(f"Uninstall cancelled at the '{what}' question")
+                return
+            confirmed.append(what)
+        flags = [f for what in confirmed for f in ("--confirmed", what)]
 
         # User confirmed uninstall - run in background thread to avoid beach ball
         def do_uninstall():
@@ -5120,69 +5112,30 @@ License: AGPL v3 or later"""
                 self.monitoring_tor_install = False
                 self.dismiss_setup_dialog()
 
-                # Take the key back off every OnionHeaven hub that may hold
-                # it, before stopping (the key in the tor container signs
-                # the request). No heartbeat goes out from here on, so none
-                # can put the key back after the /unregister.
+                # Nothing that carries the key goes to a hub from this
+                # process from here on, so no heartbeat can put the key
+                # back after the CLI's /unregister.
                 onionheaven.end_hub_traffic(self)
-                hub_notice = ""
-                if not self.is_onionheaven:
-                    left = [{"content_address": a, "onionheaven_address": h,
-                             "why": "key-unreadable"}
-                            for a, h in onionheaven.registrations_left(self)]
-                    if left and self.is_running:
-                        self.log("Uninstall: asking OnionHeaven to delete its copy of the key...")
-                        try:
-                            left = onionheaven.release_registration(self, "uninstall")
-                        except Exception as e:
-                            self.log(f"Uninstall: OnionHeaven unregister failed (continuing): {e}")
-                    hub_notice = onionheaven.describe_remaining(left)
 
-                # Stop the service (this will cancel any startup in progress)
-                self.log("Uninstall: Stopping services...")
-                subprocess.run([self.launcher_script, "stop"], capture_output=True, timeout=30)
+                rc, ans, out, err = self._run_launcher_json(
+                    ["uninstall", "--json", *flags], on_line=self.log)
+
                 self.stop_web_log_capture()
                 self.stop_container_log_capture()
                 self.stop_onion_proxy()
                 self.caffeine.stop()
 
-                # Stop and delete Colima VM
-                # Only affects OnionPress instance, not system Colima
-                self.log("Uninstall: Stopping Colima VM...")
-                colima_bin = os.path.join(self.bin_dir, "colima")
-                env = os.environ.copy()
-                env["COLIMA_HOME"] = self.colima_home
-                env["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
-                env["LIMA_INSTANCE"] = "onionpress"
-                subprocess.run([colima_bin, "stop", "-f"], capture_output=True, timeout=60, env=env)
-                self.log("Uninstall: Deleting Colima VM...")
-                subprocess.run([colima_bin, "delete", "-f"], capture_output=True, timeout=60, env=env)
-                # Wait for Colima to fully shut down before killing orphans
-                time.sleep(3)
-                # Kill any orphaned colima/lima processes as a fallback
-                subprocess.run(["pkill", "-f", f"{self.colima_home}"], capture_output=True, timeout=10)
-                time.sleep(2)
-                # Note: Docker volumes lived inside the Colima VM and are deleted with it
+                if rc != 0 or not ans or not ans.get("ok"):
+                    failure = (ans or {}).get("error") or self._launcher_failure(
+                        out, err, "see the OnionPress log")
+                    raise RuntimeError(failure)
 
-                # Remove login item LaunchAgent
-                self.remove_login_item()
-
-                # Step 3: Remove data directory (but keep it until after we show dialog)
-                self.log("Uninstall: Preparing to remove data directory...")
-                import shutil
-                data_dir_exists = os.path.exists(self.app_support)
-
-                # Step 4: Remove data directory
-                if data_dir_exists:
-                    shutil.rmtree(self.app_support)
-                    self.log("Uninstall: Data directory removed successfully")
-
-                # Step 5: Show final dialog and quit
-                # Use show_native_alert which already handles main thread
+                hub_notice = onionheaven.describe_remaining(ans.get("remaining") or [])
                 if hub_notice:
                     self.log(f"Uninstall: {hub_notice}")
                     hub_notice = ("\n\n" + hub_notice + " Ask the hub's "
                                   "operator to remove it if you need it gone.")
+                # Use show_native_alert which already handles main thread
                 self.show_native_alert(
                     title="Uninstall Complete",
                     message=("OnionPress has been uninstalled." + hub_notice +
@@ -5202,6 +5155,87 @@ License: AGPL v3 or later"""
 
         # Run uninstall in background thread to avoid blocking UI
         threading.Thread(target=do_uninstall, daemon=True).start()
+
+    def _ask_cli_question(self, what, facts, action="Continue"):
+        """A question the CLI stopped at (onionpress.confirm: {"confirm":
+        what, ...facts}), asked of the person at this Mac in a native
+        dialog; True only for the explicit yes. Cancel is the default, and
+        no answer (show_native_alert gives up after 5 minutes) is Cancel.
+        *action* names the command for the yes button ("Uninstall",
+        "Reset", "Change")."""
+        if what == "address-change":
+            return self._ask_to_replace_address(
+                facts.get("current") or "", facts.get("new") or "",
+                "replace this site's onion service key",
+                "OnionPress keeps a copy of the current key in "
+                "~/.onionpress/replaced-keys/, from which it can be imported "
+                "again.",
+                "Replace")
+        if what == "hub-holds-key":
+            listed = "\n".join(f"• {h.get('onionheaven_address')} (key of {h.get('content_address')})"
+                               for h in facts.get("hubs") or [])
+            choice = self.show_native_alert(
+                title="OnionHeaven Holds Your Key",
+                message=("These OnionHeaven hubs may hold a copy of your onion "
+                         f"service private key:\n\n{listed}\n\n"
+                         f"OnionPress asks them to delete it when you {action.lower()}, "
+                         "but only while it is running. Start OnionPress and "
+                         f"{action.lower()} again, or {action.lower()} anyway and the hub "
+                         "keeps the key."),
+                buttons=["Cancel", f"{action} Anyway"],
+                default_button=0,
+                cancel_button=0,
+                style="critical"
+            )
+            return choice == 1
+        if what == "uninstall":
+            # Final confirmation with explicit acknowledgment. rumps.Window
+            # for text input (no osascript, no permissions needed)
+            window = rumps.Window(
+                message="FINAL CONFIRMATION\n\nType 'DELETE' below to confirm permanent deletion of all data:",
+                title="Confirm Uninstall",
+                default_text="",
+                ok="Confirm Deletion",
+                cancel="Cancel",
+                dimensions=(320, 24)
+            )
+            response = window.run()
+            self.log(f"Final confirmation: button={response.clicked}, text='{response.text}'")
+            if response.clicked != 1:  # User clicked Cancel
+                self.log("Uninstall cancelled - user clicked Cancel")
+                return False
+            user_input = response.text.strip().upper() if response.text else ""
+            if user_input != "DELETE":
+                self.log(f"Uninstall cancelled - user input was: '{response.text.strip()}' (expected 'DELETE')")
+                rumps.alert(
+                    title="Uninstall Cancelled",
+                    message=f"Uninstall cancelled. Type 'DELETE' to confirm.\n\n(You typed: '{response.text.strip()}')"
+                )
+                return False
+            return True
+        if what == "reset":
+            choice = self.show_native_alert(
+                title="Reset OnionPress?",
+                message=("This will ERASE everything: WordPress, database, Tor state, "
+                         "onion address keys, config, and secrets.\n\n"
+                         "To preserve your data, make a backup first (Backup... in "
+                         "the menu). This cannot be undone."),
+                buttons=["Cancel", "Reset"], default_button=0, cancel_button=0,
+                style="critical")
+            return choice == 1
+        if what == "prefix-change":
+            choice = self.show_native_alert(
+                title="Change the Address Prefix?",
+                message=(f"The address prefix would change from "
+                         f"'{facts.get('current') or ''}' to '{facts.get('new') or ''}', but "
+                         f"this site's onion address stays\n{facts.get('address') or ''}\n"
+                         "(the prefix is used only when a new address is made: a reset, "
+                         "or a new install)."),
+                buttons=["Cancel", "Change Prefix"], default_button=0, cancel_button=0,
+                style="warning")
+            return choice == 1
+        self.log(f"Unknown question from the CLI: '{what}' (cancelled)")
+        return False
 
     # ── Settings Page Support ─────────────────────────────────────
 
@@ -5481,13 +5515,7 @@ License: AGPL v3 or later"""
             self.log(f"Settings page: restore of {new_address} "
                      f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
             return confirmed
-        confirmed = self._ask_to_replace_address(
-            current, new_address,
-            "replace this site's onion service key",
-            "OnionPress keeps a copy of the current key in "
-            "~/.onionpress/replaced-keys/, from which it can be imported "
-            "again.",
-            "Replace")
+        confirmed = self._ask_cli_question("address-change", result)
         self.log(f"Settings page: key import of {new_address} "
                  f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
         return confirmed
