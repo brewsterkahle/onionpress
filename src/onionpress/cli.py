@@ -3,7 +3,7 @@
 Usage: python -m onionpress.cli <command> [args]
 
 Commands: start, stop, restart, status, address, logs, get, setup, backup, restore, reset,
-hub-recovery-key
+hub-recovery-key, config, onionheaven
 """
 
 import argparse
@@ -166,6 +166,11 @@ def _make_log_func(log_file: str | None = None) -> Callable[[str], None]:
             except OSError:
                 pass
     return log
+
+
+def _config_key_help() -> dict:
+    from .config import CONFIG_KEY_HELP
+    return CONFIG_KEY_HELP
 
 
 def _file_log_func(log_file: str | None) -> Callable[[str], None]:
@@ -1663,6 +1668,41 @@ def main(argv: list[str] = None) -> int:
         "--dir", required=True,
         help="The backup's tor-keys/healthcheck/ folder")
 
+    p_config = sub.add_parser(
+        "config",
+        help="Read and change settings in ~/.onionpress/config "
+             "(get KEY | set KEY VALUE | unset KEY | list [--json])",
+        description="Settings: every key `config list` shows, with the check "
+                    "its value gets on the Settings page. Image overrides, "
+                    "ports, paths (ONIONPRESS_*) and ONIONHEAVEN_ACCEPT_"
+                    "REGISTRATIONS are hand-edit only. A secret "
+                    "(CLOUDFLARE_TUNNEL_TOKEN) is set with VALUE `-` and the "
+                    "value on stdin, never on the command line.")
+    config_sub = p_config.add_subparsers(dest="config_command")
+    p_cget = config_sub.add_parser("get", help="Print one setting's value")
+    p_cget.add_argument("key", metavar="KEY")
+    p_cset = config_sub.add_parser(
+        "set", help="Change one setting (VALUE `-` reads the value from stdin)")
+    p_cset.add_argument("key", metavar="KEY")
+    p_cset.add_argument("value", metavar="VALUE")
+    p_cunset = config_sub.add_parser(
+        "unset", help="Remove one setting's line, so its default applies")
+    p_cunset.add_argument("key", metavar="KEY")
+    p_clist = config_sub.add_parser(
+        "list", help="Print every setting (a secret only as <set>/<empty>)",
+        epilog="\n".join(f"  {k}: {v}" for k, v in sorted(_config_key_help().items())),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_clist.add_argument("--json", action="store_true",
+                         help="As JSON: {\"settings\": {...}, \"hand_edit_only\": [...]}")
+
+    p_oh = sub.add_parser(
+        "onionheaven",
+        help="Keep the site reachable through OnionHeaven: enable | disable | status [--json]")
+    p_oh.add_argument("onionheaven_command", nargs="?", default="status",
+                      choices=("enable", "disable", "status"))
+    p_oh.add_argument("--json", action="store_true",
+                      help="status as JSON (enabled, choice, hub, registered, may_hold_key)")
+
     p_rconf = sub.add_parser(
         "restore-config",
         help="Merge an extracted backup's user preferences into a config "
@@ -1686,6 +1726,25 @@ def main(argv: list[str] = None) -> int:
     from .hub_backup import RECOVERY_KEY_ENV
     hub_recovery_key = os.environ.pop(RECOVERY_KEY_ENV, "")
     data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+
+    if args.command == "config":
+        # Only the config file, its change marker and the login item /
+        # user units: no OnionPressCLI setup (no Docker, no port probing).
+        from . import config as _config
+        if not args.config_command:
+            p_config.print_help()
+            return 1
+        paths = resolve_paths(data_dir=args.data_dir)
+        return _config.run_config_command(
+            args, data_dir, _file_log_func(paths.log_file),
+            os_name=detect_os().value, app_bundle=paths.app_bundle)
+
+    if args.command == "onionheaven":
+        # The same: the config file and the registration record, no network.
+        from . import onionheaven
+        return onionheaven.run_onionheaven_command(
+            args.onionheaven_command, _hub_context(args.data_dir),
+            json_output=args.json)
 
     if args.command == "hub-recovery-key":
         # Needs only the data directory (restore: docker too): no
