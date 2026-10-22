@@ -588,9 +588,11 @@ class TestRestoreBackup(_Case):
         self.assertEqual(self.docker.result("restore-result.json")["error"], ha.RESTORE_FAILED_MSG)
 
     def test_another_address_waits_for_the_person_at_the_mac(self):
+        # The CLI refuses the unconfirmed run (exit 3) naming the question
         question = {"confirm": "address-change", "current": ADDR, "new": NEW_ADDR}
-        self.script({"settings-page-restore": {"rc": confirm.EXIT_CONFIRM,
-                                               "stdout": json.dumps(question) + "\n"}})
+        self.script({"settings-page-restore": {
+            "rc": confirm.EXIT_REFUSED,
+            "stdout": json.dumps({"error": "needs a confirmation", **question}) + "\n"}})
         self.docker.put("restore-password", PW)
         self._upload(b"the upload")
         self.request("restore-backup")
@@ -634,13 +636,25 @@ class TestUpdate(_Case):
         ha.handle(self.host("linux"))
         self.assertEqual(self.argvs(), [["settings-page-update-check"]])
 
-    def test_mac_up_to_date(self):
-        self.script({"update --check --json": {"stdout": json.dumps({"update_available": False}) + "\n"}})
+    def test_mac_up_to_date_is_a_success(self):
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": False, "current": "2.5.6", "latest": "2.5.6"}) + "\n"}})
         self.request("update")
         result = ha.handle(self.host())
         self.assertNotIn("relaunch", result)
-        self.assertEqual(self.docker.result("update-result.json")["error"], ha.UP_TO_DATE_MSG)
+        res = self.docker.result("update-result.json")
+        self.assertEqual((res["success"], res["update_available"]), (True, False))
+        self.assertEqual(res["message"], "OnionPress 2.5.6 is up to date.")
         self.assertEqual(self.argvs(), [["update", "--check", "--json"]])
+
+    def test_mac_failed_check_is_a_failure(self):
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": False, "error": "Update check curl failed: exit=6"}) + "\n"}})
+        self.request("update")
+        ha.handle(self.host())
+        res = self.docker.result("update-result.json")
+        self.assertFalse(res["success"])
+        self.assertEqual(res["error"], f"{ha.UPDATE_CHECK_FAILED_MSG}: Update check curl failed: exit=6")
 
     def test_mac_installs_and_asks_for_a_relaunch(self):
         self.script({"update --check --json": {"stdout": json.dumps({"update_available": True, "latest": "9.9.9"}) + "\n"},
@@ -675,8 +689,8 @@ class TestApplyConfig(_Case):
         with mock.patch.object(op_config, "apply_side_effects",
                                side_effect=lambda keys, *a, **k: effects.append(sorted(keys)) or []):
             with open(os.devnull, "w") as devnull:
-                rc = ha.apply_config(self.host(), out=devnull)
-        self.assertEqual(rc, 0)
+                accepted = ha.apply_config(self.host(), out=devnull)
+        self.assertEqual(sorted(accepted), ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN"])
         values = op_config.read_config(config)
         self.assertEqual(values["LAUNCH_ON_LOGIN"], "no")
         self.assertEqual(values["PREVENT_SLEEP"], "normal")
@@ -692,15 +706,43 @@ class TestApplyConfig(_Case):
         self.assertIn("ONIONPRESS_TOR_IMAGE", log)
 
     def test_nothing_to_apply(self):
-        self.assertEqual(ha.apply_config(self.host()), 0)
+        self.assertEqual(ha.apply_config(self.host()), [])
         self.docker.put("config-updates.json", "{}")
-        self.assertEqual(ha.apply_config(self.host()), 0)
+        self.assertEqual(ha.apply_config(self.host()), [])
 
     def test_truncated_json_is_left_for_the_next_run(self):
         self.docker.put("config-updates.json", '{"UPDATE_ON_LAUNCH": "n')
         with open(os.devnull, "w") as devnull:
-            self.assertEqual(ha.apply_config(self.host(), out=devnull), 1)
+            self.assertIsNone(ha.apply_config(self.host(), out=devnull))
         self.assertEqual(self.docker.get("config-updates.json"), '{"UPDATE_ON_LAUNCH": "n')
+
+    def test_the_mac_tick_applies_pending_settings(self):
+        """QA on 2026-10-22: config-updates.json sat unapplied while the
+        menubar ran handle-action every tick. Every Mac run applies it,
+        request or not, and says which keys so the menubar applies what it
+        owes at once; Linux's launcher does it itself (write_status)."""
+        from onionpress import config as op_config
+        config = os.path.join(self.data_dir, "config")
+        with open(config, "w") as f:
+            f.write("UPDATE_ON_LAUNCH=yes\n")
+        self.docker.put("config-updates.json", json.dumps({"UPDATE_ON_LAUNCH": "no"}))
+        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+            result = ha.handle(self.host("linux"))
+        self.assertEqual(result, {"handled": None})
+        self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "yes")
+        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+            result = ha.handle(self.host("macos"))
+        self.assertEqual(result, {"handled": None, "config": ["UPDATE_ON_LAUNCH"]})
+        self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "no")
+        self.assertIsNone(self.docker.get("config-updates.json"))
+        self.assertEqual(op_config.take_config_changes(self.data_dir), ["UPDATE_ON_LAUNCH"])
+        # With a request in the same tick, both happen
+        self.docker.put("config-updates.json", json.dumps({"UPDATE_ON_LAUNCH": "yes"}))
+        self.request("check-reachability")
+        with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
+            result = ha.handle(self.host("macos"))
+        self.assertEqual(result, {"handled": "check-reachability", "config": ["UPDATE_ON_LAUNCH"]})
+        self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "yes")
 
 
 class TestLaunchers(unittest.TestCase):

@@ -70,7 +70,7 @@ MISSING_UPLOAD_MSG = "Missing password or backup file"
 BACKUP_FAILED_MSG = "Backup failed — check logs"
 RESTORE_FAILED_MSG = "Restore failed — wrong password or invalid backup"
 HANDOFF_FAILED_MSG = "Could not hand the backup to the Settings page"
-UP_TO_DATE_MSG = "Already up to date or update check failed"
+UPDATE_CHECK_FAILED_MSG = "Could not check for updates"
 
 
 def now_iso():
@@ -286,11 +286,18 @@ def handle(host, confirmed=frozenset(), cancel=False):
             return {"handled": None, "pending": pending["confirm"],
                     "action": pending.get("action"), **pending.get("facts", {})}
 
+    # The page's saved settings (config-updates.json), every run on a Mac
+    # (Linux's launcher applies them in write_status and before a start):
+    # the menubar's poll_config_updates until issue #366. The accepted
+    # keys come back so the menubar applies what it owes at once.
+    applied = apply_config(host) if host.os_name == "macos" else []
+    extra = {"config": applied} if applied else {}
+
     action = host.read_shared(REQUEST_FILE).strip()
     if not action:
         if host.os_name == "linux":
             write_recent_logs(host)
-        return {"handled": None}
+        return {"handled": None, **extra}
     host.remove_shared(REQUEST_FILE, "service-result.json")
     if action != "refresh-status":
         host.log(f"Settings page: handling action '{action}'")
@@ -309,12 +316,12 @@ def handle(host, confirmed=frozenset(), cancel=False):
     fn = handlers.get(action)
     if fn is None:
         host.log(f"Settings page: unknown action '{action}'")
-        return {"handled": None, "unknown": action}
+        return {"handled": None, "unknown": action, **extra}
     try:
-        extra = fn() or {}
+        extra.update(fn() or {})
     except Exception as e:
         host.log(f"Settings page: action '{action}' failed: {e}")
-        extra = {"error": str(e)}
+        extra["error"] = str(e)
     return {"handled": action, **extra}
 
 
@@ -449,7 +456,8 @@ def _import_key(host, key, confirmed):
     r = host.run_launcher(["import-key", "-", "--check", "--json"],
                           input=key + "\n", timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
-    if r.returncode == confirm.EXIT_CONFIRM and ans.get("confirm") == "address-change":
+    if (r.returncode in (confirm.EXIT_CONFIRM, confirm.EXIT_REFUSED)
+            and ans.get("confirm") == "address-change"):
         if "address-change" not in confirmed:
             _pending_save(host, "import-key-file", "address-change", ans, key=key)
             host.log(f"Settings page: key import of {ans.get('new')} needs the "
@@ -609,7 +617,9 @@ def _settings_page_restore(host, local_zip, password, confirmed, work):
     try:
         r = host.run_launcher(args, env={BACKUP_PASSWORD_ENV: password})
         ans = confirm.last_json_line(r.stdout) or {}
-        if r.returncode == confirm.EXIT_CONFIRM and ans.get("confirm") == "address-change":
+        if (r.returncode in (confirm.EXIT_CONFIRM, confirm.EXIT_REFUSED)
+                and ans.get("confirm") == "address-change"):
+            ans = {k: v for k, v in ans.items() if k != "error"}
             _pending_save(host, "restore-backup", "address-change", ans,
                           zip_path=local_zip, password=password)
             host.log(f"Settings page: restore of {ans.get('new')} needs the person at this Mac")
@@ -651,10 +661,19 @@ def _update(host):
     host.log("Settings page: install update requested")
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
-    if r.returncode != 0 or not ans.get("update_available"):
+    if r.returncode != 0 or ans.get("error") or "update_available" not in ans:
+        error = ans.get("error") or r.stderr.strip() or f"rc={r.returncode}"
         host.write_result("update-result.json", {
-            "success": False,
-            "error": UP_TO_DATE_MSG + (f" ({ans['error']})" if ans.get("error") else ""),
+            "success": False, "error": f"{UPDATE_CHECK_FAILED_MSG}: {error}",
+            "current": ans.get("current"), "latest": ans.get("latest"),
+            "update_available": False, "completed_at": now_iso()})
+        return
+    if not ans.get("update_available"):
+        current = ans.get("current") or host.version
+        host.write_result("update-result.json", {
+            "success": True, "update_available": False,
+            "message": f"OnionPress {current} is up to date.",
+            "current": current, "latest": ans.get("latest") or current,
             "completed_at": now_iso()})
         return
     latest = ans.get("latest", "")
@@ -704,19 +723,19 @@ def apply_config(host, out=None):
     logged), then removed. The accepted keys go into the .config-changed
     marker for the running menubar (caffeinate, the analytics upload, the
     tunnel flag, status.json) and through config.apply_side_effects (the
-    login item). Prints `changed|unchanged|rejected KEY` lines."""
-    import sys
+    login item). Prints `changed|unchanged|rejected KEY` lines to *out*
+    (nothing without one). Returns the accepted keys ([] when there was
+    nothing to apply; None when the file is not JSON yet)."""
     from . import config as op_config
-    out = out or sys.stdout
     text = host.read_shared("config-updates.json").strip()
     if not text or text == "{}":
-        return 0
+        return []
     try:
         updates = json.loads(text)
     except ValueError:
         # Left for the next run: the page may still be writing it.
         host.log("Settings page: config-updates.json is not valid JSON (left for the next run)")
-        return 1
+        return None
     applied = op_config.apply_settings_updates(host.paths.config_file, updates)
     if applied.rejected:
         host.log("Settings page: ignored (not a setting it may change, or an "
@@ -727,14 +746,15 @@ def apply_config(host, out=None):
         host.log(f"  {op_config.describe_change(key, old, new)}")
     host.remove_shared("config-updates.json")
     changed = {key for key, _o, _n in applied.changes}
-    for key in applied.accepted:
-        print(f"{'changed' if key in changed else 'unchanged'} {key}", file=out)
-    for key in applied.rejected:
-        print(f"rejected {key}", file=out)
+    if out is not None:
+        for key in applied.accepted:
+            print(f"{'changed' if key in changed else 'unchanged'} {key}", file=out)
+        for key in applied.rejected:
+            print(f"rejected {key}", file=out)
     if applied.accepted:
         op_config.note_config_changed(host.paths.data_dir, list(applied.accepted))
         for line in op_config.apply_side_effects(
                 list(applied.accepted), host.paths.config_file, host.os_name, host.log,
                 app_bundle=host.paths.app_bundle):
             host.log(line)
-    return 0
+    return list(applied.accepted)

@@ -1042,8 +1042,14 @@ class OnionPressCLI:
         cleared); 1 = could not finish, markers kept for the next start.
         """
         from . import derivatives
+        # Detached by derivatives.spawn_regeneration with its output
+        # appended to the log file: log to the file only then, or every
+        # line lands twice (once from stderr, once from the logger).
+        log = self.log
+        if sys.stderr is None or not sys.stderr.isatty():
+            log = _file_log_func(self.paths.log_file)
         ok = derivatives.regenerate_if_pending(
-            self.paths.data_dir, self.log, docker_bin=self.docker.docker_bin)
+            self.paths.data_dir, log, docker_bin=self.docker.docker_bin)
         return 0 if ok else 1
 
     def cmd_prune_image_derivatives(self, uploads_dir: str) -> int:
@@ -1745,8 +1751,8 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
     a node that could not be checked), and for a backup holding a hub's
     keys or OnionHome's name registry; neither volume is written. A backup
     of another address replaces this one only with --confirmed
-    address-change (the handler asks the person at the Mac first: exit 4,
-    {"confirm": "address-change", "current", "new"}); one without a key
+    address-change (the handler asks the person at the Mac first: exit 3,
+    {"error", "confirm": "address-change", "current", "new"}); one without a key
     keeps it. Before the key changes, the OnionHeaven hubs that may hold
     the current one are asked to delete it, while it can still sign."""
     from . import confirm as _confirm
@@ -1769,7 +1775,9 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
                             before_key_change=before_key_change,
                             confirm_address_change=confirm_address_change)
     except _confirm.NeedsConfirmation as e:
-        return _confirm.answer_confirm(e, json_output)
+        # No --check on this command (the handler's first run is the
+        # check): refused, exit 3, the question in the answer.
+        return _confirm.answer_refused_question(e, json_output)
     except SettingsPageRestoreRefused as e:
         return _confirm.answer_error(e, json_output, code=_confirm.EXIT_REFUSED)
     except Exception as e:
@@ -2182,6 +2190,8 @@ def main(argv: list[str] = None) -> int:
     p_cunset = config_sub.add_parser(
         "unset", help="Remove one setting's line, so its default applies")
     p_cunset.add_argument("key", metavar="KEY")
+    p_cunset.add_argument("--json", action="store_true",
+                          help="Answer with one JSON object on the last line")
     p_clist = config_sub.add_parser(
         "list", help="Print every setting (a secret only as <set>/<empty>)",
         epilog="\n".join(f"  {k}: {v}" for k, v in sorted(_config_key_help().items())),
@@ -2297,7 +2307,7 @@ def main(argv: list[str] = None) -> int:
             paths=paths, docker=Docker(paths, log_func=log), log=log, os_name=os_name,
             version=__version__)
         if args.command == "apply-config":
-            return _ha.apply_config(host)
+            return 1 if _ha.apply_config(host, out=sys.stdout) is None else 0
         result = _ha.handle(host, confirmed=_confirm.given(args), cancel=args.cancel)
         if args.json:
             print(_confirm.dumps(result))

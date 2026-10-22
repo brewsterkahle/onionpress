@@ -3337,7 +3337,9 @@ class OnionPressApp(rumps.App):
         if sw and getattr(sw, 'address_prefix', None):
             # Vanity prefix chosen on the welcome screen — generated once at
             # first-run start (no on-the-fly change needed later).
-            self.write_config_value("ADDRESS_PREFIX", sw.address_prefix)
+            # Chosen just now, before any address exists: no question.
+            self.write_config_value("ADDRESS_PREFIX", sw.address_prefix,
+                                    confirmed=["prefix-change"])
             self.log(f"Address prefix set to '{sw.address_prefix}' from welcome screen")
         if sw and hasattr(sw, 'share_analytics'):
             self.write_config_value("SHARE_ANALYTICS_WITH_ONIONHOME", sw.share_analytics)
@@ -4030,13 +4032,16 @@ class OnionPressApp(rumps.App):
         """Read a value from the config file."""
         return op_config.read_value(self.config_file, key, default)
 
-    def write_config_value(self, key, value):
+    def write_config_value(self, key, value, confirmed=()):
         """Change one setting through `onionpress config set` (issue #365):
         the CLI is the one writer of ~/.onionpress/config, with the key's
         check, the log line, the login item, and the change marker. A
         secret goes on stdin, never on argv. Returns True when the CLI
         accepted it; what changed is then applied to this process by
         apply_config_changes (caffeinate, status.json in the volume).
+        A question the CLI stops at (onionpress.confirm) is asked here
+        unless *confirmed* already names it (the welcome screen's prefix:
+        the person just chose it).
         """
         if not os.path.exists(self.config_file):
             config_template = os.path.join(self.resources_dir, "config-template.txt")
@@ -4051,7 +4056,7 @@ class OnionPressApp(rumps.App):
         else:
             argv.append(value)
         argv.append("--json")
-        confirmed = []
+        confirmed = list(confirmed)
         while True:
             try:
                 result = subprocess.run(
@@ -4064,8 +4069,9 @@ class OnionPressApp(rumps.App):
                 return False
             answer = op_confirm.last_json_line(result.stdout) or {}
             # A question the CLI stops at (an ADDRESS_PREFIX the live
-            # address does not start with: "prefix-change"), asked here.
-            if result.returncode == op_confirm.EXIT_CONFIRM and answer.get("confirm"):
+            # address does not start with: "prefix-change"), asked here;
+            # the run itself is refused (exit 3) until it is answered.
+            if result.returncode != 0 and answer.get("confirm"):
                 if not self._ask_cli_question(answer["confirm"], answer, action="Change"):
                     self.log(f"config set {key}: not confirmed ({answer['confirm']})")
                     return False
@@ -5453,7 +5459,10 @@ License: AGPL v3 or later"""
                     ["--confirmed", result["confirm"]] if answered_yes else ["--cancel"])
                 if result is None:
                     return
-            if result.get("handled"):
+            if result.get("handled") or result.get("config"):
+                # The settings the page saved (the CLI applied them and
+                # left the keys in the marker) and status.json after an
+                # action.
                 self.apply_config_changes(op_config.take_config_changes(self.app_support))
                 self.write_status_to_volume()
             if result.get("relaunch"):
