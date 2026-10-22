@@ -1699,3 +1699,124 @@ def should_auto_prevent_sleep(onion_address):
     return onion_address.strip() in _ALWAYS_AWAKE_ADDRESSES
 
 
+
+
+# ---------------------------------------------------------------------------
+# `onionpress onionheaven enable|disable|status [--json]` (issue #365)
+# ---------------------------------------------------------------------------
+#
+# One implementation for both platforms (the Linux launcher's bash
+# onionheaven_cmd delegates here). enable/disable write
+# REGISTER_WITH_ONIONHEAVEN through config's `set` path, so the change is
+# logged, the running menubar is told (its marker) and the heartbeat, which
+# re-reads the choice before every request that carries the key, follows
+# within a minute; disable's /unregister is the running app's
+# (maybe_unregister_after_opt_out on a Mac, the Linux daemon), at its next
+# start when none runs. status reads the config and the registration
+# record only: no network.
+
+REGISTRATION_EXPLANATION = """\
+  OnionHeaven keeps your .onion address reachable when this machine is
+  off, asleep, or disconnected. While OnionPress runs it sends a heartbeat
+  to the OnionHeaven hub. If the heartbeats stop, the hub takes over your
+  address and redirects visitors to the Wayback Machine's archived copy of
+  your site. When you come back online, your live site takes over again.
+
+  What is shared: a copy of your onion service private key is sent to the
+  hub (run by the Internet Archive) so it can publish your address while
+  you are away. It is used only to keep your site reachable.
+
+  It is on by default. To turn it back on:
+      onionpress onionheaven enable"""
+
+ENABLE_TEXT = """\
+OnionHeaven enabled. Your site will register with the hub within a minute
+and stay reachable at your .onion address when this machine is off."""
+
+DISABLE_TEXT = """\
+OnionHeaven disabled. The heartbeats stop within a minute, and if this
+site was registered, OnionPress asks the hub to delete its copy of your
+onion service key (when OnionPress is not running: at its next start).
+Visitors will get a connection error whenever this machine is off.
+Re-enable at any time with: onionpress onionheaven enable"""
+
+
+def set_registration_choice(app, choice):
+    """Write REGISTER_WITH_ONIONHEAVEN=yes|no through the config CLI's
+    path (checked, logged, marker for the running menubar)."""
+    from onionpress import config as _config
+    assert choice in ("yes", "no")
+    reason = _config.check_config_value("REGISTER_WITH_ONIONHEAVEN", choice)
+    if reason:
+        raise ValueError(reason)
+    change = _config.set_config_value(app.config_file, "REGISTER_WITH_ONIONHEAVEN", choice)
+    app.log(f"OnionHeaven {'enabled' if choice == 'yes' else 'disabled'} by user "
+            f"(onionpress onionheaven {'enable' if choice == 'yes' else 'disable'}): "
+            f"{change.describe()}")
+    if change.changed:
+        _config.note_config_changed(app.app_support, [change.key])
+    return change
+
+
+def registration_status(app):
+    """What `onionheaven status --json` prints: the choice, the configured
+    hub, and what the registration record says hubs may hold of this
+    install's keys. No network."""
+    value = app.read_config_value("REGISTER_WITH_ONIONHEAVEN", "")
+    choice = registration_choice(value)
+    record = _load_registration_status(app)
+    main = _main_registration(record, app)
+    return {
+        "enabled": {"yes": True, "no": False}.get(choice),
+        "choice": _choice_label(choice),
+        "value": value,
+        "hub": configured_hub_address(app.read_config_value("ONIONHEAVEN_ADDRESS", "")),
+        "registered": bool(main),
+        "content_address": main[0] if main else None,
+        "registered_with": main[1] if main else None,
+        "may_hold_key": [list(pair) for pair in _registrations(record, app)],
+    }
+
+
+def run_onionheaven_command(sub, app, json_output=False, out=None):
+    """The CLI subcommand. Exit 0 done; 1 unrecognized subcommand; 2 the
+    config refused the value."""
+    import sys as _sys
+    out = out or _sys.stdout
+    if sub in ("enable", "disable"):
+        choice = "yes" if sub == "enable" else "no"
+        try:
+            set_registration_choice(app, choice)
+        except (ValueError, OSError) as e:
+            print(f"ERROR: {e}", file=_sys.stderr)
+            return 2
+        print(ENABLE_TEXT if sub == "enable" else DISABLE_TEXT, file=out)
+        return 0
+    if sub != "status":
+        print("Usage: onionpress onionheaven {enable|disable|status} [--json]",
+              file=_sys.stderr)
+        return 1
+    status = registration_status(app)
+    if json_output:
+        print(json.dumps(status, indent=2, sort_keys=True), file=out)
+        return 0
+    if status["enabled"] is True:
+        print("OnionHeaven: enabled", file=out)
+    elif status["enabled"] is False:
+        print("OnionHeaven: disabled (enable with: onionpress onionheaven enable)", file=out)
+    else:
+        print(f"OnionHeaven: not enabled (REGISTER_WITH_ONIONHEAVEN={status['value']} "
+              "is not yes or no)", file=out)
+        print("", file=out)
+        print(REGISTRATION_EXPLANATION, file=out)
+    print(f"Hub: {status['hub']}", file=out)
+    if status["may_hold_key"]:
+        # What the registration record says hubs may hold of this
+        # install's keys (now or from before a reset, key import, restore
+        # or hub change).
+        print("", file=out)
+        print("A copy of the onion service key of these addresses may be held by", file=out)
+        print("these OnionHeaven hubs (address, hub):", file=out)
+        for addr, hub in status["may_hold_key"]:
+            print(f"  {addr} {hub}", file=out)
+    return 0

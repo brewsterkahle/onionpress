@@ -13,6 +13,7 @@ import re
 import secrets
 import socket
 import subprocess
+import sys
 from dataclasses import dataclass
 
 from . import launcher_ops
@@ -82,12 +83,27 @@ def redact_config(config: dict) -> dict:
 # (read-only on the page), ports, paths, or secrets other than the tunnel
 # token. The page shows ADDRESS_PREFIX and ONIONHEAVEN_ADDRESS read-only.
 
+class _Check:
+    """The check for one config key's value: callable (True when *value*
+    is acceptable), with the words a refusal uses (`describe`)."""
+
+    def __init__(self, fn, describe):
+        self._fn = fn
+        self.describe = describe
+
+    def __call__(self, value):
+        return bool(self._fn(value))
+
+
 def _one_of(*allowed):
-    return lambda v: v in allowed
+    words = " or ".join(repr(a) if a else "empty" for a in allowed)
+    return _Check(lambda v: v in allowed, words)
 
 
 def _int_between(low, high):
-    return lambda v: bool(re.fullmatch(r"[0-9]{1,6}", v)) and low <= int(v) <= high
+    return _Check(
+        lambda v: bool(re.fullmatch(r"[0-9]{1,6}", v)) and low <= int(v) <= high,
+        f"a whole number from {low} to {high}")
 
 
 # A Cloudflare Tunnel token is base64 (of a small JSON object). The page
@@ -103,8 +119,9 @@ SETTINGS_PAGE_KEYS = {
     "REGISTER_WITH_ONIONHEAVEN": _one_of("", "yes", "no"),
     "SHARE_ANALYTICS_WITH_ONIONHOME": _one_of("yes", "no"),
     # Write-only on the page; "" is its explicit "remove token".
-    "CLOUDFLARE_TUNNEL_TOKEN":
+    "CLOUDFLARE_TUNNEL_TOKEN": _Check(
         lambda v: v == "" or bool(re.fullmatch(CLOUDFLARE_TOKEN_PATTERN, v)),
+        "a Cloudflare Tunnel token (base64), or empty to remove it"),
     # Takeover tunables, shown only on an active OnionHeaven hub.
     "ONIONHEAVEN_MAX_SERVICES": _int_between(1, 500),
     "ONIONHEAVEN_PROPAGATION_DELAY": _int_between(60, 3600),
@@ -113,6 +130,10 @@ SETTINGS_PAGE_KEYS = {
 
 # Keys whose values never appear in a log.
 SECRET_CONFIG_KEYS = frozenset({"CLOUDFLARE_TUNNEL_TOKEN"})
+
+# A value may not hold one of these: a newline would add a config line.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
+
 
 # Rejected key names are logged, and they come from WordPress: cap how many.
 _MAX_REJECTED_NAMES = 20
@@ -162,7 +183,7 @@ def filter_settings_updates(updates) -> tuple[dict, list]:
     for key, value in updates.items():
         check = SETTINGS_PAGE_KEYS.get(key)
         if (check is None or not isinstance(value, str)
-                or re.search(r"[\x00-\x1f\x7f\x85\u2028\u2029]", value)
+                or _CONTROL_CHARS.search(value)
                 or not check(value)):
             rejected.append(_loggable_key(key))
             continue
@@ -240,6 +261,18 @@ def write_value(path: str, key: str, value: str) -> None:
 
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
+
+
+def remove_value(path: str, key: str) -> None:
+    """Remove every KEY= line from the config file (comments stay)."""
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
+    if len(kept) != len(lines):
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(kept)
 
 
 def write_config(path: str, values: dict) -> None:
@@ -343,6 +376,381 @@ def validate_address_prefix(prefix: str) -> tuple[bool, str, str]:
 
     return (True, "", prefix)
 
+
+# -- The command line: `onionpress config get|set|unset|list` (issue #365) --
+#
+# Every setting a person may change is reachable through `config set`, on
+# both platforms, with the check its value gets everywhere else; the Mac
+# menubar's Settings dialog and the Linux tray are callers of it, and the
+# Settings page's channel (config-updates.json, SETTINGS_PAGE_KEYS above)
+# stays what it is. A new setting gets its `config set` entry here first
+# (its key, its check, its restart note); a UI only calls the command.
+#
+# Hand-edit only, refused by `config set`: the image overrides, ports,
+# paths and the bind host (every ONIONPRESS_* key: they change what runs
+# and where it listens) and ONIONHEAVEN_ACCEPT_REGISTRATIONS (a hub). The
+# Settings page allowlist decided the same.
+
+_ONION_ADDRESS_RE = re.compile(r"[a-z2-7]{56}\.onion")  # key_manager.ONION_ADDRESS_RE
+
+
+def _onion_address_or_empty():
+    return _Check(lambda v: v == "" or _ONION_ADDRESS_RE.fullmatch(v) is not None,
+                  "a 56-character .onion address, or empty for the default")
+
+
+def _address_prefix():
+    return _Check(lambda v: validate_address_prefix(v)[0],
+                  f"{ADDRESS_PREFIX_MIN} to {ADDRESS_PREFIX_MAX} characters "
+                  f"a-z and 2-7, or empty for the default")
+
+
+# Recorded by OnionPress at setup (the owner's login, the onionname's
+# address, whether it is registered): settable so the apps write them
+# through `config set` too, but not a setting a person normally changes.
+RECORDED_KEYS = {
+    "ONIONNAME": _Check(lambda v: v == "" or re.fullmatch(r"[A-Za-z0-9 _.@-]{1,60}", v) is not None,
+                        "a WordPress login (letters, digits, space, _ . @ -)"),
+    "ONIONNAME_ADDRESS": _onion_address_or_empty(),
+    "ONIONNAME_REGISTERED": _one_of("yes", "no"),
+}
+
+CLI_CONFIG_KEYS = {
+    **SETTINGS_PAGE_KEYS,
+    "ADDRESS_PREFIX": _address_prefix(),
+    "VM_CPU": _int_between(1, 64),
+    "VM_DISK": _int_between(10, 2000),
+    "INSTALL_IA_PLUGIN": _one_of("yes", "no"),
+    "INSTALL_CACHE_ENABLER": _one_of("yes", "no"),
+    "REPUBLISH_ON_UNREACHABLE": _one_of("yes", "no"),
+    # The format check of the Mac launcher's validate-oh-address
+    # (key_manager.is_valid_onion_address). Whether the address answers as
+    # a hub is the Settings dialog's question, asked before it saves.
+    "ONIONHEAVEN_ADDRESS": _onion_address_or_empty(),
+    "ONIONHOME_ADDRESS": _onion_address_or_empty(),
+    **RECORDED_KEYS,
+}
+
+# What applies when a key has no line, for the keys whose default lives in
+# the code that reads them rather than in DEFAULTS (config-template.txt).
+CODE_DEFAULTS = {
+    "START_ON_BOOT": "yes",                      # linux/onionpress's first config
+    "VM_DISK": "20",                             # colima.py
+    "INSTALL_CACHE_ENABLER": "yes",              # plugin_wanted in the launchers
+    "REPUBLISH_ON_UNREACHABLE": "yes",           # menubar.py, reachability.py
+    "ONIONHEAVEN_ADDRESS":                       # onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
+        "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",
+    "ONIONHEAVEN_PROPAGATION_DELAY": "180",      # the launchers' export
+    "ONIONHEAVEN_HUB_THRESHOLD": "5",
+    "ONIONNAME_REGISTERED": "no",
+}
+
+
+def default_value(key: str) -> str:
+    """The value in effect for *key* without a config line ("" if none)."""
+    return DEFAULTS.get(key) or CODE_DEFAULTS.get(key, "")
+
+
+HAND_EDIT_ONLY = frozenset({"ONIONHEAVEN_ACCEPT_REGISTRATIONS"})
+HAND_EDIT_ONLY_PREFIX = "ONIONPRESS_"
+
+# Settings a running OnionPress reads once, at start: a change takes effect
+# at the next restart. Everything else is read from the config on its next
+# use (the apps apply LAUNCH_ON_LOGIN/START_ON_BOOT and PREVENT_SLEEP at
+# once, see apply_side_effects). Shared by the CLI and the Mac Settings
+# dialog.
+NEEDS_RESTART = frozenset({
+    "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU",
+    "CLOUDFLARE_TUNNEL_TOKEN",
+    # Read at startup only (onionheaven.ONIONHEAVEN_ADDRESS). After the
+    # restart the site registers with the new hub and the old one is asked
+    # to delete its copy of the key (onionheaven.maintain_registration).
+    "ONIONHEAVEN_ADDRESS",
+    # The plugins are installed and activated by the start sequence.
+    "INSTALL_IA_PLUGIN", "INSTALL_CACHE_ENABLER",
+})
+
+# Read when the VM is created, never again: the diffdisk cap is immutable.
+VM_CREATION_ONLY = frozenset({"VM_DISK"})
+
+# One line per key for `config list --help`.
+CONFIG_KEY_HELP = {
+    "ADDRESS_PREFIX": "prefix a new onion address is generated with (restart; the old address stops working)",
+    "UPDATE_ON_LAUNCH": "pull updated container images at launch",
+    "LAUNCH_ON_LOGIN": "macOS: start OnionPress at login",
+    "START_ON_BOOT": "Linux: start OnionPress at boot",
+    "PREVENT_SLEEP": "normal (sleep as usual), on-battery (awake on AC) or never",
+    "VM_MEMORY": "container VM memory in GB (restart)",
+    "VM_CPU": "container VM CPUs (restart)",
+    "VM_DISK": "container VM disk cap in GB, applied when the VM is first created",
+    "INSTALL_IA_PLUGIN": "install the Wayback Machine Link Fixer plugin (restart)",
+    "INSTALL_CACHE_ENABLER": "install the Cache Enabler plugin (restart)",
+    "REPUBLISH_ON_UNREACHABLE": "ask Tor for fresh introduction points when the site is unreachable",
+    "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven)",
+    "ONIONHEAVEN_ADDRESS": "the OnionHeaven hub's .onion address (restart)",
+    "ONIONHEAVEN_MAX_SERVICES": "hub: addresses one takeover worker serves",
+    "ONIONHEAVEN_PROPAGATION_DELAY": "hub: seconds to wait for a descriptor to propagate",
+    "ONIONHEAVEN_HUB_THRESHOLD": "hub: missed heartbeats before a takeover",
+    "SHARE_ANALYTICS_WITH_ONIONHOME": "upload scrubbed logs to OnionHome for debugging",
+    "ONIONHOME_ADDRESS": "the OnionHome hub's .onion address",
+    "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Tunnel token (restart); set with `config set CLOUDFLARE_TUNNEL_TOKEN -` and the token on stdin",
+    "ONIONNAME": "recorded at setup: the owner's WordPress login",
+    "ONIONNAME_ADDRESS": "recorded at setup: the onionname's address",
+    "ONIONNAME_REGISTERED": "recorded at setup: whether the onionname is registered",
+}
+
+def is_hand_edit_only(key: str) -> bool:
+    return key in HAND_EDIT_ONLY or key.startswith(HAND_EDIT_ONLY_PREFIX)
+
+
+def check_config_value(key: str, value) -> str:
+    """Why `config set KEY VALUE` must refuse, or "" when it may go ahead."""
+    if is_hand_edit_only(key):
+        return (f"{key} can only be changed by editing the config file "
+                "(image overrides, ports, paths and hub admission are not settings)")
+    check = CLI_CONFIG_KEYS.get(key)
+    if check is None:
+        return f"{key} is not a setting (see: onionpress config list)"
+    if not isinstance(value, str) or _CONTROL_CHARS.search(value):
+        return f"{key}: the value may not contain control characters"
+    if not check(value):
+        return f"{key} must be {check.describe}"
+    return ""
+
+
+@dataclass
+class ConfigChange:
+    """What one `config set`/`unset` did."""
+    key: str
+    old: str
+    new: str
+    was_set: bool   # the key had a line before
+    changed: bool   # the file was written
+
+    def describe(self) -> str:
+        if not self.changed:
+            return f"{self.key}: unchanged ({loggable_value(self.key, self.new)})"
+        return describe_change(self.key, self.old, self.new)
+
+
+def set_config_value(path: str, key: str, value: str) -> ConfigChange:
+    """Write KEY=VALUE after check_config_value passed (the caller's job)."""
+    current = read_config(path)
+    old = current.get(key, "")
+    changed = key not in current or old != value
+    if changed:
+        write_value(path, key, value)
+    return ConfigChange(key, old, value, key in current, changed)
+
+
+def unset_config_value(path: str, key: str) -> ConfigChange:
+    """Remove KEY's line: the default applies again."""
+    current = read_config(path)
+    old = current.get(key, "")
+    if key in current:
+        remove_value(path, key)
+    return ConfigChange(key, old, "", key in current, key in current)
+
+
+def effective_config(path: str) -> dict:
+    """Every CLI key with the value in effect: the file's, else DEFAULTS'
+    (else ""). Secrets as loggable_value shows them, so the result can go
+    anywhere a log line can."""
+    current = read_config(path)
+    out = {}
+    for key in CLI_CONFIG_KEYS:
+        value = current.get(key, default_value(key))
+        out[key] = loggable_value(key, value)
+    return out
+
+
+def hand_edit_keys_present(path: str) -> list:
+    """The hand-edit-only keys the file holds, by name."""
+    return sorted(k for k in read_config(path) if is_hand_edit_only(k))
+
+
+# A running Mac menubar caches some settings (PREVENT_SLEEP for caffeinate,
+# the tunnel token for its menu) and does side effects of its own
+# (status.json into the volume). `config set` from a terminal reaches it
+# the way `.upload-analytics` does: a marker file in the data directory
+# that its status loop reads and removes (take_config_changes), listing
+# the keys that changed.
+CONFIG_CHANGED_MARKER = ".config-changed"
+
+
+def note_config_changed(data_dir: str, keys) -> None:
+    """Add *keys* to the marker (kept if a reader has not taken it yet)."""
+    keys = [k for k in keys if re.fullmatch(r"[A-Z][A-Z0-9_]*", k)]
+    if not keys:
+        return
+    path = os.path.join(data_dir, CONFIG_CHANGED_MARKER)
+    present = take_config_changes(data_dir)
+    for k in keys:
+        if k not in present:
+            present.append(k)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(present) + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def take_config_changes(data_dir: str) -> list:
+    """The keys the marker names, removing it; [] without one."""
+    path = os.path.join(data_dir, CONFIG_CHANGED_MARKER)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            names = f.read().split()
+    except OSError:
+        return []
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return [n for n in names if re.fullmatch(r"[A-Z][A-Z0-9_]*", n)]
+
+
+def restart_notes(keys) -> list:
+    """What to tell the person after *keys* changed: a restart, or that the
+    VM keeps its size."""
+    notes = []
+    restart = sorted(k for k in keys if k in NEEDS_RESTART)
+    if restart:
+        notes.append("Restart OnionPress for the change to take effect: "
+                     + ", ".join(restart))
+    for k in sorted(keys):
+        if k in VM_CREATION_ONLY:
+            notes.append(f"{k} applies when the container VM is first created; "
+                         "an existing VM keeps its size.")
+    return notes
+
+
+def apply_side_effects(keys, config_path: str, os_name: str, log,
+                       run=None, app_bundle: str = "", launchagent_path: str = "") -> list:
+    """What the apps do right after a setting changes, done by the CLI
+    (menubar.poll_config_updates / settings_ui and Linux's
+    apply_config_updates do the same for the Settings page's channel):
+    LAUNCH_ON_LOGIN installs or removes the Mac login item,
+    START_ON_BOOT enables or disables the user units on Linux.
+    PREVENT_SLEEP is the running menubar's (it owns caffeinate; the marker
+    tells it) and the Linux daemon re-reads it. Returns a line per effect
+    for the terminal; failures are lines too, never an exception."""
+    import subprocess as _sp
+    run = run or _sp.run
+    lines = []
+    values = read_config(config_path)
+    if "LAUNCH_ON_LOGIN" in keys and os_name == "macos":
+        from . import login_item
+        want = values.get("LAUNCH_ON_LOGIN", DEFAULTS["LAUNCH_ON_LOGIN"]) == "yes"
+        kwargs = {"path": launchagent_path} if launchagent_path else {}
+        if want:
+            ok = login_item.install(app_bundle, log, **kwargs)
+            lines.append("Login item installed." if ok
+                         else "WARNING: could not install the login item (see the log).")
+        else:
+            ok = login_item.remove(log, **kwargs)
+            lines.append("Login item removed." if ok
+                         else "WARNING: could not remove the login item (see the log).")
+    if "START_ON_BOOT" in keys and os_name == "linux":
+        want = values.get("START_ON_BOOT", "yes") == "yes"
+        verb = "enable" if want else "disable"
+        try:
+            r = run(["systemctl", "--user", verb, "onionpress.service",
+                     "onionpress-heartbeat.service"],
+                    capture_output=True, text=True, timeout=60)
+            ok = r.returncode == 0
+        except (OSError, _sp.SubprocessError) as e:
+            log(f"systemctl --user {verb}: {e}")
+            ok = False
+        if ok:
+            log(f"{'Enabled' if want else 'Disabled'} start on boot")
+            lines.append(f"Start on boot {'enabled' if want else 'disabled'}.")
+        else:
+            log(f"WARNING: Failed to {verb} start on boot")
+            lines.append(f"WARNING: systemctl --user {verb} failed (see the log).")
+    return lines
+
+
+def run_config_command(args, data_dir: str, log, *, stdin=None, out=None,
+                       err=None, os_name: str = "", app_bundle: str = "") -> int:
+    """`onionpress config get|set|unset|list` (the CLI's config subcommand).
+
+    *args* is the argparse namespace: config_command, key, value, json.
+    Only the config file, the marker and the side effects above are
+    touched: no Docker, no port probing. Exit 0 done, 1 not set / failed,
+    2 refused (bad key or value, a secret on argv)."""
+    import json as _json
+    out = out or sys.stdout
+    err = err or sys.stderr
+    stdin = stdin or sys.stdin
+    path = os.path.join(data_dir, "config")
+    sub = args.config_command
+
+    if sub == "list":
+        values = effective_config(path)
+        others = hand_edit_keys_present(path)
+        if args.json:
+            doc = {"settings": values, "hand_edit_only": others}
+            print(_json.dumps(doc, indent=2, sort_keys=True), file=out)
+            return 0
+        current = read_config(path)
+        for key in sorted(values):
+            suffix = "" if key in current else (
+                "  (default)" if default_value(key) else "  (unset)")
+            print(f"{key}={values[key]}{suffix}", file=out)
+        if others:
+            print(f"# hand-edit only, in the file: {', '.join(others)}", file=out)
+        return 0
+
+    key = args.key
+    if sub == "get":
+        current = read_config(path)
+        if key in current:
+            print(loggable_value(key, current[key]), file=out)
+            return 0
+        if default_value(key):
+            print(loggable_value(key, default_value(key)), file=out)
+            return 0
+        print(f"{key} is not set", file=err)
+        return 1
+
+    if sub == "unset":
+        if key not in CLI_CONFIG_KEYS:
+            print(f"ERROR: {check_config_value(key, '')}", file=err)
+            return 2
+        change = unset_config_value(path, key)
+    else:  # set
+        value = args.value
+        if value == "-":
+            value = stdin.read()
+            if value.endswith("\n"):
+                value = value[:-1]
+        elif key in SECRET_CONFIG_KEYS and value != "":
+            print(f"ERROR: {key} is a secret: pass - and the value on stdin "
+                  f"(printf '%s' \"$TOKEN\" | onionpress config set {key} -)",
+                  file=err)
+            return 2
+        reason = check_config_value(key, value)
+        if reason:
+            print(f"ERROR: {reason}", file=err)
+            return 2
+        change = set_config_value(path, key, value)
+
+    log(f"config {sub}: {change.describe()}")
+    print(change.describe(), file=out)
+    if not change.changed:
+        return 0
+    note_config_changed(data_dir, [key])
+    for line in apply_side_effects([key], path, os_name, log, app_bundle=app_bundle):
+        print(line, file=out)
+    for line in restart_notes([key]):
+        print(line, file=out)
+    return 0
 
 # -- Secrets --
 
