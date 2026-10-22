@@ -889,9 +889,10 @@ class TestCli(unittest.TestCase):
                 self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
                                        r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" \S+ '
                                        r'(-m onionpress\.cli )?restore "\$restore_path"')
+                # restore --check, restore, hub-recovery-key
                 uses = [ln.strip() for ln in text.splitlines()
                         if "$_HUB_RECOVERY_KEY" in ln and not ln.lstrip().startswith("#")]
-                self.assertEqual(len(uses), 2, uses)
+                self.assertEqual(len(uses), 3, uses)
                 for line in uses:
                     self.assertTrue(line.startswith(('ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ',
                                                      'if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ')),

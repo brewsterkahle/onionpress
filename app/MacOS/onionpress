@@ -983,10 +983,16 @@ HELPEOF
     fi
 
     # Check the key and derive its .onion address before anything is
-    # touched: a key that is refused changes nothing.
+    # touched: a key that is refused changes nothing. The address is the
+    # last line (a warning may precede it), and a whole v3 address.
     local address
     if ! address=$(printf '%s\n' "$key_b32" | bundled_python "$SCRIPTS_DIR/key_manager.py" decode-key - 2>&1); then
         echo "$address" >&2
+        return 1
+    fi
+    address="${address##*$'\n'}"
+    if ! is_onion_address "$address"; then
+        echo "ERROR: the key did not decode to an onion address" >&2
         return 1
     fi
 
@@ -3166,18 +3172,36 @@ main() {
             ;;
 
         restore)
-            # restore <backup_file.zip>; the password comes from
-            # read_backup_password and goes on to Python in the environment.
-            # The old `restore <password> <backup_file.zip>` still works.
+            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
+            # the password comes from read_backup_password and goes on to
+            # Python in the environment. The old `restore <password>
+            # <backup_file.zip>` still works. The flags are the check/confirm
+            # protocol's (onionpress.confirm): --check answers what the
+            # backup is, or {"ask": "password"} without one.
             setup_db_passwords
-            local restore_legacy_pass=""
-            local restore_path="${2:-}"
-            if [ -n "${3:-}" ]; then
-                restore_legacy_pass="$2"
-                restore_path="$3"
+            local restore_legacy_pass="" restore_path="" restore_check=no restore_what=no
+            restore_flags=()
+            restore_pos=()
+            for restore_arg in "${@:2}"; do
+                if [ "$restore_what" = yes ]; then
+                    restore_flags+=("$restore_arg")
+                    restore_what=no
+                    continue
+                fi
+                case "$restore_arg" in
+                    --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
+                    --json) restore_flags+=("$restore_arg") ;;
+                    --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
+                    *) restore_pos+=("$restore_arg") ;;
+                esac
+            done
+            restore_path="${restore_pos[0]:-}"
+            if [ -n "${restore_pos[1]:-}" ]; then
+                restore_legacy_pass="${restore_pos[0]}"
+                restore_path="${restore_pos[1]}"
             fi
             if [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <backup_file.zip>"
+                echo "Usage: $0 restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]"
                 echo "Restores from an OnionPress backup. Containers must be running."
                 echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
                 echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
@@ -3185,9 +3209,14 @@ main() {
                 exit 1
             fi
             read_backup_password "$restore_legacy_pass"
-            if [ -z "$BACKUP_PASS" ]; then
+            if [ -z "$BACKUP_PASS" ] && [ "$restore_check" != yes ]; then
                 echo "ERROR: Password is required." >&2
                 exit 1
+            fi
+            if [ "$restore_check" = yes ]; then
+                # Changes nothing: the CLI's answer is the whole result.
+                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path" "${restore_flags[@]}"
+                exit $?
             fi
             # install-from-backup: the Python CLI tears the install down and
             # rebuilds it from the backup (seeded key + imported DB/content),
@@ -3195,7 +3224,7 @@ main() {
             # (no .import-key-pending, no manual multisite/Tor dance).
             # The exit status is the caller's only sign of a refused or
             # failed restore (the tray and the menubar check it).
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path"; then
+            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path" "${restore_flags[@]}"; then
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
             fi

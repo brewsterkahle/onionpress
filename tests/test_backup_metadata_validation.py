@@ -785,7 +785,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                     code, r'if ! (?:ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" )?'
                           r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '
                           r'(?:op_py|bundled_python -m onionpress\.cli) restore '
-                          r'"\$restore_path"; then\n(?:[^\n]*\n){1,3}?\s*exit 1')
+                          r'"\$restore_path" "\$\{restore_flags\[@\]\}"; then\n(?:[^\n]*\n){1,3}?\s*exit 1')
 
 
 class TestRestoreResultJson(unittest.TestCase):
