@@ -901,9 +901,32 @@ generate_vanity_address() {
 # Function to import a pre-generated onion service key
 import_key() {
     local key_b32="$1"
-    # "-" reads the key from stdin, so a caller (the menubar's settings-page
-    # import) can keep it out of this process's argv, which ps shows to
-    # every user. The key is passed on to key_manager.py on stdin too.
+    shift || true
+    # The check/confirm protocol (onionpress.confirm, issue #366): --check
+    # --json answers {"ok": true, "address": ...} or {"confirm":
+    # "address-change", "current": ..., "new": ...} (exit 4) without
+    # changing anything; the import then needs --confirmed address-change
+    # (or ONIONPRESS_CONFIRMED, or the older ONIONPRESS_IMPORT_KEY_CONFIRMED=yes)
+    # unless a terminal answers the question here.
+    local ik_check=no ik_json=no ik_confirmed=no
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --check) ik_check=yes ;;
+            --json) ik_json=yes ;;
+            --confirmed)
+                [ "${2:-}" = "address-change" ] && ik_confirmed=yes
+                shift ;;
+            *) echo "Unknown import-key option: $1" >&2; return 2 ;;
+        esac
+        shift
+    done
+    if printf '%s' "${ONIONPRESS_CONFIRMED:-}" | tr ',' ' ' | grep -qw address-change; then
+        ik_confirmed=yes
+    fi
+    # "-" reads the key from stdin, so a caller (handle-action's
+    # settings-page import) can keep it out of this process's argv, which
+    # ps shows to every user. The key is passed on to key_manager.py on
+    # stdin too.
     if [ "$key_b32" = "-" ]; then
         IFS= read -r key_b32 || true
     fi
@@ -971,19 +994,33 @@ HELPEOF
     local current_addr
     current_addr=$(find "$DATA_DIR/shared/vanity-keys" -name hostname -exec cat {} \; 2>/dev/null | head -1)
     if [ "$current_addr" = "$address" ]; then
-        echo "Key already installed for: $address"
-        echo "Nothing to do."
+        if [ "$ik_json" = "yes" ]; then
+            printf '{"ok": true, "address": "%s", "unchanged": true}\n' "$address"
+        else
+            echo "Key already installed for: $address"
+            echo "Nothing to do."
+        fi
         return 0
     fi
 
     # Check if a key volume already exists (need to replace old key). The old
     # name is checked too: an install that never started on this version has
     # not migrated yet. The question is skipped only for an explicit
-    # ONIONPRESS_IMPORT_KEY_CONFIRMED=yes: the menubar sets it after the
-    # person at this Mac clicked Replace in its own dialog (a Settings-page
-    # import). Its key arrives on stdin, so this read would see the end of
-    # the input and cancel.
+    # confirmation (--confirmed address-change, ONIONPRESS_CONFIRMED, or
+    # ONIONPRESS_IMPORT_KEY_CONFIRMED=yes): handle-action gives it after the
+    # person at this Mac clicked Replace in the menubar's dialog (a
+    # Settings-page import). Its key arrives on stdin, so this read would
+    # see the end of the input and cancel. --check stops here and says what
+    # would be asked.
     if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx 'onionpress-onion-keys\|onionpress-arti-state'; then
+        if [ "$ik_check" = "yes" ]; then
+            if [ "$ik_json" = "yes" ]; then
+                printf '{"confirm": "address-change", "current": "%s", "new": "%s"}\n' "$current_addr" "$address"
+            else
+                echo "CONFIRM address-change: current=$current_addr new=$address"
+            fi
+            return 4
+        fi
         echo "An onion address key already exists."
         echo ""
         if [ -n "$current_addr" ]; then
@@ -993,9 +1030,9 @@ HELPEOF
         echo "Importing a new key will REPLACE your current onion address."
         echo "A copy of the current key is kept in $DATA_DIR/replaced-keys/."
         echo ""
-        if [ "${ONIONPRESS_IMPORT_KEY_CONFIRMED:-}" = "yes" ]; then
+        if [ "${ONIONPRESS_IMPORT_KEY_CONFIRMED:-}" = "yes" ] || [ "$ik_confirmed" = "yes" ]; then
             echo "Confirmed at this Mac."
-        else
+        elif [ -t 0 ]; then
             printf "Continue? [y/N] "
             local confirm=""
             read -r confirm || true
@@ -1003,7 +1040,14 @@ HELPEOF
                 echo "Cancelled."
                 return 1
             fi
+        else
+            echo "Cancelled."
+            echo "Not imported: this replaces the site's onion address. Run import-key --check --json to see the question, then again with --confirmed address-change." >&2
+            return 1
         fi
+    elif [ "$ik_check" = "yes" ]; then
+        [ "$ik_json" != "yes" ] || printf '{"ok": true, "address": "%s"}\n' "$address"
+        return 0
     fi
 
     # Keep a copy of the current key, ask the OnionHeaven hubs that may hold
@@ -1030,6 +1074,7 @@ HELPEOF
     fi
     echo ""
     echo "Launch OnionPress to use this address."
+    [ "$ik_json" != "yes" ] || printf '{"ok": true, "address": "%s"}\n' "$address"
     return 0
 }
 
@@ -2969,7 +3014,7 @@ main() {
             ;;
 
         import-key)
-            import_key "$2"
+            import_key "${@:2}"
             ;;
 
         logs)
@@ -3466,6 +3511,37 @@ print(f"Downloading and installing v{latest}...")
 updater.download_and_install(release_data, latest, app_path, log=print)
 print(f"Installed v{latest}. Quit and relaunch OnionPress to use the new version.")
 PY
+            ;;
+
+        handle-action)
+            # The WordPress Settings page's requests, handled once for both
+            # platforms (onionpress.handle_action, issue #366): the menubar
+            # runs this on its status loop (Linux: onionpress-watcher.timer).
+            # The actions run through this launcher: start, restart, stop,
+            # apply-config, import-key, settings-page-backup,
+            # settings-page-restore, update. A key import or a restore of
+            # another address stops at {"confirm": "address-change"} until
+            # the menubar asks the person at this Mac and runs it again with
+            # --confirmed address-change (or --cancel).
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" handle-action --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
+            ;;
+
+        apply-config)
+            # The Settings page's config-updates.json, through the allowlist
+            # (config.SETTINGS_PAGE_KEYS); what the running menubar owes is
+            # left in .config-changed for it.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" apply-config
+            ;;
+
+        settings-page-backup|settings-page-restore)
+            # The Settings page's own backup and restore, run by
+            # handle-action (the password in ONIONPRESS_BACKUP_PASSWORD):
+            # for WordPress, so without the hub data, the host's secrets or
+            # the onion service key; the restore in place
+            # (backup.restore_from_backup(through_wordpress=True)), never
+            # the install-from-backup `restore` (issue #341).
+            setup_db_passwords
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$1" "${@:2}"
             ;;
 
         help|-h|--help)
