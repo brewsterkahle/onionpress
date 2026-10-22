@@ -56,6 +56,9 @@ systemctl --user start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
+Settings: `onionpress config list` shows every setting, `onionpress config set KEY VALUE`
+changes one (`config list --help` describes the keys; on a Mac the command is
+`/Applications/OnionPress.app/Contents/MacOS/onionpress`).
 To update: `onionpress update` installs the latest release's `.deb` once it
 matches the sha256 the release publishes in `SHA256SUMS` (`onionpress update --check`
 only says whether there is one).
@@ -98,7 +101,9 @@ importing another key, restoring another site's backup or changing the hub
 asks the hub to delete its copy of the key (OnionPress has to be running for
 that; it tells you if a copy may remain).
 
-- **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*
+- **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*, or
+  `/Applications/OnionPress.app/Contents/MacOS/onionpress onionheaven enable`
+  (or `disable`, `status`)
 - **Linux:** `onionpress onionheaven enable` (or `disable`, `status`)
 - **Config file:** `REGISTER_WITH_ONIONHEAVEN=yes|no` in `~/.onionpress/config`
   (unset means yes)

@@ -370,6 +370,42 @@
   `loggable_value` so `SECRET_CONFIG_KEYS` values never reach a log.
   `tests/test_settings_page_updates.py` locks the page's fields, choices,
   ranges and token pattern to the allowlist.
+- **`onionpress config get|set|unset|list [--json]` is the one writer of
+  `~/.onionpress/config` for the apps** (issue #365, CLI-first phase 1;
+  plan: https://claude.ai/artifact/JgQYk8MQmW3ZixVYj4MS78). Its key set is
+  `config.CLI_CONFIG_KEYS`: `SETTINGS_PAGE_KEYS` (the same check objects)
+  plus `ADDRESS_PREFIX`, `VM_CPU`, `VM_DISK`, `INSTALL_IA_PLUGIN`,
+  `INSTALL_CACHE_ENABLER`, `REPUBLISH_ON_UNREACHABLE`, `ONIONHEAVEN_ADDRESS`
+  and `ONIONHOME_ADDRESS` (the `.onion` format check of
+  `validate-oh-address`; whether it answers as a hub stays the Settings
+  dialog's question) and the three `ONIONNAME*` values the apps record at
+  setup (`RECORDED_KEYS`). Hand-edit only, refused: every `ONIONPRESS_*`
+  key (image overrides, ports, paths, bind host) and
+  `ONIONHEAVEN_ACCEPT_REGISTRATIONS`. **A new setting gets its `config set`
+  entry first** (key, check, `CONFIG_KEY_HELP`, `NEEDS_RESTART` or
+  `CODE_DEFAULTS` as needed); a UI only calls the command, and
+  `tests/test_cli_config.py` fails on a key in `DEFAULTS` or the template
+  that is neither settable nor hand-edit only.
+- A secret is taken only as `config set KEY -` with the value on stdin
+  (`tests/test_secrets_off_argv.py`); `get`/`list` show it as
+  `<set>`/`<empty>`. A change is logged through `describe_change`, the key
+  goes into `~/.onionpress/.config-changed` for a running menubar
+  (`check_status` and `write_config_value` take it with
+  `take_config_changes` → `apply_config_changes`: caffeinate, the
+  analytics upload, the tunnel flag, status.json), and
+  `config.apply_side_effects` installs or removes the Mac login item
+  (`onionpress.login_item`, shared with the menubar) or runs
+  `systemctl --user enable|disable` on Linux. The keys in `NEEDS_RESTART`
+  are printed as needing a restart (the Settings dialog shares the set).
+- Callers: `menubar.write_config_value` runs the launcher's `config set`
+  (so does the Settings dialog, through its one `write_config` callback);
+  the Linux tray's setup write runs `onionpress config set`; both bash
+  launchers' `config)` and `onionheaven)` cases are one-line delegations to
+  `onionpress.cli` (Linux's `onionheaven_cmd` too; its bash body moved to
+  `onionheaven.run_onionheaven_command`). `onionpress onionheaven
+  enable|disable|status [--json]` writes the choice through the same path
+  and reads the registration record, no network. The Settings page's
+  `config-updates.json` channel and `SETTINGS_PAGE_KEYS` are unchanged.
 - Nor does the token reach WordPress in a backup. The page's backup is
   handed to WordPress, with a password from there, so it is
   `create_backup(include_hub_data=False, include_host_secrets=False)`
