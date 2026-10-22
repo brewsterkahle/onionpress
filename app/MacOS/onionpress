@@ -900,15 +900,16 @@ generate_vanity_address() {
 
 # Function to import a pre-generated onion service key
 import_key() {
-    local key_b32="$1"
-    shift || true
-    # The check/confirm protocol (onionpress.confirm, issue #366): --check
-    # --json answers {"ok": true, "address": ...} or {"confirm":
+    # import-key [<key>|-] [--check] [--json] [--confirmed address-change],
+    # in any order; the key (or "-") is the one argument that is not a
+    # flag. The check/confirm protocol (onionpress.confirm, issue #366):
+    # --check --json answers {"ok": true, "address": ...} or {"confirm":
     # "address-change", "current": ..., "new": ...} (exit 4) without
     # changing anything; the import then needs --confirmed address-change
     # (or ONIONPRESS_CONFIRMED, or the older ONIONPRESS_IMPORT_KEY_CONFIRMED=yes)
-    # unless a terminal answers the question here.
-    local ik_check=no ik_json=no ik_confirmed=no
+    # unless a terminal answers the question here; off a terminal without
+    # it the import is refused (exit 3).
+    local key_b32="" ik_check=no ik_json=no ik_confirmed=no
     while [ $# -gt 0 ]; do
         case "$1" in
             --check) ik_check=yes ;;
@@ -916,7 +917,9 @@ import_key() {
             --confirmed)
                 [ "${2:-}" = "address-change" ] && ik_confirmed=yes
                 shift ;;
-            *) echo "Unknown import-key option: $1" >&2; return 2 ;;
+            --help|-h) key_b32="--help" ;;
+            --*) echo "Unknown import-key option: $1" >&2; return 2 ;;
+            *) key_b32="$1" ;;
         esac
         shift
     done
@@ -937,7 +940,8 @@ import_key() {
     # Show help if no argument or --help
     if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
         cat <<HELPEOF
-Usage: onionpress import-key <base32-secret-key>
+Usage: onionpress import-key <base32-secret-key> [--check] [--json]
+                             [--confirmed address-change]
 
 Import a pre-generated ed25519 key for your onion service.
 
@@ -1049,7 +1053,7 @@ HELPEOF
         else
             echo "Cancelled."
             echo "Not imported: this replaces the site's onion address. Run import-key --check --json to see the question, then again with --confirmed address-change." >&2
-            return 1
+            return 3
         fi
     elif [ "$ik_check" = "yes" ]; then
         [ "$ik_json" != "yes" ] || printf '{"ok": true, "address": "%s"}\n' "$address"

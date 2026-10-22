@@ -396,7 +396,8 @@ class TestMacApplyConfig(unittest.TestCase):
 
     def test_hostile_payload(self):
         payload = dict(HOSTILE, LAUNCH_ON_LOGIN="no")
-        self.assertEqual(self._apply(json.dumps(payload)), 0)
+        self.assertEqual(sorted(self._apply(json.dumps(payload))),
+                         ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"])
         config = op_config.read_config(self.config)
         self.assertEqual(config["CLOUDFLARE_TUNNEL_TOKEN"], TOKEN)
         self.assertEqual(config["LAUNCH_ON_LOGIN"], "no")
@@ -429,7 +430,7 @@ class TestMacApplyConfig(unittest.TestCase):
                          ["LAUNCH_ON_LOGIN", "PREVENT_SLEEP", "SHARE_ANALYTICS_WITH_ONIONHOME"])
 
     def test_truncated_json_is_left_for_the_next_run(self):
-        self.assertEqual(self._apply('{"UPDATE_ON_LAUNCH": "n'), 1)
+        self.assertIsNone(self._apply('{"UPDATE_ON_LAUNCH": "n'))
         self.assertEqual(self.docker.get("config-updates.json"), '{"UPDATE_ON_LAUNCH": "n')
         self.assertEqual(self.effects, [])
 
@@ -441,6 +442,8 @@ class TestMacApplyConfig(unittest.TestCase):
         self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" apply-config', mac)
         handler = _read("src/onionpress/handle_action.py")
         self.assertIn('host.run_launcher(["apply-config"]', handler)
+        # and every Mac tick applies it itself (tests/test_handle_action.py)
+        self.assertIn('applied = apply_config(host) if host.os_name == "macos" else []', handler)
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")

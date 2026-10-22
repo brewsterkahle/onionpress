@@ -505,7 +505,8 @@ onionheaven_release() {
             "is_onion_address", "vanity_key_dir", "docker_volume_state",
             "replace_onion_key", "set_address_prefix_for", "import_key"))
         extra = env.pop("ONIONPRESS_IMPORT_KEY_ARGS", "")
-        script = "set -e\n" + self.PRELUDE + funcs + f"\nimport_key - {extra}\n"
+        first = env.pop("ONIONPRESS_IMPORT_KEY_FLAGS_FIRST", "")
+        script = "set -e\n" + self.PRELUDE + funcs + f"\nimport_key {first} - {extra}\n"
         return subprocess.run(["bash", "-c", script], input=key + "\n",
                               capture_output=True, text=True, timeout=120,
                               env=inst.env(**env))
@@ -514,7 +515,7 @@ onionheaven_release() {
         inst = _Install(self, vanity=OLD)
         before = inst.vanity()
         r = self._import(inst, b32(NEW))
-        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)    # refused, as every unconfirmed run
         self.assertIn("Cancelled.", r.stdout)
         self.assertEqual(inst.vanity(), before)
         self.assertEqual(inst.kept(), {})
@@ -563,6 +564,10 @@ onionheaven_release() {
         self.assertEqual(inst.kept(), {})
         # Only the read that decides whether there is a key to replace
         self.assertEqual([c for c in inst.calls_list() if not c.startswith("docker volume ls")], [])
+        # The flags may come before the key
+        r = self._import(inst, b32(NEW), ONIONPRESS_IMPORT_KEY_FLAGS_FIRST="--check --json")
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1])["confirm"], "address-change")
         # The same key: nothing to ask
         r = self._import(inst, b32(OLD), ONIONPRESS_IMPORT_KEY_ARGS="--check --json")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

@@ -16,7 +16,8 @@ tray, a script), generalising `import-key`'s ONIONPRESS_IMPORT_KEY_CONFIRMED:
    answer in 5 minutes is Cancel. Those semantics live in the UI.
 3. The UI runs the command again with `--confirmed <what>` for every
    question it asked (or all of them in ONIONPRESS_CONFIRMED, separated by
-   commas). Without that the CLI refuses past the check: a client that
+   commas). Without that the CLI refuses past the check (exit 3, the
+   answer naming the question: answer_refused_question): a client that
    skips step 1 gets a refusal, never a silent destructive action. At a
    terminal a command may ask its question itself instead, as the
    launchers always have.
@@ -25,8 +26,9 @@ A command may also need a secret before it can check anything (a
 restore's password): {"ask": "password", ...facts} (exit 5), and the UI
 collects it and runs the check again with it in the environment.
 
-Exit statuses: 0 ok, 1 failed, 3 refused (nothing changed), 4 a
-confirmation is needed (`EXIT_CONFIRM`), 5 an input is needed
+Exit statuses: 0 ok, 1 failed, 3 refused (nothing changed; a run that
+stopped at an unanswered question too), 4 a confirmation is needed
+(`EXIT_CONFIRM`: only `--check` answers this), 5 an input is needed
 (`EXIT_ASK`). With --json the answer is always the last line of stdout,
 so a caller parses `last_json_line`.
 
@@ -177,6 +179,23 @@ def answer_confirm(exc, json_output, out=None, err=None):
             f"{k}={v}" for k, v in sorted(exc.facts.items())), file=out)
         print(NOT_CONFIRMED_MSG.format(what=exc.what), file=err)
     return EXIT_CONFIRM
+
+
+def answer_refused_question(exc, json_output, out=None, err=None):
+    """A real run (no --check) stopped at the question *exc* asks: refused,
+    exit EXIT_REFUSED, nothing changed. The answer still carries the
+    question ({"error", "confirm", ...facts}), so a client that skipped
+    --check can ask it and run again with --confirmed."""
+    out = out or sys.stdout
+    err = err or sys.stderr
+    message = NOT_CONFIRMED_MSG.format(what=exc.what)
+    if json_output:
+        print(dumps({"error": message, **exc.answer()}), file=out)
+    else:
+        print(f"CONFIRM {exc.what}: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(exc.facts.items())), file=out)
+        print(f"ERROR: {message}", file=err)
+    return EXIT_REFUSED
 
 
 def answer_error(message, json_output, out=None, err=None, code=EXIT_FAILED):

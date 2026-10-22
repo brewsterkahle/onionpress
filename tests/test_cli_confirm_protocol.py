@@ -143,13 +143,17 @@ class TestConfigSetPrefixChange(unittest.TestCase):
         self.assertEqual(self.prefix(), "aaa")
 
     def test_the_run_refuses_without_the_confirmation(self):
+        """Refused is exit 3 (4 is --check's); the answer still names the
+        question so a client that skipped --check can ask it."""
         rc, out, err = self.run_cli("ADDRESS_PREFIX", "op2")
-        self.assertEqual(rc, confirm.EXIT_CONFIRM)
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
         self.assertIn("--confirmed prefix-change", err)
         self.assertEqual(self.prefix(), "aaa")
         rc, out, _ = self.run_cli("ADDRESS_PREFIX", "op2", "--json")
-        self.assertEqual(rc, confirm.EXIT_CONFIRM)
-        self.assertEqual(_last_json(out)["confirm"], "prefix-change")
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        ans = _last_json(out)
+        self.assertEqual(ans["confirm"], "prefix-change")
+        self.assertIn("--confirmed prefix-change", ans["error"])
         self.assertEqual(self.prefix(), "aaa")
 
     def test_confirmed_by_flag_or_environment(self):
@@ -170,11 +174,40 @@ class TestConfigSetPrefixChange(unittest.TestCase):
         # "" means the default, op2, which this address lacks
         self.assertEqual(rc, confirm.EXIT_CONFIRM)
 
-    def test_no_known_address_asks_nothing(self):
+    def test_no_known_address_asks_too(self):
+        """QA on 2026-10-22: a headless start on a not-yet-installed site
+        leaves no onion_address; the prefix is then asked about, never ok."""
         os.remove(os.path.join(self.dir, "onion_address"))
+        rc, out, _ = self.run_cli("ADDRESS_PREFIX", "op2", "--check", "--json")
+        self.assertEqual(rc, confirm.EXIT_CONFIRM)
+        self.assertEqual(_last_json(out), {"confirm": "prefix-change", "current": "aaa",
+                                           "new": "op2", "address": ""})
         rc, out, _ = self.run_cli("ADDRESS_PREFIX", "op2", "--json")
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertEqual(self.prefix(), "aaa")
+        rc, out, _ = self.run_cli("ADDRESS_PREFIX", "op2", "--confirmed", "prefix-change", "--json")
         self.assertEqual(rc, 0)
         self.assertEqual(self.prefix(), "op2")
+        # The prefix the file already has asks nothing
+        rc, out, _ = self.run_cli("ADDRESS_PREFIX", "op2", "--check", "--json")
+        self.assertEqual((rc, _last_json(out)["ok"]), (0, True))
+
+    def test_unset_takes_json_too(self):
+        rc, out, _ = self.run_cli("PREVENT_SLEEP", "never", "--json")
+        self.assertEqual(rc, 0)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(["--data-dir", self.dir, "config", "unset", "PREVENT_SLEEP", "--json"])
+        self.assertEqual(rc, 0)
+        ans = _last_json(out)
+        self.assertEqual((ans["ok"], ans["key"], ans["changed"]), (True, "PREVENT_SLEEP", True))
+        self.assertEqual(op_config.read_value(os.path.join(self.dir, "config"), "PREVENT_SLEEP", ""), "")
+
+    def test_the_log_names_the_effective_default_for_an_unset_key(self):
+        change = op_config.set_config_value(os.path.join(self.dir, "config"), "PREVENT_SLEEP", "never")
+        self.assertEqual(change.describe(), "PREVENT_SLEEP: 'normal' (unset) → 'never'")
+        change = op_config.set_config_value(os.path.join(self.dir, "config"), "PREVENT_SLEEP", "normal")
+        self.assertEqual(change.describe(), "PREVENT_SLEEP: 'never' → 'normal'")
 
     def test_other_keys_check_and_json(self):
         rc, out, _ = self.run_cli("PREVENT_SLEEP", "never", "--check", "--json")
@@ -274,8 +307,10 @@ class TestSettingsPageRestoreAddressChange(unittest.TestCase):
             kw["before_key_change"](OTHER)
             return {}
         rc, ans = self._run(frozenset(), restore)
-        self.assertEqual(rc, confirm.EXIT_CONFIRM)
-        self.assertEqual(ans, {"confirm": "address-change", "current": ADDR, "new": OTHER})
+        self.assertEqual(rc, confirm.EXIT_REFUSED)
+        self.assertEqual((ans["confirm"], ans["current"], ans["new"]),
+                         ("address-change", ADDR, OTHER))
+        self.assertIn("--confirmed address-change", ans["error"])
         rc, ans = self._run(frozenset({"address-change"}), restore)
         self.assertEqual((rc, ans), (0, {"ok": True}))
         self.assertEqual(len(seen), 2)

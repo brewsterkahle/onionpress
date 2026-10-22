@@ -530,6 +530,12 @@ class ConfigChange:
     def describe(self) -> str:
         if not self.changed:
             return f"{self.key}: unchanged ({loggable_value(self.key, self.new)})"
+        if not self.was_set and self.key not in SECRET_CONFIG_KEYS:
+            # The line was absent: its default applied (CODE_DEFAULTS for
+            # the keys whose default lives in the code that reads them).
+            before = default_value(self.key)
+            return (f"{self.key}: {before!r} (unset) → {self.new!r}" if before
+                    else f"{self.key}: unset → {self.new!r}")
         return describe_change(self.key, self.old, self.new)
 
 
@@ -708,6 +714,7 @@ def run_config_command(args, data_dir: str, log, *, stdin=None, out=None,
         return 0
 
     key = args.key
+    json_output = bool(getattr(args, "json", False))
     if sub == "get":
         current = read_config(path)
         if key in current:
@@ -726,7 +733,6 @@ def run_config_command(args, data_dir: str, log, *, stdin=None, out=None,
         change = unset_config_value(path, key)
     else:  # set
         from . import confirm as _confirm
-        json_output = bool(getattr(args, "json", False))
         value = args.value
         if value == "-":
             value = stdin.read()
@@ -746,13 +752,18 @@ def run_config_command(args, data_dir: str, log, *, stdin=None, out=None,
         try:
             prefix_change_question(key, value, data_dir, _confirm.given(args))
         except _confirm.NeedsConfirmation as e:
-            return _confirm.answer_confirm(e, json_output, out, err)
+            # --check answers the question (exit 4); a run without the
+            # confirmation refuses (exit 3), naming it.
+            if getattr(args, "check", False):
+                return _confirm.answer_confirm(e, json_output, out, err)
+            return _confirm.answer_refused_question(e, json_output, out, err)
         if getattr(args, "check", False):
             return _confirm.answer_ok(json_output, out, text=f"OK: {key} may be set.", key=key)
         change = set_config_value(path, key, value)
 
     log(f"config {sub}: {change.describe()}")
-    if sub == "set" and json_output:
+    if json_output:
+        from . import confirm as _confirm
         lines = []
         if change.changed:
             note_config_changed(data_dir, [key])
@@ -789,18 +800,23 @@ def cached_onion_address(data_dir: str) -> str:
 def prefix_change_question(key: str, value: str, data_dir: str, confirmed) -> None:
     """`config set ADDRESS_PREFIX`: raise NeedsConfirmation("prefix-change",
     current, new, address) when the install's address does not start with
-    the new prefix and that was not confirmed (onionpress.confirm). The
-    live address keeps its prefix whatever the setting says; the setting
-    is read when a new address is made."""
+    the new prefix, or is not known (no cache file: not started yet, or
+    not installed yet; "address" is "" then), and that was not confirmed
+    (onionpress.confirm). The live address keeps its prefix whatever the
+    setting says; the setting is read when a new address is made. Setting
+    the prefix the file already has asks nothing."""
     if key != "ADDRESS_PREFIX":
         return
     from . import confirm as _confirm
+    current = read_value(os.path.join(data_dir, "config"), key, "")
+    if value == current:
+        return
     addr = cached_onion_address(data_dir)
     new = value or DEFAULTS["ADDRESS_PREFIX"]
-    if not addr or addr.startswith(new):
+    if addr and addr.startswith(new):
         return
-    current = read_value(os.path.join(data_dir, "config"), key, DEFAULTS["ADDRESS_PREFIX"])
-    _confirm.require("prefix-change", confirmed, current=current, new=new, address=addr)
+    _confirm.require("prefix-change", confirmed,
+                     current=current or DEFAULTS["ADDRESS_PREFIX"], new=new, address=addr)
 
 # -- Secrets --
 

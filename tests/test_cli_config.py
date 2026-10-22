@@ -142,7 +142,10 @@ class TestConfigSet(_CliCase):
             if good is None:
                 continue
             with self.subTest(key=key):
-                rc, out, err = self.run_cli("config", "set", key, good)
+                # A prefix the (unknown) address may lack is asked about
+                # (tests/test_cli_confirm_protocol.py); answered here.
+                flags = ["--confirmed", "prefix-change"] if key == "ADDRESS_PREFIX" else []
+                rc, out, err = self.run_cli("config", "set", key, good, *flags)
                 self.assertEqual((rc, err), (0, ""), out)
                 self.assertEqual(self.file()[key], good)
                 self.assertIn(key, out)
@@ -222,7 +225,10 @@ class TestConfigSet(_CliCase):
 
     def test_change_is_logged_through_describe_change(self):
         self.run_cli("config", "set", "VM_CPU", "4")
-        self.assertIn("VM_CPU: '' → '4'", self.log())
+        # The line was absent: the effective default, not the raw file value
+        self.assertIn("VM_CPU: '2' (unset) → '4'", self.log())
+        self.run_cli("config", "set", "VM_CPU", "6")
+        self.assertIn("VM_CPU: '4' → '6'", self.log())
 
     def test_the_marker_accumulates_until_taken(self):
         self.run_cli("config", "set", "VM_CPU", "4")
@@ -638,7 +644,8 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
                 op_config.write_value(self.app.config_file, "ADDRESS_PREFIX", "abc")
                 op_config.note_config_changed(self.dir, ["ADDRESS_PREFIX"])
                 return mock.Mock(returncode=0, stdout='{"ok": true}\n', stderr="")
-            return mock.Mock(returncode=4, stdout=json.dumps(question) + "\n", stderr="")
+            return mock.Mock(returncode=3, stdout=json.dumps({"error": "needs a confirmation",
+                                                                **question}) + "\n", stderr="")
         for answer in (True, False):
             with self.subTest(answer=answer):
                 argvs.clear()
@@ -647,7 +654,7 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
                     ok = self.write(self.app, "ADDRESS_PREFIX", "abc")
                 self.assertIs(ok, answer)
                 self.app._ask_cli_question.assert_called_once_with(
-                    "prefix-change", question, action="Change")
+                    "prefix-change", {"error": "needs a confirmation", **question}, action="Change")
                 if answer:
                     self.assertEqual(argvs[1][-2:], ["--confirmed", "prefix-change"])
                     self.assertEqual(op_config.read_value(self.app.config_file, "ADDRESS_PREFIX"), "abc")
