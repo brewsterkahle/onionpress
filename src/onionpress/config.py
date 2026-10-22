@@ -653,7 +653,7 @@ def apply_side_effects(keys, config_path: str, os_name: str, log,
             lines.append("Login item installed." if ok
                          else "WARNING: could not install the login item (see the log).")
         else:
-            ok = login_item.remove(log, **kwargs)
+            ok = login_item.remove(log, run=run, **kwargs)
             lines.append("Login item removed." if ok
                          else "WARNING: could not remove the login item (see the log).")
     if "START_ON_BOOT" in keys and os_name == "linux":
