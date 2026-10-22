@@ -66,6 +66,12 @@ class Docker:
         """The resolved docker binary (bundled copy or PATH lookup)."""
         return self._docker_bin
 
+    @property
+    def env(self) -> dict:
+        """The environment docker children run with (a copy), for a caller
+        that streams a file into `docker exec` itself."""
+        return dict(self._env)
+
     @staticmethod
     def _find_docker(paths: OnionPressPaths) -> str:
         """Resolve the docker binary path."""

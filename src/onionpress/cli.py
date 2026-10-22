@@ -1340,6 +1340,87 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
             pass
 
 
+def _settings_page_log(data_dir: str):
+    paths = resolve_paths(data_dir=data_dir)
+    return _make_log_func(paths.log_file)
+
+
+def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
+                             json_output: bool = False) -> int:
+    """`onionpress settings-page-backup <zip>` (a Mac; Linux's launcher
+    runs its bash create_backup --without-hub-data --without-host-secrets).
+    Handed to WordPress by handle-action, and the password came from
+    there: refused on an OnionHeaven hub or OnionHome, or a node that
+    could not be checked (exit 3, SettingsPageBackupRefused's message), and
+    never a hub's registry or registrants' keys, nor the Cloudflare tunnel
+    token or any other config WordPress is not shown
+    (backup.TUNNEL_TOKEN_KEY), nor the site's own onion service key
+    (backup.ONION_KEY_LEFT_OUT_NOTE, the answer's "note": the app's
+    Backup... has it)."""
+    from . import confirm as _confirm
+    from .backup import (create_backup, get_admin_username, served_onion_address,
+                         SettingsPageBackupRefused, ONION_KEY_LEFT_OUT_NOTE)
+    log = _settings_page_log(data_dir)
+    try:
+        metadata = create_backup(
+            served_onion_address() or "unknown", get_admin_username(data_dir=data_dir),
+            password, output_path, __version__, log,
+            include_hub_data=False, include_host_secrets=False,
+            include_onion_key=False)
+    except SettingsPageBackupRefused as e:
+        return _confirm.answer_error(e, json_output, code=_confirm.EXIT_REFUSED)
+    except Exception as e:
+        log(f"Settings page backup failed: {e}")
+        return _confirm.answer_error(e, json_output)
+    facts = {}
+    if isinstance(metadata, dict) and metadata.get("excludes_onion_key") is True:
+        facts["note"] = ONION_KEY_LEFT_OUT_NOTE
+    return _confirm.answer_ok(json_output, **facts)
+
+
+def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
+                              json_output: bool, confirmed) -> int:
+    """`onionpress settings-page-restore <zip>` (a Mac; Linux's launcher
+    runs its bash restore_backup --from-settings-page): the in-place
+    backup.restore_from_backup(through_wordpress=True), never the
+    install-from-backup `restore` (issue #341). The file and its password
+    came through WordPress: refused on an OnionHeaven hub or OnionHome (or
+    a node that could not be checked), and for a backup holding a hub's
+    keys or OnionHome's name registry; neither volume is written. A backup
+    of another address replaces this one only with --confirmed
+    address-change (the handler asks the person at the Mac first: exit 4,
+    {"confirm": "address-change", "current", "new"}); one without a key
+    keeps it. Before the key changes, the OnionHeaven hubs that may hold
+    the current one are asked to delete it, while it can still sign."""
+    from . import confirm as _confirm
+    from .backup import restore_from_backup, SettingsPageRestoreRefused
+    log = _settings_page_log(data_dir)
+
+    def confirm_address_change(current, new):
+        _confirm.require("address-change", confirmed, current=current, new=new)
+        return True
+
+    def before_key_change(restored_address):
+        try:
+            release_onionheaven("restore", keep_address=restored_address,
+                                data_dir=data_dir, log_func=log, out=sys.stderr)
+        except Exception as e:
+            log(f"Restore: could not ask OnionHeaven to delete the old key (continuing): {e}")
+
+    try:
+        restore_from_backup(backup_file, password, log, through_wordpress=True,
+                            before_key_change=before_key_change,
+                            confirm_address_change=confirm_address_change)
+    except _confirm.NeedsConfirmation as e:
+        return _confirm.answer_confirm(e, json_output)
+    except SettingsPageRestoreRefused as e:
+        return _confirm.answer_error(e, json_output, code=_confirm.EXIT_REFUSED)
+    except Exception as e:
+        log(f"Settings page restore failed: {e}")
+        return _confirm.answer_error(e, json_output)
+    return _confirm.answer_ok(json_output)
+
+
 def main(argv: list[str] = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -1715,6 +1796,43 @@ def main(argv: list[str] = None) -> int:
         "--address", default="",
         help="The restored onion address (ADDRESS_PREFIX must match it)")
 
+    # The WordPress Settings page's requests (issue #366): one handler for
+    # both platforms, run by onionpress-watcher.timer on Linux and by the
+    # menubar's status loop on a Mac.
+    from . import confirm as _confirm
+    p_ha = sub.add_parser(
+        "handle-action",
+        help="Handle the WordPress Settings page's request (requested-action "
+             "in the shared volume), if there is one")
+    p_ha.add_argument(
+        "--launcher", default="",
+        help="The launcher script the actions run through (default: this "
+             "install's)")
+    p_ha.add_argument(
+        "--cancel", action="store_true",
+        help="The question a previous run asked was answered Cancel")
+    _confirm.add_arguments(p_ha, check=False)
+    sub.add_parser(
+        "apply-config",
+        help="Apply the Settings page's config-updates.json (the allowlisted "
+             "keys), then remove it")
+    p_spb = sub.add_parser(
+        "settings-page-backup",
+        help="The Settings page's backup: for WordPress, so without the hub "
+             "data, the host's secrets or (on a Mac) the onion service key; "
+             "the password from $ONIONPRESS_BACKUP_PASSWORD or stdin")
+    p_spb.add_argument("output", help="Where to write the zip")
+    p_spb.add_argument("--json", action="store_true",
+                       help="Answer with one JSON object on the last line")
+    p_spr = sub.add_parser(
+        "settings-page-restore",
+        help="The Settings page's restore: in place, never on a hub or "
+             "OnionHome, never a hub's keys; a backup of another address "
+             "needs --confirmed address-change; the password from "
+             "$ONIONPRESS_BACKUP_PASSWORD or stdin")
+    p_spr.add_argument("backup_file", help="The uploaded backup zip")
+    _confirm.add_arguments(p_spr, check=False)
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -1745,6 +1863,35 @@ def main(argv: list[str] = None) -> int:
         return onionheaven.run_onionheaven_command(
             args.onionheaven_command, _hub_context(args.data_dir),
             json_output=args.json)
+
+    if args.command in ("handle-action", "apply-config"):
+        # Run every 10 s (Linux) or every status tick (Mac): no
+        # OnionPressCLI setup (config/secrets creation, port probing).
+        from . import handle_action as _ha
+        paths = resolve_paths(data_dir=args.data_dir)
+        log = _make_log_func(paths.log_file)
+        os_name = detect_os().value
+        host = _ha.Host(
+            launcher=(getattr(args, "launcher", "") or _ha.default_launcher(paths, os_name)),
+            paths=paths, docker=Docker(paths, log_func=log), log=log, os_name=os_name,
+            version=__version__)
+        if args.command == "apply-config":
+            return _ha.apply_config(host)
+        result = _ha.handle(host, confirmed=_confirm.given(args), cancel=args.cancel)
+        if args.json:
+            print(_confirm.dumps(result))
+        return 0
+
+    if args.command in ("settings-page-backup", "settings-page-restore"):
+        # The page's own backup and restore, run by handle-action through
+        # the launcher (on Linux the launcher's bash does these itself).
+        password = read_backup_password()
+        if not password:
+            return _confirm.answer_error("a password is required", args.json)
+        if args.command == "settings-page-backup":
+            return cmd_settings_page_backup(args.output, password, data_dir, args.json)
+        return cmd_settings_page_restore(
+            args.backup_file, password, data_dir, args.json, _confirm.given(args))
 
     if args.command == "hub-recovery-key":
         # Needs only the data directory (restore: docker too): no

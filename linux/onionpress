@@ -4656,234 +4656,74 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         handle-action)
-            # Process action requests from the WordPress settings page.
-            # This runs as onionpress-watcher.service, a oneshot: whatever
-            # must outlive it goes through run_detached.
-            ONIONPRESS_IN_WATCHER=true
-            local action
-            action=$(wp_exec cat /var/lib/onionpress/requested-action 2>/dev/null || echo "")
-            if [ -z "$action" ]; then
-                # No action requested — just refresh logs (cheap)
-                # Full status is written on-demand when the status page detects stale data
-                write_recent_logs
-                exit 0
+            # The WordPress Settings page's requests, handled once for both
+            # platforms (onionpress.handle_action, issue #366). Its actions
+            # run through this launcher: start, restart, stop, apply-config,
+            # write-status, settings-page-backup, settings-page-restore,
+            # settings-page-update-check (the bash bodies below). This runs
+            # as onionpress-watcher.service, a oneshot: whatever must
+            # outlive it goes through run_detached, which ONIONPRESS_IN_WATCHER
+            # tells (inherited by the launcher runs under the handler).
+            ONIONPRESS_IN_WATCHER=true op_py --data-dir "$DATA_DIR" handle-action --launcher "$INSTALL_DIR/onionpress" "${@:2}"
+            ;;
+
+        settings-page-backup)
+            # The Settings page's backup (handle-action create-backup):
+            # handed to WordPress, and the password came from there
+            # (ONIONPRESS_BACKUP_PASSWORD), so never a hub's registry or
+            # registrants' keys (--without-hub-data), nor the Cloudflare
+            # tunnel token or any other config WordPress is not shown
+            # (--without-host-secrets); refused on an OnionHeaven hub or
+            # OnionHome, or a node that could not be checked (exit 3, the
+            # reason on stdout). Usage: settings-page-backup <output.zip>
+            setup_db_passwords
+            read_backup_password
+            if [ -z "$BACKUP_PASS" ] || [ -z "${2:-}" ]; then
+                echo "ERROR: settings-page-backup <output.zip>, the password in ONIONPRESS_BACKUP_PASSWORD" >&2
+                exit 1
             fi
-            wp_exec rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json 2>/dev/null
-            if [ "$action" != "refresh-status" ]; then
-                log "Handling requested action: $action"
+            spb_rc=0
+            create_backup "$BACKUP_PASS" "$2" --without-hub-data --without-host-secrets 2>>"$LOG_FILE" || spb_rc=$?
+            if [ "$spb_rc" -eq 3 ]; then
+                printf '%s\n' "$BACKUP_REFUSAL"
+                exit 3
             fi
-            case "$action" in
-                start)
-                    setup_db_passwords
-                    apply_config_updates 2>/dev/null || true
-                    echo start | wp_put /var/lib/onionpress/service-pending 2>/dev/null
-                    start_containers
-                    wait_for_services
-                    write_status
-                    local containers_info
-                    containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
-                    echo '{"success":true,"action":"start","message":"Started '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                        wp_put /var/lib/onionpress/service-result.json \&\& wp_exec rm -f /var/lib/onionpress/service-pending 2>/dev/null
-                    ;;
-                restart)
-                    setup_db_passwords
-                    apply_config_updates 2>/dev/null || true
-                    # Write pending marker to shared volume before stopping (survives container restart)
-                    echo restart | wp_put /var/lib/onionpress/service-pending 2>/dev/null
-                    stop_containers
-                    start_containers
-                    wait_for_services
-                    write_status
-                    local containers_info
-                    containers_info=$(docker ps --filter "name=onionpress" --format '{{.Names}}: {{.Status}}' 2>/dev/null | sed 's/onionpress-//g' | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
-                    echo '{"success":true,"action":"restart","message":"Restarted '"$containers_info"'","completed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                        wp_put /var/lib/onionpress/service-result.json \&\& wp_exec rm -f /var/lib/onionpress/service-pending 2>/dev/null
-                    ;;
-                stop)
-                    setup_db_passwords
-                    stop_containers
-                    ;;
-                check-reachability)
-                    log "Running Tor reachability test..."
-                    local onion_addr_test
-                    onion_addr_test=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-                    if [ -z "$onion_addr_test" ]; then
-                        echo '{"reachable":false,"error":"No onion address found","tested_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/reachability-result.json 2>/dev/null
-                        log "Reachability test: no onion address"
-                    else
-                        local http_code
-                        http_code=$(docker exec onionheaven curl -s -o /dev/null -w '%{http_code}' --max-time 60 --socks5-hostname 127.0.0.1:9050 "http://$onion_addr_test/" 2>/dev/null || echo "000")
-                        local reachable=false
-                        if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 500 ] 2>/dev/null; then
-                            reachable=true
-                        fi
-                        echo '{"reachable":'"$reachable"',"http_code":'"$http_code"',"address":"'"$onion_addr_test"'","tested_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/reachability-result.json 2>/dev/null
-                        log "Reachability test: $onion_addr_test -> HTTP $http_code (reachable=$reachable)"
-                    fi
-                    ;;
-                import-key-file)
-                    # A key import replaces this site's onion address, and
-                    # anything running in WordPress can ask for one here,
-                    # with no one at this host to ask (the Mac asks the
-                    # person at the Mac). Refused: keys are imported on the
-                    # host, with onionpress import-key, which asks first
-                    # and keeps a copy of the current key.
-                    # The page's generate-vanity, which replaced the key
-                    # the same way, is gone.
-                    wp_exec rm -f /var/lib/onionpress/import-key-data 2>/dev/null
-                    write_key_result import-result.json imported_at false "Not imported: a key import replaces this site's onion address, which the Settings page never does on Linux. On the computer running OnionPress, run: onionpress import-key"
-                    log "Key import from the Settings page refused: import a key on this computer with onionpress import-key"
-                    ;;
-                create-backup)
-                    log "Creating backup from settings page..."
-                    setup_db_passwords
-                    local bp_password
-                    bp_password=$(wp_exec cat /var/lib/onionpress/backup-password 2>/dev/null || echo "")
-                    wp_exec rm -f /var/lib/onionpress/backup-password 2>/dev/null
-                    if [ -z "$bp_password" ]; then
-                        echo '{"success":false,"error":"No password provided","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                            wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
-                        log "Backup failed: no password"
-                    else
-                        local bp_onion
-                        bp_onion=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-                        # Its first 8 characters name the file, only from a
-                        # whole address (create_backup refuses any other).
-                        if is_onion_address "$bp_onion"; then
-                            bp_onion="${bp_onion:0:8}"
-                        else
-                            bp_onion="site"
-                        fi
-                        local bp_filename="OnionPress-${bp_onion}-$(date +%Y-%m-%d-%H-%M).zip"
-                        # A folder of our own, not a guessable name in /tmp.
-                        local bp_dir bp_path
-                        bp_dir=$(mktemp -d -t onionpress-settings-backup-XXXXXX) || bp_dir=/nonexistent
-                        bp_path="$bp_dir/$bp_filename"
-                        # Handed to WordPress below, and the password came
-                        # from there: refused on an OnionHeaven hub or
-                        # OnionHome (or a node that could not be checked),
-                        # and never a hub's registry or
-                        # registrants' keys (--without-hub-data), nor the
-                        # Cloudflare tunnel token or any other config
-                        # WordPress is not shown (--without-host-secrets).
-                        local bp_rc=0
-                        create_backup "$bp_password" "$bp_path" --without-hub-data --without-host-secrets 2>>"$LOG_FILE" || bp_rc=$?
-                        if [ "$bp_rc" -eq 3 ]; then
-                            # Refused before anything was copied; the page
-                            # shows why (JSON written by python3, not by hand).
-                            rm -rf "$bp_dir"
-                            python3 -c 'import json, sys
-print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv[2]}))' \
-                                "$BACKUP_REFUSAL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | \
-                                wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
-                            log "Backup refused: back this node up with onionpress backup"
-                        elif [ "$bp_rc" -eq 0 ]; then
-                            # Hand the zip to the WordPress container for
-                            # download, written as www-data (the page's own
-                            # user). Not docker cp + chown as root: both
-                            # follow a link www-data can plant at this
-                            # predictable name, and the chown made any file
-                            # in the container its own.
-                            docker exec -i -u www-data onionpress-wordpress \
-                                sh -c 'umask 077; cat > "$1"' sh "/var/lib/onionpress/$bp_filename" \
-                                < "$bp_path" 2>>"$LOG_FILE"
-                            rm -rf "$bp_dir"
-                            echo '{"success":true,"filename":"'"$bp_filename"'","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
-                            log "Backup created: $bp_filename"
-                        else
-                            rm -rf "$bp_dir"
-                            echo '{"success":false,"error":"Backup failed — check logs","created_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' | \
-                                wp_put /var/lib/onionpress/backup-result.json 2>/dev/null
-                            log "Backup failed"
-                        fi
-                    fi
-                    ;;
-                restore-backup)
-                    log "Restoring from backup via settings page..."
-                    setup_db_passwords
-                    local rp_password
-                    rp_password=$(wp_exec cat /var/lib/onionpress/restore-password 2>/dev/null || echo "")
-                    wp_exec rm -f /var/lib/onionpress/restore-password 2>/dev/null
-                    local rp_file="/var/lib/onionpress/restore-upload.zip"
-                    # Copy the uploaded zip out of the container, into a
-                    # folder of our own. docker cp copies a symbolic link as
-                    # a link: one planted at restore-upload.zip (www-data
-                    # can) would point at a host file, so the copy must be a
-                    # regular file, not a link, before the restore reads it.
-                    local rp_dir rp_local
-                    rp_dir=$(mktemp -d -t onionpress-restore-upload-XXXXXX) || rp_dir=""
-                    rp_local="$rp_dir/restore-upload.zip"
-                    [ -n "$rp_dir" ] && docker cp "onionpress-wordpress:$rp_file" "$rp_local" 2>>"$LOG_FILE"
-                    wp_exec rm -f "$rp_file" 2>/dev/null
-                    if [ -z "$rp_password" ] || [ -z "$rp_dir" ] \
-                            || { [ ! -e "$rp_local" ] && [ ! -L "$rp_local" ]; }; then
-                        [ -n "$rp_dir" ] && rm -rf "$rp_dir"
-                        write_restore_result false "Missing password or backup file"
-                        log "Restore failed: missing password or file"
-                    elif [ -L "$rp_local" ] || [ ! -f "$rp_local" ]; then
-                        rm -rf "$rp_dir"
-                        write_restore_result false "The uploaded backup is not a regular file"
-                        log "Restore refused: the uploaded backup is not a regular file"
-                    else
-                        local rp_addr
-                        local rp_rc=0
-                        # The file and its password came through WordPress
-                        # (--from-settings-page): a backup holding an
-                        # OnionHeaven hub's keys or OnionHome's name
-                        # registry is refused, and the hub data is never
-                        # written.
-                        rp_addr=$(restore_backup "$rp_password" "$rp_local" --from-settings-page 2>>"$LOG_FILE") || rp_rc=$?
-                        if [ "$rp_rc" -eq 0 ]; then
-                            rm -rf "$rp_dir"
-                            # restore_backup's stdout is its log lines, then
-                            # the address (empty for a backup without a key).
-                            local rp_nl=$'\n'
-                            rp_addr="${rp_addr##*$rp_nl}"
-                            is_onion_address "$rp_addr" || rp_addr=""
-                            # Restart to pick up restored keys
-                            stop_containers 2>/dev/null || true
-                            start_containers
-                            wait_for_services
-                            write_status
-                            # restore_backup stopped it (it held the old key)
-                            start_heartbeat_client
-                            write_restore_result true "$rp_addr"
-                            log "Restore complete: $rp_addr"
-                        elif [ "$rp_rc" -eq 3 ]; then
-                            # Refused before anything was touched; its last
-                            # line says why and where to restore it instead.
-                            rm -rf "$rp_dir"
-                            local rp_nl=$'\n'
-                            write_restore_result false "${rp_addr##*$rp_nl}"
-                            log "Restore refused: the backup must be restored from the app or the CLI"
-                        else
-                            rm -rf "$rp_dir"
-                            start_heartbeat_client
-                            write_restore_result false "Restore failed — wrong password or invalid backup"
-                            log "Restore failed"
-                        fi
-                    fi
-                    ;;
-                refresh-status)
-                    setup_db_passwords
-                    write_status
-                    ;;
-                update)
-                    # Report only: anything running in WordPress can ask
-                    # for this, and it used to run `onionpress update`
-                    # (sudo, as root) for it. The page learns whether a
-                    # release is available and that `onionpress update`
-                    # on this machine installs it.
-                    log "Update check requested from settings page..."
-                    update_settings_page_check
-                    ;;
-                *)
-                    log "Unknown action: $action"
-                    ;;
-            esac
+            exit "$spb_rc"
+            ;;
+
+        settings-page-restore)
+            # The Settings page's restore (handle-action restore-backup):
+            # restore_backup --from-settings-page, in place, on the copy the
+            # handler made of the upload. The file and its password
+            # (ONIONPRESS_BACKUP_PASSWORD) came through WordPress: a backup
+            # holding an OnionHeaven hub's keys or OnionHome's name registry
+            # is refused, the hub data is never written, and a backup of
+            # another address is refused (no one at this host to ask; the
+            # Mac asks). Exit 3 with the reason as the last line of stdout;
+            # the handler restarts OnionPress after a success. The handler's
+            # --json and --confirmed are the Mac's: ignored here.
+            setup_db_passwords
+            read_backup_password
+            if [ -z "$BACKUP_PASS" ] || [ -z "${2:-}" ]; then
+                echo "ERROR: settings-page-restore <backup.zip>, the password in ONIONPRESS_BACKUP_PASSWORD" >&2
+                exit 1
+            fi
+            spr_rc=0
+            spr_out=$(restore_backup "$BACKUP_PASS" "$2" --from-settings-page 2>>"$LOG_FILE") || spr_rc=$?
+            if [ "$spr_rc" -ne 0 ]; then
+                # restore_backup stopped it (it held the old key)
+                start_heartbeat_client
+                [ "$spr_rc" -ne 3 ] || printf '%s\n' "$spr_out" | tail -n 1
+                exit "$spr_rc"
+            fi
+            printf '%s\n' "$spr_out" | tail -n 1
+            ;;
+
+        settings-page-update-check)
+            # The Settings page's update button (handle-action update):
+            # report only, never an install (update_settings_page_check
+            # writes update-result.json).
+            update_settings_page_check
             ;;
 
         reset)

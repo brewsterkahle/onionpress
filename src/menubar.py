@@ -63,6 +63,7 @@ from onionpress.health import (
     decode_curl_reason,
 )
 from onionpress import config as op_config
+from onionpress import confirm as op_confirm
 from onionpress import containers
 from onionpress.reachability_stats import ReachabilityStats
 from onionpress.system_metrics import host_metrics, container_metrics
@@ -425,6 +426,10 @@ class OnionPressApp(rumps.App):
             self.onion_address = "Starting..."
         self.is_running = False
         self.is_ready = False  # WordPress is ready to serve requests
+        # `onionpress handle-action` runs: one at a time (poll_settings_page)
+        self._settings_page_lock = threading.Lock()
+        self._settings_page_busy = False
+        self._settings_page_alerted_at = 0.0
         self._sleeping = False  # True between sleep/wake events — suppresses heartbeats
         self.checking = False
         self._checking_lock = threading.Lock()  # Protect self.checking from race conditions
@@ -2030,8 +2035,7 @@ class OnionPressApp(rumps.App):
 
                 # Write status, poll for config updates & action requests from WordPress settings page
                 self.write_status_to_volume()
-                self.poll_config_updates()
-                self.poll_requested_actions()
+                self.poll_settings_page()
 
                 # OnionHeaven: announce hub mode and set up sleep (one-shot).
                 # is_onionheaven itself is set with the address, above.
@@ -4507,22 +4511,6 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=do_restore, daemon=True).start()
 
-    def _release_onionheaven_before_restore(self, restored_address):
-        """backup.restore_from_backup's before_key_change: the Settings
-        page's restore is about to replace the key in the tor container.
-        OnionHeaven hubs that may hold a copy of the current one (not the
-        restored address's: a backup of this same site keeps it) are asked
-        to delete it now, while it can still sign the request. What
-        remains is logged and kept in the registration record."""
-        if self.is_onionheaven:
-            return
-        try:
-            onionheaven.release_registration(
-                self, "restore", keep_address=restored_address)
-        except Exception as e:
-            self.log(f"Restore: could not ask OnionHeaven to delete the old "
-                     f"key (continuing): {e}")
-
     def _adopt_restored_address(self):
         """The address a restore derived from the backup's key, from the
         on-disk cache it wrote — not metadata.onion_address, which is the
@@ -5400,102 +5388,109 @@ License: AGPL v3 or later"""
         except Exception:
             pass  # Container may not be running
 
-    def poll_config_updates(self):
-        """Check for config changes written by the WordPress settings page.
-
-        Anything running in WordPress can write that file, so only the
-        Settings page's own keys with valid values are applied
-        (op_config.SETTINGS_PAGE_KEYS); the rest is dropped and logged by
-        name. Secret values are never logged.
+    def poll_settings_page(self):
+        """The WordPress Settings page's requests (requested-action) and
+        config changes (config-updates.json), handled by `onionpress
+        handle-action` (onionpress.handle_action: one handler for both
+        platforms, run here on every status tick, by
+        onionpress-watcher.timer on Linux). The CLI runs the actions
+        through the launcher and writes the page its results; this process
+        only asks the question the CLI stops at (a key import or a restore
+        of another address: a native dialog, Cancel the default) and writes
+        status.json after. One run at a time: a restore or a start can take
+        minutes.
         """
+        with self._settings_page_lock:
+            if self._settings_page_busy:
+                return
+            self._settings_page_busy = True
+        threading.Thread(target=self._settings_page_run, daemon=True).start()
+
+    def _settings_page_run(self):
         try:
-            result = self._docker.exec(
-                "onionpress-wordpress",
-                ["cat", "/var/lib/onionpress/config-updates.json"],
-                timeout=5,
-                quiet=True,
-                user=wp_files.WP_USER,
-            )
-            if not result.ok or not result.output:
+            result = self._handle_action([])
+            if result is None:
                 return
-
-            updates = json.loads(result.output)
-            if not updates:
-                return
-
-            applied = op_config.apply_settings_updates(self.config_file, updates)
-            if applied.rejected:
-                self.log("Settings page: ignored (not a setting it may change, "
-                         f"or an invalid value): {', '.join(applied.rejected)}")
-            if applied.changes:
-                self.log(f"Settings page: applying {len(applied.changes)} config update(s)")
-            for key, old_val, val in applied.changes:
-                self.log(f"  {op_config.describe_change(key, old_val, val)}")
-
-            self._docker.exec(
-                "onionpress-wordpress",
-                ["rm", "-f", "/var/lib/onionpress/config-updates.json"],
-                timeout=5,
-                user=wp_files.WP_USER,
-            )
-
-            # Apply side effects for the accepted settings
-            accepted = applied.accepted
-            if "PREVENT_SLEEP" in accepted:
-                self.caffeine.stop()
-                self.caffeine.start()
-            if "LAUNCH_ON_LOGIN" in accepted:
-                if accepted["LAUNCH_ON_LOGIN"] == "yes":
-                    self.add_login_item()
-                else:
-                    self.remove_login_item()
-            if accepted.get("SHARE_ANALYTICS_WITH_ONIONHOME") == "yes":
-                from onionpress.analytics_sharing import trigger_upload
-                trigger_upload()
-
-            self.cloudflare_tunnel_enabled = bool(self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
-
-        except json.JSONDecodeError:
-            pass
-        except Exception:
-            pass  # Container may not be running
-
-    def poll_requested_actions(self):
-        """Check for action requests from the WordPress settings page."""
-        try:
-            result = self._docker.exec(
-                "onionpress-wordpress",
-                ["cat", "/var/lib/onionpress/requested-action"],
-                timeout=5,
-                quiet=True,
-                user=wp_files.WP_USER,
-            )
-            if not result.ok or not result.output:
-                return
-
-            action = result.output.strip()
-
-            self._docker.exec(
-                "onionpress-wordpress",
-                "rm -f /var/lib/onionpress/requested-action /var/lib/onionpress/service-result.json",
-                timeout=5,
-                user=wp_files.WP_USER,
-            )
-
-            if action == "refresh-status":
+            if result.get("confirm"):
+                answered_yes = self._ask_settings_page_question(result)
+                result = self._handle_action(
+                    ["--confirmed", result["confirm"]] if answered_yes else ["--cancel"])
+                if result is None:
+                    return
+            if result.get("handled"):
+                self.apply_config_changes(op_config.take_config_changes(self.app_support))
                 self.write_status_to_volume()
-                return
+            if result.get("relaunch"):
+                self._relaunch_app(os.path.dirname(self.contents_dir))
+        except Exception as e:
+            self.log(f"Settings page: {e}")
+        finally:
+            self._settings_page_busy = False
 
-            self.log(f"Settings page: handling action '{action}'")
+    def _handle_action(self, args):
+        """One `onionpress handle-action --json` run; its answer (the JSON
+        object on its last line), or None when it could not be run or
+        answered, said in a dialog (once an hour) and the log."""
+        try:
+            r = subprocess.run(
+                [self.launcher_script, "handle-action", "--json", *args],
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+        except (OSError, subprocess.SubprocessError) as e:
+            self._settings_page_failed(f"could not run onionpress handle-action: {e}")
+            return None
+        result = op_confirm.last_json_line(r.stdout)
+        if r.returncode != 0 or result is None:
+            detail = (r.stderr or r.stdout).strip()[-400:]
+            self._settings_page_failed(
+                f"onionpress handle-action failed (rc {r.returncode}): {detail}")
+            return None
+        return result
 
-            # Run action in background thread so it doesn't block the polling loop
-            threading.Thread(
-                target=self._handle_requested_action, args=(action,),
-                daemon=True
-            ).start()
+    def _settings_page_failed(self, message):
+        """A failed subprocess is never only a log line: said in a dialog,
+        at most once an hour (the loop runs it every tick)."""
+        self.log(f"Settings page: {message}")
+        now = time.time()
+        if now - self._settings_page_alerted_at < 3600:
+            return
+        self._settings_page_alerted_at = now
+        self.show_native_alert(
+            "Settings Page Requests Not Handled",
+            "OnionPress could not handle the WordPress Settings page's "
+            f"requests:\n\n{message}\n\nSee the OnionPress log.",
+            style="warning")
 
-        except Exception:
-            pass
+    def _ask_settings_page_question(self, result):
+        """The question `onionpress handle-action` stopped at, asked of the
+        person at this Mac; True only for an explicit Replace/Restore.
+        Today one question: "address-change" (handle_action.py), for a key
+        import or a restore of another address from the page."""
+        what = result.get("confirm")
+        current = result.get("current") or ""
+        new_address = result.get("new") or ""
+        if what != "address-change":
+            self.log(f"Settings page: unknown question '{what}' (cancelled)")
+            return False
+        if result.get("action") == "restore-backup":
+            confirmed = self._ask_to_replace_address(
+                current, new_address,
+                "restore a backup of another onion address, which replaces this "
+                "site's onion service key and its content",
+                "The current site's content is replaced by the backup's.",
+                "Restore")
+            self.log(f"Settings page: restore of {new_address} "
+                     f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
+            return confirmed
+        confirmed = self._ask_to_replace_address(
+            current, new_address,
+            "replace this site's onion service key",
+            "OnionPress keeps a copy of the current key in "
+            "~/.onionpress/replaced-keys/, from which it can be imported "
+            "again.",
+            "Replace")
+        self.log(f"Settings page: key import of {new_address} "
+                 f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
+        return confirmed
 
     def _ask_to_replace_address(self, current, new_address, request, note, button):
         """Ask the person at this Mac whether the Settings page may replace
@@ -5505,9 +5500,9 @@ License: AGPL v3 or later"""
 
         Anything running in WordPress can write the page's requests, so a
         key import or a restore of another address from there changes the
-        address only after this dialog (_settings_page_key_import,
-        _settings_page_restore_confirmed). *request* finishes "asked to
-        ..."; *note* says what is kept.
+        address only after this dialog (`onionpress handle-action` stops
+        at the question; _ask_settings_page_question). *request* finishes
+        "asked to ..."; *note* says what is kept.
         """
         choice = self.show_native_alert(
             "Replace this site's onion address?",
@@ -5520,483 +5515,6 @@ License: AGPL v3 or later"""
             buttons=["Cancel", button], default_button=0, cancel_button=0,
             style="critical")
         return choice == 1
-
-    def _settings_page_restore_confirmed(self, current, new_address):
-        """backup.restore_from_backup's confirm_address_change for the
-        Settings page's restore: called only for a backup of another
-        address than the one the tor container serves, before anything is
-        restored. True only if the person at this Mac clicks Restore."""
-        confirmed = self._ask_to_replace_address(
-            current, new_address,
-            "restore a backup of another onion address, which replaces this "
-            "site's onion service key and its content",
-            "The current site's content is replaced by the backup's.",
-            "Restore")
-        self.log(f"Settings page: restore of {new_address} "
-                 f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
-        return confirmed
-
-    def _settings_page_key_import(self, key_data):
-        """Import a key the Settings page sent, if the person at this Mac
-        says so. Returns the page's result: {"success", "address"|"error"}.
-
-        Anything running in WordPress can write the page's request, so the
-        key replaces this site's address only after a native dialog here
-        (current and new address) was answered Replace. The key is checked
-        first (a refused key never reaches the dialog), and the launcher's
-        import then keeps a copy of the current key before anything changes
-        (replace_onion_key). ONIONPRESS_IMPORT_KEY_CONFIRMED=yes is what
-        tells the launcher the question was asked: its own terminal
-        question would read the end of the key on stdin and cancel.
-        """
-        try:
-            new_address = key_manager.derive_onion_address(
-                key_manager.check_expanded_secret_key(
-                    key_manager.decode_base32_key(key_data)))
-        except ValueError as e:
-            self.log(f"Settings page: key import refused: {e}")
-            return {"success": False, "error": str(e)}
-        current = (self.onion_address
-                   if key_manager.is_valid_onion_address(self.onion_address) else "")
-        if new_address == current:
-            return {"success": True, "address": new_address}
-        if not self._ask_to_replace_address(
-                current, new_address,
-                "replace this site's onion service key",
-                "OnionPress keeps a copy of the current key in "
-                "~/.onionpress/replaced-keys/, from which it can be imported "
-                "again.",
-                "Replace"):
-            self.log("Settings page: key import not confirmed at this Mac")
-            return {"success": False,
-                    "error": "Not replaced: the person at the Mac running "
-                             "OnionPress has to click Replace in the dialog "
-                             "OnionPress shows there."}
-        self.log(f"Settings page: key import confirmed at this Mac ({new_address})")
-        # "-" hands the key over on stdin: in argv it would show in `ps` to
-        # every user on this Mac.
-        r = subprocess.run(
-            [self.launcher_script, "import-key", "-"],
-            input=key_data + "\n",
-            env={**os.environ, "ONIONPRESS_IMPORT_KEY_CONFIRMED": "yes"},
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=300
-        )
-        if r.returncode != 0:
-            error_msg = r.stderr.strip() or r.stdout.strip() or "Import failed"
-            self.log(f"Settings page: key import failed: {error_msg}")
-            return {"success": False, "error": error_msg}
-        # Restart to pick up the imported key
-        self.run_command("restart")
-        for _ in range(60):
-            time.sleep(2)
-            if self.is_running and key_manager.is_valid_onion_address(self.onion_address):
-                break
-        self.write_status_to_volume()
-        new_addr = self.onion_address or new_address
-        self.log(f"Settings page: key imported, address: {new_addr}")
-        return {"success": True, "address": new_addr}
-
-    def _handle_requested_action(self, action):
-        """Execute a requested action from the WordPress settings page."""
-        import datetime
-
-        def _write_result(filename, data):
-            """Write a JSON result file to the WordPress shared volume.
-
-            Error strings come from exceptions and launcher stderr and can
-            name host paths, so every string is scrubbed first. Written as
-            www-data (wp_files): root's tee followed a link planted at the
-            name, and an error string can carry text of the planter's
-            choosing (a crafted zip member name, say).
-            """
-            try:
-                data = redact.scrub_json_for_wordpress(data, self.app_support)
-                self._docker.run(
-                    wp_files.put_file_args(f"/var/lib/onionpress/{filename}"),
-                    timeout=5, input=json.dumps(data),
-                )
-            except Exception:
-                pass
-
-        def _clear_pending():
-            try:
-                self._docker.exec(
-                    "onionpress-wordpress",
-                    "rm -f /var/lib/onionpress/service-pending",
-                    timeout=5,
-                    user=wp_files.WP_USER,
-                )
-            except Exception:
-                pass
-
-        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        try:
-            if action in ("restart", "start"):
-                # Write pending marker
-                try:
-                    subprocess.run(
-                        ["docker"] + wp_files.put_file_args("/var/lib/onionpress/service-pending"),
-                        input=f"{action}\n",
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-                except Exception:
-                    pass
-
-                if action == "restart":
-                    self.log("Settings page: restarting OnionPress...")
-                    self.run_command("restart")
-                else:
-                    self.log("Settings page: starting OnionPress...")
-                    self.run_command("start")
-
-                # Wait for services to come back
-                import time
-                for _ in range(30):
-                    time.sleep(2)
-                    if self.is_running:
-                        break
-
-                self.write_status_to_volume()
-                containers_info = ""
-                try:
-                    r = subprocess.run(
-                        ["docker", "ps", "--filter", "name=onionpress", "--format", "{{.Names}}: {{.Status}}"],
-                        capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
-                    )
-                    if r.returncode == 0:
-                        containers_info = r.stdout.strip().replace("onionpress-", "").replace("\n", ", ")
-                except Exception:
-                    pass
-                _write_result("service-result.json", {
-                    "success": True, "action": action,
-                    "message": f"{'Restarted' if action == 'restart' else 'Started'} {containers_info}",
-                    "completed_at": now_iso
-                })
-                _clear_pending()
-
-            elif action == "stop":
-                self.log("Settings page: stopping OnionPress...")
-                self.run_command("stop")
-                _write_result("service-result.json", {
-                    "success": True, "action": "stop",
-                    "message": "OnionPress stopped", "completed_at": now_iso
-                })
-
-            elif action == "update":
-                self.log("Settings page: install update requested")
-                try:
-                    update_info = updater.check_for_update(
-                        self.version, log=self.log)
-                    if not update_info:
-                        _write_result("update-result.json", {
-                            "success": False,
-                            "error": "Already up to date or update check failed",
-                            "completed_at": now_iso,
-                        })
-                    else:
-                        release_data, latest_version = update_info
-                        install_path = os.path.dirname(self.contents_dir)
-                        updater.download_and_install(
-                            release_data, latest_version, install_path,
-                            log=self.log, notify=None,
-                        )
-                        _write_result("update-result.json", {
-                            "success": True,
-                            "version": latest_version,
-                            "message": f"Installed v{latest_version}. OnionPress is restarting to apply the update.",
-                            "completed_at": now_iso,
-                        })
-                        self.log(f"Settings page: installed v{latest_version}, relaunching")
-                        # Give the polling page a moment to see the result
-                        # before the WP container goes down for relaunch.
-                        import time
-                        time.sleep(2)
-                        self._relaunch_app(install_path)
-                except Exception as e:
-                    self.log(f"Settings page: update install failed: {e}")
-                    import traceback
-                    self.log(traceback.format_exc())
-                    _write_result("update-result.json", {
-                        "success": False,
-                        "error": str(e),
-                        "completed_at": now_iso,
-                    })
-
-            elif action == "check-reachability":
-                self.log("Settings page: running reachability test...")
-                onion_addr = self.onion_address if key_manager.is_valid_onion_address(self.onion_address) else ""
-                if not onion_addr:
-                    _write_result("reachability-result.json", {
-                        "reachable": False, "error": "No onion address found",
-                        "tested_at": now_iso
-                    })
-                else:
-                    try:
-                        r = subprocess.run(
-                            ["docker", "exec", "onionheaven",
-                             "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                             "--max-time", "60", "--socks5-hostname", "127.0.0.1:9050",
-                             f"http://{onion_addr}/"],
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=75
-                        )
-                        http_code = r.stdout.strip() or "000"
-                        reachable = http_code.isdigit() and 200 <= int(http_code) < 500
-                    except Exception:
-                        http_code = "000"
-                        reachable = False
-                    _write_result("reachability-result.json", {
-                        "reachable": reachable, "http_code": http_code,
-                        "address": onion_addr, "tested_at": now_iso
-                    })
-                    self.log(f"Settings page: reachability test -> HTTP {http_code} (reachable={reachable})")
-
-            elif action == "generate-vanity":
-                # On-the-fly vanity regeneration was removed (#256 phase 4b):
-                # the address is fixed at install (chosen on the welcome screen)
-                # and only changes via restore-from-backup. This used the churny
-                # stop -> delete key volume -> regen path that risked clobbering
-                # the address; it is now a no-op that reports back to the page.
-                self.log("Settings page: generate-vanity requested but disabled "
-                         "(prefix is fixed at install) — ignoring")
-                _write_result("vanity-result.json", {
-                    "success": False,
-                    "error": "Changing the address prefix is no longer supported. "
-                             "The address is chosen at install; to use a different "
-                             "one, restore from a backup that has it.",
-                    "generated_at": now_iso
-                })
-
-            elif action == "import-key-file":
-                self.log("Settings page: key import requested")
-                try:
-                    r = subprocess.run(
-                        ["docker"] + wp_files.exec_args(
-                            "cat", "/var/lib/onionpress/import-key-data"),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-                    key_data = r.stdout.strip() if r.returncode == 0 else ""
-                    subprocess.run(
-                        ["docker"] + wp_files.exec_args(
-                            "rm", "-f", "/var/lib/onionpress/import-key-data"),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-                    if not key_data:
-                        _write_result("import-result.json", {
-                            "success": False, "error": "No key data found",
-                            "imported_at": now_iso
-                        })
-                    else:
-                        outcome = self._settings_page_key_import(key_data)
-                        _write_result("import-result.json", {
-                            **outcome, "imported_at": now_iso})
-                except Exception as e:
-                    _write_result("import-result.json", {
-                        "success": False, "error": str(e),
-                        "imported_at": now_iso
-                    })
-                    self.log(f"Settings page: key import failed: {e}")
-
-            elif action == "create-backup":
-                self.log("Settings page: creating backup...")
-                try:
-                    r = subprocess.run(
-                        ["docker"] + wp_files.exec_args(
-                            "cat", "/var/lib/onionpress/backup-password"),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-                    password = r.stdout.strip() if r.returncode == 0 else ""
-                    subprocess.run(
-                        ["docker"] + wp_files.exec_args(
-                            "rm", "-f", "/var/lib/onionpress/backup-password"),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-                    if not password:
-                        _write_result("backup-result.json", {
-                            "success": False, "error": "No password provided",
-                            "created_at": now_iso
-                        })
-                    else:
-                        import tempfile
-                        # See the NSSavePanel handler for context — the
-                        # in-browser settings flow has no chance to rename
-                        # the file, so the wrong-prefix risk is worse here.
-                        try:
-                            _, _pub = key_manager.extract_keys()
-                            _derived = key_manager.derive_onion_address(_pub)
-                            onion_short = _derived.replace(".onion", "")[:8]
-                        except Exception:
-                            onion_short = (self.onion_address or "site").replace(".onion", "")[:8]
-                        import time
-                        filename = f"OnionPress-{onion_short}-{time.strftime('%Y-%m-%d-%H-%M')}.zip"
-                        tmp_path = os.path.join(tempfile.gettempdir(), filename)
-
-                        onion_addr = self.onion_address or "unknown"
-                        # Handed to WordPress below, and the password came
-                        # from there: refused on an OnionHeaven hub or
-                        # OnionHome, or a node that could not be checked
-                        # (SettingsPageBackupRefused, whose message the page
-                        # shows), and never a hub's registry or
-                        # registrants' keys, nor the Cloudflare tunnel token
-                        # or any other config WordPress is not shown
-                        # (backup.TUNNEL_TOKEN_KEY), nor the site's own
-                        # onion service key (backup.ONION_KEY_LEFT_OUT_NOTE:
-                        # the app's Backup... has it).
-                        metadata = backup_manager.create_backup(
-                            onion_addr, self._get_admin_username(), password,
-                            tmp_path, self.version, self.log,
-                            include_hub_data=False, include_host_secrets=False,
-                            include_onion_key=False
-                        )
-
-                        # Hand it to the WordPress container for download,
-                        # written as www-data (the page's own user). Not
-                        # docker cp + chown as root: both follow a link
-                        # www-data can plant at this predictable name, and
-                        # the chown made any file in the container its own.
-                        # The time allowed grows with the backup (#317).
-                        try:
-                            with open(tmp_path, 'rb') as backup_file:
-                                r = subprocess.run(
-                                    ["docker", "exec", "-i", "-u", "www-data",
-                                     "onionpress-wordpress",
-                                     "sh", "-c", 'umask 077; cat > "$1"', "sh",
-                                     f"/var/lib/onionpress/{filename}"],
-                                    stdin=backup_file, capture_output=True,
-                                    timeout=wp_files.sized_timeout(
-                                        os.fstat(backup_file.fileno()).st_size, 300)
-                                )
-                        finally:
-                            try:
-                                os.remove(tmp_path)
-                            except OSError:
-                                pass
-                        if r.returncode != 0:
-                            raise Exception("Could not hand the backup to the "
-                                            "Settings page")
-                        result = {"success": True, "filename": filename,
-                                  "created_at": now_iso}
-                        if metadata.get("excludes_onion_key") is True:
-                            # Shown under the download link.
-                            result["note"] = backup_manager.ONION_KEY_LEFT_OUT_NOTE
-                        _write_result("backup-result.json", result)
-                        self.log(f"Settings page: backup created: {filename}")
-                except Exception as e:
-                    _write_result("backup-result.json", {
-                        "success": False, "error": str(e),
-                        "created_at": now_iso
-                    })
-                    self.log(f"Settings page: backup failed: {e}")
-
-            elif action == "restore-backup":
-                self.log("Settings page: restoring from backup...")
-                try:
-                    r = subprocess.run(
-                        ["docker"] + wp_files.exec_args(
-                            "cat", "/var/lib/onionpress/restore-password"),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-                    password = r.stdout.strip() if r.returncode == 0 else ""
-                    subprocess.run(
-                        ["docker"] + wp_files.exec_args(
-                            "rm", "-f", "/var/lib/onionpress/restore-password"),
-                        capture_output=True, text=True, encoding='utf-8', errors='replace',
-                        timeout=5
-                    )
-
-                    import shutil
-                    import tempfile
-                    # A folder of our own, so nothing stale or planted sits
-                    # at the copy's path. docker cp copies a symbolic link
-                    # as a link: one planted at restore-upload.zip would
-                    # point at a host file, so the copy must be a regular
-                    # file (check_uploaded_backup) before it is read.
-                    upload_dir = tempfile.mkdtemp(prefix="onionpress-restore-upload-")
-                    local_zip = os.path.join(upload_dir, "restore-upload.zip")
-                    upload = "/var/lib/onionpress/restore-upload.zip"
-                    try:
-                        # The copy's time limit grows with the upload (#317).
-                        r = subprocess.run(
-                            ["docker"] + wp_files.exec_args("stat", "-c", "%s", upload),
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=5
-                        )
-                        size = r.stdout.strip()
-                        size = int(size) if r.returncode == 0 and size.isdigit() else 0
-                        r = subprocess.run(
-                            ["docker", "cp", f"onionpress-wordpress:{upload}", local_zip],
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=wp_files.sized_timeout(size, 60)
-                        )
-                        if r.returncode != 0:
-                            self.log(f"Settings page: could not copy the uploaded backup "
-                                     f"(docker cp rc={r.returncode})")
-                        subprocess.run(
-                            ["docker"] + wp_files.exec_args("rm", "-f", upload),
-                            capture_output=True, text=True, encoding='utf-8', errors='replace',
-                            timeout=5
-                        )
-                        if password and os.path.lexists(local_zip):
-                            backup_manager.check_uploaded_backup(local_zip)
-                            # The file and its password came through
-                            # WordPress: refused on an OnionHeaven hub or
-                            # OnionHome (or a node that could not be
-                            # checked), and for a backup holding a hub's
-                            # keys or OnionHome's name registry; neither
-                            # volume is written. A backup of another
-                            # address replaces this one only if the person
-                            # at this Mac says so; one without a key keeps
-                            # it.
-                            backup_manager.restore_from_backup(local_zip, password, self.log,
-                                                               through_wordpress=True,
-                                                               before_key_change=self._release_onionheaven_before_restore,
-                                                               confirm_address_change=self._settings_page_restore_confirmed)
-                            restored = True
-                        else:
-                            restored = False
-                    finally:
-                        shutil.rmtree(upload_dir, ignore_errors=True)
-
-                    if not restored:
-                        _write_result("restore-result.json", {
-                            "success": False, "error": "Missing password or backup file",
-                            "restored_at": now_iso
-                        })
-                    else:
-                        # Restart to pick up restored keys
-                        self.run_command("restart")
-                        import time
-                        for _ in range(30):
-                            time.sleep(2)
-                            if self.is_running:
-                                break
-                        self.write_status_to_volume()
-                        new_addr = self.onion_address or ""
-                        _write_result("restore-result.json", {
-                            "success": True, "address": new_addr,
-                            "restored_at": now_iso
-                        })
-                        self.log(f"Settings page: restore complete, address: {new_addr}")
-                except Exception as e:
-                    _write_result("restore-result.json", {
-                        "success": False, "error": str(e),
-                        "restored_at": now_iso
-                    })
-                    self.log(f"Settings page: restore failed: {e}")
-
-            else:
-                self.log(f"Settings page: unknown action '{action}'")
-
-        except Exception as e:
-            self.log(f"Settings page: action '{action}' failed: {e}")
 
     # ── Wayback Queue ──────────────────────────────────────────────
 
