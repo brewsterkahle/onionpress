@@ -475,16 +475,12 @@ class TestMaintain(_MacCase):
         self.assertEqual(rec.calls, [])
 
     def test_the_hub_address_needs_a_restart(self):
-        import ast
-        tree = ast.parse(_read("src/onionpress/settings_ui.py"))
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Assign)
-                    and getattr(node.targets[0], "id", "") == "_NEEDS_RESTART"):
-                keys = {elt.value for elt in node.value.elts}
-                break
-        else:
-            self.fail("_NEEDS_RESTART not found")
-        self.assertIn("ONIONHEAVEN_ADDRESS", keys)
+        # The Settings dialog's restart set is config.NEEDS_RESTART, shared
+        # with `onionpress config set` (#365).
+        from onionpress import config as op_config
+        self.assertIn("_NEEDS_RESTART = op_config.NEEDS_RESTART",
+                      _read("src/onionpress/settings_ui.py"))
+        self.assertIn("ONIONHEAVEN_ADDRESS", op_config.NEEDS_RESTART)
 
     def test_menubar_wiring(self):
         src = _read("src/menubar.py")
