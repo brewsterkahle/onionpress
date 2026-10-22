@@ -355,11 +355,32 @@
 - The WordPress Settings page asks for config changes through
   `config-updates.json` in the onionpress-data volume, which anything running
   in WordPress can write. Both hosts apply it only through
-  `config.apply_settings_updates` (Mac `poll_config_updates`; Linux
-  `apply_config_updates` → `onionpress.cli apply-settings-updates`): keys in
-  `SETTINGS_PAGE_KEYS`, each value checked (yes/no enums, integer ranges,
-  the token's base64 charset, no control characters). Everything else is
-  dropped and logged by key name only.
+  `config.apply_settings_updates`, run as `onionpress apply-config` (Mac:
+  `handle_action.apply_config`, which `onionpress handle-action` runs on
+  every status tick; Linux: bash `apply_config_updates` → `onionpress.cli
+  apply-settings-updates`): keys in `SETTINGS_PAGE_KEYS`, each value
+  checked (yes/no enums, integer ranges, the token's base64 charset, no
+  control characters). Everything else is dropped and logged by key name
+  only. The menubar applies nothing itself: the CLI leaves the accepted
+  keys in `.config-changed` for it (issue #366).
+- **The page's requests (`requested-action` and the files beside it) are
+  handled by `onionpress handle-action` on both platforms**
+  (`src/onionpress/handle_action.py`, issue #366): Linux's
+  onionpress-watcher.timer runs it every 10 s, the Mac menubar's status
+  loop (`poll_settings_page`) on every tick. The verbs are fixed (`ACTIONS`:
+  start, restart, stop, check-reachability, import-key-file, create-backup,
+  restore-backup, refresh-status, update); every action runs through the
+  launcher (`Host.run_launcher`: start, restart, stop, apply-config,
+  write-status, import-key, settings-page-backup, settings-page-restore,
+  settings-page-update-check, update), so the Linux launcher keeps its bash
+  bodies behind those internal cases and the Mac launcher delegates them to
+  `onionpress.cli` (`cmd_settings_page_backup`, `cmd_settings_page_restore`).
+  Linux refuses import-key-file and a restore of another address, and only
+  checks on update; on the Mac those stop at `{"confirm": "address-change"}`
+  (kept in `~/.onionpress/pending-action/`, 0700, dropped after 10 minutes
+  without an answer) until the menubar asks and runs `handle-action
+  --confirmed address-change` or `--cancel`. `tests/test_handle_action.py`
+  runs it against a stub launcher and a stub docker.
 - Never add image overrides, `ONIONHEAVEN_ADDRESS` (the heartbeat sends the
   onion key to it), `ONIONHEAVEN_ACCEPT_REGISTRATIONS`, `ADDRESS_PREFIX`,
   ports, paths or secrets other than `CLOUDFLARE_TUNNEL_TOKEN`. The page
@@ -444,11 +465,11 @@
   deletes only `OnionPress-<≤8 chars>-<YYYY-MM-DD-HH-MM>.zip`, a regular
   file directly in `/var/lib/onionpress/` (basename, strict pattern, no
   symlink, realpath check): that folder also holds `backup-password` and the
-  config. Changing the create-backup filename in `src/menubar.py` or
-  `linux/onionpress` means changing that pattern; `tests/test_backup_download.py`
+  config. Changing the create-backup filename in `handle_action.py`
+  (both platforms) means changing that pattern; `tests/test_backup_download.py`
   ties them together.
 - **A key import never loses the current key.** Every one (`onionpress
-  import-key`, and the Mac page's import through the menubar) goes
+  import-key`, and the Mac page's import through `handle-action`) goes
   through the launcher's `replace_onion_key`: the key is checked
   (`key_manager.check_expanded_secret_key`: 64 bytes, bit 255 clear,
   nonzero mod L; the public key is libsodium's, `derive_public_key`)
@@ -458,14 +479,18 @@
   the staged folder swapped in as `vanity-keys/` and `.import-key-pending`
   set (the start removes the old volumes). The page used to remove the
   volumes and vanity-keys/ before decoding the key: garbage minted a new
-  address. On a Mac the page's import needs the person at the Mac: the
-  menubar checks the key, shows a native dialog with the current and new
-  address (Cancel is the default; no answer in 5 minutes is Cancel), and
-  only Replace runs `import-key -` with `ONIONPRESS_IMPORT_KEY_CONFIRMED=yes`
-  (the launcher's terminal question would read the key's end of input and
-  cancel). Linux has no one to ask: its page's import-key-file is refused
+  address. On a Mac the page's import needs the person at the Mac:
+  `handle-action` runs `import-key - --check --json` (the key on stdin; a
+  refused key never reaches a dialog), stops at `{"confirm":
+  "address-change", "current", "new"}`, the menubar shows a native dialog
+  with both addresses (Cancel is the default; no answer in 5 minutes is
+  Cancel), and only Replace runs `handle-action --confirmed address-change`,
+  which runs `import-key - --confirmed address-change` (the older
+  `ONIONPRESS_IMPORT_KEY_CONFIRMED=yes` still counts; the launcher's
+  terminal question would read the key's end of input and cancel). Linux
+  has no one to ask: the handler refuses the page's import-key-file
   (pointing to `onionpress import-key`), and generate-vanity is gone from
-  the page and from Linux's handle-action. `tests/test_onion_key_replacement.py`.
+  the page and the handler. `tests/test_onion_key_replacement.py`.
 - **Code in WordPress never reads or replaces the site's own onion key
   without the owner at the host** (decided 2026-10-14). The Mac page's
   backup leaves it out (`create_backup(include_onion_key=False)`: no
@@ -483,10 +508,12 @@
   --from-backup` reimports only when `SETUP_BACKUP_KEY_RESTORED=yes`, and
   Linux `restore_backup` reports the kept address. A page restore of a
   backup of another address than the served one (`served_onion_address`):
-  on a Mac, `restore_from_backup(confirm_address_change=)` →
-  `_settings_page_restore_confirmed`, the key import's dialog
+  on a Mac, `restore_from_backup(confirm_address_change=)` in
+  `cli.cmd_settings_page_restore` raises the "address-change" question
+  (exit 4), `handle-action` keeps the upload and password in
+  `pending-action/`, and the menubar asks the key import's dialog
   (`_ask_to_replace_address`: Cancel default, no answer in 5 minutes is
-  Cancel), asked before anything is touched; on Linux refused
+  Cancel) before anything is touched; on Linux refused
   (`ADDRESS_CHANGE_REFUSED_MSG`, `restore_backup --from-settings-page`,
   pointing to `onionpress restore <file>`). Same-address restores go
   ahead. On an OnionHeaven hub or OnionHome, or a node that cannot say,
@@ -494,6 +521,32 @@
   (`settings_page_restore_node_refusal`, the backup check's fail-closed
   logic; Linux `settings-page-restore-node-check`), before the upload is
   opened. `tests/test_settings_page_onion_key.py`.
+
+## Check/Confirm Protocol
+- Every destructive command speaks it (`src/onionpress/confirm.py`, issue
+  #366): a UI runs `<cmd> --check --json` and the CLI, changing nothing,
+  answers `{"ok": true, ...facts}`, `{"confirm": "<what>", ...facts}` (exit
+  4) or `{"error": ...}`; the UI shows its own dialog from the facts
+  (Cancel the default, no answer in 5 minutes is Cancel: those semantics
+  live in the UI, `menubar._ask_cli_question`), then runs the command again
+  with `--confirmed <what>` for every question it asked (or all of them in
+  `$ONIONPRESS_CONFIRMED`). Without that the CLI refuses past the check
+  (exit 3) when not at a terminal; at a terminal it asks itself, as the
+  launchers always have. `{"ask": "password", ...}` (exit 5) means the
+  command needs a secret first (a restore's password), which goes in the
+  environment or on stdin, never on argv.
+- The questions (`confirm.QUESTIONS`, a test holds the menubar's dialogs to
+  the list): `address-change` (import-key, settings-page-restore), `
+  sealed-hub-data-left-out` (`restore` of a hub's sealed backup without
+  its recovery key), `hub-holds-key` (`uninstall`, `reset` while a hub may
+  hold the key and OnionPress is not running to ask it), `prefix-change`
+  (`config set ADDRESS_PREFIX` to a prefix the live address lacks),
+  `uninstall` and `reset`. `handle-action` has no `--check`: its first run
+  is the check, and `--confirmed`/`--cancel` answers the pending question.
+- A new destructive command or question: `confirm.add_arguments` on its
+  parser, `confirm.require(what, confirmed, **facts)` at the decision,
+  `answer_*` for the output, the name in `QUESTIONS`, a dialog in
+  `_ask_cli_question`, and a flow in `tests/test_cli_confirm_protocol.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published, so nothing private may sit there under a name
@@ -1141,13 +1194,28 @@
   `tests/test_backup_timeouts.py`.
 - The Mac Settings page's restore is NOT the menu's: it stays the in-place
   `restore_from_backup(through_wordpress=True, before_key_change=,
-  confirm_address_change=)`, then a restart. The launcher's `restore`
-  (install-from-backup) has none of that path's checks (hub/OnionHome
-  refusals, address-change dialog, no hub volumes written), so a backup
-  and password uploaded through WordPress must never reach it; #341's
-  switch to it was left out for that reason (fae542dd). Linux's
+  confirm_address_change=)`, now in `cli.cmd_settings_page_restore`
+  (`onionpress settings-page-restore`, which `handle-action` runs), then a
+  restart. The launcher's `restore` (install-from-backup, the menu's
+  Restore... and `onionpress restore`) has none of that path's checks
+  (hub/OnionHome refusals, address-change dialog, no hub volumes written),
+  so a backup and password uploaded through WordPress must never reach it;
+  #341's switch to it was left out for that reason (fae542dd). Linux's
   Settings-page restore is still bash's in-place `restore_backup
-  --from-settings-page`.
+  --from-settings-page`, behind the launcher's `settings-page-restore` case.
+- **The menubar performs no operation itself** (issue #366, CLI-first
+  phase 2): Backup..., Restore..., Check for Updates..., Uninstall, the
+  welcome screen's restore and the Settings page's requests run
+  `onionpress backup|restore|update|update-images|uninstall|prepare-restore|
+  handle-action` through the launcher (`_run_launcher_json`: the answer is
+  the JSON object the CLI prints last, secrets go in the environment, stdin
+  is /dev/null) and show what comes back; it keeps the dialogs, the progress
+  window (the CLI's log lines streamed in) and the notifications, and a
+  failed run is a dialog with the CLI's message, never only a log line.
+  `src/menubar.py` imports none of `backup`, `hub_backup`, `updater`; it
+  uses `key_manager` only to validate an address and `wp_files` only for
+  status writes and wp-cli reads (`tests/test_menubar_actions.py`). A new
+  menu action gets its subcommand first.
 - `wp_files.own(recursive=True)` (put_tree's first step, so every restore)
   never enters a folder named `creations` (My Creations' bind mount), and
   follows no link (find -execdir chown -h), like onionpress-web-root-owner.sh.
