@@ -3008,6 +3008,20 @@ main() {
             _validate_oh_address "$2"
             ;;
 
+        config)
+            # Read and change settings: config get KEY | set KEY VALUE |
+            # unset KEY | list [--json]. One implementation for both
+            # platforms (src/onionpress/config.py, issue #365); the
+            # menubar's Settings dialog writes through it too.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" config "${@:2}"
+            ;;
+
+        onionheaven)
+            # Opt in to / out of OnionHeaven: enable | disable | status
+            # [--json]. Delegated to src/onionpress/onionheaven.py.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" onionheaven "${@:2}"
+            ;;
+
         get)
             # Fetch a URL over Tor and print the body — for checking whether
             # a .onion is reachable. Delegated to src/onionpress/cli.py
@@ -3477,6 +3491,11 @@ User commands:
   restore       Restore from an encrypted backup zip
   setup         Run the first-time WordPress setup
   import-key    Import an existing onion service key
+  config        Read and change settings: config get KEY | set KEY VALUE |
+                unset KEY | list [--json]  (a secret: set KEY - with the
+                value on stdin; run 'config list --help' for the keys)
+  onionheaven   Keep the site reachable through OnionHeaven:
+                onionheaven enable | disable | status [--json]
   hub-recovery-key
                 An OnionHeaven hub's backup recovery key
                 (create, show, check, restore)
@@ -3491,6 +3510,8 @@ Examples:
   $0 get http://<some-address>.onion/
   $0 update --check
   $0 update -y
+  $0 config set PREVENT_SLEEP never
+  $0 onionheaven status
   $0 backup [-o <output_path>]
   $0 restore <backup.zip>
 

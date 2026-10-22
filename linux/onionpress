@@ -2348,30 +2348,6 @@ get_status() {
     docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
 }
 
-# ─── OnionHeaven on/off ─────────────────────────────────────────────
-# Prints the explanation shown to the user wherever we ask them to enable
-# OnionHeaven (installer footer, `onionpress onionheaven`, tray prompt).
-onionheaven_explain() {
-    cat <<'EOF'
-  OnionHeaven keeps your .onion address reachable when this machine is
-  off, asleep, or disconnected. While OnionPress runs it sends a heartbeat
-  to the OnionHeaven hub. If the heartbeats stop, the hub takes over your
-  address and redirects visitors to the Wayback Machine's archived copy of
-  your site. When you come back online, your live site takes over again.
-
-  What is shared: a copy of your onion service private key is sent to the
-  hub (run by the Internet Archive) so it can publish your address while
-  you are away. It is used only to keep your site reachable.
-
-  It is on by default. To turn it back on:
-
-      onionpress onionheaven enable
-
-  To opt out:  onionpress onionheaven disable
-  (that also asks the hub to delete its copy of your key)
-EOF
-}
-
 # The heartbeat client (onionpress-heartbeat.py) holds the onion service key
 # it loaded at start and sends it with every /online. Before that key goes
 # or is replaced it is stopped, or its next beat would put the key back on
@@ -2433,59 +2409,13 @@ onionheaven_release() {
     return 1
 }
 
-# Write REGISTER_WITH_ONIONHEAVEN=<value> into the config (replace or append).
-set_onionheaven_choice() {
-    local value="$1"
-    [ -f "$DATA_DIR/config" ] || touch "$DATA_DIR/config"
-    if grep -q "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config"; then
-        sed -i "s/^REGISTER_WITH_ONIONHEAVEN=.*/REGISTER_WITH_ONIONHEAVEN=$value/" "$DATA_DIR/config"
-    else
-        echo "REGISTER_WITH_ONIONHEAVEN=$value" >> "$DATA_DIR/config"
-    fi
-}
-
+# `onionpress onionheaven enable|disable|status [--json]`: one
+# implementation for both platforms in src/onionpress/onionheaven.py
+# (issue #365). It writes REGISTER_WITH_ONIONHEAVEN through the config
+# CLI's checked path; the heartbeat daemon re-reads the choice every
+# cycle, so it takes effect without a restart.
 onionheaven_cmd() {
-    local sub="$1" current
-    current=$(grep "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-    case "$sub" in
-        enable)
-            set_onionheaven_choice yes
-            log "OnionHeaven enabled by user (onionpress onionheaven enable)"
-            echo "OnionHeaven enabled. Your site will register with the hub within a minute"
-            echo "and stay reachable at your .onion address when this machine is off."
-            ;;
-        disable)
-            set_onionheaven_choice no
-            log "OnionHeaven disabled by user (onionpress onionheaven disable)"
-            echo "OnionHeaven disabled. The heartbeats stop within a minute, and if this"
-            echo "site was registered, OnionPress asks the hub to delete its copy of your"
-            echo "onion service key (when OnionPress is not running: at its next start)."
-            echo "Visitors will get a connection error whenever this machine is off."
-            echo "Re-enable at any time with: onionpress onionheaven enable"
-            ;;
-        status)
-            case "$current" in
-                yes|"") echo "OnionHeaven: enabled" ;;
-                no)  echo "OnionHeaven: disabled (enable with: onionpress onionheaven enable)" ;;
-                *)   echo "OnionHeaven: not enabled (REGISTER_WITH_ONIONHEAVEN=$current is not yes or no)"; echo ""; onionheaven_explain ;;
-            esac
-            # What the registration record says hubs may hold of this
-            # install's keys (now or from before a reset, key import,
-            # restore or hub change). No network.
-            local held
-            held=$(op_py onionheaven-registrations 2>/dev/null) || held=""
-            if [ -n "$held" ]; then
-                echo ""
-                echo "A copy of the onion service key of these addresses may be held by"
-                echo "these OnionHeaven hubs (address, hub):"
-                printf '%s\n' "$held" | sed 's/^/  /'
-            fi
-            ;;
-        *)
-            echo "Usage: onionpress onionheaven {enable|disable|status}"
-            return 1
-            ;;
-    esac
+    op_py --data-dir "$DATA_DIR" onionheaven "$@"
 }
 
 get_onion_address() {
@@ -4710,11 +4640,17 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         onionheaven)
-            # Opt in to / out of OnionHeaven. REGISTER_WITH_ONIONHEAVEN is
-            # yes (also when unset: on by default) or no. The
-            # heartbeat daemon re-reads the config every cycle, so this
-            # takes effect without a restart.
-            onionheaven_cmd "${2:-status}"
+            # Opt in to / out of OnionHeaven (enable | disable | status
+            # [--json]); delegated to onionpress.cli, see onionheaven_cmd.
+            onionheaven_cmd "${@:2}"
+            ;;
+
+        config)
+            # Read and change settings: config get KEY | set KEY VALUE |
+            # unset KEY | list [--json]. One implementation for both
+            # platforms (src/onionpress/config.py, issue #365); the tray
+            # writes through it too.
+            op_py --data-dir "$DATA_DIR" config "${@:2}"
             ;;
 
         handle-action)
@@ -5228,7 +5164,7 @@ print(json.dumps({"success": False, "error": sys.argv[1], "created_at": sys.argv
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|get|setup|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|get|setup|config|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
             exit 1
             ;;
     esac
