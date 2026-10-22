@@ -107,8 +107,11 @@ class Host:
         """`<launcher> <args>`; *env* is merged into this process's
         environment (a password goes there, never on argv)."""
         full_env = {**os.environ, **(env or {})}
+        # No terminal for the launcher: stdin is /dev/null unless *input*
+        # is given (a key), so nothing in it waits on a prompt.
         return subprocess.run(
             [self.launcher, *args], input=input, env=full_env,
+            **({} if input is not None else {"stdin": subprocess.DEVNULL}),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=timeout)
 
@@ -323,7 +326,7 @@ def _resume(host, pending, confirmed):
         if action == "import-key-file":
             key = _pending_read(host, "key").strip()
             _pending_clear(host)
-            return {"handled": action, **_import_key(host, key, confirmed)}
+            return {"handled": action, **(_import_key(host, key, confirmed) or {})}
         if action == "restore-backup":
             password = _pending_read(host, "password")
             zip_path = os.path.join(_pending_dir(host), "restore-upload.zip")
@@ -341,7 +344,7 @@ def _resume(host, pending, confirmed):
                     "restored_at": now_iso()})
                 return {"handled": action}
             return {"handled": action,
-                    **_settings_page_restore(host, local_zip, password, confirmed, work)}
+                    **(_settings_page_restore(host, local_zip, password, confirmed, work) or {})}
     except Exception as e:
         host.log(f"Settings page: action '{action}' failed: {e}")
         return {"handled": action, "error": str(e)}
@@ -591,8 +594,9 @@ def _restore_backup(host, confirmed):
 
 def _settings_page_restore(host, local_zip, password, confirmed, work):
     """The in-place restore of the page's upload (the launcher's
-    settings-page-restore: backup.restore_from_backup(through_wordpress=True)
-    on a Mac, restore_backup --from-settings-page on Linux), never the
+    settings-page-restore: backup.restore_from_backup with
+    through_wordpress=True on a Mac, restore_backup --from-settings-page
+    on Linux), never the
     install-from-backup `restore`. The file and its password came through
     WordPress: refused on an OnionHeaven hub or OnionHome (or a node that
     could not be checked), and for a backup holding a hub's keys or
@@ -710,8 +714,8 @@ def apply_config(host, out=None):
     try:
         updates = json.loads(text)
     except ValueError:
-        host.log("Settings page: config-updates.json is not valid JSON; removed")
-        host.remove_shared("config-updates.json")
+        # Left for the next run: the page may still be writing it.
+        host.log("Settings page: config-updates.json is not valid JSON (left for the next run)")
         return 1
     applied = op_config.apply_settings_updates(host.paths.config_file, updates)
     if applied.rejected:

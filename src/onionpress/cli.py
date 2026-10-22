@@ -1739,7 +1739,7 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
                               json_output: bool, confirmed) -> int:
     """`onionpress settings-page-restore <zip>` (a Mac; Linux's launcher
     runs its bash restore_backup --from-settings-page): the in-place
-    backup.restore_from_backup(through_wordpress=True), never the
+    backup.restore_from_backup with through_wordpress=True, never the
     install-from-backup `restore` (issue #341). The file and its password
     came through WordPress: refused on an OnionHeaven hub or OnionHome (or
     a node that could not be checked), and for a backup holding a hub's
@@ -1776,6 +1776,35 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
         log(f"Settings page restore failed: {e}")
         return _confirm.answer_error(e, json_output)
     return _confirm.answer_ok(json_output)
+
+
+def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
+                        json_output: bool = False) -> int:
+    """`onionpress prepare-restore <zip>`: the welcome screen's Restore from
+    backup, staged before the first start (backup.prepare_install_from_backup:
+    extract, seed the onion key, apply the config overrides, write the
+    .install-from-backup marker); the launcher's start then imports the
+    database and content. A hub's sealed registry and keys are not opened
+    here (no recovery key on this path; `onionpress hub-recovery-key
+    restore` later): the answer's "note" says so."""
+    from . import confirm as _confirm
+    from .backup import prepare_install_from_backup, sealed_skipped_message
+    log = _settings_page_log(data_dir)
+
+    def log_both(msg):
+        log(msg)
+        print(msg, file=sys.stderr)
+    try:
+        _staging, meta = prepare_install_from_backup(backup_file, password, log_both,
+                                                     data_dir=data_dir)
+    except Exception as e:
+        log(f"Restore from backup: prepare failed: {e}")
+        return _confirm.answer_error(e, json_output)
+    facts = {"onion_address": meta.get("onion_address") or "",
+             "onionheaven_data": meta.get("onionheaven_data")}
+    if meta.get("onionheaven_data") == "sealed":
+        facts["note"] = sealed_skipped_message(meta)
+    return _confirm.answer_ok(json_output, text="Staged; start OnionPress to restore.", **facts)
 
 
 def main(argv: list[str] = None) -> int:
@@ -2207,6 +2236,15 @@ def main(argv: list[str] = None) -> int:
     p_spb.add_argument("output", help="Where to write the zip")
     p_spb.add_argument("--json", action="store_true",
                        help="Answer with one JSON object on the last line")
+    p_prep = sub.add_parser(
+        "prepare-restore",
+        help="Stage a backup for a first start that restores it (the welcome "
+             "screen's Restore from backup): extract, seed the key, apply the "
+             "config overrides and write the .install-from-backup marker; the "
+             "password from $ONIONPRESS_BACKUP_PASSWORD or stdin")
+    p_prep.add_argument("backup_file", help="The backup zip")
+    p_prep.add_argument("--json", action="store_true",
+                        help="Answer with one JSON object on the last line")
     p_spr = sub.add_parser(
         "settings-page-restore",
         help="The Settings page's restore: in place, never on a hub or "
@@ -2286,12 +2324,15 @@ def main(argv: list[str] = None) -> int:
                              _ha.default_launcher(paths, os_name), check=args.check,
                              json_output=args.json, confirmed=_confirm.given(args))
 
-    if args.command in ("settings-page-backup", "settings-page-restore"):
+    if args.command in ("settings-page-backup", "settings-page-restore", "prepare-restore"):
         # The page's own backup and restore, run by handle-action through
-        # the launcher (on Linux the launcher's bash does these itself).
+        # the launcher (on Linux the launcher's bash does these itself),
+        # and the welcome screen's staging of a backup to install from.
         password = read_backup_password()
         if not password:
             return _confirm.answer_error("a password is required", args.json)
+        if args.command == "prepare-restore":
+            return cmd_prepare_restore(args.backup_file, password, data_dir, args.json)
         if args.command == "settings-page-backup":
             return cmd_settings_page_backup(args.output, password, data_dir, args.json)
         return cmd_settings_page_restore(

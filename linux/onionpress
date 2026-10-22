@@ -947,21 +947,6 @@ set_address_prefix_for() {
     log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
 }
 
-# The Settings page's key result (import-result.json), built with a JSON
-# encoder.
-# Usage: write_key_result <file> <time field> true <address> |
-#        write_key_result <file> <time field> false <error>
-write_key_result() {
-    python3 -c '
-import datetime, json, sys
-ok = sys.argv[2] == "true"
-result = {"success": ok, ("address" if ok else "error"): sys.argv[3],
-          sys.argv[1]: datetime.datetime.now(datetime.timezone.utc)
-                       .strftime("%Y-%m-%dT%H:%M:%SZ")}
-print(json.dumps(result))
-' "$2" "$3" "$4" | wp_put "/var/lib/onionpress/$1" 2>/dev/null
-}
-
 # ─── Plugin installation ─────────────────────────────────────────────
 
 # Is a WordPress.org plugin wanted? plugin_wanted INSTALL_CACHE_ENABLER |
@@ -3194,20 +3179,6 @@ restore_backup() {
 
     log "Restore: complete (from $onion_address)"
     echo "$onion_address"
-}
-
-# Write the Settings page's restore-result.json. Built with a JSON encoder,
-# not by pasting strings together: the address comes out of a backup file.
-# Usage: write_restore_result true <address> | write_restore_result false <error>
-write_restore_result() {
-    python3 -c '
-import datetime, json, sys
-ok = sys.argv[1] == "true"
-result = {"success": ok, ("address" if ok else "error"): sys.argv[2],
-          "restored_at": datetime.datetime.now(datetime.timezone.utc)
-                         .strftime("%Y-%m-%dT%H:%M:%SZ")}
-print(json.dumps(result))
-' "$1" "$2" | wp_put /var/lib/onionpress/restore-result.json 2>/dev/null
 }
 
 # ─── Write status (on-demand) ────────────────────────────────────────

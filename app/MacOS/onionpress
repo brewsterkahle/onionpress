@@ -3432,10 +3432,17 @@ main() {
             # handle-action (the password in ONIONPRESS_BACKUP_PASSWORD):
             # for WordPress, so without the hub data, the host's secrets or
             # the onion service key; the restore in place
-            # (backup.restore_from_backup(through_wordpress=True)), never
+            # (backup.restore_from_backup with through_wordpress=True), never
             # the install-from-backup `restore` (issue #341).
             setup_db_passwords
             bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$1" "${@:2}"
+            ;;
+
+        prepare-restore)
+            # The welcome screen's Restore from backup: stage the backup for
+            # the first start, which imports it (the password in
+            # ONIONPRESS_BACKUP_PASSWORD).
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" prepare-restore "${@:2}"
             ;;
 
         help|-h|--help)
@@ -3486,7 +3493,8 @@ Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address, scrub,
   handle-action (the WordPress Settings page's requests),
   apply-config (its saved settings),
-  settings-page-backup, settings-page-restore (its backup and restore)
+  settings-page-backup, settings-page-restore (its backup and restore),
+  prepare-restore (the welcome screen's restore from a backup)
 
 Examples:
   $0 status
