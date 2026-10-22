@@ -494,7 +494,9 @@ class TestConfigSetTokenOnStdin(unittest.TestCase):
             src = f.read()
         node = next(n for n in ast.walk(ast.parse(src))
                     if isinstance(n, ast.FunctionDef) and n.name == "write_config_value")
-        ns = {"os": os, "subprocess": subprocess, "op_config": op_config}
+        from onionpress import confirm as op_confirm
+        ns = {"os": os, "subprocess": subprocess, "op_config": op_config,
+              "op_confirm": op_confirm}
         exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
         app = mock.Mock()
         app.config_file = os.path.join(self.tmpdir, "config")
@@ -509,7 +511,7 @@ class TestConfigSetTokenOnStdin(unittest.TestCase):
         rec.assert_secret_not_in_argv(self, self.TOKEN)
         argv, stdin = rec.calls[0]
         self.assertEqual(argv, [app.launcher_script, "config", "set",
-                                "CLOUDFLARE_TUNNEL_TOKEN", "-"])
+                                "CLOUDFLARE_TUNNEL_TOKEN", "-", "--json"])
         self.assertEqual(stdin, self.TOKEN + "\n")
         self.assertNotIn(self.TOKEN, "\n".join(app.lines))
 
@@ -612,10 +614,17 @@ class TestKeyImportKeyOnStdin(unittest.TestCase):
         self._run_import("linux/onionpress", "replace_onion_key",
                          "python3", 'replace_onion_key "$KEY"')
 
-    def test_menubar_passes_key_on_stdin(self):
-        src = _read("src/menubar.py")
-        self.assertIn('[self.launcher_script, "import-key", "-"],', src)
-        self.assertNotIn('"import-key", key_data', src)
+    def test_handle_action_passes_key_on_stdin(self):
+        """The Settings page's key goes to the launcher's import-key on
+        stdin, in the check and in the confirmed run (onionpress.handle_action,
+        issue #366); the menubar runs no import itself."""
+        src = _read("src/onionpress/handle_action.py")
+        self.assertIn('["import-key", "-", "--check", "--json"],\n'
+                      '                          input=key + "\\n"', src)
+        self.assertIn('["import-key", "-", "--confirmed", "address-change"],\n'
+                      '                          input=key + "\\n"', src)
+        self.assertNotIn('"import-key", key', src)
+        self.assertNotIn('"import-key"', _read("src/menubar.py"))
 
 
 if __name__ == "__main__":

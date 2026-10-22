@@ -318,7 +318,9 @@ class TestEveryWordPressDeliveredBackupLeavesThemOut(unittest.TestCase):
                         break
                     i += 1
                 calls.append((rel, text[m.start():i + 1]))
-        self.assertEqual(len(calls), 3, calls)
+        # cmd_backup (the owner's) and cmd_settings_page_backup (the page's),
+        # both in the CLI (issue #366).
+        self.assertEqual(len(calls), 2, calls)
         for rel, call in calls:
             with self.subTest(rel, call=call):
                 self.assertRegex(call, r"include_host_secrets=(True|False)\b")
@@ -326,7 +328,7 @@ class TestEveryWordPressDeliveredBackupLeavesThemOut(unittest.TestCase):
                 self.assertEqual("include_host_secrets=False" in call,
                                  "include_hub_data=False" in call)
         falses = [rel for rel, c in calls if "include_host_secrets=False" in c]
-        self.assertEqual(falses, ["src/menubar.py"])
+        self.assertEqual(falses, ["src/onionpress/cli.py"])
 
     def test_the_linux_settings_page_backup_leaves_them_out(self):
         text = mv._read("linux/onionpress")
@@ -337,14 +339,14 @@ class TestEveryWordPressDeliveredBackupLeavesThemOut(unittest.TestCase):
         without = [c for c in calls if "--without-host-secrets" in c]
         self.assertEqual(len(without), 1)
         self.assertIn("--without-hub-data", without[0])
-        branch = hub._branch(text, "                create-backup)\n", "\n                    ;;\n")
+        branch = hub._linux_case(text, "settings-page-backup")
         self.assertIn(without[0], branch)
 
     def test_the_mac_settings_page_backup_leaves_them_out(self):
-        mac = hub._branch(mv._read("src/menubar.py"), 'elif action == "create-backup":',
-                          'elif action == "restore-backup":')
-        create = mac.index("backup_manager.create_backup(")
-        call = mac[create:mac.index("\n                        )", create)]
+        cli_src = mv._read("src/onionpress/cli.py")
+        mac = cli_src[cli_src.index("def cmd_settings_page_backup("):cli_src.index("def cmd_settings_page_restore(")]
+        create = mac.index("create_backup(")
+        call = mac[create:mac.index("include_onion_key=False)", create)]
         self.assertIn("include_host_secrets=False", call)
 
     def test_the_settings_page_says_so(self):

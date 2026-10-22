@@ -22,6 +22,7 @@ import unittest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SETTINGS = os.path.join(ROOT, "app", "Resources", "plugins", "onionpress-settings.php")
 MENUBAR = os.path.join(ROOT, "src", "menubar.py")
+HANDLER = os.path.join(ROOT, "src", "onionpress", "handle_action.py")
 LINUX = os.path.join(ROOT, "linux", "onionpress")
 
 
@@ -120,10 +121,13 @@ class TestPatternMatchesWhatTheHostsWrite(unittest.TestCase):
     host must change the handler's pattern with it."""
 
     def test_mac(self):
-        src = _read(MENUBAR)
+        # Both platforms name the Settings page's backup in the shared
+        # handler (onionpress.handle_action, issue #366).
+        src = _read(HANDLER)
         self.assertIn(
             "filename = f\"OnionPress-{onion_short}-{time.strftime('%Y-%m-%d-%H-%M')}.zip\"", src)
-        self.assertIn('onion_short = _derived.replace(".onion", "")[:8]', src)
+        self.assertIn('onion_short = addr.replace(".onion", "")[:8] if addr else "site"', src)
+        self.assertNotIn("OnionPress-{onion_short}", _read(MENUBAR))
         stamp = time.strftime("%Y-%m-%d-%H-%M")
         for short in ("op2homei", "site", "Starting"):
             with self.subTest(short=short):
@@ -131,9 +135,8 @@ class TestPatternMatchesWhatTheHostsWrite(unittest.TestCase):
 
     def test_linux(self):
         src = _read(LINUX)
-        self.assertIn('local bp_filename="OnionPress-${bp_onion}-$(date +%Y-%m-%d-%H-%M).zip"', src)
-        self.assertIn('bp_onion="${bp_onion:0:8}"', src)
-        self.assertIn('bp_onion="site"', src)
+        self.assertNotIn('local bp_filename="OnionPress-${bp_onion}-', src)
+        self.assertNotIn("backup-result.json", src)
         stamp = time.strftime("%Y-%m-%d-%H-%M")
         for short in ("op2homei", "site"):
             with self.subTest(short=short):

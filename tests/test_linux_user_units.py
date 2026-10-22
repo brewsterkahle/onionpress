@@ -68,8 +68,11 @@ class TestWatcherBackgroundWork(unittest.TestCase):
         self.fn = _bash_function(self.launcher, "run_detached")
 
     def test_handle_action_marks_the_watcher(self):
-        handle = _case_branch(self.launcher, "handle-action", "reset")
-        self.assertLess(handle.index("ONIONPRESS_IN_WATCHER=true"), handle.index("case \"$action\" in"))
+        # The shared handler (onionpress.handle_action) runs the actions
+        # through this launcher; the mark is inherited by those runs.
+        handle = _case_branch(self.launcher, "handle-action", "settings-page-backup")
+        self.assertRegex(handle, r'\n            ONIONPRESS_IN_WATCHER=true op_py --data-dir "\$DATA_DIR" '
+                                 r'handle-action --launcher "\$INSTALL_DIR/onionpress" "\$\{@:2\}"\n')
 
     def test_derivative_rebuild_is_detached_through_it(self):
         body = _bash_function(self.launcher, "start_containers")

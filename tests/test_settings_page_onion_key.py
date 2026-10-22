@@ -186,14 +186,21 @@ class TestMacSettingsPageBackupLeavesTheKeyOut(unittest.TestCase):
         self.assertRegex(backup.ONION_KEY_LEFT_OUT_NOTE, r"\A[A-Za-z0-9 .,:;'()-]+\Z")
 
     def test_the_settings_page_asks_for_it_and_passes_the_note_on(self):
-        body = _branch(mv._read("src/menubar.py"), 'elif action == "create-backup":',
-                       'elif action == "restore-backup":')
-        create = body.index("backup_manager.create_backup(")
+        # The Mac's page backup is `onionpress settings-page-backup`
+        # (cli.cmd_settings_page_backup); handle-action hands it to
+        # WordPress with the CLI's note (issue #366).
+        cli_src = mv._read("src/onionpress/cli.py")
+        body = cli_src[cli_src.index("def cmd_settings_page_backup("):cli_src.index("def cmd_settings_page_restore(")]
+        create = body.index("create_backup(")
         call = body[create:body.index(")\n", create)]
         self.assertIn("include_onion_key=False", call)
-        self.assertIn('result["note"] = backup_manager.ONION_KEY_LEFT_OUT_NOTE', body)
-        self.assertLess(body.index('umask 077; cat > "$1"'),
-                        body.index('_write_result("backup-result.json", result)'))
+        self.assertIn('facts["note"] = ONION_KEY_LEFT_OUT_NOTE', body)
+        handler = mv._read("src/onionpress/handle_action.py")
+        branch = handler[handler.index("def _create_backup(host):"):handler.index("# -- restore --")]
+        self.assertLess(branch.index('umask 077; cat > "$1"'),
+                        branch.index('result["note"] = ans["note"]'))
+        self.assertLess(branch.index('result["note"] = ans["note"]'),
+                        branch.index('host.write_result("backup-result.json", result)'))
 
     def test_every_python_create_backup_call_says_which_it_is(self):
         calls = []
@@ -216,12 +223,14 @@ class TestMacSettingsPageBackupLeavesTheKeyOut(unittest.TestCase):
                             break
                         i += 1
                     calls.append((rel, text[m.start():i + 1]))
-        self.assertEqual(len(calls), 3, calls)
+        # cmd_backup (the owner's) and cmd_settings_page_backup (the page's),
+        # both in the CLI (issue #366); the menubar calls neither.
+        self.assertEqual(len(calls), 2, calls)
         for rel, call in calls:
             with self.subTest(rel, call=call):
                 self.assertRegex(call, r"include_onion_key=(True|False)\b")
         falses = [rel for rel, c in calls if "include_onion_key=False" in c]
-        self.assertEqual(falses, ["src/menubar.py"])
+        self.assertEqual(falses, ["src/onionpress/cli.py"])
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +380,11 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         src = mv._read("src/menubar.py")
         body = src[src.index("    def restore(self, _):"):]
         body = body[:body.index("\n    @rumps.clicked", 1)]
-        self.assertIn("metadata.get('excludes_onion_key') is True", body)
+        # The facts come from `onionpress restore --check --json`.
+        self.assertIn("facts.get('excludes_onion_key') is True", body)
         self.assertIn("keeps its onion address", body)
+        cli_src = mv._read("src/onionpress/cli.py")
+        self.assertIn('"excludes_onion_key": metadata.get("excludes_onion_key") is True', cli_src)
 
 
 class TestCliRestoreKeepsTheKeyVolumes(unittest.TestCase):
@@ -562,16 +574,21 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         self.install.assert_identity_kept()
 
     def test_the_menubar_asks_the_person_at_the_mac(self):
+        """`onionpress handle-action` stops at {"confirm": "address-change"}
+        for a restore of another address; the menubar's
+        _ask_settings_page_question asks in a native dialog."""
         ns = {}
         exec(textwrap.dedent(_menubar_method("_ask_to_replace_address")), ns)
-        exec(textwrap.dedent(_menubar_method("_settings_page_restore_confirmed")), ns)
+        exec(textwrap.dedent(_menubar_method("_ask_settings_page_question")), ns)
+        question = {"confirm": "address-change", "current": OLD_ADDR, "new": ADDR,
+                    "action": "restore-backup", "handled": "restore-backup"}
         for answer, want in ((1, True), (0, False), (None, False)):
             with self.subTest(answer=answer):
                 app = types.SimpleNamespace(
                     log=mock.Mock(), show_native_alert=mock.Mock(return_value=answer))
                 app._ask_to_replace_address = types.MethodType(
                     ns["_ask_to_replace_address"], app)
-                self.assertIs(ns["_settings_page_restore_confirmed"](app, OLD_ADDR, ADDR), want)
+                self.assertIs(ns["_ask_settings_page_question"](app, question), want)
                 title, message = app.show_native_alert.call_args.args[:2]
                 self.assertIn(OLD_ADDR, message)
                 self.assertIn(ADDR, message)
@@ -582,10 +599,18 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
                 self.assertEqual(kwargs["cancel_button"], 0)
 
     def test_the_settings_page_restore_goes_through_it(self):
-        src = mv._read("src/menubar.py")
-        body = src[src.index('elif action == "restore-backup":'):]
-        body = body[:body.index("\n            else:")]
-        self.assertIn("confirm_address_change=self._settings_page_restore_confirmed", body)
+        # The CLI's settings-page-restore stops at the question unless
+        # --confirmed address-change was given (onionpress.confirm); the
+        # handler keeps the question for the menubar and runs it again.
+        cli_src = mv._read("src/onionpress/cli.py")
+        body = cli_src[cli_src.index("def cmd_settings_page_restore("):cli_src.index("def main(")]
+        self.assertIn("confirm_address_change=confirm_address_change", body)
+        self.assertIn('_confirm.require("address-change", confirmed, current=current, new=new)', body)
+        self.assertIn("through_wordpress=True", body)
+        handler = mv._read("src/onionpress/handle_action.py")
+        self.assertIn('if "address-change" in confirmed:\n        args += ["--confirmed", "address-change"]', handler)
+        menubar = mv._read("src/menubar.py")
+        self.assertIn('["--confirmed", result["confirm"]] if answered_yes else ["--cancel"]', menubar)
         # The dialog gives up after 5 minutes: no answer is Cancel.
         alert = _menubar_method("show_native_alert")
         self.assertIn("max_wait = 300", alert)
@@ -704,17 +729,23 @@ class TestLinuxSettingsPageRestoreKeepsTheAddress(_LinuxRestore):
 class TestLinuxSettingsPageKeyActions(unittest.TestCase):
 
     def test_no_generate_vanity_and_import_is_refused(self):
+        # One handler for both platforms (onionpress.handle_action, issue
+        # #366): no generate-vanity verb, and the import refused on Linux
+        # before any launcher runs.
+        handler = mv._read("src/onionpress/handle_action.py")
+        self.assertNotIn("generate-vanity", handler)
+        self.assertNotIn("mkp224o", handler)
+        self.assertNotIn("generate-vanity", handler[handler.index("ACTIONS = ("):])
+        branch = handler[handler.index("def _import_key_file("):handler.index("def _import_key(")]
+        self.assertIn('if host.os_name != "macos":', branch)
+        self.assertIn("IMPORT_REFUSED_LINUX_MSG", branch)
+        self.assertIn("onionpress import-key", handler[handler.index("IMPORT_REFUSED_LINUX_MSG = ("):])
+        refusal = branch[branch.index('if host.os_name != "macos":'):branch.index("if not key:")]
+        self.assertNotIn("run_launcher", refusal)
         text = mv._read("linux/onionpress")
         handle = _branch(text, "\n        handle-action)\n", "\n            ;;\n")
-        self.assertNotIn("generate-vanity)", handle)
-        self.assertNotIn("mkp224o", handle)
-        branch = _branch(handle, "\n                import-key-file)\n",
-                         "\n                    ;;\n")
-        self.assertIn("write_key_result import-result.json imported_at false", branch)
-        self.assertIn("onionpress import-key", branch)
-        for never in ("replace_onion_key", "import-key-data 2>/dev/null || echo",
-                      "start_containers", "stop_containers"):
-            self.assertNotIn(never, branch)
+        self.assertNotIn("generate-vanity", handle)
+        self.assertNotIn("import-key", handle)
 
     def test_the_page_no_longer_asks_for_generate_vanity(self):
         php = mv._read(PHP)

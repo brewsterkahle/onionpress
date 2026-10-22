@@ -29,6 +29,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, backup_crypto, cli, key_manager  # noqa: E402
 
@@ -788,46 +789,36 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
 
 
 class TestRestoreResultJson(unittest.TestCase):
-    """linux/onionpress builds restore-result.json with a JSON encoder."""
-
-    def _write(self, *args):
-        out = tempfile.NamedTemporaryFile(delete=False)
-        out.close()
-        self.addCleanup(os.unlink, out.name)
-        launcher = _read("linux/onionpress")
-        func = (_bash_function(launcher, "wp_put")
-                + _bash_function(launcher, "write_restore_result"))
-        script = ('docker() { cat > "$OUT"; }\n'
-                  'python3() { "$PY" "$@"; }\n' + func
-                  + 'write_restore_result "$@"\n')
-        r = subprocess.run(["bash", "-c", script, "bash", *args],
-                           capture_output=True, text=True, timeout=20,
-                           env={**os.environ, "OUT": out.name, "PY": sys.executable,
-                                "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        with open(out.name) as f:
-            return json.load(f)
-
-    def test_hostile_text_stays_a_string(self):
-        hostile = 'x","success":false,"error":"<b>pwned</b>\n'
-        doc = self._write("true", hostile)
-        self.assertEqual(doc["success"], True)
-        self.assertEqual(doc["address"], hostile)
-        self.assertEqual(sorted(doc), ["address", "restored_at", "success"])
-
-    def test_failure_shape(self):
-        doc = self._write("false", "Restore failed")
-        self.assertEqual((doc["success"], doc["error"]), (False, "Restore failed"))
-        self.assertRegex(doc["restored_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+    """The page's result files are built by the shared handler with a JSON
+    encoder (onionpress.handle_action Host.write_result), never by string
+    pasting; the launcher's string-built results are gone."""
 
     def test_no_string_built_result_json_remains(self):
         code = _read("linux/onionpress")
         self.assertNotIn('"address":"\'"$rp_addr"', code)
-        settings = code[code.index("                restore-backup)"):]
-        settings = settings[:settings.index("                refresh-status)")]
-        self.assertNotIn("restore-result.json", settings)
-        self.assertIn('write_restore_result true "$rp_addr"', settings)
-        self.assertIn('is_onion_address "$rp_addr" || rp_addr=""', settings)
+        self.assertNotIn("restore-result.json", code)
+        self.assertNotIn("write_restore_result", code)
+        self.assertNotIn("write_key_result", code)
+        handler = _read("src/onionpress/handle_action.py")
+        self.assertIn("self.put_shared(filename, json.dumps(data))", handler)
+        self.assertNotIn("'{\"success\"", handler)
+
+    def test_hostile_text_stays_a_string(self):
+        import test_handle_action as tha
+        from onionpress import handle_action as ha
+        from onionpress.platform import resolve_paths
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        docker = tha.FakeDocker(os.path.join(tmp, "sandbox"))
+        host = ha.Host(launcher="/nonexistent", paths=resolve_paths(data_dir=tmp, app_bundle=""),
+                       docker=docker, log=lambda m: None, os_name="linux")
+        hostile = 'x","success":false,"error":"<b>pwned</b>\n'
+        host.write_result("restore-result.json", {"success": True, "address": hostile,
+                                                  "restored_at": "now"})
+        doc = docker.result("restore-result.json")
+        self.assertEqual(doc["success"], True)
+        self.assertEqual(doc["address"], hostile)
+        self.assertEqual(sorted(doc), ["address", "restored_at", "success"])
 
 
 class TestMenubarRestoreDialog(unittest.TestCase):
@@ -839,8 +830,14 @@ class TestMenubarRestoreDialog(unittest.TestCase):
         self.body = src[start:src.index("\n    @rumps.clicked", start + 1)]
 
     def test_shown_fields_are_sanitized(self):
+        # The facts come from `onionpress restore --check --json`
+        # (cli.cmd_restore_check), which sanitizes them.
+        cli_src = _read("src/onionpress/cli.py")
+        check = cli_src[cli_src.index("    def cmd_restore_check("):cli_src.index("    def cmd_restore(")]
         for field in ("backup_date", "username", "onionpress_version"):
-            self.assertIn(f"backup_manager.metadata_text(metadata, '{field}')", self.body)
+            self.assertIn(f'metadata_text(metadata, "{field}")', check)
+            self.assertIn(f"facts.get('{field}')", self.body)
+        self.assertIn('["restore", zip_path, "--check", "--json"]', self.body)
 
     def test_a_failed_launcher_restore_is_reported_as_a_failure(self):
         # run_launcher_restore's message starts "Restore failed" and says

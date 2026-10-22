@@ -546,8 +546,15 @@ class TestSettingsPageOnlyChecks(_Harness):
 
     def test_handle_action_update_only_checks(self):
         text = _read(LINUX)
-        start = text.index("\n                update)\n")
-        branch = _code(text[start:text.index("\n                    ;;\n", start)])
+        # The shared handler (onionpress.handle_action) runs the launcher's
+        # settings-page-update-check on Linux, which only reports.
+        handler = _read("src/onionpress/handle_action.py")
+        update = handler[handler.index("def _update(host):"):handler.index("# -- recent logs")]
+        self.assertIn('if host.os_name != "macos":', update)
+        self.assertIn('host.run_launcher(["settings-page-update-check"]', update)
+        self.assertLess(update.index('["settings-page-update-check"]'), update.index("return"))
+        start = text.index("\n        settings-page-update-check)\n")
+        branch = _code(text[start:text.index("\n            ;;\n", start)])
         self.assertIn("update_settings_page_check", branch)
         for word in ('"$0"', "sudo", "apt-get", "install-tree", "update_cmd",
                      "update_from", "update_finish", "update_fetch_release"):

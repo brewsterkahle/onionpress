@@ -47,6 +47,7 @@ DOCKER_TOR_DIR = os.path.join(PROJECT_ROOT, "app", "Resources", "docker", "tor")
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from onionpress import launcher_ops  # noqa: E402
 from onionpress import backup, backup_crypto, hub_backup, key_manager  # noqa: E402
 from onionpress import cli as op_cli  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
@@ -553,10 +554,61 @@ class TestRestoreSealed(unittest.TestCase):
                         mock.patch("onionpress.derivatives.spawn_regeneration"), \
                         mock.patch.object(sys, "stdin", io.StringIO()), \
                         contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(cli.cmd_restore(PW, self.zip, key), 0)
+                    # Without a key, not at a terminal: only with the
+                    # confirmation (the menubar's Restore Without).
+                    confirmed = frozenset() if key else frozenset({"sealed-hub-data-left-out"})
+                    self.assertEqual(cli.cmd_restore(PW, self.zip, key, confirmed=confirmed), 0)
                 self.assertEqual(docker.restored_keys(), want)
                 if not key:
                     self.assertTrue([m for m in self.logs if "were not restored" in m])
+
+    def test_cmd_restore_refuses_to_leave_the_hub_data_out_unasked(self):
+        """Not at a terminal, a sealed backup without the key and without
+        --confirmed sealed-hub-data-left-out is refused before anything is
+        extracted (onionpress.confirm)."""
+        data_dir = tempfile.mkdtemp(prefix="op-hub-cli-restore-")
+        self.addCleanup(shutil.rmtree, data_dir, True)
+        cli = object.__new__(OnionPressCLI)
+        cli.paths = mock.Mock(data_dir=data_dir)
+        cli.log = self.logs.append
+        cli.containers = mock.Mock()
+        cli.docker = mock.Mock()
+        out = io.StringIO()
+        with mock.patch.object(backup, "prepare_install_from_backup") as prepare, \
+                mock.patch.object(sys, "stdin", io.StringIO()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.cmd_restore(PW, self.zip, "", json_output=True), 3)
+        prepare.assert_not_called()
+        cli.containers.stop.assert_not_called()
+        answer = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertIn("sealed-hub-data-left-out", answer["error"])
+        self.assertIn(hub_backup.RECOVERY_KEY_ENV, answer["error"])
+
+    def test_cmd_restore_check_asks_for_the_key(self):
+        """`onionpress restore --check --json` on a sealed backup: the
+        question, with the facts; a wrong key is the answer's error; the
+        right key is accepted; the confirmation stands in for the key."""
+        cli = object.__new__(OnionPressCLI)
+        cli.log = self.logs.append
+
+        def check(key, confirmed=frozenset()):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = cli.cmd_restore_check(PW, self.zip, key, confirmed, True)
+            return rc, json.loads(out.getvalue().strip().splitlines()[-1])
+        rc, ans = check("")
+        self.assertEqual(rc, 4)
+        self.assertEqual(ans["confirm"], "sealed-hub-data-left-out")
+        self.assertEqual(ans["key_id"], self.kid)
+        self.assertEqual(ans["onionheaven_data"], "sealed")
+        self.assertEqual(ans["onion_address"], mv.ADDR)
+        rc, ans = check(hub_backup.format_private_key(b"\x11" * 32))
+        self.assertEqual(rc, 1)
+        self.assertIn("error", ans)
+        rc, ans = check(self.private_text)
+        self.assertEqual((rc, ans["ok"], ans["recovery_key"]), (0, True, "accepted"))
+        rc, ans = check("", frozenset({"sealed-hub-data-left-out"}))
+        self.assertEqual((rc, ans["ok"]), (0, True))
 
 
 class TestRegistrantKeyChecks(unittest.TestCase):
@@ -818,7 +870,8 @@ class TestCli(unittest.TestCase):
             M.return_value.cmd_restore.return_value = 0
             op_cli.main(["restore", "/tmp/b.zip"])
             self.assertNotIn(hub_backup.RECOVERY_KEY_ENV, os.environ)
-        M.return_value.cmd_restore.assert_called_once_with("pw", "/tmp/b.zip", "the-key")
+        M.return_value.cmd_restore.assert_called_once_with(
+            "pw", "/tmp/b.zip", "the-key", confirmed=frozenset(), json_output=False)
 
     def test_the_launchers_pass_it_through_without_argv(self):
         """Taken out of the launcher's environment before anything runs and
@@ -859,29 +912,40 @@ class TestCli(unittest.TestCase):
 
 
 class TestMac(unittest.TestCase):
-    """src/menubar.py (AppKit, so checked as source) and the bundle."""
+    """src/menubar.py (AppKit, so checked as source) and the bundle: the
+    menubar asks `onionpress restore --check --json` what the backup
+    needs, asks the question in its own dialog, and hands the key over in
+    the environment."""
 
     def setUp(self):
         self.src = _read("src/menubar.py")
 
     def test_restore_asks_for_the_key_on_a_sealed_backup(self):
         body = self.src[self.src.index('@rumps.clicked("Restore...")'):]
-        body = body[:body.index("def _reconcile_archive_s3_keys")]
-        ask = body.index("hub_recovery_key = self._ask_hub_recovery_key(metadata)")
-        self.assertLess(body.index('if metadata.get("onionheaven_data") == "sealed":'), ask)
+        body = body[:body.index("def _adopt_restored_address")]
+        ask = body.index("hub_recovery_key = self._ask_hub_recovery_key(facts, zip_path, restore_env)")
+        self.assertLess(body.index('if facts.get("confirm") == "sealed-hub-data-left-out":'), ask)
         self.assertLess(ask, body.index("_BackupProgressWindow("))
-        self.assertIn("hub_key_env = ({hub_backup.RECOVERY_KEY_ENV: hub_recovery_key}", body)
+        self.assertIn("restore_env[launcher_ops.HUB_RECOVERY_KEY_ENV] = hub_recovery_key", body)
+        self.assertIn('confirmed_flags = ["--confirmed", "sealed-hub-data-left-out"]', body)
         self.assertIn("extra_env=hub_key_env,", body)
+        self.assertIn('extra_args=["--json", *confirmed_flags],', body)
         self.assertIn("launcher_ops.run_launcher_restore(", body)
-        self.assertIn("backup_manager.HUB_DATA_RESTORED_LOG in restore_stderr", body)
+        self.assertIn('answer.get("hub_data") == "restored"', body)
         ask_body = self.src[self.src.index("def _ask_hub_recovery_key"):]
         ask_body = ask_body[:ask_body.index('@rumps.clicked("Restore...")')]
         self.assertIn("NSSecureTextField", ask_body)
-        self.assertIn("hub_backup.check_key_for_backup(text, metadata)", ask_body)
+        # A typed key is checked by the CLI, in the environment
+        self.assertIn('["restore", zip_path, "--check", "--json"]', ask_body)
+        self.assertIn("launcher_ops.HUB_RECOVERY_KEY_ENV: text", ask_body)
+        self.assertEqual(launcher_ops.HUB_RECOVERY_KEY_ENV, hub_backup.RECOVERY_KEY_ENV)
 
     def test_a_hub_backup_without_a_key_says_so(self):
-        self.assertIn('if metadata.get("onionheaven_data") == "unsealed":\n'
-                      '                    msg += "\\n\\n" + backup_manager.HUB_DATA_UNSEALED_NOTE',
+        """The CLI's notes (HUB_DATA_UNSEALED_NOTE among them) are shown
+        with the finished backup."""
+        cli_src = _read("src/onionpress/cli.py")
+        self.assertIn("notes.append(HUB_DATA_UNSEALED_NOTE)", cli_src)
+        self.assertIn('for note in ans.get("notes") or []:\n                msg += "\\n\\n" + note',
                       self.src)
 
     def test_bundled(self):

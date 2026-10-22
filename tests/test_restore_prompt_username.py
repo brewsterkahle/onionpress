@@ -64,9 +64,14 @@ class TestMenubarRestorePrompt(unittest.TestCase):
         self.body = src[start:src.index("\n    @rumps.clicked", start + 1)]
 
     def test_uses_the_checked_parser(self):
-        self.assertIn("backup_user = backup_manager.backup_filename_username(zip_path)",
+        # The CLI answers `restore --check --json` without a password with
+        # {"ask": "password", "backup_user": ...} from the checked parser.
+        self.assertIn('backup_user = (ans or {}).get("backup_user") if (ans or {}).get("ask") == "password" else None',
                       self.body)
         self.assertNotIn(".split(\"-\")", self.body)
+        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "cli.py"), encoding="utf-8") as f:
+            cli_src = f.read()
+        self.assertIn("backup_user=backup_filename_username(args.backup_file)", cli_src)
 
     def test_name_only_words_the_prompt(self):
         uses = [line.strip() for line in self.body.splitlines() if "backup_user" in line]

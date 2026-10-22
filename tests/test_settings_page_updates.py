@@ -29,6 +29,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import config as op_config  # noqa: E402
 from onionpress import wp_files  # noqa: E402
@@ -361,85 +362,85 @@ class TestSettingsPageMatchesAllowlist(unittest.TestCase):
         self.assertNotIn("TOR_IMPL", self.fields)
 
 
-class TestMacPollConfigUpdates(unittest.TestCase):
-    """Run menubar.py's poll_config_updates against a fake app."""
-
-    class _Result:
-        def __init__(self, ok, output=""):
-            self.ok, self.output = ok, output
+class TestMacApplyConfig(unittest.TestCase):
+    """The Mac's `onionpress apply-config` (onionpress.handle_action.apply_config,
+    issue #366; the menubar's poll_config_updates until then) against a
+    stubbed WordPress volume: the allowlist, the marker for the running
+    menubar, the side effects; a truncated file is left for the next run."""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="op-poll-config-")
+        import test_handle_action as tha
+        from onionpress import handle_action as ha
+        from onionpress.platform import resolve_paths
+        self.dir = tempfile.mkdtemp(prefix="op-apply-config-mac-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
         self.config = os.path.join(self.dir, "config")
         with open(self.config, "w") as f:
             f.write(CONFIG.replace("START_ON_BOOT=no", "LAUNCH_ON_LOGIN=yes"))
-        src = _read("src/menubar.py")
-        node = next(n for n in ast.walk(ast.parse(src))
-                    if isinstance(n, ast.FunctionDef) and n.name == "poll_config_updates")
-        ns = {"json": json, "op_config": op_config, "wp_files": wp_files}
-        exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
-        self.poll = ns["poll_config_updates"]
+        self.docker = tha.FakeDocker(os.path.join(self.dir, "sandbox"))
+        self.lines = []
+        self.host = ha.Host(launcher="/nonexistent/onionpress",
+                            paths=resolve_paths(data_dir=self.dir, app_bundle=""),
+                            docker=self.docker, log=self.lines.append, os_name="macos")
+        self.effects = []
+        p = mock.patch.object(op_config, "apply_side_effects",
+                              side_effect=lambda keys, *a, **k: self.effects.append(sorted(keys)) or [])
+        p.start()
+        self.addCleanup(p.stop)
+        self.ha = ha
 
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def _app(self, payload):
-        app = mock.Mock()
-        app.config_file = self.config
-        app.lines = []
-        app.log = app.lines.append
-        app._read_config_value = lambda key, default="": op_config.read_value(
-            self.config, key, default)
-
-        def docker_exec(container, cmd, **kwargs):
-            if cmd[0] == "cat":
-                return self._Result(True, payload)
-            return self._Result(True)
-        app._docker.exec.side_effect = docker_exec
-        return app
+    def _apply(self, payload):
+        self.docker.put("config-updates.json", payload)
+        with open(os.devnull, "w") as devnull:
+            return self.ha.apply_config(self.host, out=devnull)
 
     def test_hostile_payload(self):
         payload = dict(HOSTILE, LAUNCH_ON_LOGIN="no")
-        app = self._app(json.dumps(payload))
-        with mock.patch("onionpress.analytics_sharing.trigger_upload") as upload:
-            self.poll(app)
+        self.assertEqual(self._apply(json.dumps(payload)), 0)
         config = op_config.read_config(self.config)
         self.assertEqual(config["CLOUDFLARE_TUNNEL_TOKEN"], TOKEN)
         self.assertEqual(config["LAUNCH_ON_LOGIN"], "no")
         self.assertNotIn("ONIONPRESS_TOR_IMAGE", config)
         self.assertNotIn("PREVENT_SLEEP", config)
-        log = "\n".join(app.lines)
+        log = "\n".join(self.lines)
         self.assertNotIn(TOKEN, log)
         self.assertNotIn("evil", log)
         self.assertIn("CLOUDFLARE_TUNNEL_TOKEN: set", log)
         self.assertIn("ONIONPRESS_TOR_IMAGE", log)
         self.assertIn("ONIONHEAVEN_ADDRESS", log)
-        app.remove_login_item.assert_called_once_with()
-        app.caffeine.start.assert_not_called()  # PREVENT_SLEEP was rejected
-        upload.assert_not_called()
-        self.assertTrue(app.cloudflare_tunnel_enabled)
-        rm = [c for c in app._docker.exec.call_args_list if c.args[1][0] == "rm"]
-        self.assertEqual(len(rm), 1)
+        accepted = ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"]
+        self.assertEqual(self.effects, [accepted])
+        # What the running menubar owes (caffeinate, the tunnel flag,
+        # status.json) waits in the marker it takes on its next tick.
+        self.assertEqual(sorted(op_config.take_config_changes(self.dir)), accepted)
+        self.assertIsNone(self.docker.get("config-updates.json"))
         # Read and removed as www-data, whose folder it is: root's cat or
         # rm there could be led by a link it planted.
-        for call in app._docker.exec.call_args_list:
-            self.assertEqual(call.kwargs.get("user"), "www-data", call)
+        for call in self.docker.calls:
+            self.assertEqual(call[:3], ["exec", "-u", "www-data"], call)
 
     def test_side_effects_follow_accepted_values(self):
-        app = self._app(json.dumps({
+        self._apply(json.dumps({
             "PREVENT_SLEEP": "never", "LAUNCH_ON_LOGIN": "yes",
             "SHARE_ANALYTICS_WITH_ONIONHOME": "yes"}))
-        with mock.patch("onionpress.analytics_sharing.trigger_upload") as upload:
-            self.poll(app)
-        app.caffeine.start.assert_called_once_with()
-        app.add_login_item.assert_called_once_with()
-        upload.assert_called_once_with()
+        self.assertEqual(self.effects, [["LAUNCH_ON_LOGIN", "PREVENT_SLEEP",
+                                         "SHARE_ANALYTICS_WITH_ONIONHOME"]])
+        self.assertEqual(sorted(op_config.take_config_changes(self.dir)),
+                         ["LAUNCH_ON_LOGIN", "PREVENT_SLEEP", "SHARE_ANALYTICS_WITH_ONIONHOME"])
 
-    def test_truncated_json_is_left_for_the_next_poll(self):
-        app = self._app('{"UPDATE_ON_LAUNCH": "n')
-        self.poll(app)
-        rm = [c for c in app._docker.exec.call_args_list if c.args[1][0] == "rm"]
-        self.assertEqual(rm, [])
+    def test_truncated_json_is_left_for_the_next_run(self):
+        self.assertEqual(self._apply('{"UPDATE_ON_LAUNCH": "n'), 1)
+        self.assertEqual(self.docker.get("config-updates.json"), '{"UPDATE_ON_LAUNCH": "n')
+        self.assertEqual(self.effects, [])
+
+    def test_the_menubar_runs_it_through_the_launcher(self):
+        src = _read("src/menubar.py")
+        self.assertNotIn("def poll_config_updates", src)
+        self.assertNotIn("apply_settings_updates(", src)
+        mac = _read("app/MacOS/onionpress")
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" apply-config', mac)
+        handler = _read("src/onionpress/handle_action.py")
+        self.assertIn('host.run_launcher(["apply-config"]', handler)
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
