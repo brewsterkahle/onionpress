@@ -3215,63 +3215,16 @@ main() {
             ;;
 
         reset)
-            # Wipe everything: WordPress, database, Tor state, keys, config, secrets.
-            # After reset + start + setup, restore from backup to get data back.
-            if [ "$ONIONPRESS_YES" != "true" ]; then
-                echo ""
-                echo "  This will ERASE everything: WordPress, database, Tor state,"
-                echo "  onion address keys, config, and secrets."
-                echo ""
-                echo "  To preserve your data, run 'onionpress backup' first."
-                echo ""
-                echo "  Press Enter to continue or Ctrl+C to cancel..."
-                read -r
-            fi
-
-            # The onion service key goes with the reset: OnionHeaven hubs
-            # that may hold a copy are asked to delete it first, while it
-            # can still sign the request.
-            if ! onionheaven_release reset; then
-                echo "Cancelled."
-                exit 1
-            fi
-
-            log "Resetting OnionPress (full wipe)..."
-
-            # Stop everything
+            # Wipe everything: WordPress, database, Tor state, keys, config,
+            # secrets (onionpress.cli reset, issue #366: it asks first, with
+            # --check --json / --confirmed for a UI and --yes for scripts,
+            # and asks the OnionHeaven hubs that may hold the key to delete
+            # it while the key can still sign). Start OnionPress again for
+            # fresh containers. ONIONPRESS_YES=true still means --yes.
             setup_db_passwords 2>/dev/null || true
-            stop_containers 2>/dev/null || true
-
-            # Remove all Docker volumes
-            cd "$DOCKER_DIR"
-            log "Removing Docker volumes..."
-            for vol in $(docker volume ls -q --filter "name=onionpress-" 2>/dev/null); do
-                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 && log "Removed volume: $vol" || log "WARNING: Failed to remove volume: $vol"
-            done
-
-            # Wipe data directory (keep colima VM and docker-config). The
-            # OnionHeaven registration record stays when a hub may still
-            # hold a key: it is what says what remains on which hub.
-            rm -f "$DATA_DIR/secrets" "$DATA_DIR/onionpress.log" "$DATA_DIR/.last_status_state"
-            rm -f "$DATA_DIR/config" "$DATA_DIR/config.bak"
-            if [ "$ONIONHEAVEN_RELEASE_RC" -eq 0 ]; then
-                rm -f "$DATA_DIR/onionheaven-registration.json"
-            fi
-            rm -f "$DATA_DIR/onion_address" "$DATA_DIR/healthcheck-address"
-            rm -rf "$DATA_DIR/shared/vanity-keys/"
-            log "Removed keys, config, secrets, and logs"
-
-            echo ""
-            echo "  Reset complete. Everything wiped. Starting fresh containers..."
-            echo ""
-
-            # Start fresh containers
-            setup_db_passwords
-            start_containers
-            wait_for_services
-
-            log "OnionPress reset and restarted"
-            echo "  Containers running. Run 'onionpress setup' to initialize WordPress."
+            reset_args=("${@:2}")
+            [ "${ONIONPRESS_YES:-}" != "true" ] || reset_args+=(--yes)
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" reset "${reset_args[@]}"
             ;;
 
         scrub)
@@ -3427,90 +3380,31 @@ main() {
             ;;
 
         update)
-            # Self-update from a GitHub release. Two modes:
-            #   --check     dry-run check (no install)
-            #   -y / --yes  install without prompting (use in scripts)
-            # Ported from the former onionpress-cli wrapper so there's a
-            # single CLI surface; the wrapper's check-for-update path
-            # delegates to onionpress.cli for the canonical presentation.
-            shift  # drop "update"
-            YES_FLAG="0"
-            CHECK_ONLY="0"
-            for arg in "$@"; do
-                case "$arg" in
-                    -y|--yes) YES_FLAG="1" ;;
-                    --check)  CHECK_ONLY="1" ;;
-                    -h|--help)
-                        cat <<EOF
-Usage: $0 update [--check] [-y|--yes]
-
-  --check     Only check for an update; don't install.
-  -y, --yes   Install without prompting (use in scripts).
-EOF
-                        exit 0 ;;
-                    *)
-                        echo "Unknown update option: $arg" >&2
-                        exit 2 ;;
-                esac
-            done
-
-            if [ ! -x "$_BUNDLED_PYTHON_BIN" ]; then
-                echo "Bundled Python not found at $_BUNDLED_PYTHON_BIN" >&2
-                exit 1
-            fi
-
-            if [ "$CHECK_ONLY" = "1" ]; then
-                exec bundled_python -m onionpress.cli check-for-update
-            fi
-
+            # A new release from GitHub, installed by the staged bundle swap
+            # (onionpress.cli update -> updater.download_and_install: the new
+            # bundle is copied beside the old one and renamed into place
+            # last, since this very process runs out of the one being
+            # replaced; the menubar relaunches after). --check only reports
+            # (--json for the menubar), --yes skips the prompt.
             ONIONPRESS_APP_PATH="$(dirname "$APP_DIR")" \
-            ONIONPRESS_YES="$YES_FLAG" \
-                bundled_python - <<'PY'
-import os, sys, plistlib
-from onionpress import updater
+                bundled_python -m onionpress.cli --data-dir "$DATA_DIR" update "${@:2}"
+            ;;
 
-app_path = os.environ["ONIONPRESS_APP_PATH"]
-with open(os.path.join(app_path, "Contents", "Info.plist"), "rb") as f:
-    current = plistlib.load(f).get("CFBundleShortVersionString", "0")
+        update-images)
+            # Pull the stack's pinned container images (the menubar's Check
+            # for Updates; a launch pulls only what is missing, issue #36).
+            setup_db_passwords
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" update-images "${@:2}"
+            ;;
 
-print(f"Installed: {current}")
-print("Checking GitHub for updates...")
-result = updater.check_for_update(current, log=lambda m: None)
-if not result:
-    print("Already up to date.")
-    sys.exit(0)
-
-release_data, latest = result
-print(f"Update available: {latest}  (published {release_data.get('published_at', '?')})")
-
-notes = (release_data.get("body") or "").strip()
-if notes:
-    print()
-    snippet = notes if len(notes) <= 800 else notes[:800] + "\n... (truncated)"
-    print(snippet)
-    print()
-
-others = updater.detect_other_instances()
-if others:
-    print("Note: other users are running OnionPress:")
-    for o in others:
-        print(f"  - {o['user']} (pid {o['pid']})")
-    print("Updating replaces the shared app bundle for everyone.")
-    print()
-
-if os.environ.get("ONIONPRESS_YES") != "1":
-    if not sys.stdin.isatty():
-        print("Re-run with --yes to install non-interactively.", file=sys.stderr)
-        sys.exit(2)
-    reply = input(f"Install v{latest} now? [y/N] ").strip().lower()
-    if reply not in ("y", "yes"):
-        print("Aborted.")
-        sys.exit(0)
-
-print(f"Downloading and installing v{latest}...")
-updater.download_and_install(release_data, latest, app_path, log=print)
-print(f"Installed v{latest}. Quit and relaunch OnionPress to use the new version.")
-PY
+        uninstall)
+            # Remove OnionPress (onionpress.uninstall, issue #366): asks
+            # first (--check --json and --confirmed for the menubar, or at
+            # this terminal), takes the key back off the OnionHeaven hubs
+            # that may hold it, stops OnionPress, deletes the Colima VM, the
+            # login item and ~/.onionpress. The app bundle is yours to move
+            # to the Trash.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" uninstall "${@:2}"
             ;;
 
         handle-action)
@@ -3562,7 +3456,9 @@ User commands:
   get           Fetch a URL over Tor and print the body (is this .onion up?)
                 (-i to include response headers, --max-time SECONDS)
   update        Check GitHub for a new release and install it
-                (--check to only check, -y to skip prompt)
+                (--check to only check, -y to skip prompt, --json)
+  update-images Pull the stack's container images (a launch pulls only
+                what is missing)
   backup        Create an encrypted backup zip
   restore       Restore from an encrypted backup zip
   setup         Run the first-time WordPress setup
@@ -3575,10 +3471,22 @@ User commands:
   hub-recovery-key
                 An OnionHeaven hub's backup recovery key
                 (create, show, check, restore)
+  uninstall     Remove OnionPress: the onion address and key, the site,
+                the container VM and ~/.onionpress (asks first; then move
+                OnionPress.app to the Trash)
+  reset         Wipe everything and start over (asks first)
+
+Destructive commands ask before acting. A program runs them as
+  <command> --check --json   (answers {"ok": true}, {"confirm": "<what>", ...}
+                              or {"error": ...}, changing nothing)
+  <command> --confirmed <what>
+(or sets ONIONPRESS_CONFIRMED); without the confirmation they refuse.
 
 Advanced / internal (used by the menubar app or scripts):
-  start-tor, launch, upload-analytics, validate-oh-address,
-  reset, scrub
+  start-tor, launch, upload-analytics, validate-oh-address, scrub,
+  handle-action (the WordPress Settings page's requests),
+  apply-config (its saved settings),
+  settings-page-backup, settings-page-restore (its backup and restore)
 
 Examples:
   $0 status
@@ -3586,6 +3494,7 @@ Examples:
   $0 get http://<some-address>.onion/
   $0 update --check
   $0 update -y
+  $0 uninstall --check --json
   $0 config set PREVENT_SLEEP never
   $0 onionheaven status
   $0 backup [-o <output_path>]
