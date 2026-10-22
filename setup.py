@@ -106,6 +106,7 @@ OPTIONS = {
                  'onionpress.splash_tips',
                  'onionpress.wp_files',
                  'onionpress.confirm', 'onionpress.handle_action',
+                 'onionpress.uninstall',
                  'onionpress.wordpress_egress',
                  'onionpress.thumbnails'],
     'excludes': ['tkinter', 'test', 'unittest'],
