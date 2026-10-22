@@ -142,6 +142,59 @@ class TestAllowlist(unittest.TestCase):
 
     def test_forbidden_keys_are_not_allowlisted(self):
         self.assertEqual(FORBIDDEN & set(op_config.SETTINGS_PAGE_KEYS), set())
+
+    # -- The CLI key set beside the page's (issue #365) --
+    #
+    # `onionpress config set` (config.CLI_CONFIG_KEYS) is the owner at a
+    # terminal, so it reaches more keys than the page: every page key with
+    # the same check object, plus the ones only the file could change. What
+    # the page may never set splits into keys the CLI accepts (the owner's
+    # settings) and keys nobody but a hand edit sets.
+
+    CLI_ONLY = {
+        "ADDRESS_PREFIX", "VM_DISK", "VM_CPU", "INSTALL_IA_PLUGIN",
+        "REPUBLISH_ON_UNREACHABLE", "ONIONHEAVEN_ADDRESS", "ONIONHOME_ADDRESS",
+        "ONIONNAME", "ONIONNAME_REGISTERED",
+    }
+    HAND_EDIT = {
+        "ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE",
+        "ONIONHEAVEN_ACCEPT_REGISTRATIONS", "ONIONPRESS_BIND_HOST",
+        "ONIONPRESS_PORT_OFFSET",
+    }
+
+    def test_cli_keys_include_the_page_keys_with_the_same_checks(self):
+        for key, check in op_config.SETTINGS_PAGE_KEYS.items():
+            self.assertIs(op_config.CLI_CONFIG_KEYS.get(key), check, key)
+
+    def test_forbidden_keys_split_between_cli_and_hand_edit(self):
+        self.assertEqual(FORBIDDEN, self.CLI_ONLY | self.HAND_EDIT | {"TOR_IMPL"})
+        for key in self.CLI_ONLY:
+            self.assertIn(key, op_config.CLI_CONFIG_KEYS, key)
+            self.assertNotIn(key, op_config.SETTINGS_PAGE_KEYS, key)
+        for key in self.HAND_EDIT | {"TOR_IMPL"}:
+            self.assertNotIn(key, op_config.CLI_CONFIG_KEYS, key)
+            self.assertTrue(op_config.check_config_value(key, "x"), key)
+        for key in self.HAND_EDIT:
+            self.assertTrue(op_config.is_hand_edit_only(key), key)
+
+    def test_hostile_payload_through_the_cli_check(self):
+        # The same payload at a terminal: the images and hub admission
+        # are refused there too, a value with a newline is refused, and
+        # the owner's own settings (the hub address, the prefix) pass
+        # the format check (the page still never gets them).
+        verdict = {key: op_config.check_config_value(key, value) == ""
+                   for key, value in HOSTILE.items()}
+        self.assertEqual(verdict, {
+            "UPDATE_ON_LAUNCH": True,
+            "CLOUDFLARE_TUNNEL_TOKEN": True,   # stdin only, in run_config_command
+            "ONIONPRESS_TOR_IMAGE": False,
+            "ONIONPRESS_WORDPRESS_IMAGE": False,
+            "ONIONHEAVEN_ADDRESS": True,
+            "ONIONHEAVEN_ACCEPT_REGISTRATIONS": False,
+            "ADDRESS_PREFIX": True,            # a 4-character base32 prefix
+            "VM_DISK": False,                  # below the 10 GB floor
+            "PREVENT_SLEEP": False,
+        })
         for key in op_config.SETTINGS_PAGE_KEYS:
             self.assertNotRegex(key, r"IMAGE|PORT|BIND|PATH|DIR|PASSWORD|SECRET|ACCEPT",
                                 f"{key} does not belong on the settings page")

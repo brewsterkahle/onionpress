@@ -1699,7 +1699,7 @@ def main(argv: list[str] = None) -> int:
         "onionheaven",
         help="Keep the site reachable through OnionHeaven: enable | disable | status [--json]")
     p_oh.add_argument("onionheaven_command", nargs="?", default="status",
-                      choices=("enable", "disable", "status"))
+                      metavar="{enable,disable,status}")
     p_oh.add_argument("--json", action="store_true",
                       help="status as JSON (enabled, choice, hub, registered, may_hold_key)")
 

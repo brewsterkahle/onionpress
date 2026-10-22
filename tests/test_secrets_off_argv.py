@@ -457,6 +457,63 @@ class TestLauncherDbClient(unittest.TestCase):
                         self.assertNotIn(TRICKY_PASSWORD, f.read())
 
 
+class TestConfigSetTokenOnStdin(unittest.TestCase):
+    """`onionpress config set CLOUDFLARE_TUNNEL_TOKEN` (issue #365): the
+    token is taken on stdin only; the menubar's write_config_value, which
+    runs the command through the launcher, puts it there."""
+
+    TOKEN = "eyJhIjoiMGYxZTJkM2M0YjVhNjk3ODhmN2U2ZDVjNGIzYTI5MTgiLCJ0IjoidHVubmVsIn0="
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="config-argv-test-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+    def test_cli_refuses_the_token_on_argv(self):
+        from onionpress import cli
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cli.main(["--data-dir", self.tmpdir, "config", "set",
+                           "CLOUDFLARE_TUNNEL_TOKEN", self.TOKEN])
+        self.assertEqual(rc, 2)
+        self.assertNotIn(self.TOKEN, out.getvalue() + err.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, "config")))
+        with redirect_stdout(out), redirect_stderr(err), \
+                mock.patch.object(sys, "stdin", io.StringIO(self.TOKEN)):
+            rc = cli.main(["--data-dir", self.tmpdir, "config", "set",
+                           "CLOUDFLARE_TUNNEL_TOKEN", "-"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn(self.TOKEN, out.getvalue() + err.getvalue())
+
+    def test_menubar_sends_the_token_on_stdin(self):
+        import ast
+        import textwrap
+        from onionpress import config as op_config
+        with open(os.path.join(PROJECT_DIR, "src", "menubar.py")) as f:
+            src = f.read()
+        node = next(n for n in ast.walk(ast.parse(src))
+                    if isinstance(n, ast.FunctionDef) and n.name == "write_config_value")
+        ns = {"os": os, "subprocess": subprocess, "op_config": op_config}
+        exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
+        app = mock.Mock()
+        app.config_file = os.path.join(self.tmpdir, "config")
+        open(app.config_file, "w").close()
+        app.app_support = self.tmpdir
+        app.launcher_script = "/Applications/OnionPress.app/Contents/MacOS/onionpress"
+        app.lines = []
+        app.log = app.lines.append
+        rec = _Recorder()
+        with mock.patch("subprocess.run", rec):
+            self.assertTrue(ns["write_config_value"](app, "CLOUDFLARE_TUNNEL_TOKEN", self.TOKEN))
+        rec.assert_secret_not_in_argv(self, self.TOKEN)
+        argv, stdin = rec.calls[0]
+        self.assertEqual(argv, [app.launcher_script, "config", "set",
+                                "CLOUDFLARE_TUNNEL_TOKEN", "-"])
+        self.assertEqual(stdin, self.TOKEN + "\n")
+        self.assertNotIn(self.TOKEN, "\n".join(app.lines))
+
+
 class TestKeyImportKeyOnStdin(unittest.TestCase):
     """The key-import path: menubar -> Mac launcher -> key_manager.py, and
     the Linux launcher -> key_manager.py."""
