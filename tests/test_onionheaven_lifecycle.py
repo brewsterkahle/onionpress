@@ -873,8 +873,14 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
     def test_restores_and_setup_from_backup(self):
         linux = _read("linux/onionpress")
         branch = _case_branch(linux, "restore")
-        self.assert_before(branch, "stop_heartbeat_client", "op_py restore", "restore")
-        self.assert_before(branch, "op_py restore", "start_heartbeat_client", "restore")
+        # `restore --check` runs the CLI before anything else (it changes
+        # nothing, onionpress.confirm); the real run stops the heartbeat
+        # client first (it holds the key) and starts it again after.
+        check = branch.index('if [ "$restore_check" = yes ]')
+        real = branch[branch.index("exit $?", check):]
+        self.assertNotIn("heartbeat_client", branch[:check])
+        self.assert_before(real, "stop_heartbeat_client", "op_py restore", "restore")
+        self.assert_before(real, "op_py restore", "start_heartbeat_client", "restore")
         for rel in ("linux/onionpress", "app/MacOS/onionpress"):
             with self.subTest(rel=rel):
                 branch = _case_branch(_read(rel), "setup")
