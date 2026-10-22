@@ -3307,27 +3307,29 @@ class OnionPressApp(rumps.App):
                         sw.add_log(m)
                 except Exception:
                     pass
-            try:
-                from onionpress import backup as _backup
-                _rlog("Restore from backup: preparing…")
-                _, restore_meta = _backup.prepare_install_from_backup(
-                    sw.restore_zip, sw.restore_password, _rlog,
-                    data_dir=self.app_support)
-                # A hub's sealed registry and keys: this path has no
-                # recovery key (the import runs in the launcher later, and
-                # the opened data would have to wait in ~/.onionpress in the
-                # clear). Restored afterwards with the key, on its own.
-                if restore_meta.get("onionheaven_data") == "sealed":
-                    _rlog(_backup.sealed_skipped_message(restore_meta))
-                _rlog("Restore from backup: staged — starting install…")
-            except Exception as e:
-                self.log(f"Restore from backup: prepare failed: {e}")
+            # `onionpress prepare-restore` (cli.cmd_prepare_restore) stages
+            # it; the password goes in the environment, never on argv. A
+            # hub's sealed registry and keys are not opened on this path
+            # (no recovery key; restored afterwards with the key, on its
+            # own): the CLI's note says so.
+            _rlog("Restore from backup: preparing…")
+            rc, ans, out, err = self._run_launcher_json(
+                ["prepare-restore", sw.restore_zip, "--json"],
+                env={launcher_ops.BACKUP_PASSWORD_ENV: sw.restore_password},
+                on_line=_rlog)
+            if rc != 0 or not ans or not ans.get("ok"):
+                failure = (ans or {}).get("error") or self._launcher_failure(
+                    out, err, "see the OnionPress log")
+                self.log(f"Restore from backup: prepare failed: {failure}")
                 try:
                     if sw:
                         sw.set_status("Restore failed — check the log for details")
                 except Exception:
                     pass
                 return
+            if ans.get("note"):
+                _rlog(ans["note"])
+            _rlog("Restore from backup: staged — starting install…")
             self.start_service(None)
             return
 
@@ -4782,8 +4784,8 @@ class OnionPressApp(rumps.App):
 
     def _install_update(self, latest_version):
         """`onionpress update --yes --json`: the CLI downloads the DMG and
-        swaps the bundle in (updater.download_and_install's staged copy and
-        rename; the swap is its last step, since the CLI itself runs out of
+        swaps the bundle in (the updater's staged copy and rename; the swap
+        is its last step, since the CLI itself runs out of
         the bundle being replaced), then this process asks to relaunch."""
         install_path = os.path.dirname(self.contents_dir)
 
@@ -5424,7 +5426,7 @@ License: AGPL v3 or later"""
 
     def poll_settings_page(self):
         """The WordPress Settings page's requests (requested-action) and
-        config changes (config-updates.json), handled by `onionpress
+        config changes (its saved settings), handled by `onionpress
         handle-action` (onionpress.handle_action: one handler for both
         platforms, run here on every status tick, by
         onionpress-watcher.timer on Linux). The CLI runs the actions
