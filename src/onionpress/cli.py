@@ -2147,6 +2147,9 @@ def main(argv: list[str] = None) -> int:
         "set", help="Change one setting (VALUE `-` reads the value from stdin)")
     p_cset.add_argument("key", metavar="KEY")
     p_cset.add_argument("value", metavar="VALUE")
+    # ADDRESS_PREFIX the live address does not start with asks
+    # "prefix-change" (onionpress.confirm).
+    _confirm.add_arguments(p_cset)
     p_cunset = config_sub.add_parser(
         "unset", help="Remove one setting's line, so its default applies")
     p_cunset.add_argument("key", metavar="KEY")

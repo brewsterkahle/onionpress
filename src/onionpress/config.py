@@ -725,23 +725,44 @@ def run_config_command(args, data_dir: str, log, *, stdin=None, out=None,
             return 2
         change = unset_config_value(path, key)
     else:  # set
+        from . import confirm as _confirm
+        json_output = bool(getattr(args, "json", False))
         value = args.value
         if value == "-":
             value = stdin.read()
             if value.endswith("\n"):
                 value = value[:-1]
         elif key in SECRET_CONFIG_KEYS and value != "":
-            print(f"ERROR: {key} is a secret: pass - and the value on stdin "
-                  f"(printf '%s' \"$TOKEN\" | onionpress config set {key} -)",
-                  file=err)
-            return 2
+            return _confirm.answer_error(
+                f"{key} is a secret: pass - and the value on stdin "
+                f"(printf '%s' \"$TOKEN\" | onionpress config set {key} -)",
+                json_output, out, err, code=2)
         reason = check_config_value(key, value)
         if reason:
-            print(f"ERROR: {reason}", file=err)
-            return 2
+            return _confirm.answer_error(reason, json_output, out, err, code=2)
+        # A prefix the live address does not start with changes nothing
+        # about that address (the prefix is used when a new one is made:
+        # a reset, a new install), so it is asked about first.
+        try:
+            prefix_change_question(key, value, data_dir, _confirm.given(args))
+        except _confirm.NeedsConfirmation as e:
+            return _confirm.answer_confirm(e, json_output, out, err)
+        if getattr(args, "check", False):
+            return _confirm.answer_ok(json_output, out, text=f"OK: {key} may be set.", key=key)
         change = set_config_value(path, key, value)
 
     log(f"config {sub}: {change.describe()}")
+    if sub == "set" and json_output:
+        lines = []
+        if change.changed:
+            note_config_changed(data_dir, [key])
+            lines = apply_side_effects([key], path, os_name, log, app_bundle=app_bundle)
+        for line in lines:
+            log(line)
+        print(_confirm.dumps({"ok": True, "key": key, "changed": change.changed,
+                              "described": change.describe(), "side_effects": lines,
+                              "restart": restart_notes([key])}), file=out)
+        return 0
     print(change.describe(), file=out)
     if not change.changed:
         return 0
@@ -751,6 +772,35 @@ def run_config_command(args, data_dir: str, log, *, stdin=None, out=None,
     for line in restart_notes([key]):
         print(line, file=out)
     return 0
+
+
+def cached_onion_address(data_dir: str) -> str:
+    """The address this install serves, from the launcher's cache file
+    (`onion_address` in the data directory; written at every start), or
+    "" (not running yet, a new install). No Docker here."""
+    try:
+        with open(os.path.join(data_dir, "onion_address"), encoding="utf-8") as f:
+            addr = f.read().strip()
+    except OSError:
+        return ""
+    return addr if _ONION_ADDRESS_RE.fullmatch(addr) else ""
+
+
+def prefix_change_question(key: str, value: str, data_dir: str, confirmed) -> None:
+    """`config set ADDRESS_PREFIX`: raise NeedsConfirmation("prefix-change",
+    current, new, address) when the install's address does not start with
+    the new prefix and that was not confirmed (onionpress.confirm). The
+    live address keeps its prefix whatever the setting says; the setting
+    is read when a new address is made."""
+    if key != "ADDRESS_PREFIX":
+        return
+    from . import confirm as _confirm
+    addr = cached_onion_address(data_dir)
+    new = value or DEFAULTS["ADDRESS_PREFIX"]
+    if not addr or addr.startswith(new):
+        return
+    current = read_value(os.path.join(data_dir, "config"), key, DEFAULTS["ADDRESS_PREFIX"])
+    _confirm.require("prefix-change", confirmed, current=current, new=new, address=addr)
 
 # -- Secrets --
 
