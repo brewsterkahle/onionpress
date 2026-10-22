@@ -53,9 +53,13 @@ def remove(log, path: str = "", run=None) -> bool:
     run = run or subprocess.run
     try:
         if os.path.exists(path):
-            # Unload first (ignore errors if not loaded)
-            run(["launchctl", "bootout", f"gui/{os.getuid()}", path],
-                capture_output=True, timeout=10)
+            # Unload first (ignore errors if not loaded; no launchctl at
+            # all, as off a Mac, is the same as not loaded)
+            try:
+                run(["launchctl", "bootout", f"gui/{os.getuid()}", path],
+                    capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
             os.remove(path)
         log("LaunchAgent removed")
         return True
