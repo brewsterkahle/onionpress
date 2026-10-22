@@ -382,13 +382,19 @@ class TestCreateBackup(unittest.TestCase):
                                  [f"WARNING: {note}" for note in want])
 
     def test_the_apps_finished_backup_says_what_could_not_be_checked(self):
-        """src/menubar.py's Backup... (AppKit, so checked as source)."""
-        text = mv._read("src/menubar.py")
-        create = text.index("metadata = backup_manager.create_backup(")
-        body = text[create:text.index("threading.Thread(target=do_backup", create)]
+        """src/menubar.py's Backup... (AppKit, so checked as source) runs
+        `onionpress backup --json` (cmd_backup, include_hub_data=True) and
+        shows the notes the CLI answers with."""
+        cli_src = mv._read("src/onionpress/cli.py")
+        body = cli_src[cli_src.index("    def cmd_backup("):cli_src.index("    def cmd_restore_check(")]
         self.assertIn("include_hub_data=True", body)
-        notes = body.index("for note in backup_manager.unchecked_notes(metadata):")
-        self.assertLess(notes, body.index("pw.finish(\n                    msg,"))
+        self.assertIn("notes.extend(unchecked_notes(metadata))", body)
+        self.assertIn("notes=notes)", body)
+        text = mv._read("src/menubar.py")
+        run = text.index('["backup", "--json", "-o", output_path, "--user", username]')
+        body = text[run:text.index("threading.Thread(target=do_backup", run)]
+        notes = body.index('for note in ans.get("notes") or []:')
+        self.assertLess(notes, body.index("pw.finish(\n                msg,"))
         self.assertIn('msg += "\\n\\n" + note', body[notes:])
 
     def test_unchecked_notes(self):
@@ -646,33 +652,33 @@ class TestEveryWordPressDeliveredBackupLeavesItOut(unittest.TestCase):
                     yield rel, mv._read(rel)
 
     def test_the_handoff_to_wordpress_is_only_the_settings_pages_backup(self):
+        # One hand-off, in the shared handler's create-backup (issue #366):
+        # after the launcher's settings-page-backup, which is the page's
+        # backup on both platforms.
         found = []
         for rel in self.SOURCES + [r for r, _ in self._python_sources()]:
             text = mv._read(rel)
             for m in self.HANDOFF.finditer(text):
                 found.append(rel)
-        self.assertEqual(sorted(set(found)), ["linux/onionpress", "src/menubar.py"])
-        mac = _branch(mv._read("src/menubar.py"), 'elif action == "create-backup":',
-                      'elif action == "restore-backup":')
-        self.assertEqual(len(self.HANDOFF.findall(mac)), 1)
-        self.assertEqual(len(self.HANDOFF.findall(mv._read("src/menubar.py"))), 1)
-        linux = _branch(mv._read("linux/onionpress"), "                create-backup)\n",
-                        "\n                    ;;\n")
-        self.assertEqual(len(self.HANDOFF.findall(linux)), 1)
-        self.assertEqual(len(self.HANDOFF.findall(mv._read("linux/onionpress"))), 1)
+        self.assertEqual(sorted(set(found)), ["src/onionpress/handle_action.py"])
+        handler = mv._read("src/onionpress/handle_action.py")
+        self.assertEqual(len(self.HANDOFF.findall(handler)), 1)
+        branch = handler[handler.index("def _create_backup(host):"):handler.index("# -- restore --")]
+        self.assertLess(branch.index('["settings-page-backup", path]'),
+                        self.HANDOFF.search(branch).start())
 
     def test_the_settings_pages_backups_leave_the_hub_data_out(self):
-        mac = _branch(mv._read("src/menubar.py"), 'elif action == "create-backup":',
-                      'elif action == "restore-backup":')
-        create = mac.index("backup_manager.create_backup(")
-        call = mac[create:mac.index(")", mac.index("self.log", create))]
+        cli_src = mv._read("src/onionpress/cli.py")
+        mac = cli_src[cli_src.index("def cmd_settings_page_backup("):cli_src.index("def cmd_settings_page_restore(")]
+        create = mac.index("create_backup(")
+        call = mac[create:mac.index(")", mac.index("include_onion_key", create))]
         self.assertIn("include_hub_data=False", call)
-        self.assertLess(create, self.HANDOFF.search(mac).start())
-        linux = _branch(mv._read("linux/onionpress"), "                create-backup)\n",
-                        "\n                    ;;\n")
-        self.assertRegex(linux, r'create_backup "\$bp_password" "\$bp_path" '
-                                r'--without-hub-data\b')
-        self.assertLess(linux.index("--without-hub-data"), self.HANDOFF.search(linux).start())
+        linux = _linux_case(mv._read("linux/onionpress"), "settings-page-backup")
+        self.assertRegex(linux, r'create_backup "\$BACKUP_PASS" "\$2" --without-hub-data\b')
+        # The Mac launcher's case is the CLI's command
+        mac_launcher = _linux_case(mv._read("app/MacOS/onionpress"),
+                                   "settings-page-backup|settings-page-restore")
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$1" "${@:2}"', mac_launcher)
 
     def test_every_python_create_backup_call_says_which_it_is(self):
         calls = []
@@ -691,13 +697,15 @@ class TestEveryWordPressDeliveredBackupLeavesItOut(unittest.TestCase):
                         break
                     i += 1
                 calls.append((rel, text[m.start():i + 1]))
-        self.assertEqual(len(calls), 3, calls)
+        # cmd_backup (the owner's) and cmd_settings_page_backup (the page's),
+        # both in the CLI (issue #366); the menubar calls neither.
+        self.assertEqual(len(calls), 2, calls)
         for rel, call in calls:
             with self.subTest(rel, call=call):
                 self.assertRegex(call, r"include_hub_data=(True|False)\b")
         falses = [(rel, c) for rel, c in calls if "include_hub_data=False" in c]
         self.assertEqual(len(falses), 1)
-        self.assertEqual(falses[0][0], "src/menubar.py")
+        self.assertEqual(falses[0][0], "src/onionpress/cli.py")
 
     def test_every_linux_create_backup_call_says_which_it_is(self):
         text = mv._read("linux/onionpress")
@@ -713,10 +721,20 @@ class TestEveryWordPressDeliveredBackupLeavesItOut(unittest.TestCase):
         self.assertIn('[LAUNCHER_BIN, "backup", "--output"', mv._read("src/onionpress/scrub.py"))
 
 
+def _linux_case(text, name):
+    """The body of the `<name>)` case of a launcher's main, up to its ;;."""
+    label = f"\n        {name})\n"
+    start = text.index(label) + len(label)
+    return text[start:text.index("\n            ;;\n", start)]
+
+
 class TestLinuxSettingsPageBackupBranch(unittest.TestCase):
-    """linux/onionpress's create-backup settings action, run for real with
-    create_backup stubbed: it asks for the hub data to be left out and
-    passes the note on."""
+    """linux/onionpress's settings-page-backup case (what the shared
+    handler runs for the page's create-backup), run for real with
+    create_backup stubbed: it asks for the hub data to be left out, takes
+    the password from the environment, and a refusal is exit 3 with the
+    reason on stdout; the hand-off to WordPress is the handler's
+    (tests/test_handle_action.py)."""
 
     PRELUDE = r'''
 log() { echo "[log] $1" >> "$LOG_FILE"; }
@@ -731,84 +749,74 @@ create_backup() {
     printf 'backup bytes' > "$2"
     return 0
 }
-docker() {
-    case "$*" in
-        "exec -u www-data onionpress-wordpress cat /var/lib/onionpress/backup-password") echo pw ;;
-        "exec -i -u www-data onionpress-wordpress sh -c "*)
-            shift 7; sh -c "$1" sh "$SANDBOX$3" ${4:+"$4"} ;;
-        "exec onionpress-tor "*) echo "$ADDR" ;;
-    esac
-    return 0
-}
 '''
 
     def _run(self, hub, refusal=backup.HUB_BACKUP_REFUSED_MSG):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        sandbox = os.path.join(tmp, "container")
-        os.makedirs(os.path.join(sandbox, "var", "lib", "onionpress"))
         text = mv._read("linux/onionpress")
-        branch = _branch(text, "                create-backup)\n", "\n                    ;;\n")
-        helpers = "".join(
-            f"{name}() {{\n" + _branch(text, f"\n{name}() {{\n", "\n}\n") + "\n}\n"
-            for name in ("wp_put", "wp_exec", "is_onion_address"))
+        case = _linux_case(text, "settings-page-backup")
+        helpers = mv._bash_function(text, "read_backup_password")
+        out = os.path.join(tmp, "OnionPress-x.zip")
         env = {
             "PATH": os.environ["PATH"], "HOME": os.path.join(tmp, "home"),
             "TMPDIR": tmp, "LOG_FILE": os.path.join(tmp, "log"),
-            "ARGS": os.path.join(tmp, "args"), "SANDBOX": sandbox,
-            "ADDR": mv.ADDR, "HUB": "1" if hub else "0", "DOCKER_HOST": DOCKER_HOST,
-            "REFUSAL": refusal,
+            "ARGS": os.path.join(tmp, "args"), "ONIONPRESS_BACKUP_PASSWORD": "pw",
+            "HUB": "1" if hub else "0", "DOCKER_HOST": DOCKER_HOST, "REFUSAL": refusal,
         }
         r = subprocess.run(["bash", "-c", self.PRELUDE + helpers
-                            + "run_branch() {\n" + branch + "\n}\nrun_branch\n"],
+                            + f'set -- settings-page-backup "{out}"\n' + case + "\n"],
                            capture_output=True, text=True, timeout=60, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr)
         with open(env["ARGS"]) as f:
             args = f.read().split()
-        self.handed_over = [n for n in os.listdir(os.path.join(sandbox, "var", "lib", "onionpress"))
-                            if n.endswith(".zip")]
-        with open(os.path.join(sandbox, "var", "lib", "onionpress", "backup-result.json")) as f:
-            return args, json.load(f)
+        return r, args, out
 
     def test_a_hub_hears_why_it_was_refused(self):
-        args, result = self._run(hub=True)
-        self.assertEqual(args[2:], ["--without-hub-data", "--without-host-secrets"])
-        self.assertEqual(result["success"], False)
-        self.assertEqual(result["error"], backup.HUB_BACKUP_REFUSED_MSG)
-        self.assertEqual(self.handed_over, [])
+        r, args, out = self._run(hub=True)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertEqual(args, ["pw", out, "--without-hub-data", "--without-host-secrets"])
+        self.assertEqual(r.stdout.strip().splitlines()[-1], backup.HUB_BACKUP_REFUSED_MSG)
+        self.assertFalse(os.path.exists(out))
 
     def test_a_node_that_could_not_be_checked_hears_why(self):
-        args, result = self._run(hub=True, refusal=backup.UNVERIFIED_BACKUP_REFUSED_MSG)
-        self.assertEqual(result["success"], False)
-        self.assertEqual(result["error"], backup.UNVERIFIED_BACKUP_REFUSED_MSG)
-        self.assertEqual(self.handed_over, [])
+        r, args, out = self._run(hub=True, refusal=backup.UNVERIFIED_BACKUP_REFUSED_MSG)
+        self.assertEqual(r.returncode, 3)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], backup.UNVERIFIED_BACKUP_REFUSED_MSG)
 
     def test_any_other_node_gets_its_backup(self):
-        args, result = self._run(hub=False)
+        r, args, out = self._run(hub=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(args[2:], ["--without-hub-data", "--without-host-secrets"])
-        self.assertIs(result["success"], True)
-        self.assertNotIn("note", result)
-        self.assertEqual(len(self.handed_over), 1)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), b"backup bytes")
+
+    def test_the_password_never_reaches_argv(self):
+        text = mv._read("linux/onionpress")
+        case = _linux_case(text, "settings-page-backup")
+        self.assertIn("read_backup_password", case)
+        self.assertNotIn("$3", case)
 
 
 class TestMacSettingsPageBackupBranch(unittest.TestCase):
-    """src/menubar.py's create-backup action (AppKit, so checked as
-    source): a refusal reaches the page as the result's error, and nothing
-    is handed to WordPress."""
+    """The Mac's page backup, `onionpress settings-page-backup`
+    (cli.cmd_settings_page_backup) run by the shared handler: a refusal
+    (exit 3) reaches the page as the result's error, and nothing is handed
+    to WordPress."""
 
     def test_the_refusal_is_the_pages_error(self):
-        body = _branch(mv._read("src/menubar.py"), 'elif action == "create-backup":',
-                       'elif action == "restore-backup":')
-        create = body.index("backup_manager.create_backup(")
-        # The hand-off comes after create_backup, which raises on a hub;
-        # the except clause writes str(e) as the page's error.
-        self.assertLess(create, body.index('umask 077; cat > "$1"'))
-        self.assertIn('"success": False, "error": str(e)', body[create:])
+        cli_src = mv._read("src/onionpress/cli.py")
+        body = cli_src[cli_src.index("def cmd_settings_page_backup("):cli_src.index("def cmd_settings_page_restore(")]
+        self.assertIn("except SettingsPageBackupRefused as e:\n"
+                      "        return _confirm.answer_error(e, json_output, code=_confirm.EXIT_REFUSED)", body)
         # Its one note says the onion service key is not in it
         # (tests/test_settings_page_onion_key.py), never a hub's.
-        self.assertEqual(re.findall(r'"note"\]? = ([\w.]+)', body),
-                         ["backup_manager.ONION_KEY_LEFT_OUT_NOTE"])
-        self.assertEqual(body.count('"note"'), 1)
+        self.assertEqual(re.findall(r'"note"\]? = ([\w.]+)', body), ["ONION_KEY_LEFT_OUT_NOTE"])
+        handler = mv._read("src/onionpress/handle_action.py")
+        branch = handler[handler.index("def _create_backup(host):"):handler.index("# -- restore --")]
+        refused = branch.index("if r.returncode == confirm.EXIT_REFUSED:")
+        self.assertLess(refused, branch.index('umask 077; cat > "$1"'))
+        self.assertIn('"success": False, "error": refusal', branch[refused:])
+        self.assertEqual(branch.count('result["note"]'), 1)
 
     def test_the_messages_are_plain_text(self):
         """They go into the page, and Linux's into JSON."""
@@ -1204,18 +1212,21 @@ class TestRestoreFromBackupThroughWordPress(unittest.TestCase):
                                        data_dir=self.data_dir, through_wordpress=True)
 
     def test_the_settings_page_asks_for_it(self):
-        src = mv._read("src/menubar.py")
-        body = src[src.index('elif action == "restore-backup":'):]
-        body = body[:body.index("\n            else:")]
-        self.assertIn("restore_from_backup(local_zip, password, self.log,\n", body)
-        self.assertRegex(body, r"restore_from_backup\(local_zip, password, self\.log,\s+"
-                               r"through_wordpress=True[,)]")
+        # The in-place restore is the CLI's settings-page-restore (issue
+        # #366), never the install-from-backup `restore`.
+        src = mv._read("src/onionpress/cli.py")
+        body = src[src.index("def cmd_settings_page_restore("):src.index("def main(")]
+        self.assertRegex(body, r"restore_from_backup\(backup_file, password, log, "
+                               r"through_wordpress=True,")
         # The only caller in what ships.
         callers = [rel for rel in ("src/menubar.py", "src/onionpress/cli.py",
-                                   "src/onionpress/setup_window.py")
+                                   "src/onionpress/setup_window.py", "src/onionpress/handle_action.py")
                    if "restore_from_backup(" in mv._read(rel)]
-        self.assertEqual(callers, ["src/menubar.py"])
-        self.assertEqual(mv._read("src/menubar.py").count("restore_from_backup("), 1)
+        self.assertEqual(callers, ["src/onionpress/cli.py"])
+        self.assertEqual(src.count("restore_from_backup("), 1)
+        handler = mv._read("src/onionpress/handle_action.py")
+        self.assertIn('["settings-page-restore", local_zip, "--json"]', handler)
+        self.assertNotIn('"restore", ', handler[handler.index("def _settings_page_restore("):])
 
 
 class TestSettingsPageRestoreNeverWritesTheVolumes(unittest.TestCase):
@@ -1395,55 +1406,63 @@ sys.exit(cli.OnionPressCLI.cmd_extract_backup(
 
 
 class TestLinuxSettingsPageRestoreBranch(unittest.TestCase):
-    """linux/onionpress's restore-backup settings action: it asks for the
-    refusal and shows the reason."""
+    """linux/onionpress's settings-page-restore case (what the shared
+    handler runs for the page's restore-backup): restore_backup
+    --from-settings-page on the handler's copy, the password from the
+    environment; a refusal is exit 3 with the reason as the last line of
+    stdout and the heartbeat client started again."""
 
     PRELUDE = r'''
 log() { echo "[log] $1" >> "$LOG_FILE"; }
 setup_db_passwords() { :; }
-stop_containers() { echo stop >> "$CALLS"; }
-start_containers() { echo start >> "$CALLS"; }
-wait_for_services() { :; }
-write_status() { :; }
-write_restore_result() { echo "$1|$2" >> "$RESULT"; }
+start_heartbeat_client() { echo start_heartbeat_client >> "$CALLS"; }
 restore_backup() {
-    echo "restore_backup $3" >> "$CALLS"
+    echo "restore_backup $2 $3" >> "$CALLS"
     echo "[log] Restore: extracting backup archive..."
-    echo "$REFUSAL"
-    return 3
-}
-docker() {
-    case "$1" in
-        cp) printf 'uploaded zip' > "$3" ;;
-        exec) [ "$2 $3 $5" = "-u www-data cat" ] && echo pw ;;
-    esac
+    if [ -n "$REFUSAL" ]; then
+        echo "$REFUSAL"
+        return 3
+    fi
+    echo "$ADDR"
     return 0
 }
 '''
 
-    def test_the_refusal_reaches_the_page(self):
+    def _run(self, refusal):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         text = mv._read("linux/onionpress")
-        branch = _branch(text, "                restore-backup)\n", "\n                    ;;\n")
-        helpers = mv._bash_function(text, "is_onion_address") + mv._bash_function(text, "wp_exec")
-        tmpdir = os.path.join(tmp, "t")
-        os.makedirs(tmpdir)
+        case = _linux_case(text, "settings-page-restore")
+        helpers = mv._bash_function(text, "read_backup_password")
         env = {
             "PATH": os.environ["PATH"], "HOME": os.path.join(tmp, "home"),
-            "TMPDIR": tmpdir, "LOG_FILE": os.path.join(tmp, "log"),
-            "CALLS": os.path.join(tmp, "calls"), "RESULT": os.path.join(tmp, "result"),
-            "REFUSAL": backup.HUB_DATA_RESTORE_REFUSED_MSG, "DOCKER_HOST": DOCKER_HOST,
+            "TMPDIR": tmp, "LOG_FILE": os.path.join(tmp, "log"),
+            "CALLS": os.path.join(tmp, "calls"), "ONIONPRESS_BACKUP_PASSWORD": "pw",
+            "REFUSAL": refusal, "ADDR": mv.ADDR, "DOCKER_HOST": DOCKER_HOST,
         }
         r = subprocess.run(["bash", "-c", self.PRELUDE + helpers
-                            + "run_branch() {\n" + branch + "\n}\nrun_branch\n"],
+                            + 'set -- settings-page-restore /work/restore-upload.zip --json\n'
+                            + case + "\n"],
                            capture_output=True, text=True, timeout=60, env=env)
+        try:
+            with open(env["CALLS"]) as f:
+                calls = f.read().splitlines()
+        except FileNotFoundError:
+            calls = []
+        return r, calls
+
+    def test_the_refusal_reaches_the_page(self):
+        r, calls = self._run(backup.HUB_DATA_RESTORE_REFUSED_MSG)
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], backup.HUB_DATA_RESTORE_REFUSED_MSG)
+        self.assertEqual(calls, ["restore_backup /work/restore-upload.zip --from-settings-page",
+                                 "start_heartbeat_client"])
+
+    def test_a_restore_prints_the_address_and_leaves_the_restart_to_the_handler(self):
+        r, calls = self._run("")
         self.assertEqual(r.returncode, 0, r.stderr)
-        with open(env["CALLS"]) as f:
-            self.assertEqual(f.read(), "restore_backup --from-settings-page\n")
-        with open(env["RESULT"]) as f:
-            self.assertEqual(f.read(), f"false|{backup.HUB_DATA_RESTORE_REFUSED_MSG}\n")
-        self.assertEqual(os.listdir(tmpdir), [])
+        self.assertEqual(r.stdout.strip().splitlines()[-1], mv.ADDR)
+        self.assertEqual(calls, ["restore_backup /work/restore-upload.zip --from-settings-page"])
 
 
 # ---------------------------------------------------------------------------

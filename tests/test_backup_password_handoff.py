@@ -104,21 +104,24 @@ class TestCLIParsing(unittest.TestCase):
              mock.patch.dict(os.environ, {BACKUP_PASSWORD_ENV: SECRET}):
             M.return_value.cmd_backup.return_value = 0
             self.assertEqual(cli.main(["backup"]), 0)
-        M.return_value.cmd_backup.assert_called_once_with(SECRET, None, None)
+        M.return_value.cmd_backup.assert_called_once_with(
+            SECRET, None, None, check=False, json_output=False)
 
     def test_backup_output_flag_and_user(self):
         with mock.patch("onionpress.cli.OnionPressCLI") as M, \
              mock.patch.dict(os.environ, {BACKUP_PASSWORD_ENV: SECRET}):
             M.return_value.cmd_backup.return_value = 0
             cli.main(["backup", "--output", "/tmp/b.zip", "--user", "bob"])
-        M.return_value.cmd_backup.assert_called_once_with(SECRET, "/tmp/b.zip", "bob")
+        M.return_value.cmd_backup.assert_called_once_with(
+            SECRET, "/tmp/b.zip", "bob", check=False, json_output=False)
 
     def test_restore_with_path_only(self):
         with mock.patch("onionpress.cli.OnionPressCLI") as M, \
              mock.patch.dict(os.environ, {BACKUP_PASSWORD_ENV: SECRET}):
             M.return_value.cmd_restore.return_value = 0
             cli.main(["restore", "/tmp/b.zip"])
-        M.return_value.cmd_restore.assert_called_once_with(SECRET, "/tmp/b.zip")
+        M.return_value.cmd_restore.assert_called_once_with(
+            SECRET, "/tmp/b.zip", "", confirmed=frozenset(), json_output=False)
 
     def test_legacy_positional_forms(self):
         with mock.patch("onionpress.cli.OnionPressCLI") as M, \
@@ -127,8 +130,10 @@ class TestCLIParsing(unittest.TestCase):
             M.return_value.cmd_restore.return_value = 0
             cli.main(["backup", "pw", "/tmp/b.zip"])
             cli.main(["restore", "pw", "/tmp/b.zip"])
-        M.return_value.cmd_backup.assert_called_once_with("pw", "/tmp/b.zip", None)
-        M.return_value.cmd_restore.assert_called_once_with("pw", "/tmp/b.zip")
+        M.return_value.cmd_backup.assert_called_once_with(
+            "pw", "/tmp/b.zip", None, check=False, json_output=False)
+        M.return_value.cmd_restore.assert_called_once_with(
+            "pw", "/tmp/b.zip", "", confirmed=frozenset(), json_output=False)
 
     def test_password_leaves_environ_before_the_cli_is_built(self):
         # The Docker wrapper copies os.environ for its children when the CLI
@@ -299,7 +304,7 @@ class TestNoPasswordInLauncherArgv(unittest.TestCase):
             _read("src/menubar.py")),
             "menubar restore must go through launcher_ops.run_launcher_restore")
         self.assertTrue(re.search(
-            r'\[launcher_script, "restore", zip_path\],\s*\n\s*'
+            r'\[launcher_script, "restore", zip_path, \*\(extra_args or \[\]\)\],\s*\n\s*'
             r'env=\{\*\*os\.environ, BACKUP_PASSWORD_ENV: password\} \| \(extra_env or \{\}\)',
             _read("src/onionpress/launcher_ops.py")),
             "run_launcher_restore must pass the password in the launcher's environment")

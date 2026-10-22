@@ -569,7 +569,9 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="op-menubar-config-")
         src = _read("src/menubar.py")
         tree = ast.parse(src)
-        ns = {"os": os, "subprocess": __import__("subprocess"), "op_config": op_config}
+        from onionpress import confirm as op_confirm
+        ns = {"os": os, "subprocess": __import__("subprocess"), "op_config": op_config,
+              "op_confirm": op_confirm}
         for name in ("write_config_value", "apply_config_changes"):
             node = next(n for n in ast.walk(tree)
                         if isinstance(n, ast.FunctionDef) and n.name == name)
@@ -606,7 +608,7 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
             ok = self.write(self.app, "PREVENT_SLEEP", "never")
         self.assertTrue(ok)
         self.assertEqual(self.argv, [self.app.launcher_script, "config", "set",
-                                     "PREVENT_SLEEP", "never"])
+                                     "PREVENT_SLEEP", "never", "--json"])
         self.assertIsNone(self.stdin)
         self.app.caffeine.stop.assert_called_once_with()
         self.app.caffeine.start.assert_called_once_with()
@@ -617,9 +619,40 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
         with mock.patch("subprocess.run", self._run_that_sets("CLOUDFLARE_TUNNEL_TOKEN")):
             ok = self.write(self.app, "CLOUDFLARE_TUNNEL_TOKEN", TOKEN)
         self.assertTrue(ok)
-        self.assertEqual(self.argv[-2:], ["CLOUDFLARE_TUNNEL_TOKEN", "-"])
+        self.assertEqual(self.argv[-3:], ["CLOUDFLARE_TUNNEL_TOKEN", "-", "--json"])
         self.assertEqual(self.stdin, TOKEN + "\n")
         self.assertNotIn(TOKEN, "\n".join(self.app.lines))
+
+    def test_a_question_is_asked_then_answered_with_confirmed(self):
+        """The CLI stops at "prefix-change" (exit 4, the JSON question);
+        the menubar asks through _ask_cli_question and runs it again with
+        --confirmed; Cancel runs nothing more (onionpress.confirm)."""
+        import json
+        question = {"confirm": "prefix-change", "current": "op2", "new": "abc",
+                    "address": "a" * 56 + ".onion"}
+        argvs = []
+
+        def run(argv, **kwargs):
+            argvs.append(list(argv))
+            if "--confirmed" in argv:
+                op_config.write_value(self.app.config_file, "ADDRESS_PREFIX", "abc")
+                op_config.note_config_changed(self.dir, ["ADDRESS_PREFIX"])
+                return mock.Mock(returncode=0, stdout='{"ok": true}\n', stderr="")
+            return mock.Mock(returncode=4, stdout=json.dumps(question) + "\n", stderr="")
+        for answer in (True, False):
+            with self.subTest(answer=answer):
+                argvs.clear()
+                self.app._ask_cli_question = mock.Mock(return_value=answer)
+                with mock.patch("subprocess.run", run):
+                    ok = self.write(self.app, "ADDRESS_PREFIX", "abc")
+                self.assertIs(ok, answer)
+                self.app._ask_cli_question.assert_called_once_with(
+                    "prefix-change", question, action="Change")
+                if answer:
+                    self.assertEqual(argvs[1][-2:], ["--confirmed", "prefix-change"])
+                    self.assertEqual(op_config.read_value(self.app.config_file, "ADDRESS_PREFIX"), "abc")
+                else:
+                    self.assertEqual(len(argvs), 1)
 
     def test_a_refusal_is_false_and_logged(self):
         with mock.patch("subprocess.run", self._run_that_sets("VM_CPU", rc=2)):

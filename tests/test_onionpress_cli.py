@@ -78,21 +78,24 @@ class TestCLIArgParsing(unittest.TestCase):
         self.assertEqual(result, 0)
         # cli.py dispatches backup as cmd_backup(password, output, user) —
         # output and --user both default to None when omitted.
-        instance.cmd_backup.assert_called_once_with("mypass", None, None)
+        instance.cmd_backup.assert_called_once_with("mypass", None, None,
+                                                    check=False, json_output=False)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_backup_with_output(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_backup.return_value = 0
         result = main(["backup", "mypass", "/tmp/backup.zip"])
-        instance.cmd_backup.assert_called_once_with("mypass", "/tmp/backup.zip", None)
+        instance.cmd_backup.assert_called_once_with("mypass", "/tmp/backup.zip", None,
+                                                    check=False, json_output=False)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_restore_command(self, MockCLI):
         instance = MockCLI.return_value
         instance.cmd_restore.return_value = 0
         result = main(["restore", "mypass", "/tmp/backup.zip"])
-        instance.cmd_restore.assert_called_once_with("mypass", "/tmp/backup.zip")
+        instance.cmd_restore.assert_called_once_with(
+            "mypass", "/tmp/backup.zip", "", confirmed=frozenset(), json_output=False)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_regenerate_derivatives_command(self, MockCLI):
@@ -151,7 +154,8 @@ class TestCLIArgParsing(unittest.TestCase):
         instance = MockCLI.return_value
         instance.cmd_reset.return_value = 0
         result = main(["reset", "--yes"])
-        instance.cmd_reset.assert_called_once_with(yes=True)
+        instance.cmd_reset.assert_called_once_with(
+            yes=True, check=False, json_output=False, confirmed=frozenset())
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_check_for_update_default(self, MockCLI):

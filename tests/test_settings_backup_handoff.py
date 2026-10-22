@@ -31,91 +31,33 @@ def _branch(text, head, end):
     return text[start:text.index(end, start)]
 
 
-class TestMenubarHandoff(unittest.TestCase):
+class TestHandlerHandoff(unittest.TestCase):
+    """The shared handler's create-backup (onionpress.handle_action, both
+    platforms): the zip is written into the container as www-data, never
+    docker cp + chown as root, and the local copy is removed whatever
+    happens. tests/test_handle_action.py runs it; this reads the source."""
 
     def setUp(self):
-        self.body = _branch(mv._read("src/menubar.py"),
-                            'elif action == "create-backup":',
-                            'elif action == "restore-backup":')
+        text = mv._read("src/onionpress/handle_action.py")
+        self.body = text[text.index("def _create_backup(host):"):text.index("# -- restore --")]
 
     def test_written_as_www_data_never_chowned_by_root(self):
-        self.assertIn('"docker", "exec", "-i", "-u", "www-data"', self.body)
-        self.assertIn("""'umask 077; cat > "$1"'""", self.body)
-        self.assertNotIn('"chown"', self.body)
-        self.assertNotIn('"docker", "cp"', self.body)
+        code = "\n".join(line for line in self.body.splitlines()
+                         if not line.lstrip().startswith("#"))
+        self.assertIn('"exec", "-i", "-u", "www-data"', code)
+        self.assertIn("""'umask 077; cat > "$1"'""", code)
+        self.assertNotIn('"chown"', code)
+        self.assertNotIn('"cp"', code)
+        self.assertNotIn("docker cp", code)
 
     def test_the_local_copy_is_removed_whatever_happens(self):
         handoff = self.body[self.body.index('"-u", "www-data"'):]
-        self.assertLess(handoff.index("finally:"), handoff.index("os.remove(tmp_path)"))
+        self.assertLess(handoff.index("finally:"), handoff.index("shutil.rmtree(work"))
 
-
-class TestLinuxHandoff(unittest.TestCase):
-
-    PRELUDE = r'''
-log() { echo "[log] $1" >> "$LOG_FILE"; }
-setup_db_passwords() { :; }
-create_backup() { printf 'backup bytes' > "$2"; }
-docker() {
-    echo "docker $*" >> "$CALLS"
-    case "$*" in
-        "exec -u www-data onionpress-wordpress cat /var/lib/onionpress/backup-password") echo pw ;;
-        "exec -i -u www-data onionpress-wordpress sh -c "*)
-            # Run the script the launcher hands over (the zip's, or
-            # wp_put's for the result), against a sandbox path.
-            shift 7; sh -c "$1" sh "$SANDBOX$3" ${4:+"$4"} ;;
-        "exec onionpress-tor "*) echo "$ADDR" ;;
-    esac
-    return 0
-}
-'''
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        text = mv._read("linux/onionpress")
-        self.branch = _branch(text, "                create-backup)\n",
-                              "\n                    ;;\n")
-        self.helpers = "".join(
-            f"{name}() {{\n" + _branch(text, f"\n{name}() {{\n", "\n}\n") + "\n}\n"
-            for name in ("wp_put", "wp_exec"))
-
-    def test_written_as_www_data_never_chowned_by_root(self):
-        code = "\n".join(line for line in self.branch.splitlines()
-                         if not line.lstrip().startswith("#"))
-        self.assertNotIn("chown", code)
-        self.assertNotRegex(code, r"docker cp [^\n]*onionpress-wordpress:")
-        self.assertIn("docker exec -i -u www-data onionpress-wordpress", code)
-
-    def test_the_backup_arrives_whole_and_owner_only(self):
-        sandbox = os.path.join(self.tmp, "container")
-        os.makedirs(os.path.join(sandbox, "var", "lib", "onionpress"))
-        calls = os.path.join(self.tmp, "calls")
-        env = {
-            "PATH": os.environ["PATH"], "HOME": os.path.join(self.tmp, "home"),
-            "TMPDIR": self.tmp, "LOG_FILE": os.path.join(self.tmp, "log"),
-            "CALLS": calls, "SANDBOX": sandbox, "ADDR": mv.ADDR,
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
-        script = (self.PRELUDE + self.helpers
-                  + "run_branch() {\n" + self.branch + "\n}\nrun_branch\n")
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                           timeout=60, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        volume = os.path.join(sandbox, "var", "lib", "onionpress")
-        landed = [n for n in os.listdir(volume) if n.endswith(".zip")]
-        self.assertEqual(len(landed), 1, os.listdir(volume))
-        path = os.path.join(volume, landed[0])
-        with open(path, "rb") as f:
-            self.assertEqual(f.read(), b"backup bytes")
-        self.assertEqual(os.stat(path).st_mode & 0o077, 0)
-        self.assertEqual(sorted(os.listdir(volume)), sorted(landed + ["backup-result.json"]))
-        with open(os.path.join(volume, "backup-result.json")) as f:
-            self.assertIn('"success":true', f.read())
-        # Staged in a folder of its own under TMPDIR, and removed.
-        self.assertFalse([n for n in os.listdir(self.tmp)
-                          if n.startswith("onionpress-settings-backup-")])
-        with open(calls) as f:
-            self.assertNotIn(" /tmp/OnionPress-", f.read())
+    def test_the_launchers_hand_nothing_over_themselves(self):
+        for rel in ("linux/onionpress", "app/MacOS/onionpress", "src/menubar.py"):
+            with self.subTest(rel):
+                self.assertNotIn('umask 077; cat > "$1"', mv._read(rel))
 
 
 if __name__ == "__main__":

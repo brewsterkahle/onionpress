@@ -56,18 +56,22 @@ class TestCheckUploadedBackup(unittest.TestCase):
             backup.check_uploaded_backup(os.path.join(self.tmp, "missing.zip"))
 
 
-class TestMenubarSettingsRestore(unittest.TestCase):
-    """src/menubar.py's restore-backup action (AppKit, so checked as source)."""
+class TestHandlerSettingsRestore(unittest.TestCase):
+    """The shared handler's restore-backup (onionpress.handle_action, both
+    platforms): the upload is copied into a folder of its own, checked to
+    be a regular file before anything reads it, the copy sized and
+    removed. tests/test_handle_action.py runs it with a link, a FIFO, a
+    missing upload and a regular file; this reads the source."""
 
     def setUp(self):
-        src = mv._read("src/menubar.py")
-        start = src.index('elif action == "restore-backup":')
-        self.body = src[start:src.index("\n            else:", start)]
+        src = mv._read("src/onionpress/handle_action.py")
+        self.body = src[src.index("def _restore_backup(host, confirmed):"):
+                        src.index("def _settings_page_restore(")]
 
     def test_the_copy_is_checked_before_the_restore_reads_it(self):
-        check = self.body.index("backup_manager.check_uploaded_backup(local_zip)")
-        self.assertLess(self.body.index('"docker", "cp"'), check)
-        self.assertLess(check, self.body.index("restore_from_backup(local_zip"))
+        check = self.body.index("check_uploaded_backup(local_zip)")
+        self.assertLess(self.body.index('["cp", f"onionpress-wordpress:{upload}", local_zip]'), check)
+        self.assertLess(check, self.body.index("_settings_page_restore(host, local_zip"))
 
     def test_no_fixed_time_limit_on_the_menu_restore(self):
         """Issue #317: a fixed 1800 s ended a large site's restore halfway."""
@@ -80,110 +84,18 @@ class TestMenubarSettingsRestore(unittest.TestCase):
     def test_the_copy_is_sized_and_checked(self):
         self.assertNotIn("timeout=60\n", self.body)
         self.assertIn("timeout=wp_files.sized_timeout(size, 60)", self.body)
-        self.assertIn("if r.returncode != 0:", self.body)
+        self.assertIn("if not r.ok:", self.body)
 
     def test_the_copy_lands_in_a_folder_of_its_own(self):
         self.assertIn("tempfile.mkdtemp(", self.body)
         self.assertNotIn("gettempdir()", self.body)
         self.assertNotIn("os.path.exists(local_zip)", self.body)
-        self.assertIn("shutil.rmtree(upload_dir", self.body)
+        self.assertIn("shutil.rmtree(work", self.body)
 
-
-class TestLinuxSettingsRestore(unittest.TestCase):
-    """linux/onionpress's restore-backup settings action, run for real with
-    docker stubbed: `docker cp` makes whatever the case puts at the copy's
-    path, as docker cp would copy it out of the container."""
-
-    PRELUDE = r'''
-log() { echo "[log] $1" >> "$LOG_FILE"; }
-setup_db_passwords() { :; }
-stop_containers() { :; }
-start_containers() { :; }
-wait_for_services() { :; }
-write_status() { :; }
-write_restore_result() { echo "$1|$2" >> "$RESULT"; }
-restore_backup() { echo "$2" >> "$CALLS"; cat "$2" > "$READ"; echo "$ADDR"; }
-docker() {
-    case "$1" in
-        cp)
-            case "$MODE" in
-                link) ln -s "$SECRET_FILE" "$3" ;;
-                fifo) mkfifo "$3" ;;
-                file) printf 'uploaded zip' > "$3" ;;
-                *) return 1 ;;
-            esac ;;
-        exec) [ "$2 $3 $5" = "-u www-data cat" ] && echo "$PW" ;;
-    esac
-    return 0
-}
-'''
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.secret = os.path.join(self.tmp, "secret")
-        with open(self.secret, "wb") as f:
-            f.write(SECRET)
-        text = mv._read("linux/onionpress")
-        head = "                restore-backup)\n"
-        start = text.index(head) + len(head)
-        self.branch = text[start:text.index("\n                    ;;\n", start)]
-        self.is_onion = (mv._bash_function(text, "is_onion_address")
-                         + mv._bash_function(text, "wp_exec"))
-
-    def _run(self, mode):
-        tmpdir = os.path.join(self.tmp, f"t-{mode}")
-        os.makedirs(tmpdir)
-        files = {k: os.path.join(self.tmp, f"{k}-{mode}")
-                 for k in ("log", "calls", "result", "read")}
-        env = {
-            "PATH": os.environ["PATH"], "HOME": os.path.join(self.tmp, "home"),
-            "TMPDIR": tmpdir, "MODE": mode, "SECRET_FILE": self.secret,
-            "PW": "pw", "ADDR": mv.ADDR, "LOG_FILE": files["log"],
-            "CALLS": files["calls"], "RESULT": files["result"],
-            "READ": files["read"],
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
-        script = (self.PRELUDE + self.is_onion
-                  + "run_branch() {\n" + self.branch + "\n}\nrun_branch\n")
-        r = subprocess.run(["bash", "-c", script], capture_output=True,
-                           text=True, timeout=60, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-        def read(key):
-            try:
-                with open(files[key], "rb") as f:
-                    return f.read()
-            except FileNotFoundError:
-                return None
-        # Nothing is left behind in TMPDIR, whatever happened.
-        self.assertEqual(os.listdir(tmpdir), [])
-        return read("result"), read("calls"), read("read")
-
-    def test_a_link_is_refused_unread(self):
-        result, calls, read = self._run("link")
-        self.assertEqual(result, b"false|The uploaded backup is not a regular file\n")
-        self.assertIsNone(calls)
-        self.assertIsNone(read)
-
-    def test_a_fifo_is_refused(self):
-        result, calls, _ = self._run("fifo")
-        self.assertEqual(result, b"false|The uploaded backup is not a regular file\n")
-        self.assertIsNone(calls)
-
-    def test_no_upload(self):
-        result, calls, _ = self._run("none")
-        self.assertEqual(result, b"false|Missing password or backup file\n")
-        self.assertIsNone(calls)
-
-    def test_a_regular_file_is_restored_from_a_private_folder(self):
-        result, calls, read = self._run("file")
-        self.assertEqual(result, f"true|{mv.ADDR}\n".encode())
-        self.assertEqual(read, b"uploaded zip")
-        path = calls.decode().strip()
-        self.assertEqual(os.path.basename(path), "restore-upload.zip")
-        self.assertTrue(os.path.basename(os.path.dirname(path))
-                        .startswith("onionpress-restore-upload-"), path)
+    def test_the_launchers_copy_nothing_out_themselves(self):
+        for rel in ("linux/onionpress", "app/MacOS/onionpress", "src/menubar.py"):
+            with self.subTest(rel):
+                self.assertNotIn("restore-upload.zip", mv._read(rel))
 
 
 if __name__ == "__main__":

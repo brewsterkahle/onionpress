@@ -132,15 +132,16 @@ class TestCreateBackupAddress(unittest.TestCase):
 class TestSettingsPageFileName(unittest.TestCase):
 
     def test_named_after_a_whole_address_only(self):
-        text = _read(LINUX)
-        start = text.index("                create-backup)")
-        branch = text[start:text.index("                restore-backup)", start)]
-        self.assertNotIn("cut -c1-8", branch)
-        self.assertIn('if is_onion_address "$bp_onion"; then', branch)
-        self.assertIn('bp_onion="${bp_onion:0:8}"', branch)
-        self.assertIn('bp_onion="site"', branch)
-        self.assertLess(branch.index('bp_onion="site"'),
-                        branch.index('local bp_filename="OnionPress-${bp_onion}-'))
+        # The Settings page's backup is named by the shared handler
+        # (onionpress.handle_action, issue #366): the served address only
+        # when it is a whole v3 address (Host.served_address), else "site".
+        text = _read(os.path.join(PROJECT_DIR, "src", "onionpress", "handle_action.py"))
+        branch = text[text.index("def _create_backup(host):"):text.index("# -- restore --")]
+        self.assertIn("addr = host.served_address()", branch)
+        self.assertIn('onion_short = addr.replace(".onion", "")[:8] if addr else "site"', branch)
+        served = text[text.index("    def served_address(self):"):text.index("    def containers(self):")]
+        self.assertIn('return addr if is_valid_onion_address(addr) else ""', served)
+        self.assertNotIn("\n                create-backup)\n", _read(LINUX))
 
 
 if __name__ == "__main__":

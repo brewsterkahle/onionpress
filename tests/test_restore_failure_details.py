@@ -50,7 +50,7 @@ class TestRunLauncherRestore(unittest.TestCase):
         return path
 
     def _run(self, launcher):
-        ok, message, _stderr = launcher_ops.run_launcher_restore(
+        ok, message, _stderr, _stdout, _answer = launcher_ops.run_launcher_restore(
             launcher, "/backups/b.zip", SECRET,
             data_dir=self.data_dir, log_path=self.log_path)
         return ok, message

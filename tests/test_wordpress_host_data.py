@@ -339,9 +339,14 @@ wp_is_installed() { return 1; }
         self.assertIsNone(self._volume("status.json"))
 
     def test_idle_watcher_tick_uses_the_scrubbed_copy(self):
-        body = _between(self.launcher, "        handle-action)", "            case \"$action\" in")
-        self.assertIn("write_recent_logs", body)
+        # The quiet tick is the shared handler's (onionpress.handle_action
+        # write_recent_logs, Linux only): the scrubbed excerpt, as the
+        # launcher's write_recent_logs writes it.
+        handler = _read("src/onionpress/handle_action.py")
+        body = handler[handler.index("def write_recent_logs("):handler.index("def apply_config(")]
+        self.assertIn("redact.wordpress_log_excerpt(log_file, host.paths.data_dir)", body)
         self.assertNotIn("tail", body)
+        self.assertIn('if host.os_name == "linux":\n            write_recent_logs(host)', handler)
         self._run("write_recent_logs")
         self.assertNotIn(TOKEN, self._volume("recent-logs.txt"))
 
@@ -358,7 +363,7 @@ class TestMacMenubar(unittest.TestCase):
 
     def test_status_and_logs_written_scrubbed(self):
         body = _between(self.src, "    def write_status_to_volume(self):",
-                        "    def poll_config_updates(self):")
+                        "    def poll_settings_page(self):")
         self.assertIn("json.dumps(redact.status_for_wordpress(status), indent=2)", body)
         self.assertIn("redact.wordpress_log_excerpt(log_file, self.app_support)", body)
         self.assertNotIn("readlines()", body)
@@ -366,9 +371,12 @@ class TestMacMenubar(unittest.TestCase):
         self.assertIn("self._last_status_payload = status\n", body)
 
     def test_action_results_scrubbed(self):
-        body = _between(self.src, "        def _write_result(filename, data):",
-                        "        def _clear_pending():")
-        self.assertIn("redact.scrub_json_for_wordpress(data, self.app_support)", body)
+        # The page's action results are the shared handler's (issue #366).
+        handler = _read("src/onionpress/handle_action.py")
+        body = _between(handler, "    def write_result(self, filename, data):",
+                        "    # -- the containers --")
+        self.assertIn("redact.scrub_json_for_wordpress(data, self.paths.data_dir)", body)
+        self.assertNotIn("def _write_result", self.src)
 
     def test_only_these_writers_reach_the_shared_files(self):
         for name in ("recent-logs.txt", "status.json"):

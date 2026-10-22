@@ -135,9 +135,11 @@ class TestImageOverrideReadsTheConfigFile(unittest.TestCase):
         self.assertIn("onionheaven_image(self.paths.config_file)", containers)
         menubar = _read("src/menubar.py")
         self.assertEqual(
-            2, menubar.count("containers.using_local_images(self._paths.config_file)"),
-            "Both menubar call sites must pass the resolved config path.",
+            1, menubar.count("containers.using_local_images(self._paths.config_file)"),
+            "The menubar's call site must pass the resolved config path.",
         )
+        # The pull itself is the CLI's (onionpress update-images, #366).
+        self.assertIn("using_local_images(self.paths.config_file)", _read("src/onionpress/cli.py"))
 
 
 class TestConfigOverrideLoopIsInjectionSafe(unittest.TestCase):
@@ -317,12 +319,17 @@ class TestMenubarGatesItsPull(unittest.TestCase):
     """
 
     def test_update_docker_images_checks_the_predicate(self):
-        text = _read("src/menubar.py")
+        """The menubar's update_docker_images runs `onionpress update-images`
+        (#366); the predicate is checked in cli.cmd_update_images."""
+        menubar = _read("src/menubar.py")
+        self.assertIn('self._run_launcher_json(["update-images", "--json"]',
+                      menubar[menubar.index("def update_docker_images("):])
+        text = _read("src/onionpress/cli.py")
         match = re.search(
-            r"def update_docker_images\(.*?\n(.*?)\n    def ", text, re.S)
+            r"def cmd_update_images\(.*?\n(.*?)\n    def ", text, re.S)
         self.assertIsNotNone(
             match,
-            "Could not find update_docker_images in src/menubar.py — renamed? "
+            "Could not find cmd_update_images in src/onionpress/cli.py — renamed? "
             "Update this test.",
         )
         # Comment-stripped: the guard carries a three-line comment naming
@@ -340,7 +347,7 @@ class TestMenubarGatesItsPull(unittest.TestCase):
             "locally built images, like both bash launchers do.",
         )
         self.assertLess(
-            body.index("using_local_images("), body.index('["pull"]'),
+            body.index("using_local_images("), body.index("pull_images_result("),
             "The guard must come before the pull, not after it.",
         )
 

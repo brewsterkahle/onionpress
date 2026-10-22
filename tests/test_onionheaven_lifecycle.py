@@ -486,20 +486,28 @@ class TestMaintain(_MacCase):
         src = _read("src/menubar.py")
         i = src.index("onionheaven.maybe_unregister_after_opt_out(self)")
         self.assertIn("onionheaven.maintain_registration(self)", src[i:i + 200])
-        # Uninstall: heartbeats end, then the release, then the stop.
+        # Uninstall: this process's heartbeats end, then `onionpress
+        # uninstall` (the release, then the stop: onionpress.uninstall).
         body = src[src.index("def do_uninstall():"):]
-        end = body.index("onionheaven.end_hub_traffic(self)")
-        rel = body.index('onionheaven.release_registration(self, "uninstall")')
-        stop = body.index('[self.launcher_script, "stop"]')
-        self.assertLess(end, rel)
-        self.assertLess(rel, stop)
+        self.assertLess(body.index("onionheaven.end_hub_traffic(self)"),
+                        body.index('["uninstall", "--json", *flags]'))
         self.assertNotIn("onionheaven.unregister_from_onionheaven(self)", src)
-        # Not running: the user is told before the DELETE confirmation.
+        self.assertNotIn("onionheaven.release_registration(self", src)
+        uninstall = _read("src/onionpress/uninstall.py")
+        self.assertLess(uninstall.index('release_onionheaven("uninstall"'),
+                        uninstall.index('[launcher, "stop"]'))
+        # Not running: the CLI's check asks "hub-holds-key" before "uninstall"
+        # (the DELETE confirmation); the menubar asks in that order.
+        self.assertLess(uninstall.index('"hub-holds-key", confirmed'),
+                        uninstall.index('"uninstall", confirmed'))
         proceed = src[src.index("def _proceed_with_uninstall(self):"):]
-        self.assertLess(proceed.index("onionheaven.registrations_left(self)"),
-                        proceed.index("FINAL CONFIRMATION"))
-        # The Settings page's restore releases before the key is replaced.
-        self.assertIn("before_key_change=self._release_onionheaven_before_restore", src)
+        self.assertLess(proceed.index('["uninstall", "--check", "--json", *flags]'),
+                        proceed.index("def do_uninstall():"))
+        # The Settings page's restore releases before the key is replaced
+        # (the CLI's settings-page-restore).
+        cli_src = _read("src/onionpress/cli.py")
+        self.assertIn("before_key_change=before_key_change", cli_src)
+        self.assertIn('release_onionheaven("restore", keep_address=restored_address', cli_src)
         backup = _read("src/onionpress/backup.py")
         self.assertLess(backup.index("before_key_change(derived_address)"),
                         backup.index("key_manager.write_private_key(priv, pub)"))
@@ -615,9 +623,43 @@ class TestCliResetAndRestore(_CliCase):
                  "why": "key-unreadable"}]
         with mock.patch.object(cli, "release_onionheaven", return_value=left), \
                 mock.patch("builtins.input", side_effect=["", "n"]), \
+                mock.patch.object(sys, "stdin", mock.Mock(isatty=lambda: True)), \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(obj.cmd_reset(yes=False), 1)
         self.assertEqual(obj.order, [])
+
+    def test_reset_refuses_without_the_confirmation_off_a_terminal(self):
+        """Not at a terminal (a UI, a script), `reset` needs --confirmed
+        reset, and --confirmed hub-holds-key when the hub keeps the key
+        (onionpress.confirm); --check says so and changes nothing."""
+        self.registered(hub=HUB)
+        obj = self._cli()
+        obj.docker.container_running.return_value = False
+        left = [{"content_address": SITE, "onionheaven_address": HUB,
+                 "why": "key-unreadable"}]
+        out = io.StringIO()
+        with mock.patch.object(cli, "release_onionheaven", return_value=left) as release, \
+                mock.patch.object(sys, "stdin", io.StringIO()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(obj.cmd_reset(check=True, json_output=True), 4)
+            first = json.loads(out.getvalue().strip().splitlines()[-1])
+            self.assertEqual(obj.cmd_reset(check=True, json_output=True,
+                                           confirmed=frozenset({"hub-holds-key"})), 4)
+            second = json.loads(out.getvalue().strip().splitlines()[-1])
+            self.assertEqual(obj.cmd_reset(check=True, json_output=True,
+                                           confirmed=frozenset({"hub-holds-key", "reset"})), 0)
+            release.assert_not_called()
+            self.assertEqual(obj.cmd_reset(json_output=True), 3)
+            release.assert_not_called()
+            self.assertEqual(obj.cmd_reset(json_output=True, confirmed=frozenset({"reset"})), 3)
+            release.assert_called_once()
+            self.assertEqual(obj.order, [])
+            self.assertEqual(obj.cmd_reset(json_output=True,
+                                           confirmed=frozenset({"reset", "hub-holds-key"})), 0)
+        self.assertEqual(first["confirm"], "hub-holds-key")
+        self.assertEqual(first["hubs"], [{"content_address": SITE, "onionheaven_address": HUB}])
+        self.assertEqual(second["confirm"], "reset")
+        self.assertEqual(obj.order, ["stop"])
 
     def test_restore_releases_the_old_key_but_not_the_restored_one(self):
         obj = self._cli()
@@ -769,7 +811,11 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         self.assertIn("ONIONHEAVEN_RELEASE_RC", branch[branch.index("has been uninstalled"):])
 
     def test_resets_keep_the_record_when_a_hub_may_hold_a_key(self):
-        for rel, label in (("linux/onionpress", "reset"), ("app/MacOS/onionpress", "reset"),
+        # The Mac launcher's reset is the CLI's (cmd_reset, below).
+        mac = _read("app/MacOS/onionpress")
+        self.assertRegex(_case_branch(mac, "reset"),
+                         r'bundled_python -m onionpress\.cli --data-dir "\$DATA_DIR" reset ')
+        for rel, label in (("linux/onionpress", "reset"),
                            ("app/MacOS/onionpress", "scrub")):
             with self.subTest(rel=rel, label=label):
                 branch = _case_branch(_read(rel), label)
@@ -809,13 +855,14 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
 
     def test_linux_settings_page_key_changes(self):
         text = _read("linux/onionpress")
-        # The page's key import is refused, and generate-vanity is gone
-        # (tests/test_settings_page_onion_key.py): no key change from
-        # there reaches the hubs.
-        start = text.index("                import-key-file)\n")
-        branch = text[start:text.index("\n                    ;;\n", start)]
-        self.assertNotIn("replace_onion_key", branch)
-        self.assertNotIn("onionheaven_release", branch)
+        # The page's key import is refused on Linux by the shared handler,
+        # and generate-vanity is gone (tests/test_settings_page_onion_key.py):
+        # no key change from there reaches the hubs.
+        handler = _read("src/onionpress/handle_action.py")
+        branch = handler[handler.index("def _import_key_file("):handler.index("def _import_key(")]
+        self.assertIn('if host.os_name != "macos":', branch)
+        self.assertIn("IMPORT_REFUSED_LINUX_MSG", branch)
+        self.assertNotIn("generate-vanity", handler)
         self.assertNotIn("                generate-vanity)\n", text)
         body = _shell_function(text, "restore_backup")
         self.assert_before(body, 'onionheaven_release restore "$onion_address"',
