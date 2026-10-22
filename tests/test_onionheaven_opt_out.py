@@ -736,12 +736,15 @@ class TestLinuxDaemonLoop(_LinuxCase):
 
 class TestUserFacingText(unittest.TestCase):
 
-    def test_linux_cli_disable_says_what_happens(self):
-        src = _read("linux/onionpress")
+    def test_cli_disable_says_what_happens(self):
+        # `onionpress onionheaven disable` on both platforms: the text is
+        # onionheaven.DISABLE_TEXT (the Linux launcher delegates, #365).
+        src = _read("src/onionpress/onionheaven.py")
         self.assertIn("asks the hub to delete its copy of your", src)
-        self.assertNotIn(
-            'echo "OnionHeaven disabled. Visitors will get an error whenever this machine is off."',
-            src)
+        self.assertNotIn("Visitors will get an error whenever this machine is off.", src)
+        launcher = _read("linux/onionpress")
+        self.assertNotIn("OnionHeaven disabled.", launcher)
+        self.assertRegex(launcher, r'onionheaven_cmd\(\) \{\n    op_py --data-dir "\$DATA_DIR" onionheaven "\$@"\n\}')
 
     def test_mac_texts(self):
         settings = _read("src/onionpress/settings_ui.py")

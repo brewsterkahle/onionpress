@@ -45,6 +45,7 @@ from onionpress import install_native_messaging
 from onionpress import onionheaven
 from onionpress import updater
 from onionpress import key_manager
+from onionpress import login_item
 from onionpress import backup as backup_manager
 from onionpress import hub_backup
 try:
@@ -1359,47 +1360,22 @@ class OnionPressApp(rumps.App):
         self.start_service(None)
 
 
-    LAUNCHAGENT_LABEL = "com.onionpress.launcher"
-    LAUNCHAGENT_PATH = os.path.expanduser(
-        f"~/Library/LaunchAgents/{LAUNCHAGENT_LABEL}.plist")
+    # The login item is onionpress.login_item's, shared with
+    # `onionpress config set LAUNCH_ON_LOGIN` (config.apply_side_effects).
+    LAUNCHAGENT_LABEL = login_item.LAUNCHAGENT_LABEL
+    LAUNCHAGENT_PATH = login_item.launchagent_path()
 
     def _is_login_item_installed(self):
         """Check if LaunchAgent plist exists"""
-        return os.path.exists(self.LAUNCHAGENT_PATH)
+        return login_item.is_installed()
 
     def add_login_item(self):
         """Install LaunchAgent plist for auto-start on login"""
-        try:
-            plist = {
-                "Label": self.LAUNCHAGENT_LABEL,
-                "ProgramArguments": ["open", "-a", os.path.dirname(self.contents_dir)],
-                "RunAtLoad": True,
-                "LimitLoadToSessionType": "Aqua",
-            }
-            os.makedirs(os.path.dirname(self.LAUNCHAGENT_PATH), exist_ok=True)
-            with open(self.LAUNCHAGENT_PATH, "wb") as f:
-                plistlib.dump(plist, f)
-            self.log("LaunchAgent installed for login auto-start")
-            return True
-        except Exception as e:
-            self.log(f"Error installing LaunchAgent: {e}")
-            return False
+        return login_item.install(os.path.dirname(self.contents_dir), self.log)
 
     def remove_login_item(self):
         """Remove LaunchAgent plist"""
-        try:
-            if os.path.exists(self.LAUNCHAGENT_PATH):
-                # Unload first (ignore errors if not loaded)
-                subprocess.run(
-                    ["launchctl", "bootout", f"gui/{os.getuid()}",
-                     self.LAUNCHAGENT_PATH],
-                    capture_output=True, timeout=10)
-                os.remove(self.LAUNCHAGENT_PATH)
-            self.log("LaunchAgent removed")
-            return True
-        except Exception as e:
-            self.log(f"Error removing LaunchAgent: {e}")
-            return False
+        return login_item.remove(self.log)
 
 
     def run_command(self, command):
@@ -1757,6 +1733,10 @@ class OnionPressApp(rumps.App):
             if trigger_found:
                 self.log("Upload-analytics trigger detected")
                 threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
+
+            # Settings changed by `onionpress config set` at a terminal
+            # (the CLI leaves the keys in .config-changed)
+            self.apply_config_changes(op_config.take_config_changes(self.app_support))
 
             # Check if containers are running
             status_json = self.run_command("status")
@@ -4048,13 +4028,67 @@ class OnionPressApp(rumps.App):
         return op_config.read_value(self.config_file, key, default)
 
     def write_config_value(self, key, value):
-        """Write a value to the config file."""
+        """Change one setting through `onionpress config set` (issue #365):
+        the CLI is the one writer of ~/.onionpress/config, with the key's
+        check, the log line, the login item, and the change marker. A
+        secret goes on stdin, never on argv. Returns True when the CLI
+        accepted it; what changed is then applied to this process by
+        apply_config_changes (caffeinate, status.json in the volume).
+        """
         if not os.path.exists(self.config_file):
             config_template = os.path.join(self.resources_dir, "config-template.txt")
             if os.path.exists(config_template):
                 import shutil
                 shutil.copy2(config_template, self.config_file)
-        op_config.write_value(self.config_file, key, value)
+        argv = [self.launcher_script, "config", "set", key]
+        stdin = None
+        if key in op_config.SECRET_CONFIG_KEYS and value:
+            argv.append("-")
+            stdin = f"{value}\n"
+        else:
+            argv.append(value)
+        try:
+            result = subprocess.run(
+                argv, input=stdin, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=120)
+        except (OSError, subprocess.SubprocessError) as e:
+            self.log(f"config set {key} failed to run: {e}")
+            return False
+        if result.returncode != 0:
+            # The CLI prints no secret value; a refusal names the key and
+            # what it must be.
+            self.log(f"config set {key} refused (rc {result.returncode}): "
+                     f"{(result.stderr or result.stdout).strip()}")
+            return False
+        self.apply_config_changes(op_config.take_config_changes(self.app_support))
+        return True
+
+    def apply_config_changes(self, keys):
+        """What this running app does after settings changed through
+        `onionpress config set`, by itself or at a terminal (the CLI
+        leaves the keys in ~/.onionpress/.config-changed, which
+        write_config_value and check_status take): caffeinate follows
+        PREVENT_SLEEP, an analytics upload starts when sharing was turned
+        on, the menu learns of a tunnel token, and status.json in the
+        volume gets the new values. The login item is the CLI's.
+        """
+        if not keys:
+            return
+        self.log(f"Settings changed: {', '.join(keys)}")
+        try:
+            if "PREVENT_SLEEP" in keys:
+                self.caffeine.stop()
+                self.caffeine.start()
+            if ("SHARE_ANALYTICS_WITH_ONIONHOME" in keys
+                    and self._read_config_value("SHARE_ANALYTICS_WITH_ONIONHOME") == "yes"):
+                from onionpress.analytics_sharing import trigger_upload
+                trigger_upload()
+            if "CLOUDFLARE_TUNNEL_TOKEN" in keys:
+                self.cloudflare_tunnel_enabled = bool(
+                    self._read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
+            self.write_status_to_volume()
+        except Exception as e:
+            self.log(f"Applying settings change: {e}")
 
     @rumps.clicked("Settings...")
     def open_settings(self, _):
@@ -4070,22 +4104,15 @@ class OnionPressApp(rumps.App):
 
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
 
-        def _restart_caffeinate():
-            self.caffeine.stop()
-            self.caffeine.start()
-
+        # Every change goes through `onionpress config set`
+        # (write_config_value); its side effects follow in
+        # apply_config_changes.
         show_settings_dialog(
             config_path=self.config_file,
             icon_path=icon_path,
             launcher_script=self.launcher_script,
             log_func=self.log,
-            callbacks={
-                'write_config': self.write_config_value,
-                'restart_caffeinate': _restart_caffeinate,
-                'add_login_item': self.add_login_item,
-                'remove_login_item': self.remove_login_item,
-                'sync_to_volume': self.write_status_to_volume,
-            },
+            callbacks={'write_config': self.write_config_value},
         )
 
     @rumps.clicked("Backup...")

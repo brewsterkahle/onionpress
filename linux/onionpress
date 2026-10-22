@@ -2348,6 +2348,8 @@ get_status() {
     docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
 }
 
+# ─── OnionHeaven on/off ─────────────────────────────────────────────
+
 # The heartbeat client (onionpress-heartbeat.py) holds the onion service key
 # it loaded at start and sends it with every /online. Before that key goes
 # or is replaced it is stopped, or its next beat would put the key back on
