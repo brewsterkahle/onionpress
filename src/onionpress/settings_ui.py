@@ -171,16 +171,10 @@ SETTINGS_CONSEQUENCES = {
     },
 }
 
-# Settings that require a restart to take effect.
-# All others are applied immediately (read from config on next cycle).
-_NEEDS_RESTART = {
-    "ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU",
-    "CLOUDFLARE_TUNNEL_TOKEN",
-    # Read at startup only (onionheaven.ONIONHEAVEN_ADDRESS). After the
-    # restart the site registers with the new hub and the old one is asked
-    # to delete its copy of the key (onionheaven.maintain_registration).
-    "ONIONHEAVEN_ADDRESS",
-}
+# Settings that require a restart to take effect: config.NEEDS_RESTART,
+# shared with `onionpress config set`. All others are applied immediately
+# (read from config on next cycle).
+_NEEDS_RESTART = op_config.NEEDS_RESTART
 
 # Human-readable labels for each setting key
 _LABELS = {
@@ -246,10 +240,12 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         launcher_script: Path to the onionpress launcher script (for OH validation).
         log_func: Callable for logging messages.
         callbacks: Dict with keys:
-            'write_config': func(key, value)
-            'restart_caffeinate': func()
-            'add_login_item': func()
-            'remove_login_item': func()
+            'write_config': func(key, value) -> bool. The menubar's
+                write_config_value: it runs `onionpress config set`, which
+                checks the value, writes it and installs or removes the
+                login item, and then applies the change to the running app
+                (caffeinate, the analytics upload, status.json in the
+                volume). The dialog itself touches nothing but this.
     """
     if not os.path.exists(config_path):
         rumps.alert("Settings file not found")
@@ -586,38 +582,22 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     if resp2 != 1000:  # Not "Apply"
         return
 
-    # -- Write changed values --
+    # -- Write changed values, each through `onionpress config set` --
     write_config = callbacks.get('write_config')
+    written = []
     for key in changes:
-        if write_config:
-            write_config(key, new_values[key])
-
-    # Apply sleep mode change immediately (no restart needed)
-    if "PREVENT_SLEEP" in changes:
-        restart_caffeinate = callbacks.get('restart_caffeinate')
-        if restart_caffeinate:
-            restart_caffeinate()
-
-    # Apply login item change immediately
-    if "LAUNCH_ON_LOGIN" in changes:
-        if new_values["LAUNCH_ON_LOGIN"] == "yes":
-            add_login = callbacks.get('add_login_item')
-            if add_login:
-                add_login()
-        else:
-            remove_login = callbacks.get('remove_login_item')
-            if remove_login:
-                remove_login()
-
-    # Trigger immediate analytics upload when sharing is turned on
-    if "SHARE_ANALYTICS_WITH_ONIONHOME" in changes and new_values["SHARE_ANALYTICS_WITH_ONIONHOME"] == "yes":
-        from onionpress.analytics_sharing import trigger_upload
-        trigger_upload()
-
-    # Sync config to Docker volume so WordPress settings page sees the update immediately
-    sync_to_volume = callbacks.get('sync_to_volume')
-    if sync_to_volume:
-        sync_to_volume()
+        if write_config and not write_config(key, new_values[key]):
+            _icon_alert(
+                "Settings",
+                f"Could not save {_LABELS.get(key, key)}: see the OnionPress "
+                "log. The other changes were saved." if written
+                else f"Could not save {_LABELS.get(key, key)}: see the OnionPress log.",
+                icon_path)
+            break
+        written.append(key)
+    changes = written
+    if not changes:
+        return
 
     change_details = [f"{k}={op_config.loggable_value(k, new_values[k])}" for k in changes]
     log_func(f"Settings updated: {', '.join(change_details)}")

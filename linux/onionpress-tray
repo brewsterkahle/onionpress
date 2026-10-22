@@ -1065,13 +1065,14 @@ class SetupDialog:
         # Persist analytics preference up front so the setting takes
         # effect even if provisioning is interrupted mid-way (the
         # bootstrap user is still set, and the heartbeat will respect
-        # the opt-in/out flag on next config reload).
+        # the opt-in/out flag on next config reload). Through
+        # `onionpress config set`, the one writer of the config (#365).
         try:
-            from onionpress import config as _op_config  # type: ignore
-            _op_config.write_value(
-                os.path.join(DATA_DIR, "config"),
-                "SHARE_ANALYTICS_WITH_ONIONHOME", share_analytics,
-            )
+            r = Launcher.run("config", "set", "SHARE_ANALYTICS_WITH_ONIONHOME",
+                             share_analytics, capture=True)
+            if r.returncode != 0:
+                self._log("warn: failed to persist analytics pref: "
+                          f"{(r.stderr or r.stdout).strip()}")
         except Exception as e:
             self._log(f"warn: failed to persist analytics pref: {e}")
 
