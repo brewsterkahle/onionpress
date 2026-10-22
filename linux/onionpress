@@ -4541,18 +4541,36 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         restore)
-            # restore <backup_file.zip>; the password comes from
-            # read_backup_password and goes on to Python in the environment.
-            # The old `restore <password> <backup_file.zip>` still works.
+            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
+            # the password comes from read_backup_password and goes on to
+            # Python in the environment. The old `restore <password>
+            # <backup_file.zip>` still works. The flags are the check/confirm
+            # protocol's (onionpress.confirm): --check answers what the
+            # backup is, or {"ask": "password"} without one.
             setup_db_passwords
-            local restore_legacy_pass=""
-            local restore_path="${2:-}"
-            if [ -n "${3:-}" ]; then
-                restore_legacy_pass="$2"
-                restore_path="$3"
+            local restore_legacy_pass="" restore_path="" restore_check=no restore_what=no
+            local -a restore_flags=() restore_pos=()
+            local restore_arg
+            for restore_arg in "${@:2}"; do
+                if [ "$restore_what" = yes ]; then
+                    restore_flags+=("$restore_arg")
+                    restore_what=no
+                    continue
+                fi
+                case "$restore_arg" in
+                    --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
+                    --json) restore_flags+=("$restore_arg") ;;
+                    --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
+                    *) restore_pos+=("$restore_arg") ;;
+                esac
+            done
+            restore_path="${restore_pos[0]:-}"
+            if [ -n "${restore_pos[1]:-}" ]; then
+                restore_legacy_pass="${restore_pos[0]}"
+                restore_path="${restore_pos[1]}"
             fi
             if [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <backup_file.zip>"
+                echo "Usage: $0 restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]"
                 echo "Restores from an OnionPress backup. Containers must be running."
                 echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
                 echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
@@ -4560,9 +4578,14 @@ sys.exit(0 if provision_interactive() else 1)
                 exit 1
             fi
             read_backup_password "$restore_legacy_pass"
-            if [ -z "$BACKUP_PASS" ]; then
+            if [ -z "$BACKUP_PASS" ] && [ "$restore_check" != yes ]; then
                 echo "ERROR: Password is required." >&2
                 exit 1
+            fi
+            if [ "$restore_check" = yes ]; then
+                # Changes nothing: the CLI's answer is the whole result.
+                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path" "${restore_flags[@]}"
+                exit $?
             fi
             # install-from-backup: the shared Python CLI tears the install down
             # and rebuilds it from the backup (seeded key + imported DB/content),
@@ -4575,7 +4598,7 @@ sys.exit(0 if provision_interactive() else 1)
             # copy (a backup of another address replaces the key), and
             # started again after, with the restored one.
             stop_heartbeat_client
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path"; then
+            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path" "${restore_flags[@]}"; then
                 start_heartbeat_client
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
