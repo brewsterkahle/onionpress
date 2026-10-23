@@ -13,7 +13,9 @@
 - When writing new code, docs, issues, or UI text, always use "OnionPress" and "onion service".
 
 ## Key Architecture
-- macOS menubar app (py2app built from `src/menubar.py`)
+- macOS menubar app (py2app built from `src/menubar.py`): a view of the
+  daemon's state file; `onionpress daemon` (`src/onionpress/daemon.py`,
+  a launchd agent) runs every loop (see "The Mac Daemon")
 - Launcher shell script at `app/MacOS/onionpress` (assembled into `OnionPress.app/Contents/MacOS/` at build time)
 - Docker containers (tor, wordpress, mariadb) run inside Colima VM
 - Logs at `~/.onionpress/onionpress.log` and `~/.onionpress/launcher.log`
@@ -210,8 +212,9 @@
 ## Onion Service Recovery (issue #266)
 - **The app's dual probe is the only measure of real reachability.** When it fails
   continuously for 10 min with Tor internally healthy (`RepublishTrigger` in
-  `src/onionpress/health.py`, used by `src/menubar.py` and, on Linux, by
-  `src/onionpress/reachability.py` in the heartbeat daemon), the app writes a
+  `src/onionpress/health.py`, used by the Mac daemon `src/onionpress/daemon.py`
+  (`check_status`, every status pass; the menubar shows its verdict) and, on
+  Linux, by `src/onionpress/reachability.py` in the heartbeat daemon), the app writes a
   request file inside the tor container
   (`launcher_ops.request_watchdog_republish`) and `tor-watchdog.py` answers with
   DEL_ONION + ADD_ONION — fresh intro points, immediate descriptor upload. Without it,
@@ -261,8 +264,8 @@
   guard caps a false fire during benign propagation. The class rides in the `probe`
   log line (`why=… fetch=… ours_rev=… theirs_rev=…`), `HealthResult.wedge_class`,
   and the reason string sent to the watchdog.
-- **Both wake handlers reset the republish window** (`_republish_trigger.reset()` on
-  Mac, `monitor.republish.reset()` on Linux, test-enforced): the trigger uses wall
+- **Both wake handlers reset the republish window** (`_republish_trigger.reset()` in
+  the Mac daemon's `handle_wake`, `monitor.republish.reset()` on Linux, test-enforced): the trigger uses wall
   clock, so a failure seen just before sleep would otherwise fire DEL+ADD on the
   first probe after wake, on top of the watchdog's own wake ADD.
 - The request path is a literal in both `launcher_ops.py` and `tor-watchdog.py`; a test
@@ -366,8 +369,8 @@
 - **The page's requests (`requested-action` and the files beside it) are
   handled by `onionpress handle-action` on both platforms**
   (`src/onionpress/handle_action.py`, issue #366): Linux's
-  onionpress-watcher.timer runs it every 10 s, the Mac menubar's status
-  loop (`poll_settings_page`) on every tick. The verbs are fixed (`ACTIONS`:
+  onionpress-watcher.timer runs it every 10 s, the Mac daemon's status
+  loop (`daemon.poll_settings_page`) on every tick. The verbs are fixed (`ACTIONS`:
   start, restart, stop, check-reachability, import-key-file, create-backup,
   restore-backup, refresh-status, update); every action runs through the
   launcher (`Host.run_launcher`: start, restart, stop, apply-config,
@@ -379,7 +382,9 @@
   checks on update; on the Mac those stop at `{"confirm": "address-change"}`
   (kept in `~/.onionpress/pending-action/`, 0700, dropped after 10 minutes
   without an answer) until the menubar asks and runs `handle-action
-  --confirmed address-change` or `--cancel`. `tests/test_handle_action.py`
+  --confirmed address-change` or `--cancel` (the daemon puts the question
+  in its state file, `pending_question`, and never answers it itself).
+  `tests/test_handle_action.py`
   runs it against a stub launcher and a stub docker.
 - Never add image overrides, `ONIONHEAVEN_ADDRESS` (the heartbeat sends the
   onion key to it), `ONIONHEAVEN_ACCEPT_REGISTRATIONS`, `ADDRESS_PREFIX`,
@@ -410,10 +415,10 @@
 - A secret is taken only as `config set KEY -` with the value on stdin
   (`tests/test_secrets_off_argv.py`); `get`/`list` show it as
   `<set>`/`<empty>`. A change is logged through `describe_change`, the key
-  goes into `~/.onionpress/.config-changed` for a running menubar
-  (`check_status` and `write_config_value` take it with
-  `take_config_changes` → `apply_config_changes`: caffeinate, the
-  analytics upload, the tunnel flag, status.json), and
+  goes into `~/.onionpress/.config-changed` for the running Mac daemon
+  (its `check_status` takes it with `take_config_changes` →
+  `Daemon.apply_config_changes`: caffeinate, the analytics upload, the
+  tunnel flag, the hub address, status.json; the menubar applies nothing), and
   `config.apply_side_effects` installs or removes the Mac login item
   (`onionpress.login_item`, shared with the menubar) or runs
   `systemctl --user enable|disable` on Linux. The keys in `NEEDS_RESTART`
@@ -521,6 +526,84 @@
   (`settings_page_restore_node_refusal`, the backup check's fail-closed
   logic; Linux `settings-page-restore-node-check`), before the upload is
   opened. `tests/test_settings_page_onion_key.py`.
+
+## The Mac Daemon (issue #367, CLI-first phase 3)
+- **`onionpress daemon` (`src/onionpress/daemon.py`) runs every loop the
+  menubar used to run in-process**, as the Mac counterpart of
+  `linux/onionpress-heartbeat.py`: `check_status` (containers from `docker
+  ps -a` by compose label and the tor container's hostname, not the
+  launcher's `status`/`address`; internet; WordPress; the dual probe with
+  `RepublishTrigger` and `classify_wedge`; status.json, version,
+  config-current.json and recent-logs.txt to the volume as www-data), the
+  OnionHeaven heartbeat and upkeep (`onionheaven.*` with the daemon as the
+  `app`, under `_HUB_LOCK`), the handle-action tick (`poll_settings_page`,
+  one run at a time), the hub's messages, the image monitor, the three log
+  captures (`RotatingLog`), caffeinate (`onionpress.power`), the My
+  Creations thumbnails, the browser extension's HTTP proxy, port-offset
+  detection at start, and sleep/wake through IOKit
+  (`mac_power.MacPowerHandler`; the main thread runs the CFRunLoop a
+  second at a time, `mac_power.run_loop_once`, so Python's signal
+  handlers still run). The menubar (`src/menubar.py`) is a view: menu,
+  dialogs, notifications, the browser items, the welcome and setup
+  windows, the OnionHeaven alerts view, and starting the daemon when
+  there is none. `tests/test_mac_daemon.py` (the daemon against stub
+  docker/health/launcher; the menubar census: no loop that names docker,
+  the hub or Tor, no timer but the splash tips).
+- **launchd**: `~/Library/LaunchAgents/org.onionpress.daemon.plist`
+  (`daemon.agent_plist`): `<bundle>/Contents/MacOS/onionpress daemon`,
+  `RunAtLoad`, `KeepAlive {SuccessfulExit: false}` (a crash or `kill -9`
+  is restarted after 10 s; the daemon exits 0 on TERM so `daemon stop`
+  and a `quit` stay down), `AbandonProcessGroup` (an `update` the
+  daemon's own tick started must outlive the daemon it stops), stdout and
+  stderr to `~/.onionpress/logs/daemon-std{out,err}.log`, one agent per
+  macOS user. `onionpress daemon start|stop|status|offline [--json]` are
+  the CLI (`daemon.start_agent`: install the plist, bootstrap or
+  kickstart; `stop_agent`: bootout and wait; `request_offline`: USR1 and
+  wait for `.daemon-offline-ack`); the launcher's `start` runs `daemon
+  start` before the containers, `stop` runs `daemon offline` before
+  `stop_containers` (the hub hears /offline while the tor container is
+  up, as the menubar's Stop did), `quit` runs `daemon stop` first
+  (`.daemon-quitting` tells the daemon to send /offline on its way out;
+  `--no-offline` for an update relaunch) and takes `--leave-menubar`
+  (the menubar's own Quit). The menubar starts the agent when neither
+  `daemon.pid` nor `launchctl print` shows a process
+  (`ensure_daemon_running`, at most every 30 s).
+- **Files**: `~/.onionpress/daemon-state.json` (atomic rename, 0600:
+  pid, version, ports, runtime_ready, is_running/is_ready/has_internet/
+  yellow_since/last_check_complete (the `display_state` inputs, shared
+  as `daemon.display_state_of`), address, healthcheck address, bootstrap
+  %, images_present, wordpress_up, wp_installed, proxy_running, the hub's
+  messages, `pending_question`, `relaunch`, `onionname_collision`,
+  `settings_page_error`, the probe's last code), `daemon.pid`,
+  `onion_address` (the cache, as before), `.setup_complete`. The menubar
+  reads the state every 2 s (`_view_tick`); a state older than 90 s or
+  from a dead pid is "Reconnecting to the OnionPress service..." (icon
+  starting), never "Stopped". Markers the menubar writes for the daemon:
+  `.dismiss-onionheaven-alerts`, `.onionname-retry`; `.upload-analytics`
+  and `.config-changed` are taken by the daemon's tick; `.reopen` stays
+  the menubar's. The Settings page's question the handler stops at goes
+  into `pending_question`; the menubar asks and runs `handle-action
+  --confirmed <what>` / `--cancel` itself.
+- **Logs**: the daemon owns `logs/onionpress-*.log` (and the capture
+  logs); the menubar writes `logs/menubar-*.log`; View Logs opens the
+  daemon's, the launcher's flat `onionpress.log` and its own
+  (`log_rotation.current_log_path` finds another process's active file
+  without writing it). Two processes never write one RotatingLog.
+- **Decisions**: Quit keeps today's meaning (the site goes down: daemon,
+  containers, VM) unless `QUIT_KEEPS_SITE_RUNNING=yes` (`config set`;
+  then Quit closes only the menubar and the daemon keeps the site, the
+  heartbeat and the probe running until `onionpress quit`). `onionpress
+  update` stops the daemon once the new bundle is staged, swaps, and
+  starts it from the new bundle (`updater.download_and_install`'s
+  `before_swap`/`after_swap`), before the menubar relaunches: the daemon
+  executes from the bundle being replaced (the Gatekeeper note above).
+  `onionpress uninstall` stops the daemon before the /unregister and the
+  stop, and removes the agent's plist with the login item.
+- **After editing `src/onionpress/daemon.py`, rebuild the MenubarApp**:
+  the daemon runs the bundle's interpreter and package, like every
+  `onionpress.cli` command. A daemon started from a bundle at another
+  path keeps that path in its plist (`install_agent` rewrites it when it
+  differs).
 
 ## Check/Confirm Protocol
 - Every destructive command speaks it (`src/onionpress/confirm.py`, issue
@@ -1125,8 +1208,8 @@
   hold the key) says so, one signed `/unregister` for the whole address (no
   healthcheck_address: every row, so the hub deletes the key dir) goes to
   the hub the record names, then the record is cleared. Mac:
-  `maybe_unregister_after_opt_out` from check_status (also at startup with
-  `no`), ordered after any heartbeat in flight by `_HUB_LOCK`; Linux:
+  `maybe_unregister_after_opt_out` from the daemon's check_status (also at
+  startup with `no`), ordered after any heartbeat in flight by `_HUB_LOCK`; Linux:
   `_maybe_unregister_after_opt_out` in the daemon, which used to send
   `/offline` on disable (a takeover of a running site, key kept). Retried
   every 15 min while the hub does not answer; "Entry not found" counts as
@@ -1146,14 +1229,15 @@
   onionheaven status`, the uninstall and restore dialogs and the log say what
   remains on which hub. Linux stops the heartbeat client first
   (`stop_heartbeat_client`, user and system unit): it holds the key in
-  memory. A hub change: Mac `maintain_registration` from check_status
-  (`ONIONHEAVEN_ADDRESS` is in `_NEEDS_RESTART`), Linux the daemon; an old hub
+  memory. A hub change: Mac `maintain_registration` from the daemon's
+  check_status (`ONIONHEAVEN_ADDRESS` is in `_NEEDS_RESTART`), Linux the daemon; an old hub
   that does not answer stays in `left_on_hubs`, retried every 15 min. The
   daemon also notices a key replaced under it and unregisters the old one
   with the copy in its memory before it exits. Between processes,
   `_hub_lock` (`_HUB_LOCK` + flock on `~/.onionpress/onionheaven-hub.lock`)
-  and the record's 10-min `released` hold keep the menubar's heartbeat from
-  putting a released key back before the launcher removes it.
+  and the record's 10-min `released` hold keep the Mac daemon's heartbeat
+  from putting a released key back before the launcher removes it;
+  `onionpress uninstall` stops the daemon first (`uninstall.run`).
   `tests/test_onionheaven_lifecycle.py`.
 
 ## Backups Carry Original Images Only (issue #257)
@@ -1214,8 +1298,9 @@
   failed run is a dialog with the CLI's message, never only a log line.
   `src/menubar.py` imports none of `backup`, `hub_backup`, `updater`; it
   uses `key_manager` only to validate an address and `wp_files` only for
-  status writes and wp-cli reads (`tests/test_menubar_actions.py`). A new
-  menu action gets its subcommand first.
+  the first-run setup's wp-cli calls (`tests/test_menubar_actions.py`). A new
+  menu action gets its subcommand first. Nor does it run a loop (phase 3,
+  "The Mac Daemon" below).
 - `wp_files.own(recursive=True)` (put_tree's first step, so every restore)
   never enters a folder named `creations` (My Creations' bind mount), and
   follows no link (find -execdir chown -h), like onionpress-web-root-owner.sh.
@@ -1512,19 +1597,20 @@
 - Each user gets their own `~/.onionpress/` data dir, Colima VM, and Docker containers
 - **Port offsets**: second user auto-detects port 8080 is taken and offsets all ports by +10000 (18080/19050/19077), third user by +20000, etc. Max ~5 users.
 - **Detection uses socket bind test**, not `lsof` — `lsof` only sees the current user's processes and cannot detect ports bound by other users
-- **Port detection must happen in the MenubarApp's `__init__`** (Python socket bind), not in the shell scripts — the MenubarApp launches first and needs the correct ports before the `onionpress` script runs
-- **Module-level constants in `onionpress.onion_proxy`** (`PROXY_PORT`, `PHP_PROXY_PORT`) are set at import time. The MenubarApp must update these globals after detecting the offset: `onion_proxy.PROXY_PORT = self.proxy_port`
-- The `onionpress` shell script also has detection as a fallback (for standalone use), but respects pre-set `ONIONPRESS_PORT_OFFSET` env var from the MenubarApp
+- **Port detection happens in the daemon at its start** (`daemon._resolve_ports_at_start`: `config.resolve_port_offset`, the running stack's published port first, else the bind probe), after `stop_stale_colima` and the `.previous-port-offset` wait that used to be the MenubarApp's `__init__`. The result goes into the daemon's environment (its launcher calls inherit `ONIONPRESS_PORT_OFFSET`) and the state file's `ports`; the menubar takes its ports from there (the environment's or the last state's until the first state lands) and exports them before it runs the launcher
+- **Module-level constants in `onionpress.onion_proxy`** (`PROXY_PORT`, `PHP_PROXY_PORT`) are set at import time. The daemon updates these globals after detecting the offset (`_apply_ports`); the proxy is its
+- The `onionpress` shell script also has detection as a fallback (for standalone use, and for the launchd agent, which starts with no offset in its environment), but respects a pre-set `ONIONPRESS_PORT_OFFSET` env var
 - **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
-- **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP
+- **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP. The daemon's is `daemon.pid`; the agent is per user (`gui/<uid>`), so each user's daemon has its own offset
 - **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
 - `OnionPress.app/` is gitignored — it is assembled at build time from `app/` source. Never commit build output.
 
 ## Browser Extension (issue #318)
 - The extension (`extension/`, shared by both packages; `extension-firefox/`
   holds only the Firefox manifest, test-enforced) routes `.onion` to the
-  menubar's HTTP proxy (`onion_proxy.py`, `127.0.0.1:<proxy_port>`), never
+  Mac daemon's HTTP proxy (`onion_proxy.py`, `127.0.0.1:<proxy_port>`,
+  started by `daemon.start_onion_proxy` while the stack runs), never
   to Tor's SOCKS port (see the Colima gotcha below). The port comes from the
   native messaging host (`get_proxy_port`, from Docker's published WordPress
   port: +10000 per extra macOS user); 9077 without it.
