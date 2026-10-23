@@ -267,6 +267,10 @@ class OnionPressApp(rumps.App):
         os.environ["PATH"] = f"{self.bin_dir}:{os.environ.get('PATH', '')}"
         os.environ["COLIMA_HOME"] = self.colima_home
         os.environ["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
+        # Colima honours COLIMA_HOME only when the directory exists (else it
+        # uses ~/.colima, socket forward included): make it before the
+        # first colima call below, on a fresh install too.
+        os.makedirs(os.environ["LIMA_HOME"], exist_ok=True)
         os.environ["LIMA_INSTANCE"] = "onionpress"
         os.environ["DOCKER_HOST"] = f"unix://{self.colima_home}/default/docker.sock"
         os.environ["DOCKER_CONFIG"] = docker_config_dir
