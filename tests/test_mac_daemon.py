@@ -529,6 +529,7 @@ class TestLaunchdAgent(unittest.TestCase):
         self.assertEqual(p["StandardOutPath"], "/logs/daemon-stdout.log")
         self.assertEqual(p["StandardErrorPath"], "/logs/daemon-stderr.log")
         self.assertNotIn("ONIONPRESS_PORT_OFFSET", p["EnvironmentVariables"])
+        self.assertEqual(p["EnvironmentVariables"]["HOME"], os.path.expanduser("~"))
         p = op_daemon.agent_plist(self.launcher, "/logs", port_offset_env="10000")
         self.assertEqual(p["EnvironmentVariables"]["ONIONPRESS_PORT_OFFSET"], "10000")
 
