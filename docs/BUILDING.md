@@ -51,6 +51,7 @@ make doctor        # which build tools you have, and what each missing one costs
 | browser extensions | `make extension` | any | — |
 | app icons | `make icons` | **macOS** | — |
 | unit tests | `make test-unit` | any | PyPI (PyNaCl, via uv) |
+| unit tests with coverage | `make coverage` | any | PyPI (PyNaCl, coverage, via uv); floors in `build/coverage-floors.sh` |
 | integration tests | see [Integration tests](#integration-tests) | any — **never a machine that runs OnionPress** | — |
 | source layout + pin check | `make test` | any | — |
 

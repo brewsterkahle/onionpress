@@ -53,3 +53,9 @@ tests/onionheaven-stress-results/
 # Commands are shared and travel with the repo; everything else stays local.
 .claude/*
 !.claude/commands/
+
+# make coverage
+.coverage
+.coverage.*
+build/coverage-html/
+build/coverage.xml
