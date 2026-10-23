@@ -336,6 +336,32 @@
   tests run the script and the build script's block against a fake build
   venv and bundle.
 
+## Test suite
+- `make test-unit` runs `tests/` with `unittest discover` (uv, Python 3.14,
+  PyNaCl); **there is no pytest runner**, so every test file must hold
+  `unittest.TestCase` classes: a plain class with bare asserts is
+  collected by nothing (the stress orchestrator's two files were, until
+  2026-10-23). On a Mac that runs OnionPress set
+  `DOCKER_HOST=unix:///var/empty/no-docker-for-tests.sock`: the
+  docker-backed tests then skip instead of reaching the live site (CI's
+  macOS job does the same; it runs on pull requests only, the Linux job
+  is the required check).
+- `make coverage` is the same run under `coverage` (`.coveragerc`:
+  branches; src/onionpress, linux and the tor image's scripts; tests,
+  tests/stress and setup.py left out), then `build/coverage-floors.sh`:
+  total 60 %, `cli.py` 60, `handle_action.py` 85, `confirm.py` 90,
+  `config.py` 85, each a point or two under the measured value. Raise a
+  floor when the tests catch up; never lower one to pass. CI runs the
+  three steps on the Linux job and uploads `coverage.xml` + the HTML
+  report. `tests/test_coverage_gate.py` holds the wiring.
+- **A new `onionpress` subcommand needs a row in
+  `tests/test_cli_dispatch.py`**: the census walks the parser
+  `cli.main()` builds (nested subparsers too) and fails on an
+  `add_parser` without a row saying which handler it reaches with which
+  parsed arguments and what `main` returns (stubs only; the fast paths
+  are checked never to construct `OnionPressCLI`). A grouping subcommand
+  goes in `PARENTS`.
+
 ## Security
 - **Database passwords are randomly generated per install** — never use defaults or hardcoded passwords. The `ensure_secrets` function generates unique passwords with `openssl rand` on first run, saved to `~/.onionpress/secrets`.
 - Do not commit or log database passwords.
