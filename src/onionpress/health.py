@@ -528,16 +528,6 @@ class HealthChecker:
     def _isolation_nonce() -> str:
         return f"onionpress-probe-{int(time.time() * 1000)}-{threading.get_ident()}"
 
-    def check_self_reachability(self, onion_address: str) -> ProbeResult:
-        """Probe our onion through onionpress-tor's own SOCKS.
-
-        Confirmed by timing (15s cold, 1.7s warm) that C Tor routes
-        self-connections through real circuits rather than a local
-        shortcut — so this is a genuine Tor-network probe, just using
-        the same tor instance that also hosts the service.
-        """
-        return self._probe_onion_via("onionpress-tor", onion_address)
-
     # ----- is the external vantage point itself working? ------------------
 
     def check_onionheaven_tor_healthy(self) -> bool:
@@ -1032,7 +1022,6 @@ class HealthChecker:
 
 YELLOW_TO_STUCK_SECONDS = 300      # 5 min in yellow → display "stuck"
 YELLOW_TO_RESTART_SECONDS = 120    # 2 min in yellow → eligible for restart
-YELLOW_TO_WEDGE_WARNING_SECONDS = 600   # 10 min in yellow → emit wedge warning
 RESTART_COOLDOWN_SECONDS = 300     # 5 min between auto-restarts
 RECLAIM_RETRY_SECONDS = 60         # Retry OnionHeaven reclaim every 60s
 # Outcome-verified descriptor republish (issue #266, plan item 1). The
@@ -1080,8 +1069,6 @@ class HealthState:
     reclaim_succeeded: bool = False
     reclaim_in_flight: bool = False
     reclaim_last_attempt: float = 0
-    # Wedge warning: one-shot per yellow episode. Reset when ready.
-    wedge_warning_fired: bool = False
 
 
 class RepublishTrigger:
@@ -1295,8 +1282,6 @@ class HealthMonitor:
             self.state.bootstrap_stall_count = 0
             self.state.reclaim_succeeded = False
             self.state.reclaim_in_flight = False
-            # Re-arm the wedge warning so the next yellow episode can fire it.
-            self.state.wedge_warning_fired = False
             return ServiceState.AVAILABLE
 
         if self.state.was_ready and not result.ready:
@@ -1354,25 +1339,6 @@ class HealthMonitor:
             return True
 
         return False
-
-    def should_emit_wedge_warning(self) -> bool:
-        """Return True exactly once per yellow episode after 10+ min in yellow.
-
-        Mirrors the Mac menubar's one-shot wedge hint (src/menubar.py
-        check_status). The caller logs a platform-appropriate recovery
-        message — on Linux that's `systemctl --user restart onionpress`
-        or restarting Docker; on Mac it's killing Colima.
-
-        Resets when the service becomes ready again (in evaluate()).
-        """
-        if self.state.wedge_warning_fired:
-            return False
-        if self.state.yellow_since is None:
-            return False
-        if (time.time() - self.state.yellow_since) <= YELLOW_TO_WEDGE_WARNING_SECONDS:
-            return False
-        self.state.wedge_warning_fired = True
-        return True
 
     def should_request_republish(self, result: HealthResult) -> bool:
         """Feed this cycle's dual-probe outcome to the republish trigger.
