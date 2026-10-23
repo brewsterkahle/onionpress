@@ -154,6 +154,11 @@ class _DaemonCase(unittest.TestCase):
         self.d.start_clearnet_log_capture = lambda: None
         self.d.stop_web_log_capture = lambda: None
         self.d.stop_container_log_capture = lambda: None
+        self.proxy_stopped = False
+
+        def _stop_proxy():
+            self.proxy_stopped = True
+        self.d.stop_onion_proxy = _stop_proxy
         self.d._hub_loops = lambda: None
         self.d._resync_ports = lambda: None
         self.d.run_launcher = self._run_launcher
@@ -260,6 +265,7 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(s["onion_address"], ADDR)       # the cached address stays visible
         self.d.caffeine.stop.assert_called()
         self.assertIn("Service stopped", "".join(self._log_text()))
+        self.assertTrue(self.proxy_stopped)
 
     def _log_text(self):
         logs = os.path.join(self.dir, "logs")
@@ -816,7 +822,7 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertIn("--no-offline", body)
 
     def test_daemon_case_delegates(self):
-        self.assertIn('onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"',
+        self.assertIn('exec "$_BUNDLED_PYTHON_BIN" -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"',
                       self.cases["daemon"])
         self.assertIn('daemon.pid', self.cases["upload-analytics"])
 

@@ -2917,16 +2917,18 @@ main() {
             MENUBAR_PID=""
             if [ "${2:-}" = "--leave-menubar" ]; then
                 log "quit: run from the menubar (it quits itself)"
-            elif [ -f "$PIDFILE" ]; then
-                MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
+            elif [ -f "$DATA_DIR/menubar.pid" ]; then
+                # The MenubarApp's own pid file (src/menubar.py writes it;
+                # $PIDFILE is the start lock, never the app's pid).
+                MENUBAR_PID=$(cat "$DATA_DIR/menubar.pid" 2>/dev/null | tr -d '[:space:]')
             fi
             if [ "${2:-}" != "--leave-menubar" ] && { [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; }; then
-                # Match the py2app-frozen MenubarApp binary path, anchored
-                # so only a command line that IS that executable matches —
-                # not a shell, grep or tail that merely names the path in
-                # its arguments (a bare substring match would SIGTERM
-                # those instead of the app).
-                MENUBAR_PID=$(pgrep -u "$(whoami)" -f '^[^ ]*MenubarApp/Contents/MacOS/OnionPress( |$)' 2>/dev/null | head -1)
+                # Match THIS bundle's py2app-frozen MenubarApp binary path,
+                # anchored so only a command line that IS that executable
+                # matches — not a shell, grep or tail that merely names the
+                # path in its arguments, and not another bundle's app (a
+                # test copy beside the installed one).
+                MENUBAR_PID=$(pgrep -u "$(whoami)" -f "^$RESOURCES_DIR/MenubarApp/Contents/MacOS/OnionPress( |$)" 2>/dev/null | head -1)
             fi
 
             if [ -n "$MENUBAR_PID" ] && kill -0 "$MENUBAR_PID" 2>/dev/null; then
@@ -3492,7 +3494,10 @@ main() {
             # (onionpress.daemon, issue #367): `daemon start|stop|status|
             # offline [--json]`, or `daemon` (run in the foreground: what
             # the agent's plist runs, with this script's environment).
-            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
+            # exec, not a child: launchd's pid is then the daemon itself, so
+            # its TERM (bootout, `daemon stop`) reaches the Python process
+            # (AbandonProcessGroup leaves children alone on purpose).
+            PYTHONHOME="$_BUNDLED_PYTHONHOME" exec "$_BUNDLED_PYTHON_BIN" -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
             ;;
 
         apply-config)

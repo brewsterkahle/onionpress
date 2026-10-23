@@ -359,7 +359,10 @@ wp_is_installed() { return 1; }
 
 class TestMacMenubar(unittest.TestCase):
     def setUp(self):
-        self.src = _read("src/menubar.py")
+        # The status writer is the daemon's (onionpress.daemon, #367); the
+        # menubar writes nothing into the shared volume.
+        self.src = _read("src/onionpress/daemon.py")
+        self.menubar = _read("src/menubar.py")
 
     def test_status_and_logs_written_scrubbed(self):
         body = _between(self.src, "    def write_status_to_volume(self):",
@@ -377,10 +380,12 @@ class TestMacMenubar(unittest.TestCase):
                         "    # -- the containers --")
         self.assertIn("redact.scrub_json_for_wordpress(data, self.paths.data_dir)", body)
         self.assertNotIn("def _write_result", self.src)
+        self.assertNotIn("def _write_result", self.menubar)
 
     def test_only_these_writers_reach_the_shared_files(self):
         for name in ("recent-logs.txt", "status.json"):
             self.assertEqual(self.src.count(f"/var/lib/onionpress/{name}"), 1, name)
+            self.assertNotIn(f"/var/lib/onionpress/{name}", self.menubar, name)
 
 
 class TestStatusPageIsTheOwners(unittest.TestCase):

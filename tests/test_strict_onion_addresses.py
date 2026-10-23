@@ -182,9 +182,12 @@ class TestConfiguredHubAddress(unittest.TestCase):
                     self.assertTrue(all("evil" not in m for m in app.logs))
 
     def test_menubar_reads_the_hub_through_it(self):
-        src = _read("src/menubar.py")
-        self.assertIn("onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(", src)
+        # The hub address is read by the daemon (onionpress.daemon, #367),
+        # at start and when `config set ONIONHEAVEN_ADDRESS` leaves the marker.
+        src = _read("src/onionpress/daemon.py")
+        self.assertEqual(src.count("onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address("), 2)
         self.assertNotIn("onionheaven.ONIONHEAVEN_ADDRESS = oh_addr", src)
+        self.assertNotIn("onionheaven.ONIONHEAVEN_ADDRESS =", _read("src/menubar.py"))
 
 
 class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):

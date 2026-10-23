@@ -32,14 +32,15 @@ def _read(path):
 
 class TestMacThumbnailsStartAtLaunch(unittest.TestCase):
     def test_started_in_init_before_auto_start(self):
-        src = _read(MENUBAR)
-        init = src[src.index("    def __init__(self"):src.index("    def show_launch_splash")]
-        self.assertIn("self.start_thumbnail_generator()", init)
-        self.assertLess(init.index("self.start_thumbnail_generator()"),
-                        init.index("target=self.auto_start"))
+        # The generator runs in the daemon (onionpress.daemon, #367), from
+        # its start, beside the status loop.
+        src = _read("src/onionpress/daemon.py")
+        run = src[src.index("    def run(self):"):src.index("    def _main_loop_once(")]
+        self.assertIn("self.start_thumbnail_generator()", run)
+        self.assertNotIn("start_thumbnail_generator", _read(MENUBAR))
 
     def test_generator_prunes_and_module_is_bundled(self):
-        src = _read(MENUBAR)
+        src = _read("src/onionpress/daemon.py")
         self.assertIn("thumbnails.prune(creations_dir, orphans)", src)
         self.assertIn("'onionpress.thumbnails'", _read(SETUP))
 
