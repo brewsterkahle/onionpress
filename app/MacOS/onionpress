@@ -293,6 +293,15 @@ export PATH="$BIN_DIR:$PATH"
 export PYTHONDONTWRITEBYTECODE=1
 export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
+# Colima (v0.8.1, config/files.go configBaseDir) honours $COLIMA_HOME only
+# when the directory already exists; otherwise it silently uses ~/.colima
+# for its config and for the Docker socket it has Lima forward
+# (`hostSocket:` in the instance's lima.yaml). Launchers through 2.5.6
+# left the directory for Colima to create, so a fresh install's first
+# `colima start` put the socket at ~/.colima/default/docker.sock while
+# ensure_docker_socket waited at ours, and the start failed with Docker
+# healthy. Both directories exist before anything below runs Colima.
+mkdir -p "$LIMA_HOME"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 # Also where Colima's own `docker context` create/use/rm calls land: never
@@ -807,10 +816,71 @@ ensure_docker_socket() {
     done
 
     log "ERROR: Docker socket never appeared at $socket_path after ${wait_secs}s"
-    log "  Lima's forward for the VM's /var/run/docker.sock is down."
+    if docker_socket_forward_is_foreign; then
+        log "  Lima forwards the VM's /var/run/docker.sock to $(docker_socket_forwards | tr '\n' ' ')instead (the VM was created before \$COLIMA_HOME existed); the Docker wait restarts the VM through Colima to re-point it."
+    else
+        log "  Lima's forward for the VM's /var/run/docker.sock is down."
+    fi
     log "  Diagnose: $COLIMA_HOME/_lima/colima/ha.stderr.log"
-    log "  Recover:  \"$BIN_DIR/colima\" stop && \"$BIN_DIR/colima\" start"
+    log "  Recover:  quit OnionPress, \"$BIN_DIR/colima\" stop, start OnionPress again (never a bare colima \"start\": without OnionPress's flags it mounts the whole home folder into the VM)"
     return 1
+}
+
+# The host paths Lima forwards the VM's Docker socket to: every hostSocket
+# of the instance's lima.yaml, which Colima writes from its config
+# directory at each start. Nothing is printed without a VM.
+docker_socket_forwards() {
+    sed -n 's/^[[:space:]]*hostSocket:[[:space:]]*//p' "$LIMA_HOME/colima/lima.yaml" 2>/dev/null \
+        | sed 's/^"\(.*\)"$/\1/'
+}
+
+# True when Lima forwards the VM's Docker socket somewhere outside
+# $COLIMA_HOME: a VM created by a launcher through 2.5.6 on a fresh
+# install, where Colima resolved its directory to ~/.colima (see the mkdir
+# at the top). DOCKER_HOST can never answer through that forward.
+docker_socket_forward_is_foreign() {
+    local path
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue  # no VM yet: nothing is foreign
+        case "$path" in
+            "$COLIMA_HOME"/*) ;;
+            *) return 0 ;;
+        esac
+    done <<EOF
+$(docker_socket_forwards)
+EOF
+    return 1
+}
+
+# Re-point a foreign Docker socket forward: stop the VM through Colima and
+# start it again with OnionPress's VM settings. Now that $COLIMA_HOME
+# exists, Colima regenerates lima.yaml with hostSocket under it (the
+# `colima stop && colima start` the socket wait's error line used to
+# recommend, with the flags). A Lima-level restart, the recovery for the
+# sshd wedge, cannot change the forward: it boots the same lima.yaml. $1
+# labels the log lines with the caller.
+recover_docker_socket_forward() {
+    local who="$1" cpu=2 memory=2 disk=20 value
+    log "$who: Lima forwards the VM's Docker socket to $(docker_socket_forwards | tr '\n' ' ')— not $COLIMA_HOME/default/docker.sock, where OnionPress waits for it. Restarting the VM through Colima to re-point it"
+    if [ -f "$DATA_DIR/config" ]; then
+        value=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2); [ -n "$value" ] && cpu="$value"
+        value=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2); [ -n "$value" ] && memory="$value"
+        value=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2); [ -n "$value" ] && disk="$value"
+    fi
+    if ! "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1; then
+        log "$who: colima stop failed — forcing"
+        "$BIN_DIR/colima" stop -f >> "$LOG_FILE" 2>&1 || true
+    fi
+    if ! colima_start_with_vm_settings "$cpu" "$memory" "$disk"; then
+        log "$who: Colima could not start the VM — giving up; see $LOG_FILE"
+        return 1
+    fi
+    if docker_socket_forward_is_foreign; then
+        log "$who: the VM restarted but Lima still forwards the Docker socket to $(docker_socket_forwards | tr '\n' ' ')— giving up"
+        return 1
+    fi
+    log "$who: VM restarted; Lima now forwards the Docker socket to $COLIMA_HOME/default/docker.sock"
+    return 0
 }
 
 # Ensure both key formats exist in a directory: C Tor's key files and the
@@ -1366,6 +1436,48 @@ setup_bundled_plugins() {
 # any clearnet leaks.  On existing installs the plugin is deactivated on the
 # next launch (see deactivate_wp_statistics below).
 
+# `colima start` with every setting the VM is created with: the two
+# mounts, CPUs, memory, the diffdisk cap and the backend for this
+# architecture. install_docker creates the VM with it; the Docker socket
+# recovery below restarts an existing VM with it, because that VM's
+# Colima config was saved under ~/.colima (see the mkdir at the top) and
+# a start without these flags would give it Colima's defaults: the whole
+# home folder mounted, 100 GiB of disk. On an existing VM Colima keeps
+# the backend, mount type and architecture it was created with.
+colima_start_with_vm_settings() {
+    local cpu="$1" memory="$2" disk="$3"
+    if [ "$VM_ARCH" = "aarch64" ]; then
+        # Apple Silicon: use VZ backend (Virtualization.framework)
+        "$BIN_DIR/colima" start \
+            --activate=false \
+            --ssh-config=false \
+            --vm-type vz \
+            --mount-type virtiofs \
+            --mount "$DATA_DIR/shared:w" \
+            $(docs_mount_args) \
+            --cpu "$cpu" \
+            --memory "$memory" \
+            --disk "$disk" \
+            --arch "$VM_ARCH" \
+            --vz-rosetta=false \
+            >> "$LOG_FILE" 2>&1
+    else
+        # Intel: use QEMU backend
+        "$BIN_DIR/colima" start \
+            --activate=false \
+            --ssh-config=false \
+            --vm-type qemu \
+            --mount-type sshfs \
+            --mount "$DATA_DIR/shared:w" \
+            $(docs_mount_args) \
+            --cpu "$cpu" \
+            --memory "$memory" \
+            --disk "$disk" \
+            --arch "$VM_ARCH" \
+            >> "$LOG_FILE" 2>&1
+    fi
+}
+
 # Function to initialize container runtime
 install_docker() {
     log "Container runtime initialization required"
@@ -1396,38 +1508,7 @@ install_docker() {
     log "Creating the Colima VM with a ${VM_DISK}GB diffdisk cap"
 
     # Should not happen if launcher worked, but handle it
-    if [ "$VM_ARCH" = "aarch64" ]; then
-        # Apple Silicon: use VZ backend (Virtualization.framework)
-        "$BIN_DIR/colima" start \
-            --activate=false \
-            --ssh-config=false \
-            --vm-type vz \
-            --mount-type virtiofs \
-            --mount "$DATA_DIR/shared:w" \
-            $(docs_mount_args) \
-            --cpu "$VM_CPU" \
-            --memory "$VM_MEMORY" \
-            --disk "$VM_DISK" \
-            --arch "$VM_ARCH" \
-            --vz-rosetta=false \
-            >> "$LOG_FILE" 2>&1
-    else
-        # Intel: use QEMU backend
-        "$BIN_DIR/colima" start \
-            --activate=false \
-            --ssh-config=false \
-            --vm-type qemu \
-            --mount-type sshfs \
-            --mount "$DATA_DIR/shared:w" \
-            $(docs_mount_args) \
-            --cpu "$VM_CPU" \
-            --memory "$VM_MEMORY" \
-            --disk "$VM_DISK" \
-            --arch "$VM_ARCH" \
-            >> "$LOG_FILE" 2>&1
-    fi
-
-    if [ $? -eq 0 ]; then
+    if colima_start_with_vm_settings "$VM_CPU" "$VM_MEMORY" "$VM_DISK"; then
         touch "$COLIMA_HOME/.initialized"
         log "Container runtime initialized successfully"
         return 0
@@ -1636,6 +1717,15 @@ recover_lima_vm() {
 # launcher's own `colima start`). $2 labels the log lines with the caller.
 wait_for_docker_or_recover_vm() {
     local limit="$1" who="$2"
+    # Docker cannot answer through a forward aimed outside $COLIMA_HOME,
+    # so there is nothing to wait for first: re-point it (a Running VM
+    # only; a stopped one gets its lima.yaml rewritten by the launcher's
+    # own `colima start`), then wait.
+    if docker_socket_forward_is_foreign && lima_vm_running; then
+        recover_docker_socket_forward "$who" || return 1
+        wait_for_docker "$limit"
+        return $?
+    fi
     if wait_for_docker "$limit"; then
         return 0
     fi
@@ -3010,7 +3100,11 @@ main() {
             # The same recovery runs from the start path when its Docker
             # wait times out (see wait_for_docker_or_recover_vm).
             if ! docker info >/dev/null 2>&1; then
-                recover_lima_vm restart || exit 1
+                if docker_socket_forward_is_foreign && lima_vm_running; then
+                    recover_docker_socket_forward restart || exit 1
+                else
+                    recover_lima_vm restart || exit 1
+                fi
                 log "restart: resuming normal restart"
             fi
             setup_db_passwords
