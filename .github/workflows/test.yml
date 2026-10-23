@@ -69,3 +69,46 @@ jobs:
         run: |
           python -m pip install "pynacl==1.5.0"
           python -m unittest tests.test_backup_manager tests.test_backup_metadata_validation tests.test_hub_backup_sealed
+
+  macos-tests:
+    name: Python unit tests (macOS)
+    # The Mac is what ships: the Darwin-only tests (sips/iconutil for the
+    # generated assets, BSD sed in the address-prefix tests) run only here,
+    # and the bash harnesses run under /bin/bash 3.2, the shell the
+    # launchers and build scripts get on a user's Mac (CI's Linux job runs
+    # them under bash 5). macOS runner minutes cost ten times Linux's, so
+    # this job runs on pull requests only; the Linux job stays the
+    # required check on every push and PR.
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install test dependencies
+        run: python -m pip install "pynacl>=1.5.0"
+
+      # Both launchers must parse under the Mac's own /bin/bash (3.2).
+      - name: Launchers parse under /bin/bash 3.2
+        run: |
+          /bin/bash --version | head -1
+          /bin/bash -n app/MacOS/onionpress
+          /bin/bash -n app/MacOS/launcher.sh
+          /bin/bash -n linux/onionpress
+
+      # The PHP harnesses (mu-plugin tests) skip without php; the macOS
+      # runner image does not carry one, and the Linux job runs them.
+      - name: PHP
+        run: command -v php && php --version | head -1 || echo "php absent: the PHP-harness tests skip here (the Linux job runs them)"
+
+      # DOCKER_HOST points at nothing: the docker-backed tests skip
+      # instead of reaching a daemon (a developer's Mac runs the live
+      # site; the runner has no Docker at all).
+      - name: Run all tests
+        env:
+          DOCKER_HOST: unix:///var/empty/no-docker-for-tests.sock
+        run: python -m unittest discover tests -p "test_*.py"
