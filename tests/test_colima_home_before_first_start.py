@@ -93,13 +93,20 @@ class TestDirectoriesExistBeforeColimaRuns(unittest.TestCase):
                         self.fail(f"a bare colima call, not $BIN_DIR/colima: {line.strip()}")
 
     def test_menubar_creates_the_directories_before_its_first_colima_call(self):
-        text = _read(MENUBAR)
+        # The Colima calls are the daemon's (onionpress.daemon, #367): its
+        # _setup_environment makes the directory before _resolve_ports_at_start's
+        # stop_stale_colima. The menubar still makes it for its own children.
         makedirs = 'os.makedirs(os.environ["LIMA_HOME"], exist_ok=True)'
-        self.assertIn(makedirs, text)
-        self.assertLess(text.index('os.environ["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")'),
-                        text.index(makedirs))
-        self.assertLess(text.index(makedirs),
-                        min(text.index("stop_stale_colima("), text.index("[colima_bin,")))
+        for rel in (MENUBAR, "src/onionpress/daemon.py"):
+            text = _read(rel)
+            self.assertIn(makedirs, text, rel)
+            self.assertLess(text.index('os.environ["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")'),
+                            text.index(makedirs), rel)
+        text = _read("src/onionpress/daemon.py")
+        self.assertLess(text.index(makedirs), text.index("stop_stale_colima("))
+        run = text[text.index("    def run(self):"):text.index("    def _main_loop_once(")]
+        self.assertLess(run.index("self._setup_environment()"), run.index("self._resolve_ports_at_start()"))
+        self.assertNotIn("stop_stale_colima(", _read(MENUBAR))
 
     def test_python_wrapper_creates_the_directories_on_every_run(self):
         text = _read(WRAPPER)
