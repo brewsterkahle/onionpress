@@ -86,6 +86,7 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
     FILES = (
         "src/onionpress/onionheaven.py",
         "src/menubar.py",
+        "src/onionpress/daemon.py",
         "linux/onionpress-heartbeat.py",
         "linux/onionpress-tray",
         "linux/onionpress",
@@ -126,7 +127,10 @@ class TestNoStartupPrompt(unittest.TestCase):
         text = _read("src/menubar.py")
         self.assertNotIn("prompt_enable_onionheaven", text)
         self.assertNotIn("_onionheaven_prompt_shown", text)
-        self.assertIn('if onionheaven.get_registration_choice(self) == "yes":', text)
+        # The gate is the daemon's status pass (onionpress.daemon).
+        daemon = _read("src/onionpress/daemon.py")
+        self.assertIn('if onionheaven.get_registration_choice(self) == "yes":', daemon)
+        self.assertNotIn("prompt_enable_onionheaven", daemon)
         self.assertNotIn("REGISTRATION_PROMPT", _read("src/onionpress/onionheaven.py"))
 
     def test_linux_tray_does_not_ask(self):

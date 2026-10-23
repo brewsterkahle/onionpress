@@ -424,9 +424,15 @@ class TestUninstallRun(unittest.TestCase):
                 mock.patch.object(uninstall, "hubs_holding_key", return_value=[(ADDR, HUB)]), \
                 mock.patch("onionpress.cli.release_onionheaven", return_value=["left"]) as release, \
                 mock.patch.object(uninstall.login_item, "remove", return_value=True) as remove, \
+                mock.patch.object(uninstall.op_daemon, "stop_agent", return_value=True) as stop_daemon, \
+                mock.patch.object(uninstall.op_daemon, "remove_agent") as remove_agent, \
                 mock.patch.object(uninstall.time, "sleep"):
             remaining = uninstall.run(paths, mock.Mock(), lambda m: None, "/x/onionpress")
         self.assertEqual(remaining, ["left"])
+        # The daemon (its heartbeat holds the key) stops before the release.
+        stop_daemon.assert_called_once()
+        self.assertFalse(stop_daemon.call_args.kwargs.get("offline", True))
+        remove_agent.assert_called_once()
         release.assert_called_once()
         self.assertEqual(calls[0], ["/x/onionpress", "stop"])
         self.assertEqual([c[1] for c in calls[1:3]], ["stop", "delete"])

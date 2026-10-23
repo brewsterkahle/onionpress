@@ -483,24 +483,28 @@ class TestMaintain(_MacCase):
         self.assertIn("ONIONHEAVEN_ADDRESS", op_config.NEEDS_RESTART)
 
     def test_menubar_wiring(self):
-        src = _read("src/menubar.py")
+        # The loops are the daemon's (onionpress.daemon, issue #367): the
+        # opt-out and the upkeep run from its status pass.
+        src = _read("src/onionpress/daemon.py")
         i = src.index("onionheaven.maybe_unregister_after_opt_out(self)")
         self.assertIn("onionheaven.maintain_registration(self)", src[i:i + 200])
-        # Uninstall: this process's heartbeats end, then `onionpress
-        # uninstall` (the release, then the stop: onionpress.uninstall).
-        body = src[src.index("def do_uninstall():"):]
-        self.assertLess(body.index("onionheaven.end_hub_traffic(self)"),
-                        body.index('["uninstall", "--json", *flags]'))
-        self.assertNotIn("onionheaven.unregister_from_onionheaven(self)", src)
-        self.assertNotIn("onionheaven.release_registration(self", src)
+        menubar = _read("src/menubar.py")
+        for name in ("maybe_unregister_after_opt_out", "maintain_registration",
+                     "start_registration_thread", "end_hub_traffic",
+                     "unregister_from_onionheaven", "release_registration"):
+            self.assertNotIn(f"onionheaven.{name}(", menubar, name)
+        # Uninstall: `onionpress uninstall` stops the daemon (its heartbeat
+        # holds the key), then the release, then the stop (onionpress.uninstall).
         uninstall = _read("src/onionpress/uninstall.py")
+        self.assertLess(uninstall.index("op_daemon.stop_agent("),
+                        uninstall.index('release_onionheaven("uninstall"'))
         self.assertLess(uninstall.index('release_onionheaven("uninstall"'),
                         uninstall.index('[launcher, "stop"]'))
         # Not running: the CLI's check asks "hub-holds-key" before "uninstall"
         # (the DELETE confirmation); the menubar asks in that order.
         self.assertLess(uninstall.index('"hub-holds-key", confirmed'),
                         uninstall.index('"uninstall", confirmed'))
-        proceed = src[src.index("def _proceed_with_uninstall(self):"):]
+        proceed = menubar[menubar.index("def _proceed_with_uninstall(self):"):]
         self.assertLess(proceed.index('["uninstall", "--check", "--json", *flags]'),
                         proceed.index("def do_uninstall():"))
         # The Settings page's restore releases before the key is replaced

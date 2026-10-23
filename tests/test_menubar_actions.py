@@ -105,15 +105,19 @@ class TestImports(unittest.TestCase):
         # docker calls left (status.json, the address, wp-cli reads).
         for name in ("backup", "restore", "check_for_updates", "_install_update",
                      "update_docker_images", "uninstall", "_proceed_with_uninstall",
-                     "poll_settings_page", "_settings_page_run", "_handle_action"):
+                     "_view_tick", "_apply_state", "_answer_settings_page_question"):
             with self.subTest(method=name):
                 body = _method(self.src, name)
                 self.assertNotIn('"docker"', body)
                 self.assertNotIn("self._docker.", body)
 
     def test_the_status_loop_runs_handle_action(self):
-        self.assertIn("self.write_status_to_volume()\n                self.poll_settings_page()",
-                      self.src)
+        # The status loop is the daemon's (onionpress.daemon, issue #367):
+        # it runs handle-action every tick and leaves the question it
+        # stops at in its state for the menubar.
+        daemon = open(os.path.join(PROJECT_ROOT, "src", "onionpress", "daemon.py"), encoding="utf-8").read()
+        self.assertIn("self.write_status_to_volume()\n                self.poll_settings_page()", daemon)
+        self.assertIn('[self.launcher_script, "handle-action", "--json", *args]', self.src)
 
 
 class TestDialogs(unittest.TestCase):
@@ -201,7 +205,7 @@ class TestFailuresSurface(unittest.TestCase):
                             ("check_for_updates", 'title="Update Check Failed"'),
                             ("_install_update", '"Update Failed",\n            f"Could not install the update automatically.\\n\\n{failure}'),
                             ("_proceed_with_uninstall", 'title="Uninstall Error"'),
-                            ("_settings_page_failed", '"Settings Page Requests Not Handled"')):
+                            ("_apply_state", '"Settings Page Requests Not Handled"')):
             with self.subTest(name=name):
                 self.assertIn(shown, _method(src, name))
 

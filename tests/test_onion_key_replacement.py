@@ -655,10 +655,18 @@ class TestMenubarAsksThePersonAtTheMac(unittest.TestCase):
         app.show_native_alert.assert_not_called()
 
     def test_the_poll_runs_the_answer_back(self):
+        # The daemon's tick runs handle-action and puts the question it
+        # stops at in its state (onionpress.daemon); the menubar asks and
+        # runs the answer back itself.
+        daemon = _read("src/onionpress/daemon.py")
+        body = daemon[daemon.index("def _settings_page_run(self):"):daemon.index("def _handle_action(self, args):")]
+        self.assertIn('self._pending_question = question', body)
+        self.assertNotIn("--confirmed", body)
         src = _read("src/menubar.py")
-        body = src[src.index("def _settings_page_run(self):"):src.index("def _handle_action(self, args):")]
-        self.assertIn('["--confirmed", result["confirm"]] if answered_yes else ["--cancel"]', body)
-        self.assertIn('[self.launcher_script, "handle-action", "--json", *args]', src)
+        body = src[src.index("def _answer_settings_page_question(self, question):"):]
+        body = body[:body.index("\n    def ")]
+        self.assertIn('["--confirmed", question["confirm"]] if answered_yes else ["--cancel"]', body)
+        self.assertIn('[self.launcher_script, "handle-action", "--json", *args]', body)
         # The dialog gives up after 5 minutes: no answer is Cancel.
         self.assertIn("max_wait = 300", _menubar_method("show_native_alert"))
 

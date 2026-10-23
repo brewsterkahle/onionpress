@@ -64,8 +64,10 @@ class TestTipCopy(unittest.TestCase):
         """Every menu title or path a tip mentions must exist in menubar.py."""
         menubar = _read("src/menubar.py")
         for needle in ('"Open in Tor Browser"', '"Copy Onion Address"',
-                       '"~/OnionPress/backups"', '"~/OnionPress/Creations/My Creations"'):
+                       '"~/OnionPress/backups"'):
             self.assertIn(needle, menubar, needle)
+        # The thumbnails (and that folder) are the daemon's (onionpress.daemon).
+        self.assertIn('"~/OnionPress/Creations/My Creations"', _read("src/onionpress/daemon.py"))
         joined = " ".join(SPLASH_TIPS)
         self.assertIn("Open in Tor Browser", joined)
         self.assertIn("Copy Onion Address", joined)
