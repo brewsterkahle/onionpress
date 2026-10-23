@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """The unit tests' coverage gate (`make coverage`, CI's coverage steps):
 .coveragerc measures what ships, build/coverage-floors.sh holds the total
-and the per-file floors, and CI runs the same three steps as the Makefile."""
+and the per-file floors, and CI runs the same three steps as the Makefile.
+The macOS job runs the suite where the Darwin-only tests and the bash 3.2
+harnesses can, with DOCKER_HOST pointing at nothing."""
 
 import os
 import re
@@ -64,6 +66,17 @@ class TestWorkflow(unittest.TestCase):
         self.assertIn("actions/upload-artifact@", self.text)
         # The PyNaCl 1.5.0 pass stays.
         self.assertIn('pip install "pynacl==1.5.0"', self.text)
+
+    def test_macos_job(self):
+        self.assertIn("  macos-tests:", self.text)
+        job = self.text[self.text.index("  macos-tests:"):]
+        self.assertRegex(job, r"runs-on: macos-1[45]")
+        self.assertIn("if: github.event_name == 'pull_request'", job)
+        self.assertIn("DOCKER_HOST: unix:///var/empty/no-docker-for-tests.sock", job)
+        self.assertIn('pip install "pynacl>=1.5.0"', job)
+        for launcher in ("app/MacOS/onionpress", "app/MacOS/launcher.sh", "linux/onionpress"):
+            self.assertIn(f"/bin/bash -n {launcher}", job)
+        self.assertIn('unittest discover tests -p "test_*.py"', job)
 
 
 if __name__ == "__main__":
