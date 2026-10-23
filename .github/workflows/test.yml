@@ -25,11 +25,43 @@ jobs:
 
       # PyNaCl (libsodium) encrypts backups (backup format 2): the Mac bundle
       # ships the latest release, the Linux package depends on python3-nacl.
+      # coverage measures the run (.coveragerc: branches, what ships).
       - name: Install test dependencies
-        run: python -m pip install "pynacl>=1.5.0"
+        run: python -m pip install "pynacl>=1.5.0" coverage
 
-      - name: Run all tests
-        run: python -m unittest discover tests -p "test_*.py" -v
+      # The whole suite, measured. A failing test fails here; the floors
+      # (the total and the files whose logic the tests exist for) are the
+      # next step's, so a coverage drop reads as its own failure.
+      - name: Run all tests under coverage
+        run: >
+          python -m coverage run --branch
+          --source=src/onionpress,linux,app/Resources/docker/tor
+          -m unittest discover tests -p "test_*.py" -v
+
+      - name: Coverage report
+        run: python -m coverage report --skip-empty
+
+      # build/coverage-floors.sh: the total and per-file floors, each a
+      # point or two under the measured value. Raise one when the tests
+      # catch up; never lower one to pass.
+      - name: Coverage floors
+        run: ./build/coverage-floors.sh
+
+      - name: Coverage files
+        if: always()
+        run: |
+          python -m coverage xml
+          python -m coverage html
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            build/coverage.xml
+            build/coverage-html/
+          if-no-files-found: ignore
 
       # 1.5.0 is the python3-nacl of Debian 12/13 and Ubuntu 22.04/24.04,
       # what Linux installs run: the backup tests again against it.

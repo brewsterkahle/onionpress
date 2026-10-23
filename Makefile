@@ -1,5 +1,5 @@
 .PHONY: help images images-multiarch dev-up dev-down extension icons \
-        dmg deb build build-simple test test-unit doctor clean clean-cache install
+        dmg deb build build-simple test test-unit coverage doctor clean clean-cache install
 
 help:
 	@echo "OnionPress Build System"
@@ -21,6 +21,7 @@ help:
 	@echo "  make doctor       - Report which build tools you have and lack"
 	@echo "  make test         - Check the source layout is intact"
 	@echo "  make test-unit    - Run the Python unit tests"
+	@echo "  make coverage     - The unit tests under coverage, with the floors"
 	@echo ""
 	@echo "Housekeeping:"
 	@echo "  make clean        - Remove build outputs"
@@ -118,6 +119,17 @@ test-unit:
 		exit 1; \
 	fi
 	uv run --python 3.14 --with 'pynacl>=1.5.0' python -m unittest discover tests -p 'test_*.py'
+
+# The same run under coverage (.coveragerc: branches, what ships), then the
+# floors in build/coverage-floors.sh and an HTML report in
+# build/coverage-html/. CI runs the same three steps.
+coverage:
+	uv run --python 3.14 --with 'pynacl>=1.5.0' --with coverage \
+	    python -m coverage run -m unittest discover tests -p 'test_*.py'
+	uv run --python 3.14 --with 'pynacl>=1.5.0' --with coverage \
+	    python -m coverage report --skip-empty
+	uv run --python 3.14 --with coverage ./build/coverage-floors.sh
+	uv run --python 3.14 --with coverage python -m coverage html
 
 # ─── Housekeeping ───────────────────────────────────────────────────────
 

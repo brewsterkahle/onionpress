@@ -1,0 +1,25 @@
+# Coverage of the Python unit tests (`make coverage`, CI's coverage step).
+# Measured with branches over what ships: the onionpress package, the Linux
+# entry points and the tor image's scripts. The tests themselves, the
+# stress orchestrator (a test tool) and setup.py are left out, so the
+# numbers are the test-strategy review's (2026-10-23).
+[run]
+branch = True
+source =
+    src/onionpress
+    linux
+    app/Resources/docker/tor
+omit =
+    tests/*
+    tests/stress/*
+    setup.py
+
+[report]
+skip_empty = True
+precision = 0
+
+[html]
+directory = build/coverage-html
+
+[xml]
+output = build/coverage.xml
