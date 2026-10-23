@@ -246,7 +246,10 @@ def agent_plist(launcher_script, logs_dir, port_offset_env=None):
         "LimitLoadToSessionType": "Aqua",
         "StandardOutPath": os.path.join(logs_dir, "daemon-stdout.log"),
         "StandardErrorPath": os.path.join(logs_dir, "daemon-stderr.log"),
-        "EnvironmentVariables": {"ONIONPRESS_DAEMON_LAUNCHD": "1"},
+        # launchd sets HOME itself; spelled out so the agent of a test
+        # install (HOME under /tmp) never reaches the user's ~/.onionpress.
+        "EnvironmentVariables": {"ONIONPRESS_DAEMON_LAUNCHD": "1",
+                                 "HOME": os.path.expanduser("~")},
     }
     if port_offset_env is not None:
         plist["EnvironmentVariables"]["ONIONPRESS_PORT_OFFSET"] = str(port_offset_env)
