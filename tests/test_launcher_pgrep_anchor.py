@@ -39,7 +39,15 @@ class TestScriptsUseAnchoredPattern(unittest.TestCase):
 
     def test_anchored_pattern_present(self):
         for rel in self.SCRIPTS:
-            self.assertIn(f"pgrep -u \"$(whoami)\" -f '{ANCHORED}'", _read(rel), rel)
+            text = _read(rel)
+            if rel.endswith("/onionpress"):
+                # The launcher's quit looks for THIS bundle's app (a test copy
+                # beside the installed one must not be stopped), anchored
+                # the same way (issue #367).
+                self.assertIn('pgrep -u "$(whoami)" -f "^$RESOURCES_DIR/MenubarApp/Contents/MacOS/OnionPress( |$)"',
+                              text, rel)
+            else:
+                self.assertIn(f"pgrep -u \"$(whoami)\" -f '{ANCHORED}'", text, rel)
 
     def test_bare_substring_pattern_gone(self):
         for rel in self.SCRIPTS:

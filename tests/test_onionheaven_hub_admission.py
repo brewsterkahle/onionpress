@@ -401,20 +401,28 @@ class LinuxClientClaimTest(unittest.TestCase):
 class MenubarHubFlagTest(unittest.TestCase):
     """#235: is_onionheaven is identity, set with the address."""
 
-    SRC = _read("src/menubar.py")
+    # The loops are the daemon's (onionpress.daemon, #367); the menubar
+    # takes the flag from its state, and from the cached address at init.
+    SRC = _read("src/onionpress/daemon.py")
+    MENUBAR = _read("src/menubar.py")
     ASSIGN = "self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)"
 
     def test_set_from_the_cached_address_at_init(self):
-        init = self.SRC[self.SRC.index("cached_addr_file = "):]
-        self.assertIn(self.ASSIGN, init[:init.index("self._onionheaven_checked = False")])
+        init = self.SRC[self.SRC.index("cached = op_config.cached_onion_address"):]
+        self.assertIn(self.ASSIGN, init[:init.index("self.healthcheck_address = None")])
+        init = self.MENUBAR[self.MENUBAR.index("cached_addr_file = "):]
+        self.assertIn(self.ASSIGN, init[:init.index("self.cloudflare_tunnel_enabled = False")])
 
     def test_set_where_the_live_address_is_read(self):
         self.assertRegex(
             self.SRC,
-            r"self\.onion_address = addr\.strip\(\)\n\s+" + re.escape(self.ASSIGN))
+            r"self\.onion_address = addr\n\s+self\.is_onionheaven = onionheaven\.is_onionheaven_instance\(addr\)")
+        self.assertIn('self.is_onionheaven = bool(state.get("is_onionheaven")) or '
+                      'onionheaven.is_onionheaven_instance(addr)', self.MENUBAR)
 
     def test_no_late_one_shot_flip(self):
         self.assertNotIn("self.is_onionheaven = True", self.SRC)
+        self.assertNotIn("self.is_onionheaven = True", self.MENUBAR)
 
 
 class OptInPlumbingTest(unittest.TestCase):

@@ -1266,6 +1266,10 @@ class Daemon:
                     self.stop_web_log_capture()
                     self.stop_container_log_capture()
                 self.caffeine.stop()
+                # The extension's proxy serves only while the stack runs (it
+                # would otherwise hold its own port against the conflict
+                # check below and answer for a stopped site).
+                self.stop_onion_proxy()
                 if self.runtime_ready:
                     self.port_conflict = self.check_port_conflict()
                     if self.port_conflict and not self._port_conflict_logged:

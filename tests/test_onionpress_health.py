@@ -1419,9 +1419,12 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         return src[start:src.index(end_marker, start)]
 
     def test_mac_handle_wake_resets_the_trigger(self):
-        body = self._body("src/menubar.py", "    def handle_wake(self):",
-                          "    def start_status_checker(self):")
+        # The Mac's wake handler is the daemon's (onionpress.daemon, #367).
+        body = self._body("src/onionpress/daemon.py", "    def handle_wake(self):",
+                          "    # -- the hub's messages")
         self.assertIn("self._republish_trigger.reset()", body)
+        menubar = open(os.path.join(self.ROOT, "src/menubar.py"), encoding="utf-8").read()
+        self.assertNotIn("def handle_wake(", menubar)
 
     def test_linux_wake_resets_the_trigger(self):
         body = self._body("src/onionpress/reachability.py",
