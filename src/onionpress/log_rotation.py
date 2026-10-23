@@ -85,6 +85,21 @@ def extract_log_type(filename):
     return m.group("type") if m else None
 
 
+def current_log_path(base_dir, log_type):
+    """The newest `{log_type}-YYYY-MM-DD-NNN.log` under *base_dir*, or ""
+    (another process's active log, read only: the menubar opens the
+    daemon's onionpress log in View Logs without writing to it)."""
+    try:
+        names = [n for n in os.listdir(base_dir)
+                 if n.startswith(f"{log_type}-") and n.endswith(".log")
+                 and extract_log_type(n) == log_type]
+    except OSError:
+        return ""
+    if not names:
+        return ""
+    return os.path.join(base_dir, sorted(names)[-1])
+
+
 class RotatingLog:
     """Thread-safe rotating log writer.
 

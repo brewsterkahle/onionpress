@@ -212,11 +212,15 @@ def swap_in_bundle(staged_app, install_path, log=None):
 
 
 def download_and_install(release_data, latest_version, install_path,
-                         log=None, notify=None):
+                         log=None, notify=None, before_swap=None, after_swap=None):
     """Download the DMG from *release_data*, replace the app at *install_path*.
 
     *log* — callable(str) for logging.
     *notify* — callable(title, subtitle, message) for macOS notifications.
+    *before_swap* / *after_swap* — called once the new bundle is staged,
+    right before and after the rename swap: `onionpress update` stops the
+    daemon (it executes from the bundle being replaced) and starts it again
+    from the new one (issue #367).
 
     Raises on failure.  Returns the installed version string on success.
     """
@@ -305,7 +309,13 @@ def download_and_install(release_data, latest_version, install_path,
         # 2.5.2 → 2.5.3 on 2026-10-13). Nothing executes from the staging
         # path, and a sibling is on the same volume, so rename(2) works.
         staged_app = stage_new_bundle(source_app, install_path)
-        swap_in_bundle(staged_app, install_path, log=log)
+        if before_swap is not None:
+            before_swap()
+        try:
+            swap_in_bundle(staged_app, install_path, log=log)
+        finally:
+            if after_swap is not None:
+                after_swap()
 
         if log:
             log(f"Auto-update: installed v{latest_version} successfully")

@@ -423,8 +423,29 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
     log(f"Update: downloading and installing v{latest}...")
     if not json_output:
         print(f"Downloading and installing v{latest}...")
+    # The daemon executes from the bundle being replaced (CLAUDE.md: a
+    # process running out of a half-replaced bundle has its access revoked
+    # by Gatekeeper): stopped once the new bundle is staged, started again
+    # from the new one right after the swap, before the menubar relaunches.
+    from . import daemon as _daemon
+    from . import handle_action as _ha
+    launcher = _ha.default_launcher(paths, "macos")
+    if app_path and not os.path.isfile(launcher):
+        launcher = os.path.join(app_path, "Contents", "MacOS", "onionpress")
+
+    def _stop_daemon():
+        if _daemon.daemon_pid(paths.data_dir) or _daemon.agent_loaded_pid()[0]:
+            log("Update: stopping the OnionPress daemon before the bundle swap")
+            _daemon.stop_agent(paths.data_dir, log, offline=False)
+
+    def _start_daemon():
+        log("Update: starting the OnionPress daemon from the new bundle")
+        _daemon.start_agent(launcher, paths.data_dir, log,
+                            port_offset=os.environ.get("ONIONPRESS_PORT_OFFSET"))
+
     try:
-        updater.download_and_install(release_data, latest, app_path, log=log)
+        updater.download_and_install(release_data, latest, app_path, log=log,
+                                     before_swap=_stop_daemon, after_swap=_start_daemon)
     except PermissionError as e:
         log(f"Auto-update failed (permission denied): {e}")
         message = (f"OnionPress v{latest} was downloaded but could not be installed "
@@ -2238,6 +2259,20 @@ def main(argv: list[str] = None) -> int:
         "apply-config",
         help="Apply the Settings page's config-updates.json (the allowlisted "
              "keys), then remove it")
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="The Mac's long-running loops (status, probe, heartbeat, the "
+             "Settings page's requests, log captures, the extension proxy), "
+             "as a launchd agent: daemon start | stop | status | offline, or "
+             "serve (the foreground process launchd runs)")
+    p_daemon.add_argument("daemon_command", nargs="?", default="serve",
+                          choices=("serve", "start", "stop", "status", "offline"))
+    p_daemon.add_argument("--json", action="store_true", help="Answer in JSON")
+    p_daemon.add_argument("--no-offline", action="store_true",
+                          help="stop: without telling the hub /offline (an update: "
+                               "the daemon comes right back)")
+    p_daemon.add_argument("--launcher", default="",
+                          help="The launcher script the agent runs (default: this install's)")
     p_spb = sub.add_parser(
         "settings-page-backup",
         help="The Settings page's backup: for WordPress, so without the hub "
@@ -2294,6 +2329,19 @@ def main(argv: list[str] = None) -> int:
         return onionheaven.run_onionheaven_command(
             args.onionheaven_command, _hub_context(args.data_dir),
             json_output=args.json)
+
+    if args.command == "daemon":
+        # The loops (onionpress.daemon, issue #367): no OnionPressCLI setup,
+        # the daemon resolves its own ports and docker environment.
+        from . import daemon as _daemon
+        from . import handle_action as _ha
+        paths = resolve_paths(data_dir=args.data_dir)
+        os_name = detect_os().value
+        launcher = args.launcher or _ha.default_launcher(paths, os_name)
+        return _daemon.run_daemon_command(
+            args.daemon_command, paths, _file_log_func(paths.log_file),
+            launcher_script=launcher, json_output=args.json, version=__version__,
+            no_offline=args.no_offline)
 
     if args.command in ("handle-action", "apply-config"):
         # Run every 10 s (Linux) or every status tick (Mac): no

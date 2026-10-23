@@ -423,6 +423,9 @@ CLI_CONFIG_KEYS = {
     "INSTALL_IA_PLUGIN": _one_of("yes", "no"),
     "INSTALL_CACHE_ENABLER": _one_of("yes", "no"),
     "REPUBLISH_ON_UNREACHABLE": _one_of("yes", "no"),
+    # macOS: Quit in the menu closes only the menu (the daemon keeps the
+    # site, heartbeat and probe running) instead of taking the site down.
+    "QUIT_KEEPS_SITE_RUNNING": _one_of("yes", "no"),
     # The format check of the Mac launcher's validate-oh-address
     # (key_manager.is_valid_onion_address). Whether the address answers as
     # a hub is the Settings dialog's question, asked before it saves.
@@ -437,7 +440,8 @@ CODE_DEFAULTS = {
     "START_ON_BOOT": "yes",                      # linux/onionpress's first config
     "VM_DISK": "20",                             # colima.py
     "INSTALL_CACHE_ENABLER": "yes",              # plugin_wanted in the launchers
-    "REPUBLISH_ON_UNREACHABLE": "yes",           # menubar.py, reachability.py
+    "REPUBLISH_ON_UNREACHABLE": "yes",           # daemon.py, reachability.py
+    "QUIT_KEEPS_SITE_RUNNING": "no",             # menubar.py quit_app
     "ONIONHEAVEN_ADDRESS":                       # onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
         "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",
     "ONIONHEAVEN_PROPAGATION_DELAY": "180",      # the launchers' export
@@ -486,6 +490,7 @@ CONFIG_KEY_HELP = {
     "INSTALL_IA_PLUGIN": "install the Wayback Machine Link Fixer plugin (restart)",
     "INSTALL_CACHE_ENABLER": "install the Cache Enabler plugin (restart)",
     "REPUBLISH_ON_UNREACHABLE": "ask Tor for fresh introduction points when the site is unreachable",
+    "QUIT_KEEPS_SITE_RUNNING": "macOS: Quit closes only the menu bar app; the site keeps running (default no: Quit takes the site down)",
     "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven)",
     "ONIONHEAVEN_ADDRESS": "the OnionHeaven hub's .onion address (restart)",
     "ONIONHEAVEN_MAX_SERVICES": "hub: addresses one takeover worker serves",

@@ -75,6 +75,13 @@ LAUNCH_ON_LOGIN=yes
 #
 PREVENT_SLEEP=normal
 
+# macOS: what Quit in the menu bar does. "no" (the default) takes the site
+# down: containers, the container VM and the OnionPress daemon stop, as
+# before. "yes" closes only the menu bar app; the daemon keeps the site,
+# its heartbeat to OnionHeaven and the reachability probe running until
+# you run "onionpress quit" or start the app again and Quit.
+# QUIT_KEEPS_SITE_RUNNING=no
+
 # Virtual Machine Memory (GB)
 # Default: 2 (2 GB RAM for the container VM)
 #
