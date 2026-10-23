@@ -9,7 +9,7 @@ container can sign the request that makes the hub delete it), then
 "uninstall" itself; the run needs both confirmed. It then asks the hubs
 to delete the key (release_onionheaven), stops OnionPress through the
 launcher, stops and deletes the Colima VM (the Docker volumes live in
-it), removes the login item and ~/.onionpress. The app bundle is the
+it), removes the login item, the daemon's LaunchAgent and ~/.onionpress. The app bundle is the
 person's to move to the Trash; the menubar quits after.
 """
 
@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import time
 
-from . import confirm, login_item
+from . import confirm, daemon as op_daemon, login_item
 
 DELETES = (
     "Your onion address and private key",
@@ -63,6 +63,14 @@ def run(paths, docker, log, launcher, out=None):
     """Uninstall. Returns what may remain on a hub (release_onionheaven's
     list: [] when nothing)."""
     from .cli import release_onionheaven
+    # The daemon first: its heartbeat carries the key, so it must not put
+    # the key back on a hub after the /unregister below. Its launchd agent
+    # is removed with the login item.
+    log("Uninstall: stopping the OnionPress daemon...")
+    try:
+        op_daemon.stop_agent(paths.data_dir, log, offline=False)
+    except Exception as e:
+        log(f"Uninstall: daemon stop failed (continuing): {e}")
     # Take the key back off every OnionHeaven hub that may hold it, before
     # stopping (the key in the tor container signs the request).
     remaining = []
@@ -102,6 +110,10 @@ def run(paths, docker, log, launcher, out=None):
     time.sleep(2)
 
     login_item.remove(log)
+    try:
+        op_daemon.remove_agent(log)
+    except Exception as e:
+        log(f"Uninstall: could not remove the daemon's LaunchAgent: {e}")
 
     if os.path.exists(paths.data_dir):
         shutil.rmtree(paths.data_dir)

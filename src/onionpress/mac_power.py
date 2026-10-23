@@ -254,3 +254,30 @@ class MacPowerHandler:
             self._on_has_powered_on()
         except Exception as e:
             self._log(f"MacPowerHandler: on_has_powered_on raised: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Driving the main run loop outside an NSApplication (the daemon)
+# ---------------------------------------------------------------------------
+
+def run_loop_once(seconds: float) -> bool:
+    """Run the main thread's CFRunLoop for up to *seconds* so IOKit's
+    callbacks (registered above) fire. The menubar's NSApplication ran
+    the loop itself; `onionpress daemon` has no AppKit, so it calls this
+    a second at a time, and between calls Python's own signal handlers
+    run (they never run while the interpreter is inside a C call).
+    Returns False when the frameworks are not loaded (not a Mac): the
+    caller sleeps instead."""
+    _load_frameworks()
+    if _cf is None:
+        return False
+    try:
+        if not hasattr(_cf.CFRunLoopRunInMode, "_configured"):
+            _cf.CFRunLoopRunInMode.restype = ctypes.c_int32
+            _cf.CFRunLoopRunInMode.argtypes = [c_void_p, ctypes.c_double, ctypes.c_bool]
+            _cf.CFRunLoopRunInMode._configured = True
+        mode = c_void_p.in_dll(_cf, "kCFRunLoopDefaultMode").value
+        _cf.CFRunLoopRunInMode(mode, float(seconds), False)
+        return True
+    except Exception:
+        return False

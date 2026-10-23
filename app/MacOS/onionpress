@@ -2919,6 +2919,16 @@ main() {
             # but are harmless (sleeping poll loops). The exit trap kills our own
             # children, and the PID lock prevents double-starting.
 
+            # The OnionPress daemon (onionpress.daemon, issue #367): the
+            # status loop, the dual probe, the heartbeat, the Settings
+            # page's requests, the log captures, caffeinate, the extension
+            # proxy, as a per-user launchd agent kept alive across crashes.
+            # Started here so a headless start has it too; the menubar
+            # starts it as well when it finds none.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" daemon start \
+                --launcher "$SCRIPT_DIR/onionpress" >> "$LOG_FILE" 2>&1 \
+                || log "WARNING: the OnionPress daemon could not be started (see $LOG_FILE)"
+
             # Detect container runtime (install if needed on first run)
             if ! RUNTIME=$(detect_container_runtime); then
                 install_docker || exit $?
@@ -2949,13 +2959,19 @@ main() {
             ;;
 
         stop)
+            # The daemon tells the hub /offline while the tor container is
+            # still up (what the menubar's Stop did before stopping), then
+            # the containers stop. The daemon itself keeps running.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" daemon offline >/dev/null 2>&1 || true
             setup_db_passwords
             stop_containers
             ;;
 
         quit)
             # CLI-equivalent of the menubar Quit button: take the app
-            # fully off — MenubarApp, containers, Colima VM, PID lock.
+            # fully off — daemon, MenubarApp, containers, Colima VM, PID
+            # lock. The menubar's own Quit runs `quit --leave-menubar`
+            # (it is the caller, and exits itself afterwards).
             # If the MenubarApp is alive, SIGTERM it: that fires
             # NSApplicationWillTerminateNotification → _handle_terminate
             # which runs the full cleanup synchronously. Then we run
@@ -2966,6 +2982,21 @@ main() {
 
             FAILED_STEPS=""
 
+            # The daemon first: it sends the hub /offline while the tor
+            # container is still up (`daemon stop` marks the stop as a
+            # quit), stops the extension proxy, caffeinate and the log
+            # captures, and exits 0 so launchd leaves it down.
+            # (`--no-offline`, from the menubar's update relaunch: the site
+            # is coming right back, so the hub is not told /offline.)
+            QUIT_DAEMON_ARGS=""
+            for _arg in "$@"; do
+                [ "$_arg" = "--no-offline" ] && QUIT_DAEMON_ARGS="--no-offline"
+            done
+            log "quit: stopping the OnionPress daemon"
+            if ! bundled_python -m onionpress.cli --data-dir "$DATA_DIR" daemon stop $QUIT_DAEMON_ARGS >> "$LOG_FILE" 2>&1; then
+                FAILED_STEPS="$FAILED_STEPS daemon"
+            fi
+
             # Capture MenubarApp PID. Prefer the PID file
             # (authoritative), but fall back to pgrep — the PID file
             # can be missing after a prior unclean shutdown, manual rm,
@@ -2974,10 +3005,12 @@ main() {
             # that case. `-u $(whoami)` restricts to this user's
             # processes per the multi-user rule in CLAUDE.md.
             MENUBAR_PID=""
-            if [ -f "$PIDFILE" ]; then
+            if [ "${2:-}" = "--leave-menubar" ]; then
+                log "quit: run from the menubar (it quits itself)"
+            elif [ -f "$PIDFILE" ]; then
                 MENUBAR_PID=$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]')
             fi
-            if [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; then
+            if [ "${2:-}" != "--leave-menubar" ] && { [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; }; then
                 # Match the py2app-frozen MenubarApp binary path, anchored
                 # so only a command line that IS that executable matches —
                 # not a shell, grep or tail that merely names the path in
@@ -3135,8 +3168,9 @@ main() {
             ;;
 
         upload-analytics)
-            # Trigger an immediate analytics upload via file trigger (polled by MenubarApp)
-            local pid_file="$DATA_DIR/menubar.pid"
+            # Trigger an immediate analytics upload via file trigger (polled
+            # by the OnionPress daemon's status loop)
+            local pid_file="$DATA_DIR/daemon.pid"
             if [ ! -f "$pid_file" ]; then
                 echo "OnionPress is not running (no PID file)."
                 exit 1
@@ -3536,7 +3570,7 @@ main() {
 
         handle-action)
             # The WordPress Settings page's requests, handled once for both
-            # platforms (onionpress.handle_action, issue #366): the menubar
+            # platforms (onionpress.handle_action, issue #366): the daemon
             # runs this on its status loop (Linux: onionpress-watcher.timer).
             # The actions run through this launcher: start, restart, stop,
             # apply-config, import-key, settings-page-backup,
@@ -3545,6 +3579,14 @@ main() {
             # the menubar asks the person at this Mac and runs it again with
             # --confirmed address-change (or --cancel).
             bundled_python -m onionpress.cli --data-dir "$DATA_DIR" handle-action --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
+            ;;
+
+        daemon)
+            # The Mac's long-running loops as a per-user launchd agent
+            # (onionpress.daemon, issue #367): `daemon start|stop|status|
+            # offline [--json]`, or `daemon` (run in the foreground: what
+            # the agent's plist runs, with this script's environment).
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"
             ;;
 
         apply-config)
@@ -3580,9 +3622,12 @@ Usage: $0 <command> [args]
 
 User commands:
   start         Start WordPress and Tor containers
-  stop          Stop all containers (leaves MenubarApp + VM running)
-  quit          Fully shut down: containers + Colima VM + MenubarApp
+  stop          Stop all containers (leaves the daemon, MenubarApp + VM running)
+  quit          Fully shut down: daemon + containers + Colima VM + MenubarApp
                 (equivalent of clicking Quit in the menubar)
+  daemon        The OnionPress daemon (status loop, probe, heartbeat, the
+                Settings page's requests, log captures, the extension
+                proxy), a launchd agent: daemon start | stop | status [--json]
   restart       Restart all containers
   status        Show container status
   address       Show your .onion address
@@ -3618,6 +3663,7 @@ Destructive commands ask before acting. A program runs them as
 
 Advanced / internal (used by the menubar app or scripts):
   start-tor, launch, upload-analytics, validate-oh-address, scrub,
+  daemon offline (the daemon tells the hub /offline before a stop),
   handle-action (the WordPress Settings page's requests),
   apply-config (its saved settings),
   settings-page-backup, settings-page-restore (its backup and restore),
