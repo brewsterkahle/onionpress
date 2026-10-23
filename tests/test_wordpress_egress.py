@@ -1281,8 +1281,9 @@ exit 0
         self.assertNotIn('"CLEARNET-wordpress: "', text)
 
     def test_menubar_still_collects_clearnet_lines(self):
-        menubar = _read(os.path.join(ROOT, "src", "menubar.py"))
-        self.assertIn('if "CLEARNET" in l', menubar)
+        # The dmesg poller moved to the daemon (onionpress.daemon, #367).
+        daemon = _read(os.path.join(ROOT, "src", "onionpress", "daemon.py"))
+        self.assertIn('if "CLEARNET" in l', daemon)
 
     def test_linux_reapplies_when_rootless_docker_restarts(self):
         text = _read(LINUX_LAUNCHER)

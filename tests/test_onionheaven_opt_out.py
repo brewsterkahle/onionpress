@@ -443,8 +443,10 @@ class TestMacOptOutUnregisters(_MacCase):
         self.assertNotIn("healthcheck_address", payload)
 
     def test_menubar_wiring(self):
-        src = _read("src/menubar.py")
+        # The status pass is the daemon's (onionpress.daemon, issue #367).
+        src = _read("src/onionpress/daemon.py")
         self.assertIn("onionheaven.maybe_unregister_after_opt_out(self)", src)
+        self.assertNotIn("onionheaven.maybe_unregister_after_opt_out(", _read("src/menubar.py"))
         # The only place a heartbeat thread starts, and only on yes.
         self.assertEqual(src.count("onionheaven.start_registration_thread(self)"), 1)
         i = src.index("onionheaven.start_registration_thread(self)")

@@ -610,7 +610,7 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         handler = mv._read("src/onionpress/handle_action.py")
         self.assertIn('if "address-change" in confirmed:\n        args += ["--confirmed", "address-change"]', handler)
         menubar = mv._read("src/menubar.py")
-        self.assertIn('["--confirmed", result["confirm"]] if answered_yes else ["--cancel"]', menubar)
+        self.assertIn('["--confirmed", question["confirm"]] if answered_yes else ["--cancel"]', menubar)
         # The dialog gives up after 5 minutes: no answer is Cancel.
         alert = _menubar_method("show_native_alert")
         self.assertIn("max_wait = 300", alert)

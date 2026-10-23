@@ -58,6 +58,7 @@ VALUES = {
     "INSTALL_IA_PLUGIN": ("no", "y"),
     "INSTALL_CACHE_ENABLER": ("no", "n"),
     "REPUBLISH_ON_UNREACHABLE": ("no", "off"),
+    "QUIT_KEEPS_SITE_RUNNING": ("yes", "maybe"),
     "REGISTER_WITH_ONIONHEAVEN": ("no", "later"),
     "ONIONHEAVEN_ADDRESS": (ONION, "evil.example/" + "a" * 43 + ".onion"),
     "ONIONHEAVEN_MAX_SERVICES": ("20", "501"),
@@ -568,8 +569,10 @@ class TestCallers(unittest.TestCase):
 
 
 class TestMenubarWriteConfigValue(unittest.TestCase):
-    """menubar.write_config_value runs the launcher's `config set` and
-    applies the marker's keys; a refusal is False."""
+    """menubar.write_config_value runs the launcher's `config set`; the
+    marker the CLI leaves is the daemon's to take (onionpress.daemon
+    applies caffeinate, the analytics upload and status.json); a refusal
+    is False."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-menubar-config-")
@@ -578,12 +581,10 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
         from onionpress import confirm as op_confirm
         ns = {"os": os, "subprocess": __import__("subprocess"), "op_config": op_config,
               "op_confirm": op_confirm}
-        for name in ("write_config_value", "apply_config_changes"):
-            node = next(n for n in ast.walk(tree)
-                        if isinstance(n, ast.FunctionDef) and n.name == name)
-            exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
+        node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "write_config_value")
+        exec(textwrap.dedent(ast.get_source_segment(src, node)), ns)
         self.write = ns["write_config_value"]
-        self.apply = ns["apply_config_changes"]
         self.app = mock.Mock()
         self.app.config_file = os.path.join(self.dir, "config")
         with open(self.app.config_file, "w") as f:
@@ -592,9 +593,6 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
         self.app.launcher_script = "/Applications/OnionPress.app/Contents/MacOS/onionpress"
         self.app.lines = []
         self.app.log = self.app.lines.append
-        self.app.apply_config_changes = lambda keys: self.apply(self.app, keys)
-        self.app._read_config_value = lambda key, default="": op_config.read_value(
-            self.app.config_file, key, default)
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -609,17 +607,16 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
             return mock.Mock(returncode=rc, stdout="", stderr="ERROR: refused\n")
         return run
 
-    def test_runs_config_set_and_applies_the_change(self):
+    def test_runs_config_set_and_leaves_the_marker_to_the_daemon(self):
         with mock.patch("subprocess.run", self._run_that_sets("PREVENT_SLEEP")):
             ok = self.write(self.app, "PREVENT_SLEEP", "never")
         self.assertTrue(ok)
         self.assertEqual(self.argv, [self.app.launcher_script, "config", "set",
                                      "PREVENT_SLEEP", "never", "--json"])
         self.assertIsNone(self.stdin)
-        self.app.caffeine.stop.assert_called_once_with()
-        self.app.caffeine.start.assert_called_once_with()
-        self.app.write_status_to_volume.assert_called_once_with()
-        self.assertEqual(op_config.take_config_changes(self.dir), [])
+        # The menubar applies nothing itself: the daemon takes the marker.
+        self.assertEqual(op_config.take_config_changes(self.dir), ["PREVENT_SLEEP"])
+        self.assertNotIn("def apply_config_changes", _read("src/menubar.py"))
 
     def test_secret_goes_on_stdin(self):
         with mock.patch("subprocess.run", self._run_that_sets("CLOUDFLARE_TUNNEL_TOKEN")):
@@ -666,21 +663,46 @@ class TestMenubarWriteConfigValue(unittest.TestCase):
             ok = self.write(self.app, "VM_CPU", "0")
         self.assertFalse(ok)
         self.assertIn("refused", "\n".join(self.app.lines))
-        self.app.caffeine.stop.assert_not_called()
 
-    def test_apply_config_changes_triggers_upload_when_sharing_turned_on(self):
-        with open(self.app.config_file, "a") as f:
+
+class TestDaemonAppliesConfigChanges(unittest.TestCase):
+    """onionpress.daemon.Daemon.apply_config_changes: what used to be the
+    menubar's apply_config_changes (caffeinate, the upload, the tunnel
+    flag, status.json)."""
+
+    def setUp(self):
+        from onionpress import daemon as op_daemon
+        from onionpress.platform import resolve_paths
+        self.dir = tempfile.mkdtemp(prefix="op-daemon-config-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.config = os.path.join(self.dir, "config")
+        with open(self.config, "w") as f:
+            f.write("VM_MEMORY=2\n")
+        paths = resolve_paths(data_dir=self.dir, app_bundle="")
+        self.d = op_daemon.Daemon(paths, version="t", launcher_script="/x/onionpress",
+                                  docker=mock.Mock(), health_checker=mock.Mock())
+        self.d.caffeine = mock.Mock()
+        self.d.write_status_to_volume = mock.Mock()
+        self.d.is_running = True
+
+    def test_prevent_sleep_restarts_caffeinate_and_rewrites_status(self):
+        self.d.apply_config_changes(["PREVENT_SLEEP"])
+        self.d.caffeine.stop.assert_called_once_with()
+        self.d.caffeine.start.assert_called_once_with()
+        self.d.write_status_to_volume.assert_called_once_with()
+
+    def test_sharing_turned_on_triggers_an_upload(self):
+        with open(self.config, "a") as f:
             f.write("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
         with mock.patch("onionpress.analytics_sharing.trigger_upload") as upload:
-            self.apply(self.app, ["SHARE_ANALYTICS_WITH_ONIONHOME", "CLOUDFLARE_TUNNEL_TOKEN"])
+            self.d.apply_config_changes(["SHARE_ANALYTICS_WITH_ONIONHOME", "CLOUDFLARE_TUNNEL_TOKEN"])
         upload.assert_called_once_with()
-        self.assertFalse(self.app.cloudflare_tunnel_enabled)
-        self.app.caffeine.stop.assert_not_called()
+        self.assertFalse(self.d.cloudflare_tunnel_enabled)
+        self.d.caffeine.stop.assert_not_called()
 
     def test_nothing_for_no_keys(self):
-        self.apply(self.app, [])
-        self.assertEqual(self.app.lines, [])
-        self.app.write_status_to_volume.assert_not_called()
+        self.d.apply_config_changes([])
+        self.d.write_status_to_volume.assert_not_called()
 
 
 if __name__ == "__main__":
