@@ -109,6 +109,10 @@ export PATH="$BIN_DIR:$PATH"
 # Configure Colima environment
 export COLIMA_HOME="$COLIMA_HOME"
 export LIMA_HOME="$COLIMA_HOME/_lima"
+# Colima honours $COLIMA_HOME only when the directory exists, else it uses
+# ~/.colima, including for the Docker socket forward (see the same mkdir
+# in the onionpress script). Created before anything here runs Colima.
+mkdir -p "$LIMA_HOME"
 export LIMA_INSTANCE="onionpress"
 export DOCKER_HOST="unix://$COLIMA_HOME/default/docker.sock"
 # Colima drives the host `docker` CLI: every start creates a "colima" context,
@@ -235,7 +239,7 @@ ensure_docker_socket() {
     log "ERROR: Docker socket never appeared at $socket_path after ${wait_secs}s"
     log "  Lima's forward for the VM's /var/run/docker.sock is down."
     log "  Diagnose: $COLIMA_HOME/_lima/colima/ha.stderr.log"
-    log "  Recover:  \"$BIN_DIR/colima\" stop && \"$BIN_DIR/colima\" start"
+    log "  Recover:  quit OnionPress, \"$BIN_DIR/colima\" stop, start OnionPress again (never a bare colima \"start\": without OnionPress's flags it mounts the whole home folder into the VM)"
     return 1
 }
 

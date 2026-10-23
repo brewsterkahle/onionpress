@@ -830,6 +830,19 @@
 - **Do not move app state to `~/Library/Application Support/`** — the space in the path breaks Colima/Docker socket paths (104-char Unix socket limit + space handling issues)
 - **Diffdisk cap is 20 GiB on new installs** (issue #230) via `--disk` to the first `colima start` in `app/MacOS/launcher.sh` and `src/onionpress/colima.py`. The cap is set at VM creation and is immutable — existing installs keep their original 100 GiB cap. Dangling Docker images auto-prune after each successful image pull (`update_docker_images()` in `src/menubar.py` and the bash launchers), keeping real usage well under 5 GiB in practice. The cap is configurable via `VM_DISK=N` in `~/.onionpress/config` *before* first launch; when the OnionHeaven hub vanity key is present at first start, the cap auto-bumps to 100 GiB for takeover-container headroom (hub is the edge case; normal nodes never need more than 20).
 - **Do not add additional `--mount` flags without considering security implications**
+- **`$COLIMA_HOME` must exist before anything runs Colima** (issue #370).
+  Colima honours `COLIMA_HOME` only when the directory exists; otherwise it
+  uses `~/.colima`, including for the Docker socket forward it writes into
+  the instance's lima.yaml (`hostSocket:`). Through 2.5.6 nothing created
+  it before the first `colima start`, so a fresh install's VM forwarded
+  the socket to `~/.colima/default/docker.sock` while the launcher waited
+  at its own path. Both launchers `mkdir -p "$LIMA_HOME"` where they export
+  the variables; the menubar and `Colima._run` do the same. A Running VM
+  whose lima.yaml forwards the socket outside `$COLIMA_HOME` is restarted
+  through Colima with `colima_start_with_vm_settings` (the first start's
+  flags: a bare `colima start` there mounts the whole home folder), from
+  `wait_for_docker_or_recover_vm` and the restart case; the Lima-level
+  restart cannot change the forward. `tests/test_colima_home_before_first_start.py`.
 
 ## OnionHeaven Hub Data Volume
 - The hub's registry and every registrant's onion key live on

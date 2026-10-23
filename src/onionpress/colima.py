@@ -48,6 +48,9 @@ class Colima:
         env = os.environ.copy()
         env["COLIMA_HOME"] = self.paths.colima_home
         env["LIMA_HOME"] = os.path.join(self.paths.colima_home, "_lima")
+        # Colima honours COLIMA_HOME only when the directory exists; without
+        # it the first start forwards the Docker socket to ~/.colima.
+        os.makedirs(env["LIMA_HOME"], exist_ok=True)
         env["LIMA_INSTANCE"] = "onionpress"
         # Colima's `docker context` create/use/rm calls edit whichever
         # config they inherit: make it ours, never the user's ~/.docker.
