@@ -342,6 +342,13 @@ ROWS = [
     Row("migrate-key-volume", ["migrate-key-volume"],
         "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
         returns=mock.Mock(**{"migrate_key_volume.return_value": False})),
+    # Phase 4 (#120): the Linux launcher's db_import() is backup.db_import,
+    # what restore_container_artifacts runs; the password is stdin's first
+    # line, never argv. A failure raises there and is exit 1 here
+    # (tests/test_db_import_sandbox.py).
+    Row("db-import", ["db-import", "--sql-file", "/st/database/wordpress.sql"],
+        "backup.db_import", mock.call("/st/database/wordpress.sql", "pw"), rc=0,
+        returns=None, stdin="pw\n"),
     # Phase 4 (#120): the launchers' regenerate_derivatives_pending() is this.
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
