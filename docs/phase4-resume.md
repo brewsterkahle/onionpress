@@ -50,7 +50,7 @@ the harness is about something else.
 | 1 | `using_local_images` | done, 80aae349 |
 | 2 | `regenerate_derivatives_pending` | done, 76bee60e |
 | 3 | `retire_old_onionheaven_containers` | done, c5bb487a |
-| 4 | `migrate_tor_network` | done (the slice 4 commit) |
+| 4 | `migrate_tor_network` | done, c8d644e6 |
 | 5 | `migrate_key_volume` | todo (only with every check kept, see below) |
 | 6 | `db_import` | todo |
 | 7 | `block_wordpress_egress` | todo |
