@@ -77,9 +77,12 @@
   requirement and its network dependencies. `make doctor` reports missing tools.
 - `build/build-images.sh` builds the tor/wordpress images locally (`make images`).
   `build/dev-up.sh` runs the stack on them (`make dev-up`).
-- **Every `docker pull` is gated on `using_local_images()`** — implemented three
-  times (app/MacOS/onionpress, linux/onionpress, onionpress.containers). Change
-  all three together; a test enforces they agree.
+- **Every `docker pull` is gated on `using_local_images()`** — one rule,
+  `onionpress.containers.using_local_images`; both launchers' bash
+  `using_local_images()` is a delegation to `onionpress.cli
+  using-local-images` (Phase 4, #120), the menubar and `update-images`
+  call it in-process. `tests/test_local_image_mode.py` runs the bash
+  delegation and checks no pull escapes the gate.
 - **The tor image is built on the Tor Project's own Onimages C Tor image**
   (`containers.torproject.org/tpo/onion-services/onimages/tor:trixie`,
   amd64 + arm64 since Onimages 0.3.0, 2026-09-24). Tor and the verified

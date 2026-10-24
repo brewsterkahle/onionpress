@@ -34,8 +34,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
-    backup, cli, config, confirm, handle_action, launcher_ops, multisite,
-    onionheaven, redact, scrub, wordpress_egress,
+    backup, cli, config, confirm, containers, daemon, handle_action,
+    launcher_ops, multisite, onionheaven, redact, scrub, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -301,6 +301,24 @@ ROWS = [
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
         returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"])),
+    # The Mac daemon (#367): no OnionPressCLI; the launcher given, else
+    # this install's.
+    Row("daemon", ["daemon", "status", "--json"], "daemon.run_daemon_command",
+        mock.call("status", ANY, ANY, launcher_script="/stub/launcher", json_output=True,
+                  version=cli.__version__, no_offline=False), os_name="macos",
+        check=lambda t, m: t.assertEqual(m.call_args.args[1].data_dir, t.dir)),
+    Row("daemon", ["daemon", "stop", "--no-offline", "--launcher", "/l"],
+        "daemon.run_daemon_command",
+        mock.call("stop", ANY, ANY, launcher_script="/l", json_output=False,
+                  version=cli.__version__, no_offline=True), os_name="macos"),
+    Row("daemon", ["daemon"], "daemon.run_daemon_command",
+        mock.call("serve", ANY, ANY, launcher_script="/stub/launcher", json_output=False,
+                  version=cli.__version__, no_offline=False), os_name="macos"),
+    # Phase 4 (#120): the launchers' using_local_images() is this.
+    Row("using-local-images", ["using-local-images"], "containers.using_local_images",
+        mock.call(D("config")), rc=0, returns=True),
+    Row("using-local-images", ["using-local-images"], "containers.using_local_images",
+        mock.call(D("config")), rc=1, returns=False),
     Row("wordpress-egress", ["wordpress-egress", "--check", "--wp-port", "8080", "--bin-dir", "/b"],
         "wordpress_egress.ensure", mock.call(ANY, ANY, action="check", wp_port=8080),
         rc=0, returns=mock.Mock(ok=True, line=lambda: "ok"),
@@ -337,6 +355,7 @@ MODULES = {
     "cli": cli, "config": config, "handle_action": handle_action, "onionheaven": onionheaven,
     "multisite": multisite, "scrub": scrub, "redact": redact, "backup": backup,
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
+    "containers": containers, "daemon": daemon,
 }
 
 

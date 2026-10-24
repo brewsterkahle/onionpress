@@ -8,9 +8,10 @@ started — you would build an image, launch the app, and silently test someone
 else's build. The failure is invisible: the stack comes up fine, it is just
 not running your code.
 
-Three implementations of the same predicate have to agree — app/MacOS/onionpress,
-linux/onionpress and onionpress.containers.using_local_images() — so these
-checks cover all three.
+The rule lives once, in onionpress.containers.using_local_images(); the
+launchers' using_local_images() is a delegation to `onionpress.cli
+using-local-images` (Phase 4, #120), run here under bash to check it hands
+back the Python's verdict.
 """
 
 import os
@@ -189,6 +190,13 @@ class TestConfigOverrideLoopIsInjectionSafe(unittest.TestCase):
                                      f"config value executed commands: {created}")
 
 
+def _bash_function(text, name):
+    """The launcher's `name() { ... }` block, closing brace included."""
+    start = text.index(f"\n{name}() {{")
+    end = text.index("\n}\n", start)
+    return text[start:end + 3]
+
+
 class TestLaunchersDefineThePredicate(unittest.TestCase):
 
     def test_both_launchers_define_it(self):
@@ -199,14 +207,56 @@ class TestLaunchersDefineThePredicate(unittest.TestCase):
                     f"{path} must define using_local_images().",
                 )
 
-    def test_both_treat_ghcr_as_published(self):
-        for path in LAUNCHERS:
+    def test_both_delegate_to_the_cli(self):
+        """One rule, in Python: the bash function is the CLI call and
+        nothing else (no second copy of the ghcr.io test to drift)."""
+        for path, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
+                             ("linux/onionpress", "op_py")):
             with self.subTest(path=path):
-                self.assertIn(
-                    "ghcr.io/*)", _read(path),
-                    f"{path}'s using_local_images() must treat a ghcr.io "
-                    "reference as a published image, not a local build.",
-                )
+                body = _bash_function(_read(path), "using_local_images")
+                code = [l.strip() for l in body.splitlines()
+                        if l.strip() and not l.strip().startswith("#")]
+                self.assertEqual(code[0], "using_local_images() {")
+                self.assertEqual(code[-1], "}")
+                code = code[1:-1]
+                self.assertEqual(
+                    code, [f'{runner} --data-dir "$DATA_DIR" using-local-images'])
+
+    def _run_bash_predicate(self, launcher, env):
+        """The launcher's own function under bash, with the launcher's
+        runner pointed at this interpreter and src/; returns its exit code."""
+        text = _read(launcher)
+        script = ('bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
+                  'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
+                  + _bash_function(text, "using_local_images")
+                  + "using_local_images\n")
+        with tempfile.TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "config"), "w") as f:
+                f.write(env.pop("CONFIG", ""))
+            result = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                     "HOME": data_dir, "DATA_DIR": data_dir,
+                     "PY": sys.executable,
+                     "SRC": os.path.join(PROJECT_ROOT, "src"), **env})
+        self.assertEqual(result.stderr, "", result.stderr)
+        return result.returncode
+
+    def test_the_delegation_hands_back_the_verdict(self):
+        cases = (
+            ({}, 1),
+            ({"ONIONPRESS_TOR_IMAGE": "ghcr.io/brewsterkahle/onionpress-tor:latest"}, 1),
+            ({"ONIONPRESS_TOR_IMAGE": "onionpress-tor:dev"}, 0),
+            ({"ONIONPRESS_WORDPRESS_IMAGE": "onionpress-wordpress:dev"}, 0),
+            # The launcher's own export loop puts a config value in the
+            # environment, but the CLI reads $DATA_DIR/config itself too.
+            ({"CONFIG": "ONIONPRESS_TOR_IMAGE=onionpress-tor:dev\n"}, 0),
+            ({"CONFIG": "ONIONPRESS_TOR_IMAGE=ghcr.io/x/onionpress-tor:latest\n"}, 1),
+        )
+        for launcher in LAUNCHERS:
+            for env, expected in cases:
+                with self.subTest(launcher=launcher, env=env):
+                    self.assertEqual(self._run_bash_predicate(launcher, dict(env)), expected)
 
     def test_both_read_the_overrides_from_config(self):
         """So an installed app can be pointed at local images without editing

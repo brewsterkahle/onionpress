@@ -2127,6 +2127,12 @@ def main(argv: list[str] = None) -> int:
         "wordpress-status",
         help="Read status JSON on stdin and print the fields the WordPress "
              "container may see")
+    sub.add_parser(
+        "using-local-images",
+        help="Exit 0 when the stack points at images built on this machine "
+             "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "
+             "or ~/.onionpress/config, not on ghcr.io), 1 when at published "
+             "ones; both launchers gate every image pull on it")
     p_egress = sub.add_parser(
         "wordpress-egress",
         help="Shut WordPress's network (onionpress-wp0) off from everything "
@@ -2497,6 +2503,15 @@ def main(argv: list[str] = None) -> int:
         for key in applied.rejected:
             print(f"rejected {key}")
         return 0
+
+    if args.command == "using-local-images":
+        # The launchers' using_local_images(): the one copy of the rule
+        # (containers.using_local_images; the menubar and update-images
+        # call it in-process). Before the stack is up, so no OnionPressCLI
+        # setup (config/secrets creation, port probing).
+        from .containers import using_local_images
+        paths = resolve_paths(data_dir=args.data_dir)
+        return 0 if using_local_images(paths.config_file) else 1
 
     if args.command == "wordpress-egress":
         # Run by both launchers before they start the containers: no

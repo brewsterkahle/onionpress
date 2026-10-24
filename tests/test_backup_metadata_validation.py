@@ -115,14 +115,17 @@ def _bash_function(text, name):
 # ensure_key_helper_image and key_volume_cat, and what they use. A harness
 # that runs create_backup loads them from the launcher itself; its docker
 # stub answers `image inspect` (the image is here) and `volume ls`.
-LINUX_KEY_HELPERS = ("using_local_images", "docker_volume_state",
-                     "ensure_key_helper_image", "key_volume_cat")
+# using_local_images is a delegation to `onionpress.cli using-local-images`
+# (Phase 4, #120), stubbed here as "published images": these harnesses are
+# about the key reads, and the predicate has tests/test_local_image_mode.py.
+LINUX_KEY_HELPERS = ("docker_volume_state", "ensure_key_helper_image", "key_volume_cat")
 
 
 def _linux_key_helpers(text=None):
     text = _read("linux/onionpress") if text is None else text
     line = next(l for l in text.splitlines() if l.startswith("KEY_HELPER_IMAGE="))
-    return "\n" + line + "\n" + "".join(_bash_function(text, n) for n in LINUX_KEY_HELPERS)
+    return ("\n" + line + "\nusing_local_images() { return 1; }\n"
+            + "".join(_bash_function(text, n) for n in LINUX_KEY_HELPERS))
 
 
 def _cheap_kdf(test):
