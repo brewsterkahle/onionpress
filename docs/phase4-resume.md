@@ -43,7 +43,7 @@ the harness is about something else.
 
 | # | pair | status |
 |---|------|--------|
-| 1 | `using_local_images` | todo |
+| 1 | `using_local_images` | done (commit: see git log, "Phase 4 slice 1") |
 | 2 | `regenerate_derivatives_pending` | todo |
 | 3 | `retire_old_onionheaven_containers` | todo |
 | 4 | `migrate_tor_network` | todo |
@@ -96,8 +96,28 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   www-data's names (`onionpress.wp_files`); wp-cli as www-data, never
   `--allow-root`; secrets never on argv.
 
+## Slice notes
+
+- Slice 1 (`using_local_images`): the `docker pull` gates stay in bash
+  (`if using_local_images; then`); only the predicate's body moved. The
+  bash function is `… --data-dir "$DATA_DIR" using-local-images`, a fast
+  path in `cli.main` over `containers.using_local_images(paths.config_file)`
+  (exit 0 local, 1 published). The launchers' config→environment export
+  loop for the two image variables stays (compose reads them); its
+  injection-safety test stays too. Bash harnesses: `test_install_invariants`
+  defines `bundled_python`/`op_py` on `sys.executable`;
+  `test_backup_metadata_validation._linux_key_helpers` emits a
+  `using_local_images() { return 1; }` stub; `test_linux_backup_onion_address`'s
+  `op_py` stub answers the subcommand; `test_backup_password_verify` runs
+  the real delegation (it already had `op_py` and a `python3` wrapper).
+  Also added in passing: the `daemon` subcommand's rows in
+  `tests/test_cli_dispatch.py` (PR #376 and PR #377 landed separately, so
+  the census was failing on main's merge of both).
+
 ## Next step
 
-Slice 1: `using_local_images` — add the `using-local-images` fast path to
-`cli.main`, delegate both bash bodies, fix the bash harnesses that load the
-function, retire `TestLaunchersDefineThePredicate`'s body checks.
+Slice 2: `regenerate_derivatives_pending` — a `regenerate-derivatives-pending`
+fast path over `derivatives.regeneration_pending(paths.data_dir, docker_bin)`
+(exit 0 pending, 1 not), delegate both bash bodies, replace
+`TestDerivativeRegenerationWiring.test_launchers_carry_the_same_pending_check`
+with a Python test and a delegation check.

@@ -45,6 +45,7 @@ db_client() { echo "-- dump"; }
 op_py() {
     case "$1" in
         pack-backup) cat >/dev/null; cp "$3/metadata.json" "$META_OUT"; : > "$5" ;;
+        --data-dir) [ "$3" != using-local-images ] ;;   # the predicate: published images
         *) return 0 ;;
     esac
 }

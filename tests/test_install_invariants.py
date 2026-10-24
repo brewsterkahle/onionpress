@@ -12,6 +12,7 @@ import ast
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -2052,11 +2053,16 @@ exit 0
                 f'LOG_FILE="{tmp}/log"; DATA_DIR="{tmp}"; DOCKER_DIR="{tmp}"\n'
                 'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
                 "sleep() { :; }\n"  # wait_for_docker's 180 s pass instantly
+                # using_local_images delegates to onionpress.cli (Phase 4):
+                # the launchers' runners, on this interpreter and src/.
+                'bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
+                'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
                 + functions + snippet + "\n")
             run_env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
                        "STUB_MODE": mode, "STUB_VOLUMES": volumes,
                        "STUB_CALLS": calls, "STUB_FAIL": fail,
-                       "STUB_IMAGE": image}
+                       "STUB_IMAGE": image,
+                       "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src")}
             run_env.update(env or {})
             out = subprocess.run(["bash", "-c", script], env=run_env,
                                  capture_output=True, text=True, timeout=60)

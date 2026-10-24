@@ -404,17 +404,11 @@ unset _img_var _img_val
 # published ones. Every `docker pull` / `docker compose pull` below is gated
 # on this: without the gate they overwrite a local tag with the registry's
 # copy, so a developer would build an image, start the app, and silently test
-# someone else's build.
+# someone else's build. The rule itself (a reference not on ghcr.io, from the
+# environment or ~/.onionpress/config) is onionpress.containers.using_local_images,
+# asked through the CLI (Phase 4, #120).
 using_local_images() {
-    local _ref
-    for _ref in "${ONIONPRESS_TOR_IMAGE:-}" "${ONIONPRESS_WORDPRESS_IMAGE:-}"; do
-        [ -n "$_ref" ] || continue
-        case "$_ref" in
-            ghcr.io/*) ;;   # explicitly pointed at a published image
-            *) return 0 ;;
-        esac
-    done
-    return 1
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" using-local-images
 }
 
 # The image every one-shot helper that handles the onion service key runs

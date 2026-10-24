@@ -889,11 +889,11 @@ All of them now check `using_local_images()` — true when
 that is *not* on `ghcr.io`. A `ghcr.io` reference is a deliberate pin, not a
 local build, so pulls keep working normally for everyone else.
 
-The predicate exists in three places — `app/MacOS/onionpress`,
-`linux/onionpress` and `onionpress.containers.using_local_images()` — because
-the bash CLI, the Linux launcher and the macOS menubar are parallel
-implementations. `tests/test_local_image_mode.py` checks all three agree and
-that no pull escapes the guard.
+The predicate is `onionpress.containers.using_local_images()`; the bash
+launchers' `using_local_images()` ask it through `onionpress using-local-images`
+(exit 0 = local images), and the macOS menubar calls it in-process.
+`tests/test_local_image_mode.py` runs the bash delegation and checks that no
+pull escapes the guard.
 
 ### Pointing an installed app at local images
 
