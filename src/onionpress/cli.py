@@ -174,6 +174,29 @@ def _config_key_help() -> dict:
     return CONFIG_KEY_HELP
 
 
+def _launcher_log_func() -> Callable[[str], None]:
+    """A log function in the bash launchers' `log` format on stdout, for a
+    start step a launcher runs as `… 2>&1 | tee -a "$LOG_FILE"` (Phase 4,
+    #120): the lines land in the log and on the launcher's terminal as the
+    bash body's did."""
+    def log(msg: str) -> None:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] {msg}", flush=True)
+    return log
+
+
+def _start_step_manager(paths) -> ContainerManager:
+    """A ContainerManager for one of the launchers' pre-`compose up` steps:
+    the ports from the launcher's own ONIONPRESS_PORT_OFFSET (never the
+    bind probe, which detect_port_offset would run beside a running
+    stack), the launcher's log format."""
+    from .config import PortConfig
+    offset = os.environ.get("ONIONPRESS_PORT_OFFSET", "")
+    port_config = PortConfig.from_offset(int(offset) if offset.isdigit() else 0)
+    return ContainerManager(Docker(paths), paths, port_config,
+                            log_func=_launcher_log_func())
+
+
 def _file_log_func(log_file: str | None) -> Callable[[str], None]:
     """A log function that writes to the log file only (the terminal gets
     a summary instead)."""
@@ -2134,6 +2157,13 @@ def main(argv: list[str] = None) -> int:
         help="Read status JSON on stdin and print the fields the WordPress "
              "container may see")
     sub.add_parser(
+        "retire-old-onionheaven-containers",
+        help="Before the first `compose up`: remove every onionpress-tor, "
+             "onionheaven and onionheaven-(poll|takeover)-N that does not "
+             "mount onionpress-onionheaven-data (started by an older "
+             "OnionPress; the hub data move must not race them); always "
+             "exits 0")
+    sub.add_parser(
         "using-local-images",
         help="Exit 0 when the stack points at images built on this machine "
              "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "
@@ -2508,6 +2538,15 @@ def main(argv: list[str] = None) -> int:
             print(f"{'changed' if key in changed else 'unchanged'} {key}")
         for key in applied.rejected:
             print(f"rejected {key}")
+        return 0
+
+    if args.command == "retire-old-onionheaven-containers":
+        # The launchers' retire_old_onionheaven_containers() (Phase 4,
+        # #120): ContainerManager's own step (start_core runs it too),
+        # logged in the launcher's format; no OnionPressCLI setup. Exit 0
+        # whatever is found: the step never stops a start.
+        paths = resolve_paths(data_dir=args.data_dir)
+        _start_step_manager(paths).retire_old_onionheaven_containers()
         return 0
 
     if args.command == "regenerate-derivatives-pending":

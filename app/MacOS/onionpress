@@ -493,23 +493,13 @@ stop_onionheaven_farm() {
 # after it. So before compose starts anything, every OnionHeaven worker and
 # Tor-side container that does not mount onionpress-onionheaven-data is
 # removed, all at once: compose recreates onionpress-tor and onionheaven,
-# and the heartbeat starts new workers. Identical in both launchers
-# (tests/test_onionheaven_data_move_hardening.py).
+# and the heartbeat starts new workers. The step is
+# ContainerManager.retire_old_onionheaven_containers (start_core's too),
+# run through the CLI (Phase 4, #120); its log lines come back on stdout in
+# this script's log format, so the tee carries them to the log and the
+# terminal, and the pipe's status is tee's: the step never stops a start.
 retire_old_onionheaven_containers() {
-    local name mounts pids=""
-    for name in $(docker ps -a --format '{{.Names}}' 2>/dev/null \
-            | grep -E '^(onionpress-tor|onionheaven|onionheaven-(poll|takeover)-[0-9]+)$'); do
-        mounts=$(docker inspect --format '{{range .Mounts}}{{.Name}}:{{.Destination}} {{end}}' "$name" 2>/dev/null) || continue
-        case " $mounts" in
-            *" onionpress-onionheaven-data:/var/lib/onionheaven "*) continue ;;
-        esac
-        log "Removing $name: it does not mount onionpress-onionheaven-data (started by an older OnionPress)"
-        docker rm -f "$name" >> "$LOG_FILE" 2>&1 &
-        pids="$pids $!"
-    done
-    if [ -n "$pids" ]; then
-        wait $pids || true
-    fi
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" retire-old-onionheaven-containers 2>&1 | tee -a "$LOG_FILE"
 }
 
 # onionpress-network's bridge has a fixed name, onionpress-tor0

@@ -44,8 +44,8 @@ the harness is about something else.
 | # | pair | status |
 |---|------|--------|
 | 1 | `using_local_images` | done, 80aae349 |
-| 2 | `regenerate_derivatives_pending` | done (the slice 2 commit) |
-| 3 | `retire_old_onionheaven_containers` | todo |
+| 2 | `regenerate_derivatives_pending` | done, 76bee60e |
+| 3 | `retire_old_onionheaven_containers` | done (the slice 3 commit) |
 | 4 | `migrate_tor_network` | todo |
 | 5 | `migrate_key_volume` | todo (only with every check kept, see below) |
 | 6 | `db_import` | todo |
@@ -126,15 +126,22 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   fast), and the docker leg is tested in Python with an explicit stub binary
   (`test_install_invariants.TestDerivativeRegenerationWiring`).
 
+- Slice 3 (`retire_old_onionheaven_containers`): the fast path builds the
+  manager with `cli._start_step_manager(paths)` (`PortConfig.from_offset`
+  of `$ONIONPRESS_PORT_OFFSET`, never the bind probe; `_launcher_log_func`,
+  `[ts] msg` on stdout) and always exits 0. The bash body is
+  `… 2>&1 | tee -a "$LOG_FILE"`: the lines reach the log and the terminal
+  as `log` sent them, and the pipe's status is tee's, so a Python failure
+  is in the log but never stops the start (the bash body never did
+  either). `test_onionheaven_data_move_hardening.TestLaunchers` keeps its
+  bash harness for `stop_onionheaven_farm`; the retirement is tested in
+  Python with a fake docker (removed set, inspect failure keeps, never the
+  farm controller, all at once).
+
 ## Next step
 
-Slice 3: `retire_old_onionheaven_containers` — a
-`retire-old-onionheaven-containers` fast path over
-`ContainerManager.retire_old_onionheaven_containers` (a manager built with
-`PortConfig.from_offset($ONIONPRESS_PORT_OFFSET)`, never the bind probe, and
-a log function in the launchers' `[ts] msg` format on stdout); the bash body
-is `… 2>&1 | tee -a "$LOG_FILE"` (the pipe's status is tee's, so the step
-never stops a start under `set -e`); the bash harness tests in
-`tests/test_onionheaven_data_move_hardening.py` become Python tests with a
-fake docker; `test_onionheaven_farm.test_launchers_leave_the_controller_alone`
-stops parsing the bash grep pattern.
+Slice 4: `migrate_tor_network` — the same fast path shape
+(`migrate-tor-network` over `ContainerManager.migrate_tor_network`, which
+`tests/test_wordpress_egress.TestTorNetworkMove` already covers); delete the
+bash `MOVE_STUB`/`_move` tests, keep the delegation check and the
+start_containers ordering check.
