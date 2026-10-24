@@ -439,6 +439,15 @@
   in its state file, `pending_question`, and never answers it itself).
   `tests/test_handle_action.py`
   runs it against a stub launcher and a stub docker.
+- **The page's Stop and Restart are the launcher's** (issue #354): on
+  Linux they reach its `stop)`/`restart)` cases, which stop the heartbeat
+  client before the containers (so it sends /offline to the hub) and start
+  it again after a restart. After the page's Stop the `onionpress.service`
+  user unit is still active (its `start` process keeps its status loop and
+  the PID lock), so `onionpress start` is refused and `systemctl --user
+  start onionpress` does nothing: the page's hint says `onionpress
+  restart` (it named `sudo systemctl start onionpress`, a system unit
+  current installs lack). `tests/test_linux_settings_page_stop.py`.
 - Never add image overrides, `ONIONHEAVEN_ADDRESS` (the heartbeat sends the
   onion key to it), `ONIONHEAVEN_ACCEPT_REGISTRATIONS`, `ADDRESS_PREFIX`,
   ports, paths or secrets other than `CLOUDFLARE_TUNNEL_TOKEN`. The page

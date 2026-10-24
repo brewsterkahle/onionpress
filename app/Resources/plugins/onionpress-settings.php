@@ -1411,7 +1411,8 @@ function onionpress_settings_page() {
         <p class="description" style="margin-top: 10px;">
             Restart will apply any saved settings changes. The page will be unavailable briefly during restart.
             <?php if ( $current_platform === 'linux' ) : ?>
-            <br>To start after a full stop, use SSH: <code>sudo systemctl start onionpress</code>
+            <br>To start again after Stop, run <code>onionpress restart</code> on that machine (over SSH, say).
+            The OnionPress service stays up after Stop, so <code>onionpress start</code> and <code>systemctl --user start onionpress</code> do nothing.
             <?php endif; ?>
         </p>
 
