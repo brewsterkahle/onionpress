@@ -349,7 +349,7 @@
 - `make coverage` is the same run under `coverage` (`.coveragerc`:
   branches; src/onionpress, linux and the tor image's scripts; tests,
   tests/stress and setup.py left out), then `build/coverage-floors.sh`:
-  total 60 %, `cli.py` 60, `handle_action.py` 85, `confirm.py` 90,
+  total 60 %, `cli.py` 69, `handle_action.py` 85, `confirm.py` 90,
   `config.py` 85, each a point or two under the measured value. Raise a
   floor when the tests catch up; never lower one to pass. CI runs the
   three steps on the Linux job and uploads `coverage.xml` + the HTML
