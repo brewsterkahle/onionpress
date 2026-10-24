@@ -671,6 +671,7 @@ class TestLinuxDaemonLoop(_LinuxCase):
                 mock.patch.object(hb, "_start_analytics_sharing"), \
                 mock.patch.object(hb, "_start_reachability_loop"), \
                 mock.patch.object(hb, "_poll_analytics_opt_in", lambda prev, cfg: prev), \
+                mock.patch.object(hb, "_poll_upload_trigger", lambda cfg: False), \
                 mock.patch.object(hb, "SleepInhibitor", _Inhibitor), \
                 mock.patch.object(hb, "HAVE_PYSOCKS", True), \
                 mock.patch.object(hb, "HubConnection") as conn, \

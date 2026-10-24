@@ -34,8 +34,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
-    backup, cli, config, confirm, containers, daemon, derivatives, handle_action,
-    launcher_ops, multisite, onionheaven, redact, scrub, wordpress_egress,
+    analytics_sharing, backup, cli, config, confirm, containers, daemon, derivatives,
+    handle_action, launcher_ops, multisite, onionheaven, redact, scrub, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -301,6 +301,14 @@ ROWS = [
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
         returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"])),
+    # Share Now from the command line (#351): analytics_sharing.request_upload
+    # with this run's paths and the platform; no OnionPressCLI (it reads the
+    # config and leaves a marker). Its status is main's.
+    Row("upload-analytics", ["upload-analytics"], "analytics_sharing.request_upload",
+        mock.call(ANY, "linux", out=ANY), rc=0, returns=0,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].data_dir, t.dir)),
+    Row("upload-analytics", ["upload-analytics"], "analytics_sharing.request_upload",
+        mock.call(ANY, "macos", out=ANY), rc=1, returns=1, os_name="macos"),
     # The Mac daemon (#367): no OnionPressCLI; the launcher given, else
     # this install's.
     Row("daemon", ["daemon", "status", "--json"], "daemon.run_daemon_command",
@@ -398,6 +406,7 @@ MODULES = {
     "multisite": multisite, "scrub": scrub, "redact": redact, "backup": backup,
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
+    "analytics_sharing": analytics_sharing,
 }
 
 

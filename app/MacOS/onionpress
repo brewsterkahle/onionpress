@@ -3004,21 +3004,12 @@ main() {
             ;;
 
         upload-analytics)
-            # Trigger an immediate analytics upload via file trigger (polled
-            # by the OnionPress daemon's status loop)
-            local pid_file="$DATA_DIR/daemon.pid"
-            if [ ! -f "$pid_file" ]; then
-                echo "OnionPress is not running (no PID file)."
-                exit 1
-            fi
-            local pid
-            pid=$(cat "$pid_file")
-            if ! kill -0 "$pid" 2>/dev/null; then
-                echo "OnionPress is not running (PID $pid is stale)."
-                exit 1
-            fi
-            touch "$DATA_DIR/.upload-analytics"
-            echo "Analytics upload triggered. Check logs for result."
+            # Upload the diagnostic logs to OnionHome now (Share Now from
+            # the command line): one implementation for both platforms,
+            # onionpress.analytics_sharing.request_upload (issue #351). It
+            # refuses while sharing is off or the daemon is not running,
+            # else leaves the marker the daemon's status loop takes.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" upload-analytics
             ;;
 
         validate-oh-address)

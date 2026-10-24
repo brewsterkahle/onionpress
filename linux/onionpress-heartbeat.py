@@ -41,6 +41,9 @@ so a Linux install ships its logs to OnionHome on the same daily cadence
 as the Mac menubar app. The daemon is the natural home for it: it already
 runs continuously under systemd and re-reads the config every cycle.
 Before this, nothing on Linux ever ran the upload cycle (issue #207).
+The Settings page's Share Now and `onionpress upload-analytics` leave a
+trigger file this daemon takes every cycle (issue #351: until then nothing
+on Linux read it, while the page said the upload was queued).
 
 It also runs the onion service recovery loop (onionpress.reachability):
 the dual probe and the RepublishTrigger that ask tor-watchdog for a
@@ -221,10 +224,12 @@ def _registration_choice(config):
 # Docker exec helper
 # ---------------------------------------------------------------------------
 
-def docker_exec(container, args, timeout=30, input=None):
+def docker_exec(container, args, timeout=30, input=None, user=None):
     """Run a command inside a Docker container. Returns (success, stdout).
-    *input*, if given, is written to the command's stdin (docker exec -i)."""
-    cmd = ["docker", "exec"] + (["-i"] if input is not None else []) + [container] + args
+    *input*, if given, is written to the command's stdin (docker exec -i);
+    *user*, if given, is who runs it (docker exec -u)."""
+    cmd = (["docker", "exec"] + (["-i"] if input is not None else [])
+           + (["-u", user] if user else []) + [container] + args)
     try:
         result = subprocess.run(
             cmd, input=input, capture_output=True, text=True,
@@ -1197,6 +1202,69 @@ def _start_reachability_loop():
     return _reachability
 
 
+# Share Now (issue #351): the Settings page's REST endpoint touches
+# UPLOAD_TRIGGER_VOLUME_PATH in the onionpress-data volume, `onionpress
+# upload-analytics` touches $DATA_DIR/UPLOAD_TRIGGER_MARKER. Both are taken
+# here every cycle, as the Mac daemon's status loop takes them; a test ties
+# the copies to onionpress.analytics_sharing's.
+UPLOAD_TRIGGER_MARKER = ".upload-analytics"
+UPLOAD_TRIGGER_VOLUME_PATH = "/var/lib/onionpress/.upload-analytics"
+WP_USER = "www-data"
+
+
+def _take_upload_trigger():
+    """True once when a Share Now request is waiting, removing it.
+
+    The host marker counts only once removed (a marker that cannot be
+    removed would otherwise upload every cycle). The page's file is
+    www-data's, so it is checked and removed as www-data in the wordpress
+    container, never by root (a link planted at that name would be
+    followed); a stack that is down answers no.
+    """
+    found = False
+    path = os.path.join(DATA_DIR, UPLOAD_TRIGGER_MARKER)
+    if os.path.lexists(path):
+        try:
+            os.remove(path)
+        except OSError as e:
+            log.warning("Share Now: could not remove %s: %s", path, e)
+        else:
+            found = True
+    ok, _ = docker_exec(
+        "onionpress-wordpress",
+        ["sh", "-c", f"test -f {UPLOAD_TRIGGER_VOLUME_PATH} && rm {UPLOAD_TRIGGER_VOLUME_PATH}"],
+        timeout=5, user=WP_USER)
+    return found or ok
+
+
+def _poll_upload_trigger(config):
+    """Per-cycle check for a Share Now request. Returns True when the
+    upload loop was woken.
+
+    Only an explicit ``yes`` uploads, as for the loop's own daily upload:
+    with sharing off the request is taken and logged, nothing is sent (the
+    page and `onionpress upload-analytics` say so up front, but the file
+    can be touched by anything in WordPress).
+    """
+    if not _take_upload_trigger():
+        return False
+    if config.get(ANALYTICS_CONFIG_KEY, "no").strip().lower() != "yes":
+        log.info("Share Now: ignored, %s is not yes (set \"Share diagnostic logs "
+                 "with OnionHome\" to Enabled on the Settings page, or: "
+                 "onionpress config set %s yes)", ANALYTICS_CONFIG_KEY, ANALYTICS_CONFIG_KEY)
+        return False
+    if _analytics_host is None:
+        log.warning("Share Now: ignored, the analytics upload loop is not "
+                    "running on this install")
+        return False
+    analytics_sharing = _import_analytics_sharing()
+    if analytics_sharing is None:
+        return False
+    log.info("Share Now: uploading the diagnostic logs to OnionHome now")
+    analytics_sharing.trigger_upload()
+    return True
+
+
 def _poll_analytics_opt_in(previous, config):
     """Per-cycle check of the opt-in flag. Returns its current value.
 
@@ -1698,7 +1766,9 @@ def main():
         # Sleep forever (or until signal) — the server container handles everything
         while _running:
             time.sleep(60)
-            analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, read_config())
+            config = read_config()
+            analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
+            _poll_upload_trigger(config)
         return
 
     global _registered, _hub_conn
@@ -1760,6 +1830,7 @@ def main():
         new_enabled = choice == "yes"
         new_hub = _hub_address(config)
         analytics_opt_in = _poll_analytics_opt_in(analytics_opt_in, config)
+        _poll_upload_trigger(config)
 
         # The key this daemon loaded at start may have been replaced since
         # (a key import or restore while it ran): it must not go on sending

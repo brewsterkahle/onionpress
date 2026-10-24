@@ -22,10 +22,28 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 
 from onionpress import redact
+
+# Share Now (issue #351). The marker `onionpress upload-analytics` touches
+# in the data directory, and the file the Settings page's REST endpoint
+# touches in the onionpress-data volume (www-data's: the daemons take it
+# as www-data). Both are taken by the host's long-running process, the
+# Mac daemon's status loop (daemon.UPLOAD_TRIGGER_MARKER) and Linux's
+# heartbeat client, which then upload now; a test ties the copies.
+UPLOAD_TRIGGER_MARKER = ".upload-analytics"
+UPLOAD_TRIGGER_VOLUME_PATH = "/var/lib/onionpress/.upload-analytics"
+SHARING_CONFIG_KEY = "SHARE_ANALYTICS_WITH_ONIONHOME"
+SHARING_OFF_MSG = (
+    f"Log sharing is off ({SHARING_CONFIG_KEY} is not yes), so nothing is "
+    f"uploaded. Turn it on with: onionpress config set {SHARING_CONFIG_KEY} yes")
+NOT_RUNNING_MSG = (
+    "OnionPress is not running: nothing would take the request. "
+    "Start OnionPress first.")
+REQUESTED_MSG = "Analytics upload requested. Check the log for the result."
 
 # Permissive "safe filename" check used when the server asks for a file
 # back. Log naming can evolve on the client side faster than both ends
@@ -41,6 +59,63 @@ _upload_now = threading.Event()
 def trigger_upload():
     """Wake the sharing loop to upload immediately."""
     _upload_now.set()
+
+
+def sharing_enabled(config_file):
+    """The opt-in as the loops read it: only an explicit ``yes`` uploads."""
+    from onionpress import config as op_config
+    value = op_config.read_config(config_file).get(SHARING_CONFIG_KEY, "no")
+    return value.strip().lower() == "yes"
+
+
+def daemon_running(data_dir, os_name):
+    """Whether the process that takes a Share Now request is running: on
+    macOS the daemon (`daemon.pid` names a live process), on Linux the
+    heartbeat client (its user unit, else an old install's system unit,
+    active)."""
+    if os_name == "macos":
+        from onionpress.daemon import PID_FILENAME
+        try:
+            with open(os.path.join(data_dir, PID_FILENAME)) as fh:
+                pid = int(fh.read().strip())
+            os.kill(pid, 0)
+        except (OSError, ValueError):
+            return False
+        return True
+    for argv in (["systemctl", "--user", "is-active", "onionpress-heartbeat.service"],
+                 ["systemctl", "is-active", "onionpress-heartbeat.service"]):
+        try:
+            if subprocess.run(argv, capture_output=True, timeout=15).returncode == 0:
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return False
+
+
+def request_upload(paths, os_name, out=sys.stdout):
+    """`onionpress upload-analytics` (both launchers delegate here): ask
+    the running daemon to upload the diagnostic logs to OnionHome now.
+
+    Refuses, exit 1, while sharing is off (the daemons upload nothing
+    then; the Settings page says the same) and when no daemon would take
+    the request. Otherwise leaves ``UPLOAD_TRIGGER_MARKER`` in the data
+    directory, which the Mac daemon's status loop and Linux's heartbeat
+    client take within a cycle, and exits 0.
+    """
+    if not sharing_enabled(paths.config_file):
+        print(SHARING_OFF_MSG, file=out)
+        return 1
+    if not daemon_running(paths.data_dir, os_name):
+        print(NOT_RUNNING_MSG, file=out)
+        return 1
+    try:
+        with open(os.path.join(paths.data_dir, UPLOAD_TRIGGER_MARKER), "a"):
+            pass
+    except OSError as e:
+        print(f"Could not leave the request in {paths.data_dir}: {e}", file=out)
+        return 1
+    print(REQUESTED_MSG, file=out)
+    return 0
 
 
 def start_analytics_sharing(app):

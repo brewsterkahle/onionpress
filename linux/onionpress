@@ -4624,6 +4624,16 @@ sys.exit(0 if provision_interactive() else 1)
             _validate_oh_address "$2"
             ;;
 
+        upload-analytics)
+            # Upload the diagnostic logs to OnionHome now (Share Now from
+            # the command line): one implementation for both platforms,
+            # onionpress.analytics_sharing.request_upload (issue #351). It
+            # refuses while sharing is off or the heartbeat client is not
+            # running, else leaves the marker the client takes in its next
+            # cycle.
+            op_py --data-dir "$DATA_DIR" upload-analytics
+            ;;
+
         scrub)
             # Full lifecycle test — backup, uninstall, install, restore,
             # verify. Ported from ~300 lines of bash to src/onionpress/
@@ -4829,7 +4839,7 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|get|setup|config|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|address|get|setup|config|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
             exit 1
             ;;
     esac

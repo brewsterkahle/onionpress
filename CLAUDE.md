@@ -448,6 +448,24 @@
   start onionpress` does nothing: the page's hint says `onionpress
   restart` (it named `sudo systemctl start onionpress`, a system unit
   current installs lack). `tests/test_linux_settings_page_stop.py`.
+- **Share Now is taken by the host's long-running process on both
+  platforms** (issue #351): the page's REST endpoint touches
+  `/var/lib/onionpress/.upload-analytics` (www-data's), `onionpress
+  upload-analytics` touches `~/.onionpress/.upload-analytics`; the Mac
+  daemon's status loop and Linux's heartbeat client
+  (`_poll_upload_trigger`, every cycle of both its loops, the volume file
+  removed as www-data) take both and wake the upload loop
+  (`analytics_sharing.trigger_upload`), which uploads only on
+  `SHARE_ANALYTICS_WITH_ONIONHOME=yes`; with it off the request is logged
+  and nothing is sent. Until then nothing on Linux read the file while
+  the page said "queued". Both launchers' `upload-analytics` is
+  `analytics_sharing.request_upload` (the CLI subcommand), which refuses
+  while sharing is off or nothing runs to take the request (Mac:
+  `daemon.pid` alive; Linux: the heartbeat unit active); the page answers
+  "off" instead of "queued" when config-current.json says so. The marker
+  name and path are literals in `analytics_sharing`, `daemon.py`, the
+  heartbeat and the page; `tests/test_settings_page_share_now.py` ties
+  them.
 - Never add image overrides, `ONIONHEAVEN_ADDRESS` (the heartbeat sends the
   onion key to it), `ONIONHEAVEN_ACCEPT_REGISTRATIONS`, `ADDRESS_PREFIX`,
   ports, paths or secrets other than `CLOUDFLARE_TUNNEL_TOKEN`. The page

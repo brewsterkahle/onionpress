@@ -824,7 +824,12 @@ class TestLauncherWiring(unittest.TestCase):
     def test_daemon_case_delegates(self):
         self.assertIn('exec "$_BUNDLED_PYTHON_BIN" -m onionpress.cli --data-dir "$DATA_DIR" daemon --launcher "$SCRIPT_DIR/onionpress" "${@:2}"',
                       self.cases["daemon"])
-        self.assertIn('daemon.pid', self.cases["upload-analytics"])
+        # upload-analytics is the CLI's (analytics_sharing.request_upload,
+        # #351): the daemon.pid check moved there with the Linux launcher's
+        # delegation (tests/test_settings_page_share_now.py).
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" upload-analytics',
+                      self.cases["upload-analytics"])
+        self.assertNotIn('daemon.pid', self.cases["upload-analytics"])
 
     def test_help_names_the_daemon(self):
         self.assertIn("  daemon        ", self.src)

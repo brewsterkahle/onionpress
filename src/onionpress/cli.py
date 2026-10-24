@@ -25,6 +25,7 @@ from .config import (
 from .docker import Docker
 from .containers import ContainerManager
 from .launcher_ops import BACKUP_PASSWORD_ENV
+from .analytics_sharing import SHARING_CONFIG_KEY
 from .hub_backup import RECOVERY_KEY_ENV
 
 
@@ -2346,6 +2347,11 @@ def main(argv: list[str] = None) -> int:
         "apply-config",
         help="Apply the Settings page's config-updates.json (the allowlisted "
              "keys), then remove it")
+    sub.add_parser(
+        "upload-analytics",
+        help="Upload the diagnostic logs to OnionHome now (Share Now; needs "
+             f"{SHARING_CONFIG_KEY}=yes and a running OnionPress): the daemon "
+             "takes the request within a cycle")
     p_daemon = sub.add_parser(
         "daemon",
         help="The Mac's long-running loops (status, probe, heartbeat, the "
@@ -2416,6 +2422,15 @@ def main(argv: list[str] = None) -> int:
         return onionheaven.run_onionheaven_command(
             args.onionheaven_command, _hub_context(args.data_dir),
             json_output=args.json)
+
+    if args.command == "upload-analytics":
+        # Share Now from the command line (#351): both launchers'
+        # `upload-analytics` is this. It reads the config and leaves a
+        # marker, so no OnionPressCLI setup (config/secrets creation, port
+        # probing).
+        from . import analytics_sharing
+        paths = resolve_paths(data_dir=args.data_dir)
+        return analytics_sharing.request_upload(paths, detect_os().value, out=sys.stdout)
 
     if args.command == "daemon":
         # The loops (onionpress.daemon, issue #367): no OnionPressCLI setup,

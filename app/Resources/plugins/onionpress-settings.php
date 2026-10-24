@@ -260,12 +260,30 @@ add_action( 'rest_api_init', function () {
         'methods'             => 'POST',
         'permission_callback' => function () { return onionpress_settings_owner_allowed(); },
         'callback'            => function () {
-            // Touch the trigger file the menubar watches. The menubar's
-            // handler itself decides whether to run the upload now (if
-            // online + ready) or queue it for when the service comes
-            // back online. Either outcome is reported to the user with
-            // the same "queued" wording because we can't cheaply know
-            // the menubar's state from here without more plumbing.
+            // Share Now. The host's long-running process (the Mac daemon's
+            // status loop, Linux's heartbeat client) takes the trigger
+            // file touched here within a cycle and uploads then, or as
+            // soon as it is online. Nothing is uploaded while sharing is
+            // off, so say that instead of "queued" when the host's view
+            // of the config (the config-current.json it writes to the
+            // shared volume; anything but yes is no, as the upload loops
+            // read it) says so (issue #351). No file to read: the host
+            // decides, as before.
+            $sharing     = null;
+            $config_file = '/var/lib/onionpress/config-current.json';
+            if ( file_exists( $config_file ) ) {
+                $raw = file_get_contents( $config_file );
+                $decoded = $raw === false ? null : json_decode( $raw, true );
+                if ( is_array( $decoded ) ) {
+                    $value   = $decoded['SHARE_ANALYTICS_WITH_ONIONHOME'] ?? 'no';
+                    $sharing = strtolower( trim( (string) $value ) ) === 'yes' ? 'yes' : 'no';
+                }
+            }
+            if ( $sharing === 'no' ) {
+                return new WP_REST_Response( array(
+                    'message' => 'Log sharing is off, so nothing is uploaded. Set "Share diagnostic logs with OnionHome" to Enabled, save the settings, then Share Now.',
+                ), 200 );
+            }
             $trigger = '/var/lib/onionpress/.upload-analytics';
             if ( touch( $trigger ) ) {
                 return new WP_REST_Response( array(
