@@ -53,7 +53,7 @@ the harness is about something else.
 | 4 | `migrate_tor_network` | done, c8d644e6 |
 | 5 | `migrate_key_volume` | done, 487a3e06 |
 | 6 | `db_import` | done, 14d3ff94 |
-| 7 | `block_wordpress_egress` | todo |
+| 7 | `block_wordpress_egress` | done, 7c22e46a |
 
 Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
 
@@ -215,25 +215,80 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   they did not change. No `docker run` here (exec only), so no
   capabilities row.
 
+- Slice 7 (`block_wordpress_egress`): moved, not recorded as done as it
+  stood — the two verdict lines were the last bash words of the body, and
+  the move took well under an hour. Both launchers were already the
+  delegation to `wordpress-egress` (`wordpress_egress.ensure`, a fast path
+  in `cli.main`; the Mac passes `--bin-dir "$BIN_DIR"`, both `--wp-port
+  "$ONIONPRESS_WP_PORT"`); what moved is the `$(…) || rc=$?` capture and
+  the two `log` lines, now `cli._log_wordpress_egress_verdict` over
+  `_launcher_log_func` (`[ts] msg` on stdout), worded per platform as each
+  bash body worded them (`detect_os()`: the Mac's `✓ … in place: <line>`
+  and `WARNING: … this Mac's own services — see <paths.log_file>`, which
+  is the launcher's `$LOG_FILE`; Linux's `… this machine and its LAN.`).
+  `--check` (nobody's launcher call) still prints the bare status line.
+  The bash `${out:-rc=$rc}` fallback became a `try/except` around
+  `Docker()` + `ensure` in the fast path: whatever goes wrong is the
+  WARNING's words, never a traceback and never a start stopped. The bash
+  bodies are the slice 5 shape: `… 2>&1 | tee -a "$LOG_FILE"`, then on the
+  Mac `[ "${PIPESTATUS[0]}" -eq 0 ] || START_ERRORS="$START_ERRORS
+  wordpress-egress"` (the START SUMMARY's list is bash state the Python
+  cannot set), and `return 0` on both (the launchers run under `set -e`;
+  a failure is a WARNING, never a stopped start). Linux's status-loop
+  re-apply (`rootless_netns` changed) calls the same function and needs
+  nothing new. One delta from the bash: the Python's stderr used to go to
+  the log file only (`2>>"$LOG_FILE"`); now it is tee'd to the terminal
+  too, as slices 3–5 do. Tests (`tests/test_wordpress_egress.py`):
+  `TestLaunchers.test_the_helpers_call_the_shared_cli_and_never_stop_the_start`
+  now holds the delegation shape (tee, `return 0`, no `log` call or
+  WARNING words in the body, the Mac's PIPESTATUS/START_ERRORS line,
+  none on Linux); `test_the_cli_logs_each_launchers_own_verdict_line`
+  (both platforms' four lines, `cli.detect_os` patched — the helper must
+  use `cli`'s module-level `detect_os`, a local re-import dodged the
+  patch), `test_check_prints_the_bare_status_line`,
+  `test_whatever_goes_wrong_is_the_warning_never_a_traceback`
+  (`cli.Docker` raising); and `TestLauncherDelegationEndToEnd` runs each
+  launcher's function cut out under bash with `bundled_python`/`op_py` on
+  `sys.executable` and a `docker` stub on PATH (`info` answers
+  `["name=seccomp"]`, `run` prints `ok`: the CLI's system-Docker path, so
+  skipped on a Mac; the Linux launcher's case also skipped where
+  `Docker()` would take a bundle's docker over the stub, like slice 5's
+  harness — the Mac launcher's `--bin-dir` points `Docker()` at the stub's
+  folder, so that case always runs): the one verdict line is on stdout
+  and in `$LOG_FILE`, the function returns 0 both ways, and only the Mac
+  with `docker info` failing has ` wordpress-egress` in `START_ERRORS`.
+  The dispatch census rows were already right (the row's Mock has
+  `line`); the `docker run` census has no new site (the helper's
+  `docker run` was the Python's already). CLAUDE.md's "Nor any
+  connection (issue #144)" bullet now says the bash function is the
+  delegation.
+
 ## Next step
 
-Slice 7: `block_wordpress_egress`. Both launchers are already the
-delegation to `wordpress-egress` (`wordpress_egress.ensure` over
-`_launcher_log_func`-less output: the CLI prints one status line; Mac
-passes `--bin-dir "$BIN_DIR"`, both `--wp-port "$ONIONPRESS_WP_PORT"`),
-held by `tests/test_wordpress_egress.TestLaunchers` (called before the
-first `compose up`, `return 0`, the WARNING words). What is still bash,
-per launcher: the `$(…) || rc=$?` capture, the two `log` lines ("egress
-block in place: $out" / "WARNING: … not in place: ${out:-rc=$rc}"), and
-on the Mac `START_ERRORS="$START_ERRORS wordpress-egress"` (the START
-SUMMARY's list, bash state the Python cannot set). On Linux the status
-loop's rootless re-apply (`rootless_netns`, the `netns` comparison around
-line 2277) calls the function again when the namespace changes. Decide
-whether to move the two log lines into the CLI (printing them in the
-launcher's `[ts] msg` format as slices 3–5 do, with the bash body
-becoming `… 2>&1 | tee -a "$LOG_FILE"; return 0`) — then the Mac's
-`START_ERRORS` append needs the status back, so the shape would be the
-slice 5 one (`PIPESTATUS[0]`, status noted, `return 0` kept) — or record
-slice 7 as done as it stands (the body is one CLI call plus logging).
-Either way CLAUDE.md's "Nor any connection (issue #144)" bullet already
-names the Python as the implementation.
+The slice table is complete: slices 1–7 are on `phase4`, every launcher
+body in it a one-line (or, where a status must come back, two-line)
+delegation to `onionpress.cli`, each with a Python unit test against a
+fake docker, its dispatch-census row and, where it runs a container, its
+`docker run` census row. The branch is the hand-over: ready for a PR
+against `main` of `brewsterkahle/onionpress` once Ivar wants one (none
+opened). Before opening it, run both suites once more at the tip (one at
+a time) and note the pre-existing local failures above (10 in
+`test_onionheaven_data_move_hardening` / `test_onionheaven_data_volume`,
+2 in `test_wp_cli_as_www_data.TestWebRootOwnerGivesBack`; CI is clean).
+
+Still out of scope, as decided at the start: `start_containers`, `setup`
+and the Colima bootstrap stay bash. Each is a different kind of move (a
+long orchestration with START SUMMARY state, the first-run flow with its
+prompts, and the VM's lifecycle, which the menubar's `onionpress.colima`
+already covers in part), so each would want its own plan: the same slice
+rules apply (log lines and exit behaviour kept, a fake-docker unit test,
+the census rows, CLAUDE.md), with `START_ERRORS` the first thing to
+design — slice 7 left it in bash because the Python cannot set it, and
+`start_containers` is where it is read.
+
+Notes carried over from slice 7 that a later slice may want: the
+`try/except` around a fast path's work is the right way to keep a bash
+`${out:-rc=$rc}` fallback (the launchers' terminal and log never see a
+traceback); and a helper in `cli.py` that asks `detect_os()` must use the
+module-level import, so the dispatch census's `os_name` and a test's
+`mock.patch.object(cli, "detect_os", …)` reach it.
