@@ -26,6 +26,28 @@ fi
 DATA_DIR="$REAL_HOME/.onionpress"
 USER_SYSTEMD_DIR="$REAL_HOME/.config/systemd/user"
 
+# What this run leaves behind on exit, whether it finishes or is
+# interrupted: the folder it clones the repo into when not run from a
+# checkout (nothing when it is), and the journal tail it starts while the
+# site comes up. Only these two, by variables of this script's own: never
+# a folder named by the environment. Through 2.5.6 the clone was kept in
+# TMPDIR, the standard temp-folder variable (libpam-tmpdir sets it to
+# /tmp/user/<uid>; people set it in their profile), and `rm -rf "$TMPDIR"`
+# ran whether or not anything had been cloned (issue #346).
+CLONE_DIR=""
+JOURNAL_PID=""
+cleanup() {
+    if [ -n "$JOURNAL_PID" ]; then
+        kill "$JOURNAL_PID" 2>/dev/null || true
+    fi
+    if [ -n "$CLONE_DIR" ]; then
+        rm -rf -- "$CLONE_DIR"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 echo ""
 echo "  OnionPress Installer for Linux"
 echo "  ==============================="
@@ -266,9 +288,9 @@ if [ -f "$SCRIPT_DIR/onionpress" ] && [ -d "$SCRIPT_DIR/../src/onionpress" ]; th
 else
     # Download from GitHub
     echo "  Downloading from GitHub..."
-    TMPDIR=$(mktemp -d)
-    git clone --depth 1 "$REPO_URL" "$TMPDIR/onionpress"
-    REPO_DIR="$TMPDIR/onionpress"
+    CLONE_DIR=$(mktemp -d)
+    git clone --depth 1 "$REPO_URL" "$CLONE_DIR/onionpress"
+    REPO_DIR="$CLONE_DIR/onionpress"
 fi
 
 # Verify source directory exists
@@ -326,9 +348,11 @@ $SUDO install -D -m 0755 "$REPO_DIR/linux/onionpress-sleep-hook" \
 VERSION=$(cat "$INSTALL_DIR/VERSION")
 echo "  OnionPress $VERSION installed to $INSTALL_DIR"
 
-# Clean up temp dir if we cloned
-if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR:-}" ]; then
-    rm -rf "$TMPDIR"
+# Remove the clone, if this run made one (the trap at the top removes it
+# when a run is interrupted before this point).
+if [ -n "$CLONE_DIR" ]; then
+    rm -rf -- "$CLONE_DIR"
+    CLONE_DIR=""
 fi
 
 # ─── Create data directory & secrets ─────────────────────────────────
@@ -443,8 +467,7 @@ local_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 echo "  ───── live progress (image pulls take 2-3 min on first run) ─────"
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     journalctl --user -u onionpress -f --no-hostname --no-pager --since=now &
-JOURNAL_PID=$!
-trap "kill $JOURNAL_PID 2>/dev/null || true" EXIT INT TERM
+JOURNAL_PID=$!   # cleanup (the EXIT trap at the top) kills it
 
 # Use restart (not start) so a stale service from a previous install is replaced.
 # --no-block: don't wait for Type=notify READY=1. Without --no-block, this
@@ -475,7 +498,7 @@ done
 
 # Stop tailing the journal before we print the success message.
 kill $JOURNAL_PID 2>/dev/null || true
-trap - EXIT INT TERM
+JOURNAL_PID=""
 echo "  ─────────────────────────────────────────────────────────────────"
 
 if [ "$wp_ready" = "true" ]; then
