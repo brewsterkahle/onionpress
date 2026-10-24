@@ -51,7 +51,7 @@ the harness is about something else.
 | 2 | `regenerate_derivatives_pending` | done, 76bee60e |
 | 3 | `retire_old_onionheaven_containers` | done, c5bb487a |
 | 4 | `migrate_tor_network` | done, c8d644e6 |
-| 5 | `migrate_key_volume` | todo (only with every check kept, see below) |
+| 5 | `migrate_key_volume` | done, 487a3e06 |
 | 6 | `db_import` | todo |
 | 7 | `block_wordpress_egress` | todo |
 
@@ -82,8 +82,9 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   match (compose services, `onionheaven-(poll|takeover)-<digits>`), anything
   else only disconnected with a WARNING; a network that will not go is a
   WARNING, never a stopped start.
-- `migrate_key_volume`: fails loudly, never into an empty copy: pinned
-  `KEY_HELPER_IMAGE` (never pulled for a local stack), `--network none`,
+- `migrate_key_volume`: fails loudly, never into an empty copy: the pinned
+  tor image (`containers.tor_image`, the launchers' `KEY_HELPER_IMAGE`;
+  never pulled for a local stack), `--network none`,
   `--cap-drop ALL --cap-add DAC_OVERRIDE`, `--entrypoint sh`; walks down to
   `state/keystore/hss` one listed folder at a time (unreadable is not
   absent), refuses links and anything but folders and files, verifies every
@@ -148,22 +149,53 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   coverage, with the delegation check and the start_containers ordering
   check (`retire` before `migrate` before `compose up`) kept.
 
+- Slice 5 (`migrate_key_volume`): `ContainerManager.migrate_key_volume`
+  (with `volume_state`, the launchers' `docker_volume_state` in Python, and
+  the sh copy as the module constant `KEY_VOLUME_MIGRATION_SCRIPT`), the
+  fast path `migrate-key-volume` over `_start_step_manager`, exit 0/1 from
+  its bool. Unlike slices 3 and 4 the status must reach the callers' `if !
+  migrate_key_volume`, so the bash body is `… 2>&1 | tee -a "$LOG_FILE"`
+  followed by `return "${PIPESTATUS[0]}"` (bash 3.2 has PIPESTATUS; under
+  `set -e` a failing non-last pipeline member does not exit). The helper's
+  own output, which bash appended to the log file, is logged line by line
+  (`_log_lines`), so it reaches the terminal too. `ensure_tor_image` was
+  already the Python `ensure_key_helper_image` (it only got the bash's
+  "Pulling … for the onion service key helpers" words); the bash
+  `ensure_key_helper_image` and `docker_volume_state` stay for the key
+  seeds and Linux's `key_volume_cat`. Tests: `TestKeyVolumeMigrationInPython`
+  (fake docker; every case the bash harness ran, plus the second `volume ls`
+  unanswered, the marker's timing around the copy, a failed `volume create`,
+  an unwritable data dir, and the CLI's exit status) and
+  `TestMigrationScriptLocally` now reads the constant. The bash harness
+  (`TestLauncherVolumeChecksUnderDockerFailure`) keeps two end-to-end runs
+  of the delegation (status through PIPESTATUS, lines in the log) that skip
+  where `Docker()` would take a bundle's docker over the PATH stub (a Mac
+  with the app installed), and its stdout checks read the last line, since
+  the tee'd lines now precede the `echo $rc`. The `docker run` census lost
+  the two bash rows and gained containers.py's (its floor is 12 sites
+  now). Pre-existing on this Linux machine, unrelated and identical at the
+  previous HEAD: 10 failures in `test_onionheaven_data_move_hardening` /
+  `test_onionheaven_data_volume` (the later-arrivals/sparse cases), and 2
+  in `test_wp_cli_as_www_data.TestWebRootOwnerGivesBack` (a relative
+  `./bin` in the shell's PATH makes `find -execdir` refuse); CI is clean.
+
 ## Next step
 
-Slice 5: `migrate_key_volume` (`app/MacOS/onionpress` lines 1832-1938 and
-`linux/onionpress` 1637-1743 at this commit, 106 lines, test-enforced identical by
-`tests/test_install_invariants.TestKeyVolumeMigration` and run under bash by
-`TestLauncherVolumeChecksUnderDockerFailure` there, with the pinned-image,
-`--network none`, marker and failed-copy cases). Move it only if every check
-in the invariants list above survives and the Python test is at least as
-strict as those bash runs (the helper `docker run` keeps its row in
-`tests/test_container_capabilities.py`; `ensure_key_helper_image` and
-`docker_volume_state` are its bash callees and would move with it or stay
-as bash the delegation needs). Its callers (`start_containers`, the Mac
-`start-tor` subcommand, both launchers' `setup`) stay bash: `if !
-migrate_key_volume; then … return 1` must keep stopping the start, so the
-delegation hands the exit status through (no tee). If it is larger than an
-hour, skip to slice 6 (`db_import`: a bash body only in `linux/onionpress`
-(line 639), the Mac restores through `backup.restore_container_artifacts`
-already; `tests/test_db_import_sandbox.py` holds both to the same client
-flags) and write down why.
+Slice 6: `db_import` (`linux/onionpress` line 639 at this commit; the Mac
+launcher has no bash body: its restores go through
+`backup.restore_container_artifacts`, whose import is the same client
+flags). `tests/test_db_import_sandbox.py` holds the bash function and the
+Python to `--sandbox --binary-mode --local-infile=0`, the dump on stdin
+after the password line, and the `--sandbox` capability check; the Linux
+`restore_backup` calls it as `db_import "$db_pass" "$sql_file"`. The move:
+a Python entry (probably a `db-import` subcommand taking the password on
+stdin's first line, or in the environment, never argv:
+`tests/test_secrets_off_argv.py`) that `backup.restore_container_artifacts`
+and the Linux launcher share, the bash body a delegation that keeps the
+`"$db_pass" "$sql_file"` call shape (or feeds the file on stdin), the
+sandbox test rewritten against the one Python implementation, and the
+dispatch row. The timeout must stay sized to the dump
+(`wp_files.sized_timeout`, issue #317). Then slice 7
+(`block_wordpress_egress`), already a delegation to `wordpress-egress`
+in both launchers (`tests/test_wordpress_egress.TestLaunchers`): check
+whether anything bash is left to move, and if not record it as done.
