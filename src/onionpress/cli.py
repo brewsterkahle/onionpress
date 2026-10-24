@@ -2171,6 +2171,13 @@ def main(argv: list[str] = None) -> int:
              "OnionPress's own containers on it and disconnecting anything "
              "else; always exits 0")
     sub.add_parser(
+        "migrate-key-volume",
+        help="Before anything starts Tor: copy the onion service key out of "
+             "onionpress-arti-state (its name until 2026-09-25) into "
+             "onionpress-onion-keys once, verified, in the pinned tor image "
+             "with no network; exit 1 (the start must stop) when Docker does "
+             "not answer, the copy fails or the image is not here")
+    sub.add_parser(
         "using-local-images",
         help="Exit 0 when the stack points at images built on this machine "
              "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "
@@ -2560,6 +2567,16 @@ def main(argv: list[str] = None) -> int:
         else:
             manager.retire_old_onionheaven_containers()
         return 0
+
+    if args.command == "migrate-key-volume":
+        # The launchers' migrate_key_volume() (Phase 4, #120):
+        # ContainerManager's, logged in the launcher's format; no
+        # OnionPressCLI setup (it runs before the stack is up). Unlike the
+        # two steps above, its status matters: 1 stops the start, since
+        # starting tor would create an empty onionpress-onion-keys that the
+        # next start took for the migrated key.
+        paths = resolve_paths(data_dir=args.data_dir)
+        return 0 if _start_step_manager(paths).migrate_key_volume() else 1
 
     if args.command == "regenerate-derivatives-pending":
         # The launchers' regenerate_derivatives_pending() (Phase 4, #120):

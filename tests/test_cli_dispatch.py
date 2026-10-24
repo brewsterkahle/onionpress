@@ -329,6 +329,19 @@ ROWS = [
             m.return_value.migrate_tor_network.assert_called_once_with(),
             m.return_value.retire_old_onionheaven_containers.assert_not_called(),
             t.assertEqual(m.call_args.args[2].wp_port, 8080))),
+    # Phase 4 (#120): the launchers' migrate_key_volume() is ContainerManager's;
+    # unlike the two above its status matters: 1 stops the start.
+    Row("migrate-key-volume", ["migrate-key-volume"],
+        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": True}),
+        env={"ONIONPRESS_PORT_OFFSET": "10000"},
+        check=lambda t, m: (
+            m.return_value.migrate_key_volume.assert_called_once_with(),
+            m.return_value.migrate_tor_network.assert_not_called(),
+            t.assertEqual(m.call_args.args[2].wp_port, 18080))),
+    Row("migrate-key-volume", ["migrate-key-volume"],
+        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"migrate_key_volume.return_value": False})),
     # Phase 4 (#120): the launchers' regenerate_derivatives_pending() is this.
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),

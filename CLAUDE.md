@@ -104,18 +104,22 @@
   `key_manager.py` convert between that PEM and C Tor's key files. That
   volume is every install's identity and, on macOS, the only route by which
   the key reaches the container. It was `onionpress-arti-state` (layout
-  `state/keystore/hss/<name>/`) until 2026-09-25; both launchers carry an
-  identical `migrate_key_volume()` (test-enforced) that copies an old volume
-  to the new name once, before first-run detection, and refuses to start if
-  the copy fails — the first-run check keys off the new volume's existence,
-  so skipping the migration would mint a new address. Keep the old name in
-  the wipe lists (`.import-key-pending`, restore) so a replaced identity
-  cannot be migrated back.
+  `state/keystore/hss/<name>/`) until 2026-09-25; both launchers'
+  `migrate_key_volume()` run `ContainerManager.migrate_key_volume`
+  (`onionpress migrate-key-volume`, Phase 4 #120; the bash is the one-line
+  delegation, exit status handed through with PIPESTATUS), which copies an
+  old volume to the new name once, before first-run detection, and refuses
+  to start if the copy fails — the first-run check keys off the new
+  volume's existence, so skipping the migration would mint a new address.
+  Keep the old name in the wipe lists (`.import-key-pending`, restore) so a
+  replaced identity cannot be migrated back.
 - **The key volume migration fails loudly, never into an empty copy.** It
-  runs from the stack's pinned tor image (`KEY_HELPER_IMAGE`, which
-  `ensure_key_helper_image` pulls by its pin when missing, never for a
-  locally built stack), `--network none`, `--entrypoint sh`, DAC_OVERRIDE
-  only: the copy is root's, 0700/0600. It walks down to
+  runs from the stack's pinned tor image (`containers.tor_image`, which
+  `ContainerManager.ensure_tor_image` pulls by its pin when missing, never
+  for a locally built stack; the launchers' remaining helpers use the same
+  pin as `KEY_HELPER_IMAGE` / `ensure_key_helper_image`), `--network none`,
+  `--entrypoint sh`, DAC_OVERRIDE only: the copy is root's, 0700/0600. The
+  script is `containers.KEY_VOLUME_MIGRATION_SCRIPT`. It walks down to
   `state/keystore/hss` one listed folder at a time, so a folder it cannot
   list stops it (unreadable is not absent: it used to pass for a missing
   keystore and leave an empty copy the next start took for the key),
@@ -133,9 +137,13 @@
   onionpress-onion-keys. `start_containers`, the Mac `start-tor`
   subcommand and both launchers' `setup` run `if ! migrate_key_volume`
   first (test-enforced); `onionpress.cli start` and
-  `ContainerManager.start_tor` have no copy of it and refuse while one is
+  `ContainerManager.start_tor` do not run it and refuse while one is
   due (`key_volume_not_ready`: the old volume there and the new one absent
-  or marked, or `docker volume ls` unanswered). A failed first-run key
+  or marked, or `docker volume ls` unanswered).
+  `tests/test_install_invariants.TestKeyVolumeMigrationInPython` runs the
+  Python against a fake docker (every case the bash harness ran until the
+  body moved, plus the marker's timing and an unwritable marker);
+  `TestMigrationScriptLocally` runs the script under sh. A failed first-run key
   seed removes the volume it made and stops the start, as does
   `cli.cmd_restore`'s, so Tor never starts without the key it was given.
 - **All Dockerfile inputs are pinned** as `ARG` defaults in the Dockerfiles
@@ -894,8 +902,8 @@
   entrypoint's chmod of it logs "Operation not permitted" harmlessly);
   autoheal, autoheal-proxy, onionheaven-farm (the farm controller: the
   docker CLI over the socket, nothing else), cloudflared nothing. Helpers: reads of key
-  files, mkp224o, key seeds and migrate_key_volume (its copy is root's)
-  DAC_OVERRIDE; the Linux tor-state seeds CHOWN DAC_OVERRIDE FOWNER (they
+  files, mkp224o, key seeds and `ContainerManager.migrate_key_volume` (its
+  copy is root's) DAC_OVERRIDE; the Linux tor-state seeds CHOWN DAC_OVERRIDE FOWNER (they
   chown to debian-tor); the mkp224o probe nothing. `docker exec` runs with
   the container's set, so a root exec into tor or wordpress that touches
   debian-tor's or www-data's files relies on that DAC_OVERRIDE. Change a
