@@ -34,7 +34,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
-    backup, cli, config, confirm, containers, daemon, handle_action,
+    backup, cli, config, confirm, containers, daemon, derivatives, handle_action,
     launcher_ops, multisite, onionheaven, redact, scrub, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
@@ -314,6 +314,11 @@ ROWS = [
     Row("daemon", ["daemon"], "daemon.run_daemon_command",
         mock.call("serve", ANY, ANY, launcher_script="/stub/launcher", json_output=False,
                   version=cli.__version__, no_offline=False), os_name="macos"),
+    # Phase 4 (#120): the launchers' regenerate_derivatives_pending() is this.
+    Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
+        "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
+    Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
+        "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=1, returns=False),
     # Phase 4 (#120): the launchers' using_local_images() is this.
     Row("using-local-images", ["using-local-images"], "containers.using_local_images",
         mock.call(D("config")), rc=0, returns=True),
@@ -355,7 +360,7 @@ MODULES = {
     "cli": cli, "config": config, "handle_action": handle_action, "onionheaven": onionheaven,
     "multisite": multisite, "scrub": scrub, "redact": redact, "backup": backup,
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
-    "containers": containers, "daemon": daemon,
+    "containers": containers, "daemon": daemon, "derivatives": derivatives,
 }
 
 

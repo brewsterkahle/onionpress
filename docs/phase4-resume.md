@@ -43,8 +43,8 @@ the harness is about something else.
 
 | # | pair | status |
 |---|------|--------|
-| 1 | `using_local_images` | done (commit: see git log, "Phase 4 slice 1") |
-| 2 | `regenerate_derivatives_pending` | todo |
+| 1 | `using_local_images` | done, 80aae349 |
+| 2 | `regenerate_derivatives_pending` | done (the slice 2 commit) |
 | 3 | `retire_old_onionheaven_containers` | todo |
 | 4 | `migrate_tor_network` | todo |
 | 5 | `migrate_key_volume` | todo (only with every check kept, see below) |
@@ -114,10 +114,27 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   `tests/test_cli_dispatch.py` (PR #376 and PR #377 landed separately, so
   the census was failing on main's merge of both).
 
+- Slice 2 (`regenerate_derivatives_pending`): `regenerate-derivatives-pending`
+  is a fast path over `derivatives.regeneration_pending(paths.data_dir,
+  Docker(paths).docker_bin)`, the same check the sweep
+  (`regenerate-derivatives`) runs, so the gate and the sweep cannot disagree;
+  exit 0 = pending. The bash body is the delegation with `2>>"$LOG_FILE"`.
+  Note for harness tests: `resolve_paths()` finds `/Applications/OnionPress.app`
+  on a Mac that has it, so `Docker(paths).docker_bin` is the bundle's docker
+  there, not a stub on PATH; a bash-level test can only exercise the host
+  marker (and sets `DOCKER_HOST` at nothing so the container leg fails
+  fast), and the docker leg is tested in Python with an explicit stub binary
+  (`test_install_invariants.TestDerivativeRegenerationWiring`).
+
 ## Next step
 
-Slice 2: `regenerate_derivatives_pending` — a `regenerate-derivatives-pending`
-fast path over `derivatives.regeneration_pending(paths.data_dir, docker_bin)`
-(exit 0 pending, 1 not), delegate both bash bodies, replace
-`TestDerivativeRegenerationWiring.test_launchers_carry_the_same_pending_check`
-with a Python test and a delegation check.
+Slice 3: `retire_old_onionheaven_containers` — a
+`retire-old-onionheaven-containers` fast path over
+`ContainerManager.retire_old_onionheaven_containers` (a manager built with
+`PortConfig.from_offset($ONIONPRESS_PORT_OFFSET)`, never the bind probe, and
+a log function in the launchers' `[ts] msg` format on stdout); the bash body
+is `… 2>&1 | tee -a "$LOG_FILE"` (the pipe's status is tee's, so the step
+never stops a start under `set -e`); the bash harness tests in
+`tests/test_onionheaven_data_move_hardening.py` become Python tests with a
+fake docker; `test_onionheaven_farm.test_launchers_leave_the_controller_alone`
+stops parsing the bash grep pattern.

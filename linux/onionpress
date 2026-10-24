@@ -1798,8 +1798,9 @@ migrate_key_volume() {
 # into the container). start_containers then runs
 # `onionpress.cli regenerate-derivatives` detached in the background; it uses
 # `wp media regenerate --only-missing`, so an interrupted sweep resumes on the
-# next start, and it clears both markers only when it completes. Kept
-# identical in the macOS and Linux launchers; a test enforces that.
+# next start, and it clears both markers only when it completes. The check
+# is onionpress.cli's (derivatives.regeneration_pending, the same one the
+# sweep uses), asked through the CLI (Phase 4, #120).
 # Run "$@" in the background so that it outlives this script; its output
 # goes to $LOG_FILE. The settings watcher (onionpress-watcher.service) is a
 # Type=oneshot unit: systemd kills everything left in its cgroup when
@@ -1825,9 +1826,7 @@ run_detached() {
 }
 
 regenerate_derivatives_pending() {
-    [ -f "$DATA_DIR/.regenerate-derivatives-pending" ] && return 0
-    docker exec onionpress-wordpress test -f \
-        /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives >/dev/null 2>&1
+    op_py --data-dir "$DATA_DIR" regenerate-derivatives-pending 2>>"$LOG_FILE"
 }
 
 # Tor's SOCKS port must be published on 127.0.0.1 only (docker-compose.yml).

@@ -2281,39 +2281,75 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         end = text.index("\n}\n", start)
         return text[start:end]
 
-    def test_launchers_carry_the_same_pending_check(self):
-        bodies = [self._function_body(_read(f), "regenerate_derivatives_pending")
-                  for f in self.LAUNCHERS]
-        self.assertEqual(
-            bodies[0], bodies[1],
-            "regenerate_derivatives_pending() must be identical in the macOS "
-            "and Linux launchers; edit both.")
-        self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', bodies[0])
-        self.assertIn(self.CONTAINER_MARKER, bodies[0])
-
-    def test_every_launcher_start_kicks_off_regeneration_when_pending(self):
-        for f in self.LAUNCHERS:
-            text = _read(f)
+    def test_launchers_delegate_the_pending_check(self):
+        """Phase 4 (#120): the check is onionpress.cli's, the same
+        derivatives.regeneration_pending the sweep itself uses, so the gate
+        and the sweep cannot disagree about a marker."""
+        for f, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
+                          ("linux/onionpress", "op_py")):
             with self.subTest(launcher=f):
-                sc = text.index("\nstart_containers() {")
-                sc_end = text.index("\n}\n", sc)
-                body = text[sc:sc_end]
-                guard = body.index("regenerate_derivatives_pending; then")
-                kick = body.index("regenerate-derivatives", guard)
-                self.assertLess(guard, kick, "the kick-off must be guarded on the marker")
-                # Detached (not in the script's job table) and after
-                # provision-post-install so the fallback mu-plugin is
-                # already installed when the sweep starts. Linux detaches
-                # through run_detached, which also gets it out of the
-                # settings watcher's oneshot cgroup (issue #316).
-                kick_line = body[body.rfind("\n", 0, kick):body.index("\n", kick)]
-                self.assertRegex(
-                    kick_line,
-                    r"^\s*(\(\s*\S.*regenerate-derivatives.*&\s*\)"
-                    r"|run_detached\s.*regenerate-derivatives)\s*$")
-                self.assertLess(body.index("provision-post-install"), guard)
+                body = self._function_body(_read(f), "regenerate_derivatives_pending")
+                code = [l.strip() for l in body.splitlines()
+                        if l.strip() and not l.strip().startswith("#")]
+                self.assertEqual(code, [
+                    "regenerate_derivatives_pending() {",
+                    f'{runner} --data-dir "$DATA_DIR" regenerate-derivatives-pending '
+                    '2>>"$LOG_FILE"'])
 
-    def test_python_marker_paths_match_the_launchers(self):
+    def _pending_under_bash(self, launcher, host_marker):
+        """The launcher's own function under bash, its runner on this
+        interpreter and src/, DOCKER_HOST at nothing (the container marker's
+        `docker exec` then fails, as it does with the stack down); returns
+        the exit code."""
+        text = _read(launcher)
+        with tempfile.TemporaryDirectory() as tmp:
+            if host_marker:
+                open(os.path.join(tmp, self.HOST_MARKER), "w").close()
+            script = ('bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
+                      'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
+                      + self._function_body(text, "regenerate_derivatives_pending") + "\n}\n"
+                      + "regenerate_derivatives_pending\n")
+            out = subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                env={"PATH": "/usr/bin:/bin", "HOME": tmp, "DATA_DIR": tmp,
+                     "LOG_FILE": os.path.join(tmp, "log"),
+                     "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
+                     "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src")})
+            self.assertEqual(out.stderr, "")
+        return out.returncode
+
+    def test_the_delegation_answers_for_the_host_marker(self):
+        for f in self.LAUNCHERS:
+            with self.subTest(launcher=f):
+                self.assertEqual(self._pending_under_bash(f, host_marker=True), 0)
+                self.assertEqual(self._pending_under_bash(f, host_marker=False), 1)
+
+    def test_the_container_marker_is_asked_of_docker(self):
+        """derivatives.regeneration_pending, what the subcommand runs: the
+        host marker first (no docker), else `docker exec onionpress-wordpress
+        test -f <container marker>`; a docker that fails is 'not pending'."""
+        from onionpress import derivatives
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = os.path.join(tmp, "docker")
+            with open(stub, "w") as f:
+                f.write("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\n"
+                        "[ \"$1 $2 $3 $4\" = \"exec onionpress-wordpress test -f\" ] "
+                        "&& [ -e \"$0.marker\" ]\n")
+            os.chmod(stub, 0o755)
+            self.assertFalse(derivatives.regeneration_pending(tmp, stub))
+            open(stub + ".marker", "w").close()
+            self.assertTrue(derivatives.regeneration_pending(tmp, stub))
+            with open(stub + ".calls") as f:
+                self.assertEqual(set(f.read().splitlines()),
+                                 {f"exec onionpress-wordpress test -f {self.CONTAINER_MARKER}"})
+            os.remove(stub + ".calls")
+            open(os.path.join(tmp, self.HOST_MARKER), "w").close()
+            self.assertTrue(derivatives.regeneration_pending(tmp, stub))
+            self.assertFalse(os.path.exists(stub + ".calls"), "the host marker needs no docker")
+            self.assertFalse(derivatives.regeneration_pending(
+                os.path.join(tmp, "elsewhere"), os.path.join(tmp, "no-such-docker")))
+
+    def test_python_marker_paths_are_the_documented_ones(self):
         from onionpress import derivatives
         self.assertEqual(derivatives.HOST_MARKER, self.HOST_MARKER)
         self.assertEqual(derivatives.CONTAINER_MARKER, self.CONTAINER_MARKER)
