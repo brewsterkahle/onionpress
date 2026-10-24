@@ -1620,126 +1620,18 @@ wait_for_docker() {
 }
 
 # One-time migration of the onion service key volume from its historical
-# name. Until 2026-09-25 the delivered PEM lived in onionpress-arti-state at
-# state/keystore/hss/<name>/ (arti's keystore layout); it now lives in
-# onionpress-onion-keys at <name>/. This runs before the first-run check,
-# which keys off the NEW volume's existence — without it an upgraded install
-# would look like a fresh one and mint a new address. For the same reason it
-# refuses to let the start continue when the copy fails, when the old
-# keystore cannot be read (only a keystore the old volume shows to be absent
-# counts as nothing to copy), or when Docker cannot say which volumes exist:
-# the old volume is left untouched and the next start retries. Until the
-# copy is verified, $DATA_DIR/.key-volume-migration-pending says the new
-# volume is not to be trusted: a start that finds it beside both volumes (an
-# interrupted copy, or a failed one whose volume could not be removed)
-# removes the new volume and copies again. Kept identical in the macOS and
-# Linux launchers; a test enforces that.
+# name, onionpress-arti-state (until 2026-09-25), to onionpress-onion-keys:
+# ContainerManager.migrate_key_volume (Phase 4, #120; CLAUDE.md, "The key
+# volume migration fails loudly"), run through the shared CLI. It runs
+# before the first-run check, which keys off the NEW volume's existence, so
+# its exit status is this function's and a 1 stops the start (the callers'
+# `if ! migrate_key_volume`): an empty onionpress-onion-keys that starting
+# tor would create passes for the migrated key on the next start. The log
+# lines reach the log and the terminal as log's do; PIPESTATUS keeps the
+# Python's status past tee.
 migrate_key_volume() {
-    local state=0 old_state=0
-    local pending="$DATA_DIR/.key-volume-migration-pending"
-    docker_volume_state onionpress-onion-keys || state=$?
-    if [ "$state" -eq 2 ]; then
-        log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
-        return 1
-    fi
-    if [ "$state" -eq 0 ] && [ ! -e "$pending" ]; then
-        return 0
-    fi
-    docker_volume_state onionpress-arti-state || old_state=$?
-    case "$old_state" in
-        1) # Nothing to copy from: a fresh install, one that never had the
-           # old volume, or one whose volumes a key import or restore wiped.
-           if [ "$state" -eq 0 ]; then
-               log "WARNING: a key volume migration did not finish and onionpress-arti-state is gone; keeping onionpress-onion-keys as it is"
-           fi
-           rm -f "$pending"
-           return 0 ;;
-        2) log "ERROR: Docker did not say whether onionpress-arti-state exists; not starting"
-           return 1 ;;
-    esac
-    if [ "$state" -eq 0 ]; then
-        log "A key volume migration did not finish; removing the unverified onionpress-onion-keys to copy again"
-        if ! docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
-            log "ERROR: could not remove the unverified onionpress-onion-keys; not starting (the old key volume is untouched)"
-            return 1
-        fi
-    fi
-    if ! ensure_key_helper_image; then
-        log "ERROR: no tor image to migrate the key volume with; not starting (the old key volume is untouched)"
-        return 1
-    fi
-    log "Migrating the onion service key volume: onionpress-arti-state -> onionpress-onion-keys"
-    if ! : > "$pending"; then
-        log "ERROR: could not write $pending; not starting (the old key volume is untouched)"
-        return 1
-    fi
-    if ! docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
-        log "ERROR: could not create onionpress-onion-keys; not starting (the old key volume is untouched)"
-        return 1
-    fi
-    # Arti's files are its own user's, in 0700 folders: reading them takes
-    # DAC_OVERRIDE. The copy is root's, 0700/0600, as the key seeds make
-    # it, so nothing else is needed. The script walks down to the keystore
-    # one listed folder at a time, so a folder it cannot list (without
-    # DAC_OVERRIDE, say) stops it instead of passing for a missing keystore,
-    # as it used to: an empty copy that the next start took for the
-    # migrated key. The keystore may hold folders and files only; every
-    # name in it has to be in the copy and every file the same bytes.
-    if ! docker run --rm \
-        --network none \
-        --cap-drop ALL \
-        --cap-add DAC_OVERRIDE \
-        --security-opt no-new-privileges:true \
-        -v onionpress-arti-state:/old:ro \
-        -v onionpress-onion-keys:/new \
-        --entrypoint sh \
-        "$KEY_HELPER_IMAGE" -c '
-            set -eu
-            dir="$1" dest="$2"
-            for name in state keystore hss; do
-                listing=$(ls -A "$dir")
-                if ! printf "%s\n" "$listing" | grep -qxF "$name"; then
-                    echo "the old key volume holds no keystore ($dir has no $name): nothing to copy"
-                    chmod 700 "$dest"
-                    exit 0
-                fi
-                dir="$dir/$name"
-                if [ -L "$dir" ] || [ ! -d "$dir" ]; then
-                    echo "$dir is not a folder" >&2
-                    exit 1
-                fi
-            done
-            wanted=$(cd "$dir" && find .)
-            odd=$(cd "$dir" && find . ! -type d ! -type f)
-            if [ -n "$odd" ]; then
-                echo "the old keystore holds more than folders and files: $odd" >&2
-                exit 1
-            fi
-            cp -R "$dir/." "$dest/"
-            chmod 700 "$dest"
-            find "$dest" -mindepth 1 -type d -exec chmod 700 {} +
-            find "$dest" -type f -exec chmod 600 {} +
-            got=$(cd "$dest" && find .)
-            if [ "$(printf "%s\n" "$got" | sort)" != "$(printf "%s\n" "$wanted" | sort)" ]; then
-                echo "the copy does not hold what the old keystore holds" >&2
-                exit 1
-            fi
-            differ=$(cd "$dir" && find . -type f ! -exec cmp -s {} "$dest/{}" \; -print)
-            if [ -n "$differ" ]; then
-                echo "did not copy intact: $differ" >&2
-                exit 1
-            fi
-            echo "copied the old keystore: $(find "$dest" -type f | wc -l) files, each compared with its original"
-        ' migrate-key-volume /old /new >> "$LOG_FILE" 2>&1; then
-        if docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
-            rm -f "$pending"
-        fi
-        log "ERROR: key volume migration failed; not starting so the old key volume stays intact (see $LOG_FILE)"
-        return 1
-    fi
-    rm -f "$pending"
-    log "Key volume migrated; onionpress-arti-state is kept as a fallback until uninstall sweeps it"
-    return 0
+    op_py --data-dir "$DATA_DIR" migrate-key-volume 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
 }
 
 # Image derivatives (issue #257): backups carry original images only, so a

@@ -102,9 +102,9 @@ COPY_INTO_TOR_STATE = {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
 DOCKER_RUN_SITES = {
     ("app/Resources/docker/tor/onionheaven-farm.py", "worker_run_argv"): [WORKER],
     ("src/onionpress/containers.py", "start_farm_worker"): [WORKER],
-    # Reads arti's files (its own user's, 0700) into a copy root owns.
-    ("app/MacOS/onionpress", "migrate_key_volume"): [READ_USER_KEY],
-    ("linux/onionpress", "migrate_key_volume"): [READ_USER_KEY],
+    # Reads arti's files (its own user's, 0700) into a copy root owns (the
+    # launchers' migrate_key_volume runs it, Phase 4 #120).
+    ("src/onionpress/containers.py", "migrate_key_volume"): [READ_USER_KEY],
     ("app/MacOS/onionpress", "start_containers"): [READ_USER_KEY],
     ("linux/onionpress", "start_containers"): [
         READ_USER_KEY, COPY_INTO_TOR_STATE, COPY_INTO_TOR_STATE],
@@ -367,7 +367,7 @@ class TestDockerRunCensus(unittest.TestCase):
         expected = {site: len(caps) for site, caps in DOCKER_RUN_SITES.items()}
         expected.update(PRIVILEGED_SITES)
         self.assertEqual(found, expected)
-        self.assertGreaterEqual(sum(found.values()), 13)
+        self.assertGreaterEqual(sum(found.values()), 12)
 
     def test_only_the_listed_sites_are_privileged(self):
         for site, runs in self.sites.items():

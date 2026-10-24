@@ -119,6 +119,56 @@ def forget_key_volume_migration(data_dir: str) -> None:
         pass
 
 
+# The copy ContainerManager.migrate_key_volume runs in the tor image
+# (`sh -c SCRIPT migrate-key-volume /old /new`): arti's files are its own
+# user's, in 0700 folders, so reading them takes DAC_OVERRIDE; the copy is
+# root's, 0700/0600, as the key seeds make it, so nothing else is needed.
+# It walks down to the keystore one listed folder at a time, so a folder
+# it cannot list (without DAC_OVERRIDE, say) stops it instead of passing
+# for a missing keystore, as it used to: an empty copy that the next start
+# took for the migrated key. The keystore may hold folders and files only;
+# every name in it has to be in the copy and every file the same bytes.
+# tests/test_install_invariants.TestMigrationScriptLocally runs it under sh.
+KEY_VOLUME_MIGRATION_SCRIPT = r"""
+            set -eu
+            dir="$1" dest="$2"
+            for name in state keystore hss; do
+                listing=$(ls -A "$dir")
+                if ! printf "%s\n" "$listing" | grep -qxF "$name"; then
+                    echo "the old key volume holds no keystore ($dir has no $name): nothing to copy"
+                    chmod 700 "$dest"
+                    exit 0
+                fi
+                dir="$dir/$name"
+                if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+                    echo "$dir is not a folder" >&2
+                    exit 1
+                fi
+            done
+            wanted=$(cd "$dir" && find .)
+            odd=$(cd "$dir" && find . ! -type d ! -type f)
+            if [ -n "$odd" ]; then
+                echo "the old keystore holds more than folders and files: $odd" >&2
+                exit 1
+            fi
+            cp -R "$dir/." "$dest/"
+            chmod 700 "$dest"
+            find "$dest" -mindepth 1 -type d -exec chmod 700 {} +
+            find "$dest" -type f -exec chmod 600 {} +
+            got=$(cd "$dest" && find .)
+            if [ "$(printf "%s\n" "$got" | sort)" != "$(printf "%s\n" "$wanted" | sort)" ]; then
+                echo "the copy does not hold what the old keystore holds" >&2
+                exit 1
+            fi
+            differ=$(cd "$dir" && find . -type f ! -exec cmp -s {} "$dest/{}" \; -print)
+            if [ -n "$differ" ]; then
+                echo "did not copy intact: $differ" >&2
+                exit 1
+            fi
+            echo "copied the old keystore: $(find "$dest" -type f | wc -l) files, each compared with its original"
+        """
+
+
 # The OnionHeaven hub data volume (onionheaven_common.HUB_DATA_VOLUME and
 # ONIONHEAVEN_DATA_DIR in the tor image), and the containers that use it.
 HUB_DATA_VOLUME = "onionpress-onionheaven-data"
@@ -266,7 +316,8 @@ class ContainerManager:
         that handles the onion service key runs from it: pulled by its
         pinned reference when missing, never for a locally built stack
         (using_local_images). None when it is not here and cannot be.
-        Mirrors ensure_key_helper_image() in both launchers."""
+        Mirrors ensure_key_helper_image() in both launchers (the key seeds,
+        Linux's backup key reads); migrate_key_volume runs it."""
         image = tor_image(self.paths.config_file)
         inspect = ["image", "inspect", "--format", "{{.Id}}", image]
         if self.docker.run(inspect, timeout=30, quiet=True).ok:
@@ -275,7 +326,7 @@ class ContainerManager:
             self._log(f"ERROR: the locally built tor image {image} is not here "
                       "(build it with build/build-images.sh)")
             return None
-        self._log(f"Pulling {image}...")
+        self._log(f"Pulling {image} for the onion service key helpers...")
         if not self.docker.run(["pull", image], timeout=600).ok:
             self._log(f"ERROR: could not pull {image}")
             return None
@@ -285,9 +336,10 @@ class ContainerManager:
         """Why Tor must not start yet, or None.
 
         The launchers move the key out of OLD_KEY_VOLUME before anything
-        starts Tor (migrate_key_volume); this has no copy of that step and
-        refuses instead while it is still due: the old volume is there and
-        the new one is not, or holds an unverified copy (the marker). An
+        starts Tor (their migrate_key_volume, this manager's through
+        `onionpress migrate-key-volume`); start_tor does not run that step
+        and refuses instead while it is still due: the old volume is there
+        and the new one is not, or holds an unverified copy (the marker). An
         unanswered `docker volume ls` refuses too."""
         pending = os.path.lexists(
             os.path.join(self.paths.data_dir, KEY_VOLUME_MIGRATION_PENDING))
@@ -301,6 +353,121 @@ class ContainerManager:
                     "start OnionPress with its launcher (`onionpress start`), "
                     f"which moves it to {KEY_VOLUME} first")
         return None
+
+    def volume_state(self, name: str) -> int:
+        """Whether Docker has volume *name*: 0 yes, 1 no, 2 Docker could not
+        say (the daemon is not up yet, e.g. the Colima VM is still booting).
+        Callers must treat 2 as "stop", never as "no": a missing key volume
+        is the first-run signal, so reading a Docker error as absence turns
+        an upgrade into a first run. The launchers' docker_volume_state."""
+        result = self.docker.run(["volume", "ls", "--format", "{{.Name}}"],
+                                 timeout=30, quiet=True)
+        if not result.ok:
+            return 2
+        return 0 if name in result.stdout.split() else 1
+
+    def _log_lines(self, result) -> None:
+        """A helper's output, line by line, where the launchers appended it
+        to the log."""
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.strip():
+                self._log(line.rstrip())
+
+    def migrate_key_volume(self) -> bool:
+        """One-time migration of the onion service key volume from its
+        historical name; False means the start must not go on.
+
+        Until 2026-09-25 the delivered PEM lived in OLD_KEY_VOLUME at
+        state/keystore/hss/<name>/ (arti's keystore layout); it now lives in
+        KEY_VOLUME at <name>/. This runs before the first-run check, which
+        keys off the NEW volume's existence: without it an upgraded install
+        would look like a fresh one and mint a new address. For the same
+        reason it refuses to let the start continue when the copy fails,
+        when the old keystore cannot be read (only a keystore the old volume
+        shows to be absent counts as nothing to copy), or when Docker cannot
+        say which volumes exist: the old volume is left untouched and the
+        next start retries. Until the copy is verified, the marker
+        (KEY_VOLUME_MIGRATION_PENDING in the data dir) says the new volume
+        is not to be trusted: a start that finds it beside both volumes (an
+        interrupted copy, or a failed one whose volume could not be removed)
+        removes the new volume and copies again. The copy runs
+        KEY_VOLUME_MIGRATION_SCRIPT in the stack's pinned tor image
+        (ensure_tor_image), no network, DAC_OVERRIDE only. Both launchers'
+        migrate_key_volume() run this (`onionpress migrate-key-volume`,
+        Phase 4 #120) and stop the start on False.
+        """
+        data_dir = self.paths.data_dir
+        pending = os.path.join(data_dir, KEY_VOLUME_MIGRATION_PENDING)
+        state = self.volume_state(KEY_VOLUME)
+        if state == 2:
+            self._log(f"ERROR: Docker did not say whether {KEY_VOLUME} exists; not starting")
+            return False
+        if state == 0 and not os.path.lexists(pending):
+            return True
+        old_state = self.volume_state(OLD_KEY_VOLUME)
+        if old_state == 1:
+            # Nothing to copy from: a fresh install, one that never had the
+            # old volume, or one whose volumes a key import or restore wiped.
+            if state == 0:
+                self._log(f"WARNING: a key volume migration did not finish and "
+                          f"{OLD_KEY_VOLUME} is gone; keeping {KEY_VOLUME} as it is")
+            forget_key_volume_migration(data_dir)
+            return True
+        if old_state == 2:
+            self._log(f"ERROR: Docker did not say whether {OLD_KEY_VOLUME} exists; not starting")
+            return False
+        if state == 0:
+            self._log(f"A key volume migration did not finish; removing the unverified "
+                      f"{KEY_VOLUME} to copy again")
+            removed = self.docker.run(["volume", "rm", KEY_VOLUME], timeout=60, quiet=True)
+            self._log_lines(removed)
+            if not removed.ok:
+                self._log(f"ERROR: could not remove the unverified {KEY_VOLUME}; not "
+                          "starting (the old key volume is untouched)")
+                return False
+        image = self.ensure_tor_image()
+        if image is None:
+            self._log("ERROR: no tor image to migrate the key volume with; not starting "
+                      "(the old key volume is untouched)")
+            return False
+        self._log(f"Migrating the onion service key volume: {OLD_KEY_VOLUME} -> {KEY_VOLUME}")
+        try:
+            with open(pending, "w", encoding="utf-8"):
+                pass
+        except OSError as e:
+            self._log(f"ERROR: could not write {pending}; not starting (the old key "
+                      f"volume is untouched): {e}")
+            return False
+        created = self.docker.run(["volume", "create", KEY_VOLUME], timeout=60, quiet=True)
+        self._log_lines(created)
+        if not created.ok:
+            self._log(f"ERROR: could not create {KEY_VOLUME}; not starting (the old key "
+                      "volume is untouched)")
+            return False
+        copied = self.docker.run(
+            ["run", "--rm",
+             "--network", "none",
+             "--cap-drop", "ALL",
+             "--cap-add", "DAC_OVERRIDE",
+             "--security-opt", "no-new-privileges:true",
+             "-v", f"{OLD_KEY_VOLUME}:/old:ro",
+             "-v", f"{KEY_VOLUME}:/new",
+             "--entrypoint", "sh",
+             image, "-c", KEY_VOLUME_MIGRATION_SCRIPT, "migrate-key-volume", "/old", "/new"],
+            timeout=600, quiet=True)
+        self._log_lines(copied)
+        if not copied.ok:
+            removed = self.docker.run(["volume", "rm", KEY_VOLUME], timeout=60, quiet=True)
+            self._log_lines(removed)
+            if removed.ok:
+                forget_key_volume_migration(data_dir)
+            self._log("ERROR: key volume migration failed; not starting so the old key "
+                      f"volume stays intact (see {self.paths.log_file})")
+            return False
+        forget_key_volume_migration(data_dir)
+        self._log(f"Key volume migrated; {OLD_KEY_VOLUME} is kept as a fallback until "
+                  "uninstall sweeps it")
+        return True
 
     # -- Core lifecycle --
 
