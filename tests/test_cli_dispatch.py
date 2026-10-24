@@ -359,6 +359,8 @@ ROWS = [
         mock.call(D("config")), rc=0, returns=True),
     Row("using-local-images", ["using-local-images"], "containers.using_local_images",
         mock.call(D("config")), rc=1, returns=False),
+    # Phase 4 (#120): the launchers' block_wordpress_egress() is this (the
+    # verdict logged in their format; --check prints the bare line).
     Row("wordpress-egress", ["wordpress-egress", "--check", "--wp-port", "8080", "--bin-dir", "/b"],
         "wordpress_egress.ensure", mock.call(ANY, ANY, action="check", wp_port=8080),
         rc=0, returns=mock.Mock(ok=True, line=lambda: "ok"),

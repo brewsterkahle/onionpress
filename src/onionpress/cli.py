@@ -185,6 +185,27 @@ def _launcher_log_func() -> Callable[[str], None]:
     return log
 
 
+def _log_wordpress_egress_verdict(result, log: Callable[[str], None],
+                                 log_file: str) -> None:
+    """The launchers' block_wordpress_egress() verdict lines (Phase 4,
+    #120), worded as each launcher's bash body worded them: the Mac's
+    start log ticks a step that is in place and points at the log file,
+    Linux's names the LAN. A failure is a WARNING: the launchers start
+    anyway (the Mac notes the status in its START SUMMARY)."""
+    mac = detect_os() == OS.MACOS
+    if result.ok:
+        log(f"{'✓ ' if mac else ''}WordPress network egress block in place: {result.line()}")
+    elif mac:
+        log("WARNING: WordPress network egress block not in place: "
+            f"{result.line()}. WordPress and MariaDB can reach the network "
+            "directly, and the Tor-side containers this Mac's own services "
+            f"— see {log_file}")
+    else:
+        log("WARNING: WordPress network egress block not in place: "
+            f"{result.line()}. WordPress and MariaDB can reach the network "
+            "directly, and the Tor-side containers this machine and its LAN.")
+
+
 def _start_step_manager(paths) -> ContainerManager:
     """A ContainerManager for one of the launchers' pre-`compose up` steps:
     the ports from the launcher's own ONIONPRESS_PORT_OFFSET (never the
@@ -2628,8 +2649,14 @@ def main(argv: list[str] = None) -> int:
         return 0 if using_local_images(paths.config_file) else 1
 
     if args.command == "wordpress-egress":
-        # Run by both launchers before they start the containers: no
-        # OnionPressCLI setup (config/secrets creation, port probing).
+        # The launchers' block_wordpress_egress() (Phase 4, #120): run
+        # before they start the containers, so no OnionPressCLI setup
+        # (config/secrets creation, port probing). Their bash body is
+        # `… 2>&1 | tee -a "$LOG_FILE"` and returns 0 whatever happens
+        # (the Mac puts a non-zero status into its START SUMMARY), so the
+        # verdict is logged here in their `[ts] msg` format; --check (not
+        # a launcher's call) prints the bare status line. Never a
+        # traceback: whatever goes wrong is the WARNING's words.
         import dataclasses
         from . import wordpress_egress
         paths = resolve_paths(data_dir=args.data_dir)
@@ -2638,10 +2665,16 @@ def main(argv: list[str] = None) -> int:
         wp_port = args.wp_port
         if wp_port is None and os.environ.get("ONIONPRESS_WP_PORT", "").isdigit():
             wp_port = int(os.environ["ONIONPRESS_WP_PORT"])
-        result = wordpress_egress.ensure(
-            paths, Docker(paths), action="check" if args.check else "apply",
-            wp_port=wp_port)
-        print(result.line())
+        try:
+            result = wordpress_egress.ensure(
+                paths, Docker(paths), action="check" if args.check else "apply",
+                wp_port=wp_port)
+        except Exception as e:  # a start must never stop here
+            result = wordpress_egress.Result(False, "", f"error: {e}")
+        if args.check:
+            print(result.line())
+        else:
+            _log_wordpress_egress_verdict(result, _launcher_log_func(), paths.log_file)
         return 0 if result.ok else 1
 
     if args.command == "onionheaven-unregister":

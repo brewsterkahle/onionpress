@@ -789,8 +789,11 @@
   for the host, except replies (`RELATED,ESTABLISHED`): the published port,
   LAN visitors (own address, not the gateway) and docker-proxy still work.
   `onionpress/wordpress_egress.py` holds the script and puts it in place
-  before every start's first `compose up` (both launchers'
-  `block_wordpress_egress`, `ContainerManager.start_core`): Colima VM via
+  before every start's first `compose up` (`ContainerManager.start_core`;
+  both launchers' `block_wordpress_egress` is `onionpress wordpress-egress
+  … 2>&1 | tee -a "$LOG_FILE"; return 0`, Phase 4 #120: the CLI logs the
+  verdict in the launchers' format, the Mac reads its status out of
+  PIPESTATUS for the START SUMMARY): Colima VM via
   `limactl shell`, plus a docker.service drop-in (`ExecStartPre=-`) so it is
   there before Docker restarts containers after a VM boot; rootless Linux
   via `nsenter -U --preserve-credentials -n -m` into RootlessKit (the

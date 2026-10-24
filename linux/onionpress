@@ -1722,15 +1722,11 @@ note_if_lan_looks_local() {
 # container on any bridge, other projects' too, would otherwise reach it
 # through docker-proxy and arrive as the gateway auto-login trusts.
 # Best effort: without the chain the site still starts (WordPress's own
-# requests still go through Tor) and the log says so.
+# requests still go through Tor) and the log says so. The body is
+# onionpress.cli's (Phase 4, #120): it logs the verdict in this script's
+# log format, tee'd into the log, and its status never stops the start.
 block_wordpress_egress() {
-    local out rc=0
-    out=$(op_py --data-dir "$DATA_DIR" wordpress-egress --wp-port "$ONIONPRESS_WP_PORT" 2>>"$LOG_FILE") || rc=$?
-    if [ "$rc" -eq 0 ]; then
-        log "WordPress network egress block in place: $out"
-    else
-        log "WARNING: WordPress network egress block not in place: ${out:-rc=$rc}. WordPress and MariaDB can reach the network directly, and the Tor-side containers this machine and its LAN."
-    fi
+    op_py --data-dir "$DATA_DIR" wordpress-egress --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
     return 0
 }
 
