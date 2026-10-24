@@ -52,7 +52,7 @@ the harness is about something else.
 | 3 | `retire_old_onionheaven_containers` | done, c5bb487a |
 | 4 | `migrate_tor_network` | done, c8d644e6 |
 | 5 | `migrate_key_volume` | done, 487a3e06 |
-| 6 | `db_import` | todo |
+| 6 | `db_import` | done, 14d3ff94 |
 | 7 | `block_wordpress_egress` | todo |
 
 Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
@@ -179,23 +179,61 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   in `test_wp_cli_as_www_data.TestWebRootOwnerGivesBack` (a relative
   `./bin` in the shell's PATH makes `find -execdir` refuse); CI is clean.
 
+- Slice 6 (`db_import`): `backup.db_import(sql_path, password, *, user,
+  name)` is the one implementation: `restore_container_artifacts` calls it
+  (the Mac's and the CLI's restores, the Settings page's), and
+  `onionpress db-import --sql-file <dump>` is the fast path over it (no
+  `OnionPressCLI`; the password is stdin's first line, never argv or the
+  environment; exit 0, or one `ERROR: …` line on stderr and exit 1 for an
+  empty password, a client too old for `--sandbox`, a failed import or a
+  timeout). The Linux bash body is `printf '%s\n' "$1" | op_py --data-dir
+  "$DATA_DIR" db-import --sql-file "$2"`, so `restore_backup`'s
+  `db_import "$db_pass" "$sql_file" 2>>"$LOG_FILE"` is unchanged and the
+  pipeline's status is the Python's. Two deltas from the bash: its "too
+  old" line went through `log` (terminal + log file), now it is stderr
+  only, which the caller's `2>>"$LOG_FILE"` lands in the log before the
+  caller's own `log "ERROR: Database import failed"`; and the dump is read
+  into memory (`subprocess.run(input=password + b'\n' + dump)`, as the
+  Mac's restore always did) where bash `cat`ed it — a streaming Popen
+  would be the better shape but every restore test records
+  `backup.subprocess.run`'s `input` (test_secrets_off_argv,
+  test_onionhome_registry_restore, test_db_import_sandbox), so it was
+  left for a slice of its own. `db_import` refuses a password that is not
+  one line (empty, LF or CR: the rest would be read as SQL). Tests:
+  `test_db_import_sandbox` has `TestDbImport` (mocked `subprocess.run`:
+  probe first, flags, argv shape, stdin bytes, the timeout equal to
+  `sized_timeout(len(dump), _DB_IMPORT_FLOOR_S, _DB_IMPORT_BYTES_PER_S)`,
+  old client refused before anything is sent, failed import's words, bad
+  passwords), `TestDbImportSubcommand` (`cli.main` with stdin, never
+  `OnionPressCLI`) and `TestLinuxDelegationEndToEnd` (the bash function
+  cut out, `op_py` on `sys.executable`, a `docker` stub on PATH recording
+  argv and stdin: the stub sees the password line then the dump, the
+  function's status is the Python's). `test_backup_timeouts
+  .test_the_import_is_sized` reads `db_import`'s body now. The bash
+  harnesses in test_backup_hub_data_off_wordpress and
+  test_settings_page_onion_key stub `db_import() { … }` themselves, so
+  they did not change. No `docker run` here (exec only), so no
+  capabilities row.
+
 ## Next step
 
-Slice 6: `db_import` (`linux/onionpress` line 639 at this commit; the Mac
-launcher has no bash body: its restores go through
-`backup.restore_container_artifacts`, whose import is the same client
-flags). `tests/test_db_import_sandbox.py` holds the bash function and the
-Python to `--sandbox --binary-mode --local-infile=0`, the dump on stdin
-after the password line, and the `--sandbox` capability check; the Linux
-`restore_backup` calls it as `db_import "$db_pass" "$sql_file"`. The move:
-a Python entry (probably a `db-import` subcommand taking the password on
-stdin's first line, or in the environment, never argv:
-`tests/test_secrets_off_argv.py`) that `backup.restore_container_artifacts`
-and the Linux launcher share, the bash body a delegation that keeps the
-`"$db_pass" "$sql_file"` call shape (or feeds the file on stdin), the
-sandbox test rewritten against the one Python implementation, and the
-dispatch row. The timeout must stay sized to the dump
-(`wp_files.sized_timeout`, issue #317). Then slice 7
-(`block_wordpress_egress`), already a delegation to `wordpress-egress`
-in both launchers (`tests/test_wordpress_egress.TestLaunchers`): check
-whether anything bash is left to move, and if not record it as done.
+Slice 7: `block_wordpress_egress`. Both launchers are already the
+delegation to `wordpress-egress` (`wordpress_egress.ensure` over
+`_launcher_log_func`-less output: the CLI prints one status line; Mac
+passes `--bin-dir "$BIN_DIR"`, both `--wp-port "$ONIONPRESS_WP_PORT"`),
+held by `tests/test_wordpress_egress.TestLaunchers` (called before the
+first `compose up`, `return 0`, the WARNING words). What is still bash,
+per launcher: the `$(…) || rc=$?` capture, the two `log` lines ("egress
+block in place: $out" / "WARNING: … not in place: ${out:-rc=$rc}"), and
+on the Mac `START_ERRORS="$START_ERRORS wordpress-egress"` (the START
+SUMMARY's list, bash state the Python cannot set). On Linux the status
+loop's rootless re-apply (`rootless_netns`, the `netns` comparison around
+line 2277) calls the function again when the namespace changes. Decide
+whether to move the two log lines into the CLI (printing them in the
+launcher's `[ts] msg` format as slices 3–5 do, with the bash body
+becoming `… 2>&1 | tee -a "$LOG_FILE"; return 0`) — then the Mac's
+`START_ERRORS` append needs the status back, so the shape would be the
+slice 5 one (`PIPESTATUS[0]`, status noted, `return 0` kept) — or record
+slice 7 as done as it stands (the body is one CLI call plus logging).
+Either way CLAUDE.md's "Nor any connection (issue #144)" bullet already
+names the Python as the implementation.
