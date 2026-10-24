@@ -266,6 +266,66 @@ systemctl --global enable onionpress.service onionpress-heartbeat.service onionp
 # network's egress rules at boot) from its next start; nothing restarts now.
 systemctl daemon-reload 2>/dev/null || true
 
+# The tray for the user's active graphical session, so the icon appears
+# without making them log out and back in. Best-effort: no graphical
+# session, no tray; one already running is left alone. The autostart
+# entry in /etc/xdg/autostart/ handles all subsequent logins.
+spawn_tray() {
+    if loginctl show-user "$REAL_USER" 2>/dev/null | grep -q 'Display='; then
+        if ! pgrep -u "$REAL_USER" -f '/onionpress-tray$' >/dev/null 2>&1; then
+            (runuser -u "$REAL_USER" -- bash -lc \
+                'setsid /usr/local/bin/onionpress-tray >/dev/null 2>&1 < /dev/null &' \
+              || su - "$REAL_USER" -c \
+                'setsid /usr/local/bin/onionpress-tray >/dev/null 2>&1 < /dev/null &') 2>/dev/null || true
+        fi
+    fi
+}
+
+# Upgrade (issue #357): the new files are in place, but onionpress.service
+# (a long-running Type=notify user unit: its `start` stays in its status
+# loop), the heartbeat daemon and the tray keep running the old code, the
+# containers the old pinned images, and the status keeps reporting the old
+# version (so the Settings page offers the update just installed), while
+# the watcher timer runs the new `handle-action` every 10 s against all of
+# it. `systemctl --global enable` and the daemon-reload above touch none
+# of them, and prerm leaves them running on purpose. So, as linux/install.sh
+# does on a re-run, restart what runs for the installing user: the user
+# manager reads the new unit files, then onionpress.service and the
+# heartbeat are restarted where they run (try-restart: a stopped site
+# stays stopped). The heartbeat is ordered After= onionpress.service, so
+# systemd stops it first (it sends /offline on its way down) and starts it
+# last: the launcher's own `restart` ordering. The tray is replaced the
+# way a first install starts it. `--machine=USER@.host` needs systemd 248+
+# and the user's manager running (lingering, or a login): if it fails,
+# the old code keeps running and the message says what to run.
+# `onionpress update` (the launcher's release install) runs apt-get and
+# then restarts the containers itself once more: two restarts, never two
+# at once, since try-restart returns only once the site is up again.
+if [ "$1" = "configure" ] && [ -n "$2" ] && [ "$REAL_USER" != "root" ]; then
+    VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
+    echo "  OnionPress $VERSION_INSTALLED installed over $2. Restarting the site for $REAL_USER (the running one is still version $2)..."
+    if systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null \
+       && systemctl --user --machine="${REAL_USER}@.host" try-restart \
+              onionpress.service onionpress-heartbeat.service 2>/dev/null; then
+        echo "  OnionPress restarted: now running $VERSION_INSTALLED where it was running."
+    else
+        cat <<EOF
+  Could not restart OnionPress for $REAL_USER through systemd, so the old
+  version keeps running until it is restarted. As $REAL_USER, run:
+
+    systemctl --user daemon-reload
+    systemctl --user try-restart onionpress onionpress-heartbeat
+
+EOF
+    fi
+    # The tray paints the old code's view of status.json; replace it. The
+    # pause lets its StatusNotifier D-Bus name go before the new one claims it.
+    if pkill -u "$REAL_USER" -f '/onionpress-tray$' 2>/dev/null; then
+        sleep 1
+    fi
+    spawn_tray
+fi
+
 # Self-contained bootstrap. Only runs on first install (not upgrade) and
 # only when we have a real target user. Two-tier strategy:
 #   1. Preferred: rootless Docker (user-level daemon at
@@ -404,18 +464,8 @@ Then:
 EOF
     fi
 
-    # Spawn the tray for the user's active graphical session so the icon
-    # appears without making them log out and back in. Best-effort — if
-    # there's no graphical session, this is a no-op. The autostart entry
-    # in /etc/xdg/autostart/ handles all subsequent logins.
-    if loginctl show-user "$REAL_USER" 2>/dev/null | grep -q 'Display='; then
-        if ! pgrep -u "$REAL_USER" -f '/onionpress-tray$' >/dev/null 2>&1; then
-            (runuser -u "$REAL_USER" -- bash -lc \
-                'setsid /usr/local/bin/onionpress-tray >/dev/null 2>&1 < /dev/null &' \
-              || su - "$REAL_USER" -c \
-                'setsid /usr/local/bin/onionpress-tray >/dev/null 2>&1 < /dev/null &') 2>/dev/null || true
-        fi
-    fi
+    # The tray for the user's active graphical session (spawn_tray above).
+    spawn_tray
 
     # Warn about a stale install.sh-style install if we detect one in the
     # user's home. Only one curl|bash installer is known in the field
@@ -463,7 +513,8 @@ case "$1" in
         pkill -f /opt/onionpress/onionpress 2>/dev/null || true
         ;;
     upgrade|deconfigure|failed-upgrade)
-        # No-op — preserve running state across upgrade.
+        # No-op: the running state is kept across the upgrade; the new
+        # package's postinst restarts the site on the new files (issue #357).
         ;;
 esac
 PRERM

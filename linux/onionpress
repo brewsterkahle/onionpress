@@ -3752,7 +3752,12 @@ update_from_release() {
     echo "  Checked: $RELEASE_DEB matches the sha256 in the release's $RELEASE_SUMS."
 
     # apt-get, not dpkg -i, so new dependencies come along; never removing
-    # a package to make room.
+    # a package to make room. The package's postinst restarts the user's
+    # onionpress.service and heartbeat where they run and returns once the
+    # site is up on the new files (issue #357); update_finish then pulls
+    # the images and restarts once more, as every update path ends. Two
+    # restarts, one after the other: the second is what restarts a site
+    # the user runs without the unit.
     apt_opts=(-y --no-remove)
     if [ "$force" = "yes" ]; then
         apt_opts+=(--reinstall --allow-downgrades)

@@ -52,6 +52,17 @@
   old `rm -rf "$TMPDIR"` deleted on a run from a checkout), removed by its
   `trap cleanup EXIT` and once installed. Never `rm -rf` a folder named by
   the environment. `tests/test_install_sh_clone_cleanup.py`.
+- **The .deb's postinst restarts the site on an upgrade** (issue #357):
+  with `$2` set it runs `systemctl --user --machine=<user>@.host
+  daemon-reload` and `try-restart onionpress.service
+  onionpress-heartbeat.service` (the heartbeat's `After=` makes systemd
+  stop it first, so /offline goes out, and start it last), then replaces
+  the tray through `spawn_tray` (the first install's starter too). A
+  failure prints the commands to run and never fails the install; prerm
+  stays a no-op on upgrade. `onionpress update` restarts once more after
+  apt-get returns (serial, never beside it). Before, the old units, daemon
+  and tray kept running the old code until a reboot.
+  `tests/test_deb_upgrade_restarts.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **CI builds and attests the `.deb` on every published release**
   (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
