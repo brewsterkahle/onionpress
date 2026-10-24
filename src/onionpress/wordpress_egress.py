@@ -55,7 +55,8 @@ The same script closes two more ways in and out:
   own namespace when the host's resolv.conf names one). Docker cannot
   rename a network's bridge, so an onionpress-network made before, on
   Docker's br-<id>, is recreated before the first `compose up`
-  (migrate_tor_network in both launchers, ContainerManager.migrate_tor_network).
+  (ContainerManager.migrate_tor_network, which both launchers' migrate_tor_network
+  run through the CLI).
 * The published port's hairpin. Docker skips its DNAT for traffic that
   comes in from any of its bridges, so docker-proxy takes a container's
   connection to <any host address>:<WordPress's port> and hands it to

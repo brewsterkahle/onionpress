@@ -1127,105 +1127,21 @@ class TestLaunchers(unittest.TestCase):
                 self.assertLess(code.index("\n    migrate_tor_network\n"),
                                 code.index("docker compose up"))
 
-    def test_the_launchers_carry_the_same_move(self):
-        bodies = [_function_body(_read(p), "migrate_tor_network")
-                  for p in (MAC_LAUNCHER, LINUX_LAUNCHER)]
-        self.assertEqual(bodies[0], bodies[1])
-        self.assertIn(f'"com.docker.network.bridge.name":"{egress.TOR_BRIDGE}"', bodies[0])
-        self.assertIn(egress.TOR_NETWORK, bodies[0])
-        self.assertTrue(bodies[0].rstrip().endswith("return 0"), "set -e")
-
-    MOVE_STUB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$STUB_DIR/calls"
-case "$1 $2" in
-    "network inspect")
-        [ -f "$STUB_DIR/options" ] || exit 1
-        case "$4" in
-            "{{json .Options}}") cat "$STUB_DIR/options" ;;
-            *) n=$(cat "$STUB_DIR/inspected" 2>/dev/null || echo 0)
-               echo $((n + 1)) > "$STUB_DIR/inspected"
-               cat "$STUB_DIR/names.$n" 2>/dev/null || cat "$STUB_DIR/names" ;;
-        esac ;;
-    "network rm") exit "${STUB_RM_RC:-0}" ;;
-esac
-exit 0
-"""
-
-    def _move(self, launcher, options, names, later_names=None, rm_rc=0):
-        tmp = tempfile.mkdtemp(prefix="op-tor-net-")
-        self.addCleanup(shutil.rmtree, tmp, True)
-        os.makedirs(os.path.join(tmp, "bin"))
-        stub = os.path.join(tmp, "bin", "docker")
-        with open(stub, "w") as f:
-            f.write(self.MOVE_STUB)
-        os.chmod(stub, 0o755)
-        if options is not None:
-            with open(os.path.join(tmp, "options"), "w") as f:
-                f.write(options + "\n")
-        with open(os.path.join(tmp, "names.0"), "w") as f:
-            f.write(" ".join(names) + " \n")
-        with open(os.path.join(tmp, "names"), "w") as f:
-            f.write(" ".join(later_names if later_names is not None else names) + " \n")
-        open(os.path.join(tmp, "calls"), "w").close()
-        script = ("set -e\n"
-                  f'LOG_FILE="{tmp}/log"\n'
-                  'log() { printf "%s\\n" "$*" >> "$LOG_FILE.lines"; }\n'
-                  + _function_body(_read(launcher), "migrate_tor_network") + "\n}\n"
-                  "migrate_tor_network\n")
-        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                             timeout=60, env={"PATH": os.path.join(tmp, "bin") + ":/usr/bin:/bin",
-                                              "STUB_DIR": tmp, "STUB_RM_RC": str(rm_rc)})
-        self.assertEqual(out.returncode, 0, out.stderr)
-        with open(os.path.join(tmp, "calls")) as f:
-            calls = f.read().splitlines()
-        try:
-            with open(os.path.join(tmp, "log.lines")) as f:
-                lines = f.read()
-        except OSError:
-            lines = ""
-        return calls, lines
-
-    def test_the_move_empties_and_removes_an_old_network(self):
-        ours = ["onionpress-tor", "onionheaven-takeover-3", "onionheaven-poll-0",
-                "onionpress-cloudflared", "onionpress-wordpress", "onionpress-db"]
-        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
-                calls, lines = self._move(launcher, "{}", ["onionheaven", "other"] + ours,
-                                          later_names=["other"] + ours)
-                removed = [c.split()[-1] for c in calls if c.startswith("rm -f ")]
-                self.assertEqual(removed[0], "onionheaven")
-                self.assertEqual(sorted(removed[1:]), sorted(ours))
-                self.assertIn(f"network disconnect -f {egress.TOR_NETWORK} other", calls)
-                self.assertEqual(calls[-1], f"network rm {egress.TOR_NETWORK}")
-                self.assertIn("other is on onionpress-network but is not OnionPress's", lines)
-
-    def test_the_move_never_removes_names_that_only_look_like_ours(self):
-        look_alikes = TestTorNetworkMove.LOOK_ALIKES
-        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
-                calls, lines = self._move(launcher, "{}", look_alikes + ["onionpress-tor"])
-                removed = [c.split()[-1] for c in calls if c.startswith("rm -f ")]
-                self.assertEqual(removed, ["onionpress-tor"])
-                for name in look_alikes:
-                    self.assertIn(f"network disconnect -f {egress.TOR_NETWORK} {name}", calls)
-                    self.assertIn(f"{name} is on onionpress-network but is not OnionPress's",
-                                  lines)
-
-    def test_the_move_leaves_a_network_on_its_bridge_alone(self):
-        options = json.dumps({"com.docker.network.bridge.name": egress.TOR_BRIDGE},
-                             separators=(",", ":"))
-        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            for opts in (options, None, ""):
-                with self.subTest(launcher=os.path.relpath(launcher, ROOT), options=opts):
-                    calls, _ = self._move(launcher, opts, ["onionpress-tor"])
-                    self.assertEqual(len(calls), 1, calls)
-
-    def test_a_network_that_will_not_go_is_a_warning(self):
-        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
-                _, lines = self._move(launcher, '{"com.docker.network.bridge.name":"br-x"}',
-                                      [], rm_rc=1)
-                self.assertIn("WARNING: could not recreate onionpress-network", lines)
+    def test_the_launchers_delegate_the_move(self):
+        """Phase 4 (#120): one implementation,
+        ContainerManager.migrate_tor_network (TestTorNetworkMove), run
+        through the CLI with its log lines teed into the launcher's log; the
+        pipe's status is tee's, so under `set -e` the step never stops a
+        start, as the bash body's `return 0` did."""
+        for path, runner in ((MAC_LAUNCHER, "bundled_python -m onionpress.cli"),
+                             (LINUX_LAUNCHER, "op_py")):
+            with self.subTest(launcher=os.path.relpath(path, ROOT)):
+                body = _function_body(_read(path), "migrate_tor_network")
+                code = [l.strip() for l in body.splitlines()
+                        if l.strip() and not l.strip().startswith("#")]
+                self.assertEqual(code, [
+                    "migrate_tor_network() {",
+                    f'{runner} --data-dir "$DATA_DIR" migrate-tor-network 2>&1 | tee -a "$LOG_FILE"'])
 
     # -- Rootless Docker's port driver --
 

@@ -26,6 +26,10 @@ Coverage floors (`build/coverage-floors.sh`): total 60 %, `cli.py` 69,
 After every commit: `git push origin HEAD:phase4` (never squash or
 force-push). No PR until the slices through 7 are in; the branch is the
 hand-over. Never touch `~/.onionpress` or `/Applications/OnionPress.app`.
+Run one suite at a time: `test_onionpress_colima` (`/tmp/colima_test_args*`)
+and `test_backup_manager`'s staging-cleanup scans fail when two runs
+overlap on one machine (`make test-unit` beside `make coverage`, 2026-10-24).
+Each full run is about 5 minutes here.
 
 Delegation shape: Mac `bundled_python -m onionpress.cli --data-dir
 "$DATA_DIR" <subcommand> "$@"` (the bundle's interpreter; `/usr/bin/python3`
@@ -45,8 +49,8 @@ the harness is about something else.
 |---|------|--------|
 | 1 | `using_local_images` | done, 80aae349 |
 | 2 | `regenerate_derivatives_pending` | done, 76bee60e |
-| 3 | `retire_old_onionheaven_containers` | done (the slice 3 commit) |
-| 4 | `migrate_tor_network` | todo |
+| 3 | `retire_old_onionheaven_containers` | done, c5bb487a |
+| 4 | `migrate_tor_network` | done (the slice 4 commit) |
 | 5 | `migrate_key_volume` | todo (only with every check kept, see below) |
 | 6 | `db_import` | todo |
 | 7 | `block_wordpress_egress` | todo |
@@ -138,10 +142,28 @@ Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
   Python with a fake docker (removed set, inspect failure keeps, never the
   farm controller, all at once).
 
+- Slice 4 (`migrate_tor_network`): the same fast path shape as slice 3
+  (`cli.main` handles both names in one branch). The bash `MOVE_STUB`/`_move`
+  harness tests went; `TestTorNetworkMove` (Python, fake docker) is the
+  coverage, with the delegation check and the start_containers ordering
+  check (`retire` before `migrate` before `compose up`) kept.
+
 ## Next step
 
-Slice 4: `migrate_tor_network` — the same fast path shape
-(`migrate-tor-network` over `ContainerManager.migrate_tor_network`, which
-`tests/test_wordpress_egress.TestTorNetworkMove` already covers); delete the
-bash `MOVE_STUB`/`_move` tests, keep the delegation check and the
-start_containers ordering check.
+Slice 5: `migrate_key_volume` (`app/MacOS/onionpress` lines 1832-1938 and
+`linux/onionpress` 1637-1743 at this commit, 106 lines, test-enforced identical by
+`tests/test_install_invariants.TestKeyVolumeMigration` and run under bash by
+`TestLauncherVolumeChecksUnderDockerFailure` there, with the pinned-image,
+`--network none`, marker and failed-copy cases). Move it only if every check
+in the invariants list above survives and the Python test is at least as
+strict as those bash runs (the helper `docker run` keeps its row in
+`tests/test_container_capabilities.py`; `ensure_key_helper_image` and
+`docker_volume_state` are its bash callees and would move with it or stay
+as bash the delegation needs). Its callers (`start_containers`, the Mac
+`start-tor` subcommand, both launchers' `setup`) stay bash: `if !
+migrate_key_volume; then … return 1` must keep stopping the start, so the
+delegation hands the exit status through (no tee). If it is larger than an
+hour, skip to slice 6 (`db_import`: a bash body only in `linux/onionpress`
+(line 639), the Mac restores through `backup.restore_container_artifacts`
+already; `tests/test_db_import_sandbox.py` holds both to the same client
+flags) and write down why.

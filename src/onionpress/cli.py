@@ -2164,6 +2164,13 @@ def main(argv: list[str] = None) -> int:
              "OnionPress; the hub data move must not race them); always "
              "exits 0")
     sub.add_parser(
+        "migrate-tor-network",
+        help="Before the first `compose up`: recreate an onionpress-network "
+             "whose bridge is not onionpress-tor0 (made by an older "
+             "OnionPress; the Tor side's rules name the bridge), removing "
+             "OnionPress's own containers on it and disconnecting anything "
+             "else; always exits 0")
+    sub.add_parser(
         "using-local-images",
         help="Exit 0 when the stack points at images built on this machine "
              "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "
@@ -2540,13 +2547,18 @@ def main(argv: list[str] = None) -> int:
             print(f"rejected {key}")
         return 0
 
-    if args.command == "retire-old-onionheaven-containers":
-        # The launchers' retire_old_onionheaven_containers() (Phase 4,
-        # #120): ContainerManager's own step (start_core runs it too),
-        # logged in the launcher's format; no OnionPressCLI setup. Exit 0
-        # whatever is found: the step never stops a start.
+    if args.command in ("retire-old-onionheaven-containers", "migrate-tor-network"):
+        # The launchers' retire_old_onionheaven_containers() and
+        # migrate_tor_network() (Phase 4, #120): ContainerManager's own
+        # steps (start_core runs them too), logged in the launcher's
+        # format; no OnionPressCLI setup. Exit 0 whatever is found: neither
+        # step may stop a start.
         paths = resolve_paths(data_dir=args.data_dir)
-        _start_step_manager(paths).retire_old_onionheaven_containers()
+        manager = _start_step_manager(paths)
+        if args.command == "migrate-tor-network":
+            manager.migrate_tor_network()
+        else:
+            manager.retire_old_onionheaven_containers()
         return 0
 
     if args.command == "regenerate-derivatives-pending":
