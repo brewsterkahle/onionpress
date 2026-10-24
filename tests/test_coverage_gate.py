@@ -31,7 +31,7 @@ class TestCoverageConfig(unittest.TestCase):
         script = _read("build/coverage-floors.sh")
         self.assertIn("TOTAL_FLOOR=60", script)
         floors = dict(re.findall(r"(?m)^(src/onionpress/\S+\.py) (\d+)$", script))
-        self.assertEqual(floors, {"src/onionpress/cli.py": "60",
+        self.assertEqual(floors, {"src/onionpress/cli.py": "69",
                                   "src/onionpress/handle_action.py": "85",
                                   "src/onionpress/confirm.py": "90",
                                   "src/onionpress/config.py": "85"})

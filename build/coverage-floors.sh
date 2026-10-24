@@ -13,7 +13,7 @@ TOTAL_FLOOR=60
 
 # "<file> <floor>" per line.
 FILE_FLOORS="
-src/onionpress/cli.py 60
+src/onionpress/cli.py 69
 src/onionpress/handle_action.py 85
 src/onionpress/confirm.py 90
 src/onionpress/config.py 85
