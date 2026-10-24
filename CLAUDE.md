@@ -1293,8 +1293,9 @@
   platforms share the classification.
 - **The two halves must ship together.** A restore writes
   `~/.onionpress/.regenerate-derivatives-pending`; every launcher start
-  (`regenerate_derivatives_pending()` in both launchers, test-enforced
-  identical, and the CLI `start`/`restore` paths) then runs
+  (both launchers' `regenerate_derivatives_pending()`, a delegation to
+  `onionpress regenerate-derivatives-pending` over
+  `derivatives.regeneration_pending`, and the CLI `start`/`restore` paths) then runs
   `onionpress.cli regenerate-derivatives` detached in the background:
   `nice`d `wp media regenerate --only-missing --yes` per site. `--only-missing`
   makes it resumable, so the marker is cleared only when a sweep completes.

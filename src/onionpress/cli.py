@@ -2009,6 +2009,12 @@ def main(argv: list[str] = None) -> int:
         "regenerate-derivatives",
         help="Rebuild the resized image copies a restored backup left out "
              "(no-op unless a restore left the pending marker; resumable)")
+    sub.add_parser(
+        "regenerate-derivatives-pending",
+        help="Exit 0 when a restore left resized images to rebuild (the host "
+             "marker in the data dir, or the one a backup carries in the "
+             "container's uploads/), 1 when not; both launchers' start gates "
+             "the detached regenerate-derivatives on it")
     p_prune = sub.add_parser(
         "prune-image-derivatives",
         help="Delete regenerable -WxH/-scaled image copies from a staged "
@@ -2503,6 +2509,16 @@ def main(argv: list[str] = None) -> int:
         for key in applied.rejected:
             print(f"rejected {key}")
         return 0
+
+    if args.command == "regenerate-derivatives-pending":
+        # The launchers' regenerate_derivatives_pending() (Phase 4, #120):
+        # the two markers regenerate-derivatives itself acts on, asked the
+        # same way (derivatives.regeneration_pending). No OnionPressCLI
+        # setup; exit 0 = a rebuild is owed.
+        from . import derivatives
+        paths = resolve_paths(data_dir=args.data_dir)
+        pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths).docker_bin)
+        return 0 if pending else 1
 
     if args.command == "using-local-images":
         # The launchers' using_local_images(): the one copy of the rule
