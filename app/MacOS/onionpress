@@ -511,51 +511,13 @@ retire_old_onionheaven_containers() {
 # worker (no compose service) is still on it. Every container on it is
 # OnionPress's and is removed (compose recreates its services, the
 # heartbeat its workers), onionheaven first since it starts workers;
-# anything else is only disconnected. Once per install; kept identical in
-# both launchers (ContainerManager.migrate_tor_network does the same), a
-# test enforces it.
+# anything else is only disconnected. Once per install. The step is
+# ContainerManager.migrate_tor_network (start_core's too), run through the
+# CLI (Phase 4, #120); its log lines come back on stdout in this script's
+# log format, so the tee carries them to the log and the terminal, and the
+# pipe's status is tee's: the step never stops a start.
 migrate_tor_network() {
-    local options names name ours pids=""
-    options=$(docker network inspect --format '{{json .Options}}' onionpress-network 2>/dev/null) || return 0
-    case "$options" in
-        *'"com.docker.network.bridge.name":"onionpress-tor0"'*) return 0 ;;
-        "{"*) ;;
-        *) return 0 ;;
-    esac
-    log "Recreating onionpress-network on its own bridge (onionpress-tor0), so the Tor side's rules apply to it"
-    names=$(docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' onionpress-network 2>/dev/null) || names=""
-    case " $names " in
-        *" onionheaven "*)
-            docker rm -f onionheaven >> "$LOG_FILE" 2>&1 || true
-            names=$(docker network inspect --format '{{range .Containers}}{{.Name}} {{end}}' onionpress-network 2>/dev/null) || names="" ;;
-    esac
-    for name in $names; do
-        # OnionPress's own names only: its compose services and the
-        # workers, onionheaven-poll-<n> and onionheaven-takeover-<n>.
-        ours=no
-        case "$name" in
-            onionpress-tor|onionpress-wordpress|onionpress-db|onionpress-cloudflared|onionheaven) ours=yes ;;
-            onionheaven-poll-[0-9]*|onionheaven-takeover-[0-9]*)
-                case "${name##*-}" in
-                    *[!0-9]*) ;;
-                    *) ours=yes ;;
-                esac ;;
-        esac
-        if [ "$ours" = yes ]; then
-            docker rm -f "$name" >> "$LOG_FILE" 2>&1 &
-            pids="$pids $!"
-        else
-            log "WARNING: $name is on onionpress-network but is not OnionPress's: disconnecting it"
-            docker network disconnect -f onionpress-network "$name" >> "$LOG_FILE" 2>&1 || true
-        fi
-    done
-    if [ -n "$pids" ]; then
-        wait $pids || true
-    fi
-    if ! docker network rm onionpress-network >> "$LOG_FILE" 2>&1; then
-        log "WARNING: could not recreate onionpress-network on onionpress-tor0: until it is, the Tor-side containers can reach this machine and its network (see $LOG_FILE)"
-    fi
-    return 0
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" migrate-tor-network 2>&1 | tee -a "$LOG_FILE"
 }
 
 # Function to check if a command exists

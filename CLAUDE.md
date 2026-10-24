@@ -807,9 +807,9 @@
   Not 198.18/15 (fake-IP proxies). Before, tor, onionheaven, cloudflared
   and takeover workers reached the LAN, the host's services and, through
   192.168.5.2 (Lima maps it to the Mac's 127.0.0.1), everything on the
-  Mac's loopback. Docker cannot rename a bridge: both launchers'
-  `migrate_tor_network` (identical, test-enforced) and
-  `ContainerManager.migrate_tor_network` remove an old onionpress-network
+  Mac's loopback. Docker cannot rename a bridge:
+  `ContainerManager.migrate_tor_network` (`start_core`, and both launchers'
+  `migrate_tor_network` through `onionpress migrate-tor-network`) removes an old onionpress-network
   before the first `compose up` (onionheaven first, then OnionPress's
   containers on it, by exact name, workers only as
   `onionheaven-{poll,takeover}-<digits>`; anything else is only

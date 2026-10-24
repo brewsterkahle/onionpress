@@ -129,8 +129,8 @@ _HUB_CONTAINER_RE = re.compile(
 
 # What OnionPress puts on onionpress-network: its compose services (wordpress
 # and db too, before issue #144 moved them) and the takeover workers.
-# migrate_tor_network removes these and only disconnects anything else; the
-# launchers' migrate_tor_network matches the same names.
+# migrate_tor_network removes these and only disconnects anything else (the
+# launchers' migrate_tor_network runs it: `onionpress migrate-tor-network`).
 _TOR_NETWORK_CONTAINER_RE = re.compile(
     r"onionpress-(tor|wordpress|db|cloudflared)|onionheaven"
     r"|onionheaven-(poll|takeover)-[0-9]+")
@@ -654,7 +654,8 @@ class ContainerManager:
         (no compose service) is still on it. Everything OnionPress put there
         is removed, onionheaven first since it starts workers (compose
         recreates its services, the heartbeat its workers); anything else is
-        only disconnected. The launchers' migrate_tor_network does the same.
+        only disconnected. The launchers' migrate_tor_network runs this
+        (`onionpress migrate-tor-network`).
         """
         inspected = self.docker.run(
             ["network", "inspect", "--format", "{{json .Options}}",
