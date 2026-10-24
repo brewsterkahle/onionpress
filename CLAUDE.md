@@ -1448,8 +1448,11 @@
   inside a sourced file — a root shell in onionpress-db, reachable from
   WordPress through the Settings page's restore — and `LOAD DATA LOCAL
   INFILE` reads the exec'd process's inherited `MYSQL_ROOT_PASSWORD` out of
-  `/proc`. So every import (`backup.restore_container_artifacts`; both
-  launchers' `db_import`, test-enforced identical) streams the dump on
+  `/proc`. So the one import, `backup.db_import` (what
+  `restore_container_artifacts` runs; the Linux launcher's bash `db_import`
+  is a one-line delegation to `onionpress db-import`, the password on
+  stdin's first line, never argv; the Mac launcher has none, its restores
+  go through `restore_container_artifacts`), streams the dump on
   stdin after the password line — never `docker cp`'d to a fixed
   `/tmp/wordpress.sql` and `source`d — through a client run
   `--sandbox --binary-mode --local-infile=0`, and refuses a client too old

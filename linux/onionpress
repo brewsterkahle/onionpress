@@ -625,27 +625,17 @@ db_client() {
 }
 
 # Import a restored dump into the wordpress DB: db_import <password> <sql_file>
-# The password is the first stdin line (reaches the client as MYSQL_PWD); the
-# dump is streamed after it. The client runs with its own command parsing OFF
-# so nothing in a crafted dump can run anything but SQL in the db container:
-#   --sandbox        refuses \!/system, \./source, tee, pager (a sourced dump
-#                    runs them as OS root otherwise — a shell in onionpress-db)
-#   --binary-mode    treats the dump as data, not \x client escapes, and keeps
-#                    binary blobs intact (mariadb-dump's own output imports)
-#   --local-infile=0 refuses LOAD DATA LOCAL INFILE (reading the exec'd
-#                    process's inherited MYSQL_ROOT_PASSWORD from /proc)
-# No docker cp of the dump to a fixed /tmp/wordpress.sql + `source`.
-# Identical in app/MacOS/onionpress and linux/onionpress (test-enforced).
+# onionpress.cli db-import, backup.db_import (Phase 4, #120): the one
+# implementation, what the Mac's restores run too. The password is the
+# first stdin line (reaches the client as MYSQL_PWD, never argv: ps shows
+# every user's command lines); the dump is streamed after it into a client
+# run --sandbox --binary-mode --local-infile=0, so nothing in a crafted
+# dump can run anything but SQL in the db container, and a client too old
+# for --sandbox is refused rather than imported into unsandboxed. The
+# pipeline's status is the Python's (exit 1 on any failure, one ERROR line
+# on stderr).
 db_import() {
-    local db_pass="$1"
-    local sql_file="$2"
-    if ! docker exec onionpress-db sh -c 'mariadb --help 2>/dev/null | grep -q -- --sandbox'; then
-        log "ERROR: the onionpress-db MariaDB client is too old (no --sandbox); refusing to import a backup unsandboxed"
-        return 1
-    fi
-    { printf '%s\n' "$db_pass"; cat "$sql_file"; } | docker exec -i onionpress-db \
-        sh -c 'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' sh \
-        mariadb --sandbox --binary-mode --local-infile=0 -u wordpress wordpress
+    printf '%s\n' "$1" | op_py --data-dir "$DATA_DIR" db-import --sql-file "$2"
 }
 
 # Set a WordPress user's password: wp_set_user_password <login> <password>

@@ -2177,6 +2177,16 @@ def main(argv: list[str] = None) -> int:
              "onionpress-onion-keys once, verified, in the pinned tor image "
              "with no network; exit 1 (the start must stop) when Docker does "
              "not answer, the copy fails or the image is not here")
+    p_db_import = sub.add_parser(
+        "db-import",
+        help="Import a restored database dump into the running onionpress-db "
+             "as the wordpress user (the Linux launcher's db_import; the "
+             "password is the first line of stdin, never an argument): the "
+             "client runs --sandbox --binary-mode --local-infile=0 with the "
+             "dump on its stdin after the password line, and a client too old "
+             "for --sandbox is refused; exit 1 on any failure")
+    p_db_import.add_argument(
+        "--sql-file", required=True, help="The dump to import (wordpress.sql)")
     sub.add_parser(
         "using-local-images",
         help="Exit 0 when the stack points at images built on this machine "
@@ -2577,6 +2587,26 @@ def main(argv: list[str] = None) -> int:
         # next start took for the migrated key.
         paths = resolve_paths(data_dir=args.data_dir)
         return 0 if _start_step_manager(paths).migrate_key_volume() else 1
+
+    if args.command == "db-import":
+        # The Linux launcher's db_import() (Phase 4, #120): backup.db_import,
+        # what restore_container_artifacts runs for the Mac's and the CLI's
+        # restores. The password is stdin's first line (the launcher pipes
+        # it in; argv is every user's to read); the dump follows it into the
+        # sandboxed client's stdin. No OnionPressCLI setup. Every refusal
+        # (an old client, a failed import) is one ERROR line and exit 1,
+        # which restore_backup turns into its "Database import failed".
+        from .backup import db_import
+        password = sys.stdin.readline().rstrip("\n") if sys.stdin is not None else ""
+        if not password:
+            print("ERROR: no database password on stdin", file=sys.stderr)
+            return 1
+        try:
+            db_import(args.sql_file, password)
+        except Exception as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.command == "regenerate-derivatives-pending":
         # The launchers' regenerate_derivatives_pending() (Phase 4, #120):

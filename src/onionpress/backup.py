@@ -2707,34 +2707,11 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
         # otherwise ride into the ALTER USER below.
         db_password = _restore_db_password(data_dir, db_creds['password'])
 
-        # Import the dump with the client's command parsing OFF so a crafted
-        # dump cannot run \! / system / \. / tee / pager (a shell in the db
-        # container as OS root) or LOAD DATA LOCAL (read MYSQL_ROOT_PASSWORD
-        # out of /proc/self/environ). The dump goes in on stdin after the
-        # password line — never docker cp'd to a fixed /tmp path and sourced.
-        # The DB dump is the database only (media rides wp-content), so its
-        # bytes fit in memory the way create_backup already holds them.
-        _assert_db_client_sandboxed()
-        import_argv = _db_client_argv(
-            'mariadb', *_DB_IMPORT_SAFE_FLAGS,
-            '-u', db_creds['user'], db_creds['name'])
-        sql_bytes = os.path.getsize(sql_path)
-        with open(sql_path, 'rb') as f:
-            dump_bytes = f.read()
-        result = subprocess.run(
-            import_argv,
-            # First stdin line is the password (read into MYSQL_PWD); the
-            # dump bytes follow for the client to read as SQL.
-            input=db_password.encode() + b'\n' + dump_bytes,
-            capture_output=True,
-            # Sized from the dump (issue #317: a fixed limit failed large
-            # sites); importing rebuilds every index.
-            timeout=wp_files.sized_timeout(sql_bytes, _DB_IMPORT_FLOOR_S,
-                                           _DB_IMPORT_BYTES_PER_S),
-        )
-        if result.returncode != 0:
-            raise Exception("Database import failed: "
-                            f"{result.stderr.decode('utf-8', 'replace').strip()}")
+        # The one sandboxed import (db_import below; the Linux launcher's
+        # db_import runs it as `onionpress db-import`): the client's command
+        # parsing OFF, the dump on stdin after the password line.
+        db_import(sql_path, db_password,
+                  user=db_creds['user'], name=db_creds['name'])
 
         # Reconcile the wordpress mysql user's password with the
         # CURRENT install's secrets. The mariadb-dump only dumps
@@ -3270,6 +3247,53 @@ def _assert_db_client_sandboxed():
 _DB_DUMP_FLOOR_S = 120
 _DB_IMPORT_FLOOR_S = 120
 _DB_IMPORT_BYTES_PER_S = 256 << 10
+
+
+def db_import(sql_path, password, *, user='wordpress', name='wordpress'):
+    """Import the dump at *sql_path* into database *name* of the running
+    onionpress-db as *user*, with *password*. Raises on any failure.
+
+    The one implementation (Phase 4, #120): restore_container_artifacts
+    runs it, and the Linux launcher's db_import() is `onionpress db-import`
+    (backup.py's caller of this, the password on stdin's first line).
+
+    The client's own command parsing is OFF so a crafted dump cannot run
+    \\! / system / \\. / tee / pager (a shell in the db container as OS
+    root) or LOAD DATA LOCAL (read MYSQL_ROOT_PASSWORD out of
+    /proc/self/environ): `--sandbox --binary-mode --local-infile=0`, and a
+    client too old for --sandbox is refused rather than fallen back from
+    (_assert_db_client_sandboxed). The dump goes in on stdin after the
+    password line (read into MYSQL_PWD, never argv: the process list shows
+    every user's command lines) — never docker cp'd to a fixed /tmp path
+    and sourced. The DB dump is the database only (media rides
+    wp-content), so its bytes fit in memory the way create_backup once held
+    them. The timeout is sized from the dump (issue #317: a fixed limit
+    failed large sites); importing rebuilds every index.
+    """
+    if not password or '\n' in password or '\r' in password:
+        # The password is stdin's first line: empty or with a line break it
+        # would not reach the client whole, and the rest would be read as
+        # SQL.
+        raise Exception("Database import refused: the database password is "
+                        "empty or holds a line break")
+    _assert_db_client_sandboxed()
+    import_argv = _db_client_argv(
+        'mariadb', *_DB_IMPORT_SAFE_FLAGS, '-u', user, name)
+    sql_bytes = os.path.getsize(sql_path)
+    with open(sql_path, 'rb') as f:
+        dump_bytes = f.read()
+    result = subprocess.run(
+        import_argv,
+        # First stdin line is the password (read into MYSQL_PWD); the
+        # dump bytes follow for the client to read as SQL.
+        input=password.encode() + b'\n' + dump_bytes,
+        capture_output=True,
+        timeout=wp_files.sized_timeout(sql_bytes, _DB_IMPORT_FLOOR_S,
+                                       _DB_IMPORT_BYTES_PER_S),
+    )
+    if result.returncode != 0:
+        raise Exception("Database import failed: "
+                        f"{result.stderr.decode('utf-8', 'replace').strip()}")
 
 
 def _run_db_client_to_file(argv, password, out_path, timeout, what):
