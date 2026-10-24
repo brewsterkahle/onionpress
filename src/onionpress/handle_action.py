@@ -27,11 +27,20 @@ has already handed over and which the confirmed run needs again. The next
 `handle-action --confirmed address-change` resumes it; `--cancel`, or no
 answer within PENDING_MAX_AGE, writes the page a "not confirmed" result
 and drops it. While one is pending no other request is handled.
+
+Each request may carry an id (`request-id`, written by the page before
+`requested-action`): the result of that request echoes it as
+`request_id`, and the page's poll takes no result without it, since the
+last run's result file is still there when the next request is made
+(issue #356). The id is opaque; it is checked (REQUEST_ID_RE) before it
+is echoed, as anything in WordPress can write the file. The action's own
+earlier result is removed with the request, before the action runs.
 """
 
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -43,9 +52,25 @@ from .launcher_ops import BACKUP_PASSWORD_ENV
 
 SHARED = wp_files.SHARED_DIR
 REQUEST_FILE = "requested-action"
+# The page's id for the request (issue #356), beside REQUEST_FILE; echoed
+# as "request_id" in the action's result only when it is one of these.
+REQUEST_ID_FILE = "request-id"
+REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 ACTIONS = ("start", "restart", "stop", "check-reachability", "import-key-file",
            "create-backup", "restore-backup", "refresh-status", "update")
+
+# Each action's result file for the page (what its poll reads). Removed
+# when the request is taken, so the page can never find the last run's.
+RESULT_FILES = {
+    "start": "service-result.json", "restart": "service-result.json",
+    "stop": "service-result.json",
+    "check-reachability": "reachability-result.json",
+    "import-key-file": "import-result.json",
+    "create-backup": "backup-result.json",
+    "restore-backup": "restore-result.json",
+    "update": "update-result.json",
+}
 
 PENDING_DIR = "pending-action"
 PENDING_MAX_AGE = 10 * 60      # the dialog gives up after 5 minutes
@@ -100,6 +125,8 @@ class Host:
         self.log = log
         self.os_name = os_name
         self.version = version
+        # The request being handled's id (checked), echoed by write_result.
+        self.request_id = ""
 
     # -- the launcher --
 
@@ -139,10 +166,12 @@ class Host:
                                timeout=10, input=data, quiet=True)
 
     def write_result(self, filename, data):
-        """A result JSON for the page. Error strings come from exceptions
-        and launcher output and can name host paths, so every string is
-        scrubbed first."""
+        """A result JSON for the page, with the request's id when it had
+        one. Error strings come from exceptions and launcher output and
+        can name host paths, so every string is scrubbed first."""
         try:
+            if self.request_id:
+                data = {**data, "request_id": self.request_id}
             data = redact.scrub_json_for_wordpress(data, self.paths.data_dir)
             self.put_shared(filename, json.dumps(data))
         except Exception as e:      # the page polls; nothing else to do
@@ -233,7 +262,7 @@ def _pending_save(host, action, question, facts, *, key=None, zip_path=None,
         shutil.move(zip_path, os.path.join(d, "restore-upload.zip"))
     doc = {"action": action, "confirm": question,
            "facts": {k: v for k, v in facts.items() if k != "confirm"},
-           "asked_at": time.time()}
+           "asked_at": time.time(), "request_id": host.request_id}
     _write_private(os.path.join(d, "request.json"), json.dumps(doc))
 
 
@@ -245,9 +274,23 @@ def _pending_read(host, name):
         return ""
 
 
+def checked_request_id(value, log=None):
+    """*value* if it is a request id the result may echo, else ''."""
+    value = value.strip() if isinstance(value, str) else ""
+    if not value:
+        return ""
+    if REQUEST_ID_RE.fullmatch(value):
+        return value
+    if log:
+        # Not logged: anything in WordPress could have written it.
+        log("Settings page: request id dropped (not [A-Za-z0-9_-], 1-64 characters)")
+    return ""
+
+
 def _finish_not_confirmed(host, pending, why):
     """The page's answer when the question was not answered Yes."""
     action = pending.get("action")
+    host.request_id = checked_request_id(pending.get("request_id"))
     host.log(f"Settings page: {action} not confirmed at this Mac ({why})")
     if action == "import-key-file":
         host.write_result("import-result.json", {
@@ -298,7 +341,13 @@ def handle(host, confirmed=frozenset(), cancel=False):
         if host.os_name == "linux":
             write_recent_logs(host)
         return {"handled": None, **extra}
-    host.remove_shared(REQUEST_FILE, "service-result.json")
+    host.request_id = checked_request_id(host.read_shared(REQUEST_ID_FILE), host.log)
+    # The request, its id, and the action's earlier result: the page's
+    # poll must never find the last run's answer (issue #356).
+    stale = [REQUEST_FILE, REQUEST_ID_FILE, "service-result.json"]
+    if RESULT_FILES.get(action) not in (None, "service-result.json"):
+        stale.append(RESULT_FILES[action])
+    host.remove_shared(*stale)
     if action != "refresh-status":
         host.log(f"Settings page: handling action '{action}'")
 
@@ -328,6 +377,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
 def _resume(host, pending, confirmed):
     """The confirmed run of a pending question."""
     action = pending.get("action")
+    host.request_id = checked_request_id(pending.get("request_id"))
     host.log(f"Settings page: {action} confirmed at this Mac")
     try:
         if action == "import-key-file":
@@ -655,8 +705,10 @@ def _update(host):
         # page learns whether a release is available and that `onionpress
         # update` on this machine installs it (the launcher writes
         # update-result.json, one GitHub lookup per 5 minutes).
+        # The launcher writes the result: the request's id goes with it.
         host.log("Settings page: update check requested")
-        host.run_launcher(["settings-page-update-check"], timeout=300)
+        host.run_launcher(["settings-page-update-check"], timeout=300,
+                          env={"ONIONPRESS_REQUEST_ID": host.request_id})
         return
     host.log("Settings page: install update requested")
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)

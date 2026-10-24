@@ -42,7 +42,7 @@ stdin = "" if sys.stdin.isatty() else sys.stdin.read()
 rec = {"argv": sys.argv[1:], "stdin": stdin,
        "env": {k: v for k, v in os.environ.items()
                if k in ("ONIONPRESS_BACKUP_PASSWORD", "ONIONPRESS_CONFIRMED",
-                        "ONIONPRESS_IN_WATCHER")}}
+                        "ONIONPRESS_IN_WATCHER", "ONIONPRESS_REQUEST_ID")}}
 with open(calls, "a") as f:
     f.write(json.dumps(rec) + "\n")
 key = " ".join(sys.argv[1:])
@@ -673,6 +673,120 @@ class TestUpdate(_Case):
         result = ha.handle(self.host())
         self.assertNotIn("relaunch", result)
         self.assertEqual(self.docker.result("update-result.json")["error"], "Download failed")
+
+
+class TestRequestId(_Case):
+    """Issue #356: the page's request-id comes back as request_id in the
+    action's result, and the action's earlier result goes with the
+    request, before the action runs."""
+
+    def request_with_id(self, action, request_id):
+        self.docker.put("request-id", request_id + "\n")
+        self.request(action)
+
+    def test_the_id_is_echoed_and_the_request_files_removed(self):
+        self.request_with_id("check-reachability", "Ab9_-xyz")
+        ha.handle(self.host())
+        res = self.docker.result("reachability-result.json")
+        self.assertEqual((res["reachable"], res["request_id"]), (True, "Ab9_-xyz"))
+        self.assertIsNone(self.docker.get("request-id"))
+        self.assertIsNone(self.docker.get("requested-action"))
+
+    def test_no_id_means_no_echo(self):
+        self.request("check-reachability")
+        ha.handle(self.host())
+        self.assertNotIn("request_id", self.docker.result("reachability-result.json"))
+
+    def test_a_bad_id_is_dropped_not_echoed(self):
+        for bad in ("../x", "a b", "x" * 65, "id;rm -rf /", "\u00e9", '"'):
+            with self.subTest(bad=bad):
+                self.request_with_id("check-reachability", bad)
+                self.logs.clear()
+                ha.handle(self.host())
+                self.assertNotIn("request_id", self.docker.result("reachability-result.json"))
+                self.assertIsNone(self.docker.get("request-id"))
+                log = "\n".join(self.logs)
+                self.assertIn("request id dropped", log)
+                self.assertNotIn(bad, log)
+
+    def test_the_checked_id(self):
+        self.assertEqual(ha.checked_request_id(" abc \n"), "abc")
+        self.assertEqual(ha.checked_request_id("x" * 64), "x" * 64)
+        for bad in ("", None, 7, "x" * 65, "a.b", "a/b"):
+            self.assertEqual(ha.checked_request_id(bad), "")
+
+    def test_the_stale_result_is_removed_before_the_action_runs(self):
+        for action, name in (("check-reachability", "reachability-result.json"),
+                             ("create-backup", "backup-result.json"),
+                             ("restore-backup", "restore-result.json"),
+                             ("import-key-file", "import-result.json"),
+                             ("update", "update-result.json"),
+                             ("restart", "service-result.json")):
+            with self.subTest(action=action):
+                self.docker.put(name, json.dumps({"success": True, "stale": True}))
+                self.docker.calls.clear()
+                self.request_with_id(action, "req1")
+                ha.handle(self.host("linux"))
+                rm = [c for c in self.docker.calls
+                      if c[:5] == ["exec", "-u", "www-data", "onionpress-wordpress", "rm"]
+                      and f"{wp_files.SHARED_DIR}/{name}" in c]
+                self.assertEqual(len(rm), 1, self.docker.calls)
+                before = self.docker.calls[:self.docker.calls.index(rm[0])]
+                self.assertTrue(all(c[4] == "cat" for c in before),
+                                f"the removal comes right after the request is read: {before}")
+                res = self.docker.result(name)
+                if res is not None:        # Linux's update: the launcher writes it
+                    self.assertNotIn("stale", res)
+                    self.assertEqual(res["request_id"], "req1")
+
+    def test_every_result_file_is_known(self):
+        self.assertEqual(set(ha.RESULT_FILES), set(ha.ACTIONS) - {"refresh-status"})
+        written = set(re.findall(r'write_result\("([a-z-]+\.json)"', open(ha.__file__).read()))
+        self.assertEqual(written, set(ha.RESULT_FILES.values()))
+
+    def test_linux_update_check_hands_the_id_to_the_launcher(self):
+        self.request_with_id("update", "upd-1")
+        ha.handle(self.host("linux"))
+        calls = self.launcher_calls()
+        self.assertEqual(calls[-1]["argv"], ["settings-page-update-check"])
+        self.assertEqual(calls[-1]["env"].get("ONIONPRESS_REQUEST_ID"), "upd-1")
+
+    def test_a_pending_question_keeps_the_id_for_its_answer(self):
+        self.script(TestKeyImport._confirm_answer(self))
+        self.docker.put("import-key-data", TestKeyImport.KEY)
+        self.request_with_id("import-key-file", "imp-1")
+        ha.handle(self.host())
+        with open(os.path.join(self.data_dir, ha.PENDING_DIR, "request.json")) as f:
+            self.assertEqual(json.load(f)["request_id"], "imp-1")
+        self.docker.address = NEW_ADDR
+        ha.handle(self.host(), confirmed=frozenset({"address-change"}))
+        res = self.docker.result("import-result.json")
+        self.assertEqual((res["success"], res["request_id"]), (True, "imp-1"))
+
+    def test_a_cancelled_question_answers_with_its_own_id(self):
+        self.script(TestKeyImport._confirm_answer(self))
+        self.docker.put("import-key-data", TestKeyImport.KEY)
+        self.request_with_id("import-key-file", "imp-2")
+        ha.handle(self.host())
+        ha.handle(self.host(), cancel=True)
+        res = self.docker.result("import-result.json")
+        self.assertEqual((res["error"], res["request_id"]), (ha.IMPORT_NOT_CONFIRMED_MSG, "imp-2"))
+
+    def test_a_timed_out_question_then_the_next_request_each_get_their_id(self):
+        self.script(TestKeyImport._confirm_answer(self))
+        self.docker.put("import-key-data", TestKeyImport.KEY)
+        self.request_with_id("import-key-file", "imp-3")
+        ha.handle(self.host())
+        req_path = os.path.join(self.data_dir, ha.PENDING_DIR, "request.json")
+        with open(req_path) as f:
+            req = json.load(f)
+        req["asked_at"] = time.time() - ha.PENDING_MAX_AGE - 1
+        with open(req_path, "w") as f:
+            json.dump(req, f)
+        self.request_with_id("check-reachability", "reach-1")
+        ha.handle(self.host())
+        self.assertEqual(self.docker.result("import-result.json")["request_id"], "imp-3")
+        self.assertEqual(self.docker.result("reachability-result.json")["request_id"], "reach-1")
 
 
 class TestApplyConfig(_Case):

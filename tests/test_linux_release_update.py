@@ -128,7 +128,8 @@ wp_put() { echo "wp_put $*" >> "$CALLS"; cat > "$WP_PUT_OUT"; }
 
 FUNCTIONS = ("is_release_version", "version_newer", "release_curl", "sha256_of",
              "update_find_release", "update_fetch_release", "update_from_release",
-             "update_settings_page_check", "update_usage", "update_cmd")
+             "update_settings_page_check", "update_settings_page_put_result",
+             "update_usage", "update_cmd")
 
 
 def _launcher_script(call):
@@ -529,6 +530,26 @@ class TestSettingsPageOnlyChecks(_Harness):
         result = self.check()
         self.assertIs(result["success"], False)
         self.assertIn("could not look up the latest release", result["error"])
+
+    def test_the_requests_id_is_echoed(self):
+        # Issue #356: handle-action exports the page's request id; the
+        # result carries it, fresh or from the cache.
+        self.release("2.6.0")
+        result = self.check(ONIONPRESS_REQUEST_ID="Req_1-a")
+        self.assertEqual(result["request_id"], "Req_1-a")
+        self.assertIs(result["update_available"], True)
+        cached = self.check(ONIONPRESS_REQUEST_ID="Req_2")
+        self.assertEqual(cached["request_id"], "Req_2")
+        self.assertFalse([c for c in self.calls if c.startswith("curl ")])
+        with open(os.path.join(self.data_dir, "update-check.json")) as f:
+            self.assertNotIn("request_id", json.load(f))
+
+    def test_without_an_id_or_with_a_bad_one_none_is_echoed(self):
+        self.release("2.6.0")
+        self.assertNotIn("request_id", self.check())
+        for bad in ("a b", "x" * 65, "../x", "a;b"):
+            with self.subTest(bad=bad):
+                self.assertNotIn("request_id", self.check(ONIONPRESS_REQUEST_ID=bad))
 
     def test_one_github_lookup_per_five_minutes(self):
         self.release("2.6.0")

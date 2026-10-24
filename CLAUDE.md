@@ -439,6 +439,25 @@
   in its state file, `pending_question`, and never answers it itself).
   `tests/test_handle_action.py`
   runs it against a stub launcher and a stub docker.
+- **A result answers one request** (issue #356): the page writes an id
+  (`wp_generate_password(16)`) to `request-id` before `requested-action`
+  and unlinks the action's own result file; `handle()` reads the id with
+  the request, keeps it only as `[A-Za-z0-9_-]{1,64}`
+  (`checked_request_id`, the bad one dropped and never logged), removes
+  the request, the id and the action's result file (`RESULT_FILES`)
+  before the action runs, and `Host.write_result` adds it as
+  `request_id` to every result of that request (a pending Mac question
+  keeps it in `pending-action/request.json` for its answer; Linux's
+  `settings-page-update-check` gets it as `ONIONPRESS_REQUEST_ID` and
+  `update_settings_page_put_result` echoes it, from the 5-min cache too).
+  The page's poll (`onionpress_action_result_is_this_requests`, the
+  service result too) takes a result carrying the request's id; one
+  carrying another id is an earlier request's; one without any (a host
+  from before the id) only when its mtime is not older than the request;
+  a page that sent no id gets the old rule. Before, the first poll took
+  the last run's file for this run's and stopped.
+  `tests/test_settings_page_results.py` (the PHP rule under php where
+  installed), `TestRequestId` in `test_handle_action.py`.
 - **The page's Stop and Restart are the launcher's** (issue #354): on
   Linux they reach its `stop)`/`restart)` cases, which stop the heartbeat
   client before the containers (so it sends /offline to the hub) and start

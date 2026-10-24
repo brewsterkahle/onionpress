@@ -445,11 +445,34 @@ add_action( 'admin_init', function () {
         'update' => 'update',
     );
     $cmd = $cmd_map[ $action ];
-    if ( 'update' === $action ) {
-        // The page polls for this file: an earlier answer is not this one.
-        @unlink( '/var/lib/onionpress/update-result.json' );
+    // The page polls for the action's result file, and the last run's is
+    // still there (issue #356): it is removed here, the host removes it
+    // again when it takes the request, and the poll takes only a result
+    // carrying this request's id, which the host echoes as request_id.
+    // The id goes in request-id before requested-action, which is what
+    // the host looks for. A host from before the id leaves the file and
+    // echoes nothing: the poll then takes a result written since now.
+    $result_files = array(
+        'start' => '/var/lib/onionpress/service-result.json',
+        'restart' => '/var/lib/onionpress/service-result.json',
+        'stop' => '/var/lib/onionpress/service-result.json',
+        'check-reachability' => '/var/lib/onionpress/reachability-result.json',
+        'import-key-file'    => '/var/lib/onionpress/import-result.json',
+        'create-backup'      => '/var/lib/onionpress/backup-result.json',
+        'restore-backup'     => '/var/lib/onionpress/restore-result.json',
+        'update'             => '/var/lib/onionpress/update-result.json',
+    );
+    if ( isset( $result_files[ $cmd ] ) ) {
+        @unlink( $result_files[ $cmd ] );
+    }
+    $request_id   = wp_generate_password( 16, false, false );
+    $requested_at = time();
+    @unlink( '/var/lib/onionpress/request-id' );
+    if ( @file_put_contents( '/var/lib/onionpress/request-id', $request_id ) === false ) {
+        $request_id = '';
     }
     if ( @file_put_contents( $file, $cmd ) === false ) {
+        @unlink( '/var/lib/onionpress/request-id' );
         add_action( 'admin_notices', function () {
             echo '<div class="notice notice-error"><p>Failed to write action request. The shared volume may not be mounted.</p></div>';
         } );
@@ -479,12 +502,14 @@ add_action( 'admin_init', function () {
     }
     $causes_downtime = in_array( $action, $downtime_actions, true );
     $poll_action = $cmd_map[ $action ] ?? $action;
-    add_action( 'admin_notices', function () use ( $label, $causes_downtime, $poll_action ) {
+    add_action( 'admin_notices', function () use ( $label, $causes_downtime, $poll_action, $request_id, $requested_at ) {
         $msg = esc_html( $label ) . ' OnionPress... This may take a minute.';
         if ( $causes_downtime ) {
             $msg .= ' The page will become unavailable during restart.';
         }
-        echo '<div class="notice notice-info op-action-notice" data-op-action="' . esc_attr( $poll_action ) . '"><p>' . $msg . '</p></div>';
+        echo '<div class="notice notice-info op-action-notice" data-op-action="' . esc_attr( $poll_action ) . '"'
+            . ' data-op-request-id="' . esc_attr( $request_id ) . '"'
+            . ' data-op-requested-at="' . esc_attr( (string) $requested_at ) . '"><p>' . $msg . '</p></div>';
     } );
 } );
 
@@ -995,6 +1020,31 @@ add_action( 'wp_ajax_onionpress_download_backup', function () {
 } );
 
 /**
+ * Whether a result file answers the request the page is polling for
+ * (issue #356): the host echoes the request's id as request_id, and the
+ * last run's result file is still there until it does. With an id from
+ * the page, only the result carrying it; a result carrying another id
+ * is an earlier request's. A result without one (a host from before the
+ * id) counts only when written since the request. Without an id from
+ * the page (none could be written), the same, as before.
+ */
+function onionpress_action_result_is_this_requests( $result, $file, $request_id, $requested_at ) {
+    $echoed = ( is_array( $result ) && isset( $result['request_id'] ) && is_string( $result['request_id'] ) )
+        ? $result['request_id'] : '';
+    if ( '' !== $request_id ) {
+        if ( $echoed === $request_id ) {
+            return true;
+        }
+        if ( '' !== $echoed ) {
+            return false;
+        }
+    }
+    clearstatcache( true, $file );
+    $mtime = @filemtime( $file );
+    return false === $mtime || $mtime >= (int) $requested_at;
+}
+
+/**
  * AJAX handler for polling action completion.
  */
 add_action( 'wp_ajax_onionpress_poll_action', function () {
@@ -1003,6 +1053,13 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
     }
 
     $action = sanitize_text_field( $_GET['op_action'] ?? '' );
+    // The request's id and time, from the notice the request left (the id
+    // as the host echoes it: [A-Za-z0-9_-], at most 64 characters).
+    $request_id = ( isset( $_GET['op_request_id'] ) && is_string( $_GET['op_request_id'] )
+        && preg_match( '/^[A-Za-z0-9_-]{1,64}$/D', $_GET['op_request_id'] ) )
+        ? $_GET['op_request_id'] : '';
+    $requested_at = ( isset( $_GET['op_requested_at'] ) && is_string( $_GET['op_requested_at'] ) )
+        ? (int) $_GET['op_requested_at'] : 0;
     $pending = file_exists( '/var/lib/onionpress/requested-action' );
 
     // Map actions to their result files
@@ -1018,7 +1075,10 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
         $rf = $result_files[ $action ];
         if ( file_exists( $rf ) ) {
             $result = json_decode( file_get_contents( $rf ), true );
-            wp_send_json( array( 'done' => true, 'result' => $result ) );
+            if ( onionpress_action_result_is_this_requests( $result, $rf, $request_id, $requested_at ) ) {
+                wp_send_json( array( 'done' => true, 'result' => $result ) );
+            }
+            // An earlier request's: the host replaces it.
         }
         wp_send_json( array( 'done' => false ) );
     }
@@ -1028,8 +1088,12 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
     $service_pending = '/var/lib/onionpress/service-pending';
     if ( file_exists( $service_result ) ) {
         $result = json_decode( file_get_contents( $service_result ), true );
+        // Read once: this request's answer, or an earlier request's that
+        // nobody polled for (the host removes it with the next request).
         @unlink( $service_result );
-        wp_send_json( array( 'done' => true, 'result' => $result ) );
+        if ( onionpress_action_result_is_this_requests( $result, $service_result, $request_id, $requested_at ) ) {
+            wp_send_json( array( 'done' => true, 'result' => $result ) );
+        }
     }
     // Still in progress if pending marker exists (written before container restart)
     if ( file_exists( $service_pending ) ) {
@@ -1711,9 +1775,14 @@ function onionpress_settings_page() {
             if (!notice) return;
             var action = notice.getAttribute('data-op-action');
             if (!action) return;
+            /* The request's id and time: the poll takes only this request's result */
+            var requestId = notice.getAttribute('data-op-request-id') || '';
+            var requestedAt = notice.getAttribute('data-op-requested-at') || '0';
 
             var poll = setInterval(function() {
-                fetch(ajaxurl + '?action=onionpress_poll_action&op_action=' + encodeURIComponent(action))
+                fetch(ajaxurl + '?action=onionpress_poll_action&op_action=' + encodeURIComponent(action)
+                      + '&op_request_id=' + encodeURIComponent(requestId)
+                      + '&op_requested_at=' + encodeURIComponent(requestedAt))
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (!data.done) return;

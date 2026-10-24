@@ -3786,8 +3786,7 @@ update_settings_page_check() {
     local cache="$DATA_DIR/update-check.json"
     if [ -f "$cache" ] && [ ! -L "$cache" ] && [ -n "$(find "$cache" -mmin -5 2>/dev/null)" ]; then
         log "Settings page update check: answered with the one from the last 5 minutes"
-        wp_put /var/lib/onionpress/update-result.json < "$cache" 2>/dev/null \
-            || log "WARNING: could not write update-result.json"
+        update_settings_page_put_result < "$cache"
         return 0
     fi
     current=$(installed_version)
@@ -3826,7 +3825,28 @@ print(json.dumps(result))
     fi
     rm -f "$cache"
     printf '%s\n' "$result" > "$cache" 2>/dev/null || true
-    printf '%s\n' "$result" | wp_put /var/lib/onionpress/update-result.json 2>/dev/null \
+    printf '%s\n' "$result" | update_settings_page_put_result
+}
+
+# The check's result (stdin) to update-result.json for the page, with the
+# request's id (ONIONPRESS_REQUEST_ID, which handle-action exports) as
+# request_id, so the page's poll takes this answer and never an earlier
+# one (issue #356). The id is echoed only as [A-Za-z0-9_-], 1-64
+# characters (handle_action.REQUEST_ID_RE): the page wrote it.
+update_settings_page_put_result() {
+    local out
+    if ! out=$(python3 -I -c '
+import json, os, re, sys
+result = json.load(sys.stdin)
+rid = os.environ.get("ONIONPRESS_REQUEST_ID", "")
+if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rid):
+    result["request_id"] = rid
+print(json.dumps(result))
+'); then
+        log "WARNING: could not write update-result.json"
+        return 0
+    fi
+    printf '%s\n' "$out" | wp_put /var/lib/onionpress/update-result.json 2>/dev/null \
         || log "WARNING: could not write update-result.json"
 }
 
