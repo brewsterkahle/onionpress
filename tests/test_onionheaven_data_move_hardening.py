@@ -809,29 +809,101 @@ class TestLaunchers(unittest.TestCase):
         with open(os.path.join(tmp, "calls")) as f:
             return f.read().splitlines(), took
 
-    def test_the_launchers_carry_the_same_retirement(self):
-        bodies = [_bash_function(hd._read(p), "retire_old_onionheaven_containers")
-                  for p in LAUNCHERS]
-        self.assertEqual(bodies[0], bodies[1])
+    def test_the_launchers_delegate_the_retirement(self):
+        """Phase 4 (#120): one implementation,
+        ContainerManager.retire_old_onionheaven_containers, run through the
+        CLI with its log lines teed into the launcher's log; the pipe's
+        status is tee's, so the step never stops a start."""
+        for launcher, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
+                                 ("linux/onionpress", "op_py")):
+            with self.subTest(launcher=launcher):
+                body = _bash_function(hd._read(launcher), "retire_old_onionheaven_containers")
+                code = [l.strip() for l in body.splitlines()
+                        if l.strip() and not l.strip().startswith("#")]
+                self.assertEqual(code, [
+                    "retire_old_onionheaven_containers() {",
+                    f'{runner} --data-dir "$DATA_DIR" retire-old-onionheaven-containers '
+                    '2>&1 | tee -a "$LOG_FILE"',
+                    "}"])
+
+    def _retire(self, containers, rm_seconds=0):
+        """ContainerManager.retire_old_onionheaven_containers against a
+        docker that lists *containers* ({name: mounts JSON, or None when
+        inspect fails}); returns (removed, calls, log lines, seconds)."""
+        from onionpress.config import PortConfig
+        from onionpress.containers import ContainerManager
+        from onionpress.docker import DockerResult
+        from onionpress.platform import resolve_paths
+        calls = []
+
+        class FakeDocker:
+            def run(self, args, **kw):
+                calls.append(" ".join(args))
+                if args[:2] == ["ps", "-a"]:
+                    return DockerResult(0, "".join(n + "\n" for n in containers), "")
+                if args[0] == "inspect":
+                    mounts = containers.get(args[3])
+                    if mounts is None:
+                        return DockerResult(1, "", "Error: No such object")
+                    return DockerResult(0, mounts + "\n", "")
+                if args[:2] == ["rm", "-f"]:
+                    time.sleep(rm_seconds)
+                    return DockerResult(0, args[2] + "\n", "")
+                return DockerResult(0, "", "")
+
+        tmp = tempfile.mkdtemp(prefix="op-retire-py-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        logs = []
+        cm = ContainerManager(FakeDocker(), resolve_paths(data_dir=tmp),
+                              PortConfig(0, 8080, 9050, 9077), log_func=logs.append,
+                              egress=lambda: None)
+        started = time.monotonic()
+        removed = cm.retire_old_onionheaven_containers()
+        return removed, calls, logs, time.monotonic() - started
+
+    OLD_MOUNTS_JSON = json.dumps([{"Name": "onionpress-persistent-data",
+                                   "Destination": "/var/lib/onionpress"}])
+    NEW_MOUNTS_JSON = json.dumps([{"Name": "onionpress-persistent-data",
+                                   "Destination": "/var/lib/onionpress"},
+                                  {"Name": "onionpress-onionheaven-data",
+                                   "Destination": "/var/lib/onionheaven"}])
 
     def test_containers_without_the_volume_are_removed_before_compose_starts(self):
         containers = {
-            "onionpress-tor": OLD_MOUNTS,
-            "onionheaven": NEW_MOUNTS,
-            "onionheaven-takeover-3": OLD_MOUNTS,
-            "onionheaven-poll-1": "",
-            "onionheaven-takeover-4": NEW_MOUNTS,
+            "onionpress-tor": self.OLD_MOUNTS_JSON,
+            "onionheaven": self.NEW_MOUNTS_JSON,
+            "onionheaven-takeover-3": self.OLD_MOUNTS_JSON,
+            "onionheaven-poll-1": "[]",
+            "onionheaven-takeover-4": self.NEW_MOUNTS_JSON,
             "onionheaven-takeover-9": None,             # inspect fails: kept
-            "onionpress-wordpress": OLD_MOUNTS,         # not one of them
+            "onionheaven-farm": self.OLD_MOUNTS_JSON,   # the controller: never
+            "onionpress-wordpress": self.OLD_MOUNTS_JSON,   # not one of them
         }
-        for launcher in LAUNCHERS:
-            with self.subTest(launcher=launcher):
-                calls, _ = self._run(launcher, "retire_old_onionheaven_containers",
-                                     containers)
-                removed = sorted(c.split()[-1] for c in calls if c.startswith("rm -f "))
-                self.assertEqual(removed, ["onionheaven-poll-1", "onionheaven-takeover-3",
+        removed, calls, logs, _ = self._retire(containers)
+        self.assertEqual(sorted(removed), ["onionheaven-poll-1", "onionheaven-takeover-3",
                                            "onionpress-tor"])
-                self.assertFalse([c for c in calls if "onionpress-wordpress" in c])
+        self.assertEqual(sorted(c.split()[-1] for c in calls if c.startswith("rm -f ")),
+                         sorted(removed))
+        for kept in ("onionpress-wordpress", "onionheaven-farm", "onionheaven-takeover-9",
+                     "onionheaven-takeover-4", "onionheaven"):
+            self.assertNotIn(f"rm -f {kept}", calls)
+        self.assertEqual(sorted(logs), sorted(
+            f"Removing {n}: it does not mount onionpress-onionheaven-data "
+            "(started by an older OnionPress)" for n in removed))
+
+    def test_the_retirement_removes_all_at_once(self):
+        containers = {f"onionheaven-takeover-{i}": self.OLD_MOUNTS_JSON for i in range(4)}
+        removed, _, _, took = self._retire(containers, rm_seconds=0.4)
+        self.assertEqual(len(removed), 4)
+        self.assertLess(took, 1.2, "four removals of 0.4 s each ran one after another")
+
+    def test_nothing_to_retire_calls_no_rm(self):
+        removed, calls, logs, _ = self._retire({"onionpress-tor": self.NEW_MOUNTS_JSON,
+                                                "onionpress-wordpress": self.OLD_MOUNTS_JSON})
+        self.assertEqual((removed, logs), ([], []))
+        self.assertFalse([c for c in calls if c.startswith("rm")])
+        removed, calls, _, _ = self._retire({})
+        self.assertEqual(removed, [])
 
     def test_every_start_retires_them_before_compose_up(self):
         for launcher in LAUNCHERS:

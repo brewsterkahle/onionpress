@@ -986,8 +986,9 @@
   (`purge_kept_keys`), and are removed after 30 days.
 - Older containers must not race the move: every start removes each
   takeover/poll worker, `onionpress-tor` and `onionheaven` that does not
-  mount the volume before `compose up` (`retire_old_onionheaven_containers`,
-  identical in both launchers; `ContainerManager.start_core`), the farm
+  mount the volume before `compose up`
+  (`ContainerManager.retire_old_onionheaven_containers`: `start_core`, and
+  both launchers through `onionpress retire-old-onionheaven-containers`), the farm
   stops in parallel (`stop -t 1`), and the heartbeat retires old workers the
   registry does not list too.
 - Fails closed only if the first move fails with a real key (non-empty key

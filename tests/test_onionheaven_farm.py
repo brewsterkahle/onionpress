@@ -719,12 +719,12 @@ class TestWiring(unittest.TestCase):
     def test_launchers_leave_the_controller_alone(self):
         """retire_old_onionheaven_containers removes Tor-side containers
         that lack the hub data volume; the controller has none on purpose."""
-        mac = _read("app/MacOS/onionpress")
-        fn = mac[mac.index("retire_old_onionheaven_containers() {"):]
-        fn = fn[:fn.index("\n}\n")]
-        pattern = re.search(r"grep -E '(\^.*\$)'", fn).group(1)
-        self.assertIsNone(re.fullmatch(pattern[1:-1], "onionheaven-farm"))
-        self.assertIsNotNone(re.fullmatch(pattern[1:-1], "onionheaven"))
+        # Both launchers run ContainerManager's step (Phase 4, #120).
+        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
+            text = _read(launcher)
+            fn = text[text.index("retire_old_onionheaven_containers() {"):]
+            fn = fn[:fn.index("\n}\n")]
+            self.assertIn("retire-old-onionheaven-containers", fn)
         from onionpress import containers
         self.assertIsNone(containers._HUB_CONTAINER_RE.fullmatch("onionheaven-farm"))
         self.assertIsNotNone(containers._HUB_CONTAINER_RE.fullmatch("onionheaven"))

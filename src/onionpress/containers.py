@@ -614,7 +614,8 @@ class ContainerManager:
         onionpress-persistent-data. The data move must not race them, and
         nothing may use that copy after it. Compose recreates onionpress-tor
         and onionheaven, the heartbeat starts new workers. The launchers'
-        retire_old_onionheaven_containers does the same.
+        retire_old_onionheaven_containers runs this (`onionpress
+        retire-old-onionheaven-containers`).
         """
         result = self.docker.run(["ps", "-a", "--format", "{{.Names}}"],
                                  timeout=15, quiet=True)
