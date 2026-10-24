@@ -118,15 +118,15 @@ test-unit:
 		echo "  .venv/bin/python -m unittest discover tests -p 'test_*.py'"; \
 		exit 1; \
 	fi
-	uv run --python 3.14 --with 'pynacl>=1.5.0' python -m unittest discover tests -p 'test_*.py'
+	uv run --python 3.14 --with 'pynacl>=1.5.0' --with pyyaml python -m unittest discover tests -p 'test_*.py'
 
 # The same run under coverage (.coveragerc: branches, what ships), then the
 # floors in build/coverage-floors.sh and an HTML report in
 # build/coverage-html/. CI runs the same three steps.
 coverage:
-	uv run --python 3.14 --with 'pynacl>=1.5.0' --with coverage \
+	uv run --python 3.14 --with 'pynacl>=1.5.0' --with pyyaml --with coverage \
 	    python -m coverage run -m unittest discover tests -p 'test_*.py'
-	uv run --python 3.14 --with 'pynacl>=1.5.0' --with coverage \
+	uv run --python 3.14 --with 'pynacl>=1.5.0' --with pyyaml --with coverage \
 	    python -m coverage report --skip-empty
 	uv run --python 3.14 --with coverage ./build/coverage-floors.sh
 	uv run --python 3.14 --with coverage python -m coverage html
