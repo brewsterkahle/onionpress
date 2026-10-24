@@ -1075,14 +1075,85 @@ class TestLaunchers(unittest.TestCase):
                                 code.index("docker compose up"))
 
     def test_the_helpers_call_the_shared_cli_and_never_stop_the_start(self):
+        """Phase 4 (#120) slice 7: the bash body is the delegation, tee'd
+        into the log (the CLI logs the verdict in the launchers' format),
+        and returns 0 whatever the CLI's status; the Mac reads that status
+        out of PIPESTATUS for its START SUMMARY."""
         for path, runner in ((MAC_LAUNCHER, "bundled_python -m onionpress.cli"),
                              (LINUX_LAUNCHER, "op_py")):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
                 body = _function_body(_read(path), "block_wordpress_egress")
                 self.assertIn(f'{runner} --data-dir "$DATA_DIR" wordpress-egress', body)
+                self.assertIn('2>&1 | tee -a "$LOG_FILE"', body)
                 self.assertTrue(body.rstrip().endswith("return 0"),
                                 "both launchers run under set -e")
-                self.assertIn("WARNING: WordPress network egress block not in place", body)
+                self.assertNotIn("\n    log ", body, "the verdict lines are the CLI's")
+                self.assertNotIn("WARNING", body)
+        mac = _function_body(_read(MAC_LAUNCHER), "block_wordpress_egress")
+        self.assertIn('[ "${PIPESTATUS[0]}" -eq 0 ] || START_ERRORS="$START_ERRORS wordpress-egress"',
+                      mac)
+        self.assertNotIn("START_ERRORS", _function_body(_read(LINUX_LAUNCHER),
+                                                        "block_wordpress_egress"))
+
+    def _run_cli(self, argv, result, os_name, docker=None):
+        """cli.main(argv) with ensure answering *result*: (rc, stdout)."""
+        import contextlib
+        import io
+        from onionpress import cli
+        from onionpress.platform import OS
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        out = io.StringIO()
+        with mock.patch.object(egress, "ensure", return_value=result), \
+             mock.patch.object(cli, "detect_os", return_value=OS[os_name]), \
+             mock.patch.object(cli, "Docker", docker or mock.Mock()), \
+             contextlib.redirect_stdout(out):
+            rc = cli.main(["--data-dir", tmp, *argv])
+        return rc, out.getvalue(), tmp
+
+    TS = r"\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] "
+
+    def test_the_cli_logs_each_launchers_own_verdict_line(self):
+        """The lines the bash bodies logged, in the launchers' `[ts] msg`
+        format on stdout (tee'd into the log by the bash body)."""
+        ok = egress.Result(True, "colima-vm", "ok")
+        rc, out, _ = self._run_cli(["wordpress-egress"], ok, "MACOS")
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, "^" + self.TS + r"✓ WordPress network egress block in place: ok \(colima-vm\)\n$")
+        rc, out, _ = self._run_cli(["wordpress-egress"], ok, "LINUX")
+        self.assertEqual(rc, 0)
+        self.assertRegex(out, "^" + self.TS + r"WordPress network egress block in place: ok \(colima-vm\)\n$")
+
+        bad = egress.Result(False, "", "error: Docker did not answer `docker info`")
+        rc, out, tmp = self._run_cli(["wordpress-egress"], bad, "MACOS")
+        self.assertEqual(rc, 1)
+        self.assertRegex(out, "^" + self.TS + "WARNING: WordPress network egress block not in place: "
+                         r"error: Docker did not answer `docker info`\. WordPress and MariaDB can reach "
+                         "the network directly, and the Tor-side containers this Mac's own services "
+                         "— see " + re.escape(os.path.join(tmp, "onionpress.log")) + "\n$")
+        rc, out, _ = self._run_cli(["wordpress-egress"], bad, "LINUX")
+        self.assertEqual(rc, 1)
+        self.assertRegex(out, "^" + self.TS + "WARNING: WordPress network egress block not in place: "
+                         r"error: Docker did not answer `docker info`\. WordPress and MariaDB can reach "
+                         r"the network directly, and the Tor-side containers this machine and its LAN\.\n$")
+
+    def test_check_prints_the_bare_status_line(self):
+        rc, out, _ = self._run_cli(["wordpress-egress", "--check"],
+                                   egress.Result(True, "rootless", "ok"), "LINUX")
+        self.assertEqual((rc, out), (0, "ok (rootless)\n"))
+        rc, out, _ = self._run_cli(["wordpress-egress", "--check"],
+                                   egress.Result(False, "rootless", "missing"), "LINUX")
+        self.assertEqual((rc, out), (1, "missing (rootless)\n"))
+
+    def test_whatever_goes_wrong_is_the_warning_never_a_traceback(self):
+        """The bash body's `${out:-rc=$rc}` fallback: a start must never
+        stop here, and the log must still say why."""
+        rc, out, _ = self._run_cli(["wordpress-egress"], egress.Result(True, "x", "ok"),
+                                   "LINUX", docker=mock.Mock(side_effect=OSError("no docker")))
+        self.assertEqual(rc, 1)
+        self.assertRegex(out, "^" + self.TS + "WARNING: WordPress network egress block not in place: "
+                         "error: no docker\. ")
+        self.assertNotIn("Traceback", out)
 
     def test_mac_passes_its_own_limactl(self):
         body = _function_body(_read(MAC_LAUNCHER), "block_wordpress_egress")
@@ -1241,6 +1312,93 @@ class TestLaunchers(unittest.TestCase):
 
     def test_py2app_bundles_the_module(self):
         self.assertIn("'onionpress.wordpress_egress'", _read(os.path.join(ROOT, "setup.py")))
+
+
+class TestLauncherDelegationEndToEnd(unittest.TestCase):
+    """Each launcher's block_wordpress_egress, cut out and run under bash
+    with the launchers' runners on this interpreter and a `docker` stub on
+    PATH (Phase 4, #120): the CLI's verdict line reaches the terminal and
+    the log file, the function returns 0 either way, and the Mac's START
+    SUMMARY names the step only when the block is not in place."""
+
+    STUB = """#!/bin/sh
+printf '%s\\n' "$*" >> "$STUB_CALLS"
+case "$1" in
+  info) [ "${STUB_INFO_RC:-0}" -eq 0 ] || exit 1; echo '["name=seccomp"]' ;;
+  run) echo ok ;;
+esac
+exit 0
+"""
+
+    @staticmethod
+    def _python_uses_the_stub_docker():
+        """Without --bin-dir, Docker() takes the bundle's docker when there
+        is one (a Mac with OnionPress installed), not the stub on PATH."""
+        from onionpress.docker import Docker
+        from onionpress.platform import resolve_paths
+        with tempfile.TemporaryDirectory() as tmp:
+            return Docker(resolve_paths(data_dir=tmp)).docker_bin == "docker"
+
+    def _run(self, launcher, info_rc=0):
+        tmp = tempfile.mkdtemp(prefix="egress-bash-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        bin_dir = os.path.join(tmp, "bin")
+        os.mkdir(bin_dir)
+        stub = os.path.join(bin_dir, "docker")
+        with open(stub, "w", encoding="utf-8") as f:
+            f.write(self.STUB)
+        os.chmod(stub, 0o755)
+        log_file = os.path.join(tmp, "onionpress.log")
+        script = (
+            "set -e\n"
+            f'LOG_FILE="{log_file}"; DATA_DIR="{tmp}"; BIN_DIR="{bin_dir}"\n'
+            'ONIONPRESS_WP_PORT=8080; START_ERRORS=""\n'
+            'bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
+            'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
+            + _function_body(_read(launcher), "block_wordpress_egress") + "\n}\n"
+            "block_wordpress_egress\n"
+            'echo "rc=$? errors=[$START_ERRORS]"\n')
+        env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
+               "STUB_CALLS": os.path.join(tmp, "calls"), "STUB_INFO_RC": str(info_rc),
+               "PY": sys.executable, "SRC": os.path.join(ROOT, "src"),
+               "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"}
+        res = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
+                             text=True, encoding="utf-8", timeout=120)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        with open(log_file, encoding="utf-8") as f:
+            log = f.read()
+        lines = res.stdout.splitlines()
+        return lines[:-1], lines[-1], log
+
+    def _cases(self):
+        if sys.platform == "darwin":
+            self.skipTest("the CLI's Linux path (docker info) is what the stub answers")
+        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
+            if launcher is LINUX_LAUNCHER and not self._python_uses_the_stub_docker():
+                continue  # the bundle's docker would be run, not the stub
+            yield launcher
+
+    def test_in_place(self):
+        for launcher in self._cases():
+            with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
+                out, last, log = self._run(launcher)
+                self.assertEqual(last, "rc=0 errors=[]")
+                self.assertEqual(len(out), 1, out)
+                self.assertRegex(out[0], r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] (✓ )?"
+                                 r"WordPress network egress block in place: ok \(system-docker\)$")
+                self.assertEqual(log, out[0] + "\n")
+
+    def test_not_in_place(self):
+        for launcher in self._cases():
+            with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
+                out, last, log = self._run(launcher, info_rc=1)
+                mac = launcher is MAC_LAUNCHER
+                self.assertEqual(last, "rc=0 errors=[ wordpress-egress]" if mac
+                                 else "rc=0 errors=[]")
+                self.assertEqual(len(out), 1, out)
+                self.assertIn("] WARNING: WordPress network egress block not in place: "
+                              "error: Docker did not answer `docker info`.", out[0])
+                self.assertEqual(log, out[0] + "\n")
 
 
 if __name__ == "__main__":

@@ -2313,17 +2313,14 @@ HTEOF
 # Best effort, like the other start steps: without the chain the site still
 # starts (WordPress's own requests still go through Tor), and the log and
 # the start summary say so. The Python side bounds `limactl shell`, which
-# hangs for good when the VM's sshd is wedged.
+# hangs for good when the VM's sshd is wedged. The body is onionpress.cli's
+# (Phase 4, #120): it logs the verdict in this script's log format, tee'd
+# into the log; its status only names the step in the START SUMMARY and
+# never stops the start.
 block_wordpress_egress() {
-    local out rc=0
-    out=$(bundled_python -m onionpress.cli --data-dir "$DATA_DIR" wordpress-egress \
-        --bin-dir "$BIN_DIR" --wp-port "$ONIONPRESS_WP_PORT" 2>>"$LOG_FILE") || rc=$?
-    if [ "$rc" -eq 0 ]; then
-        log "✓ WordPress network egress block in place: $out"
-    else
-        log "WARNING: WordPress network egress block not in place: ${out:-rc=$rc}. WordPress and MariaDB can reach the network directly, and the Tor-side containers this Mac's own services — see $LOG_FILE"
-        START_ERRORS="$START_ERRORS wordpress-egress"
-    fi
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" wordpress-egress \
+        --bin-dir "$BIN_DIR" --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || START_ERRORS="$START_ERRORS wordpress-egress"
     return 0
 }
 
