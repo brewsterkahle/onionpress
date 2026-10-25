@@ -740,6 +740,41 @@
   path keeps that path in its plist (`install_agent` rewrites it when it
   differs).
 
+## The App's Functions as Subcommands (issue #382)
+- The rows #350 left after its four phases live in
+  `src/onionpress/app_commands.py`, one implementation for both platforms,
+  none constructing `OnionPressCLI` (its setup creates config and secrets
+  and probes ports): `version [--json]`; `address [--url] [--copy]` (the
+  served address from the tor container, else the daemon's `onion_address`
+  cache; the URL is the menu's Copy Onion Address, `/<ONIONNAME>/` and no
+  token; the clipboard through pbcopy / wl-copy / xclip / xsel);
+  `check-reachability [--json]` (`reachability_test`, the one probe through
+  the `onionheaven` Tor client, which handle-action's check-reachability
+  runs too; exit 0/1/2); `logs --app|--launcher|--web [-n N] [-f]` (the Mac
+  daemon's `logs/onionpress-*.log`, the flat `onionpress.log`, the
+  `wordpress-visitors` capture or, without it, `docker logs
+  onionpress-wordpress` with the `OnionPress-HealthCheck` lines dropped as
+  the daemon drops them; bare `logs` stays the compose follow);
+  `open site|admin|settings|onion` (the browser gets
+  `launcher_ops.login_target`'s file:// page, never the token; the port from
+  `$ONIONPRESS_WP_PORT`, else `config.resolve_port_offset`; `onion` prefers
+  Tor Browser, on a Mac `open -a` of `launcher_ops.TOR_BROWSER_APPS`);
+  `onionname show|set NAME [--json]` (checked by `setup_logic.validate_onionname`,
+  registered with OnionHome under the served address when the site is up,
+  then recorded through `config.set_config_value`; a taken name is refused
+  with its suggestions, exit 2, nothing recorded; one not registered now is
+  recorded `ONIONNAME_REGISTERED=no` and on a Mac `.onionname-retry` has the
+  daemon retry it); `onionheaven alerts [--dismiss] [--json]`
+  (`onionheaven.read_hub_messages` / `remove_hub_messages`, which the daemon
+  uses too; `HUB_MESSAGES_DIR` is the tray's `ALERT_MSG_DIR`; the dismiss
+  touches `.dismiss-onionheaven-alerts` on a Mac). `import-key --file
+  <hs_ed25519_secret_key>` is bash in both launchers over `key_manager.py
+  encode-key-file` (96-byte C Tor file or the bare 64-byte key, checked
+  before anything happens); Linux's `import-key` takes `-` now too. Both
+  launchers delegate `address`, `logs` with flags and the new names to
+  `onionpress.cli`. `tests/test_cli_app_commands.py`; rows in
+  `tests/test_cli_dispatch.py`.
+
 ## Check/Confirm Protocol
 - Every destructive command speaks it (`src/onionpress/confirm.py`, issue
   #366): a UI runs `<cmd> --check --json` and the CLI, changing nothing,

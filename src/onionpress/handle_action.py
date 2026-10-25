@@ -463,16 +463,13 @@ def _check_reachability(host):
             "reachable": False, "error": "No onion address found", "tested_at": now_iso()})
         host.log("Settings page: reachability test: no onion address")
         return
-    r = host.docker.run(
-        ["exec", "onionheaven", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-         "--max-time", "60", "--socks5-hostname", "127.0.0.1:9050", f"http://{addr}/"],
-        timeout=75, quiet=True)
-    code = r.output.strip() if r.ok else ""
-    code = code if code.isdigit() else "000"
-    reachable = 200 <= int(code) < 500
-    host.write_result("reachability-result.json", {
-        "reachable": reachable, "http_code": code, "address": addr, "tested_at": now_iso()})
-    host.log(f"Settings page: reachability test -> HTTP {code} (reachable={reachable})")
+    # The same probe as `onionpress check-reachability`: through the
+    # independent onionheaven Tor client.
+    from .app_commands import reachability_test
+    result = reachability_test(host.docker, addr)
+    host.write_result("reachability-result.json", result)
+    host.log(f"Settings page: reachability test -> HTTP {result['http_code']} "
+             f"(reachable={result['reachable']})")
 
 
 # -- key import --
