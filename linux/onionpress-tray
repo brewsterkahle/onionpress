@@ -46,7 +46,7 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # Ensure the shared `onionpress` package is importable. The .deb installs
 # it at /opt/onionpress/lib/onionpress/; let callers override via PYTHONPATH.
@@ -286,6 +286,45 @@ class Launcher:
             )
         except (OSError, FileNotFoundError) as e:
             log(f"launcher async failed: {e}")
+
+
+class UpdateCheckOutcome(NamedTuple):
+    """What Check for Updates… tells the user: a notification."""
+    category: str
+    title: str
+    body: str
+    urgency: str = "normal"
+    release_url: Optional[str] = None
+
+
+def update_check_outcome(returncode: int, stdout: str, stderr: str) -> UpdateCheckOutcome:
+    """The notification for one `onionpress.cli check-for-update --json`
+    run. The CLI exits 0 whatever happened and says so in its JSON: an
+    `error` (no network, GitHub not answering, curl refusing to start) is
+    "Update check failed", never "Up to date" (issue #355: the tray used
+    to read every failure as the current version)."""
+    failed = UpdateCheckOutcome("update-check", "Update check failed", "")
+    if returncode != 0:
+        return failed._replace(body=(stderr or "").strip()[:200]
+                               or f"onionpress check-for-update exited {returncode}")
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        return failed._replace(body="The update check gave no answer.")
+    if not isinstance(data, dict) or data.get("error") or "update_available" not in data:
+        why = data.get("error") if isinstance(data, dict) else None
+        return failed._replace(body=str(why or "The update check gave no answer.")[:200])
+    if data.get("update_available"):
+        return UpdateCheckOutcome(
+            "update-available",
+            f"OnionPress {data.get('latest')} is available",
+            "Run 'onionpress update' in a terminal to install it "
+            "(it checks the package against the release's SHA256SUMS).",
+            release_url=data.get("release_url") or None)
+    return UpdateCheckOutcome(
+        "update-check", "Up to date",
+        f"You're on the current version ({data.get('current')}).",
+        urgency="low")
 
 
 # ─── 4. Notifier ────────────────────────────────────────────────────────
@@ -1774,31 +1813,16 @@ class OnionPressTray:
                     capture_output=True, text=True, timeout=20,
                     env={**os.environ, "PYTHONPATH": _LIB_DIR},
                 )
-                if r.returncode != 0:
-                    self.notifier.notify(
-                        "update-check", "Update check failed",
-                        (r.stderr or "")[:200],
-                    )
-                    return
-                data = json.loads(r.stdout)
-                if data.get("update_available"):
-                    self.notifier.notify(
-                        "update-available",
-                        f"OnionPress {data['latest']} is available",
-                        "Run 'onionpress update' in a terminal to install it "
-                        "(it checks the package against the release's SHA256SUMS).",
-                        actions=[(
-                            "open-release", "View release",
-                            lambda url=data.get("release_url"):
-                                subprocess.Popen(["xdg-open", url]) if url else None,
-                        )],
-                    )
-                else:
-                    self.notifier.notify(
-                        "update-check", "Up to date",
-                        f"You're on the current version ({data.get('current')}).",
-                        urgency="low",
-                    )
+                outcome = update_check_outcome(r.returncode, r.stdout, r.stderr)
+                actions = None
+                if outcome.release_url:
+                    actions = [(
+                        "open-release", "View release",
+                        lambda url=outcome.release_url: subprocess.Popen(["xdg-open", url]),
+                    )]
+                self.notifier.notify(
+                    outcome.category, outcome.title, outcome.body,
+                    urgency=outcome.urgency, actions=actions)
             except Exception as e:
                 log(f"update check error: {e}")
         threading.Thread(target=_run, daemon=True).start()

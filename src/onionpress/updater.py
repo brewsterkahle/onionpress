@@ -19,6 +19,22 @@ def _parse_version(version_str):
     except (ValueError, AttributeError):
         return (0,)
 
+
+# macOS's CA bundle. Debian, Ubuntu and Raspberry Pi OS keep theirs at
+# /etc/ssl/certs/ca-certificates.crt, which curl finds by itself; naming
+# the Mac's path there made every check fail before connecting (curl exit
+# 77, issue #355), and the tray read the failure as "Up to date".
+CA_BUNDLE = "/etc/ssl/cert.pem"
+
+
+def _curl_tls_args():
+    """`--cacert CA_BUNDLE` where that file exists, else nothing (curl's
+    own default bundle)."""
+    if os.path.exists(CA_BUNDLE):
+        return ["--cacert", CA_BUNDLE]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Instance discovery
 # ---------------------------------------------------------------------------
@@ -109,7 +125,7 @@ def check_for_update(current_version, log=None):
     url = "https://api.github.com/repos/brewsterkahle/onionpress/releases/latest"
     try:
         result = subprocess.run(
-            ["curl", "-s", "--cacert", "/etc/ssl/cert.pem",
+            ["curl", "-s", *_curl_tls_args(),
              "-H", "User-Agent: onionpress", "--max-time", "10", url],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=15,
@@ -248,7 +264,7 @@ def download_and_install(release_data, latest_version, install_path,
     try:
         # Download
         result = subprocess.run(
-            ["curl", "-L", "-s", "--cacert", "/etc/ssl/cert.pem",
+            ["curl", "-L", "-s", *_curl_tls_args(),
              "-H", "User-Agent: onionpress", "--max-time", "300",
              "-o", dmg_path, dmg_url],
             capture_output=True, text=True, encoding="utf-8",
