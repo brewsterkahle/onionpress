@@ -1899,3 +1899,29 @@
   - Or install `curl` in the tor container and use `curl --socks5-hostname 127.0.0.1:9050`
 - WordPress container has `curl`
 - Test onion service path (internal): `docker exec onionpress-tor wget -q -O /dev/null http://wordpress:80/`
+
+## The OnionHeaven Overview (one view of both roles)
+- **`onionheaven.overview(app)` says which hub keeps this site reachable
+  and whom this install keeps reachable**: `client` (the choice, the hub,
+  `hub_known_as` from `KNOWN_HOSTS`: the Internet Archive's OnionHeaven
+  and OnionHome; the record's `registered_at` / `last_heartbeat_at`; the
+  served and health-check addresses; `left_on_hubs` with `key_here`, whether
+  the key that could ask for the copy's deletion is still here), `hub`
+  (`active` = `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes` or the canonical
+  address; counts; `sites` from the registry capped at `HUB_SITES_LIMIT`;
+  the takeover settings) and `known_hosts`. `status_block()` is status.json's
+  `onionheaven` object: the flat keys onionpress-status.php always read (the
+  platform's `server_active`: the Mac's stays `bool(self.is_onionheaven)`,
+  `tests/test_linux_hub_mode.py` pins the line) plus the nested view.
+- **Who carries it**: the Mac daemon computes it in `check_status` (the
+  registry is asked only on a hub) and publishes it in daemon-state.json
+  (`"onionheaven"`) and status.json; Linux's `write_status` merges `op_py
+  onionheaven overview --json` into the block; `onionpress onionheaven
+  overview [--json]` prints it. `_mark_registered` (Mac) and
+  `_record_registered` (Linux) write `registered_at` (kept across beats)
+  and `last_heartbeat_at` (every beat). A UI reads the overview; it never
+  asks docker itself.
+- **Registry rows are checked before they are shown** (`hub_sites`: a v3
+  address, a status from a fixed set, short printable timestamps and
+  versions): the registry is data anything on the hub volume can write.
+  `tests/test_onionheaven_overview.py`.

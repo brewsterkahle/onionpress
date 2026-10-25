@@ -2360,11 +2360,12 @@ def main(argv: list[str] = None) -> int:
     p_oh = sub.add_parser(
         "onionheaven",
         help="Keep the site reachable through OnionHeaven: enable | disable | "
-             "status [--json] | alerts [--dismiss] [--json]")
+             "status [--json] | overview [--json] | alerts [--dismiss] [--json]")
     p_oh.add_argument("onionheaven_command", nargs="?", default="status",
-                      metavar="{enable,disable,status,alerts}")
+                      metavar="{enable,disable,status,overview,alerts}")
     p_oh.add_argument("--json", action="store_true",
                       help="status as JSON (enabled, choice, hub, registered, may_hold_key); "
+                           "overview as JSON (client, hub, known_hosts); "
                            "alerts as JSON (alerts, dismissed)")
     p_oh.add_argument("--dismiss", action="store_true",
                       help="alerts: dismiss them all (the menu's Dismiss All)")

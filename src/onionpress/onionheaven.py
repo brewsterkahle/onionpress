@@ -954,6 +954,11 @@ def _mark_registered(app, content_addr):
             and main == (content_addr, hub)
             and status.get("content_address") == content_addr
             and not any(_pair(e) == (content_addr, hub) for e in entries)):
+        # Already recorded: only the beat's time, for the OnionHeaven
+        # screen (client_overview).
+        status["last_heartbeat_at"] = _now_iso()
+        status.setdefault("registered_at", status.get("last_attempt") or status["last_heartbeat_at"])
+        _save_registration_status(app, status)
         return
     app._onionheaven_registration_succeeded = True
     if main is not None and main != (content_addr, hub):
@@ -967,9 +972,15 @@ def _mark_registered(app, content_addr):
                     "this install no longer has that key, so OnionPress "
                     "cannot ask the hub to delete it")
     _forget_left_on_hub(status, content_addr, hub)
+    now = _now_iso()
+    if main != (content_addr, hub) or not status.get("registered_at"):
+        # A new registration (first beat, or a new hub or address): when
+        # it began. Kept across the beats that follow.
+        status["registered_at"] = now
     status.update({
         "registered": True,
-        "last_attempt": _now_iso(),
+        "last_attempt": now,
+        "last_heartbeat_at": now,
         "onionheaven_address": hub,
         "content_address": content_addr,
     })
@@ -1792,8 +1803,18 @@ def run_onionheaven_command(sub, app, json_output=False, out=None):
             return 2
         print(ENABLE_TEXT if sub == "enable" else DISABLE_TEXT, file=out)
         return 0
+    if sub == "overview":
+        # Both roles, for the OnionHeaven screen (below): the record and
+        # the config, plus the registry's rows when this install is a hub
+        # (docker exec into onionheaven; no network).
+        ov = overview(app)
+        if json_output:
+            print(json.dumps(ov, indent=2, sort_keys=True), file=out)
+        else:
+            print(describe_overview(ov), file=out)
+        return 0
     if sub != "status":
-        print("Usage: onionpress onionheaven {enable|disable|status} [--json]",
+        print("Usage: onionpress onionheaven {enable|disable|status|overview|alerts} [--json]",
               file=_sys.stderr)
         return 1
     status = registration_status(app)
@@ -1820,6 +1841,296 @@ def run_onionheaven_command(sub, app, json_output=False, out=None):
         for addr, hub in status["may_hold_key"]:
             print(f"  {addr} {hub}", file=out)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# The OnionHeaven screen: one view of both roles this install can play
+# ---------------------------------------------------------------------------
+#
+# overview(app) answers two questions the Settings dialog, the WordPress
+# page and `onionpress onionheaven overview` all show: which hub keeps this
+# site reachable (the config's choice and hub, the registration record,
+# the last heartbeat) and whom this install keeps reachable (a hub: the
+# registry's rows). The hosts the project runs are named (KNOWN_HOSTS), so
+# the screen can say "the Internet Archive's OnionHeaven" instead of 56
+# characters, and say so when a hub is nobody it knows. status_block() is
+# the status.json `onionheaven` object: the flat keys the status page has
+# always read, plus this nested view.
+#
+# The registry is data anything mounting the hub volume can write: every
+# row is checked here (a v3 address, a status from a fixed set, short
+# printable timestamps and versions) before it is shown anywhere.
+
+DEFAULT_ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
+
+KNOWN_HOSTS = (
+    {"address": DEFAULT_ONIONHEAVEN_ADDRESS,
+     "name": "the Internet Archive's OnionHeaven",
+     "kind": "onionheaven", "operator": "Internet Archive",
+     "note": "the hub new OnionPress installs use"},
+    {"address": DEFAULT_ONIONHOME_ADDRESS,
+     "name": "OnionHome",
+     "kind": "onionhome", "operator": "Internet Archive",
+     "note": "the onion name registry, not an OnionHeaven hub"},
+)
+
+# The hub settings the screen edits (config.SETTINGS_PAGE_KEYS checks them;
+# the auto-promote threshold went with #353).
+HUB_SETTINGS = ("ONIONHEAVEN_PROPAGATION_DELAY", "ONIONHEAVEN_MAX_SERVICES")
+
+HUB_SITES_LIMIT = 200
+_SITE_STATUSES = frozenset({"online", "taken-over", "unregistered"})
+_REGISTRY_DB = f"{ONIONHEAVEN_DATA_DIR}/registry.db"
+_SITES_SQL = (
+    "SELECT content_address, COALESCE(status,''), COALESCE(last_healthy,''), "
+    "COALESCE(last_checked,''), COALESCE(version,''), COALESCE(wordpress_healthy,'') "
+    "FROM registry WHERE unregistered_at IS NULL "
+    "ORDER BY status, last_healthy DESC LIMIT %d")
+_COUNTS_SQL = (
+    "SELECT COUNT(*), SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
+    "SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) "
+    "FROM registry WHERE unregistered_at IS NULL")
+
+
+def known_host(address):
+    """The KNOWN_HOSTS entry for *address* (a copy), or None."""
+    address = (address or "").strip().lower()
+    for host in KNOWN_HOSTS:
+        if host["address"] == address:
+            return dict(host)
+    return None
+
+
+def _short_text(value, limit=40):
+    """*value* if it is short printable ASCII, else ''."""
+    value = str(value or "")
+    if len(value) > limit or not value.isascii() or not value.isprintable():
+        return ""
+    return value
+
+
+def _registry_query(app, sql):
+    """Rows of *sql* run in the onionheaven container, tab-separated, or
+    None when the container did not answer."""
+    ok, out = _run_docker(
+        app, ["exec", "onionheaven", "sqlite3", "-separator", "\t", _REGISTRY_DB, sql],
+        timeout=10)
+    return out if ok else None
+
+
+def hub_sites(app, limit=HUB_SITES_LIMIT):
+    """The sites this hub keeps reachable, from the registry's current
+    rows, each checked before it is shown; None when the registry did
+    not answer."""
+    out = _registry_query(app, _SITES_SQL % int(limit))
+    if out is None:
+        return None
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 6:
+            continue
+        addr, status, last_healthy, last_checked, version, wp_ok = parts
+        if not key_manager.is_valid_onion_address(addr):
+            continue
+        status = status.strip().lower()
+        rows.append({
+            "content_address": addr,
+            "status": status if status in _SITE_STATUSES else "unknown",
+            "last_healthy": _short_text(last_healthy),
+            "last_checked": _short_text(last_checked),
+            "version": _short_text(version, 32),
+            "wordpress_healthy": {"1": True, "0": False}.get(wp_ok.strip()),
+        })
+    return rows
+
+
+def hub_counts(app):
+    """{registered_count, online_count, taken_over_count} from the
+    registry, or None when it did not answer."""
+    out = _registry_query(app, _COUNTS_SQL)
+    if out is None:
+        return None
+    try:
+        total, online, taken = (out.strip().split("\t") + ["", "", ""])[:3]
+        return {"registered_count": int(total or 0), "online_count": int(online or 0),
+                "taken_over_count": int(taken or 0)}
+    except ValueError:
+        return None
+
+
+def takeover_worker_count(app):
+    ok, out = _run_docker(app, ["ps", "--format", "{{.Names}}",
+                                "--filter", "name=onionheaven-takeover"], timeout=5)
+    if not ok:
+        return 0
+    import re
+    return len([n for n in out.splitlines() if re.fullmatch(r"onionheaven-takeover-\d+", n.strip())])
+
+
+def _own_address(app):
+    """This install's served address: the app's, else the cached one."""
+    addr = getattr(app, "onion_address", None) or ""
+    if not key_manager.is_valid_onion_address(addr):
+        from onionpress.config import cached_onion_address
+        addr = cached_onion_address(app.app_support) or ""
+    return addr if key_manager.is_valid_onion_address(addr) else ""
+
+
+def client_overview(app):
+    """Which hub keeps this site reachable: the choice, the hub and what
+    is known about it, the registration record, the heartbeat. No docker,
+    no network."""
+    st = registration_status(app)
+    record = _load_registration_status(app)
+    hub = st["hub"]
+    host = known_host(hub)
+    own = _own_address(app)
+    content = st["content_address"] or own
+    left = []
+    for entry in _left_on_hubs(record):
+        h = known_host(entry["onionheaven_address"])
+        left.append({
+            "content_address": entry["content_address"],
+            "onionheaven_address": entry["onionheaven_address"],
+            "hub_known_as": h["name"] if h else None,
+            "since": entry.get("since"),
+            "reason": entry.get("reason"),
+            # Only the key this install still has can sign the request
+            # that asks the hub to delete its copy.
+            "key_here": bool(own) and entry["content_address"] == own,
+        })
+    return {
+        "enabled": st["enabled"],
+        "choice": st["choice"],
+        "value": st["value"],
+        "hub": hub,
+        "hub_known_as": host["name"] if host else None,
+        "hub_kind": host["kind"] if host else None,
+        "hub_is_default": hub == DEFAULT_ONIONHEAVEN_ADDRESS,
+        "registered": st["registered"],
+        "registered_with": st["registered_with"],
+        "content_address": content,
+        "healthcheck_address": getattr(app, "healthcheck_address", None) or "",
+        "registered_at": record.get("registered_at"),
+        "last_heartbeat_at": record.get("last_heartbeat_at"),
+        "last_attempt": record.get("last_attempt"),
+        "unregistered_at": record.get("unregistered_at"),
+        "left_on_hubs": left,
+        "retry_minutes": OPT_OUT_RETRY_SECONDS // 60,
+    }
+
+
+def hub_overview(app, sites=True):
+    """Whom this install keeps reachable. A hub is an install that accepts
+    registrations (ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes, hand-edited) or
+    serves the canonical hub address; only then is the registry asked
+    (docker exec into onionheaven)."""
+    own = _own_address(app)
+    accept = str(app.read_config_value("ONIONHEAVEN_ACCEPT_REGISTRATIONS", "") or "").strip().lower() == "yes"
+    canonical = bool(own) and own == DEFAULT_ONIONHEAVEN_ADDRESS
+    active = accept or canonical or bool(getattr(app, "is_onionheaven", False))
+    host = known_host(own)
+    ov = {
+        "active": active,
+        "accepting_registrations": accept or canonical,
+        "address": own,
+        "known_as": host["name"] if host else None,
+        "is_canonical": canonical,
+        "registered_count": 0, "online_count": 0, "taken_over_count": 0,
+        "takeover_containers": 0,
+        "counts_unavailable": False,
+        "sites": [], "sites_unavailable": False, "sites_truncated": False,
+        "sites_limit": HUB_SITES_LIMIT,
+        "settings": {},
+    }
+    if not active:
+        return ov
+    from onionpress import config as _cfg
+    for key in HUB_SETTINGS:
+        default = _cfg.DEFAULTS.get(key) or _cfg.CODE_DEFAULTS.get(key, "")
+        ov["settings"][key] = str(app.read_config_value(key, default) or default)
+    counts = hub_counts(app)
+    if counts is None:
+        ov["counts_unavailable"] = True
+    else:
+        ov.update(counts)
+    ov["takeover_containers"] = takeover_worker_count(app)
+    if sites:
+        rows = hub_sites(app)
+        if rows is None:
+            ov["sites_unavailable"] = True
+        else:
+            ov["sites"] = rows
+            ov["sites_truncated"] = len(rows) >= HUB_SITES_LIMIT
+    return ov
+
+
+def overview(app, hub=True, sites=True):
+    """Both roles: {"client", "hub", "known_hosts", "generated_at"}. Without
+    *hub* the registry is not asked (no docker at all: the Mac dialog's
+    fallback while the daemon's state is stale)."""
+    return {
+        "client": client_overview(app),
+        "hub": hub_overview(app, sites=sites) if hub else None,
+        "known_hosts": [dict(h) for h in KNOWN_HOSTS],
+        "generated_at": _now_iso(),
+    }
+
+
+def status_block(ov, server_active=None):
+    """status.json's `onionheaven` object: the flat keys onionpress-status.php
+    has always read (*server_active* as the platform defines it, else the
+    hub view's), plus the nested view for the OnionHeaven page."""
+    c = ov["client"]
+    h = ov.get("hub") or {}
+    return {
+        "server_active": bool(h.get("active")) if server_active is None else bool(server_active),
+        "client_registered": bool(c["registered"]),
+        "client_enabled": c["enabled"] is True,
+        "client_hub": c["hub"],
+        "registered_count": int(h.get("registered_count", 0) or 0),
+        "online_count": int(h.get("online_count", 0) or 0),
+        "taken_over_count": int(h.get("taken_over_count", 0) or 0),
+        "takeover_containers": int(h.get("takeover_containers", 0) or 0),
+        "client": c,
+        "hub": ov.get("hub"),
+        "known_hosts": ov.get("known_hosts", []),
+        "generated_at": ov.get("generated_at"),
+    }
+
+
+def describe_overview(ov):
+    """`onionpress onionheaven overview` as text."""
+    c = ov["client"]
+    h = ov.get("hub") or {}
+    lines = []
+    if c["enabled"] is True:
+        state = "registered" if c["registered"] else "enabled, not registered yet"
+    elif c["enabled"] is False:
+        state = "disabled"
+    else:
+        state = f"not enabled (REGISTER_WITH_ONIONHEAVEN={c['value']} is not yes or no)"
+    lines.append(f"Kept reachable by a hub: {state}")
+    who = f" ({c['hub_known_as']})" if c["hub_known_as"] else " (not a known host)"
+    lines.append(f"  Hub: {c['hub']}{who}")
+    if c["content_address"]:
+        lines.append(f"  Site: {c['content_address']}")
+    if c["last_heartbeat_at"]:
+        lines.append(f"  Last heartbeat accepted: {c['last_heartbeat_at']}")
+    for entry in c["left_on_hubs"]:
+        lines.append(f"  A copy of the key of {entry['content_address']} may still be held by "
+                     f"{entry['onionheaven_address']} ({entry.get('reason') or '?'})")
+    if h.get("active"):
+        lines.append(f"Serving as an OnionHeaven hub: {h['registered_count']} registered, "
+                     f"{h['online_count']} online, {h['taken_over_count']} taken over, "
+                     f"{h['takeover_containers']} takeover worker(s)")
+        for site in h.get("sites", []):
+            lines.append(f"  {site['content_address']} {site['status']} {site['last_healthy'] or '-'} "
+                         f"{site['version'] or '-'}")
+    else:
+        lines.append("Serving as an OnionHeaven hub: no")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
