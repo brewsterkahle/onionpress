@@ -1776,6 +1776,16 @@
 - **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
 - **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP. The daemon's is `daemon.pid`; the agent is per user (`gui/<uid>`), so each user's daemon has its own offset
+- **launcher.sh's already-running check matches THIS bundle's MenubarApp**
+  (issue #372): `pgrep -u "$(whoami)" -f "^${MENUBAR_EXE_RE}( |$)"`, the
+  bundle's own `Contents/Resources/MenubarApp/Contents/MacOS/OnionPress`
+  with its ERE metacharacters quoted by sed. The old `^[^ ]*MenubarApp/…`
+  matched any bundle's, so a second bundle of the same user (a build
+  under test with its own HOME) never started beside the installed one
+  and touched `.reopen` in the other install's data dir. `onionpress quit`
+  already looked for `$RESOURCES_DIR`'s. The launchd agent's label is
+  still one per user, so two bundles of one user share the daemon.
+  `tests/test_launcher_pgrep_anchor.py` runs the block under bash.
 - **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
 - `OnionPress.app/` is gitignored — it is assembled at build time from `app/` source. Never commit build output.
 
