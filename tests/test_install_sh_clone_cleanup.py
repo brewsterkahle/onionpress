@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -152,8 +153,12 @@ class TestTheCleanupPrologueRuns(unittest.TestCase):
                       'echo "$CLONE_DIR"\n')
         self.assertEqual(r.returncode, 0, r.stderr)
         clone = r.stdout.strip()
-        self.assertTrue(clone.startswith(self.tmpdir + os.sep),
-                        f"mktemp -d honours TMPDIR: {clone}")
+        # install.sh runs on Linux, whose GNU mktemp puts the clone in
+        # $TMPDIR; macOS's BSD mktemp -d ignores TMPDIR (the macOS CI job),
+        # so there only the removal is checked.
+        if sys.platform != "darwin":
+            self.assertTrue(clone.startswith(self.tmpdir + os.sep),
+                            f"mktemp -d honours TMPDIR: {clone}")
         self.assertFalse(os.path.exists(clone), "the clone was not removed on exit")
         self._assert_tmpdir_intact()
 
