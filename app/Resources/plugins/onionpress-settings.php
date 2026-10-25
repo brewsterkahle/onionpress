@@ -891,7 +891,9 @@ add_action( 'admin_init', function () {
     // only when a token was pasted or the remove box ticked, and either takes
     // a restart to start or remove cloudflared.
     $needs_restart = isset( $updates['CLOUDFLARE_TUNNEL_TOKEN'] );
-    $restart_keys = array( 'ADDRESS_PREFIX', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS' );
+    // The hub's takeover tunables are read by the containers at start
+    // (config.NEEDS_RESTART).
+    $restart_keys = array( 'ADDRESS_PREFIX', 'VM_MEMORY', 'ONIONHEAVEN_ADDRESS', 'ONIONHEAVEN_MAX_SERVICES', 'ONIONHEAVEN_PROPAGATION_DELAY' );
     if ( ! empty( $updates ) ) {
         $onion_address = '';
         $sf = '/var/lib/onionpress/status.json';
@@ -1227,7 +1229,7 @@ function onionpress_settings_fields() {
         ),
         'ONIONHEAVEN_MAX_SERVICES' => array(
             'label'       => 'Max Services per Takeover Worker',
-            'description' => 'Maximum onion services each takeover container can handle. Lower values use more containers but are more reliable.',
+            'description' => 'Maximum onion services each takeover container can handle. Lower values use more containers but are more reliable. Applied at the next restart.',
             'type'        => 'text',
             'placeholder' => '50',
             'show_when'   => 'onionheaven_server',
@@ -1236,21 +1238,12 @@ function onionpress_settings_fields() {
         ),
         'ONIONHEAVEN_PROPAGATION_DELAY' => array(
             'label'       => 'Takeover Delay (seconds)',
-            'description' => 'Seconds after last heartbeat before triggering takeover. Default 180 (~3 missed heartbeats).',
+            'description' => 'Seconds after a site\'s last successful healthcheck before the hub takes it over. Default 180 (~3 missed heartbeats). Applied at the next restart.',
             'type'        => 'text',
             'placeholder' => '180',
             'show_when'   => 'onionheaven_server',
             'min'         => 60,
             'max'         => 3600,
-        ),
-        'ONIONHEAVEN_HUB_THRESHOLD' => array(
-            'label'       => 'Hub Auto-Promote Threshold',
-            'description' => 'Number of registered sites before auto-promoting to hub mode (10 intro points). Default 5.',
-            'type'        => 'text',
-            'placeholder' => '5',
-            'show_when'   => 'onionheaven_server',
-            'min'         => 1,
-            'max'         => 1000,
         ),
     );
 }

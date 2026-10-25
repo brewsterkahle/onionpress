@@ -33,7 +33,9 @@ DEFAULTS = {
     # (see onionheaven.registration_choice).
     "REGISTER_WITH_ONIONHEAVEN": "yes",
     "ONIONHEAVEN_ADDRESS": "",
-    "ONIONHEAVEN_MAX_SERVICES": "10",
+    # The containers' own default (onionheaven_common.MAX_SERVICES_PER_WORKER,
+    # onionheaven-farm.py, docker-compose.yml): one number everywhere.
+    "ONIONHEAVEN_MAX_SERVICES": "50",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
     "ONIONHOME_ADDRESS": "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion",
 }
@@ -52,7 +54,7 @@ SAFE_CONFIG_KEYS = frozenset({
     "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "START_ON_BOOT",
     "PREVENT_SLEEP",
     "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
-    "ONIONHEAVEN_PROPAGATION_DELAY", "ONIONHEAVEN_HUB_THRESHOLD",
+    "ONIONHEAVEN_PROPAGATION_DELAY",
     "SHARE_ANALYTICS_WITH_ONIONHOME", "ONIONHOME_ADDRESS",
     "ONIONNAME", "ONIONNAME_REGISTERED",
 })
@@ -122,10 +124,14 @@ SETTINGS_PAGE_KEYS = {
     "CLOUDFLARE_TUNNEL_TOKEN": _Check(
         lambda v: v == "" or bool(re.fullmatch(CLOUDFLARE_TOKEN_PATTERN, v)),
         "a Cloudflare Tunnel token (base64), or empty to remove it"),
-    # Takeover tunables, shown only on an active OnionHeaven hub.
+    # Takeover tunables, shown only on an active OnionHeaven hub. Both
+    # launchers and ContainerManager hand them to compose (issue #353):
+    # ONIONHEAVEN_PROPAGATION_DELAY as TOR_PROPAGATION_DELAY to tor and
+    # onionheaven, ONIONHEAVEN_MAX_SERVICES under its own name to onionheaven
+    # and onionheaven-farm. A new tunable needs a reader, or
+    # tests/test_settings_page_keys_are_read.py fails.
     "ONIONHEAVEN_MAX_SERVICES": _int_between(1, 500),
     "ONIONHEAVEN_PROPAGATION_DELAY": _int_between(60, 3600),
-    "ONIONHEAVEN_HUB_THRESHOLD": _int_between(1, 1000),
 }
 
 # Keys whose values never appear in a log.
@@ -444,8 +450,7 @@ CODE_DEFAULTS = {
     "QUIT_KEEPS_SITE_RUNNING": "no",             # menubar.py quit_app
     "ONIONHEAVEN_ADDRESS":                       # onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
         "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion",
-    "ONIONHEAVEN_PROPAGATION_DELAY": "180",      # the launchers' export
-    "ONIONHEAVEN_HUB_THRESHOLD": "5",
+    "ONIONHEAVEN_PROPAGATION_DELAY": "180",      # onionheaven_common.PROPAGATION_DELAY
     "ONIONNAME_REGISTERED": "no",
 }
 
@@ -472,6 +477,8 @@ NEEDS_RESTART = frozenset({
     "ONIONHEAVEN_ADDRESS",
     # The plugins are installed and activated by the start sequence.
     "INSTALL_IA_PLUGIN", "INSTALL_CACHE_ENABLER",
+    # Handed to the tor and onionheaven containers' environment by compose.
+    "ONIONHEAVEN_MAX_SERVICES", "ONIONHEAVEN_PROPAGATION_DELAY",
 })
 
 # Read when the VM is created, never again: the diffdisk cap is immutable.
@@ -493,9 +500,8 @@ CONFIG_KEY_HELP = {
     "QUIT_KEEPS_SITE_RUNNING": "macOS: Quit closes only the menu bar app; the site keeps running (default no: Quit takes the site down)",
     "REGISTER_WITH_ONIONHEAVEN": "keep the site reachable through OnionHeaven (see: onionpress onionheaven)",
     "ONIONHEAVEN_ADDRESS": "the OnionHeaven hub's .onion address (restart)",
-    "ONIONHEAVEN_MAX_SERVICES": "hub: addresses one takeover worker serves",
-    "ONIONHEAVEN_PROPAGATION_DELAY": "hub: seconds to wait for a descriptor to propagate",
-    "ONIONHEAVEN_HUB_THRESHOLD": "hub: missed heartbeats before a takeover",
+    "ONIONHEAVEN_MAX_SERVICES": "hub: addresses one takeover worker serves (restart)",
+    "ONIONHEAVEN_PROPAGATION_DELAY": "hub: seconds after a site's last good healthcheck before its takeover (restart)",
     "SHARE_ANALYTICS_WITH_ONIONHOME": "upload scrubbed logs to OnionHome for debugging",
     "ONIONHOME_ADDRESS": "the OnionHome hub's .onion address",
     "CLOUDFLARE_TUNNEL_TOKEN": "Cloudflare Tunnel token (restart); set with `config set CLOUDFLARE_TUNNEL_TOKEN -` and the token on stdin",

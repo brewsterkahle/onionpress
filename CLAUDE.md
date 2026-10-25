@@ -504,6 +504,21 @@
   `loggable_value` so `SECRET_CONFIG_KEYS` values never reach a log.
   `tests/test_settings_page_updates.py` locks the page's fields, choices,
   ranges and token pattern to the allowlist.
+- **Every page key reaches a reader** (issue #353,
+  `tests/test_settings_page_keys_are_read.py`: a census row per key in
+  `SETTINGS_PAGE_KEYS`, the host file that reads it or, for the hub's
+  takeover tunables, the compose mapping and the image constant). Both
+  launchers and `ContainerManager._build_env` export
+  `ONIONHEAVEN_MAX_SERVICES` and `ONIONHEAVEN_PROPAGATION_DELAY` from the
+  config (the Mac side never did; `_build_env` falls back to the default
+  for a value the check refuses); compose hands the delay to tor and
+  onionheaven as `TOR_PROPAGATION_DELAY` (web-server.py reads it too; tor
+  never got it) and the cap to onionheaven and onionheaven-farm under its
+  own name (it went to onionheaven as `ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD`,
+  which nothing read). One default, 50 and 180, in config, compose, the
+  image and the page's placeholder (`DEFAULTS` said 10). Both are in
+  `NEEDS_RESTART`. `ONIONHEAVEN_HUB_THRESHOLD` is gone: nothing ever read
+  it.
 - **`onionpress config get|set|unset|list [--json]` is the one writer of
   `~/.onionpress/config` for the apps** (issue #365, CLI-first phase 1;
   plan: https://claude.ai/artifact/JgQYk8MQmW3ZixVYj4MS78). Its key set is

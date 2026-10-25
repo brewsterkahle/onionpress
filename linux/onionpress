@@ -350,9 +350,13 @@ mkdir -p "$ONIONPRESS_SHARED_DIR/analytics"
 
 export ONIONHEAVEN="1"
 export ONIONHEAVEN_HUB="${ONIONHEAVEN_HUB:-0}"
+# The hub's takeover tunables (the Settings page writes them; compose hands
+# ONIONHEAVEN_PROPAGATION_DELAY to tor and onionheaven as
+# TOR_PROPAGATION_DELAY, ONIONHEAVEN_MAX_SERVICES to onionheaven and
+# onionheaven-farm). Kept in step with app/MacOS/onionpress and
+# onionpress.containers (issue #353).
 export ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
 export ONIONHEAVEN_PROPAGATION_DELAY="${ONIONHEAVEN_PROPAGATION_DELAY:-180}"
-export ONIONHEAVEN_HUB_THRESHOLD="${ONIONHEAVEN_HUB_THRESHOLD:-5}"
 
 # Locally built container images (development).
 #
@@ -447,8 +451,6 @@ if [ -f "$DATA_DIR/config" ]; then
     [ -n "$_val" ] && export ONIONHEAVEN_MAX_SERVICES="$_val"
     _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
     [ -n "$_val" ] && export ONIONHEAVEN_PROPAGATION_DELAY="$_val"
-    _val=$(grep "^ONIONHEAVEN_HUB_THRESHOLD=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-    [ -n "$_val" ] && export ONIONHEAVEN_HUB_THRESHOLD="$_val"
 fi
 
 # Cloudflare Tunnel token (empty = no tunnel), read as the Mac launcher reads

@@ -63,7 +63,6 @@ VALUES = {
     "ONIONHEAVEN_ADDRESS": (ONION, "evil.example/" + "a" * 43 + ".onion"),
     "ONIONHEAVEN_MAX_SERVICES": ("20", "501"),
     "ONIONHEAVEN_PROPAGATION_DELAY": ("120", "30"),
-    "ONIONHEAVEN_HUB_THRESHOLD": ("3", "0"),
     "SHARE_ANALYTICS_WITH_ONIONHOME": ("yes", "sometimes"),
     "ONIONHOME_ADDRESS": (ONION, ONION.upper()),
     "ONIONNAME": ("brewster", "x" * 61),
@@ -217,7 +216,8 @@ class TestConfigSet(_CliCase):
         self.assertEqual(sorted(k for k in op_config.NEEDS_RESTART),
                          sorted({"ADDRESS_PREFIX", "VM_MEMORY", "VM_CPU",
                                  "CLOUDFLARE_TUNNEL_TOKEN", "ONIONHEAVEN_ADDRESS",
-                                 "INSTALL_IA_PLUGIN", "INSTALL_CACHE_ENABLER"}))
+                                 "INSTALL_IA_PLUGIN", "INSTALL_CACHE_ENABLER",
+                                 "ONIONHEAVEN_MAX_SERVICES", "ONIONHEAVEN_PROPAGATION_DELAY"}))
 
     def test_side_effects_run_for_the_changed_key(self):
         self.run_cli("config", "set", "LAUNCH_ON_LOGIN", "no")
