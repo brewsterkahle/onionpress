@@ -87,7 +87,7 @@ OPTIONS = {
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
                  'onionpress.colima',
-                 'onionpress.ui_helpers', 'onionpress.settings_ui',
+                 'onionpress.ui_helpers', 'onionpress.settings_ui', 'onionpress.onionheaven_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
                  'onionpress.analytics_sharing', 'onionpress.power',
                  'onionpress.onion_proxy', 'onionpress.onion_auth',

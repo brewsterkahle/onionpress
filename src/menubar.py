@@ -368,6 +368,7 @@ class OnionPressApp(rumps.App):
             rumps.MenuItem("View Logs", callback=self.view_logs),
             rumps.MenuItem("View Web Usage Log", callback=self.view_web_log),
             rumps.MenuItem("Settings...", callback=self.open_settings),
+            rumps.MenuItem("OnionHeaven...", callback=self.open_onionheaven),
             rumps.separator,
             rumps.MenuItem("Backup...", callback=self.backup),
             rumps.MenuItem("Restore...", callback=self.restore),
@@ -2045,6 +2046,32 @@ class OnionPressApp(rumps.App):
         # apply_config_changes.
         show_settings_dialog(
             config_path=self.config_file,
+            icon_path=icon_path,
+            launcher_script=self.launcher_script,
+            log_func=self.log,
+            callbacks={'write_config': self.write_config_value},
+        )
+
+    @rumps.clicked("OnionHeaven...")
+    def open_onionheaven(self, _):
+        """The OnionHeaven screen: which hub keeps this site reachable and
+        whom this OnionPress keeps reachable, from the daemon's state file
+        (onionheaven.overview, no docker here), with the registration
+        choice, the hub address and a hub's takeover settings as its
+        controls. Every change goes through `onionpress config set`
+        (write_config_value)."""
+        from onionpress.onionheaven_ui import show_onionheaven_dialog
+
+        if not os.path.exists(self.config_file):
+            config_template = os.path.join(self.parent_resources_dir, "config-template.txt")
+            if os.path.exists(config_template):
+                import shutil
+                shutil.copy2(config_template, self.config_file)
+
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        show_onionheaven_dialog(
+            app=self,
+            state=self.state if self._state_fresh else None,
             icon_path=icon_path,
             launcher_script=self.launcher_script,
             log_func=self.log,

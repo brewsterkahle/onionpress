@@ -1925,3 +1925,24 @@
   address, a status from a fixed set, short printable timestamps and
   versions): the registry is data anything on the hub volume can write.
   `tests/test_onionheaven_overview.py`.
+
+## The OnionHeaven Screen
+- **One screen shows the overview (section above) on both platforms.**
+  Mac: OnionHeaven… in the menu (`src/onionpress/onionheaven_ui.py`, an
+  NSAlert form like the Settings dialog) reads it from the daemon's state
+  file and falls back to `overview(app, hub=False)` (no docker) while the
+  state is stale; WordPress: OnionPress → OnionHeaven
+  (`onionpress_onionheaven_page` in onionpress-settings.php, the owner's:
+  the submenu is registered only when `onionpress_settings_owner_allowed()`,
+  and the page refuses before reading the host's files; on a hub the hub
+  card spans both columns). The Settings dialog and the main Settings page
+  no longer carry `REGISTER_WITH_ONIONHEAVEN` / `ONIONHEAVEN_ADDRESS` (the
+  page's fields carry `'page' => 'onionheaven'` and the main page skips
+  them; the save handler is shared, so the OnionHeaven page posts the
+  settings nonce). The dialog's "Check hub now" and a changed hub address
+  run the launcher's `validate-oh-address` (`settings_ui.probe_hub_address`
+  / `validate_hub_address`); every write goes through `config set`
+  (`settings_ui.confirm_and_write_changes`, shared with the Settings
+  dialog). Accepting registrations stays hand-edit only; the screen says
+  so. Screenshots for review: `docs/screenshots/onionheaven-screen/`.
+  `tests/test_onionheaven_screen.py`.
