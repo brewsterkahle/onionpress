@@ -1382,6 +1382,17 @@
   from putting a released key back before the launcher removes it;
   `onionpress uninstall` stops the daemon first (`uninstall.run`).
   `tests/test_onionheaven_lifecycle.py`.
+- **Hub mode is decided by address on both platforms** (issue #345):
+  status.json's `onionheaven.server_active` (the status page's "Mode",
+  the Settings page's takeover tunables) is
+  `onionheaven.is_onionheaven_instance(<served address>)`, the Mac
+  daemon's rule; the Linux launcher's `write_status` asks it through
+  `is_onionheaven_hub` → `onionpress is-onionheaven-hub <address>` and
+  queries the hub's registry only when it says yes. It used to be "a
+  container named `onionheaven` is running", which every node has, so
+  every Linux node called itself the hub. `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`
+  on another address is not counted, as on the Mac.
+  `tests/test_linux_hub_mode.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - `create_backup` prunes WordPress's regenerable derivatives (`-WxH` sizes,

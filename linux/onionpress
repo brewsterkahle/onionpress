@@ -385,6 +385,14 @@ using_local_images() {
     op_py --data-dir "$DATA_DIR" using-local-images
 }
 
+# Whether the address given is the OnionHeaven hub's (issue #345): the Mac
+# daemon's rule, onionheaven.is_onionheaven_instance. Every node runs an
+# onionheaven container (its heartbeat monitor idles off the hub), so a
+# running one says nothing about the node's mode.
+is_onionheaven_hub() {
+    op_py --data-dir "$DATA_DIR" is-onionheaven-hub "$1"
+}
+
 # The image every one-shot helper that handles the onion service key runs
 # from (the key volume migration, the key seeds, the backup's key reads):
 # the stack's own tor image, pinned by digest like the rest, or the locally
@@ -2487,8 +2495,8 @@ create_backup() {
 
     # The Settings page's backup carries this node's own onion service key
     # to WordPress: refused on an OnionHeaven hub or OnionHome, before
-    # anything is copied (not on status.json's server_active, which is
-    # true on every Linux node). Fails closed: no address, a container
+    # anything is copied (not on status.json's server_active, the status
+    # page's view, which fails open). Fails closed: no address, a container
     # that does not answer, or a helper that fails, and it is refused too.
     # Only exit 3 says why on stdout; any other failure (a crash, an older
     # CLI) gets the words of backup.UNVERIFIED_BACKUP_REFUSED_MSG, which the
@@ -3210,8 +3218,10 @@ except: print('false')
     [ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no
     oh_client_hub=${oh_client_hub:-oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion}
 
-    # Check if this node is an OH server
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
+    # Hub or client: by the served address (is_onionheaven_hub), as the Mac
+    # daemon decides it, never by a running onionheaven container, which
+    # every node has (issue #345). The registry is queried on the hub only.
+    if is_onionheaven_hub "$onion_addr"; then
         oh_server_active="true"
         # Query OH server stats from registry DB
         local oh_stats
