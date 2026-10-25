@@ -207,15 +207,19 @@ srv.main()
             stderr=subprocess.PIPE,
             env=env,
         )
-        # Wait for server to start
-        for _ in range(50):
+        # Wait for server to start. 30 s, not 5: the macOS CI runner took
+        # longer than 5 s to import and bind it.
+        for _ in range(300):
             time.sleep(0.1)
+            if self.proc.poll() is not None:
+                err = self.proc.stderr.read().decode("utf-8", "replace")[-2000:]
+                raise RuntimeError(f"Server exited with {self.proc.returncode}: {err}")
             try:
                 with socket.create_connection(('127.0.0.1', self.port), timeout=0.5):
                     return
             except (ConnectionRefusedError, OSError):
                 pass
-        raise RuntimeError("Server did not start within 5 seconds")
+        raise RuntimeError("Server did not start within 30 seconds")
 
     def stop(self):
         if self.proc:

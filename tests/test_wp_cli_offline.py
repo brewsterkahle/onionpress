@@ -104,8 +104,13 @@ class TestMultisiteCallsAreOffline(unittest.TestCase):
                 return _completed("twentytwentyfour\n")
             return _completed()
 
+        # put_tree (the theme and plugin copies) streams a tar to `docker
+        # exec` through Popen, not run: it is not a wp-cli call, and left
+        # unmocked it starts the real docker (FileNotFoundError on a runner
+        # without one, the macOS job's).
         with mock.patch.object(multisite.subprocess, "run", side_effect=fake_run) as run, \
-             mock.patch.object(wp_files.subprocess, "run", side_effect=fake_run) as run2:
+             mock.patch.object(wp_files.subprocess, "run", side_effect=fake_run) as run2, \
+             mock.patch.object(wp_files, "put_tree", return_value=_completed()):
             multisite.deactivate_wp_statistics(docker_bin="docker")
             multisite.provision_post_install(themes_dir=os.path.dirname(themes),
                                              plugins_dir=plugins, docker_bin="docker")
