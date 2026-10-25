@@ -269,6 +269,8 @@ ROWS = [
         mock.call("status", ANY, json_output=False)),
     Row("onionheaven", ["onionheaven", "disable", "--json"], "onionheaven.run_onionheaven_command",
         mock.call("disable", ANY, json_output=True)),
+    Row("onionheaven", ["onionheaven", "overview", "--json"], "onionheaven.run_onionheaven_command",
+        mock.call("overview", ANY, json_output=True)),
     Row("onionheaven-unregister", ["onionheaven-unregister", "--reason", "reset",
                                    "--keep-address", ONION], "cli.release_onionheaven",
         mock.call("reset", keep_address=ONION, data_dir=D("")), rc=0, returns=[]),

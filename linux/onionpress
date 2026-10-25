@@ -3326,10 +3326,21 @@ except: print('false')
         serving_from_wayback="true"
     fi
 
+    # Both OnionHeaven roles for the OnionHeaven page (onionheaven.overview:
+    # the record, the config, and the registry's rows on a hub).
+    local oh_overview_json
+    oh_overview_json=$(op_py --data-dir "$DATA_DIR" onionheaven overview --json 2>/dev/null || echo '{}')
+
     # Build status.json
     local status_json
     status_json=$(python3 -c "
 import json, sys
+try:
+    _ov = json.loads(sys.argv[26])
+    if not isinstance(_ov, dict):
+        _ov = {}
+except (ValueError, IndexError):
+    _ov = {}
 status = {
     'state': sys.argv[1],
     'version': sys.argv[2],
@@ -3351,6 +3362,7 @@ status = {
         'client_registered': sys.argv[14] == 'true',
         'client_hub': sys.argv[15],
         'client_enabled': sys.argv[16] == 'yes',
+        **{k: v for k, v in _ov.items() if k in ('client', 'hub', 'known_hosts', 'generated_at')},
     },
     'wp_installed': sys.argv[19] == 'true',
     'onboarded': sys.argv[20] == 'true',
@@ -3367,7 +3379,7 @@ print(json.dumps(status, indent=2))
   "$load_avg_json" "$host_uptime_seconds" \
   "$wp_installed_str" "$onboarded" "$mkp224o_available" \
   "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback" \
-  "${ONIONPRESS_WP_PORT:-8080}")
+  "${ONIONPRESS_WP_PORT:-8080}" "$oh_overview_json")
 
     # Write to shared volume (consumed by the WP settings/status page): only
     # the fields those pages show (redact.WORDPRESS_STATUS_KEYS, shared with
