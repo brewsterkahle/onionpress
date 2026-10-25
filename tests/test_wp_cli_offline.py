@@ -209,11 +209,16 @@ class TestOfflineUnderPhp(unittest.TestCase):
 
     def test_without_the_variable_the_proxy_probes_as_before(self):
         out = self._run([["safe", u] for u in self.REMOTE])
-        for url, r in zip(self.REMOTE, out):
+        # onionpress_socks_proxy_for() probes a daemon once per process and
+        # answers later requests for it from its cache: the update host asks
+        # onionheaven first, the other two onionpress-tor, so the .onion
+        # (the second onionpress-tor request) is served without a probe.
+        expected = [["onionheaven"], ["onionpress-tor"], []]
+        for url, r, probes in zip(self.REMOTE, out, expected):
             with self.subTest(url=url):
                 self.assertEqual(r["result"], "sent")
                 self.assertEqual(r["dns"], [])
-                self.assertTrue(r["socks"], "the SOCKS probe ran")
+                self.assertEqual(r["socks"], probes)
 
     def test_with_the_variable_nothing_leaves(self):
         cases = [["env", ENV_FLAG]]
