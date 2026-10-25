@@ -1654,6 +1654,23 @@
   instead of running WordPress as root. `tests/test_wp_cli_as_www_data.py`
   scans everything that ships for `--allow-root` and for "wp" argv lists
   outside wp_files, and keeps the copies equal.
+- **The host's provisioning wp-cli calls make no outbound request**
+  (issue #373): `wp_files.wp_cli_args(offline=True)` adds `-e
+  ONIONPRESS_WP_OFFLINE=1`, and the onionpress-tor-proxy mu-plugin's first
+  `pre_http_request` filter (`onionpress_tor_proxy_offline`, priority 1)
+  answers every request to a host outside Docker with a WP_Error before
+  the SOCKS probe; its later filters hand a set `$pre` on. `multisite._wp`
+  passes it by default (provision-post-install, setup-bundled-plugins'
+  steps, deactivate-wp-statistics): wp-cli loads WordPress, `wp theme
+  list` runs `wp_update_themes()` through Tor, and with Tor down each
+  such request waited for the proxy's timeout until the 60 s call expired
+  and START SUMMARY said provision-post-install failed with the site up.
+  Callers that download (`setup_logic`'s `wp language core install`, the
+  daemon's `Docker.wp`, the bash `wp_cli`) are unchanged. The mu-plugin is
+  the app's (`MU_PLUGINS`, put in place by provision-post-install before
+  its first update-checking call), not the image's: no image publish.
+  `tests/test_wp_cli_offline.py` locks the name to the PHP literal and
+  runs the plugin under php where it is installed (CI).
 - What wp-cli prints is www-data's to choose. Root acts on none of it but
   the audit's downloaded core zip, removed only when the name is
   `/tmp/onionpress-wordpress-<version>.zip`.

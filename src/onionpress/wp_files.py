@@ -153,17 +153,29 @@ def exec_args(*command: str, container: str = WP_CONTAINER) -> list[str]:
 # its home, /var/www, is root's, and wp-cli warns on every command that
 # wants the cache when it cannot make ~/.wp-cli/cache there.
 WP_CLI_CACHE_DIR = "/tmp/wp-cli-cache"
+# Set to 1 in a wp-cli process's environment (wp_cli_args(offline=True)),
+# the onionpress-tor-proxy mu-plugin makes no outbound request at all. The
+# name is a literal in the mu-plugin; tests/test_wp_cli_offline.py ties
+# the two together.
+OFFLINE_ENV = "ONIONPRESS_WP_OFFLINE"
 
 
 def wp_cli_args(*args: str, stdin: bool = False, nice: bool = False,
+                offline: bool = False,
                 container: str = WP_CONTAINER) -> list[str]:
     """`docker` arguments (no binary) that run wp-cli *args* as www-data.
     *stdin* adds `-i`, for the values and secrets wp-cli reads from stdin
     (`wp eval` code reading php://stdin, `wp option update <key>`); *nice*
-    runs it at `nice -n 10` (long background sweeps)."""
+    runs it at `nice -n 10` (long background sweeps); *offline* sets
+    OFFLINE_ENV, which the onionpress-tor-proxy mu-plugin answers by
+    refusing every request to a host outside Docker before it is made
+    (issue #373: wp-cli loads WordPress, whose update checks went through
+    Tor and, with Tor down, hung until the proxy's timeout). For calls
+    that need nothing from the network: the provisioning."""
     return (["exec"] + (["-i"] if stdin else [])
-            + ["-u", WP_USER, "-e", f"WP_CLI_CACHE_DIR={WP_CLI_CACHE_DIR}",
-               container] + (["nice", "-n", "10"] if nice else [])
+            + ["-u", WP_USER, "-e", f"WP_CLI_CACHE_DIR={WP_CLI_CACHE_DIR}"]
+            + (["-e", f"{OFFLINE_ENV}=1"] if offline else [])
+            + [container] + (["nice", "-n", "10"] if nice else [])
             + ["wp", *args])
 
 
