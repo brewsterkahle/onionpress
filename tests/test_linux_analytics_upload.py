@@ -16,6 +16,8 @@ import base64
 import gzip
 import importlib.util
 import json
+import logging
+import logging.handlers
 import os
 import platform
 import secrets
@@ -37,7 +39,8 @@ from onionpress import analytics_sharing, key_manager, onion_auth  # noqa: E402
 HEARTBEAT_PATH = os.path.join(PROJECT_DIR, "linux", "onionpress-heartbeat.py")
 
 # The daemon's HOME for the whole test module: DATA_DIR is computed from
-# it at import, and a FileHandler on $DATA_DIR/onionpress.log is opened.
+# it at import, and a WatchedFileHandler on $DATA_DIR/onionpress.log is
+# opened.
 _HOME = tempfile.mkdtemp(prefix="op-linux-analytics-")
 _DATA_DIR = os.path.join(_HOME, ".onionpress")
 os.makedirs(_DATA_DIR)
@@ -125,6 +128,59 @@ class TestDaemonImportPath(unittest.TestCase):
             "enabling it needs no daemon restart.",
         )
 
+
+class TestDaemonLogSurvivesRotation(unittest.TestCase):
+    """The daemon logs to the onionpress.log the launcher rotates by rename
+    (issue #203, item 4). A plain FileHandler kept writing to the renamed
+    file, then to a deleted one, so the heartbeat's lines vanished from the
+    log and from the analytics upload until the daemon was restarted."""
+
+    def test_handler_is_a_watched_file_handler(self):
+        src = _read("linux/onionpress-heartbeat.py")
+        self.assertNotIn(
+            "logging.FileHandler(", src,
+            "linux/onionpress-heartbeat.py must not open onionpress.log with a "
+            "plain FileHandler: the launcher's rotate_log renames the file.",
+        )
+        self.assertIn("logging.handlers.WatchedFileHandler(", src)
+        self.assertIn("import logging.handlers", src)
+        handler = hb._log_file_handler(os.path.join(tempfile.mkdtemp(prefix="op-wfh-"),
+                                                    "onionpress.log"))
+        try:
+            self.assertIsInstance(handler, logging.handlers.WatchedFileHandler)
+        finally:
+            handler.close()
+
+    def test_lines_follow_the_path_across_a_rename(self):
+        tmp = tempfile.mkdtemp(prefix="op-rotate-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "onionpress.log")
+        handler = hb._log_file_handler(path)
+        self.addCleanup(handler.close)
+        handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s",
+                                               datefmt="%Y-%m-%d %H:%M:%S"))
+        logger = logging.getLogger("onionpress-heartbeat-rotation-test")
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+
+        logger.info("before rotation")
+        # What rotate_log does: rename the file away and start a new one.
+        os.rename(path, path + ".1")
+        with open(path, "w"):
+            pass
+        logger.info("after rotation")
+
+        with open(path + ".1", encoding="utf-8") as fh:
+            rotated = fh.read()
+        with open(path, encoding="utf-8") as fh:
+            current = fh.read()
+        self.assertIn("before rotation", rotated)
+        self.assertNotIn("after rotation", rotated)
+        self.assertIn("after rotation", current,
+                      "the line after the rename must be in the new file at the "
+                      "original path, not in the renamed one")
 
 class TestAdvertisedNames(unittest.TestCase):
     def setUp(self):

@@ -61,6 +61,7 @@ import base64
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 import re
 import signal
@@ -121,13 +122,29 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config")
 STATE_PATH = os.path.join(DATA_DIR, "onionheaven-registration.json")
 
 # Logging
+
+
+def _log_file_handler(path):
+    """The handler for onionpress.log, which the launcher rotates.
+
+    The bash launcher's ``rotate_log`` renames onionpress.log to ``.1``,
+    ``.2``, ``.3`` (dropping the oldest) on every launcher call once it
+    passes 5 MB. A plain FileHandler keeps its descriptor on the renamed
+    file, and after three rotations on a deleted one, so this daemon's
+    lines left the log, and the analytics upload, until it was restarted
+    (issue #203). WatchedFileHandler reopens the path whenever its inode
+    changes, so each line lands in the current file.
+    """
+    return logging.handlers.WatchedFileHandler(path)
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.path.join(DATA_DIR, "onionpress.log")),
+        _log_file_handler(os.path.join(DATA_DIR, "onionpress.log")),
     ],
 )
 log = logging.getLogger("onionpress-heartbeat")
@@ -1994,7 +2011,7 @@ def offline_once():
     """
     # Drop the StreamHandler the daemon installs — when invoked by the
     # launcher's sleep-pre our stderr is already redirected into the
-    # same onionpress.log file the FileHandler writes to, so each line
+    # same onionpress.log file the WatchedFileHandler writes to, so each line
     # would land twice without this.
     root = logging.getLogger()
     for h in list(root.handlers):
