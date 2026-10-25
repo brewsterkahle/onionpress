@@ -35,8 +35,6 @@ from test_handle_action import _Case as HandleActionCase  # noqa: E402
 ADDR = "a" * 56 + ".onion"
 NEW_ADDR = "b" * 56 + ".onion"
 HUB = "c" * 56 + ".onion"
-LS = f"exec onionpress-tor ls {onionheaven.HUB_MESSAGES_DIR}/"
-RM = f"exec onionpress-tor sh -c rm -f {onionheaven.HUB_MESSAGES_DIR}/*.json"
 
 
 class RaisingDocker(FakeDocker):
@@ -241,46 +239,6 @@ class TestOnionnameSetEdges(Sandbox):
         self.assertEqual(registrar.calls, [])
         self.assertIn("(start OnionPress)", self.out.getvalue())
         self.assertTrue(os.path.exists(os.path.join(self.dir, app_commands.ONIONNAME_RETRY_MARKER)))
-
-
-class TestAlertsEdges(Sandbox):
-
-    def _docker(self, messages, removable=True):
-        answers = {LS: "\n".join(f"m{i}.json" for i in range(len(messages))) + "\n"}
-        if removable:
-            answers[RM] = ""
-        for i, m in enumerate(messages):
-            answers[f"exec onionpress-tor cat {onionheaven.HUB_MESSAGES_DIR}/m{i}.json"] = json.dumps(m)
-        return FakeDocker(answers)
-
-    def test_a_dismiss_that_fails(self):
-        docker = self._docker([{"type": "takeover_notice", "message": "taken over"}],
-                              removable=False)
-        rc = app_commands.alerts_command(docker, self.dir, "linux", dismiss=True, out=self.out)
-        self.assertEqual(rc, 1)
-        self.assertIn("[Takeover Notice] taken over\n", self.out.getvalue())
-        self.assertIn("Could not dismiss the alerts.", self.out.getvalue())
-        self.out.truncate(0)
-        self.out.seek(0)
-        rc = app_commands.alerts_command(docker, self.dir, "linux", dismiss=True,
-                                         json_output=True, out=self.out)
-        self.assertEqual(rc, 1)
-        self.assertFalse(json.loads(self.out.getvalue())["dismissed"])
-
-    def test_a_mac_marker_that_cannot_be_written_is_no_failure(self):
-        os.mkdir(os.path.join(self.dir, app_commands.DISMISS_ALERTS_MARKER))
-        docker = self._docker([{"type": "x", "message": "m"}])
-        rc = app_commands.alerts_command(docker, self.dir, "macos", dismiss=True, out=self.out)
-        self.assertEqual(rc, 0)
-        self.assertIn("Dismissed.", self.out.getvalue())
-
-    def test_nothing_to_dismiss_is_fine(self):
-        docker = self._docker([])
-        rc = app_commands.alerts_command(docker, self.dir, "macos", dismiss=True,
-                                         json_output=True, out=self.out)
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(self.out.getvalue()), {"alerts": [], "dismissed": False})
-        self.assertNotIn(RM, docker.calls)
 
 
 # ---------------------------------------------------------------------------

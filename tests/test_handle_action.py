@@ -656,23 +656,26 @@ class TestUpdate(_Case):
         self.assertFalse(res["success"])
         self.assertEqual(res["error"], f"{ha.UPDATE_CHECK_FAILED_MSG}: Update check curl failed: exit=6")
 
-    def test_mac_installs_and_asks_for_a_relaunch(self):
-        self.script({"update --check --json": {"stdout": json.dumps({"update_available": True, "latest": "9.9.9"}) + "\n"},
-                     "update --yes --json": {"stdout": '{"ok": true, "version": "9.9.9"}\n'}})
+    def test_mac_reports_a_newer_release_and_never_installs(self):
+        self.script({"update --check --json": {"stdout": json.dumps(
+            {"update_available": True, "current": "2.5.6", "latest": "9.9.9"}) + "\n"}})
         self.request("update")
         result = ha.handle(self.host())
-        self.assertEqual(result, {"handled": "update", "relaunch": True, "version": "9.9.9"})
-        self.assertEqual(self.argvs(), [["update", "--check", "--json"], ["update", "--yes", "--json"]])
+        self.assertEqual(result, {"handled": "update"})
+        self.assertEqual(self.argvs(), [["update", "--check", "--json"]])
         res = self.docker.result("update-result.json")
-        self.assertEqual((res["success"], res["version"]), (True, "9.9.9"))
+        self.assertEqual((res["success"], res["update_available"], res["installable"],
+                          res["current"], res["latest"]),
+                         (True, True, True, "2.5.6", "9.9.9"))
+        self.assertEqual(res["message"], ha.MAC_UPDATE_AVAILABLE_MSG.format(latest="9.9.9"))
+        self.assertIn("Check for Updates", res["message"])
 
-    def test_a_failed_install(self):
-        self.script({"update --check --json": {"stdout": json.dumps({"update_available": True, "latest": "9.9.9"}) + "\n"},
-                     "update --yes --json": {"rc": 1, "stdout": '{"error": "Download failed"}\n'}})
-        self.request("update")
-        result = ha.handle(self.host())
-        self.assertNotIn("relaunch", result)
-        self.assertEqual(self.docker.result("update-result.json")["error"], "Download failed")
+    def test_no_platform_installs_from_the_page(self):
+        # Anything running in WordPress can write requested-action: the
+        # handler may check for a release, never download or install one.
+        src = open(ha.__file__).read()
+        self.assertNotIn('"--yes"', src)
+        self.assertNotIn("relaunch", src)
 
 
 class TestRequestId(_Case):

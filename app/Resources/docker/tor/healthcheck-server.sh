@@ -1,13 +1,11 @@
 #!/bin/sh
 # OnionPress Healthcheck Server
-# Listens on port 8081 via socat, serves status JSON on GET,
-# stores OnionHeaven messages on POST.
+# Listens on port 8081 via socat and serves status JSON on GET. GET only:
+# until 2.5.7 a POST stored its body as an "OnionHeaven message" that the
+# apps showed the owner in a native dialog, with nothing checking who sent
+# it and nothing in OnionHeaven ever sending one.
 
 HEALTHCHECK_PORT=8081
-MESSAGES_DIR="/var/lib/tor/healthcheck-messages"
-MESSAGES_MAX=100
-MESSAGES_TTL=86400  # 24 hours in seconds
-MAX_REQUEST_BODY=1048576  # 1 MB
 CONTENT_HOSTNAME_FILE="/var/lib/tor/hidden_service/wordpress/hostname"
 HEALTHCHECK_HOSTNAME_FILE="/var/lib/tor/hidden_service/healthcheck/hostname"
 VERSION_FILE="/var/lib/tor/healthcheck-version"
@@ -45,40 +43,8 @@ get_version() {
     fi
 }
 
-# Delete messages older than MESSAGES_TTL
-cleanup_old_messages() {
-    local now
-    now=$(date +%s)
-    for f in "$MESSAGES_DIR"/*.json; do
-        [ -f "$f" ] || continue
-        # Filename is timestamp.json — extract the seconds portion
-        local basename="${f##*/}"
-        local file_ts="${basename%.json}"
-        # Strip nanosecond suffix if present (keep first 10 digits)
-        file_ts=$(echo "$file_ts" | cut -c1-10)
-        if [ "$((now - file_ts))" -gt "$MESSAGES_TTL" ] 2>/dev/null; then
-            rm -f "$f"
-        fi
-    done
-}
-
-# Enforce max message count, deleting oldest first
-enforce_message_cap() {
-    local count
-    count=$(ls -1 "$MESSAGES_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$count" -gt "$MESSAGES_MAX" ]; then
-        local excess=$((count - MESSAGES_MAX))
-        ls -1 "$MESSAGES_DIR"/*.json | sort | head -n "$excess" | while read f; do
-            rm -f "$f"
-        done
-    fi
-}
-
 # Handle GET — return status JSON
 handle_get() {
-    # Clean up expired messages before responding
-    cleanup_old_messages
-
     # Read addresses
     local content_address=""
     local healthcheck_address=""
@@ -129,22 +95,9 @@ handle_get() {
     now=$(date +%s)
     local uptime=$((now - started))
 
-    # Collect pending messages
+    # "messages" stays, always empty, so an older hub's reader of this JSON
+    # finds the field it expects.
     local messages="[]"
-    if [ -d "$MESSAGES_DIR" ] && [ "$(ls -A "$MESSAGES_DIR" 2>/dev/null)" ]; then
-        messages="["
-        local first=true
-        for f in "$MESSAGES_DIR"/*.json; do
-            [ -f "$f" ] || continue
-            if [ "$first" = true ]; then
-                first=false
-            else
-                messages="$messages,"
-            fi
-            messages="$messages$(cat "$f")"
-        done
-        messages="$messages]"
-    fi
 
     # Build JSON response
     local body
@@ -163,41 +116,6 @@ handle_get() {
     local len=${#body}
     STATUS=200
     printf "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" "$len" "$body"
-}
-
-# Handle POST — store OnionHeaven message
-handle_post() {
-    local content_length="$1"
-    local body=""
-
-    if [ "$content_length" -gt "$MAX_REQUEST_BODY" ] 2>/dev/null; then
-        STATUS=413
-        printf "HTTP/1.0 413 Request Entity Too Large\r\nContent-Type: text/plain\r\nContent-Length: 22\r\n\r\nRequest body too large"
-        return
-    fi
-
-    if [ "$content_length" -gt 0 ] 2>/dev/null; then
-        body=$(dd bs=1 count="$content_length" 2>/dev/null)
-    fi
-
-    if [ -z "$body" ]; then
-        STATUS="400 empty body"
-        printf "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nEmpty body."
-        return
-    fi
-
-    # Enforce cap before writing new message
-    enforce_message_cap
-
-    # Save message with timestamp-based filename
-    local ts
-    ts=$(date +%s%N 2>/dev/null || date +%s)
-    echo "$body" > "$MESSAGES_DIR/${ts}.json"
-
-    local reply='{"stored":true}'
-    local len=${#reply}
-    STATUS="200 stored"
-    printf "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" "$len" "$reply"
 }
 
 # Handle a single HTTP request (called by socat via --handle-request)
@@ -243,8 +161,6 @@ handle_request() {
     STATUS=""
     if [ "$method" = "GET" ]; then
         handle_get
-    elif [ "$method" = "POST" ]; then
-        handle_post "$content_length"
     else
         STATUS=405
         printf "HTTP/1.0 405 Method Not Allowed\r\nContent-Type: text/plain\r\nContent-Length: 18\r\n\r\nMethod Not Allowed"
@@ -262,5 +178,4 @@ fi
 # Main: record start time, create directories, start socat listener
 echo "Healthcheck server starting on port $HEALTHCHECK_PORT..."
 date +%s > "$STARTED_FILE"
-mkdir -p "$MESSAGES_DIR"
 exec socat TCP-LISTEN:${HEALTHCHECK_PORT},reuseaddr,fork SYSTEM:"sh /healthcheck-server.sh --handle-request"

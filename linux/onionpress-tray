@@ -116,12 +116,6 @@ APP_ICON_PATH = os.path.join(INSTALL_DIR, "app-icon.png")
 POLL_INTERVAL_SEC = 2
 NOTIFY_DEBOUNCE_SEC = 60
 
-# OnionHeaven hub messages are written by the heartbeat client to the
-# tor container's filesystem; the tray polls this directory to surface
-# them as a menu item. Mirrors the Mac MenubarApp's poll_onionheaven_
-# messages flow (src/menubar.py:2198).
-ALERT_MSG_DIR = "/var/lib/tor/healthcheck-messages"
-ALERT_POLL_INTERVAL_SEC = 60
 
 
 # ─── Logging ────────────────────────────────────────────────────────────
@@ -1586,15 +1580,6 @@ class OnionPressTray:
         self._announced_starting = False
         self._announced_online = False
         self._setup_shown = False
-        self._alert_messages: list = []
-
-        # Kick the first alert poll soon (so users coming up with a
-        # pending hub message see it quickly), then every ALERT_POLL_
-        # INTERVAL_SEC. Each poll spawns a daemon thread for the docker
-        # exec so the GTK main loop never blocks on the container.
-        GLib.timeout_add_seconds(5, self._kick_alert_poll_first)
-        GLib.timeout_add_seconds(ALERT_POLL_INTERVAL_SEC,
-                                  self._kick_alert_poll)
 
     def _build_menu(self):
         # Layout mirrors the Mac menubar (src/menubar.py:472) so users
@@ -1607,15 +1592,6 @@ class OnionPressTray:
         self.menu_status = Gtk.MenuItem(label="OnionPress is starting…")
         self.menu_status.set_sensitive(False)
         self.menu.append(self.menu_status)
-
-        # OnionHeaven alerts — hidden until the hub posts something.
-        # set_no_show_all keeps `self.menu.show_all()` from un-hiding it
-        # on the first display; visibility is then driven by _apply_alerts
-        # as messages arrive and are dismissed.
-        self.menu_alerts = self._item("OnionHeaven Alerts",
-                                       self._on_view_alerts)
-        self.menu_alerts.set_no_show_all(True)
-        self.menu_alerts.hide()
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -2066,94 +2042,6 @@ class OnionPressTray:
             except Exception as e:
                 log(f"regenerate error: {e}")
         threading.Thread(target=_run, daemon=True).start()
-
-    # ── OnionHeaven alerts ───────────────────────────────────────────
-
-    def _kick_alert_poll_first(self):
-        # GLib.timeout_add_seconds returning False means "don't repeat" —
-        # this one-shot kicks the first poll then leaves the recurring
-        # timer to do the rest.
-        threading.Thread(target=self._poll_alerts, daemon=True).start()
-        return False
-
-    def _kick_alert_poll(self):
-        threading.Thread(target=self._poll_alerts, daemon=True).start()
-        return True
-
-    def _poll_alerts(self):
-        try:
-            r = subprocess.run(
-                ["docker", "exec", "onionpress-tor",
-                 "ls", ALERT_MSG_DIR],
-                capture_output=True, text=True, timeout=10,
-            )
-            files = []
-            if r.returncode == 0:
-                files = [f for f in r.stdout.split()
-                         if f.endswith(".json")]
-            messages = []
-            for fname in files:
-                try:
-                    r2 = subprocess.run(
-                        ["docker", "exec", "onionpress-tor",
-                         "cat", f"{ALERT_MSG_DIR}/{fname}"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    if r2.returncode == 0 and r2.stdout.strip():
-                        messages.append(json.loads(r2.stdout))
-                except Exception:
-                    continue
-        except Exception:
-            # Container may be down or starting — keep last known state
-            # rather than clearing the menu mid-flight.
-            return
-        GLib.idle_add(self._apply_alerts, messages)
-
-    def _apply_alerts(self, messages):
-        if messages == self._alert_messages:
-            return False
-        self._alert_messages = messages
-        if messages:
-            self.menu_alerts.set_label(
-                f"OnionHeaven Alerts ({len(messages)})")
-            self.menu_alerts.show()
-            log(f"OnionHeaven alerts: {len(messages)} message(s)")
-        else:
-            self.menu_alerts.hide()
-        return False
-
-    def _on_view_alerts(self, *_):
-        if not self._alert_messages:
-            return
-        lines = []
-        for msg in self._alert_messages:
-            mtype = msg.get("type", "unknown").replace("_", " ").title()
-            text = msg.get("message", "")
-            lines.append(f"[{mtype}] {text}")
-        summary = "\n".join(lines)
-
-        dlg = Gtk.MessageDialog(
-            parent=None, flags=0,
-            message_type=Gtk.MessageType.INFO,
-            text=f"OnionHeaven Alerts ({len(self._alert_messages)})",
-        )
-        dlg.format_secondary_text(summary)
-        dlg.add_button("Close", Gtk.ResponseType.CLOSE)
-        dlg.add_button("Dismiss All", Gtk.ResponseType.APPLY)
-        response = dlg.run()
-        dlg.destroy()
-        if response == Gtk.ResponseType.APPLY:
-            def _dismiss():
-                try:
-                    subprocess.run(
-                        ["docker", "exec", "onionpress-tor", "sh", "-c",
-                         f"rm -f {ALERT_MSG_DIR}/*.json"],
-                        capture_output=True, timeout=10,
-                    )
-                except Exception as e:
-                    log(f"dismiss alerts: {e}")
-                GLib.idle_add(self._apply_alerts, [])
-            threading.Thread(target=_dismiss, daemon=True).start()
 
     def _on_check_updates(self, *_):
         def _run():

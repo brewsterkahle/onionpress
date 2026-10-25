@@ -3,22 +3,31 @@
 OnionPress Local Proxy Server
 
 A local HTTP server on localhost:9077 (+10000 per additional macOS user):
-  - an HTTP forward proxy: .onion URLs go through Tor (via the PHP proxy in
-    the WordPress container), clearnet URLs directly, HTTPS clearnet by
-    CONNECT tunnelling. The browser extension routes .onion URLs through
-    it (an HTTP proxy on the Mac itself: Tor's SOCKS port does not work
-    through Colima's port forwarding, issue #318). /proxy/{host}/{path}
-    does the same for a tool that cannot use a proxy.
+  - an HTTP forward proxy for .onion URLs only, through Tor (via the PHP
+    proxy in the WordPress container). The browser extension routes .onion
+    URLs through it (an HTTP proxy on the Mac itself: Tor's SOCKS port does
+    not work through Colima's port forwarding, issue #318); it routes
+    nothing else here, and the proxy refuses every other target: no
+    clearnet fetch, no CONNECT relay, nothing on the LAN or this Mac's
+    loopback (it used to relay all of those for any local client).
+    /proxy/{host}/{path} does the same for a tool that cannot use a proxy.
   - /status: whether OnionPress is running, and its onion address (the
     extension polls it).
   - /setup: the first-run WordPress setup page.
+
+Any web page in any browser on this Mac can send requests to 127.0.0.1.
+/status and /proxy/ answer the extension (its Origin), the proxy's own
+pages, the address bar and command-line tools, and refuse a request
+another site's page made (_from_a_web_page): /status named the onion
+address this Mac serves with Access-Control-Allow-Origin: *, which tied
+the person's clearnet browsing to their onion site, and /proxy/ let a
+page send the person's Tor to any onion URL.
 """
 
 import os
 import re
 import secrets
 import socket
-import select
 import string
 import subprocess
 import json
@@ -466,6 +475,33 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             return origin
         return None
 
+    def _from_a_web_page(self):
+        """True for a request a browser made on behalf of another site's
+        page. Browsers add Origin to cross-origin fetches and Sec-Fetch-Site
+        to every request for 127.0.0.1 (a potentially trustworthy origin),
+        which no page can remove or forge. The extension's own fetches carry
+        its Origin, the proxy's own pages are same-origin, an address-bar
+        visit is Sec-Fetch-Site: none, and a command-line tool sends none
+        of these. localhost:<wp port> is same-site with localhost:<this>,
+        so same-site counts as another site's page."""
+        if self._get_cors_origin():
+            return False
+        port = getattr(self.server, 'server_port', None)
+        own = (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+        origin = self.headers.get('Origin')
+        if origin is not None:
+            return origin not in own
+        site = self.headers.get('Sec-Fetch-Site')
+        if site is not None:
+            return site not in ('same-origin', 'none')
+        referer = self.headers.get('Referer')
+        if referer:
+            return not referer.startswith(tuple(o + '/' for o in own))
+        return False
+
+    def _refuse_web_page(self):
+        self.send_error(403, "Not for web pages")
+
     def do_OPTIONS(self):
         """Handle CORS preflight requests (browser extensions only)."""
         self.send_response(204)
@@ -479,56 +515,17 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_CONNECT(self):
-        """Handle HTTPS tunneling for clearnet URLs."""
-        try:
-            host, port_str = self.path.rsplit(':', 1)
-            port = int(port_str)
-        except ValueError:
-            self.send_error(400, "Bad CONNECT target")
-            return
-
-        # .onion HTTPS should be downgraded to HTTP by the extension
-        host, is_onion, _ = _onion_host(host)
-        if is_onion:
-            self.send_error(502, "Use http:// for .onion sites")
-            return
-
-        # Connect directly to clearnet target
-        try:
-            remote = socket.create_connection((host, port), timeout=10)
-        except Exception as e:
-            self.send_error(502, f"Cannot connect to {host}:{port}: {e}")
-            return
-
-        self.send_response(200, 'Connection established')
-        self.end_headers()
-
-        # Relay data between browser and remote server
-        conns = [self.connection, remote]
-        try:
-            while True:
-                readable, _, errored = select.select(conns, [], conns, 60)
-                if errored:
-                    break
-                if not readable:
-                    break  # timeout
-                for sock in readable:
-                    data = sock.recv(65536)
-                    if not data:
-                        remote.close()
-                        return
-                    if sock is self.connection:
-                        remote.sendall(data)
-                    else:
-                        self.connection.sendall(data)
-        except Exception:
-            pass
-        finally:
-            remote.close()
+        """No tunnelling: the extension sends .onion over http:// only, and
+        a CONNECT relay to any host:port was an open proxy for every local
+        client (the LAN, this Mac's loopback, the internet)."""
+        self.send_error(403, "This proxy carries .onion sites only (http://)")
 
     def _handle_request(self, head_only=False):
         # Status endpoint
         if self.path == '/status':
+            if self._from_a_web_page():
+                self._refuse_web_page()
+                return
             self._handle_status()
             return
 
@@ -551,6 +548,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 target_path += '?' + parsed.query
             target_port = parsed.port
         elif self.path.startswith('/proxy/'):
+            if self._from_a_web_page():
+                self._refuse_web_page()
+                return
             parts = self.path[len('/proxy/'):].split('/', 1)
             target_host = parts[0].lower()
             target_path = '/' + parts[1] if len(parts) > 1 else '/'
@@ -564,9 +564,13 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Not a valid v3 .onion address")
             return
 
-        # For /proxy/ format, only allow .onion
-        if not is_forward_proxy and not is_onion:
-            self.send_error(400, "Only .onion addresses allowed in /proxy/ format")
+        # .onion only, in both forms: the extension routes nothing else here,
+        # and a clearnet fetch reached the LAN and this Mac's loopback.
+        if not is_onion:
+            if is_forward_proxy:
+                self.send_error(403, "This proxy carries .onion sites only")
+            else:
+                self.send_error(400, "Only .onion addresses allowed in /proxy/ format")
             return
 
         # Build the target URL
@@ -593,19 +597,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 self._send_response(status, resp_headers, body, head_only)
                 return
 
-        # Fetch: .onion via Tor, clearnet directly
+        # Fetch through Tor
         try:
-            if is_onion:
-                status, resp_headers, body = self._fetch_via_php(
-                    target_url, post_data=post_data, content_type=content_type,
-                    head_only=head_only
-                )
-            else:
-                status, resp_headers, body = self._fetch_direct(
-                    target_url, target_host, target_port,
-                    target_path, post_data=post_data,
-                    content_type=content_type, head_only=head_only
-                )
+            status, resp_headers, body = self._fetch_via_php(
+                target_url, post_data=post_data, content_type=content_type,
+                head_only=head_only
+            )
         except Exception as e:
             if is_onion and self._wants_page():
                 self._send_onion_unreachable(target_url, head_only)
@@ -722,54 +719,6 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                     PHP_PROXY_PORT, elapsed)
             self.server._wp_unreachable_since = None
             self.server._wp_unreachable_last_log = None
-
-        return status, resp_headers, body
-
-    def _fetch_direct(self, url, host, port, path,
-                      post_data=None, content_type=None, head_only=False):
-        """Fetch a clearnet URL directly (no Tor)."""
-        headers = {"Host": host}
-        if content_type:
-            headers["Content-Type"] = content_type
-        # Forward Accept headers from the browser
-        for hdr in ('Accept', 'Accept-Language', 'Accept-Encoding'):
-            val = self.headers.get(hdr)
-            if val:
-                headers[hdr] = val
-
-        method = "HEAD" if head_only else ("POST" if post_data else "GET")
-
-        conn = http.client.HTTPConnection(host, port or 80, timeout=30)
-        conn.request(method, path, body=post_data, headers=headers)
-        resp = conn.getresponse()
-        body = resp.read()
-        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
-        status = resp.status
-        conn.close()
-
-        # Follow redirects (up to 5)
-        redirects = 0
-        while status in (301, 302, 303, 307, 308) and redirects < 5:
-            location = resp_headers.get('location', '')
-            if not location:
-                break
-            parsed = urlparse(location)
-            if parsed.scheme == 'https':
-                # Can't follow HTTPS redirect in direct fetch; return redirect to browser
-                break
-            rhost = parsed.hostname or host
-            rport = parsed.port or 80
-            rpath = parsed.path or '/'
-            if parsed.query:
-                rpath += '?' + parsed.query
-            conn = http.client.HTTPConnection(rhost, rport, timeout=30)
-            conn.request("GET", rpath, headers={"Host": rhost})
-            resp = conn.getresponse()
-            body = resp.read()
-            resp_headers = {k.lower(): v for k, v in resp.getheaders()}
-            status = resp.status
-            conn.close()
-            redirects += 1
 
         return status, resp_headers, body
 
@@ -1218,9 +1167,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(body)))
-        # /status needs permissive CORS so the browser extension can read it.
-        # This endpoint only exposes operational status (no secrets).
-        self.send_header('Access-Control-Allow-Origin', '*')
+        # The extension reads this cross-origin, so it gets its own Origin
+        # back; never "*": the onion address names the site this Mac serves.
+        cors_origin = self._get_cors_origin()
+        if cors_origin:
+            self.send_header('Access-Control-Allow-Origin', cors_origin)
+        self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()
         self.wfile.write(body)
 
