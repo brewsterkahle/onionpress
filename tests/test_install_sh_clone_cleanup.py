@@ -35,6 +35,16 @@ def _m(pattern):
     return re.compile(pattern, re.MULTILINE)
 
 
+def _alive(pid):
+    """Whether *pid* still runs. A killed orphan that nothing has reaped
+    yet is a zombie, which os.kill(pid, 0) counts as alive (CI, 2026-10-25:
+    the signalled sleep below was still one 2.5 s after the run)."""
+    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                       capture_output=True, text=True, check=False)
+    state = r.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
 def _code(text):
     """Text without `#` comment lines: the header explains the old bug by
     quoting it, and that must not pass for the instruction."""
@@ -179,11 +189,9 @@ class TestTheCleanupPrologueRuns(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         pid = int(r.stdout.strip())
         # The sleep has been signalled by the time bash exits; give it a
-        # moment to go.
-        for _ in range(50):
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+        # moment to go (a zombie counts as gone: _alive).
+        for _ in range(100):
+            if not _alive(pid):
                 break
             time.sleep(0.05)
         else:
