@@ -4354,17 +4354,29 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         backup)
-            # backup [-o|--output <path>]; the password comes from
-            # read_backup_password. The old `backup <password> [output_path]`
-            # still works.
+            # backup [-o|--output <path>] [--check] [--json] [--user <login>];
+            # the password comes from read_backup_password. The old `backup
+            # <password> [output_path]` still works. --check is the
+            # check/confirm protocol's (onionpress.confirm, issue #375): the
+            # shared CLI verifies the password as the owner's and names the
+            # file, making no backup; the tray asks that first and then runs
+            # the backup at the named path. The backup itself stays
+            # create_backup's (bash); --json adds its answer's last line.
             setup_db_passwords
             shift
-            local backup_path=""
-            local -a backup_pos=()
+            local backup_path="" backup_check=no backup_json=no
+            local -a backup_pos=() backup_check_flags=()
             while [ $# -gt 0 ]; do
                 case "$1" in
                     -o|--output)
                         backup_path="${2:-}"
+                        shift
+                        if [ $# -gt 0 ]; then shift; fi
+                        ;;
+                    --check) backup_check=yes; shift ;;
+                    --json) backup_json=yes; backup_check_flags+=(--json); shift ;;
+                    --user)
+                        backup_check_flags+=(--user "${2:-}")
                         shift
                         if [ $# -gt 0 ]; then shift; fi
                         ;;
@@ -4375,8 +4387,17 @@ sys.exit(0 if provision_interactive() else 1)
                 backup_path="${backup_pos[1]}"
             fi
             read_backup_password "${backup_pos[0]:-}"
+            if [ "$backup_check" = yes ]; then
+                # Changes nothing: the CLI's answer is the whole result
+                # ({"ok": true, "filename", "output", ...} or {"error"}).
+                if [ -n "$backup_path" ]; then
+                    backup_check_flags+=(-o "$backup_path")
+                fi
+                ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" backup --check "${backup_check_flags[@]}"
+                exit $?
+            fi
             if [ -z "$BACKUP_PASS" ]; then
-                echo "Usage: $0 backup [-o|--output <path>]"
+                echo "Usage: $0 backup [-o|--output <path>] [--check] [--json] [--user <login>]"
                 echo "Creates a password-protected backup of your OnionPress site."
                 echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
                 exit 1
@@ -4387,6 +4408,9 @@ sys.exit(0 if provision_interactive() else 1)
             fi
             create_backup "$BACKUP_PASS" "$backup_path"
             echo "Backup saved to: $backup_path"
+            if [ "$backup_json" = yes ]; then
+                python3 -I -c 'import json, sys; print(json.dumps({"ok": True, "output": sys.argv[1]}))' "$backup_path"
+            fi
             ;;
 
         restore)

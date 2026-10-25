@@ -738,6 +738,24 @@
   parser, `confirm.require(what, confirmed, **facts)` at the decision,
   `answer_*` for the output, the name in `QUESTIONS`, a dialog in
   `_ask_cli_question`, and a flow in `tests/test_cli_confirm_protocol.py`.
+- **The Linux tray is a client too** (issue #375, `linux/onionpress-tray`
+  section 3b, GTK-free so a stub launcher tests it): Restore… runs `restore
+  <zip> --check --json` (`plan_restore`: the `{"ask": "password"}` prompt
+  worded with `backup_user`, the facts dialog with address, date, user,
+  version and `excludes_onion_key`, the recovery-key dialog for
+  `sealed-hub-data-left-out` — the typed key is checked by another
+  `--check` with it in `ONIONPRESS_HUB_RECOVERY_KEY`, "Restore Without" is
+  `--confirmed sealed-hub-data-left-out`, any other question is cancelled)
+  and then the real run with the `RestorePlan`'s args and environment.
+  Backup… runs `backup --check --json` (`check_backup`; the Linux
+  launcher's `backup)` case hands `--check`, `--json` and `--user` to
+  `onionpress.cli backup --check` with the password in the environment,
+  the backup itself staying bash's `create_backup`, now at the check's
+  `output` path, the CLI's file name). The flow runs in a worker thread,
+  each dialog marshalled to the GTK loop (`_on_main_thread`), Cancel the
+  default and no answer in 5 minutes Cancel (`_run_dialog`); `Launcher.run`
+  gives the launcher no terminal (stdin /dev/null) and takes `extra_env`
+  for the key. `tests/test_linux_tray_protocol.py`.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published, so nothing private may sit there under a name

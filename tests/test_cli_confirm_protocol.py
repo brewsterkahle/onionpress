@@ -105,6 +105,17 @@ class TestConfirmModule(unittest.TestCase):
         # runs them)
         self.assertNotIn("default_button=1", asked)
 
+    def test_the_tray_asks_the_restore_question(self):
+        """The Linux tray's Restore... (issue #375) meets one question,
+        "sealed-hub-data-left-out" (plan_restore, tests/test_linux_tray_protocol.py);
+        any other it cancels and says so."""
+        tray = _read("linux/onionpress-tray")
+        self.assertIn('SEALED_HUB_DATA_QUESTION = "sealed-hub-data-left-out"', tray)
+        flow = tray[tray.index("def plan_restore("):tray.index("# ─── 4. Notifier")]
+        self.assertIn("if question == SEALED_HUB_DATA_QUESTION:", flow)
+        self.assertIn("elif question:", flow)
+        self.assertIn("ui.ask_recovery_key(facts, problem)", flow)
+
     def test_the_parser_refuses_an_unknown_question(self):
         with mock.patch("sys.stderr", io.StringIO()):
             with self.assertRaises(SystemExit):

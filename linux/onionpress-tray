@@ -42,6 +42,7 @@ import fcntl
 import json
 import logging
 import logging.handlers
+import re
 import signal
 import subprocess
 import threading
@@ -70,6 +71,11 @@ try:
     from onionpress import setup_logic as _setup_logic  # type: ignore
 except ImportError:
     _setup_logic = None
+
+try:
+    from onionpress import confirm as _confirm  # type: ignore
+except ImportError:
+    _confirm = None
 
 
 # ─── Constants ──────────────────────────────────────────────────────────
@@ -232,6 +238,9 @@ class Status:
 # launcher_ops.BACKUP_PASSWORD_ENV). Argv would put it in every local
 # user's `ps` and in tray.log; the environment is readable by us only.
 BACKUP_PASSWORD_ENV = "ONIONPRESS_BACKUP_PASSWORD"
+# And an OnionHeaven hub's backup recovery key, for a restore of its
+# sealed registry and registrants' keys (launcher_ops.HUB_RECOVERY_KEY_ENV).
+HUB_RECOVERY_KEY_ENV = "ONIONPRESS_HUB_RECOVERY_KEY"
 
 # Launcher subcommands whose arguments can carry a secret (the old
 # `backup <password>` / `restore <password> <zip>` forms, setup --pass,
@@ -251,18 +260,24 @@ class Launcher:
 
     @staticmethod
     def run(*args, capture: bool = False, timeout: Optional[int] = 60,
-            password: Optional[str] = None) -> subprocess.CompletedProcess:
-        """password: handed to `backup`/`restore` in the environment.
-        timeout=None waits for the launcher however long it takes."""
+            password: Optional[str] = None,
+            extra_env: Optional[dict] = None) -> subprocess.CompletedProcess:
+        """password: handed to `backup`/`restore` in the environment, as is
+        *extra_env* (a hub's recovery key). timeout=None waits for the
+        launcher however long it takes. The launcher gets no terminal:
+        stdin is /dev/null, so a command that would read a password there
+        answers {"ask": "password"} (onionpress.confirm) instead of waiting."""
         cmd = [LAUNCHER, *args]
         log(f"launcher: {_loggable(cmd)}")
         env = None
-        if password is not None:
-            env = {**os.environ, BACKUP_PASSWORD_ENV: password}
+        if password is not None or extra_env:
+            env = {**os.environ, **(extra_env or {})}
+            if password is not None:
+                env[BACKUP_PASSWORD_ENV] = password
         try:
             return subprocess.run(
                 cmd, capture_output=capture, text=True, timeout=timeout,
-                env=env,
+                env=env, stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired:
             # str(TimeoutExpired) is the whole argv.
@@ -325,6 +340,158 @@ def update_check_outcome(returncode: int, stdout: str, stderr: str) -> UpdateChe
         "update-check", "Up to date",
         f"You're on the current version ({data.get('current')}).",
         urgency="low")
+
+
+# ─── 3b. The check/confirm protocol (onionpress.confirm, issue #375) ────
+#
+# `onionpress backup` and `onionpress restore` are asked first what they
+# would do (`--check --json`): the CLI answers {"ok": true, ...facts},
+# {"ask": "password"}, {"confirm": "<what>", ...facts} or {"error": ...},
+# changing nothing; the tray shows its own dialogs from the facts and runs
+# the command again with `--confirmed <what>` for every question it asked.
+# What follows is the client without GTK: the dialogs are an object the
+# caller supplies (RestoreUI below; the GTK one is _GtkRestoreUI), so the
+# flow is tested against a stub launcher. Cancel is the default in every
+# dialog, and no answer in QUESTION_TIMEOUT_SEC is Cancel (_run_dialog).
+
+SEALED_HUB_DATA_QUESTION = "sealed-hub-data-left-out"
+QUESTION_TIMEOUT_SEC = 300
+
+
+def _last_json_line(text: str) -> Optional[dict]:
+    """The JSON object the CLI printed last (onionpress.confirm), or None."""
+    if _confirm is not None:
+        return _confirm.last_json_line(text)
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    try:
+        doc = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _without_log_stamp(line: str) -> str:
+    """A launcher log line without its `[YYYY-MM-DD HH:MM:SS] ` or
+    `YYYY-MM-DD HH:MM:SS ` stamp (launcher_ops.strip_log_stamp)."""
+    if launcher_ops is not None:
+        line = launcher_ops.strip_log_stamp(line)
+    return re.sub(r"^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\]?\s*", "", line)
+
+
+def launcher_failure(stdout: str, stderr: str, default: str) -> str:
+    """What a failed `onionpress` run said: its last ERROR line, else its
+    last line, else *default* (the menubar's reading of it)."""
+    lines = [_without_log_stamp(ln.strip())
+             for ln in (stderr or "").splitlines() + (stdout or "").splitlines()
+             if ln.strip()]
+    errors = [ln for ln in lines if ln.startswith("ERROR")]
+    if errors:
+        return errors[-1][len("ERROR:"):].strip() or default
+    return lines[-1] if lines else default
+
+
+def launcher_answer(*args, password: Optional[str] = None,
+                    extra_env: Optional[dict] = None):
+    """Run `onionpress <args>` and read the JSON object it printed last:
+    (rc, answer or None, stdout, stderr). A launcher that could not be run
+    is (-1, None, "", why)."""
+    try:
+        r = Launcher.run(*args, capture=True, timeout=None,
+                         password=password, extra_env=extra_env)
+    except Exception as e:
+        log(f"launcher {args[0]}: could not run: {e}")
+        return -1, None, "", str(e)
+    return r.returncode, _last_json_line(r.stdout), r.stdout or "", r.stderr or ""
+
+
+def check_backup(password: str):
+    """`onionpress backup --check --json`: the CLI verifies *password* as
+    the owner's and names the file. (facts, None) when it is, else
+    (None, why) for the dialog."""
+    rc, ans, out, err = launcher_answer("backup", "--check", "--json", password=password)
+    if ans and ans.get("ok"):
+        return ans, None
+    return None, (ans or {}).get("error") or launcher_failure(
+        out, err, "Could not verify the password.")
+
+
+class RestoreUI:
+    """The dialogs plan_restore asks of the person at this desktop. Each
+    returns the answer or None for Cancel; the GTK ones give up after
+    QUESTION_TIMEOUT_SEC, which is Cancel."""
+
+    def ask_password(self, backup_user: Optional[str]) -> Optional[str]:
+        raise NotImplementedError
+
+    def confirm(self, facts: dict) -> bool:
+        raise NotImplementedError
+
+    def ask_recovery_key(self, facts: dict, problem: Optional[str]) -> Optional[str]:
+        """The hub's recovery key as typed, "" to restore without the hub
+        data, None to cancel. *problem*: why the last key was refused."""
+        raise NotImplementedError
+
+    def error(self, title: str, message: str) -> None:
+        raise NotImplementedError
+
+
+class RestorePlan(NamedTuple):
+    """What the checks established: the real run is
+    `Launcher.run("restore", *args, password=password, extra_env=extra_env)`."""
+    args: list
+    password: str
+    extra_env: dict
+
+
+def plan_restore(backup_path: str, ui: RestoreUI) -> Optional[RestorePlan]:
+    """The protocol up to the real run of `onionpress restore <zip>`: the
+    password the CLI asks for, the facts for the confirmation dialog
+    (address, date, user, version, whether the key is in the backup), and
+    a hub's sealed data question ("sealed-hub-data-left-out": the recovery
+    key, checked by the CLI against the backup, or restore without it, with
+    --confirmed). None when cancelled or refused (the error shown)."""
+    rc, ans, out, err = launcher_answer("restore", backup_path, "--check", "--json")
+    backup_user = (ans or {}).get("backup_user") if (ans or {}).get("ask") == "password" else None
+    password = ui.ask_password(backup_user)
+    if not password:
+        return None
+    rc, facts, out, err = launcher_answer("restore", backup_path, "--check", "--json",
+                                          password=password)
+    if not facts or facts.get("error") or not (facts.get("ok") or facts.get("confirm")):
+        failure = (facts or {}).get("error") or launcher_failure(out, err, "Could not read backup")
+        log(f"restore: failed to read backup metadata: {failure}")
+        ui.error("Invalid backup", failure)
+        return None
+    if not ui.confirm(facts):
+        return None
+    extra_env: dict = {}
+    confirmed: list = []
+    question = facts.get("confirm")
+    if question == SEALED_HUB_DATA_QUESTION:
+        problem = None
+        while True:
+            key = ui.ask_recovery_key(facts, problem)
+            if key is None:
+                return None
+            if not key:
+                log("restore: the hub's sealed data will not be restored (no recovery key given)")
+                confirmed = ["--confirmed", SEALED_HUB_DATA_QUESTION]
+                break
+            rc, ans, out, err = launcher_answer(
+                "restore", backup_path, "--check", "--json",
+                password=password, extra_env={HUB_RECOVERY_KEY_ENV: key})
+            if ans and ans.get("ok"):
+                extra_env[HUB_RECOVERY_KEY_ENV] = key
+                break
+            problem = (ans or {}).get("error") or launcher_failure(
+                out, err, "The key could not be checked.")
+    elif question:
+        log(f"restore: unexpected question '{question}' (cancelled)")
+        ui.error("Restore not started",
+                 f"OnionPress asked a question this tray cannot answer ({question}). "
+                 f"Run 'onionpress restore' in a terminal.")
+        return None
+    return RestorePlan([backup_path, "--json", *confirmed], password, extra_env)
 
 
 # ─── 4. Notifier ────────────────────────────────────────────────────────
@@ -581,13 +748,195 @@ def _notify_failed(title: str) -> None:
         log(f"notification failed: {e}")
 
 
+def _run_dialog(dlg, timeout: int = QUESTION_TIMEOUT_SEC):
+    """dlg.run(), answered Cancel after *timeout* seconds without one: a
+    question left on the screen is not a yes (onionpress.confirm)."""
+    fired = []
+
+    def _give_up():
+        fired.append(True)
+        dlg.response(Gtk.ResponseType.CANCEL)
+        return False
+
+    source = GLib.timeout_add_seconds(timeout, _give_up)
+    try:
+        return dlg.run()
+    finally:
+        if not fired:
+            GLib.source_remove(source)
+
+
+def _on_main_thread(fn):
+    """Run fn() in the GTK main loop (dialogs are its) and return what it
+    returned; for a worker thread that waits on the launcher. On the main
+    thread itself fn() is simply called (waiting there would stop the
+    loop that has to run it)."""
+    if threading.current_thread() is threading.main_thread():
+        return fn()
+    done = threading.Event()
+    box = {}
+
+    def _call():
+        try:
+            box["result"] = fn()
+        except Exception as e:  # noqa: BLE001 - handed back to the caller
+            box["error"] = e
+        finally:
+            done.set()
+        return False
+
+    GLib.idle_add(_call)
+    done.wait()
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _error_dialog(parent, title: str, message: str) -> None:
+    dlg = Gtk.MessageDialog(
+        parent=parent, flags=0,
+        message_type=Gtk.MessageType.ERROR,
+        buttons=Gtk.ButtonsType.CLOSE,
+        text=title,
+    )
+    dlg.format_secondary_text(message)
+    _run_dialog(dlg)
+    dlg.destroy()
+
+
+class _GtkRestoreUI(RestoreUI):
+    """plan_restore's dialogs, each run in the GTK main loop; the flow
+    itself runs in a worker thread, so the tray stays responsive while
+    the launcher reads the backup."""
+
+    def __init__(self, parent, backup_path):
+        self.parent = parent
+        self.backup_name = os.path.basename(backup_path)
+
+    def ask_password(self, backup_user):
+        return _on_main_thread(lambda: self._ask_password(backup_user))
+
+    def _ask_password(self, backup_user):
+        dlg = Gtk.MessageDialog(
+            parent=self.parent, flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Restore from backup",
+        )
+        who = f"of '{backup_user}' " if backup_user else ""
+        dlg.format_secondary_text(
+            f"Enter the password {who}that was used when\n"
+            f"{self.backup_name} was created.")
+        entry = Gtk.Entry()
+        entry.set_visibility(False)
+        entry.set_activates_default(True)
+        dlg.get_content_area().pack_end(entry, False, False, 8)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        dlg.show_all()
+        response = _run_dialog(dlg)
+        password = entry.get_text()
+        dlg.destroy()
+        if response != Gtk.ResponseType.OK or not password:
+            return None
+        return password
+
+    def confirm(self, facts):
+        return _on_main_thread(lambda: self._confirm(facts))
+
+    def _confirm(self, facts):
+        # The CLI validated the address and username and sanitized the
+        # rest (cli.cmd_restore_check).
+        addr = facts.get("onion_address") or "unknown"
+        if facts.get("excludes_onion_key") is True:
+            # A Settings page backup holds no key: this site keeps its
+            # address (the restore refuses one whose metadata says so but
+            # which holds a key).
+            addr += " (its key is not in this backup)"
+            warning = ("This will overwrite your current site and database. "
+                       "This backup was made from the Settings page and holds "
+                       "no onion address key, so this site keeps its onion "
+                       "address. This cannot be undone.")
+        else:
+            warning = ("This will overwrite your current site, database, and "
+                       "onion address. This cannot be undone.")
+        dlg = Gtk.MessageDialog(
+            parent=self.parent, flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Restore from this backup?",
+        )
+        dlg.format_secondary_text(
+            f"Onion address: {addr}\n"
+            f"Backup date: {facts.get('backup_date') or 'unknown'}\n"
+            f"Username: {facts.get('username') or 'unknown'}\n"
+            f"OnionPress version: {facts.get('onionpress_version') or 'unknown'}\n\n"
+            f"{warning}")
+        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        restore_btn = dlg.add_button("_Restore", Gtk.ResponseType.OK)
+        restore_btn.get_style_context().add_class("destructive-action")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        response = _run_dialog(dlg)
+        dlg.destroy()
+        return response == Gtk.ResponseType.OK
+
+    def ask_recovery_key(self, facts, problem):
+        return _on_main_thread(lambda: self._ask_recovery_key(facts, problem))
+
+    def _ask_recovery_key(self, facts, problem):
+        kid = facts.get("recovery_key_id") or "unknown"
+        dlg = Gtk.Dialog(title="Restore the hub's registrants' keys?",
+                         parent=self.parent, flags=0)
+        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Restore _Without", Gtk.ResponseType.REJECT)
+        dlg.add_button("Restore With _Key", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        body = dlg.get_content_area()
+        body.set_border_width(16)
+        body.set_spacing(8)
+        blurb = Gtk.Label(label=(
+            f"This backup holds an OnionHeaven hub's registry and its "
+            f"registrants' onion service keys, sealed to the hub's recovery "
+            f"key (key id {kid}). Paste that key to restore them.\n\n"
+            f"Without it, everything else is restored: registrants that are "
+            f"online send their keys again within a minute; sites that are "
+            f"offline cannot be taken over until they come back."))
+        blurb.set_line_wrap(True)
+        blurb.set_xalign(0)
+        blurb.set_max_width_chars(60)
+        body.add(blurb)
+        entry = Gtk.Entry()
+        entry.set_visibility(False)
+        entry.set_placeholder_text("recovery key")
+        body.add(entry)
+        if problem:
+            problem_lbl = Gtk.Label()
+            problem_lbl.set_xalign(0)
+            problem_lbl.set_line_wrap(True)
+            problem_lbl.set_markup(
+                f"<span foreground='red'>{GLib.markup_escape_text(problem)}</span>")
+            body.add(problem_lbl)
+        body.show_all()
+        response = _run_dialog(dlg)
+        text = entry.get_text().strip()
+        dlg.destroy()
+        if response == Gtk.ResponseType.REJECT:
+            return ""
+        if response != Gtk.ResponseType.OK or not text:
+            return None
+        return text
+
+    def error(self, title, message):
+        _on_main_thread(lambda: _error_dialog(self.parent, title, message))
+
+
 def show_backup_dialog(parent=None):
     # Custom Gtk.Dialog (not MessageDialog) so we can verify the password
-    # inline against WordPress before kicking off the long-running backup
-    # — matches the Mac flow where `verify_wp_admin` runs before the zip
-    # work starts. Bash already re-verifies inside create_backup, so this
-    # is purely a UX improvement: the user sees "Password does not match"
-    # in 1-2s instead of waiting for the full backup to fail.
+    # before kicking off the long-running backup: `onionpress backup
+    # --check --json` (check_backup) verifies it as the owner's and names
+    # the file, as the Mac's Backup... asks before its save panel. Bash
+    # re-verifies inside create_backup, so this is a UX improvement: the
+    # user sees "Password does not match" in 1-2s instead of waiting for
+    # the full backup to fail.
     dlg = Gtk.Dialog(
         title="Create OnionPress backup",
         parent=parent,
@@ -638,13 +987,10 @@ def show_backup_dialog(parent=None):
             "<i>Verifying password…</i>")
 
         def _verify():
-            ok, msg = False, "verification unavailable"
-            try:
-                from onionpress import backup as _b  # type: ignore
-                ok, msg = _b.verify_wp_admin_password_any(password)
-            except Exception as e:
-                msg = f"verification failed: {e}"
-                log(f"backup verify: {e}")
+            facts, msg = check_backup(password)
+            ok = facts is not None
+            if ok:
+                checked["output"] = facts.get("output") or ""
 
             def _apply():
                 if ok:
@@ -661,6 +1007,7 @@ def show_backup_dialog(parent=None):
         return True
 
     password = None
+    checked = {}
     while True:
         response = dlg.run()
         if response == Gtk.ResponseType.OK:
@@ -683,8 +1030,11 @@ def show_backup_dialog(parent=None):
         # backups, and killing the launcher stopped only the shell, not the
         # docker and Python steps under it. The copies there carry their own
         # limits, sized to the site, and fail the launcher when one is hit.
+        # The file the check named (the CLI's backup_filename: address and
+        # login in the name, which the restore's password prompt reads).
+        output_args = ["-o", checked["output"]] if checked.get("output") else []
         try:
-            r = Launcher.run("backup", capture=True, timeout=None,
+            r = Launcher.run("backup", *output_args, capture=True, timeout=None,
                              password=password)
             if r.returncode == 0:
                 Notify.Notification.new(
@@ -702,6 +1052,12 @@ def show_backup_dialog(parent=None):
 
 
 def show_restore_dialog(parent=None):
+    """Restore from a backup .zip through `onionpress restore` (install-
+    from-backup). The launcher is asked first what the backup is
+    (`restore <zip> --check --json`, plan_restore): the password it needs,
+    the facts for the confirmation dialog, and whether a hub's sealed data
+    needs the recovery key. The dialogs are this process's (_GtkRestoreUI);
+    the password and the key go in the environment, never on argv."""
     chooser = Gtk.FileChooserNative.new(
         "Choose a backup .zip", parent, Gtk.FileChooserAction.OPEN,
         "_Restore", "_Cancel",
@@ -717,34 +1073,25 @@ def show_restore_dialog(parent=None):
     if not backup_path:
         return
 
-    pw_dlg = Gtk.MessageDialog(
-        parent=parent, flags=0,
-        message_type=Gtk.MessageType.WARNING,
-        buttons=Gtk.ButtonsType.OK_CANCEL,
-        text="Restore from backup",
-    )
-    pw_dlg.format_secondary_text(
-        f"This will replace the current site with the contents of\n"
-        f"{os.path.basename(backup_path)}.\n\n"
-        f"Enter the password the backup was created with.")
-    entry = Gtk.Entry()
-    entry.set_visibility(False)
-    entry.set_activates_default(True)
-    pw_dlg.get_content_area().pack_end(entry, False, False, 8)
-    pw_dlg.set_default_response(Gtk.ResponseType.OK)
-    pw_dlg.show_all()
-    response = pw_dlg.run()
-    password = entry.get_text()
-    pw_dlg.destroy()
-    if response != Gtk.ResponseType.OK or not password:
-        return
+    ui = _GtkRestoreUI(parent, backup_path)
 
     def _run():
+        # The checks wait on the launcher (reading a large backup takes a
+        # while); each dialog is marshalled to the main loop.
+        try:
+            plan = plan_restore(backup_path, ui)
+        except Exception as e:
+            log(f"restore check error: {e}")
+            _notify_failed("Restore failed")
+            return
+        if plan is None:
+            return
         # No time limit, as for the backup above: a fixed 600 s ended large
         # sites' restores halfway, the launcher's own steps still running.
         try:
-            r = Launcher.run("restore", backup_path,
-                             capture=True, timeout=None, password=password)
+            r = Launcher.run("restore", *plan.args,
+                             capture=True, timeout=None, password=plan.password,
+                             extra_env=plan.extra_env)
             if r.returncode == 0:
                 Notify.Notification.new(
                     "Restore complete",
@@ -752,8 +1099,12 @@ def show_restore_dialog(parent=None):
                     "onionpress",
                 ).show()
             else:
+                answer = _last_json_line(r.stdout) or {}
                 Notify.Notification.new(
-                    "Restore failed", (r.stderr or "")[:200], "onionpress",
+                    "Restore failed",
+                    (answer.get("error") or launcher_failure(
+                        r.stdout, r.stderr, "See the OnionPress log."))[:200],
+                    "onionpress",
                 ).show()
         except Exception as e:
             log(f"restore error: {e}")
