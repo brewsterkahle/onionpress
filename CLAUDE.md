@@ -707,6 +707,18 @@
   the menubar's. The Settings page's question the handler stops at goes
   into `pending_question`; the menubar asks and runs `handle-action
   --confirmed <what>` / `--cancel` itself.
+- **`.setup_complete` is written by every setup, not only the daemon**
+  (issue #374): the menubar shows the welcome screen until it exists, and
+  the daemon writes it only once the site is fully operational, so a node
+  set up headlessly with `onionpress setup` (or stopped before the site
+  was reachable) got the welcome screen at its first menubar launch.
+  `setup_logic.mark_setup_complete` (`SETUP_COMPLETE_MARKER`) writes it
+  at the end of a completed `install_fresh_wordpress` (the setup window,
+  the Linux paths), the Mac launcher's `setup` touches it after
+  `setup_wordpress_cli` (both branches) and for an already installed site
+  (the repair for a node from before: run `onionpress setup`), and the
+  daemon's write stays. `tests/test_setup_complete_marker.py` runs the
+  launcher's case under bash and keeps the four literals equal.
 - **Logs**: the daemon owns `logs/onionpress-*.log` (and the capture
   logs); the menubar writes `logs/menubar-*.log`; View Logs opens the
   daemon's, the launcher's flat `onionpress.log` and its own

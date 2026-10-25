@@ -3084,6 +3084,10 @@ main() {
             cd "$DOCKER_DIR"
             if wp_is_installed; then
                 echo "WordPress is already installed."
+                # A site is set up: the menubar must not show the welcome
+                # screen for it (issue #374; a node set up headlessly before
+                # this marker existed gets it from this run).
+                touch "$DATA_DIR/.setup_complete"
                 exit 0
             fi
             # Make sure WordPress container is running
@@ -3099,6 +3103,12 @@ main() {
             # A failed setup — for --from-backup, a backup refused before
             # anything was restored — must not go on to flag a key reimport.
             setup_wordpress_cli "$@" || exit 1
+            # WordPress is installed: what the menubar's first-run check
+            # asks (issue #374). Its own setup window writes the same
+            # marker (setup_logic.mark_setup_complete), the daemon again
+            # once the site is operational; without it a headless setup's
+            # first menubar launch showed the welcome screen.
+            touch "$DATA_DIR/.setup_complete"
             if [ -n "$has_from_backup" ]; then
                 # --from-backup restored keys to vanity-keys/ — need to reinstall
                 # into the key volume so Tor uses the restored address.

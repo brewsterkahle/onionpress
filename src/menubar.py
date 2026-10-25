@@ -185,8 +185,11 @@ class OnionPressApp(rumps.App):
         _ensure_edit_menu()
 
         # Detect first-run early so we can show the right window.
-        # Use .setup_complete marker (written by the daemon after setup finishes)
-        # instead of secrets (which the launcher recreates before Python starts).
+        # Use the .setup_complete marker (written when a setup completes:
+        # setup_logic.mark_setup_complete from the setup window, the
+        # launcher's `onionpress setup`, and the daemon once the site is
+        # operational) instead of secrets (which the launcher recreates
+        # before Python starts).
         self._is_first_run = False
         setup_marker = os.path.join(self.app_support, ".setup_complete")
         if not os.path.exists(setup_marker):

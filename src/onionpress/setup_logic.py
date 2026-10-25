@@ -471,6 +471,31 @@ def start_bundled_plugin_setup(launcher_bin: str, log: Callable[[str], None]) ->
     return True
 
 
+# The Mac menubar shows the welcome screen until this file exists in the
+# data dir (issue #374). Every setup that installs WordPress writes it when
+# it completes: this function (the Mac setup window, the Linux paths), the
+# Mac launcher's `onionpress setup` (bash: touch), and the Mac daemon once
+# more when the site is fully operational. The name is a literal in
+# src/menubar.py, src/onionpress/daemon.py and app/MacOS/onionpress;
+# tests/test_setup_complete_marker.py keeps them equal.
+SETUP_COMPLETE_MARKER = ".setup_complete"
+
+
+def mark_setup_complete(data_dir: str, log: Callable[[str], None] | None = None) -> bool:
+    """Write the setup-complete marker in *data_dir*. False, logged, when
+    it cannot be written (the setup itself has succeeded by then)."""
+    path = os.path.join(data_dir, SETUP_COMPLETE_MARKER)
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("1")
+    except OSError as e:
+        if log:
+            log(f"WARNING: could not write {path}: {e}")
+        return False
+    return True
+
+
 def install_fresh_wordpress(
     *,
     site_title: str,
@@ -622,6 +647,8 @@ def install_fresh_wordpress(
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
     _write_config(data_dir, "ONIONNAME", onionname)
     log(f"Onionname saved to config: {onionname}")
+    if password_set:
+        mark_setup_complete(data_dir, log)
 
     # 8. Fetch archive.org S3 keys in the background.
     # Tor-routed login can take 10-30s, so we don't block setup
@@ -753,6 +780,7 @@ def provision_existing_wordpress(
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
     _write_config(data_dir, "ONIONNAME", onionname)
     log(f"Onionname saved to config: {onionname}")
+    mark_setup_complete(data_dir, log)
 
     return True
 
