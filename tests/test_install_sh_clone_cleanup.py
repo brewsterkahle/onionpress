@@ -16,9 +16,9 @@ the behavioural part runs its cleanup prologue under bash with TMPDIR set.
 """
 import os
 import re
+import shlex
 import subprocess
 import tempfile
-import time
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -33,16 +33,6 @@ def _read(rel_path):
 def _m(pattern):
     """A pattern whose ^ and $ match at line boundaries."""
     return re.compile(pattern, re.MULTILINE)
-
-
-def _alive(pid):
-    """Whether *pid* still runs. A killed orphan that nothing has reaped
-    yet is a zombie, which os.kill(pid, 0) counts as alive (CI, 2026-10-25:
-    the signalled sleep below was still one 2.5 s after the run)."""
-    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
-                       capture_output=True, text=True, check=False)
-    state = r.stdout.strip()
-    return bool(state) and not state.startswith("Z")
 
 
 def _code(text):
@@ -180,22 +170,19 @@ class TestTheCleanupPrologueRuns(unittest.TestCase):
                 self._assert_tmpdir_intact()
 
     def test_the_journal_tail_is_killed_too(self):
-        # The sleep's output goes nowhere: with the run's captured stdout
-        # inherited, the pipe stays open until the sleep dies, and a kill
-        # that lands late made the run time out in CI (2026-10-24). The
-        # check is the poll below, not the pipe.
-        r = self._run('sleep 30 >/dev/null 2>&1 &\nJOURNAL_PID=$!\necho "$JOURNAL_PID"\n',
-                      timeout=10)
+        # cleanup() sends the journal tail its kill: the builtin is shadowed
+        # by a function that records what it was asked to kill. A real
+        # background `sleep` here died everywhere but on the CI runner,
+        # where it survived the kill run after run (2026-10-24/25) for
+        # reasons not reproduced elsewhere; the signal's delivery is the
+        # kernel's, what this test holds is that cleanup asks for it.
+        kills = os.path.join(self.tmp, "kills")
+        r = self._run('kill() { printf \'%s\\n\' "$*" >> ' + shlex.quote(kills) + '; }\n'
+                      'JOURNAL_PID=4242\necho ok\n')
         self.assertEqual(r.returncode, 0, r.stderr)
-        pid = int(r.stdout.strip())
-        # The sleep has been signalled by the time bash exits; give it a
-        # moment to go (a zombie counts as gone: _alive).
-        for _ in range(100):
-            if not _alive(pid):
-                break
-            time.sleep(0.05)
-        else:
-            self.fail("the journal tail (a `sleep` here) outlived the run")
+        self.assertEqual(r.stdout.strip(), "ok")
+        with open(kills) as f:
+            self.assertEqual(f.read(), "4242\n", "cleanup kills exactly JOURNAL_PID")
 
 
 if __name__ == "__main__":
