@@ -65,10 +65,14 @@ class TestCLIArgParsing(unittest.TestCase):
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_address_command(self, MockCLI):
-        instance = MockCLI.return_value
-        instance.cmd_address.return_value = 0
-        result = main(["address"])
+        # `address` reads the tor container without OnionPressCLI's setup
+        # (onionpress.app_commands, issue #382).
+        with mock.patch("onionpress.cli.Docker"), \
+                mock.patch("onionpress.app_commands.address_command", return_value=0) as cmd:
+            result = main(["address"])
         self.assertEqual(result, 0)
+        MockCLI.assert_not_called()
+        self.assertEqual(cmd.call_args.kwargs["url"], False)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_backup_command(self, MockCLI):

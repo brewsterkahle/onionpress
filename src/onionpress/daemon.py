@@ -1683,30 +1683,18 @@ class Daemon:
 
     def poll_onionheaven_messages(self):
         """Messages the hub left through the healthcheck service, into the
-        state for the menubar's alert item."""
+        state for the menubar's alert item (onionheaven.read_hub_messages,
+        what `onionpress onionheaven alerts` reads too)."""
         try:
-            r = self._docker.run(["exec", "onionpress-tor", "ls", "/var/lib/tor/healthcheck-messages/"],
-                                 timeout=10, quiet=True)
-            files = r.output.split() if r.ok else []
-            json_files = [f for f in files if f.endswith(".json")]
-            if not json_files:
+            messages = onionheaven.read_hub_messages(self._docker)
+            if messages is None:
+                return
+            if not messages:
                 if self.onionheaven_messages:
                     self.onionheaven_messages = []
                     self._onionheaven_alert_shown = False
                 return
-            messages = []
-            for fname in json_files:
-                try:
-                    rr = self._docker.run(["exec", "onionpress-tor", "cat",
-                                           f"/var/lib/tor/healthcheck-messages/{fname}"],
-                                          timeout=5, quiet=True)
-                    if rr.ok and rr.output.strip():
-                        msg = json.loads(rr.output.strip())
-                        if isinstance(msg, dict):
-                            messages.append(msg)
-                except Exception:
-                    continue
-            if messages and messages != self.onionheaven_messages:
+            if messages != self.onionheaven_messages:
                 self.onionheaven_messages = messages
                 if not self._onionheaven_alert_shown:
                     self._onionheaven_alert_shown = True
@@ -1718,16 +1706,12 @@ class Daemon:
             pass
 
     def dismiss_onionheaven_alerts(self):
-        """The menubar's Dismiss All (.dismiss-onionheaven-alerts)."""
+        """The menubar's Dismiss All (.dismiss-onionheaven-alerts), and
+        `onionpress onionheaven alerts --dismiss`'s marker."""
         self.log("Dismissing OnionHeaven alerts")
         self.onionheaven_messages = []
         self._onionheaven_alert_shown = False
-        try:
-            self._docker.run(["exec", "onionpress-tor", "sh", "-c",
-                              "rm -f /var/lib/tor/healthcheck-messages/*.json"],
-                             timeout=10, quiet=True)
-        except Exception:
-            pass
+        onionheaven.remove_hub_messages(self._docker)
         self.publish_state()
 
     # -- analytics -------------------------------------------------------

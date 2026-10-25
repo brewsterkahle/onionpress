@@ -669,13 +669,33 @@ echo "Success: password set for ", $u->user_login, "\n";
 # ─── Key import ──────────────────────────────────────────────────────
 
 import_key() {
-    local key_b32="$1"
+    # import-key [<key>|-|--file <hs_ed25519_secret_key>]: the key as
+    # base32; "-" reads it from stdin (so a caller keeps it out of this
+    # process's argv, which ps shows to every user); --file reads C Tor's
+    # key file (key_manager.py encode-key-file checks it first).
+    local key_b32=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                key_b32=$(python3 "$SCRIPTS_DIR/key_manager.py" encode-key-file "${2:-}") || return 1
+                shift ;;
+            --help|-h) key_b32="--help" ;;
+            --*) echo "Unknown import-key option: $1" >&2; return 2 ;;
+            *) key_b32="$1" ;;
+        esac
+        shift
+    done
+    if [ "$key_b32" = "-" ]; then
+        IFS= read -r key_b32 || true
+    fi
 
     mkdir -p "$DATA_DIR"
 
     if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
         cat <<HELPEOF
 Usage: onionpress import-key <base32-secret-key>
+       onionpress import-key --file <hs_ed25519_secret_key>
+       onionpress import-key -        (the key on stdin)
 
 Import a pre-generated ed25519 key for your onion service.
 
@@ -4183,7 +4203,18 @@ main() {
             ;;
 
         address)
-            get_onion_address
+            # The address, its shareable URL (--url) or that URL on the
+            # clipboard (--copy): onionpress.app_commands (issue #382).
+            op_py --data-dir "$DATA_DIR" address "${@:2}"
+            ;;
+
+        version|check-reachability|open|onionname)
+            # The app's remaining functions as subcommands (issue #382):
+            # the version, the Settings page's reachability test through
+            # the onionheaven Tor client, the tray's Open Local Site /
+            # Open in Tor Browser / Settings (logged in), and the
+            # onionname (show | set NAME).
+            op_py --data-dir "$DATA_DIR" "$1" "${@:2}"
             ;;
 
         dashboard)
@@ -4324,7 +4355,7 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         import-key)
-            import_key "$2"
+            import_key "${@:2}"
             ;;
 
         sleep-pre|sleep-post)
@@ -4372,8 +4403,14 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         logs)
-            cd "$DOCKER_DIR"
-            docker compose "${CF_COMPOSE[@]}" logs -f
+            # Bare: the container logs. --app, --launcher or --web (-n N,
+            # -f): the end of that OnionPress log (issue #382).
+            if [ $# -gt 1 ]; then
+                op_py --data-dir "$DATA_DIR" logs "${@:2}"
+            else
+                cd "$DOCKER_DIR"
+                docker compose "${CF_COMPOSE[@]}" logs -f
+            fi
             ;;
 
         backup)
@@ -4906,7 +4943,9 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|get|setup|config|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+            echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
+            echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME; onionheaven alerts [--dismiss]"
             exit 1
             ;;
     esac

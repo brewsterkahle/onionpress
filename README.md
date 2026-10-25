@@ -56,6 +56,16 @@ systemctl --user start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
+Everything the menu and the Settings page offer is a command too (on a Mac
+the command is `/Applications/OnionPress.app/Contents/MacOS/onionpress`):
+`onionpress version`; `onionpress address --url` (the site's shareable URL,
+`--copy` puts it on the clipboard); `onionpress open site|admin|settings|onion`
+(a browser, logged in; `onion` opens Tor Browser where it is installed);
+`onionpress logs --app|--launcher|--web` (`-n N` lines, `-f` to follow);
+`onionpress check-reachability` (the Settings page's test, through the
+independent onionheaven Tor client); `onionpress import-key --file
+hs_ed25519_secret_key`; `onionpress onionname show|set NAME`; `onionpress
+onionheaven alerts [--dismiss]` (the hub's messages).
 Settings: `onionpress config list` shows every setting, `onionpress config set KEY VALUE`
 changes one (`config list --help` describes the keys; on a Mac the command is
 `/Applications/OnionPress.app/Contents/MacOS/onionpress`).

@@ -482,6 +482,22 @@ def decode_base32_key(key_b32):
     return key_bytes
 
 
+def encode_key_file(path):
+    """The base32 `import-key` takes, read from a key file: C Tor's
+    hs_ed25519_secret_key (96 bytes, header included) or the bare 64-byte
+    expanded secret key. Anything else, or an unusable key, is refused
+    (decode_base32_key's checks) before the base32 is printed."""
+    import os
+    with open(path, 'rb') as f:
+        data = f.read(97)
+    if len(data) not in (64, 96):
+        raise ValueError(f"{os.path.basename(path)}: a key file is 96 bytes "
+                         f"(hs_ed25519_secret_key) or 64 (the bare key), not {len(data)}")
+    key_b32 = base64.b32encode(data).decode('ascii')
+    decode_base32_key(key_b32)
+    return key_b32
+
+
 # The order of ed25519's base point. A secret scalar that is a multiple of
 # it has the neutral element for its public key: no key at all.
 ED25519_ORDER = 2**252 + 27742317777372353535851937790883648493
@@ -895,6 +911,7 @@ if __name__ == "__main__":
         print("  key_manager.py write-keys <hex_privkey> <hex_pubkey> <key_dir>")
         print("  key_manager.py import-key <base32_key> <output_dir>")
         print("  key_manager.py decode-key <base32_key>")
+        print("  key_manager.py encode-key-file <hs_ed25519_secret_key>")
         print("  key_manager.py staged-address <key_dir>")
         print("  key_manager.py keep-current [--no-served] <replaced_keys_dir> [<key_dir>...]")
         print("  (<base32_key> may be '-' to read the key from stdin)")
@@ -965,6 +982,15 @@ if __name__ == "__main__":
             private_key = decode_base32_key(_key_arg(sys.argv[2]))
             address = derive_onion_address(check_expanded_secret_key(private_key))
             print(address)
+
+        elif cmd == "encode-key-file":
+            # The base32 of a key file (`onionpress import-key --file`):
+            # C Tor's hs_ed25519_secret_key (96 bytes with its header) or
+            # the bare 64-byte expanded key, checked as decode-key checks
+            # it, so a file that is not a usable key is refused here.
+            if len(sys.argv) < 3:
+                _usage()
+            print(encode_key_file(sys.argv[2]))
 
         elif cmd == "staged-address":
             # The address of the key files in a folder (they must agree),

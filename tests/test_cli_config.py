@@ -541,7 +541,7 @@ class TestCallers(unittest.TestCase):
         self.assertIn("  onionheaven   ", help_text)
         self.assertIn("set KEY - with the", help_text)
         linux = _read("linux/onionpress")
-        self.assertIn("|get|setup|config|onionheaven|", linux)
+        self.assertIn("|config|onionname|onionheaven|", linux)
 
     def test_guis_write_config_only_through_the_cli(self):
         for rel in ("src/onionpress/settings_ui.py", "linux/onionpress-tray"):
