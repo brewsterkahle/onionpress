@@ -36,16 +36,13 @@ ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
 
 # Update Docker Images on Launch
-# Default: "yes" (automatically update on launch)
+# Default: "no"
 #
-# When enabled, onionpress will automatically check for and download updated
-# WordPress, MariaDB, and Tor container images when the app launches.
-# This ensures you have the latest security patches and features.
+# Every container image is pinned by digest, and a launch pulls only the
+# pins a new release moved. "yes" re-pulls every image at every launch,
+# which contacts the image registry each time for nothing new.
 #
-# Set to "no" to disable automatic updates on launch.
-# Note: Updates only occur when containers are stopped.
-#
-UPDATE_ON_LAUNCH=yes
+UPDATE_ON_LAUNCH=no
 
 # Launch on Login
 # Default: "yes" (auto-start on login)

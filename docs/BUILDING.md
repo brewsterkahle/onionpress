@@ -882,7 +882,10 @@ Since then the start-time pull on both platforms is `docker compose pull
 pinned by digest, a launch fetches exactly the pins a new release moved and
 nothing else, and never touches the registry otherwise. The refresh paths
 (`update_images()`, `onionpress update`, the menubar's Check for Updates)
-are the ones that still pull unconditionally.
+are the ones that still pull unconditionally. `UPDATE_ON_LAUNCH` therefore
+defaults to `no` everywhere (`config.DEFAULTS`, the template, both launchers'
+inline fallback configs): `yes` only adds a re-pull of every image at every
+launch, a registry contact before Tor is up (issue #36).
 
 All of them now check `using_local_images()` — true when
 `ONIONPRESS_TOR_IMAGE` or `ONIONPRESS_WORDPRESS_IMAGE` points at a reference
