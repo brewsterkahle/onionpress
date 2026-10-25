@@ -622,7 +622,7 @@ class OnionPressCLI:
                 return 1
 
             # Pull images if configured
-            if read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "yes") == "yes":
+            if read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "no") == "yes":
                 self.containers.pull_images()
 
             # Start core services

@@ -16,8 +16,11 @@ import base64
 import gzip
 import importlib.util
 import json
+import logging
+import logging.handlers
 import os
 import platform
+import re
 import secrets
 import shutil
 import sys
@@ -37,7 +40,8 @@ from onionpress import analytics_sharing, key_manager, onion_auth  # noqa: E402
 HEARTBEAT_PATH = os.path.join(PROJECT_DIR, "linux", "onionpress-heartbeat.py")
 
 # The daemon's HOME for the whole test module: DATA_DIR is computed from
-# it at import, and a FileHandler on $DATA_DIR/onionpress.log is opened.
+# it at import, and a WatchedFileHandler on $DATA_DIR/onionpress.log is
+# opened.
 _HOME = tempfile.mkdtemp(prefix="op-linux-analytics-")
 _DATA_DIR = os.path.join(_HOME, ".onionpress")
 os.makedirs(_DATA_DIR)
@@ -125,6 +129,59 @@ class TestDaemonImportPath(unittest.TestCase):
             "enabling it needs no daemon restart.",
         )
 
+
+class TestDaemonLogSurvivesRotation(unittest.TestCase):
+    """The daemon logs to the onionpress.log the launcher rotates by rename
+    (issue #203, item 4). A plain FileHandler kept writing to the renamed
+    file, then to a deleted one, so the heartbeat's lines vanished from the
+    log and from the analytics upload until the daemon was restarted."""
+
+    def test_handler_is_a_watched_file_handler(self):
+        src = _read("linux/onionpress-heartbeat.py")
+        self.assertNotIn(
+            "logging.FileHandler(", src,
+            "linux/onionpress-heartbeat.py must not open onionpress.log with a "
+            "plain FileHandler: the launcher's rotate_log renames the file.",
+        )
+        self.assertIn("logging.handlers.WatchedFileHandler(", src)
+        self.assertIn("import logging.handlers", src)
+        handler = hb._log_file_handler(os.path.join(tempfile.mkdtemp(prefix="op-wfh-"),
+                                                    "onionpress.log"))
+        try:
+            self.assertIsInstance(handler, logging.handlers.WatchedFileHandler)
+        finally:
+            handler.close()
+
+    def test_lines_follow_the_path_across_a_rename(self):
+        tmp = tempfile.mkdtemp(prefix="op-rotate-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "onionpress.log")
+        handler = hb._log_file_handler(path)
+        self.addCleanup(handler.close)
+        handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s",
+                                               datefmt="%Y-%m-%d %H:%M:%S"))
+        logger = logging.getLogger("onionpress-heartbeat-rotation-test")
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+
+        logger.info("before rotation")
+        # What rotate_log does: rename the file away and start a new one.
+        os.rename(path, path + ".1")
+        with open(path, "w"):
+            pass
+        logger.info("after rotation")
+
+        with open(path + ".1", encoding="utf-8") as fh:
+            rotated = fh.read()
+        with open(path, encoding="utf-8") as fh:
+            current = fh.read()
+        self.assertIn("before rotation", rotated)
+        self.assertNotIn("after rotation", rotated)
+        self.assertIn("after rotation", current,
+                      "the line after the rename must be in the new file at the "
+                      "original path, not in the renamed one")
 
 class TestAdvertisedNames(unittest.TestCase):
     def setUp(self):
@@ -224,6 +281,59 @@ class TestAnalyticsHost(unittest.TestCase):
         self.assertEqual(self.host._last_status_payload["platform"], "linux")
 
 
+class TestContainerLogCapture(unittest.TestCase):
+    """The launcher's start_container_log_capture tails the containers whose
+    logs the upload ships (issue #203, item 5): onionpress-wordpress too,
+    whose stderr carries PHP's error_log (the Wayback state transitions),
+    and `onionpress restart` starts the capture again, as `start` does."""
+
+    CAPTURED = ("onionpress-tor", "onionheaven", "onionpress-wordpress")
+
+    def _launcher(self):
+        return _read("linux/onionpress")
+
+    def _function(self, src, name):
+        start = src.index(f"\n{name}() {{\n")
+        return src[start:src.index("\n}\n", start)]
+
+    def _case(self, src, label):
+        start = src.index(f"\n        {label})\n")
+        return src[start:src.index("\n            ;;\n", start)]
+
+    def test_captures_the_wordpress_container(self):
+        body = self._function(self._launcher(), "start_container_log_capture")
+        m = re.search(r"for container in (.+); do", body)
+        self.assertIsNotNone(m, body)
+        self.assertEqual(tuple(m.group(1).split()), self.CAPTURED)
+        # Each goes to container-<name without the onionpress- prefix>.log,
+        # under the same 5 MB rotation, and is tailed by one docker logs -f.
+        self.assertIn('container-${container#onionpress-}.log', body)
+        self.assertIn('"$LOG_MAX_SIZE"', body)
+        self.assertIn('docker logs -f --tail 200 "$container" >> "$logfile" 2>&1 &', body)
+
+    def test_the_host_advertises_every_captured_log(self):
+        host = hb.AnalyticsHost(CONTENT, HC, data_dir=tempfile.mkdtemp(prefix="op-cap-"))
+        logs_dir = os.path.join(host.app_support, "logs")
+        advertised = {
+            os.path.basename(rl.current_path())
+            for rl in (host._tor_log, host._onionheaven_log, host._wp_errors_log)
+        }
+        self.assertEqual(
+            advertised,
+            {f"container-{c.removeprefix('onionpress-')}.log" for c in self.CAPTURED})
+        self.assertEqual(host._wp_errors_log.current_path(),
+                         os.path.join(logs_dir, "container-wordpress.log"))
+        self.assertTrue(analytics_sharing.redact.scrubs_ips("container-wordpress"),
+                        "the WordPress log is visitor-facing: its IPs are pseudonymized")
+
+    def test_start_and_restart_both_start_the_capture(self):
+        src = self._launcher()
+        for label in ("start", "restart"):
+            case = self._case(src, label)
+            self.assertIn("start_container_log_capture", case, label)
+            self.assertLess(case.index("wait_for_services"),
+                            case.index("start_container_log_capture"), label)
+
 class TestUploadCycleOnLinux(unittest.TestCase):
     """Drive analytics_sharing._do_upload_cycle with the Linux host and the
     Linux on-disk log layout; docker is never called."""
@@ -244,6 +354,10 @@ class TestUploadCycleOnLinux(unittest.TestCase):
                "Oct 10 06:00:00.000 [notice] Bootstrapped 100%\n")
         _write(os.path.join(self.data, "logs", "container-tor.log.1"),
                "Oct 01 06:00:00.000 [notice] Bootstrapped 100%\n" * 20)
+        _write(os.path.join(self.data, "logs", "container-wordpress.log"),
+               "[10-Oct-2026 06:00:00 UTC] [OnionPress Wayback] state: idle -> sweeping\n")
+        _write(os.path.join(self.data, "logs", "container-wordpress.log.1"),
+               "[01-Oct-2026 06:00:00 UTC] PHP Warning: something\n" * 20)
         _write(os.path.join(self.data, "status.json"),
                json.dumps({"state": "running", "platform": "linux"}))
 
@@ -282,17 +396,24 @@ class TestUploadCycleOnLinux(unittest.TestCase):
             r"^onionpress-2026-10-10-[0-9a-f]{8}\.log\.gz$",   # active launcher/daemon log
             r"^onionpress-2026-10-01-[0-9a-f]{8}\.log\.gz$",   # onionpress.log.1
             r"^container-tor-[0-9a-f]{8}\.log\.gz$",           # active + .1 (two matches)
+            r"^container-wordpress-[0-9a-f]{8}\.log\.gz$",     # active + .1 (two matches)
             rf"^status-{today}\.json\.gz$",
         ]
         import re
         for pat in patterns:
             self.assertTrue(any(re.match(pat, n) for n in names), f"{pat} not in {names}")
         self.assertEqual(sum(1 for n in names if n.startswith("container-tor-")), 2)
+        # The WordPress container's log (PHP error_log, the Wayback state
+        # transitions) ships like the others: the rotated .1 too, which the
+        # container-*.log scan alone would not find (issue #203, item 5).
+        self.assertEqual(sum(1 for n in names if n.startswith("container-wordpress-")), 2)
         # The on-disk names must not leak through _do_upload_cycle's own
         # container-*.log scan: the active file ships once, under the
         # advertised name.
         self.assertNotIn("container-tor.log.gz", names)
         self.assertNotIn("container-tor.log", names)
+        self.assertNotIn("container-wordpress.log.gz", names)
+        self.assertNotIn("container-wordpress.log", names)
         self.assertEqual(result["uploaded"], len(names))
         self.assertEqual(result["wanted"], len(names))
 
@@ -366,13 +487,14 @@ class TestUploadIsScrubbedOnLinux(unittest.TestCase):
     def test_nothing_sensitive_leaves_the_machine(self):
         result = self._cycle()
         self.assertEqual(result["status"], "ok", self.logged)
-        self.assertIn("container-wordpress.log.gz", self.uploads)
+        wp_names = [n for n in self.uploads if n.startswith("container-wordpress-")]
+        self.assertEqual(len(wp_names), 1, sorted(self.uploads))
         self.assertEqual(len(self.uploads), 4, sorted(self.uploads))
         for name, body in self.uploads.items():
             for leak in self.LEAKS:
                 self.assertNotIn(leak, body, f"{leak!r} shipped in {name}")
 
-        wp = self.uploads["container-wordpress.log.gz"]
+        wp = self.uploads[wp_names[0]]
         self.assertIn("_wpnonce=<redacted>", wp)
         self.assertIn("Cookie: <redacted>", wp)
         self.assertRegex(wp, r"^fd[0-9a-f]{2}:", "visitor IP not pseudonymized")
@@ -392,9 +514,10 @@ class TestUploadIsScrubbedOnLinux(unittest.TestCase):
         with mock.patch.object(analytics_sharing.redact, "scrub_for_upload", flaky):
             result = self._cycle()
         self.assertEqual(result["status"], "ok", self.logged)
-        self.assertNotIn("container-wordpress.log.gz", self.uploads)
+        self.assertFalse([n for n in self.uploads if n.startswith("container-wordpress")],
+                         sorted(self.uploads))
         self.assertEqual(len(self.uploads), 3, sorted(self.uploads))
-        self.assertTrue(any("not offering container-wordpress.log" in m for m in self.logged),
+        self.assertTrue(any("not offering container-wordpress-" in m for m in self.logged),
                         self.logged)
 
 

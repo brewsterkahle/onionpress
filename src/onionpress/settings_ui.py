@@ -61,8 +61,10 @@ SETTINGS_HELP = {
     ),
     "UPDATE_ON_LAUNCH": (
         "Update Docker Images on Launch\n\n"
-        "Automatically check for updated WordPress, MariaDB, and Tor container "
-        "images when the app launches. Ensures you have the latest security patches."
+        "Re-pull every WordPress, MariaDB, and Tor container image when the app "
+        "launches. Off by default: the images are pinned, and a launch fetches "
+        "only what a new release moved. On, every launch contacts the image "
+        "registry."
     ),
     "INSTALL_IA_PLUGIN": (
         "Archive Your Posts to Make Your Site Robust\n\n"
@@ -198,7 +200,7 @@ SETTINGS_KEYS = [
     ("VM_CPU", "2"),
     ("PREVENT_SLEEP", "normal"),
     ("LAUNCH_ON_LOGIN", "yes"),
-    ("UPDATE_ON_LAUNCH", "yes"),
+    ("UPDATE_ON_LAUNCH", "no"),  # images are pinned; a launch pulls only what a release moved
     ("INSTALL_IA_PLUGIN", "yes"),
     ("REGISTER_WITH_ONIONHEAVEN", "yes"),  # on by default; unset shows checked
     ("SHARE_ANALYTICS_WITH_ONIONHOME", "no"),

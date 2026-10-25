@@ -2295,7 +2295,14 @@ _status_poll_loop() {
 
 start_container_log_capture() {
     mkdir -p "$CONTAINER_LOG_DIR"
-    for container in onionpress-tor onionheaven; do
+    # onionpress-wordpress too (container-wordpress.log): its stderr carries
+    # every PHP error_log line, the `[OnionPress Wayback]` state transitions
+    # among them, which the analytics upload ships; it was left out through
+    # 2.5.6 while the Mac daemon captured it (issue #203). The tailers end
+    # with their containers (`docker logs -f` exits when the container is
+    # removed by `compose down`), which is what keeps a restart from running
+    # two per container; this process's own are killed in stop_containers.
+    for container in onionpress-tor onionheaven onionpress-wordpress; do
         local logfile="$CONTAINER_LOG_DIR/container-${container#onionpress-}.log"
         # Rotate container log if over 5MB
         if [ -f "$logfile" ]; then
@@ -4162,6 +4169,10 @@ main() {
             stop_containers
             start_containers
             wait_for_services
+            # The `start` process's tailers ended with the old containers
+            # (and stop_containers above kills only this process's), so
+            # without this a restart left no container log capture (#203).
+            start_container_log_capture
             write_status
             # Start it again where its unit is enabled
             start_heartbeat_client

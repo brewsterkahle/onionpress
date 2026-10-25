@@ -1169,7 +1169,7 @@ function onionpress_settings_fields() {
         ),
         'UPDATE_ON_LAUNCH' => array(
             'label'       => 'Update on Launch',
-            'description' => 'Automatically check for and download updated Docker images when the app launches.',
+            'description' => 'Re-pull every container image when the app launches. Disabled by default: the images are pinned, and a launch fetches only what a new release moved.',
             'type'        => 'select',
             'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
         ),

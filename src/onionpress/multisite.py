@@ -45,6 +45,8 @@ MU_PLUGINS = (
     "onionpress-social-archive-twitter.php",
     "onionpress-social-archive-mastodon.php",
     "onionpress-social-archive-bluesky.php",
+    "onionpress-social-archive-reddit.php",
+    "onionpress-social-archive-blog.php",
     "onionpress-image-fallback.php",
     # What Cache Enabler and the Link Fixer may do here
     # (configure_cache_enabler and configure_ia_plugin refuse to set them
