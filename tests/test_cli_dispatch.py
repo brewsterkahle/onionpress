@@ -362,6 +362,11 @@ ROWS = [
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=1, returns=False),
+    # Issue #345: the Linux launcher's is_onionheaven_hub() is this.
+    Row("is-onionheaven-hub", ["is-onionheaven-hub", ONION],
+        "onionheaven.is_onionheaven_instance", mock.call(ONION), rc=0, returns=True),
+    Row("is-onionheaven-hub", ["is-onionheaven-hub"],
+        "onionheaven.is_onionheaven_instance", mock.call(""), rc=1, returns=False),
     # Phase 4 (#120): the launchers' using_local_images() is this.
     Row("using-local-images", ["using-local-images"], "containers.using_local_images",
         mock.call(D("config")), rc=0, returns=True),

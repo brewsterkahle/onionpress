@@ -378,13 +378,20 @@ initialize_colima() {
     fi
 }
 
-# Check if menubar app is already running.
+# Check if THIS bundle's menubar app is already running.
 # Anchored: the real process's command line is exactly the executable
 # path, with no arguments. A bare substring match also hit any process
 # that merely mentioned the path in its arguments (a shell, grep, tail,
 # editor...), and then this block exited without starting the app at all
 # (seen 2026-10-11: a test script's pgrep -f quoting the same path).
-if pgrep -u "$(whoami)" -f '^[^ ]*MenubarApp/Contents/MacOS/OnionPress( |$)' >/dev/null 2>&1; then
+# This bundle's own path, not any bundle's MenubarApp (issue #372): a
+# second bundle (a build under test, its own HOME and data dir) never
+# started while the installed one ran, and touched .reopen in the other
+# install's data dir instead. pgrep -f takes an ERE, so the path's
+# metacharacters are quoted ("OnionPress (1).app", the "." of ".app").
+MENUBAR_EXE="$MENUBAR_APP/Contents/MacOS/OnionPress"
+MENUBAR_EXE_RE=$(printf '%s' "$MENUBAR_EXE" | sed 's/[][*.^$()+?{}|\\]/\\&/g')
+if pgrep -u "$(whoami)" -f "^${MENUBAR_EXE_RE}( |$)" >/dev/null 2>&1; then
     echo "" >> "$LOG_FILE"
     echo "============================================================" >> "$LOG_FILE"
     log "=== Launcher restarted (app already running) ==="

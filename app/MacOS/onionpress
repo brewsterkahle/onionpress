@@ -379,6 +379,22 @@ if [ -f "$DATA_DIR/config" ]; then
 fi
 export ONIONHEAVEN_ACCEPT_REGISTRATIONS
 
+# The hub's takeover tunables (the Settings page writes them; compose hands
+# ONIONHEAVEN_PROPAGATION_DELAY to tor and onionheaven as
+# TOR_PROPAGATION_DELAY, ONIONHEAVEN_MAX_SERVICES to onionheaven and
+# onionheaven-farm). Kept in step with linux/onionpress and
+# onionpress.containers (issue #353); until then only the Linux launcher
+# read them. A value that is not a whole number is left to the default.
+ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
+ONIONHEAVEN_PROPAGATION_DELAY="${ONIONHEAVEN_PROPAGATION_DELAY:-180}"
+if [ -f "$DATA_DIR/config" ]; then
+    _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    [[ "$_val" =~ ^[0-9]+$ ]] && ONIONHEAVEN_MAX_SERVICES="$_val"
+    _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    [[ "$_val" =~ ^[0-9]+$ ]] && ONIONHEAVEN_PROPAGATION_DELAY="$_val"
+fi
+export ONIONHEAVEN_MAX_SERVICES ONIONHEAVEN_PROPAGATION_DELAY
+
 # Locally built container images (development).
 #
 # build/build-images.sh builds the tor and wordpress images from this repo and
@@ -3068,6 +3084,10 @@ main() {
             cd "$DOCKER_DIR"
             if wp_is_installed; then
                 echo "WordPress is already installed."
+                # A site is set up: the menubar must not show the welcome
+                # screen for it (issue #374; a node set up headlessly before
+                # this marker existed gets it from this run).
+                touch "$DATA_DIR/.setup_complete"
                 exit 0
             fi
             # Make sure WordPress container is running
@@ -3083,6 +3103,12 @@ main() {
             # A failed setup — for --from-backup, a backup refused before
             # anything was restored — must not go on to flag a key reimport.
             setup_wordpress_cli "$@" || exit 1
+            # WordPress is installed: what the menubar's first-run check
+            # asks (issue #374). Its own setup window writes the same
+            # marker (setup_logic.mark_setup_complete), the daemon again
+            # once the site is operational; without it a headless setup's
+            # first menubar launch showed the welcome screen.
+            touch "$DATA_DIR/.setup_complete"
             if [ -n "$has_from_backup" ]; then
                 # --from-backup restored keys to vanity-keys/ — need to reinstall
                 # into the key volume so Tor uses the restored address.

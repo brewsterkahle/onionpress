@@ -15,7 +15,8 @@ from typing import Callable
 from . import key_manager, wordpress_egress
 from .docker import Docker, DockerError
 from .config import (
-    DEFAULTS, Secrets, ensure_secrets, load_secrets, read_value,
+    DEFAULTS, SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
+    read_value,
     PortConfig, detect_port_offset,
 )
 from .platform import OnionPressPaths
@@ -308,6 +309,15 @@ class ContainerManager:
         # from here never recreates tor/onionheaven with a different value.
         env["ONIONHEAVEN_ACCEPT_REGISTRATIONS"] = read_value(
             self.paths.config_file, "ONIONHEAVEN_ACCEPT_REGISTRATIONS", "")
+
+        # The hub's takeover tunables, as both launchers export them (issue
+        # #353): compose hands ONIONHEAVEN_PROPAGATION_DELAY to tor and
+        # onionheaven as TOR_PROPAGATION_DELAY and ONIONHEAVEN_MAX_SERVICES
+        # to onionheaven and onionheaven-farm. A value the config check
+        # refuses (a hand edit) is left to the default.
+        for key in ("ONIONHEAVEN_MAX_SERVICES", "ONIONHEAVEN_PROPAGATION_DELAY"):
+            value = read_value(self.paths.config_file, key, "")
+            env[key] = value if SETTINGS_PAGE_KEYS[key](value) else default_value(key)
 
         return env
 

@@ -903,8 +903,9 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
         self.assertEqual(backup.ONIONHOME_ADDRESS, onionnames_registrar.DEFAULT_ONIONHOME_ADDRESS)
 
     def test_not_on_server_active(self):
-        """status.json's onionheaven.server_active is true on every Linux
-        node: no refusal may rest on it."""
+        """status.json's onionheaven.server_active is the status page's
+        view (by address since #345; before, true on every Linux node):
+        no refusal may rest on it."""
         for rel in ("src/onionpress/backup.py", "linux/onionpress"):
             text = mv._read(rel)
             start = text.index("settings_page_backup_refusal" if rel.endswith(".py")
@@ -1477,8 +1478,9 @@ class TestSettingsPageSaysSo(unittest.TestCase):
         self.restore = _branch(self.php, "<h2>Restore</h2>", "</form>")
 
     def test_the_backup_section(self):
-        # On every node: status.json's server_active is true on every Linux
-        # node, so the page does not try to tell.
+        # On every node: status.json's server_active is the status page's
+        # view (true on every Linux node before #345), so the page does not
+        # try to tell.
         self.assertNotIn("$oh_server_active", self.backup)
         self.assertIn("On an OnionHeaven hub or on OnionHome, a backup is refused "
                       "here", self.backup)

@@ -358,13 +358,16 @@ class TestEnsureArchiveS3Keys(unittest.TestCase):
             multisite._wp("option", "get", "x")
             multisite._wp("option", "update", "x", input="v")
         plain, piped = (c.args[0] for c in srun.call_args_list)
-        # As www-data, never root, and never --allow-root.
+        # As www-data, never root, and never --allow-root; and with no
+        # outbound request from the WordPress it loads (issue #373).
         self.assertEqual(plain, ["docker", "exec", "-u", "www-data", "-e",
                                  "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                                 "-e", "ONIONPRESS_WP_OFFLINE=1",
                                  "onionpress-wordpress", "wp", "option", "get", "x"])
         self.assertEqual(piped[:4], ["docker", "exec", "-i", "-u"])
         self.assertEqual(piped[1:], ["exec", "-i", "-u", "www-data", "-e",
                                      "WP_CLI_CACHE_DIR=/tmp/wp-cli-cache",
+                                     "-e", "ONIONPRESS_WP_OFFLINE=1",
                                      "onionpress-wordpress", "wp", "option",
                                      "update", "x"])
         self.assertEqual(srun.call_args_list[1].kwargs["input"], "v")

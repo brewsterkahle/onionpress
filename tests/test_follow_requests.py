@@ -180,6 +180,9 @@ class TestHostRule(unittest.TestCase):
         pre = php[php.index("add_filter( 'pre_http_request', function"):]
         self.assertTrue(pre.startswith(
             "add_filter( 'pre_http_request', function ( $pre, $args, $url ) {\n"
+            "    if ( false !== $pre ) {\n"
+            "        return $pre;   // already answered (onionpress_tor_proxy_offline): no probe\n"
+            "    }\n"
             "    $host = strtolower( (string) parse_url( $url, PHP_URL_HOST ) );\n"
             "    if ( '' === $host || onionpress_is_local_host( $host ) ) {\n"
             "        return $pre;\n"), pre[:300])

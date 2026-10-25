@@ -164,6 +164,34 @@ function onionpress_tor_proxy_cron_request( $cron_request ) {
 add_filter( 'cron_request', 'onionpress_tor_proxy_cron_request', PHP_INT_MAX );
 
 /**
+ * ONIONPRESS_WP_OFFLINE=1 in the process environment: no outbound request
+ * at all (issue #373). The host's provisioning wp-cli calls set it
+ * (onionpress.wp_files.wp_cli_args(offline=True); the name is a literal in
+ * both, test-locked). wp-cli loads WordPress, and `wp theme list` runs
+ * wp_update_themes(), `wp plugin list` wp_update_plugins(): update checks
+ * through Tor that, with Tor down, each waited for the proxy's timeout
+ * until the host's call expired and the start summary said the
+ * provisioning failed. First in line, before the SOCKS probe and the URL
+ * check: nothing is connected to and nothing looked up. Local hosts
+ * (containers, the wp-cron loopback) are untouched. Apache's PHP never
+ * sees the variable.
+ */
+function onionpress_tor_proxy_offline( $pre, $args, $url ) {
+    if ( '1' !== getenv( 'ONIONPRESS_WP_OFFLINE' ) ) {
+        return $pre;
+    }
+    $host = strtolower( (string) parse_url( $url, PHP_URL_HOST ) );
+    if ( '' === $host || onionpress_is_local_host( $host ) ) {
+        return $pre;
+    }
+    return new WP_Error(
+        'onionpress_offline',
+        'OnionPress: not requesting ' . $host . ' — this wp-cli run makes no outbound request (ONIONPRESS_WP_OFFLINE)'
+    );
+}
+add_filter( 'pre_http_request', 'onionpress_tor_proxy_offline', 1, 3 );
+
+/**
  * Refuse any non-local request we cannot guarantee is proxied.
  *
  * Two ways that happens: the curl transport is missing (WordPress would fall
@@ -172,6 +200,9 @@ add_filter( 'cron_request', 'onionpress_tor_proxy_cron_request', PHP_INT_MAX );
  * the correct outcome for this project; leaking is not.
  */
 add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
+    if ( false !== $pre ) {
+        return $pre;   // already answered (onionpress_tor_proxy_offline): no probe
+    }
     $host = strtolower( (string) parse_url( $url, PHP_URL_HOST ) );
     if ( '' === $host || onionpress_is_local_host( $host ) ) {
         return $pre;
@@ -237,7 +268,7 @@ add_filter( 'http_request_args', 'onionpress_tor_proxy_request_args', PHP_INT_MA
  * onionpress_remote_url_is_safe(). WordPress's own error code and message.
  */
 function onionpress_tor_proxy_check_url( $pre, $args, $url ) {
-    if ( empty( $args['onionpress_check_url'] ) || onionpress_remote_url_is_safe( $url ) ) {
+    if ( false !== $pre || empty( $args['onionpress_check_url'] ) || onionpress_remote_url_is_safe( $url ) ) {
         return $pre;
     }
     return new WP_Error( 'http_request_failed', __( 'A valid URL was not provided.' ) );

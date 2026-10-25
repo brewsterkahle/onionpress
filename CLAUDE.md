@@ -504,6 +504,21 @@
   `loggable_value` so `SECRET_CONFIG_KEYS` values never reach a log.
   `tests/test_settings_page_updates.py` locks the page's fields, choices,
   ranges and token pattern to the allowlist.
+- **Every page key reaches a reader** (issue #353,
+  `tests/test_settings_page_keys_are_read.py`: a census row per key in
+  `SETTINGS_PAGE_KEYS`, the host file that reads it or, for the hub's
+  takeover tunables, the compose mapping and the image constant). Both
+  launchers and `ContainerManager._build_env` export
+  `ONIONHEAVEN_MAX_SERVICES` and `ONIONHEAVEN_PROPAGATION_DELAY` from the
+  config (the Mac side never did; `_build_env` falls back to the default
+  for a value the check refuses); compose hands the delay to tor and
+  onionheaven as `TOR_PROPAGATION_DELAY` (web-server.py reads it too; tor
+  never got it) and the cap to onionheaven and onionheaven-farm under its
+  own name (it went to onionheaven as `ONIONHEAVEN_TAKEOVER_SCALE_THRESHOLD`,
+  which nothing read). One default, 50 and 180, in config, compose, the
+  image and the page's placeholder (`DEFAULTS` said 10). Both are in
+  `NEEDS_RESTART`. `ONIONHEAVEN_HUB_THRESHOLD` is gone: nothing ever read
+  it.
 - **`onionpress config get|set|unset|list [--json]` is the one writer of
   `~/.onionpress/config` for the apps** (issue #365, CLI-first phase 1;
   plan: https://claude.ai/artifact/JgQYk8MQmW3ZixVYj4MS78). Its key set is
@@ -692,6 +707,18 @@
   the menubar's. The Settings page's question the handler stops at goes
   into `pending_question`; the menubar asks and runs `handle-action
   --confirmed <what>` / `--cancel` itself.
+- **`.setup_complete` is written by every setup, not only the daemon**
+  (issue #374): the menubar shows the welcome screen until it exists, and
+  the daemon writes it only once the site is fully operational, so a node
+  set up headlessly with `onionpress setup` (or stopped before the site
+  was reachable) got the welcome screen at its first menubar launch.
+  `setup_logic.mark_setup_complete` (`SETUP_COMPLETE_MARKER`) writes it
+  at the end of a completed `install_fresh_wordpress` (the setup window,
+  the Linux paths), the Mac launcher's `setup` touches it after
+  `setup_wordpress_cli` (both branches) and for an already installed site
+  (the repair for a node from before: run `onionpress setup`), and the
+  daemon's write stays. `tests/test_setup_complete_marker.py` runs the
+  launcher's case under bash and keeps the four literals equal.
 - **Logs**: the daemon owns `logs/onionpress-*.log` (and the capture
   logs); the menubar writes `logs/menubar-*.log`; View Logs opens the
   daemon's, the launcher's flat `onionpress.log` and its own
@@ -1382,6 +1409,17 @@
   from putting a released key back before the launcher removes it;
   `onionpress uninstall` stops the daemon first (`uninstall.run`).
   `tests/test_onionheaven_lifecycle.py`.
+- **Hub mode is decided by address on both platforms** (issue #345):
+  status.json's `onionheaven.server_active` (the status page's "Mode",
+  the Settings page's takeover tunables) is
+  `onionheaven.is_onionheaven_instance(<served address>)`, the Mac
+  daemon's rule; the Linux launcher's `write_status` asks it through
+  `is_onionheaven_hub` → `onionpress is-onionheaven-hub <address>` and
+  queries the hub's registry only when it says yes. It used to be "a
+  container named `onionheaven` is running", which every node has, so
+  every Linux node called itself the hub. `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`
+  on another address is not counted, as on the Mac.
+  `tests/test_linux_hub_mode.py`.
 
 ## Backups Carry Original Images Only (issue #257)
 - `create_backup` prunes WordPress's regenerable derivatives (`-WxH` sizes,
@@ -1628,6 +1666,23 @@
   instead of running WordPress as root. `tests/test_wp_cli_as_www_data.py`
   scans everything that ships for `--allow-root` and for "wp" argv lists
   outside wp_files, and keeps the copies equal.
+- **The host's provisioning wp-cli calls make no outbound request**
+  (issue #373): `wp_files.wp_cli_args(offline=True)` adds `-e
+  ONIONPRESS_WP_OFFLINE=1`, and the onionpress-tor-proxy mu-plugin's first
+  `pre_http_request` filter (`onionpress_tor_proxy_offline`, priority 1)
+  answers every request to a host outside Docker with a WP_Error before
+  the SOCKS probe; its later filters hand a set `$pre` on. `multisite._wp`
+  passes it by default (provision-post-install, setup-bundled-plugins'
+  steps, deactivate-wp-statistics): wp-cli loads WordPress, `wp theme
+  list` runs `wp_update_themes()` through Tor, and with Tor down each
+  such request waited for the proxy's timeout until the 60 s call expired
+  and START SUMMARY said provision-post-install failed with the site up.
+  Callers that download (`setup_logic`'s `wp language core install`, the
+  daemon's `Docker.wp`, the bash `wp_cli`) are unchanged. The mu-plugin is
+  the app's (`MU_PLUGINS`, put in place by provision-post-install before
+  its first update-checking call), not the image's: no image publish.
+  `tests/test_wp_cli_offline.py` locks the name to the PHP literal and
+  runs the plugin under php where it is installed (CI).
 - What wp-cli prints is www-data's to choose. Root acts on none of it but
   the audit's downloaded core zip, removed only when the name is
   `/tmp/onionpress-wordpress-<version>.zip`.
@@ -1750,6 +1805,16 @@
 - **`LSMultipleInstancesProhibited` must NOT be in any Info.plist** — macOS enforces it across ALL users sharing the same app bundle, not just per-user
 - **`pgrep` in the launcher must use `-u $(whoami)`** to restrict to the current user's processes
 - **PID lock file** (`~/.onionpress/onionpress.pid`) prevents the same user from double-launching; cleaned up via `trap` on EXIT/INT/TERM/HUP. The daemon's is `daemon.pid`; the agent is per user (`gui/<uid>`), so each user's daemon has its own offset
+- **launcher.sh's already-running check matches THIS bundle's MenubarApp**
+  (issue #372): `pgrep -u "$(whoami)" -f "^${MENUBAR_EXE_RE}( |$)"`, the
+  bundle's own `Contents/Resources/MenubarApp/Contents/MacOS/OnionPress`
+  with its ERE metacharacters quoted by sed. The old `^[^ ]*MenubarApp/…`
+  matched any bundle's, so a second bundle of the same user (a build
+  under test with its own HOME) never started beside the installed one
+  and touched `.reopen` in the other install's data dir. `onionpress quit`
+  already looked for `$RESOURCES_DIR`'s. The launchd agent's label is
+  still one per user, so two bundles of one user share the daemon.
+  `tests/test_launcher_pgrep_anchor.py` runs the block under bash.
 - **Container-internal ports are NOT offset** — Docker networking (`onionpress-tor:9050`, `wordpress:80`) is isolated per-VM. Only host-side port mappings change.
 - `OnionPress.app/` is gitignored — it is assembled at build time from `app/` source. Never commit build output.
 

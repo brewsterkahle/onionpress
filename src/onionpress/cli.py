@@ -2209,6 +2209,16 @@ def main(argv: list[str] = None) -> int:
              "for --sandbox is refused; exit 1 on any failure")
     p_db_import.add_argument(
         "--sql-file", required=True, help="The dump to import (wordpress.sql)")
+    p_is_hub = sub.add_parser(
+        "is-onionheaven-hub",
+        help="Exit 0 when the onion address given is the OnionHeaven hub's "
+             "(onionheaven.is_onionheaven_instance, the Mac daemon's rule), "
+             "1 otherwise; the Linux launcher's write_status asks it, so "
+             "status.json's onionheaven.server_active is decided by the "
+             "node's address, never by the onionheaven container, which "
+             "every node runs (issue #345)")
+    p_is_hub.add_argument("address", nargs="?", default="",
+                          help="The node's served onion address")
     sub.add_parser(
         "using-local-images",
         help="Exit 0 when the stack points at images built on this machine "
@@ -2653,6 +2663,13 @@ def main(argv: list[str] = None) -> int:
         paths = resolve_paths(data_dir=args.data_dir)
         pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths).docker_bin)
         return 0 if pending else 1
+
+    if args.command == "is-onionheaven-hub":
+        # The Linux launcher's is_onionheaven_hub() (issue #345): the Mac
+        # daemon's rule, by address. No OnionPressCLI setup (every status
+        # tick, beside a live stack).
+        from .onionheaven import is_onionheaven_instance
+        return 0 if is_onionheaven_instance(args.address) else 1
 
     if args.command == "using-local-images":
         # The launchers' using_local_images(): the one copy of the rule

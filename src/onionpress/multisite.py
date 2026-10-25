@@ -139,12 +139,21 @@ def _wp(
     docker_bin: str = "docker",
     timeout: int = 60,
     input: Optional[str] = None,
+    offline: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run wp-cli inside the onionpress-wordpress container, as www-data
     (wp_files.wp_cli_args). With *input*, `docker exec -i` and *input* on
-    wp-cli's stdin."""
+    wp-cli's stdin.
+
+    *offline* (the default: nothing here needs the network) holds every
+    outbound request of the WordPress it loads (wp_files.OFFLINE_ENV, read
+    by the onionpress-tor-proxy mu-plugin). `wp theme list` runs
+    wp_update_themes(), an update check through Tor; with Tor down each
+    such request hung until the proxy's timeout, the call expired, and the
+    start reported provision-post-install failed (issue #373)."""
     return subprocess.run(
-        [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None),
+        [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None,
+                                            offline=offline),
         input=input,
         capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=timeout,

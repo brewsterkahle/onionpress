@@ -190,8 +190,9 @@ OnionHome that backup is refused before anything is copied
 (`settings_page_backup_refusal`: the node's own address is the canonical
 hub's or OnionHome's, its config has `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`,
 this volume holds registrants' keys or registry rows, or OnionHome's
-registry is on its volume; never `status.json`'s `server_active`, which is
-true on every Linux node), and the page says why. It fails closed: when the
+registry is on its volume; never `status.json`'s `server_active`, the
+status page's view, which was true on every Linux node until #345), and the
+page says why. It fails closed: when the
 node has no address to check, or the onionheaven or onionpress-tor container
 does not answer those checks, the backup is refused as well, since the node
 could be either. A hub is backed up from

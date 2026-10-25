@@ -239,7 +239,7 @@ class TestAllowlist(unittest.TestCase):
             ("VM_MEMORY", "0"), ("VM_MEMORY", "65"), ("VM_MEMORY", "-1"),
             ("VM_MEMORY", "2.5"), ("VM_MEMORY", "\uff12"), ("VM_MEMORY", 2),
             ("VM_MEMORY", ""), ("ONIONHEAVEN_PROPAGATION_DELAY", "59"),
-            ("ONIONHEAVEN_MAX_SERVICES", "501"), ("ONIONHEAVEN_HUB_THRESHOLD", "0"),
+            ("ONIONHEAVEN_MAX_SERVICES", "501"), ("ONIONHEAVEN_MAX_SERVICES", "0"),
             ("CLOUDFLARE_TUNNEL_TOKEN", "short"),
             ("CLOUDFLARE_TUNNEL_TOKEN", TOKEN + "\nONIONPRESS_TOR_IMAGE=x"),
             ("CLOUDFLARE_TUNNEL_TOKEN", TOKEN + " x"),
@@ -256,7 +256,6 @@ class TestAllowlist(unittest.TestCase):
             "PREVENT_SLEEP": "on-battery", "VM_MEMORY": "64",
             "REGISTER_WITH_ONIONHEAVEN": "", "SHARE_ANALYTICS_WITH_ONIONHOME": "yes",
             "ONIONHEAVEN_MAX_SERVICES": "1", "ONIONHEAVEN_PROPAGATION_DELAY": "3600",
-            "ONIONHEAVEN_HUB_THRESHOLD": "1000",
         }
         self.assertEqual(op_config.filter_settings_updates(good), (good, []))
         for token in (TOKEN, TOKEN.rstrip("="), "A-b_c+d/" * 8, ""):
@@ -333,8 +332,7 @@ class TestSettingsPageMatchesAllowlist(unittest.TestCase):
     def test_number_ranges_match_the_host_check(self):
         numeric = {k: f for k, f in self.fields.items() if f["min"] is not None}
         self.assertEqual(set(numeric), {
-            "VM_MEMORY", "ONIONHEAVEN_MAX_SERVICES",
-            "ONIONHEAVEN_PROPAGATION_DELAY", "ONIONHEAVEN_HUB_THRESHOLD"})
+            "VM_MEMORY", "ONIONHEAVEN_MAX_SERVICES", "ONIONHEAVEN_PROPAGATION_DELAY"})
         for key, field in numeric.items():
             check = op_config.SETTINGS_PAGE_KEYS[key]
             self.assertTrue(check(str(field["min"])) and check(str(field["max"])), key)
