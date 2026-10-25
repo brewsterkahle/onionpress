@@ -1121,6 +1121,11 @@ class AnalyticsHost:
         self._onionheaven_log = _RotatedPlainLog(
             os.path.join(logs_dir, "container-onionheaven.log"),
             "container-onionheaven")
+        # The WordPress container's stderr (PHP error_log, the Wayback
+        # state transitions); the launcher's capture writes it since #203.
+        self._wp_errors_log = _RotatedPlainLog(
+            os.path.join(logs_dir, "container-wordpress.log"),
+            "container-wordpress")
 
     # -- what analytics_sharing calls --------------------------------------
 
