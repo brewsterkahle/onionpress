@@ -388,11 +388,25 @@
 - `make coverage` is the same run under `coverage` (`.coveragerc`:
   branches; src/onionpress, linux and the tor image's scripts; tests,
   tests/stress and setup.py left out), then `build/coverage-floors.sh`:
-  total 60 %, `cli.py` 69, `handle_action.py` 85, `confirm.py` 90,
-  `config.py` 85, each a point or two under the measured value. Raise a
-  floor when the tests catch up; never lower one to pass. CI runs the
-  three steps on the Linux job and uploads `coverage.xml` + the HTML
-  report. `tests/test_coverage_gate.py` holds the wiring.
+  total 63 %, `cli.py` 97, `app_commands.py` 94, `handle_action.py` 95,
+  `confirm.py` 98, `config.py` 85, each a point or two under the measured
+  value. Raise a floor when the tests catch up; never lower one to pass.
+  CI runs the three steps on the Linux job and uploads `coverage.xml` +
+  the HTML report. `tests/test_coverage_gate.py` holds the wiring.
+- **Every `onionpress` command handler has a test of its own**:
+  `tests/test_cli_dispatch.py` is the census (main() reaches each handler
+  with the parsed arguments); `tests/test_cli_commands.py` runs the
+  handlers in `cli.py` against stubs (OnionPressCLI built with Docker,
+  the port probe and secrets patched, each module patched where the
+  handler imports it: update, uninstall and reset at a terminal, the
+  lifecycle commands, restore's four hub-data fates and its JSON answer,
+  the staging helpers, the hub recovery key, update-images,
+  generate-vanity, the Settings page's commands, the password and
+  recovery-key readers); `tests/test_cli_edges.py` covers the paths
+  app_commands, confirm and handle_action leave out, reusing the
+  harnesses of `test_cli_app_commands.py` and `test_handle_action.py`.
+  A new handler or branch gets its case there; coverage of `cli.py`
+  (99 % on 2026-10-25) is held by the floors above.
 - **A new `onionpress` subcommand needs a row in
   `tests/test_cli_dispatch.py`**: the census walks the parser
   `cli.main()` builds (nested subparsers too) and fails on an

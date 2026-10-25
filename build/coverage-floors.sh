@@ -3,19 +3,21 @@
 # files whose logic the tests are meant to exercise (the CLI and the
 # check/confirm, Settings-page and config code). Run after `coverage run`
 # (`make coverage`, CI). Each floor sits a point or two under what the
-# 2026-10-23 run measured; raise one when the tests catch up, never lower
-# one to pass. Runs under macOS /bin/bash 3.2 (no associative arrays).
+# run that set it measured (2026-10-23; the CLI's raised 2026-10-25 with
+# tests/test_cli_commands.py and tests/test_cli_edges.py); raise one when
+# the tests catch up, never lower one to pass. Runs under macOS /bin/bash 3.2 (no associative arrays).
 set -e
 set -o pipefail  # coverage's exit code, not tail's
 cd "$(dirname "$0")/.."
 
-TOTAL_FLOOR=60
+TOTAL_FLOOR=63
 
 # "<file> <floor>" per line.
 FILE_FLOORS="
-src/onionpress/cli.py 69
-src/onionpress/handle_action.py 85
-src/onionpress/confirm.py 90
+src/onionpress/cli.py 97
+src/onionpress/app_commands.py 94
+src/onionpress/handle_action.py 95
+src/onionpress/confirm.py 98
 src/onionpress/config.py 85
 "
 
