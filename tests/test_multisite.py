@@ -222,6 +222,40 @@ class TestMuPluginsList(unittest.TestCase):
             f"Critical mu-plugins missing from MU_PLUGINS: {missing}",
         )
 
+    # The directory's files are what an install can deploy; MU_PLUGINS is
+    # what provision-post-install deploys (both platforms). Linux's
+    # `onionpress update` copies every *.php there into mu-plugins/, so a
+    # file left out of the tuple reaches updated Linux sites and no other
+    # install: the Reddit and Blog importers were in that state (#229).
+    PLUGINS_DIR = pathlib.Path(__file__).resolve().parent.parent / "app" / "Resources" / "plugins"
+    # Installed as wp-content/sunrise.php by provision_post_install, never
+    # as an mu-plugin.
+    NOT_MU_PLUGINS = {"onionpress-sunrise.php"}
+
+    def test_mu_plugins_is_the_directory(self):
+        on_disk = {
+            p.name for p in self.PLUGINS_DIR.iterdir()
+            if p.is_file() and p.name.startswith("onionpress-")
+            and p.name.endswith(".php")
+        }
+        self.assertTrue(on_disk, f"no mu-plugins found in {self.PLUGINS_DIR}")
+        listed = set(multisite.MU_PLUGINS)
+        self.assertEqual(len(multisite.MU_PLUGINS), len(listed), "duplicate in MU_PLUGINS")
+        self.assertFalse(
+            listed & self.NOT_MU_PLUGINS,
+            f"{listed & self.NOT_MU_PLUGINS} is not an mu-plugin",
+        )
+        not_deployed = on_disk - self.NOT_MU_PLUGINS - listed
+        self.assertFalse(
+            not_deployed,
+            f"in app/Resources/plugins but not in MU_PLUGINS (never installed): {not_deployed}",
+        )
+        not_on_disk = listed - on_disk
+        self.assertFalse(
+            not_on_disk,
+            f"in MU_PLUGINS but not in app/Resources/plugins: {not_on_disk}",
+        )
+
 
 class TestConfigureIaPlugin(unittest.TestCase):
     def test_skips_when_wp_not_installed(self):
