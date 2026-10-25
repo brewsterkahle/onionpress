@@ -59,3 +59,6 @@ tests/onionheaven-stress-results/
 .coverage.*
 build/coverage-html/
 build/coverage.xml
+
+# End-to-end test results (e2e/run.sh)
+e2e-results/

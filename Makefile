@@ -1,5 +1,5 @@
 .PHONY: help images images-multiarch dev-up dev-down extension icons \
-        dmg deb build build-simple test test-unit coverage doctor clean clean-cache install
+        dmg deb build build-simple test test-unit coverage e2e e2e-probe doctor clean clean-cache install
 
 help:
 	@echo "OnionPress Build System"
@@ -22,6 +22,9 @@ help:
 	@echo "  make test         - Check the source layout is intact"
 	@echo "  make test-unit    - Run the Python unit tests"
 	@echo "  make coverage     - The unit tests under coverage, with the floors"
+	@echo "  make e2e-probe    - What this host could test end to end (starts nothing)"
+	@echo "  make e2e TIER=t0  - The end-to-end suite on throwaway installs (slow;"
+	@echo "                      docs/E2E-TESTING.md; E2E_ARGS for e2e/run.sh options)"
 	@echo ""
 	@echo "Housekeeping:"
 	@echo "  make clean        - Remove build outputs"
@@ -101,6 +104,12 @@ test:
 	@echo ""
 	@echo "Source layout is valid!"
 	@echo "To build: make dmg"
+
+e2e-probe:
+	@./e2e/run.sh --probe
+
+e2e:
+	./e2e/run.sh --tier $(or $(TIER),t0) $(E2E_ARGS)
 
 test-unit:
 	@# Run the Python unit tests under a pinned 3.14 via uv. Some modules
