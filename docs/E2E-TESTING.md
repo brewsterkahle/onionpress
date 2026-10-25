@@ -74,7 +74,7 @@ OnionPress gets Docker there, and the arch (whatever the host or VM runs):
 
 | Flavour | What it is | Default |
 |---|---|---|
-| `deb` | `apt install ./onionpress.deb` on a fresh system: `Depends: docker.io \| docker-ce` pulls in Debian's own system docker.io | yes |
+| `deb` | `apt install ./onionpress.deb` on a fresh system: `Depends: docker.io \| docker-ce` pulls in Debian's docker.io, and the postinst sets it up rootless when it can (else the docker group); the report says which | yes |
 | `install-sh` | `linux/install.sh`: Docker CE from Docker's repository, rootless, system daemon disabled | with `--linux-flavours all` |
 
 What each host can offer:
@@ -213,11 +213,20 @@ Small, test-motivated, each with its own unit test:
 3. **Wayback endpoint override** (filter in the mu-plugin) pointing at a
    mock container, so the sweep can be run end to end without submitting
    to the public Wayback Machine.
-4. **Headless Mac setup.** The 2.5.3 QA set WordPress up via
-   `setup_logic.install_fresh_wordpress`; a supported
-   `onionpress setup --non-interactive` path (Linux has one) would make the
-   Mac first run testable without the setup window.
-5. Optional time knobs for slow paths (republish window, takeover delay),
+4. **The setup window's provisioning without the window.** Both launchers'
+   `onionpress setup --user … --pass …` install WordPress headlessly (T0
+   uses it), but the Mac setup window also creates the owner's subsite and
+   onion name (`setup_logic.install_fresh_wordpress`); a CLI path to that
+   would let T1 test the Mac first run as a user gets it.
+5. **A daemon launchd label per data directory.** The Mac daemon's agent is
+   `org.onionpress.daemon` in the user's gui domain, whatever `$HOME` says.
+   A test node in a scratch `HOME` and the live install of the same macOS
+   user would take over each other's agent (a test teardown's `bootout`
+   would stop the live heartbeat; the hub takes the address over ~10 min
+   later). Until the label carries the data directory, the harness refuses
+   to start a Mac node while that label is loaded for any program outside
+   its scratch root (`harness/safety.py`).
+6. Optional time knobs for slow paths (republish window, takeover delay),
    env-only, logged loudly when set. `ONIONHEAVEN_HEARTBEAT_INTERVAL`
    already exists.
 
@@ -424,9 +433,9 @@ what this host could test without starting anything.
 
 ## 8. Order of work
 
-1. Harness skeleton: host probe, safety guard + tripwire, the node kinds
-   (Mac and `linux-vm` first, `linux-user`/`linux-host` next), the
-   platform-aware report, evidence collection, T0. This alone replaces most of the hand-run QA setup.
+1. ~~Harness skeleton: host probe, safety guard + tripwire, Mac and
+   `linux-vm` nodes, the platform-aware report, evidence collection, T0.~~
+   Built (§10). Next in this step: `linux-user`/`linux-host` nodes.
 2. §5.1 (OnionHome override) and pre-written configs, so T2 needs no image
    patching.
 3. T1 backup/restore, keys, and security properties (highest bug yield in
@@ -466,3 +475,35 @@ what this host could test without starting anything.
 - **Not Ubuntu for now**, even though CI runners are Ubuntu: running Debian
   VMs on them keeps one target. If Ubuntu users show up, it is one more
   VM image, not a harness change.
+
+## 10. Running it
+
+```bash
+make e2e-probe                  # what this host could test; starts nothing
+make dmg                        # a Mac build to test (or pass one, below)
+make e2e                        # T0 on every platform the host offers
+e2e/run.sh --tier t0 --platforms debian
+e2e/run.sh --release latest     # a published release's .dmg/.deb (checked against SHA256SUMS)
+e2e/run.sh --mac-app /Applications/OnionPress.app --deb build/onionpress.deb
+e2e/run.sh --keep -x            # stop at the first failure, leave the nodes up
+e2e/merge-results.py e2e-results/A/results.json e2e-results/B/results.json
+```
+
+Builds: the Mac node copies `--mac-app`/`--mac-dmg`/the release's DMG,
+else the checkout's `OnionPress.app` or `build/onionpress.dmg`; without
+one, macOS is reported as not tested. A Debian node installs `--deb`/the
+release's `.deb`, else builds one inside the VM from the checkout's
+tracked files as they are on disk. Lima comes from `PATH`, `--limactl`,
+or the `limactl` bundled in an OnionPress.app (the build under test, or
+the one in /Applications, used only as a tool).
+
+Each run writes `e2e-results/<date>-<host>/`: `report.md`, `results.json`,
+`junit.xml`, `harness.log`, and per node `nodes/<name>/` (the harness log
+of every command, the data dir's logs and config, every container's log
+and `docker inspect`). Nodes live under `/tmp/ope2e` (`--scratch-root`),
+which the harness claims with a marker file; the next run removes
+whatever a killed or `--keep` run left there (VMs included).
+
+Code: `e2e/harness/` (probe, safety, nodes, report, session; no pytest
+in it, so `tests/test_e2e_harness.py` checks it in the unit suite),
+`e2e/conftest.py` (pytest wiring), `e2e/test_t<N>_*.py` (tiers).
