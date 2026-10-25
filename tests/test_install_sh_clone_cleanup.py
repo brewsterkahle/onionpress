@@ -170,7 +170,12 @@ class TestTheCleanupPrologueRuns(unittest.TestCase):
                 self._assert_tmpdir_intact()
 
     def test_the_journal_tail_is_killed_too(self):
-        r = self._run('sleep 30 &\nJOURNAL_PID=$!\necho "$JOURNAL_PID"\n', timeout=10)
+        # The sleep's output goes nowhere: with the run's captured stdout
+        # inherited, the pipe stays open until the sleep dies, and a kill
+        # that lands late made the run time out in CI (2026-10-24). The
+        # check is the poll below, not the pipe.
+        r = self._run('sleep 30 >/dev/null 2>&1 &\nJOURNAL_PID=$!\necho "$JOURNAL_PID"\n',
+                      timeout=10)
         self.assertEqual(r.returncode, 0, r.stderr)
         pid = int(r.stdout.strip())
         # The sleep has been signalled by the time bash exits; give it a
