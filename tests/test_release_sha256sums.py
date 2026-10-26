@@ -65,6 +65,8 @@ case "$cmd" in
         touch "$S/exists"
         mkdir -p "$S/assets"
         for a in "$@"; do
+            if [ "${prev:-}" = "--notes-file" ]; then cp "$a" "$S/notes"; prev=""; continue; fi
+            prev="$a"
             case "$a" in
                 --draft) touch "$S/draft" ;;
                 -*) ;;
@@ -118,6 +120,10 @@ class TestReleaseScript(unittest.TestCase):
         shutil.copy(os.path.join(PROJECT_DIR, "build", "release.sh"),
                     os.path.join(build, "release.sh"))
         _write(os.path.join(self.proj, "src", "menubar.py"), '        self.version = "9.8.7"\n')
+        _write(os.path.join(self.proj, "RELEASE_HISTORY.md"),
+               "# History\n\n## 9.8.70 — 2026-01-02\n\n- not this one\n\n"
+               "## 9.8.7 — 2026-01-01\n\n- What changed in 9.8.7.\n\n"
+               "## 9.8.6 — 2025-12-31\n\n- older\n")
         _write(os.path.join(build, "build-linux.sh"),
                '#!/bin/bash\nprintf "the deb built %s" "$BUILD_ID" > "$(dirname "$0")/onionpress.deb"\n',
                0o755)
@@ -204,6 +210,32 @@ class TestReleaseScript(unittest.TestCase):
         self.assertTrue(self.is_draft())
         self.assertFalse([c for c in self.calls if c.startswith("gh release edit")])
         self.assertIn("Draft release v9.8.7 ready", r.stdout)
+
+    def test_the_notes_start_with_the_versions_release_history(self):
+        r = self.run_release()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.state, "notes")) as f:
+            self.assertEqual(f.read().strip(), "- What changed in 9.8.7.")
+        create = next(c for c in self.calls if c.startswith("gh release create"))
+        self.assertIn("--generate-notes", create)
+
+    def test_a_version_without_notes_is_refused_before_building(self):
+        for history in ("# History\n\n## 9.8.6 — 2025-12-31\n\n- older\n",
+                        "# History\n\n## 9.8.7 — 2026-01-01\n\n\n## 9.8.6\n\n- older\n"):
+            self.setUp()
+            _write(os.path.join(self.proj, "RELEASE_HISTORY.md"), history)
+            r = self.run_release()
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("RELEASE_HISTORY.md has no notes for 9.8.7", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(self.proj, "build", "onionpress.deb")))
+            self.assertFalse([c for c in self.calls if c.startswith("gh release create")])
+
+    def test_an_existing_release_keeps_its_notes(self):
+        os.remove(os.path.join(self.proj, "RELEASE_HISTORY.md"))
+        self.existing_release(onionpress_dmg=b"old dmg", onionpress_deb=b"old deb")
+        r = self.run_release()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.state, "notes")))
 
     def test_no_release_is_finished_without_sha256sums(self):
         # A new release: created, but left a draft.
@@ -331,6 +363,32 @@ class TestReleaseRepoInSource(unittest.TestCase):
         create = self.src[self.src.index("gh release create"):]
         create = create[:create.index("--generate-notes")]
         self.assertIn('--target "$MAIN_SHA"', create)
+        self.assertIn('--notes-file "$NOTES_PATH"', create)
+
+
+class TestReleaseHistory(unittest.TestCase):
+    """RELEASE_HISTORY.md has a section for the version the tree declares
+    (release.sh will not cut it otherwise), each heading `## X.Y.Z — date`,
+    newest first."""
+
+    def setUp(self):
+        with open(os.path.join(PROJECT_DIR, "RELEASE_HISTORY.md")) as f:
+            self.headings = [l.rstrip("\n") for l in f if l.startswith("## ")]
+
+    def test_headings(self):
+        versions = []
+        for h in self.headings:
+            m = re.fullmatch(r"## (\d+)\.(\d+)\.(\d+) — \d{4}-\d\d-\d\d", h)
+            self.assertTrue(m, h)
+            versions.append(tuple(map(int, m.groups())))
+        self.assertEqual(versions, sorted(versions, reverse=True))
+        self.assertEqual(len(versions), len(set(versions)))
+
+    def test_the_current_version_has_notes(self):
+        with open(os.path.join(PROJECT_DIR, "src", "menubar.py")) as f:
+            version = re.search(r'self\.version = "([^"]+)"', f.read()).group(1)
+        self.assertTrue(any(h.split()[1] == version for h in self.headings),
+                        "RELEASE_HISTORY.md has no '## %s — <date>' section" % version)
 
 
 if __name__ == "__main__":
