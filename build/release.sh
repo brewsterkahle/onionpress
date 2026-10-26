@@ -38,7 +38,9 @@
 #   build/release.sh --draft      # same, but leave a new GitHub release a draft
 #
 #   Bump the version FIRST (build/bump-version.sh X.Y.Z, macOS only) and
-#   commit, then run this. This script does not bump — it releases whatever
+#   commit, with the version's section in RELEASE_HISTORY.md (the new
+#   release's notes start with it; no section, no release), then run this.
+#   This script does not bump — it releases whatever
 #   version the source tree declares.
 #
 # WHICH REPOSITORY
@@ -199,6 +201,22 @@ if [ "$OS" = "Darwin" ] && [ "$release_exists" = "0" ]; then
     echo "Tagging $TAG at $RELEASE_REPO main ($MAIN_SHA), which is HEAD."
 fi
 
+# A new release's notes start with its section of RELEASE_HISTORY.md
+# ("## X.Y.Z — date" up to the next "## "), above GitHub's generated list.
+# No section, or an empty one, and nothing is built.
+NOTES_PATH="$WORK_DIR/release-notes.md"
+if [ "$OS" = "Darwin" ] && [ "$release_exists" = "0" ]; then
+    HISTORY="$PROJECT_DIR/RELEASE_HISTORY.md"
+    [ -f "$HISTORY" ] || fail "$HISTORY not found."
+    awk -v v="$VERSION" '
+        /^## / { if (found) exit; split($0, w, " "); if (w[2] == v) { found = 1; next } }
+        found' "$HISTORY" > "$NOTES_PATH"
+    grep -q '[^[:space:]]' "$NOTES_PATH" \
+        || fail "RELEASE_HISTORY.md has no notes for $VERSION.
+  Add a '## $VERSION — $(date +%Y-%m-%d)' section saying what changed for the
+  people who run OnionPress, commit it to main, then run this again."
+fi
+
 # ─── Always build the .deb (works on macOS via build-linux.sh's fallback) ──
 echo ""
 echo "── Building Linux .deb ──────────────────────────────────────────────"
@@ -257,6 +275,7 @@ if [ "$OS" = "Darwin" ]; then
             --draft \
             --target "$MAIN_SHA" \
             --title "$TAG" \
+            --notes-file "$NOTES_PATH" \
             --generate-notes
         if [ -z "$DRAFT" ]; then
             PUBLISH_AFTER_VERIFY=1
