@@ -423,11 +423,25 @@
 - `make coverage` is the same run under `coverage` (`.coveragerc`:
   branches; src/onionpress, linux and the tor image's scripts; tests,
   tests/stress and setup.py left out), then `build/coverage-floors.sh`:
-  total 60 %, `cli.py` 69, `handle_action.py` 85, `confirm.py` 90,
-  `config.py` 85, each a point or two under the measured value. Raise a
-  floor when the tests catch up; never lower one to pass. CI runs the
-  three steps on the Linux job and uploads `coverage.xml` + the HTML
-  report. `tests/test_coverage_gate.py` holds the wiring.
+  total 63 %, `cli.py` 97, `app_commands.py` 94, `handle_action.py` 95,
+  `confirm.py` 98, `config.py` 85, each a point or two under the measured
+  value. Raise a floor when the tests catch up; never lower one to pass.
+  CI runs the three steps on the Linux job and uploads `coverage.xml` +
+  the HTML report. `tests/test_coverage_gate.py` holds the wiring.
+- **Every `onionpress` command handler has a test of its own**:
+  `tests/test_cli_dispatch.py` is the census (main() reaches each handler
+  with the parsed arguments); `tests/test_cli_commands.py` runs the
+  handlers in `cli.py` against stubs (OnionPressCLI built with Docker,
+  the port probe and secrets patched, each module patched where the
+  handler imports it: update, uninstall and reset at a terminal, the
+  lifecycle commands, restore's four hub-data fates and its JSON answer,
+  the staging helpers, the hub recovery key, update-images,
+  generate-vanity, the Settings page's commands, the password and
+  recovery-key readers); `tests/test_cli_edges.py` covers the paths
+  app_commands, confirm and handle_action leave out, reusing the
+  harnesses of `test_cli_app_commands.py` and `test_handle_action.py`.
+  A new handler or branch gets its case there; coverage of `cli.py`
+  (99 % on 2026-10-25) is held by the floors above.
 - **A new `onionpress` subcommand needs a row in
   `tests/test_cli_dispatch.py`**: the census walks the parser
   `cli.main()` builds (nested subparsers too) and fails on an
@@ -492,8 +506,14 @@
   settings-page-update-check, update), so the Linux launcher keeps its bash
   bodies behind those internal cases and the Mac launcher delegates them to
   `onionpress.cli` (`cmd_settings_page_backup`, `cmd_settings_page_restore`).
-  Linux refuses import-key-file and a restore of another address, and only
-  checks on update; on the Mac those stop at `{"confirm": "address-change"}`
+  Linux refuses import-key-file and a restore of another address; `update`
+  only checks on **both** platforms (through 2.5.6 the Mac ran `update
+  --yes` from the page's request: an unattended download and install of
+  the latest GitHub release, whose DMG nothing verifies beyond TLS, on the
+  say-so of anything running in WordPress; now `update --check --json`
+  and `MAC_UPDATE_AVAILABLE_MSG` pointing to Check for Updates..., which
+  asks the person at the Mac; the `relaunch` state key is gone with it);
+  on the Mac the first two stop at `{"confirm": "address-change"}`
   (kept in `~/.onionpress/pending-action/`, 0700, dropped after 10 minutes
   without an answer) until the menubar asks and runs `handle-action
   --confirmed address-change` or `--cancel` (the daemon puts the question
@@ -738,7 +758,7 @@
   config-current.json and recent-logs.txt to the volume as www-data), the
   OnionHeaven heartbeat and upkeep (`onionheaven.*` with the daemon as the
   `app`, under `_HUB_LOCK`), the handle-action tick (`poll_settings_page`,
-  one run at a time), the hub's messages, the image monitor, the three log
+  one run at a time), the image monitor, the three log
   captures (`RotatingLog`), caffeinate (`onionpress.power`), the My
   Creations thumbnails, the browser extension's HTTP proxy, port-offset
   detection at start, and sleep/wake through IOKit
@@ -746,8 +766,7 @@
   second at a time, `mac_power.run_loop_once`, so Python's signal
   handlers still run). The menubar (`src/menubar.py`) is a view: menu,
   dialogs, notifications, the browser items, the welcome and setup
-  windows, the OnionHeaven alerts view, and starting the daemon when
-  there is none. `tests/test_mac_daemon.py` (the daemon against stub
+  windows, and starting the daemon when there is none. `tests/test_mac_daemon.py` (the daemon against stub
   docker/health/launcher; the menubar census: no loop that names docker,
   the hub or Tor, no timer but the splash tips).
 - **launchd**: `~/Library/LaunchAgents/org.onionpress.daemon.plist`
@@ -773,14 +792,14 @@
   pid, version, ports, runtime_ready, is_running/is_ready/has_internet/
   yellow_since/last_check_complete (the `display_state` inputs, shared
   as `daemon.display_state_of`), address, healthcheck address, bootstrap
-  %, images_present, wordpress_up, wp_installed, proxy_running, the hub's
-  messages, `pending_question`, `relaunch`, `onionname_collision`,
+  %, images_present, wordpress_up, wp_installed, proxy_running,
+  `pending_question`, `onionname_collision`,
   `settings_page_error`, the probe's last code), `daemon.pid`,
   `onion_address` (the cache, as before), `.setup_complete`. The menubar
   reads the state every 2 s (`_view_tick`); a state older than 90 s or
   from a dead pid is "Reconnecting to the OnionPress service..." (icon
   starting), never "Stopped". Markers the menubar writes for the daemon:
-  `.dismiss-onionheaven-alerts`, `.onionname-retry`; `.upload-analytics`
+  `.onionname-retry`; `.upload-analytics`
   and `.config-changed` are taken by the daemon's tick; `.reopen` stays
   the menubar's. The Settings page's question the handler stops at goes
   into `pending_question`; the menubar asks and runs `handle-action
@@ -842,10 +861,7 @@
   then recorded through `config.set_config_value`; a taken name is refused
   with its suggestions, exit 2, nothing recorded; one not registered now is
   recorded `ONIONNAME_REGISTERED=no` and on a Mac `.onionname-retry` has the
-  daemon retry it); `onionheaven alerts [--dismiss] [--json]`
-  (`onionheaven.read_hub_messages` / `remove_hub_messages`, which the daemon
-  uses too; `HUB_MESSAGES_DIR` is the tray's `ALERT_MSG_DIR`; the dismiss
-  touches `.dismiss-onionheaven-alerts` on a Mac). `import-key --file
+  daemon retry it). `import-key --file
   <hs_ed25519_secret_key>` is bash in both launchers over `key_manager.py
   encode-key-file` (96-byte C Tor file or the bare 64-byte key, checked
   before anything happens); Linux's `import-key` takes `-` now too. Both
@@ -1389,6 +1405,27 @@
   on the hub follow the procedure there (count, tar the old dir, stop
   fully, update, check the log line and the counts).
 
+## Registration Caps (issue #391, branch `sec-391-registration-caps`, not merged)
+- Minting a key is instant, so web-server.py bounds what a free
+  registration can take: `registration_room` (after the signature, before
+  the key is looked at) refuses a new (content, healthcheck) pair for an
+  address at `MAX_ROWS_PER_ADDRESS` (4) with 429 and a new address on a
+  hub at `MAX_REGISTRANTS` (5000) with 503 "hub full"; an existing pair
+  always has room, so the registered keep heartbeating. `analytics_room`
+  refuses a new analytics pair past `ANALYTICS_MAX_PAIRS_PER_ADDRESS` (4)
+  per address or `ANALYTICS_MAX_INSTANCES` (10000) in all (manifest and
+  upload, before the directory is made). `onionnames.register_name`
+  refuses the `MAX_NAMES_PER_ADDRESS` (10) + 1th name of an address as
+  `too_many` (429 from `local_register`); the migration script goes
+  through `validate_name` only, so a legacy registry is not cut. Tests
+  that build big registries lift the cap (`MAX_NAMES_PER_ADDRESS`
+  patched). Env: `ONIONHEAVEN_MAX_ROWS_PER_ADDRESS`,
+  `ONIONHEAVEN_MAX_REGISTRANTS`, `ONIONHOME_ANALYTICS_MAX_PAIRS_PER_ADDRESS`,
+  `ONIONHOME_ANALYTICS_MAX_INSTANCES`, `ONIONHOME_MAX_NAMES_PER_ADDRESS`.
+  The numbers, a per-address `/online` interval and whether a row must
+  pass an audit before it earns a worker slot are the issue's decision.
+  `tests/test_hub_registration_caps.py`.
+
 ## Registry Names Reach Docker Only as Workers'
 - The registry is data anything mounting the hub volume can write as root
   (onionpress-tor faces Tor; every takeover worker). The heartbeat holds the
@@ -1549,6 +1586,25 @@
   files. Needs a tor image publish; on
   OnionHome compare the name count before and after, and never downgrade it
   afterwards (docs/DOCKER-SOCKET.md, "The OnionHome name registry").
+
+## No Message Channel From the Hub (removed 2026-10-25)
+- The healthcheck onion service (tor image, `healthcheck-server.sh`) is
+  GET-only. Through 2.5.6 a POST to it stored any body under
+  `/var/lib/tor/healthcheck-messages/`, and the Mac daemon, the menubar,
+  the Linux tray and `onionpress onionheaven alerts` showed each file's
+  `type` and `message` in a native "OnionHeaven Alerts" dialog. Nothing
+  checked who sent it, nothing in OnionHeaven ever sent one, and the hub
+  hands out healthcheck addresses on `/status/<address>`: a phishing
+  channel to the owner's desktop for anyone. Both ends are gone (the
+  handler, `onionheaven.read_hub_messages`/`remove_hub_messages`,
+  `app_commands.alerts_command`, the `alerts` subcommand, the daemon's
+  poll and `.dismiss-onionheaven-alerts`, the menubar item, the tray's
+  poll). The GET's `"messages":[]` stays for an older hub's reader. A hub
+  that wants to tell an owner something needs a signed channel designed
+  for it. The image side needs a tor image publish; until then an old
+  image still stores POSTs that nothing reads.
+  `tests/test_install_invariants` (the handler under sh),
+  `tests/test_mac_daemon` (the menubar census names `healthcheck-messages`).
 
 ## The Directory Answers Visitors Only on OnionHome (issue #394)
 - `onionpress-directory.php` is a mu-plugin on every node, and its two
@@ -2076,6 +2132,23 @@
 - `~/.onionpress/extension-connected` is JSON `{timestamp, browser}` from
   both writers (`browser.write_extension_marker`; the native host's own
   copy, test-tied). The extension polls `/status` every 5 s (not logged).
+- **The proxy carries `.onion` only and answers no other site's page**
+  (2026-10-25). Any web page in any browser on the Mac can send requests
+  to 127.0.0.1, and `/status` answered them with the served onion address
+  under `Access-Control-Allow-Origin: *`: a clearnet site could learn
+  which onion site its visitor publishes. Now `/status` and `/proxy/`
+  refuse a request made for another site's page
+  (`OnionProxyHandler._from_a_web_page`: an `Origin` that is not the
+  extension's or the proxy's own, a `Sec-Fetch-Site` other than
+  `same-origin`/`none` (`same-site` is localhost:8080's page), a foreign
+  `Referer`; the extension's fetch, the setup page, the address bar and
+  curl pass), `/status` echoes only an extension `Origin` and sends
+  `nosniff`, and every non-onion target is refused: no clearnet fetch
+  (`_fetch_direct` is gone), no `CONNECT` relay (it tunnelled to any
+  host:port for any local client, the LAN and the Mac's loopback
+  included). The extension routes only `.onion` here, so nothing shipped
+  used either. `tests/test_browser_extension.TestProxy`,
+  `tests/test_strict_onion_addresses.TestOnionProxyRouting`.
 - Fallback: `.onion` while OnionPress is down → `offline.html`; onion
   service not answering → the proxy's `ONION_UNREACHABLE_PAGE`. Both only
   *link* the Wayback Machine (clearnet, said on the page), never redirect.

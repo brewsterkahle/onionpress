@@ -123,7 +123,6 @@ MISSING_UPLOAD_MSG = "Missing password or backup file"
 BACKUP_FAILED_MSG = "Backup failed — check logs"
 RESTORE_FAILED_MSG = "Restore failed — wrong password or invalid backup"
 HANDOFF_FAILED_MSG = "Could not hand the backup to the Settings page"
-UPDATE_CHECK_FAILED_MSG = "Could not check for updates"
 
 
 def now_iso():
@@ -349,8 +348,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
     """One run of `onionpress handle-action`. Returns what the caller (the
     menubar) needs to know: {"handled": <action or None>}, with
     {"confirm": <question>, ...facts} when the Mac must ask, {"pending":
-    <question>} while one is unanswered, {"relaunch": true} after the Mac
-    installed an update."""
+    <question>} while one is unanswered."""
     pending = _pending_load(host)
     if cancel:
         if pending:
@@ -788,18 +786,30 @@ def _settings_page_restore(host, local_zip, password, confirmed, work):
 
 # -- update --
 
+
+UPDATE_CHECK_FAILED_MSG = "Could not check for updates"
+# The Mac page's answer when a release is newer than the installed one.
+MAC_UPDATE_AVAILABLE_MSG = ("OnionPress {latest} is available. To install it, choose "
+                            "Check for Updates... in the OnionPress menu on this Mac, "
+                            "or run `onionpress update` there.")
+
+
 def _update(host):
+    """Report only, on both platforms: anything running in WordPress can
+    write requested-action, so this never installs anything. The page
+    learns whether a release is newer than the installed one and how to
+    install it. Linux: the launcher's settings-page-update-check (one
+    GitHub lookup per 5 minutes; it writes update-result.json). macOS:
+    `update --check --json`; installing is the menubar's Check for
+    Updates..., which asks the person at the Mac, or `onionpress update`.
+    Through 2.5.6 the Mac ran `update --yes` here: an unattended download
+    and install of the latest release on the page's say-so."""
+    host.log("Settings page: update check requested")
     if host.os_name != "macos":
-        # Report only: anything running in WordPress can ask for this. The
-        # page learns whether a release is available and that `onionpress
-        # update` on this machine installs it (the launcher writes
-        # update-result.json, one GitHub lookup per 5 minutes).
         # The launcher writes the result: the request's id goes with it.
-        host.log("Settings page: update check requested")
         host.run_launcher(["settings-page-update-check"], timeout=300,
                           env={"ONIONPRESS_REQUEST_ID": host.request_id})
         return
-    host.log("Settings page: install update requested")
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
     if r.returncode != 0 or ans.get("error") or "update_available" not in ans:
@@ -809,8 +819,8 @@ def _update(host):
             "current": ans.get("current"), "latest": ans.get("latest"),
             "update_available": False, "completed_at": now_iso()})
         return
+    current = ans.get("current") or host.version
     if not ans.get("update_available"):
-        current = ans.get("current") or host.version
         host.write_result("update-result.json", {
             "success": True, "update_available": False,
             "message": f"OnionPress {current} is up to date.",
@@ -818,23 +828,13 @@ def _update(host):
             "completed_at": now_iso()})
         return
     latest = ans.get("latest", "")
-    r = host.run_launcher(["update", "--yes", "--json"])
-    ans = confirm.last_json_line(r.stdout) or {}
-    if r.returncode != 0:
-        error = ans.get("error") or r.stderr.strip() or r.stdout.strip() or "Update failed"
-        host.log(f"Settings page: update install failed: {error}")
-        host.write_result("update-result.json", {
-            "success": False, "error": error, "completed_at": now_iso()})
-        return
+    host.log(f"Settings page: update check: installed {current}, latest {latest}; "
+             "the page never installs")
     host.write_result("update-result.json", {
-        "success": True, "version": latest,
-        "message": f"Installed v{latest}. OnionPress is restarting to apply the update.",
+        "success": True, "update_available": True, "installable": True,
+        "message": MAC_UPDATE_AVAILABLE_MSG.format(latest=latest),
+        "current": current, "latest": latest,
         "completed_at": now_iso()})
-    host.log(f"Settings page: installed v{latest}, relaunching")
-    # Give the polling page a moment to see the result before the
-    # WordPress container goes down for the relaunch (the menubar's).
-    time.sleep(2)
-    return {"relaunch": True, "version": latest}
 
 
 # -- recent logs (Linux's quiet tick) --

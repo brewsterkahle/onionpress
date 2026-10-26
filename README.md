@@ -64,8 +64,7 @@ the command is `/Applications/OnionPress.app/Contents/MacOS/onionpress`):
 `onionpress logs --app|--launcher|--web` (`-n N` lines, `-f` to follow);
 `onionpress check-reachability` (the Settings page's test, through the
 independent onionheaven Tor client); `onionpress import-key --file
-hs_ed25519_secret_key`; `onionpress onionname show|set NAME`; `onionpress
-onionheaven alerts [--dismiss]` (the hub's messages).
+hs_ed25519_secret_key`; `onionpress onionname show|set NAME`.
 Settings: `onionpress config list` shows every setting, `onionpress config set KEY VALUE`
 changes one (`config list --help` describes the keys; on a Mac the command is
 `/Applications/OnionPress.app/Contents/MacOS/onionpress`).
