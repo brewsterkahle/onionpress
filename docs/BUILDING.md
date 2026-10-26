@@ -171,6 +171,19 @@ environment set still works:
 
 `build/refresh-image-digests.sh` is the only thing that writes any of them.
 
+The Mac bundle's own inputs are pinned by hash too (issue #387): the
+`*_SHA256_*` constants at the top of `build/build-dmg-simple.sh` are what
+each download must hash to (`fetch_checked` refuses anything else), and the
+Python packages come from `build/requirements-macos.lock` and
+`build/build-requirements-macos.lock` with pip's `--require-hashes`
+(Pillow, for the DMG background fallback only, from
+`build/dmg-background-requirements-macos.lock`, installed after py2app so
+it never sits in the venv py2app bundles).
+`build/refresh-python-locks.sh` regenerates the locks (uv, network); a new
+Colima, Lima, Docker CLI, Compose, libsodium or mkp224o version means
+putting its published sum (or `shasum -a 256` of a fresh download, for the
+two that publish none) and, for mkp224o, the tag's commit into the script.
+
 ### Why this is one file and not five
 
 It used to be five independent copies kept in sync by remembering to run the

@@ -90,6 +90,30 @@
   apt-get returns (serial, never beside it). Before, the old units, daemon
   and tray kept running the old code until a reboot.
   `tests/test_deb_upgrade_restarts.py`.
+- **Everything the Mac bundle is built from is pinned by hash** (issue
+  #387, branch `sec-387-build-hashes`, not yet run on a Mac): every
+  third-party download in `build-dmg-simple.sh` goes through
+  `fetch_checked <sha256> <dest> <url>` against the `*_SHA256_*`
+  constants at the top (Colima's from its release's `*.sha256sum`
+  files, Lima's from its `SHA256SUMS`, Compose's from `checksums.txt`;
+  the Docker CLI tarballs and the libsodium tarball hashed from a
+  download, since neither publishes sums), and the binary cache's keys
+  carry those hashes, so a cache made from other bytes is a miss.
+  mkp224o is cloned at its tag and held to `MKP224O_COMMIT` with no
+  fallback to master; libsodium is `SODIUM_VERSION` + `SODIUM_SHA256`,
+  fetched outside the mkp224o subshell so a bad tarball ends the build.
+  The Python side installs with `--require-hashes` from
+  `build/requirements-macos.lock` (from `src/requirements.txt`) and
+  `build/build-requirements-macos.lock` (pip, py2app, setuptools<81,
+  wheel; from `build/build-requirements-macos.in`), all written by
+  `build/refresh-python-locks.sh` (uv); `py2app-extensions.sh` takes
+  PyNaCl's sdist and cffi's per-arch wheels from the runtime lock
+  (`lock_block`) and refuses a single-arch extension of a package that
+  lock lacks. Pillow (DMG background fallback) has its own
+  `build/dmg-background-requirements-macos.lock`, installed only after
+  py2app: in the build lock it sat in the py2app venv and broke the
+  universal2 merge. Bumping a version means putting its new hash in the
+  script and re-running the refresh. `tests/test_dmg_build_pins.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **CI builds and attests the `.deb` on every published release**
   (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
@@ -122,7 +146,7 @@
   annotated tag through `git/tags/<sha>`).
   `tests/test_build_release_hygiene.py` refuses an unpinned `uses:`.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
-- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
+- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 passed. The build lock pins `setuptools<81` (from `build/build-requirements-macos.in`), and the build scripts' "py2app failed" retry reinstalls from that lock. py2app 0.28.10 (in the lock) no longer passes `dry_run`, so the pin is probably obsolete, but no build has tried setuptools 81+; it is kept on purpose until one does. Re-check it whenever the locks are refreshed: the steps to drop it are in the `.in` file's comment. Upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Local Build Path
 - **`docs/BUILDING.md` is the map** — every component, its command, its host-OS
