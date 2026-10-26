@@ -44,6 +44,21 @@
   - `src/onionpress/` — shared package: backup, key_manager, setup_window, onion_proxy, onion_auth, onionheaven, updater, install_native_messaging, native_messaging_host, power, health, docker, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*
   - `setup.py` — py2app config. Adding a new submodule to `onionpress` just means one new line in the `includes` list — no build-script change needed. Build scripts only copy the whole `onionpress` package into site-packages.
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
+- **Every release goes on `brewsterkahle/onionpress`, never a fork, and
+  `build/release.sh` enforces it.** In a checkout whose `origin` is a fork
+  (`ivar/onionpress`, upstream as the `brewster` remote), `gh` defaults to
+  the fork: v2.5.4 was first published on `ivar/onionpress`, tagged at the
+  fork's stale `main`; the Mac updater, Linux `onionpress update` and the
+  README all read brewsterkahle's releases, so no user saw it, and the
+  fork's CI ran the stale tag's workflows. release.sh passes
+  `-R "$RELEASE_REPO"` (`brewsterkahle/onionpress`; `ONIONPRESS_RELEASE_REPO`
+  only for testing) to every `gh release` call, and before creating a
+  release, before anything is built, refuses unless HEAD is the tip of that
+  repo's `main` (`gh api repos/…/commits/main`) and any existing tag of that
+  name points there; it creates the tag with `--target <that sha>`. Check
+  out upstream `main` (`git fetch brewster && git checkout brewster/main`)
+  to release. Hand-run `gh release` commands need `-R brewsterkahle/onionpress`
+  too. `tests/test_release_sha256sums.py`.
 - **Cut releases with `build/release.sh`** — it builds BOTH artifacts and uploads both to one release, so the Linux `.deb` can't be forgotten. (It was: v2.4.101–v2.4.106 shipped only the `.dmg`, which 404'd the README's `releases/latest/download/onionpress.deb` link — that link resolves to the *Latest* release's asset of that name.) Bump + commit first, then run it. Cross-platform rule it enforces: the `.dmg` can only be built on macOS, so on **macOS** it builds `.dmg`+`.deb` and creates/updates the release with both; on **Linux** it builds only the `.deb` and *refuses to create* a release (a `.dmg`-less "Latest" would break the Mac link) — it only attaches the `.deb` to an existing release that already carries the matching `.dmg`. Always run the Mac side first.
 - **Every release carries `SHA256SUMS`** (`<sha256>  onionpress.deb` / `onionpress.dmg`, sha256sum format), written by `build/release.sh` (on Linux it downloads the release's `.dmg` to hash it). A new release is created as a draft; the script downloads `SHA256SUMS` and the `.deb` back, checks them, and only then publishes. It fails instead of finishing a release without them (`tests/test_release_sha256sums.py`). Linux's `onionpress update` installs **only** a release's `onionpress.deb` whose sha256 is its `SHA256SUMS` line, whose package is `onionpress` of the tag's version, and that is newer than the installed one (`--force` reinstalls/downgrades; drafts never; pre-releases only with `--pre`; `--version X.Y.Z`; `--check` reports only), with `sudo apt-get install -y --no-remove`; a git checkout only with `--from-checkout` (developers). So a release without `SHA256SUMS` cannot be installed that way. The Settings page's update button on Linux only checks: handle-action `update` writes `update-result.json` (one GitHub lookup per 5 min) and never installs, since anything in WordPress can write `requested-action` (`tests/test_linux_release_update.py`). Signing `SHA256SUMS` with a pinned key is the planned next step.
 - **A release's `SHA256SUMS` may be signed** (issues #246 and #386 step 2,
@@ -110,6 +125,30 @@
   apt-get returns (serial, never beside it). Before, the old units, daemon
   and tray kept running the old code until a reboot.
   `tests/test_deb_upgrade_restarts.py`.
+- **Everything the Mac bundle is built from is pinned by hash** (issue
+  #387, branch `sec-387-build-hashes`, not yet run on a Mac): every
+  third-party download in `build-dmg-simple.sh` goes through
+  `fetch_checked <sha256> <dest> <url>` against the `*_SHA256_*`
+  constants at the top (Colima's from its release's `*.sha256sum`
+  files, Lima's from its `SHA256SUMS`, Compose's from `checksums.txt`;
+  the Docker CLI tarballs and the libsodium tarball hashed from a
+  download, since neither publishes sums), and the binary cache's keys
+  carry those hashes, so a cache made from other bytes is a miss.
+  mkp224o is cloned at its tag and held to `MKP224O_COMMIT` with no
+  fallback to master; libsodium is `SODIUM_VERSION` + `SODIUM_SHA256`,
+  fetched outside the mkp224o subshell so a bad tarball ends the build.
+  The Python side installs with `--require-hashes` from
+  `build/requirements-macos.lock` (from `src/requirements.txt`) and
+  `build/build-requirements-macos.lock` (pip, py2app, setuptools<81,
+  wheel; from `build/build-requirements-macos.in`), all written by
+  `build/refresh-python-locks.sh` (uv); `py2app-extensions.sh` takes
+  PyNaCl's sdist and cffi's per-arch wheels from the runtime lock
+  (`lock_block`) and refuses a single-arch extension of a package that
+  lock lacks. Pillow (DMG background fallback) has its own
+  `build/dmg-background-requirements-macos.lock`, installed only after
+  py2app: in the build lock it sat in the py2app venv and broke the
+  universal2 merge. Bumping a version means putting its new hash in the
+  script and re-running the refresh. `tests/test_dmg_build_pins.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **CI builds and attests the `.deb` on every published release**
   (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
@@ -142,7 +181,7 @@
   annotated tag through `git/tags/<sha>`).
   `tests/test_build_release_hygiene.py` refuses an unpinned `uses:`.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
-- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
+- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 passed. The build lock pins `setuptools<81` (from `build/build-requirements-macos.in`), and the build scripts' "py2app failed" retry reinstalls from that lock. py2app 0.28.10 (in the lock) no longer passes `dry_run`, so the pin is probably obsolete, but no build has tried setuptools 81+; it is kept on purpose until one does. Re-check it whenever the locks are refreshed: the steps to drop it are in the `.in` file's comment. Upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Local Build Path
 - **`docs/BUILDING.md` is the map** — every component, its command, its host-OS
@@ -1425,7 +1464,7 @@
   on the hub follow the procedure there (count, tar the old dir, stop
   fully, update, check the log line and the counts).
 
-## Registration Caps (issue #391, branch `sec-391-registration-caps`, not merged)
+## Registration Caps (issue #391; on main since #414, the numbers still open)
 - Minting a key is instant, so web-server.py bounds what a free
   registration can take: `registration_room` (after the signature, before
   the key is looked at) refuses a new (content, healthcheck) pair for an
@@ -1443,7 +1482,8 @@
   `ONIONHEAVEN_MAX_REGISTRANTS`, `ONIONHOME_ANALYTICS_MAX_PAIRS_PER_ADDRESS`,
   `ONIONHOME_ANALYTICS_MAX_INSTANCES`, `ONIONHOME_MAX_NAMES_PER_ADDRESS`.
   The numbers, a per-address `/online` interval and whether a row must
-  pass an audit before it earns a worker slot are the issue's decision.
+  pass an audit before it earns a worker slot are still the issue's
+  decision (the code reached main on #414's branch, not by one).
   `tests/test_hub_registration_caps.py`.
 
 ## Registry Names Reach Docker Only as Workers'
