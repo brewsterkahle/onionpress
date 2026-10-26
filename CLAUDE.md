@@ -924,6 +924,21 @@
 - Never call `wp_remote_*`/`fetch_feed` directly for a follow;
   `tests/test_follow_requests.py` fails if one appears.
 
+## Imported Bodies Are Filtered at Ingest (issue #403)
+- The Mastodon importer stored the instance's `content` verbatim and
+  the blog importer ran a regex sanitizer that missed entity-encoded
+  `jav&#x61;script:` hrefs, `<img/onerror=...>` without whitespace,
+  `<base>` and `<meta refresh>`; the_content never runs kses, and what
+  protected the site was that both run under wp-cron, where save-time
+  kses happens to apply. Each foreign HTML field now goes through
+  `wp_kses_post()` where it is read (`onionpress_mastodon_render_content`,
+  both the status and the boosted status; `onionpress_blog_render_content`,
+  which insert and update share), and the regex sanitizer is gone.
+  Bluesky, Twitter and Reddit build their HTML from `esc_html`'d text.
+  `tests/test_importers_kses_at_ingest.py` keeps a census: a
+  `(string) ( $x['content'|'html'|'rendered'] ...)` read in an importer
+  is filtered on its line or cut to plain text in its function.
+
 ## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
 - `onionpress_get_aggregated_feed_items()` (sidebar, every page) only reads:
   the `onionpress_blogroll_items` transient, else each current follow's
