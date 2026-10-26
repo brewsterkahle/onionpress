@@ -66,6 +66,7 @@ from urllib.parse import parse_qs, urlparse
 from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
+    note_signed_request,
     takeover_function, release_function,
     is_registration_hub, registrations_opted_in, write_key_file,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR, OWN_HOSTNAME_PATH,
@@ -481,10 +482,30 @@ def _verify_signature(handler, data, endpoint):
     timestamp = data.get("timestamp", "")
     signature = data.get("signature", "")
 
-    return verify_payload(
+    ok, err = verify_payload(
         content_address, endpoint, healthcheck_address,
         timestamp, signature
     )
+    if not ok:
+        return ok, err
+    # Verified, and not seen before (issue #400): a captured /offline
+    # replayed within the timestamp tolerance forced a takeover of a live
+    # site. The mark moves only on a verified signature, so this comes
+    # after the check, and the registry is opened only here.
+    try:
+        conn = db_connect()
+        try:
+            db_ensure_schema(conn)
+            fresh, why = note_signed_request(conn, content_address, timestamp, signature)
+        finally:
+            conn.close()
+    except Exception as e:
+        log(f"REJECT-REPLAY-CHECK /{endpoint}: {content_address}: {e}")
+        return False, "Could not check the request against replay"
+    if not fresh:
+        log(f"REJECT-REPLAY /{endpoint}: {content_address}: {why}")
+        return False, why
+    return True, ""
 
 
 # Endpoint label of the signature that backs an is_onionheaven claim on

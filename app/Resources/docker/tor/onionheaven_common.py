@@ -316,7 +316,98 @@ def db_ensure_schema(conn):
         if "status" not in tc_cols:
             conn.execute("ALTER TABLE takeover_containers ADD COLUMN status TEXT DEFAULT 'active'")
 
+    # Verified requests' marks against replay (issue #400).
+    conn.execute("""CREATE TABLE IF NOT EXISTS signed_requests (
+        content_address TEXT PRIMARY KEY,
+        last_timestamp  TEXT NOT NULL,
+        signatures      TEXT NOT NULL,
+        updated_at      TEXT
+    )""")
+
     db_commit_with_retry(conn)
+
+
+# ---------------------------------------------------------------------------
+# Replay marks (issue #400)
+# ---------------------------------------------------------------------------
+#
+# A signed request is valid for TIMESTAMP_TOLERANCE (5 min) either side of
+# the hub's clock, and nothing else told one apart from its replay: a
+# captured /offline posted again within those minutes set
+# takeover_requested on a live site, and the monitor took it over until
+# the next /online. So the hub keeps, per content address, the latest
+# timestamp it accepted a verified request at, and refuses one that is
+# older; and since clients stamp to the second and may send two requests
+# in one (an /online then the /offline of a suspend), it also keeps the
+# signatures accepted at that latest second and refuses one of those
+# again (Ed25519 is deterministic: a replay is byte-identical). A clock
+# set back on a client costs it at most the tolerance's worth of refused
+# requests, said in the log. The marks are not registry rows: a restore
+# keeps only registry and takeover_containers, and the tolerance still
+# bounds what an empty table admits.
+
+# Signatures remembered at one timestamp; more than this at one second
+# is nothing a client does.
+SIGNED_REQUEST_MARKS_LIMIT = 32
+
+
+def _signed_request_time(timestamp):
+    """The timestamp as verify_payload parsed it, in UTC, or None."""
+    try:
+        ts = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def note_signed_request(conn, content_address, timestamp, signature):
+    """Record a verified request against replay; (True, "") when it is
+    new for its address, (False, why) when it is older than the latest
+    accepted, or one already accepted at that same time.
+
+    Read-decide-write in one immediate transaction, so two copies of a
+    replay arriving together cannot both pass. Called only for a
+    request whose signature verified: a forgery never moves the mark."""
+    ts = _signed_request_time(timestamp)
+    if ts is None:
+        return False, "Invalid timestamp format"
+    ts_text = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT last_timestamp, signatures FROM signed_requests WHERE content_address = ?",
+            (content_address,)).fetchone()
+        signatures = []
+        if row is not None:
+            last = _signed_request_time(row[0])
+            try:
+                seen = json.loads(row[1])
+            except (ValueError, TypeError):
+                seen = []
+            if last is not None and ts < last:
+                conn.rollback()
+                return False, (f"Request older than the last accepted one "
+                               f"({row[0]}): a replay, or this client's clock was set back")
+            if last is not None and ts == last:
+                if signature in seen:
+                    conn.rollback()
+                    return False, "Request already accepted (replay)"
+                signatures = [s for s in seen if isinstance(s, str)][-SIGNED_REQUEST_MARKS_LIMIT + 1:]
+        signatures.append(signature)
+        conn.execute(
+            "INSERT INTO signed_requests (content_address, last_timestamp, signatures, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(content_address) DO UPDATE SET "
+            "last_timestamp = excluded.last_timestamp, signatures = excluded.signatures, "
+            "updated_at = excluded.updated_at",
+            (content_address, ts_text, json.dumps(signatures),
+             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+        db_commit_with_retry(conn)
+    except Exception:
+        conn.rollback()
+        raise
+    return True, ""
 
 
 # ---------------------------------------------------------------------------

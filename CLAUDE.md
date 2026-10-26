@@ -1375,6 +1375,27 @@
   name and log endpoints. `tests/test_onion_auth.py` keeps that census and
   keeps the three copies of onion_auth.py (src, tor image, tests/stress)
   identical.
+- **A verified request is accepted once** (issue #400): a signature is
+  good for `TIMESTAMP_TOLERANCE` (5 min) either side of the hub's clock,
+  and a captured `/offline` replayed inside that window forced a takeover
+  of a live site. `_verify_signature` now, after `verify_payload` says
+  yes, runs `onionheaven_common.note_signed_request` (the `signed_requests`
+  table, `db_ensure_schema`): per content address the latest accepted
+  timestamp and the signatures accepted at that second (clients stamp
+  to the second and may send an `/online` and the `/offline` of a
+  suspend in one; Ed25519 is deterministic, so a replay is
+  byte-identical), refused as 403 when older or already seen, in one
+  `BEGIN IMMEDIATE` so two copies cannot both pass. A forgery never
+  moves the mark (the registry is opened only after the check); a
+  registry that cannot be opened refuses. A client clock set back costs
+  at most the tolerance's worth of refused requests (`REJECT-REPLAY` in
+  the log). The peer claim and the OnionHome name endpoints have their
+  own namespaces and are not marked. A hub restore keeps only
+  `registry` and `takeover_containers`; an empty table admits what the
+  tolerance admits. Ships in the tor image. `ReplayTest` in
+  `tests/test_hub_signature_verification.py`; a harness that posts one
+  message twice in a second needs distinct timestamps
+  (`test_hub_stored_keys._online`).
 - Without PyNaCl verify raises `VerificationUnavailable`, never says yes:
   do_POST answers 503 and nothing is done; a peer claim earns nothing. No
   /online then gets through, so the heartbeat monitor takes over no site
