@@ -805,6 +805,11 @@ class TestNoVerifierOfOurOwn(unittest.TestCase):
              "verify_payload"),
             ("app/Resources/docker/tor/web-server.py", "_handle_logs_upload",
              "verify_payload"),
+            # A release's SHA256SUMS.sig against the embedded release keys
+            # (issue #246): libsodium's VerifyKey.verify, the same primitive
+            # onion_auth.verify is, over a file, not a request.
+            ("src/onionpress/release_signing.py", "verify", "verify"),
+            ("src/onionpress/release_signing.py", "check_release_sums", "verify"),
         }
         names = {"verify", "verify_payload", "verify_name_payload"}
         found = set()
