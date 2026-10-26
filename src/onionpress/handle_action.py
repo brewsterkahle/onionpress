@@ -35,6 +35,15 @@ last run's result file is still there when the next request is made
 (issue #356). The id is opaque; it is checked (REQUEST_ID_RE) before it
 is echoed, as anything in WordPress can write the file. The action's own
 earlier result is removed with the request, before the action runs.
+
+Three limits on what the page can make the host do (issue #396): a read
+of a request file stops at READ_LIMITS bytes (a multi-GB file is not
+read into the daemon); each action runs at most once per MIN_INTERVAL
+seconds (stop and restart a minute, so code in WordPress cannot bounce
+the site in a loop), the last times kept in $DATA_DIR/THROTTLE_FILE;
+and the request's text reaches the log only once it is one of ACTIONS,
+an unknown one as its byte count, since the log is republished to
+WordPress as recent-logs.txt and uploaded by analytics sharing.
 """
 
 import datetime
@@ -59,6 +68,25 @@ REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 ACTIONS = ("start", "restart", "stop", "check-reachability", "import-key-file",
            "create-backup", "restore-backup", "refresh-status", "update")
+
+# The most bytes read from a request file (issue #396): `head -c` in the
+# container, and a file over its limit is dropped, never truncated into
+# a shorter value. Everything the page writes is small: an action name,
+# a 16-character id, a password, a key (a PEM or base32, under a KiB),
+# config-updates.json (a few keys).
+READ_LIMIT = 64 * 1024
+READ_LIMITS = {REQUEST_FILE: 256, REQUEST_ID_FILE: 256,
+               "backup-password": 4096, "restore-password": 4096}
+
+# Seconds between two runs of one action (issue #396): the last run's
+# time per action is kept in THROTTLE_FILE under the data dir, since on
+# Linux every run is a new process. A request inside the interval is
+# dropped with a result the page can show. refresh-status is free: it
+# only rewrites status.json, and the Linux watcher runs every 10 s.
+MIN_INTERVAL = {"start": 60, "restart": 60, "stop": 60,
+                "create-backup": 60, "restore-backup": 60, "import-key-file": 60,
+                "update": 60, "check-reachability": 30, "refresh-status": 0}
+THROTTLE_FILE = ".handle-action-times.json"
 
 # Each action's result file for the page (what its poll reads). Removed
 # when the request is taken, so the page can never find the last run's.
@@ -144,9 +172,18 @@ class Host:
     # -- the shared volume, as www-data --
 
     def read_shared(self, name, timeout=5):
-        r = self.docker.run(wp_files.exec_args("cat", f"{SHARED}/{name}"),
+        """The file's text, at most its READ_LIMITS entry (else READ_LIMIT)
+        bytes: one byte more is read, and a file that long is dropped as
+        too large, logged by name, never handed on cut short."""
+        limit = READ_LIMITS.get(name, READ_LIMIT)
+        r = self.docker.run(wp_files.exec_args("head", "-c", str(limit + 1), f"{SHARED}/{name}"),
                             timeout=timeout, quiet=True)
-        return r.output if r.ok else ""
+        if not r.ok:
+            return ""
+        if len(r.stdout.encode("utf-8", "replace")) > limit:
+            self.log(f"Settings page: {name} ignored: over {limit} bytes")
+            return ""
+        return r.output
 
     def shared_size(self, name):
         r = self.docker.run(wp_files.exec_args("stat", "-c", "%s", f"{SHARED}/{name}"),
@@ -339,6 +376,12 @@ def handle(host, confirmed=frozenset(), cancel=False):
         if host.os_name == "linux":
             write_recent_logs(host)
         return {"handled": None, **extra}
+    if action not in ACTIONS:
+        # Not logged as written: the log is republished to WordPress.
+        host.remove_shared(REQUEST_FILE, REQUEST_ID_FILE)
+        size = len(action.encode("utf-8", "replace"))
+        host.log(f"Settings page: unknown action dropped ({size} bytes)")
+        return {"handled": None, "unknown": size, **extra}
     host.request_id = checked_request_id(host.read_shared(REQUEST_ID_FILE), host.log)
     # The request, its id, and the action's earlier result: the page's
     # poll must never find the last run's answer (issue #356).
@@ -346,6 +389,17 @@ def handle(host, confirmed=frozenset(), cancel=False):
     if RESULT_FILES.get(action) not in (None, "service-result.json"):
         stale.append(RESULT_FILES[action])
     host.remove_shared(*stale)
+    wait = throttle(host, action)
+    if wait:
+        host.log(f"Settings page: {action} dropped: ran {MIN_INTERVAL[action] - wait} s ago, "
+                 f"at most once per {MIN_INTERVAL[action]} s")
+        if RESULT_FILES.get(action):
+            host.write_result(RESULT_FILES[action], {
+                "success": False, "action": action,
+                "message": f"{action} ran less than {MIN_INTERVAL[action]} seconds ago; "
+                           f"try again in {wait} seconds",
+                "completed_at": now_iso()})
+        return {"handled": None, "throttled": action, "retry_in": wait, **extra}
     if action != "refresh-status":
         host.log(f"Settings page: handling action '{action}'")
 
@@ -360,10 +414,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
         "refresh-status": lambda: _refresh_status(host),
         "update": lambda: _update(host),
     }
-    fn = handlers.get(action)
-    if fn is None:
-        host.log(f"Settings page: unknown action '{action}'")
-        return {"handled": None, "unknown": action, **extra}
+    fn = handlers[action]
     try:
         extra.update(fn() or {})
     except Exception as e:
@@ -405,6 +456,47 @@ def _resume(host, pending, confirmed):
         return {"handled": action, "error": str(e)}
     _pending_clear(host)
     return {"handled": None}
+
+
+# -- the per-action interval (issue #396) --
+
+def throttle(host, action, now=None):
+    """Seconds until *action* may run again, 0 when it may run now (and
+    then its time is recorded). The file is this host's own (the data
+    dir, no container mounts it); an unreadable one counts as empty."""
+    interval = MIN_INTERVAL.get(action, 0)
+    if interval <= 0:
+        return 0
+    now = time.time() if now is None else now
+    path = os.path.join(host.paths.data_dir, THROTTLE_FILE)
+    times = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            times = {k: float(v) for k, v in loaded.items()
+                     if k in ACTIONS and isinstance(v, (int, float))}
+    except (OSError, ValueError):
+        pass
+    last = times.get(action)
+    wait = 0
+    if last is not None and last > now:
+        # A clock set back: one more interval from now, not from then.
+        times[action] = now
+        wait = interval
+    elif last is not None and now - last < interval:
+        return max(1, int(interval - (now - last) + 0.999))
+    else:
+        times[action] = now
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(times, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as e:
+        host.log(f"Settings page: could not record the time of {action}: {e}")
+    return wait
 
 
 # -- start / restart / stop --

@@ -94,6 +94,15 @@
   fresh runner and checks the second run replaced the first (the nested
   `docker/docker`, `lib/onionpress/onionpress` of issue #316 that
   `install-tree.sh` ended).
+- **Every workflow action is pinned to a commit SHA** (issue #389):
+  `uses: owner/action@<40-hex> # vX.Y.Z`, the version comment being what
+  the SHA was resolved from. A floating major tag is whatever its
+  maintainer (or whoever holds their account) points it at, and the
+  release job holds `contents: write`. `.github/dependabot.yml` bumps the
+  SHA and the comment together, weekly, grouped. Bump by hand with
+  `gh api repos/<owner>/<action>/git/ref/tags/<tag>` (dereference an
+  annotated tag through `git/tags/<sha>`).
+  `tests/test_build_release_hygiene.py` refuses an unpinned `uses:`.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
@@ -487,6 +496,32 @@
   the last run's file for this run's and stopped.
   `tests/test_settings_page_results.py` (the PHP rule under php where
   installed), `TestRequestId` in `test_handle_action.py`.
+- **The page can make the host do only so much** (issue #396): `Host.read_shared`
+  reads a request file through `head -c` up to `READ_LIMITS[name]` (else
+  `READ_LIMIT`, 64 KiB; the action and id 256 bytes, passwords 4 KiB) and
+  drops, by name in the log, a file over its limit, never a cut-short
+  value; each action runs at most once per `MIN_INTERVAL[action]` seconds
+  (stop, start, restart and the long ones 60, check-reachability 30,
+  refresh-status free), the last times in `$DATA_DIR/.handle-action-times.json`
+  (`throttle`; a request inside the interval gets a failed result naming
+  the wait); and the request's text reaches the log only once it is in
+  `ACTIONS`, an unknown one as `unknown action dropped (N bytes)`, since
+  the log goes back to WordPress as recent-logs.txt and out with
+  analytics sharing. `TestBoundedReads`, `TestThrottle` in
+  `tests/test_handle_action.py` (its `_Case` zeroes the intervals).
+- **The owner's GETs with a side effect carry a nonce** (issue #402):
+  `wp_ajax_onionpress_poll_action` (unlinks service-result.json once
+  read) and `wp_ajax_onionpress_check_update` (a request through Tor, a
+  transient) `check_ajax_referer` their own action right after the owner
+  check, the page's script sending `_wpnonce`; `/onionpress-status-json`
+  writes `requested-action=refresh-status` only with the status page's
+  nonce (`onionpress_status_refresh_allowed`, `wp_verify_nonce` on
+  `_wpnonce`) and never over a request already there (it clobbered a
+  pending owner action), and every reply carries `refresh_nonce` so a
+  page left open keeps a fresh one. Without the nonce the data still
+  comes back; only the write is skipped. A new `wp_ajax_` handler in the
+  settings plugin needs a `check_ajax_referer`
+  (`tests/test_settings_page_nonces.py`, a census).
 - **The page's Stop and Restart are the launcher's** (issue #354): on
   Linux they reach its `stop)`/`restart)` cases, which stop the heartbeat
   client before the containers (so it sends /offline to the hub) and start
@@ -872,6 +907,18 @@
   `onionpress-uploads.ini` (needs an image publish); the form checks the
   limits before sending and posts `creations_upload_count`, and
   `handle_upload` reports refused, failed, unmoved and dropped files.
+- **What the folder serves is sandboxed** (issue #399): both paths, the
+  page's `serve_file` and the image's `onionpress-creations.conf` for
+  the raw `/wp-content/creations/...` path, send
+  `X-Content-Type-Options: nosniff`, and `Content-Security-Policy:
+  sandbox` for a document a browser could run script from
+  (`OnionPress_Creations::SANDBOXED_EXTENSIONS`: HTML, XHTML, SHTML,
+  MHTML, SVG, XML, XSL, by extension or by type; the conf's `FilesMatch`
+  lists the same extensions, test-tied). A saved web page or an SVG
+  dropped into My Creations opened at localhost:8080 ran script with
+  the owner's cookies. The sandbox has no `allow-scripts`: a published
+  page keeps its markup and loses its script. Needs an image publish for
+  the raw path. `tests/test_creations_sandboxed_serving.py`.
 - The Mac thumbnail generator starts at launch; `onionpress.thumbnails`
   decides what to make and removes thumbnails of files that are gone
   (never when part of the folder could not be read).
@@ -1419,6 +1466,26 @@
   `tests/test_install_invariants` (the handler under sh),
   `tests/test_mac_daemon` (the menubar census names `healthcheck-messages`).
 
+## The Directory Answers Visitors Only on OnionHome (issue #394)
+- `onionpress-directory.php` is a mu-plugin on every node, and its two
+  request hooks (`/follow?name=` on parse_request, the `/NAME[/REST]`
+  dispatch of a 404 on template_redirect) used to run for any request
+  whose Host header was OnionHome's or onionpress.org: the Host is the
+  visitor's to choose, so every node looked names up through Tor (30 s
+  in an Apache worker, no cache) and redirected.
+  `onionpress_directory_request_path()` now returns null unless
+  `onionpress_directory_is_onionhome_node()` (the node's own served
+  address, from the shared volume's `onion_address`, is
+  `ONIONPRESS_ONIONHOME_ADDRESS`), before the Host check; the visitor
+  handlers go through `onionpress_directory_lookup_for_visitor` (a miss
+  is not asked again for 60 s, a transient). The Settings page's own
+  `onionpress_directory_lookup()` calls (the owner's Following form, on
+  every node) are untouched. `ONIONPRESS_ONION_ADDRESS_FILE` lets a test
+  point the address read elsewhere. onionpress-status-hint.php (a 302
+  to the hub's fixed address) and onionpress-user-path.php
+  (`/<onionname>/` on every install, by design) stay on every node.
+  `tests/test_onionname_redirect.py` (the gate under php where installed).
+
 ## OnionHeaven Is On by Default
 - **`REGISTER_WITH_ONIONHEAVEN`: `yes` or unset/empty registers, `no` opts
   out** (and unregisters, below); any other value (a typo) does neither, so
@@ -1819,6 +1886,18 @@
   post (`_source_id`) is left to that scan on its first save.
 - Re-pinning either plugin means re-reading these against its internals
   (docs/BUILDING.md). `tests/test_bundled_plugins.py`.
+
+## The Hit Counter Has One Writer (issue #398)
+- `onionpress-hit-counter.php` is the plugin folder's only PHP: anything
+  else under wp-content/plugins is reachable directly, and
+  `standalone-counter.php` (SHORTINIT, a raw UPDATE of the main site's
+  wp_options for anyone) was a second, unauthenticated writer. The
+  increment checks the nonce it mints for its script
+  (`check_ajax_referer('onionpress_counter_nonce', 'nonce', false)`) and
+  on failure answers the current count without counting, so a page
+  served from the cache past the nonce's life still shows a counter.
+  The legacy `/var/lib/onionpress/hit-counter.txt` migration is gone
+  (nothing wrote it since the option). `tests/test_hit_counter.py`.
 
 ## The Wayback Sweep Is the Network's (issue #322)
 - One sweep walks every site, so its state is the network's, never a blog's:

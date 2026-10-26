@@ -61,6 +61,10 @@ sys.exit(ans.get("rc", 0))
 '''
 
 
+# handle_action.MIN_INTERVAL as shipped; _Case zeroes it.
+REAL_INTERVALS = dict(ha.MIN_INTERVAL)
+
+
 class FakeDocker:
     """The docker the handler sees: the shared volume (www-data's) as
     files in a sandbox folder, the tor hostname, `docker ps` lines."""
@@ -74,6 +78,7 @@ class FakeDocker:
         self.curl_code = curl_code
         self.calls = []
         self.cp_target = None          # what `docker cp` leaves at the copy
+        self.head_limits = []          # (file, bytes) of every bounded read
         # The hand-off runs `docker exec -i` itself, on this binary.
         self.docker_bin = os.path.join(sandbox, "docker")
         with open(self.docker_bin, "w") as f:
@@ -110,6 +115,13 @@ class FakeDocker:
             cmd = args[4:]
             if cmd[0] == "cat":
                 text = self.get(os.path.basename(cmd[1]))
+                return DockerResult(0 if text is not None else 1, text or "", "")
+            if cmd[0] == "head":          # head -c N PATH (Host.read_shared)
+                assert cmd[1] == "-c" and cmd[2].isdigit(), cmd
+                self.head_limits.append((os.path.basename(cmd[3]), int(cmd[2])))
+                text = self.get(os.path.basename(cmd[3]))
+                if text is not None:
+                    text = text.encode()[:int(cmd[2])].decode("utf-8", "replace")
                 return DockerResult(0 if text is not None else 1, text or "", "")
             if cmd[0] == "rm":
                 for p in cmd[2:]:
@@ -184,6 +196,11 @@ class _Case(unittest.TestCase):
         p = mock.patch.object(ha.time, "sleep", lambda s: None)
         p.start()
         self.addCleanup(p.stop)
+        # No per-action interval (issue #396) but in TestThrottle: cases
+        # here run one action several times in one data dir.
+        p = mock.patch.dict(ha.MIN_INTERVAL, {a: 0 for a in ha.ACTIONS})
+        p.start()
+        self.addCleanup(p.stop)
 
     def script(self, answers):
         with open(self.script_file, "w") as f:
@@ -223,12 +240,20 @@ class TestQuietTick(_Case):
         self.assertIn("started for", text)
         self.assertNotIn(os.path.expanduser("~"), text)
 
-    def test_unknown_action_is_logged_and_dropped(self):
-        self.request("drop-tables")
-        self.assertEqual(ha.handle(self.host()), {"handled": None, "unknown": "drop-tables"})
+    def test_unknown_action_is_dropped_and_logged_by_size_only(self):
+        # Issue #396: the log goes back to WordPress (recent-logs.txt) and
+        # out with analytics sharing, so the page's text never reaches it.
+        self.request("drop-tables\n[2026-01-01] forged line")
+        self.docker.put("request-id", "abc123\n")
+        self.assertEqual(ha.handle(self.host()), {"handled": None, "unknown": 36})
         self.assertIsNone(self.docker.get("requested-action"))
-        self.assertIn("unknown action 'drop-tables'", "\n".join(self.logs))
+        self.assertIsNone(self.docker.get("request-id"))
+        log = "\n".join(self.logs)
+        self.assertIn("unknown action dropped (36 bytes)", log)
+        self.assertNotIn("drop-tables", log)
+        self.assertNotIn("forged", log)
         self.assertEqual(self.argvs(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, ha.THROTTLE_FILE)))
 
     def test_every_verb_is_known(self):
         self.assertEqual(ha.ACTIONS, ("start", "restart", "stop", "check-reachability",
@@ -735,7 +760,7 @@ class TestRequestId(_Case):
                       and f"{wp_files.SHARED_DIR}/{name}" in c]
                 self.assertEqual(len(rm), 1, self.docker.calls)
                 before = self.docker.calls[:self.docker.calls.index(rm[0])]
-                self.assertTrue(all(c[4] == "cat" for c in before),
+                self.assertTrue(all(c[4] == "head" for c in before),
                                 f"the removal comes right after the request is read: {before}")
                 res = self.docker.result(name)
                 if res is not None:        # Linux's update: the launcher writes it
@@ -860,6 +885,119 @@ class TestApplyConfig(_Case):
             result = ha.handle(self.host("macos"))
         self.assertEqual(result, {"handled": "check-reachability", "config": ["UPDATE_ON_LAUNCH"]})
         self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "yes")
+
+
+class TestBoundedReads(_Case):
+    """Issue #396: Host.read_shared reads at most a file's limit."""
+
+    def test_every_request_file_is_read_through_head(self):
+        self.request("refresh-status")
+        ha.handle(self.host("linux"))
+        files = dict(self.docker.head_limits)
+        self.assertEqual(files["requested-action"], 257)
+        self.assertEqual(files["request-id"], 257)
+        self.assertNotIn(["exec", "-u", "www-data", "onionpress-wordpress", "cat",
+                          "/var/lib/onionpress/requested-action"], self.docker.calls)
+
+    def test_limits_cover_what_the_page_writes(self):
+        self.assertEqual(ha.READ_LIMIT, 64 * 1024)
+        for name in ("requested-action", "request-id"):
+            self.assertEqual(ha.READ_LIMITS[name], 256)
+        for name in ("backup-password", "restore-password"):
+            self.assertEqual(ha.READ_LIMITS[name], 4096)
+        self.assertNotIn("config-updates.json", ha.READ_LIMITS)   # READ_LIMIT
+        self.assertNotIn("import-key-data", ha.READ_LIMITS)
+
+    def test_a_file_over_its_limit_is_dropped_not_cut_short(self):
+        # "stop" + a megabyte: cut at 256 bytes it would still be "stop".
+        self.request("stop" + " " * (1024 * 1024))
+        host = self.host()
+        self.assertEqual(ha.handle(host), {"handled": None})
+        self.assertIn("requested-action ignored: over 256 bytes", "\n".join(self.logs))
+        self.assertEqual(self.argvs(), [])
+        self.assertEqual(dict(self.docker.head_limits)["requested-action"], 257)
+
+    def test_a_password_over_its_limit_is_empty(self):
+        self.docker.put("backup-password", "x" * 5000)
+        host = self.host()
+        self.assertEqual(host.read_shared("backup-password"), "")
+        self.assertIn("backup-password ignored: over 4096 bytes", "\n".join(self.logs))
+        self.docker.put("backup-password", "y" * 4096)
+        self.assertEqual(host.read_shared("backup-password"), "y" * 4096)
+
+
+class TestThrottle(_Case):
+    """Issue #396: one run of an action per MIN_INTERVAL seconds."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.dict(ha.MIN_INTERVAL, REAL_INTERVALS)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_intervals(self):
+        for action in ha.ACTIONS:
+            self.assertIn(action, ha.MIN_INTERVAL)
+        for action in ("stop", "restart", "start"):
+            self.assertGreaterEqual(ha.MIN_INTERVAL[action], 60)
+        self.assertEqual(ha.MIN_INTERVAL["refresh-status"], 0)
+
+    def test_a_second_stop_within_a_minute_is_dropped_with_a_result(self):
+        self.docker.running = True
+        self.request("stop")
+        self.assertEqual(ha.handle(self.host())["handled"], "stop")
+        self.assertEqual(self.argvs(), [["stop"]])
+        self.docker.put("request-id", "req2\n")
+        self.request("stop")
+        r = ha.handle(self.host())
+        self.assertEqual(r["handled"], None)
+        self.assertEqual(r["throttled"], "stop")
+        self.assertTrue(1 <= r["retry_in"] <= 60)
+        self.assertEqual(self.argvs(), [["stop"]])          # not run again
+        self.assertIsNone(self.docker.get("requested-action"))
+        result = self.docker.result("service-result.json")
+        self.assertFalse(result["success"])
+        self.assertEqual(result["request_id"], "req2")
+        self.assertIn("less than 60 seconds ago", result["message"])
+        self.assertIn("stop dropped: ran", "\n".join(self.logs))
+
+    def test_the_interval_is_per_action_and_kept_on_disk(self):
+        path = os.path.join(self.data_dir, ha.THROTTLE_FILE)
+        host = self.host()
+        self.assertEqual(ha.throttle(host, "stop", now=1000.0), 0)
+        self.assertEqual(ha.throttle(host, "start", now=1001.0), 0)   # another action
+        self.assertEqual(ha.throttle(host, "stop", now=1030.0), 30)
+        self.assertEqual(ha.throttle(host, "stop", now=1059.5), 1)
+        self.assertEqual(ha.throttle(host, "stop", now=1060.0), 0)
+        self.assertEqual(ha.throttle(host, "refresh-status", now=1060.0), 0)
+        self.assertEqual(ha.throttle(host, "refresh-status", now=1060.0), 0)
+        with open(path) as f:
+            times = json.load(f)
+        self.assertEqual(times, {"stop": 1060.0, "start": 1001.0})
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        # A new process (Linux: every run) reads the same file.
+        self.assertEqual(ha.throttle(self.host(), "stop", now=1070.0), 50)
+
+    def test_a_damaged_or_future_record_never_blocks_forever(self):
+        path = os.path.join(self.data_dir, ha.THROTTLE_FILE)
+        with open(path, "w") as f:
+            f.write("not json")
+        host = self.host()
+        self.assertEqual(ha.throttle(host, "stop", now=1000.0), 0)
+        with open(path, "w") as f:
+            json.dump({"stop": 999999999.0, "bogus": 1, "start": "x"}, f)
+        # A clock set back: one more minute from now, never for good.
+        self.assertEqual(ha.throttle(host, "stop", now=1000.0), 60)
+        self.assertEqual(ha.throttle(host, "stop", now=1030.0), 30)
+        self.assertEqual(ha.throttle(host, "stop", now=1060.0), 0)
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"stop": 1060.0})   # the junk is gone
+
+    def test_refresh_status_is_never_throttled(self):
+        for _ in range(3):
+            self.request("refresh-status")
+            self.assertEqual(ha.handle(self.host("linux"))["handled"], "refresh-status")
+        self.assertEqual(self.argvs(), [["write-status"]] * 3)
 
 
 class TestLaunchers(unittest.TestCase):

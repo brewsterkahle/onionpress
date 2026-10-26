@@ -428,6 +428,16 @@ class OnionPress_Creations {
         }
 
         header('Content-Type: ' . $content_type);
+        // A file in the folder is the owner's to publish, not to run on
+        // this origin (issue #399): nothing is sniffed into another type,
+        // and a document a browser could run script from (HTML, SVG, XML)
+        // is sandboxed: no script, no access to the session at
+        // localhost:8080 whose origin it is served from. The image's
+        // onionpress-creations.conf sends the same two for the raw path.
+        header('X-Content-Type-Options: nosniff');
+        if (self::is_sandboxed($basename, $content_type)) {
+            header('Content-Security-Policy: sandbox');
+        }
 
         // Allow images/media to be displayed inline, force download for others
         $inline_types = array('image/', 'video/', 'audio/', 'text/html', 'text/plain', 'application/pdf');
@@ -461,6 +471,30 @@ class OnionPress_Creations {
         }
         self::send_bytes($filepath, $first, $length);
         exit;
+    }
+
+    /**
+     * Extensions a browser renders as a document that can carry script
+     * (or, for XML, a stylesheet that does), served with a sandbox CSP.
+     * The regex in onionpress-creations.conf lists the same; a test
+     * keeps the two equal.
+     */
+    const SANDBOXED_EXTENSIONS = array('htm', 'html', 'xhtml', 'xht', 'shtml', 'mht', 'mhtml',
+                                       'svg', 'svgz', 'xml', 'xsl', 'xslt');
+
+    /**
+     * Whether serve_file() sandboxes this file: by its extension, or by
+     * a content type (wp_check_filetype's) of HTML, SVG or XML.
+     */
+    public static function is_sandboxed($basename, $content_type) {
+        $ext = strtolower(pathinfo($basename, PATHINFO_EXTENSION));
+        if (in_array($ext, self::SANDBOXED_EXTENSIONS, true)) {
+            return true;
+        }
+        $type = strtolower(strtok($content_type, ';'));
+        return $type === 'text/html' || $type === 'application/xhtml+xml'
+            || $type === 'image/svg+xml' || substr($type, -4) === '/xml'
+            || substr($type, -4) === '+xml';
     }
 
     /**
