@@ -4,7 +4,7 @@ Retro-style animated hit counter with persistent storage that survives reboots a
 
 ## Features
 
-- 🎯 **Persistent Storage**: Counter data stored in `/var/lib/onionpress/` - survives reboots, restarts, and upgrades
+- 🎯 **Persistent Storage**: the count is a WordPress option, so it is in every backup and survives reboots, restarts and upgrades
 - 🎨 **Animated Odometer**: Classic mechanical odometer animation when count changes
 - 🎪 **Multiple Styles**: Choose from odometer, digital, or classic styles
 - 📊 **Auto-Increment**: Automatically increments on each page view
@@ -23,8 +23,7 @@ The plugin is pre-installed with OnionPress. Simply activate it in WordPress:
 ### Manual Installation
 
 1. Copy the `onionpress-hit-counter` folder to `/var/www/html/wp-content/plugins/`
-2. Ensure `/var/lib/onionpress/` directory exists and is writable by www-data
-3. Activate the plugin in WordPress admin
+2. Activate the plugin in WordPress admin
 
 ## Usage
 
@@ -90,31 +89,13 @@ To add the hit counter to the OnionPress product website homepage:
 
 ## Persistent Storage
 
-The counter value is stored in:
-```
-/var/lib/onionpress/hit-counter.txt
-```
-
-This location is mounted as a Docker volume (`onionpress-persistent-data`) ensuring the count persists across:
+The count is the `onionpress_hit_counter` option in the main site's
+`wp_options` table (not autoloaded), so it persists across:
 - Container restarts
 - Computer reboots
 - Software upgrades
-- WordPress reinstalls
 
-## Export/Import
-
-The counter data is automatically included when exporting your site using the OnionPress export script:
-
-```bash
-cd product-website/scripts
-./export-site.sh
-```
-
-The counter will be restored when importing to a new instance:
-
-```bash
-./import-site.sh
-```
+and is part of every OnionPress backup, like the rest of the database.
 
 ## Technical Details
 
@@ -131,55 +112,32 @@ onionpress-hit-counter/
 
 ### How It Works
 
-1. **On Page Load**: JavaScript calls WordPress AJAX endpoint
-2. **Server Side**: PHP increments counter in flat file
-3. **Response**: Returns new count to JavaScript
-4. **Animation**: Odometer animates to new value
+1. **On Page Load**: JavaScript posts to the WordPress AJAX endpoint
+   (`increment_counter`) with the nonce the page was given
+2. **Server Side**: PHP checks the nonce and increments the option; a
+   request without a valid nonce (a page cached past the nonce's life)
+   gets the current count and counts nothing
+3. **Response**: Returns the count to JavaScript
+4. **Animation**: Odometer animates to the new value
 5. **One Per Load**: Only increments once per page load (prevents refresh spam)
 
-### Storage Location
-
-The plugin stores data in `/var/lib/onionpress/` instead of the WordPress database because:
-- WordPress database can be reset during upgrades
-- Flat file storage is simple and reliable
-- Same persistence level as Tor keys
-- Easy to backup and restore
+There is no other writer: the `standalone-counter.php` endpoint that
+bypassed WordPress (SHORTINIT, a raw UPDATE of `wp_options` for anyone)
+was removed in 1.2.0 (issue #398).
 
 ## Troubleshooting
 
 ### Counter doesn't increment
 
-1. Check if `/var/lib/onionpress/` exists and is writable:
+1. Check the browser console: the increment is a POST to
+   `admin-ajax.php?action=increment_counter`
+2. A page served from the page cache for longer than a day carries an
+   expired nonce; the counter then shows but does not move until the
+   cached page is refreshed
+3. Read the stored count:
    ```bash
-   docker exec onionpress-wordpress ls -la /var/lib/onionpress/
+   docker exec -u www-data onionpress-wordpress wp option get onionpress_hit_counter
    ```
-
-2. Check file permissions:
-   ```bash
-   docker exec onionpress-wordpress ls -la /var/lib/onionpress/hit-counter.txt
-   ```
-
-3. Ensure www-data owns the directory:
-   ```bash
-   docker exec onionpress-wordpress chown -R www-data:www-data /var/lib/onionpress/
-   ```
-
-### Counter resets after reboot
-
-Ensure the Docker volume is properly configured in `docker-compose.yml`:
-
-```yaml
-volumes:
-  onionpress-data:
-    name: onionpress-persistent-data
-```
-
-And mounted in the wordpress service:
-
-```yaml
-volumes:
-  - onionpress-data:/var/lib/onionpress
-```
 
 ### Animation doesn't work
 

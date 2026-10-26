@@ -1820,6 +1820,18 @@
 - Re-pinning either plugin means re-reading these against its internals
   (docs/BUILDING.md). `tests/test_bundled_plugins.py`.
 
+## The Hit Counter Has One Writer (issue #398)
+- `onionpress-hit-counter.php` is the plugin folder's only PHP: anything
+  else under wp-content/plugins is reachable directly, and
+  `standalone-counter.php` (SHORTINIT, a raw UPDATE of the main site's
+  wp_options for anyone) was a second, unauthenticated writer. The
+  increment checks the nonce it mints for its script
+  (`check_ajax_referer('onionpress_counter_nonce', 'nonce', false)`) and
+  on failure answers the current count without counting, so a page
+  served from the cache past the nonce's life still shows a counter.
+  The legacy `/var/lib/onionpress/hit-counter.txt` migration is gone
+  (nothing wrote it since the option). `tests/test_hit_counter.py`.
+
 ## The Wayback Sweep Is the Network's (issue #322)
 - One sweep walks every site, so its state is the network's, never a blog's:
   - **archive.org keys** live in the main site's options. Setup, the
