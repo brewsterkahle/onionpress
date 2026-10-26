@@ -38,8 +38,19 @@
 #   build/release.sh --draft      # same, but leave a new GitHub release a draft
 #
 #   Bump the version FIRST (build/bump-version.sh X.Y.Z, macOS only) and
-#   commit, then run this. This script does not bump — it releases whatever
+#   commit, with the version's section in RELEASE_HISTORY.md (the new
+#   release's notes start with it; no section, no release), then run this.
+#   This script does not bump — it releases whatever
 #   version the source tree declares.
+#
+# WHICH REPOSITORY
+#   Every gh call names RELEASE_REPO (brewsterkahle/onionpress) with -R, and
+#   a new release is tagged, with --target, at the tip of that repository's
+#   main, which HEAD must be. In a checkout whose origin is a fork, gh
+#   defaults to the fork: v2.5.4 was first published on ivar/onionpress,
+#   tagged at the fork's stale main, where the Mac updater, Linux's
+#   `onionpress update` and the README (all brewsterkahle's) never saw it.
+#   ONIONPRESS_RELEASE_REPO overrides it, for testing only.
 #
 # REQUIREMENTS
 #   - gh, authenticated (gh auth status)
@@ -72,6 +83,8 @@ SUMS_PATH="$BUILD_DIR/SHA256SUMS"
 OS="$(uname -s)"
 echo "OnionPress release $TAG  (host: $OS)"
 PUBLISH_AFTER_VERIFY=0
+RELEASE_REPO="${ONIONPRESS_RELEASE_REPO:-brewsterkahle/onionpress}"
+echo "Repository: $RELEASE_REPO"
 REQUIRED_ASSETS=""
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -116,7 +129,7 @@ write_sums() {
 # `onionpress update` makes before installing. Exits on any failure.
 verify_release() {
     local names need line
-    names=$(gh release view "$TAG" --json assets --jq '.assets[].name') \
+    names=$(gh release view -R "$RELEASE_REPO" "$TAG" --json assets --jq '.assets[].name') \
         || fail "could not list the assets of release $TAG."
     printf '%s\n' "$names" | sed 's/^/  /'
     for need in "$@"; do
@@ -124,7 +137,7 @@ verify_release() {
     done
     rm -rf "$WORK_DIR/published"
     mkdir "$WORK_DIR/published"
-    gh release download "$TAG" --pattern SHA256SUMS --pattern onionpress.deb \
+    gh release download -R "$RELEASE_REPO" "$TAG" --pattern SHA256SUMS --pattern onionpress.deb \
             --dir "$WORK_DIR/published" \
         || fail "could not download SHA256SUMS and onionpress.deb of $TAG to check them."
     cmp -s "$WORK_DIR/published/SHA256SUMS" "$SUMS_PATH" \
@@ -138,11 +151,55 @@ verify_release() {
 # Does the release already exist, and does it already have a .dmg?
 release_exists=0
 release_has_dmg=0
-if gh release view "$TAG" >/dev/null 2>&1; then
+if gh release view -R "$RELEASE_REPO" "$TAG" >/dev/null 2>&1; then
     release_exists=1
-    if gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "onionpress.dmg"; then
+    if gh release view -R "$RELEASE_REPO" "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "onionpress.dmg"; then
         release_has_dmg=1
     fi
+fi
+
+# A new release is tagged at the tip of RELEASE_REPO's main, and only from
+# that commit: never a fork's main, never a commit main has moved past.
+# Checked before anything is built.
+MAIN_SHA=""
+if [ "$OS" = "Darwin" ] && [ "$release_exists" = "0" ]; then
+    MAIN_SHA=$(gh api "repos/$RELEASE_REPO/commits/main" --jq .sha) \
+        || fail "could not read the tip of $RELEASE_REPO's main."
+    [[ "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]] \
+        || fail "the tip of $RELEASE_REPO's main is not a commit id: '$MAIN_SHA'."
+    HEAD_SHA=$(git -C "$PROJECT_DIR" rev-parse HEAD) \
+        || fail "could not read HEAD of $PROJECT_DIR."
+    if [ "$HEAD_SHA" != "$MAIN_SHA" ]; then
+        fail "HEAD ($HEAD_SHA) is not the tip of $RELEASE_REPO's main ($MAIN_SHA).
+  $TAG is tagged at that commit and built from this checkout, so they must
+  be the same. Merge and push to $RELEASE_REPO's main, check it out
+  (git fetch <its remote> && git checkout <its remote>/main), then run this again."
+    fi
+    # gh release create ignores --target for a tag that already exists.
+    TAG_SHA=$(gh api "repos/$RELEASE_REPO/git/matching-refs/tags/$TAG" \
+            --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .object.sha") \
+        || fail "could not check whether $RELEASE_REPO already has a tag $TAG."
+    if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$MAIN_SHA" ]; then
+        fail "$RELEASE_REPO already has a tag $TAG, at $TAG_SHA, not at main ($MAIN_SHA).
+  A release would use that tag as it is. Remove it on $RELEASE_REPO first if it is wrong."
+    fi
+    echo "Tagging $TAG at $RELEASE_REPO main ($MAIN_SHA), which is HEAD."
+fi
+
+# A new release's notes start with its section of RELEASE_HISTORY.md
+# ("## X.Y.Z — date" up to the next "## "), above GitHub's generated list.
+# No section, or an empty one, and nothing is built.
+NOTES_PATH="$WORK_DIR/release-notes.md"
+if [ "$OS" = "Darwin" ] && [ "$release_exists" = "0" ]; then
+    HISTORY="$PROJECT_DIR/RELEASE_HISTORY.md"
+    [ -f "$HISTORY" ] || fail "$HISTORY not found."
+    awk -v v="$VERSION" '
+        /^## / { if (found) exit; split($0, w, " "); if (w[2] == v) { found = 1; next } }
+        found' "$HISTORY" > "$NOTES_PATH"
+    grep -q '[^[:space:]]' "$NOTES_PATH" \
+        || fail "RELEASE_HISTORY.md has no notes for $VERSION.
+  Add a '## $VERSION — $(date +%Y-%m-%d)' section saying what changed for the
+  people who run OnionPress, commit it to main, then run this again."
 fi
 
 # ─── Always build the .deb (works on macOS via build-linux.sh's fallback) ──
@@ -194,14 +251,16 @@ if [ "$OS" = "Darwin" ]; then
     echo ""
     if [ "$release_exists" = "1" ]; then
         echo "── Updating existing release $TAG (both assets + SHA256SUMS) ────────"
-        gh release upload "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" --clobber
+        gh release upload -R "$RELEASE_REPO" "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" --clobber
     else
         # A draft until verify_release passes; published below unless
         # --draft was asked for.
         echo "── Creating release $TAG with both assets + SHA256SUMS ──────────────"
-        gh release create "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" \
+        gh release create -R "$RELEASE_REPO" "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" \
             --draft \
+            --target "$MAIN_SHA" \
             --title "$TAG" \
+            --notes-file "$NOTES_PATH" \
             --generate-notes
         if [ -z "$DRAFT" ]; then
             PUBLISH_AFTER_VERIFY=1
@@ -235,7 +294,7 @@ EOF
     REQUIRED_ASSETS="onionpress.deb SHA256SUMS"
     if [ "$release_has_dmg" = "1" ]; then
         mkdir "$WORK_DIR/dmg"
-        gh release download "$TAG" --pattern onionpress.dmg --dir "$WORK_DIR/dmg" \
+        gh release download -R "$RELEASE_REPO" "$TAG" --pattern onionpress.dmg --dir "$WORK_DIR/dmg" \
             || fail "could not download the onionpress.dmg of $TAG to hash it for SHA256SUMS."
         write_sums "$DEB_PATH" "$WORK_DIR/dmg/onionpress.dmg"
         REQUIRED_ASSETS="onionpress.dmg $REQUIRED_ASSETS"
@@ -244,7 +303,7 @@ EOF
     fi
     echo ""
     echo "── Attaching .deb + SHA256SUMS to existing release $TAG ─────────────"
-    gh release upload "$TAG" "$DEB_PATH" "$SUMS_PATH" --clobber
+    gh release upload -R "$RELEASE_REPO" "$TAG" "$DEB_PATH" "$SUMS_PATH" --clobber
 fi
 
 # ─── Verify the assets, SHA256SUMS included, then publish ──────────────────
@@ -256,13 +315,13 @@ verify_release $REQUIRED_ASSETS
 if [ "$PUBLISH_AFTER_VERIFY" = "1" ]; then
     echo ""
     echo "── Publishing $TAG ───────────────────────────────────────────────────"
-    gh release edit "$TAG" --draft=false
+    gh release edit -R "$RELEASE_REPO" "$TAG" --draft=false
 fi
 
 echo ""
-if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
+if [ "$(gh release view -R "$RELEASE_REPO" "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "true" ]; then
     echo "✅ Draft release $TAG ready with the Linux .deb and SHA256SUMS (not published)."
-    echo "   Publish it with: gh release edit $TAG --draft=false"
+    echo "   Publish it with: gh release edit -R $RELEASE_REPO $TAG --draft=false"
 else
     echo "✅ Release $TAG published with the Linux .deb and SHA256SUMS included."
 fi

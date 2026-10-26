@@ -1,0 +1,4 @@
+# The DMG background fallback (build/create-dmg-background.py), installed
+# only when build/dmg-assets/dmg-background.png is missing, after py2app:
+# kept out of the build lock so it never sits in the venv py2app bundles.
+Pillow

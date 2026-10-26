@@ -1,0 +1,14 @@
+pip
+py2app
+# setuptools<81: kept on purpose; check whenever the locks are refreshed.
+# setuptools 81 removed dry_run from distutils' spawn(), which py2app
+# 0.28.9 passed (py2app issue #557). py2app 0.28.10 no longer passes it
+# (py2app/util.py byte_compile, which our build reaches through setup.py's
+# optimize=2), so the pin is probably no longer needed, but no build has
+# been tried with setuptools 81 or newer (checked 2026-10-26).
+# To drop it: remove "<81", run build/refresh-python-locks.sh, make one
+# ONIONPRESS_RELEASE_BUILD=1 Mac build; if it passes, also delete the
+# "py2app failed" retry in build-dmg-simple.sh and rebuild-menubar.sh and
+# the below-81 assertion in tests/test_dmg_build_pins.py.
+setuptools<81
+wheel
