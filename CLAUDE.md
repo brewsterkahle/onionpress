@@ -467,6 +467,19 @@
   the last run's file for this run's and stopped.
   `tests/test_settings_page_results.py` (the PHP rule under php where
   installed), `TestRequestId` in `test_handle_action.py`.
+- **The page can make the host do only so much** (issue #396): `Host.read_shared`
+  reads a request file through `head -c` up to `READ_LIMITS[name]` (else
+  `READ_LIMIT`, 64 KiB; the action and id 256 bytes, passwords 4 KiB) and
+  drops, by name in the log, a file over its limit, never a cut-short
+  value; each action runs at most once per `MIN_INTERVAL[action]` seconds
+  (stop, start, restart and the long ones 60, check-reachability 30,
+  refresh-status free), the last times in `$DATA_DIR/.handle-action-times.json`
+  (`throttle`; a request inside the interval gets a failed result naming
+  the wait); and the request's text reaches the log only once it is in
+  `ACTIONS`, an unknown one as `unknown action dropped (N bytes)`, since
+  the log goes back to WordPress as recent-logs.txt and out with
+  analytics sharing. `TestBoundedReads`, `TestThrottle` in
+  `tests/test_handle_action.py` (its `_Case` zeroes the intervals).
 - **The page's Stop and Restart are the launcher's** (issue #354): on
   Linux they reach its `stop)`/`restart)` cases, which stop the heartbeat
   client before the containers (so it sends /offline to the hub) and start
