@@ -396,7 +396,9 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
     if [ "$rootless_ok" = "0" ]; then
         if ! id -nG "$REAL_USER" 2>/dev/null | grep -qw docker; then
             if usermod -aG docker "$REAL_USER" 2>/dev/null; then
-                echo "  Added $REAL_USER to the docker group."
+                echo "  Added $REAL_USER to the docker group: rootless Docker could not"
+                echo "  be set up, so OnionPress will use the system daemon. Membership"
+                echo "  of that group is root-equivalent on this machine (issue #388)."
             else
                 bootstrap_ok=0
             fi
