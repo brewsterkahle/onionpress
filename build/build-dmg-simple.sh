@@ -722,8 +722,9 @@ if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
     --dist-dir "$MENUBAR_BUILD_DIR/dist" \
     --bdist-base "$MENUBAR_BUILD_DIR/build" \
     2>&1; then
-    # py2app uses distutils.spawn(dry_run=...) which setuptools 81+ removed.
-    # Retry with older setuptools until py2app ships a fix.
+    # py2app 0.28.9 used distutils.spawn(dry_run=...), which setuptools 81+
+    # removed; whether the pin is still needed is noted in
+    # build/build-requirements-macos.in.
     # The build lock pins setuptools below 81 already; this retry is
     # for a venv that somehow lost that pin, from the same lock.
     echo "py2app failed — retrying with the locked setuptools..."
