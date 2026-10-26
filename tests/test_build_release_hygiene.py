@@ -142,9 +142,32 @@ class WorkflowRunnersAndActions(unittest.TestCase):
                                      "Pin the Ubuntu version; -latest moved to "
                                      "Ubuntu 26 on 2026-10-19 without a review.")
 
+    def test_actions_are_pinned_by_commit_sha(self):
+        """Issue #389: a floating major tag (`@v7`) is whatever the action's
+        maintainer, or whoever holds their account, points it at; the
+        release job holds contents: write. Every `uses:` names a full
+        commit SHA, with the version it was resolved from in a trailing
+        comment for Dependabot (.github/dependabot.yml) and the reader."""
+        pinned = re.compile(
+            r"uses:[ \t]*[\w.-]+/[\w.-]+@[0-9a-f]{40}[ \t]+#[ \t]*v\d+(\.\d+)*[ \t]*$",
+            re.M)
+        for name, code in self.workflows.items():
+            for line in code.splitlines():
+                if "uses:" not in line:
+                    continue
+                with self.subTest(workflow=name, line=line.strip()):
+                    self.assertRegex(line, pinned,
+                                     "Pin the action to a 40-hex commit SHA "
+                                     "with `# vX.Y.Z` after it.")
+
+    def test_dependabot_bumps_the_action_pins(self):
+        text = _read(".github/dependabot.yml")
+        self.assertIn("package-ecosystem: github-actions", text)
+
     def test_actions_run_on_node_24(self):
         for name, code in self.workflows.items():
-            for action, major in re.findall(r"uses:[ \t]*([\w.-]+/[\w.-]+)@v(\d+)", code):
+            for action, major in re.findall(
+                    r"uses:[ \t]*([\w.-]+/[\w.-]+)@[0-9a-f]{40}[ \t]+#[ \t]*v(\d+)", code):
                 with self.subTest(workflow=name, action=action):
                     self.assertIn(action, NODE24_MAJOR,
                                   "New action: add its first node24 major here.")

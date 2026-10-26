@@ -1,0 +1,13 @@
+# Keeps the commit-SHA pins in .github/workflows current (issue #389).
+# Each `uses:` is pinned to a full commit SHA with the version in a trailing
+# comment; Dependabot bumps the SHA and the comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
