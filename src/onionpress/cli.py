@@ -2249,6 +2249,18 @@ def main(argv: list[str] = None) -> int:
              "for --sandbox is refused; exit 1 on any failure")
     p_db_import.add_argument(
         "--sql-file", required=True, help="The dump to import (wordpress.sql)")
+    p_relsig = sub.add_parser(
+        "release-signature",
+        help="A release's SHA256SUMS.sig (onionpress.release_signing, issue #246)")
+    relsig_sub = p_relsig.add_subparsers(dest="relsig_command", required=True)
+    p_relsig_verify = relsig_sub.add_parser(
+        "verify",
+        help="Exit 0 when SHA256SUMS is signed by an embedded release key (or no "
+             "key is embedded yet, said on stdout), 1 when refused, 2 when a "
+             "file cannot be read; the Linux launcher's update runs it")
+    p_relsig_verify.add_argument("sums", help="The release's SHA256SUMS")
+    p_relsig_verify.add_argument("sig", nargs="?", default="",
+                                 help="Its SHA256SUMS.sig (absent: the release carries none)")
     p_is_hub = sub.add_parser(
         "is-onionheaven-hub",
         help="Exit 0 when the onion address given is the OnionHeaven hub's "
@@ -2756,6 +2768,11 @@ def main(argv: list[str] = None) -> int:
         paths = resolve_paths(data_dir=args.data_dir)
         pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths).docker_bin)
         return 0 if pending else 1
+
+    if args.command == "release-signature":
+        # No OnionPressCLI setup: the Linux launcher runs it mid-update.
+        from .release_signing import verify_files
+        return verify_files(args.sums, args.sig or None)
 
     if args.command == "is-onionheaven-hub":
         # The Linux launcher's is_onionheaven_hub() (issue #345): the Mac

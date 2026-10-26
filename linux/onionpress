@@ -3550,6 +3550,10 @@ _validate_oh_address() {
 RELEASE_REPO="brewsterkahle/onionpress"
 RELEASE_DEB="onionpress.deb"
 RELEASE_SUMS="SHA256SUMS"
+# Its signature by the maintainer's key (issue #246; onionpress.release_signing):
+# checked by `onionpress release-signature verify` when a public key is
+# embedded in this install, else said to be unchecked.
+RELEASE_SIG="SHA256SUMS.sig"
 # Where the .deb installs; update refuses to put it beside another tree.
 RELEASE_INSTALL_DIR="/opt/onionpress"
 
@@ -3705,6 +3709,16 @@ update_fetch_release() {
         UPDATE_ERROR="could not download $RELEASE_SUMS of $UPDATE_TAG (see $LOG_FILE)."
         return 1
     fi
+    # The signature, when the release carries one (a failed download is a
+    # missing signature, never a pass); verified against the embedded key.
+    rm -f "$dir/$RELEASE_SIG"
+    release_curl --max-time 60 --max-filesize 4096 \
+        -o "$dir/$RELEASE_SIG" "$base/$RELEASE_SIG" 2>>"$LOG_FILE" || rm -f "$dir/$RELEASE_SIG"
+    if ! sig_note=$(op_py release-signature verify "$dir/$RELEASE_SUMS" "$dir/$RELEASE_SIG" 2>>"$LOG_FILE"); then
+        UPDATE_ERROR="$RELEASE_SUMS of $UPDATE_TAG: ${sig_note:-signature check failed}"
+        return 1
+    fi
+    log "update: $sig_note"
     if ! release_curl --max-time 900 --max-filesize 268435456 \
             -o "$dir/$RELEASE_DEB" "$base/$RELEASE_DEB" 2>>"$LOG_FILE"; then
         UPDATE_ERROR="could not download $RELEASE_DEB of $UPDATE_TAG (see $LOG_FILE)."

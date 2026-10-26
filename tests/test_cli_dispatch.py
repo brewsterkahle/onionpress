@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, cli, config, confirm, containers, daemon,
-    derivatives, handle_action, launcher_ops, multisite, onionheaven, redact, scrub,
-    wordpress_egress,
+    derivatives, handle_action, launcher_ops, multisite, onionheaven, redact, release_signing,
+    scrub, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -395,6 +395,10 @@ ROWS = [
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=1, returns=False),
     # Issue #345: the Linux launcher's is_onionheaven_hub() is this.
+    Row("release-signature verify", ["release-signature", "verify", "/r/SHA256SUMS", "/r/SHA256SUMS.sig"],
+        "release_signing.verify_files", mock.call("/r/SHA256SUMS", "/r/SHA256SUMS.sig")),
+    Row("release-signature verify", ["release-signature", "verify", "/r/SHA256SUMS"],
+        "release_signing.verify_files", mock.call("/r/SHA256SUMS", None)),
     Row("is-onionheaven-hub", ["is-onionheaven-hub", ONION],
         "onionheaven.is_onionheaven_instance", mock.call(ONION), rc=0, returns=True),
     Row("is-onionheaven-hub", ["is-onionheaven-hub"],
@@ -444,12 +448,13 @@ MODULES = {
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
+    "release_signing": release_signing,
 }
 
 
 # Subcommands that only group others: without a subcommand each prints
 # its help and exits 1 (TestDispatch); their children are the census's.
-PARENTS = {("config",), ("hub-recovery-key",), ("onionname",)}
+PARENTS = {("config",), ("hub-recovery-key",), ("onionname",), ("release-signature",)}
 
 
 def leaves(tree):

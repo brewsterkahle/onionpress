@@ -46,6 +46,26 @@
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
 - **Cut releases with `build/release.sh`** — it builds BOTH artifacts and uploads both to one release, so the Linux `.deb` can't be forgotten. (It was: v2.4.101–v2.4.106 shipped only the `.dmg`, which 404'd the README's `releases/latest/download/onionpress.deb` link — that link resolves to the *Latest* release's asset of that name.) Bump + commit first, then run it. Cross-platform rule it enforces: the `.dmg` can only be built on macOS, so on **macOS** it builds `.dmg`+`.deb` and creates/updates the release with both; on **Linux** it builds only the `.deb` and *refuses to create* a release (a `.dmg`-less "Latest" would break the Mac link) — it only attaches the `.deb` to an existing release that already carries the matching `.dmg`. Always run the Mac side first.
 - **Every release carries `SHA256SUMS`** (`<sha256>  onionpress.deb` / `onionpress.dmg`, sha256sum format), written by `build/release.sh` (on Linux it downloads the release's `.dmg` to hash it). A new release is created as a draft; the script downloads `SHA256SUMS` and the `.deb` back, checks them, and only then publishes. It fails instead of finishing a release without them (`tests/test_release_sha256sums.py`). Linux's `onionpress update` installs **only** a release's `onionpress.deb` whose sha256 is its `SHA256SUMS` line, whose package is `onionpress` of the tag's version, and that is newer than the installed one (`--force` reinstalls/downgrades; drafts never; pre-releases only with `--pre`; `--version X.Y.Z`; `--check` reports only), with `sudo apt-get install -y --no-remove`; a git checkout only with `--from-checkout` (developers). So a release without `SHA256SUMS` cannot be installed that way. The Settings page's update button on Linux only checks: handle-action `update` writes `update-result.json` (one GitHub lookup per 5 min) and never installs, since anything in WordPress can write `requested-action` (`tests/test_linux_release_update.py`). Signing `SHA256SUMS` with a pinned key is the planned next step.
+- **A release's `SHA256SUMS` may be signed** (issues #246 and #386 step 2,
+  branch `sec-246-signed-sums`, not merged): `src/onionpress/release_signing.py`
+  holds `RELEASE_SIGNING_PUBLIC_KEYS` (Ed25519, hex; empty until the
+  maintainer runs `build/release-key.py create <file>` and commits the
+  public half), the `.sig` format (`SIG_ASSET`, one text file: header,
+  key id, base64 signature; PyNaCl) and the policy `check_release_sums`:
+  no key embedded, nothing enforced and the updaters log `NO_KEY_NOTE`;
+  a key embedded, a release without `SHA256SUMS.sig` or with one that
+  does not verify is refused. `build/release.sh` signs `SHA256SUMS` when
+  `ONIONPRESS_RELEASE_SIGNING_KEY` names the secret key file (kept off
+  GitHub and CI) and uploads the `.sig`, else warns. The Mac updater
+  fetches the `.sig` (`_fetch_release_sig`, the fourth curl) and checks
+  before the hash; Linux `update_fetch_release` downloads it (a failed
+  download is a missing signature) and runs `onionpress
+  release-signature verify <sums> <sig>` (0 verified or unchecked, 1
+  refused, 2 unreadable) before the `.deb`. Open: CI's linux-package
+  workflow rewrites the `.deb` line of `SHA256SUMS` after publication,
+  which breaks a signature made on the Mac; either CI stops rewriting
+  (the Mac-built `.deb` stays) or signs with a key in a GitHub secret
+  (the threat this guards against). `tests/test_release_signing.py`.
 - **The update check's curl names macOS's CA bundle only where it exists**
   (issue #355, `updater._curl_tls_args`): `--cacert /etc/ssl/cert.pem` was
   passed unconditionally, and Debian/Ubuntu/Raspberry Pi OS keep theirs at

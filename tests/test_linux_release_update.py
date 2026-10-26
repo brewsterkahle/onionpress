@@ -126,7 +126,7 @@ update_from_checkout() { echo "update_from_checkout" >> "$CALLS"; }
 wp_put() { echo "wp_put $*" >> "$CALLS"; cat > "$WP_PUT_OUT"; }
 '''
 
-FUNCTIONS = ("is_release_version", "version_newer", "release_curl", "sha256_of",
+FUNCTIONS = ("op_py", "is_release_version", "version_newer", "release_curl", "sha256_of",
              "update_find_release", "update_fetch_release", "update_from_release",
              "update_settings_page_check", "update_settings_page_put_result",
              "update_usage", "update_cmd")
@@ -199,7 +199,10 @@ class _Harness(unittest.TestCase):
                  "HOME": self.tmp, "TMPDIR": self.tmpdir, "LOG_FILE": self.log_file,
                  "CALLS": self.calls_file, "FAKE": self.fake, "CURRENT": current,
                  "INSTALL_DIR": install_dir, "WP_PUT_OUT": self.wp_put_out,
-                 "DATA_DIR": self.data_dir, **env})
+                 "DATA_DIR": self.data_dir,
+                 # op_py (the SHA256SUMS.sig check, issue #246) runs the
+                 # checkout's package under the system python3.
+                 "ONIONPRESS_PYTHONPATH": os.path.join(PROJECT_DIR, "src"), **env})
         return r
 
     def update(self, *args, **kw):
@@ -233,7 +236,8 @@ class TestReleaseUpdate(_Harness):
         calls = self.calls
         self.assertIn(f"{API}/latest", calls[0])
         self.assertEqual([c.split()[-1] for c in self.downloads()],
-                         [f"{DOWNLOAD}/v2.6.0/SHA256SUMS", f"{DOWNLOAD}/v2.6.0/onionpress.deb"])
+                         [f"{DOWNLOAD}/v2.6.0/SHA256SUMS", f"{DOWNLOAD}/v2.6.0/SHA256SUMS.sig",
+                          f"{DOWNLOAD}/v2.6.0/onionpress.deb"])
         installs = self.installs()
         self.assertEqual(len(installs), 1, calls)
         self.assertRegex(installs[0], r"^sudo apt-get install -y --no-remove "
