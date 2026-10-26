@@ -668,6 +668,9 @@ class TestUpdateOrder(unittest.TestCase):
                                   side_effect=lambda s, i: order.append("stage") or "/tmp/staged"), \
                 mock.patch.object(updater, "swap_in_bundle",
                                   side_effect=lambda *a, **k: order.append("swap")), \
+                mock.patch.object(updater, "_fetch_release_sums",
+                                  return_value=f"{'a' * 64}  x.dmg\n"), \
+                mock.patch.object(updater, "sha256_of", return_value="a" * 64), \
                 mock.patch.object(updater.shutil, "rmtree"):
             updater.download_and_install(
                 {"assets": [{"name": "x.dmg", "browser_download_url": "https://x/x.dmg"}]},
