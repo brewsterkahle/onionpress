@@ -11,6 +11,7 @@ Usage:
 
 import base64
 import hashlib
+import itertools
 import json
 import os
 import signal
@@ -21,6 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 import urllib.request
 
 # Allow importing from src/ and docker/tor/
@@ -29,6 +31,21 @@ PROJECT_DIR = os.path.dirname(TESTS_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
 from onionpress import onion_auth
+
+
+# Issue #400: the hub accepts a verified request once per address and
+# timestamp, and these tests post one message several times in one
+# second (register, then /online), so every timestamp signed here is a
+# second later than the last one (within the 300 s tolerance).
+_TICK = itertools.count()
+
+
+def _ticking_timestamp():
+    return (datetime.now(timezone.utc) + timedelta(seconds=next(_TICK) % 240)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+onion_auth.make_timestamp = _ticking_timestamp
 
 # ---------------------------------------------------------------------------
 # Test key generation helpers

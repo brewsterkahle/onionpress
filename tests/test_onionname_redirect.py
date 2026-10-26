@@ -167,6 +167,115 @@ class TestNameResolvesToTheOnionRoot(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(PHP, "php not installed")
+class TestOnlyOnionHomeAnswersVisitors(unittest.TestCase):
+    """Issue #394: the two request hooks run only on the node whose own
+    address is OnionHome's. The Host header is the visitor's to choose,
+    so `Host: onionpress.org` used to make every node look names up
+    (through Tor, 30 s, inside an Apache worker) and redirect."""
+
+    ONIONHOME = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
+    OTHER = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz2345.onion"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="onionpress-directory-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _request_path(self, own_address, host, uri="/alice/posts/1"):
+        addr_file = os.path.join(self.tmp, "onion_address")
+        if own_address is None:
+            if os.path.exists(addr_file):
+                os.remove(addr_file)
+        else:
+            with open(addr_file, "w") as f:
+                f.write(own_address + "\n")
+        harness = textwrap.dedent(f"""\
+            <?php
+            define('ABSPATH', __DIR__);
+            define('ONIONPRESS_ONION_ADDRESS_FILE', {json.dumps(addr_file)});
+            function add_action(...$args) {{}}
+            $_SERVER['HTTP_HOST'] = {json.dumps(host)};
+            $_SERVER['REQUEST_METHOD'] = 'GET';
+            $_SERVER['REQUEST_URI'] = {json.dumps(uri)};
+            require {json.dumps(PLUGIN)};
+            echo json_encode([
+                'node' => onionpress_directory_is_onionhome_node(),
+                'path' => onionpress_directory_request_path(),
+            ]);
+        """)
+        path = os.path.join(self.tmp, "harness.php")
+        with open(path, "w") as f:
+            f.write(harness)
+        proc = subprocess.run(
+            [PHP, "-d", "error_reporting=E_ALL", "-d", "display_errors=stderr", path],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("Warning", proc.stderr, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_onionhome_answers_on_its_hosts(self):
+        for host in (self.ONIONHOME, "onionpress.org", "www.onionpress.org"):
+            with self.subTest(host=host):
+                self.assertEqual(self._request_path(self.ONIONHOME, host),
+                                 {"node": True, "path": "alice/posts/1"})
+
+    def test_another_node_answers_nobody_whatever_the_host(self):
+        for host in ("onionpress.org", self.ONIONHOME, self.OTHER):
+            with self.subTest(host=host):
+                self.assertEqual(self._request_path(self.OTHER, host),
+                                 {"node": False, "path": None})
+
+    def test_a_node_without_an_address_yet_answers_nobody(self):
+        self.assertEqual(self._request_path(None, "onionpress.org"),
+                         {"node": False, "path": None})
+        self.assertEqual(self._request_path("garbage", "onionpress.org"),
+                         {"node": False, "path": None})
+
+
+class TestVisitorLookupsAreGatedAndCached(unittest.TestCase):
+    """The static half of #394: the hooks go through request_path() (the
+    gate), the visitor handlers through the negative cache, and the
+    Settings page's own calls stay direct."""
+
+    def setUp(self):
+        self.src = _read("app/Resources/plugins/onionpress-directory.php")
+
+    def test_the_gate_is_the_own_address_not_the_host(self):
+        fn = self.src[self.src.index("function onionpress_directory_request_path()"):]
+        fn = fn[:fn.index("\n}\n")]
+        self.assertLess(fn.index("onionpress_directory_is_onionhome_node()"),
+                        fn.index("onionpress_directory_is_onionhome_host("))
+        node = self.src[self.src.index("function onionpress_directory_is_onionhome_node()"):]
+        node = node[:node.index("\n}\n")]
+        self.assertIn("onionpress_directory_own_address() === ONIONPRESS_ONIONHOME_ADDRESS", node)
+        self.assertNotIn("HTTP_HOST", node)
+
+    def test_both_hooks_start_from_request_path(self):
+        for hook in ("add_action( 'parse_request'", "add_action( 'template_redirect'"):
+            body = self.src[self.src.index(hook):]
+            body = body[:body.index("onionpress_directory_handle_")]
+            self.assertIn("onionpress_directory_request_path()", body)
+
+    def test_visitor_handlers_use_the_negative_cache(self):
+        for fn in ("onionpress_directory_handle_follow_by_name",
+                   "onionpress_directory_handle_name_lookup"):
+            body = self.src[self.src.index(f"function {fn}("):]
+            body = body[:body.index("\n}\n")]
+            with self.subTest(handler=fn):
+                self.assertIn("onionpress_directory_lookup_for_visitor( $name )", body)
+                self.assertNotIn("onionpress_directory_lookup( $name )", body)
+        cache = self.src[self.src.index("function onionpress_directory_lookup_for_visitor("):]
+        cache = cache[:cache.index("\n}\n")]
+        self.assertIn("get_transient( $key )", cache)
+        self.assertIn("set_transient( $key, 1, ONIONPRESS_DIRECTORY_MISS_TTL )", cache)
+        self.assertIn("const ONIONPRESS_DIRECTORY_MISS_TTL = 60;", self.src)
+
+    def test_the_settings_page_keeps_the_direct_lookup(self):
+        settings = _read("app/Resources/plugins/onionpress-settings.php")
+        self.assertIn("onionpress_directory_lookup( $name )", settings)
+        self.assertNotIn("lookup_for_visitor", settings)
+
+
 class TestNameLookupIsGatedOn404(unittest.TestCase):
     """The /NAME[/REST] dispatch only runs once WordPress itself has failed
     to find anything at the URL — otherwise every WordPress route (however

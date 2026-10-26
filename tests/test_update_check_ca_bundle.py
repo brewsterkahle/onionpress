@@ -61,14 +61,15 @@ class TestCurlCaBundle(unittest.TestCase):
             argv = self._check(f.name)
             self.assertEqual(argv[argv.index("--cacert") + 1], f.name)
 
-    def test_both_curl_calls_go_through_the_helper(self):
+    def test_every_curl_call_goes_through_the_helper(self):
         tree = ast.parse(_read(os.path.join(PROJECT_ROOT, "src/onionpress/updater.py")))
         curls = []
         for node in ast.walk(tree):
             if isinstance(node, ast.List) and node.elts and isinstance(node.elts[0], ast.Constant) \
                     and node.elts[0].value == "curl":
                 curls.append(node)
-        self.assertEqual(len(curls), 2)
+        # The release check, the DMG, and the release's SHA256SUMS (#386).
+        self.assertEqual(len(curls), 3)
         for lst in curls:
             names = [e.value.func.id for e in lst.elts
                      if isinstance(e, ast.Starred) and isinstance(e.value, ast.Call)]

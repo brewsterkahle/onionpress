@@ -71,10 +71,13 @@ class TestNoProxyProtocolListener(unittest.TestCase):
         entrypoint = _read(TOR_ENTRYPOINT)
         self.assertRegex(entrypoint,
                          r"(?m)^socat TCP-LISTEN:8080,reuseaddr,fork TCP:wordpress:80 &$")
-        services = re.search(r"cat > /etc/tor/onion-services\.json << 'SERVICES_EOF'\n"
+        services = re.search(r"cat > /etc/tor/onion-services\.json << SERVICES_EOF\n"
                              r"(.*?)\nSERVICES_EOF", entrypoint, re.S)
         self.assertIsNotNone(services)
-        wordpress = [s for s in json.loads(services.group(1)) if s["name"] == "wordpress"]
+        # The heredoc expands ${HUB_API_PORT} (the hub API's port on a hub
+        # or OnionHome only, issue #393); a plain node's is the text as is.
+        wordpress = [s for s in json.loads(services.group(1).replace("${HUB_API_PORT}", ""))
+                     if s["name"] == "wordpress"]
         self.assertEqual(len(wordpress), 1)
         self.assertIn("80,127.0.0.1:8080", wordpress[0]["ports"])
 

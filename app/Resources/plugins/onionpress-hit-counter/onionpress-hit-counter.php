@@ -3,7 +3,7 @@
  * Plugin Name: OnionPress Hit Counter
  * Plugin URI: https://github.com/brewsterkahle/onionpress
  * Description: Retro-style animated hit counter with persistent storage that survives reboots and upgrades
- * Version: 1.1.1
+ * Version: 1.2.0
  * Author: OnionPress
  * Author URI: https://github.com/brewsterkahle/onionpress
  * License: AGPL-3.0-or-later
@@ -28,9 +28,6 @@ class OnionPress_Hit_Counter {
     }
 
     private function __construct() {
-        // Migrate from old file-based storage if needed
-        $this->maybe_migrate_from_file();
-
         // Register hooks
         add_shortcode('hit_counter', array($this, 'render_counter'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_assets'));
@@ -38,20 +35,6 @@ class OnionPress_Hit_Counter {
         add_action('wp_ajax_nopriv_increment_counter', array($this, 'ajax_increment_counter'));
         add_action('wp_ajax_get_counter', array($this, 'ajax_get_counter'));
         add_action('wp_ajax_nopriv_get_counter', array($this, 'ajax_get_counter'));
-    }
-
-    /**
-     * Migrate counter value from old file-based storage to wp_options
-     */
-    private function maybe_migrate_from_file() {
-        $old_file = '/var/lib/onionpress/hit-counter.txt';
-        if (file_exists($old_file) && get_option($this->option_key) === false) {
-            $count = (int) @file_get_contents($old_file);
-            if ($count > 0) {
-                update_option($this->option_key, $count, 'no');
-            }
-            @unlink($old_file);
-        }
     }
 
     /**
@@ -71,14 +54,24 @@ class OnionPress_Hit_Counter {
     }
 
     /**
-     * AJAX handler to increment counter
+     * AJAX handler to increment counter.
+     *
+     * Anonymous increments are the feature, so the nonce is the one the
+     * page's script was given (issue #398: it was minted and never
+     * checked). A request without it, or with a stale one (a page cached
+     * past the nonce's life), gets the count as it is and counts nothing:
+     * the counter still shows, and nothing off the page moves it.
      */
     public function ajax_increment_counter() {
-        $new_count = $this->increment_counter();
+        if (check_ajax_referer('onionpress_counter_nonce', 'nonce', false)) {
+            $count = $this->increment_counter();
+        } else {
+            $count = $this->get_counter();
+        }
 
         wp_send_json_success(array(
-            'count' => $new_count,
-            'formatted' => $this->format_counter($new_count)
+            'count' => $count,
+            'formatted' => $this->format_counter($count)
         ));
     }
 
@@ -152,14 +145,14 @@ class OnionPress_Hit_Counter {
             'onionpress-hit-counter',
             plugins_url('assets/hit-counter.css', __FILE__),
             array(),
-            '1.1.1'
+            '1.2.0'
         );
 
         wp_enqueue_script(
             'onionpress-hit-counter',
             plugins_url('assets/hit-counter.js', __FILE__),
             array('jquery'),
-            '1.1.1',
+            '1.2.0',
             true
         );
 

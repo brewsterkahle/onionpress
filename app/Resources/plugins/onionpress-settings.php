@@ -1065,6 +1065,9 @@ add_action( 'wp_ajax_onionpress_poll_action', function () {
     if ( ! onionpress_settings_owner_allowed() ) {
         wp_send_json_error( 'Unauthorized', 403 );
     }
+    // The poll removes service-result.json once read (issue #402): only
+    // the page's own script, with its nonce, may make it.
+    check_ajax_referer( 'onionpress_poll_action' );
 
     $action = sanitize_text_field( $_GET['op_action'] ?? '' );
     // The request's id and time, from the notice the request left (the id
@@ -1123,6 +1126,9 @@ add_action( 'wp_ajax_onionpress_check_update', function () {
     if ( ! onionpress_settings_owner_allowed() ) {
         wp_send_json_error( 'Unauthorized', 403 );
     }
+    // A request through Tor and a transient write (issue #402): not on
+    // the say-so of another page the owner has open.
+    check_ajax_referer( 'onionpress_check_update' );
 
     $current = trim( @file_get_contents( '/var/lib/onionpress/version' ) ?: 'unknown' );
 
@@ -1796,11 +1802,13 @@ function onionpress_settings_page() {
             /* The request's id and time: the poll takes only this request's result */
             var requestId = notice.getAttribute('data-op-request-id') || '';
             var requestedAt = notice.getAttribute('data-op-requested-at') || '0';
+            var pollNonce = '<?php echo esc_js( wp_create_nonce( 'onionpress_poll_action' ) ); ?>';
 
             var poll = setInterval(function() {
                 fetch(ajaxurl + '?action=onionpress_poll_action&op_action=' + encodeURIComponent(action)
                       + '&op_request_id=' + encodeURIComponent(requestId)
-                      + '&op_requested_at=' + encodeURIComponent(requestedAt))
+                      + '&op_requested_at=' + encodeURIComponent(requestedAt)
+                      + '&_wpnonce=' + encodeURIComponent(pollNonce))
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (!data.done) return;
@@ -1851,6 +1859,7 @@ function onionpress_settings_page() {
             var el = document.getElementById('op-update-status');
             if (!el) return;
             var nonce = '<?php echo esc_js( wp_create_nonce( "onionpress_action" ) ); ?>';
+            var checkNonce = '<?php echo esc_js( wp_create_nonce( 'onionpress_check_update' ) ); ?>';
             /* On Linux the page cannot install an update: its button asks the
                host to check the release, and `onionpress update` on the
                machine installs it. */
@@ -1861,7 +1870,7 @@ function onionpress_settings_page() {
             }
             function render() {
                 el.innerHTML = '<span class="description">version: <?php echo esc_js( $op_current_display ); ?>, checking for updates...</span>';
-                fetch(ajaxurl + '?action=onionpress_check_update')
+                fetch(ajaxurl + '?action=onionpress_check_update&_wpnonce=' + encodeURIComponent(checkNonce))
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         var cur = vTag(data.current || '<?php echo esc_js( $op_current_display ); ?>');

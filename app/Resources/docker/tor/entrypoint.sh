@@ -401,9 +401,23 @@ cp /etc/tor/torrc.template /etc/tor/torrc
 
 # Write onion service definitions for the watchdog to ADD_ONION.
 # Keys live on disk at /var/lib/tor/hidden_service/<name>/.
-cat > /etc/tor/onion-services.json << 'SERVICES_EOF'
+#
+# Port 8083 (web-server.py: the hub API, OnionHome's name and analytics
+# endpoints) goes on this node's address only when the node is a hub or
+# OnionHome (onionheaven_common.hub_api_exposed, issue #393): on every
+# other node it served nothing a visitor needs, as root, beside the site
+# key and the control cookie. The hostname is derived from the key above,
+# so an existing address is known here; a node still to mint one is no hub.
+HUB_API_PORT=""
+if python3 -c 'import sys; sys.path.insert(0, "/"); from onionheaven_common import hub_api_exposed; sys.exit(0 if hub_api_exposed() else 1)'; then
+    HUB_API_PORT=', "8083,127.0.0.1:8083"'
+    echo "Hub API (port 8083) is on this node's onion address (an OnionHeaven hub or OnionHome)"
+else
+    echo "Hub API (port 8083) stays off this node's onion address (not a hub)"
+fi
+cat > /etc/tor/onion-services.json << SERVICES_EOF
 [
-  {"name": "wordpress", "ports": ["80,127.0.0.1:8080", "8083,127.0.0.1:8083"]},
+  {"name": "wordpress", "ports": ["80,127.0.0.1:8080"${HUB_API_PORT}]},
   {"name": "healthcheck", "ports": ["80,127.0.0.1:8081"]}
 ]
 SERVICES_EOF

@@ -29,11 +29,12 @@ class TestCoverageConfig(unittest.TestCase):
 
     def test_floors(self):
         script = _read("build/coverage-floors.sh")
-        self.assertIn("TOTAL_FLOOR=60", script)
+        self.assertIn("TOTAL_FLOOR=63", script)
         floors = dict(re.findall(r"(?m)^(src/onionpress/\S+\.py) (\d+)$", script))
-        self.assertEqual(floors, {"src/onionpress/cli.py": "69",
-                                  "src/onionpress/handle_action.py": "85",
-                                  "src/onionpress/confirm.py": "90",
+        self.assertEqual(floors, {"src/onionpress/cli.py": "97",
+                                  "src/onionpress/app_commands.py": "94",
+                                  "src/onionpress/handle_action.py": "95",
+                                  "src/onionpress/confirm.py": "98",
                                   "src/onionpress/config.py": "85"})
         for path in floors:
             self.assertTrue(os.path.exists(os.path.join(PROJECT_ROOT, path)), path)

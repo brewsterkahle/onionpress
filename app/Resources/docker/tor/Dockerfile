@@ -43,7 +43,7 @@
 # ARGs used in FROM lines must be declared before the first FROM (global
 # scope) and re-declared inside any stage that needs them.
 
-ARG TOR_IMAGE=containers.torproject.org/tpo/onion-services/onimages/tor:trixie@sha256:f2e8ff4e4dac9c6aa2be580aa749cad4a7087579b06eedabc0f0aa844f3da148
+ARG TOR_IMAGE=containers.torproject.org/tpo/onion-services/onimages/tor:trixie@sha256:d29e07a65489fa9e3c8c57b88d53fc540fb99ccc8afc2fd9a1850191cd7869d0
 ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:9f36dfce2d1fd053d700a4eca00c358df79bf7d8cb69d4a9e8d9981af18834ea
 
 # Stage 1: Build mkp224o for vanity .onion address generation. Lives in this
@@ -237,6 +237,10 @@ COPY onionnames.py /onionnames.py
 COPY onionheaven-data-migrate.py /onionheaven-data-migrate.py
 COPY wordlists /wordlists
 RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /onionheaven-farm.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
+# The healthcheck and redirect listeners cap their children and time idle
+# connections out (socat's max-children, issue #393): a socat without the
+# option would refuse to start them.
+RUN socat -hhh 2>&1 | grep -q 'max-children'
 # onion_auth signs on libsodium here, never on its pure-Python fallback.
 RUN python3 -c "import sys; sys.path.insert(0, '/'); import onion_auth as a; k = bytes(range(64)); p = a.derive_public_key(k); sys.exit(None if a.signing_uses_libsodium() and a.verify(p, b'x', a.sign_expanded(k, p, b'x')) else 'onion_auth does not sign on libsodium')"
 # Mount point of the OnionHeaven hub data volume (registry and registrants'
