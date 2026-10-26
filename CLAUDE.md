@@ -1431,6 +1431,26 @@
   OnionHome compare the name count before and after, and never downgrade it
   afterwards (docs/DOCKER-SOCKET.md, "The OnionHome name registry").
 
+## The Directory Answers Visitors Only on OnionHome (issue #394)
+- `onionpress-directory.php` is a mu-plugin on every node, and its two
+  request hooks (`/follow?name=` on parse_request, the `/NAME[/REST]`
+  dispatch of a 404 on template_redirect) used to run for any request
+  whose Host header was OnionHome's or onionpress.org: the Host is the
+  visitor's to choose, so every node looked names up through Tor (30 s
+  in an Apache worker, no cache) and redirected.
+  `onionpress_directory_request_path()` now returns null unless
+  `onionpress_directory_is_onionhome_node()` (the node's own served
+  address, from the shared volume's `onion_address`, is
+  `ONIONPRESS_ONIONHOME_ADDRESS`), before the Host check; the visitor
+  handlers go through `onionpress_directory_lookup_for_visitor` (a miss
+  is not asked again for 60 s, a transient). The Settings page's own
+  `onionpress_directory_lookup()` calls (the owner's Following form, on
+  every node) are untouched. `ONIONPRESS_ONION_ADDRESS_FILE` lets a test
+  point the address read elsewhere. onionpress-status-hint.php (a 302
+  to the hub's fixed address) and onionpress-user-path.php
+  (`/<onionname>/` on every install, by design) stay on every node.
+  `tests/test_onionname_redirect.py` (the gate under php where installed).
+
 ## OnionHeaven Is On by Default
 - **`REGISTER_WITH_ONIONHEAVEN`: `yes` or unset/empty registers, `no` opts
   out** (and unregisters, below); any other value (a typo) does neither, so
