@@ -142,6 +142,15 @@ case "$1" in
     *) exit 1 ;;
 esac
 ''',
+        # The postinst removes /var/run/docker.sock; never the real one
+        # (a CI runner has Docker).
+        "rm": '''#!/bin/bash
+echo "rm $*" >> "$STUB_LOG"
+for a; do
+    case "$a" in /var/run/*|/run/*) exit 0 ;; esac
+done
+exec /bin/rm "$@"
+''',
         "usermod": '''#!/bin/bash
 echo "usermod $*" >> "$STUB_LOG"
 ''',
@@ -160,7 +169,7 @@ echo "dockerd-rootless-setuptool.sh: 360: $BIN/docker: not found" >&2
 exit 127
 '''
 
-    TOOLS = ("bash", "sh", "env", "grep", "awk", "cut", "cat", "mkdir", "rm",
+    TOOLS = ("bash", "sh", "env", "grep", "awk", "cut", "cat", "mkdir",
              "tr", "head", "date", "chmod", "touch")
 
     def setUp(self):
@@ -231,6 +240,7 @@ exit 127
                         "contrib goes first on the tool's PATH, so it finds dockerd-rootless.sh")
         self.assertTrue(tool[0].endswith(" install --force"), tool[0])
         self.assertIn("systemctl disable --now docker.service docker.socket", calls)
+        self.assertIn("rm -f /var/run/docker.sock", calls)
         self.assertIn("Docker mode: rootless (no logout required).", r.stdout)
         self.assertNotIn("One manual step needed", r.stdout)
         self.assertTrue(self._enabled_onionpress(calls), calls)
