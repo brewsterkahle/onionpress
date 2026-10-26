@@ -418,9 +418,13 @@ class MoveCase(unittest.TestCase):
         os.makedirs(root, exist_ok=True)
         conn = onionnames.db_connect(os.path.join(root, "onionnames.db"))
         onionnames.db_init(conn)
-        for name, address in names:
-            ok, reason, _ = onionnames.register_name(conn, name, address)
-            self.assertTrue(ok, reason)
+        # Big registries here give one address hundreds of names; the
+        # per-address cap (issue #391) is a registration rule, not a
+        # registry one.
+        with mock.patch.object(onionnames, "MAX_NAMES_PER_ADDRESS", 10 ** 6):
+            for name, address in names:
+                ok, reason, _ = onionnames.register_name(conn, name, address)
+                self.assertTrue(ok, reason)
         conn.execute("INSERT INTO dynamic_reservations VALUES ('about-us', 'wp-pages', "
                      "'2026-10-01T00:00:00Z')")
         for sql in extra_sql:

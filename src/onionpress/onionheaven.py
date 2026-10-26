@@ -1814,7 +1814,7 @@ def run_onionheaven_command(sub, app, json_output=False, out=None):
             print(describe_overview(ov), file=out)
         return 0
     if sub != "status":
-        print("Usage: onionpress onionheaven {enable|disable|status|overview|alerts} [--json]",
+        print("Usage: onionpress onionheaven {enable|disable|status|overview} [--json]",
               file=_sys.stderr)
         return 1
     status = registration_status(app)
@@ -2131,49 +2131,3 @@ def describe_overview(ov):
     else:
         lines.append("Serving as an OnionHeaven hub: no")
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# The hub's messages (OnionHeaven Alerts)
-# ---------------------------------------------------------------------------
-
-# Where the healthcheck service leaves the hub's messages in the tor
-# container; the Mac daemon's poll, the Linux tray's (ALERT_MSG_DIR) and
-# `onionpress onionheaven alerts` read it, Dismiss All empties it.
-HUB_MESSAGES_DIR = "/var/lib/tor/healthcheck-messages"
-
-
-def read_hub_messages(docker):
-    """The hub's messages as a list of dicts (empty: none), or None when
-    the tor container could not be asked. *docker* is an
-    onionpress.docker.Docker (run(args, timeout=, quiet=))."""
-    try:
-        r = docker.run(["exec", "onionpress-tor", "ls", HUB_MESSAGES_DIR + "/"],
-                       timeout=10, quiet=True)
-    except Exception:
-        return None
-    if not r.ok:
-        return None
-    messages = []
-    for fname in sorted(f for f in r.output.split() if f.endswith(".json")):
-        try:
-            rr = docker.run(["exec", "onionpress-tor", "cat", f"{HUB_MESSAGES_DIR}/{fname}"],
-                            timeout=5, quiet=True)
-            if rr.ok and rr.output.strip():
-                msg = json.loads(rr.output.strip())
-                if isinstance(msg, dict):
-                    messages.append(msg)
-        except Exception:
-            continue
-    return messages
-
-
-def remove_hub_messages(docker):
-    """Dismiss All: delete the message files. True when the container
-    answered."""
-    try:
-        r = docker.run(["exec", "onionpress-tor", "sh", "-c",
-                        f"rm -f {HUB_MESSAGES_DIR}/*.json"], timeout=10, quiet=True)
-        return bool(r.ok)
-    except Exception:
-        return False

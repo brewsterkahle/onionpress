@@ -381,7 +381,7 @@ class TestWiring(unittest.TestCase):
         self.assertNotIn("SELECT COUNT(*)", src)  # the inline query moved
 
     def test_cli_knows_overview(self):
-        self.assertIn("{enable,disable,status,overview,alerts}", _read("src/onionpress/cli.py"))
+        self.assertIn("{enable,disable,status,overview}", _read("src/onionpress/cli.py"))
 
     def test_linux_status_carries_the_overview(self):
         src = _read("linux/onionpress")
