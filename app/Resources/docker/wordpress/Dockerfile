@@ -99,6 +99,10 @@ RUN a2enconf onionpress-xmlrpc-block onionpress-log-format onionpress-health oni
 # uploads confs' `php_admin_flag engine off` from being skipped silently by
 # their <IfModule>. The remoteip_module check keeps REMOTE_ADDR the TCP
 # peer (above) whatever a new base image enables.
+# The core-update helper verifies a downloaded package's members with
+# ZipArchive before it is installed (issue #395); without the extension it
+# refuses every update, so the build checks it is there.
+RUN php -r 'exit(class_exists("ZipArchive") ? 0 : 1);'
 RUN apache2ctl configtest \
     && apache2ctl -M 2>/dev/null | grep -q ' php_module ' \
     && [ "$(php -r 'echo var_export((bool) ini_get("session.upload_progress.enabled"), true);')" = false ] \

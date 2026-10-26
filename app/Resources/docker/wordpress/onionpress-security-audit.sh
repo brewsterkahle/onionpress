@@ -186,7 +186,10 @@ else
         else
             package=$(field "$check_out" package)
             log "core update available: $current -> $target — downloading over Tor"
-            dl_out=$(helper download "$package")
+            # The helper fetches only from downloads.wordpress.org and
+            # checks every member of the zip against WordPress.org's
+            # checksum list for $target before saying ok (issue #395).
+            dl_out=$(helper download "$package" "$target")
             zip=$(field "$dl_out" path)
             if [ "$(field "$dl_out" status)" != "ok" ]; then
                 record "UPDATE DOWNLOAD FAILED: $current -> $target over Tor ($(field "$dl_out" error)). Core is still $current."

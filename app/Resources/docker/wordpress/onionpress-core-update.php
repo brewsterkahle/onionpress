@@ -164,6 +164,111 @@ function op_pick_core_update( $current, $image_branch, $offers ) {
     return array( $target, $package );
 }
 
+/**
+ * The host a core package may come from (issue #395): WordPress.org's
+ * download host, over https. The update offer names the URL, and the
+ * offer arrives over Tor; a package from anywhere else is refused before
+ * a byte is fetched.
+ */
+function op_package_url_allowed( $url ) {
+    $p = parse_url( (string) $url );
+    if ( ! is_array( $p ) || empty( $p['scheme'] ) || empty( $p['host'] ) ) {
+        return false;
+    }
+    if ( 'https' !== strtolower( $p['scheme'] ) || ! empty( $p['user'] ) || ! empty( $p['pass'] ) ) {
+        return false;
+    }
+    return 'downloads.wordpress.org' === strtolower( $p['host'] );
+}
+
+/**
+ * WordPress.org's md5 list for *version* (en_US), over Tor. Returns the
+ * array of relative path => md5, or a string saying why not (never
+ * evidence of tampering: a fetch that failed is "netfail").
+ */
+function op_fetch_checksums( $version ) {
+    $url = 'https://api.wordpress.org/core/checksums/1.0/?version=' . rawurlencode( $version )
+         . '&locale=en_US';
+    $res = wp_remote_get( $url, array(
+        'timeout'            => 120,
+        'reject_unsafe_urls' => false,
+    ) );
+    if ( is_wp_error( $res ) || 200 != wp_remote_retrieve_response_code( $res ) ) {
+        return is_wp_error( $res )
+            ? $res->get_error_message()
+            : 'HTTP ' . wp_remote_retrieve_response_code( $res );
+    }
+    $body = json_decode( wp_remote_retrieve_body( $res ), true );
+    $sums = isset( $body['checksums'][ $version ]['en_US'] )
+        ? $body['checksums'][ $version ]['en_US']
+        : ( isset( $body['checksums'] ) && is_array( $body['checksums'] ) ? $body['checksums'] : null );
+    if ( ! is_array( $sums ) || count( $sums ) < 100 ) {
+        return 'no usable checksum list for ' . $version;
+    }
+    return $sums;
+}
+
+/**
+ * Check a downloaded core package against the release's checksum list
+ * before anything unzips it over a live install (issue #395). Every file
+ * member under wordpress/ that the list names must have its md5; a
+ * member the list does not name is refused unless it is under
+ * wp-content/ (the tree WordPress's own verify leaves alone); every
+ * listed file outside wp-content/ must be in the package. Returns '' when
+ * the package is the release, else one line saying what is wrong.
+ */
+function op_verify_core_zip( $zip_path, $sums ) {
+    if ( ! class_exists( 'ZipArchive' ) ) {
+        return 'cannot verify the package: the zip extension is missing';
+    }
+    $zip = new ZipArchive();
+    if ( true !== $zip->open( $zip_path, ZipArchive::RDONLY ) ) {
+        return 'cannot open the package as a zip';
+    }
+    $seen = array();
+    $bad  = array();
+    for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+        $name = (string) $zip->getNameIndex( $i );
+        if ( '' === $name || '/' === substr( $name, -1 ) ) {
+            continue;   // a folder entry
+        }
+        if ( 0 !== strpos( $name, 'wordpress/' ) || false !== strpos( $name, '..' ) ) {
+            $bad[] = 'outside wordpress/: ' . $name;
+            continue;
+        }
+        $rel = substr( $name, strlen( 'wordpress/' ) );
+        if ( ! isset( $sums[ $rel ] ) ) {
+            if ( 0 !== strpos( $rel, 'wp-content/' ) ) {
+                $bad[] = 'not in the release: ' . $rel;
+            }
+            continue;
+        }
+        $seen[ $rel ] = true;
+        $stream = $zip->getStream( $name );
+        if ( ! $stream ) {
+            $bad[] = 'unreadable: ' . $rel;
+            continue;
+        }
+        $ctx = hash_init( 'md5' );
+        hash_update_stream( $ctx, $stream );
+        fclose( $stream );
+        if ( hash_final( $ctx ) !== strtolower( (string) $sums[ $rel ] ) ) {
+            $bad[] = 'mismatch: ' . $rel;
+        }
+    }
+    $zip->close();
+    foreach ( $sums as $rel => $md5 ) {
+        if ( 0 === strpos( $rel, 'wp-content/' ) || isset( $seen[ $rel ] ) ) {
+            continue;
+        }
+        $bad[] = 'missing: ' . $rel;
+    }
+    if ( $bad ) {
+        return count( $bad ) . ' file(s) differ from the release: ' . implode( ', ', array_slice( $bad, 0, 5 ) );
+    }
+    return '';
+}
+
 if ( '' === op_socks_proxy() ) {
     op_out( 'status', 'netfail' );
     op_out( 'error', 'no Tor SOCKS proxy reachable (tried onionheaven:9050, onionpress-tor:9050)' );
@@ -212,10 +317,24 @@ if ( 'download' === $mode ) {
         exit( 0 );
     }
 
+    if ( ! op_package_url_allowed( $url ) ) {
+        op_out( 'status', 'error' );
+        op_out( 'error', 'refusing to download a package from anywhere but https://downloads.wordpress.org: ' . $url );
+        exit( 0 );
+    }
     $name = basename( parse_url( $url, PHP_URL_PATH ) );
-    if ( ! preg_match( '/^wordpress-[0-9.]+(-[a-z-]+)?\.zip$/D', $name ) ) {
+    if ( ! preg_match( '/^wordpress-([0-9.]+)(-[a-z-]+)?\.zip$/D', $name, $nm ) ) {
         op_out( 'status', 'error' );
         op_out( 'error', 'refusing to download unexpected package name: ' . $name );
+        exit( 0 );
+    }
+    // The version the package claims, and the one the caller wants: the
+    // checksum list is fetched for it, so the two must agree.
+    $version = $nm[1];
+    $wanted  = isset( $args[2] ) ? (string) $args[2] : '';
+    if ( '' !== $wanted && $wanted !== $version ) {
+        op_out( 'status', 'error' );
+        op_out( 'error', 'package ' . $name . ' is not version ' . $wanted );
         exit( 0 );
     }
     $dest = '/tmp/onionpress-' . $name;
@@ -260,7 +379,26 @@ if ( 'download' === $mode ) {
         exit( 0 );
     }
 
+    // The package is the release WordPress.org publishes checksums for,
+    // or it is not handed to `wp core update` (issue #395): until now the
+    // md5 check ran only after the install, report-only.
+    $sums = op_fetch_checksums( $version );
+    if ( ! is_array( $sums ) ) {
+        @unlink( $dest );
+        op_out( 'status', 'netfail' );
+        op_out( 'error', 'could not fetch the checksum list for ' . $version . ': ' . $sums );
+        exit( 0 );
+    }
+    $problem = op_verify_core_zip( $dest, $sums );
+    if ( '' !== $problem ) {
+        @unlink( $dest );
+        op_out( 'status', 'error' );
+        op_out( 'error', 'package ' . $name . ' refused: ' . $problem );
+        exit( 0 );
+    }
+
     op_out( 'status', 'ok' );
+    op_out( 'verified', count( $sums ) );
     op_out( 'path', $dest );
     op_out( 'bytes', $size );
     exit( 0 );
@@ -269,34 +407,15 @@ if ( 'download' === $mode ) {
 /* ----------------------------------------------------------------- verify */
 if ( 'verify' === $mode ) {
     $version = isset( $args[1] ) && '' !== $args[1] ? (string) $args[1] : get_bloginfo( 'version' );
-    $url     = 'https://api.wordpress.org/core/checksums/1.0/?version=' . rawurlencode( $version )
-             . '&locale=en_US';
 
-    $res = wp_remote_get( $url, array(
-        'timeout'            => 120,
-        'reject_unsafe_urls' => false,
-    ) );
-
-    if ( is_wp_error( $res ) || 200 != wp_remote_retrieve_response_code( $res ) ) {
-        // A checksum fetch that never happened is NOT evidence of tampering.
-        // The old code piped this straight into "CORE FILE INTEGRITY FAILED",
-        // so a DNS hiccup at boot wrote a fake compromise finding into the
-        // user's security report.
+    // A checksum fetch that never happened is NOT evidence of tampering.
+    // The old code piped this straight into "CORE FILE INTEGRITY FAILED",
+    // so a DNS hiccup at boot wrote a fake compromise finding into the
+    // user's security report.
+    $sums = op_fetch_checksums( $version );
+    if ( ! is_array( $sums ) ) {
         op_out( 'status', 'netfail' );
-        op_out( 'error', is_wp_error( $res )
-            ? $res->get_error_message()
-            : 'HTTP ' . wp_remote_retrieve_response_code( $res ) );
-        exit( 0 );
-    }
-
-    $body = json_decode( wp_remote_retrieve_body( $res ), true );
-    $sums = isset( $body['checksums'][ $version ]['en_US'] )
-        ? $body['checksums'][ $version ]['en_US']
-        : ( isset( $body['checksums'] ) && is_array( $body['checksums'] ) ? $body['checksums'] : null );
-
-    if ( ! is_array( $sums ) || count( $sums ) < 100 ) {
-        op_out( 'status', 'netfail' );
-        op_out( 'error', 'no usable checksum list for ' . $version );
+        op_out( 'error', $sums );
         exit( 0 );
     }
 

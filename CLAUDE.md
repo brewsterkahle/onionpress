@@ -425,6 +425,23 @@
   (docs/BUILDING.md, "Moving to a new WordPress branch").
   `tests/test_wordpress_branch_upgrade.py`. Needs an image publish.
 
+## A Core Package Is Checked Before It Is Installed (issue #395)
+- `onionpress-core-update.php`'s `download` fetches a package only from
+  `https://downloads.wordpress.org` (`op_package_url_allowed`; the offer
+  names the URL), takes the version from the package name (and the
+  audit's `$target`, which must agree), fetches WordPress.org's md5
+  list for it over Tor (`op_fetch_checksums`, shared with `verify`) and
+  holds every member of the zip to it (`op_verify_core_zip`, ZipArchive:
+  a listed file's md5 must match, a member the list lacks is refused
+  unless under `wp-content/`, a listed file outside `wp-content/` must
+  be there, nothing outside `wordpress/`) before it answers ok; a
+  refused package is removed. Before, size + `PK` was the whole check
+  and the md5 comparison ran after `wp core update`, report-only. The
+  image build checks ZipArchive is there (without it every update is
+  refused). Needs an image publish. `tests/test_core_update_verified.py`
+  (the PHP halves under a php with the zip extension; CI's runner has
+  one, `php:8.3-cli` does not).
+
 ## Settings Page Config Writes Are Allowlisted
 - The WordPress Settings page asks for config changes through
   `config-updates.json` in the onionpress-data volume, which anything running
