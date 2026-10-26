@@ -50,6 +50,13 @@
   from draft only after reading it back. Hand-run `gh release` needs
   `-R brewsterkahle/onionpress`. No Internet Archive uploads.
   `tests/test_release_sha256sums.py`.
+- **Every release adds its notes to `RELEASE_HISTORY.md`** before it is cut:
+  a `## X.Y.Z — YYYY-MM-DD` section at the top, saying what changed for the
+  people who run OnionPress (what to do, what to know; hub/OnionHome steps
+  under their own heading). Write it in the bump PR. `release.sh` puts the
+  section above GitHub's generated PR list and refuses a version without
+  one; the tree's version must have one. `TestReleaseHistory` in
+  `tests/test_release_sha256sums.py`.
 - `onionpress update` (Linux) installs only a release `.deb` matching its
   `SHA256SUMS` line, of the tag's version, newer than installed; the
   Settings page's update only checks (anything in WordPress can request
