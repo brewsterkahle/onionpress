@@ -66,7 +66,7 @@ from urllib.parse import parse_qs, urlparse
 from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    note_signed_request,
+    note_signed_request, ONIONHOME_ADDRESS,
     takeover_function, release_function,
     is_registration_hub, registrations_opted_in, write_key_file,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR, OWN_HOSTNAME_PATH,
@@ -102,7 +102,7 @@ LISTEN_PORT = 8083
 # /var/lib/onionpress/onion_address path depended on the launcher's
 # docker-exec running after readiness checks, which silently never happened
 # on boots that timed out — leaving op2home permanently returning 403/404.
-_ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
+_ONIONHOME_ADDRESS = ONIONHOME_ADDRESS     # onionheaven_common's
 _is_onionhome_cache = None
 
 

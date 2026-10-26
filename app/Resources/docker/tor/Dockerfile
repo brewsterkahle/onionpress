@@ -237,6 +237,10 @@ COPY onionnames.py /onionnames.py
 COPY onionheaven-data-migrate.py /onionheaven-data-migrate.py
 COPY wordlists /wordlists
 RUN chmod +x /entrypoint.sh /healthcheck-server.sh /onionheaven-redirect.sh /onionheaven-tor-manager.sh /onionheaven-heartbeat.py /onionheaven-farm.py /web-server.py /onionheaven-takeover-worker.py /onionheaven-queue-manager.py /key-convert.py /tor-watchdog.py /onionheaven-data-migrate.py
+# The healthcheck and redirect listeners cap their children and time idle
+# connections out (socat's max-children, issue #393): a socat without the
+# option would refuse to start them.
+RUN socat -hhh 2>&1 | grep -q 'max-children'
 # onion_auth signs on libsodium here, never on its pure-Python fallback.
 RUN python3 -c "import sys; sys.path.insert(0, '/'); import onion_auth as a; k = bytes(range(64)); p = a.derive_public_key(k); sys.exit(None if a.signing_uses_libsodium() and a.verify(p, b'x', a.sign_expanded(k, p, b'x')) else 'onion_auth does not sign on libsodium')"
 # Mount point of the OnionHeaven hub data volume (registry and registrants'

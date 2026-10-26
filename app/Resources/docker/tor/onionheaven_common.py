@@ -160,6 +160,35 @@ def is_registration_hub(own_address):
     return own_address == ONIONHEAVEN_HUB_ADDRESS
 
 
+# OnionHome's address: the one node that serves the name registry and
+# the analytics endpoints (web-server.py's _is_onionhome).
+ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
+
+
+def read_own_address(path=OWN_HOSTNAME_PATH):
+    """This node's served onion address from Tor's hostname file, or None
+    (not written yet, unreadable, or not a v3 address)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            addr = f.read().strip()
+    except OSError:
+        return None
+    return addr if _ONION_ADDRESS_RE.fullmatch(addr) else None
+
+
+def hub_api_exposed(own_address=None, path=OWN_HOSTNAME_PATH):
+    """Whether web-server.py (port 8083: the hub API, OnionHome's name and
+    analytics endpoints) goes on this node's onion address (issue #393).
+    Only a hub (is_registration_hub: the opt-in or the canonical address)
+    or OnionHome; every other node keeps it off its address, where it
+    served nothing a visitor needs and ran as root beside the site key.
+    Inside the container network it listens as before (the Settings
+    page's and the directory plugin's local calls on OnionHome)."""
+    if own_address is None:
+        own_address = read_own_address(path)
+    return is_registration_hub(own_address) or own_address == ONIONHOME_ADDRESS
+
+
 def read_tor_container_address():
     """Return the onion address of this node's tor container, or None.
 
