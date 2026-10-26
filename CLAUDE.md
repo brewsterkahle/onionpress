@@ -1138,6 +1138,31 @@
   the upgrade, check `docker logs onionheaven-farm` for "listening on" and
   the first `spawn … -> ok`.
 
+## A Plain Node's Address Carries No Hub API (issue #393)
+- The tor entrypoint maps port 8083 (web-server.py: the hub API,
+  OnionHome's name and analytics endpoints) onto the node's onion
+  address only when `onionheaven_common.hub_api_exposed()` says so: a
+  hub (`is_registration_hub`: the opt-in or the canonical address) or
+  OnionHome (`ONIONHOME_ADDRESS`, now in onionheaven_common; web-server
+  imports it). The hostname is derived from the key before the
+  onion-services.json is written, so an existing address is known; a
+  node still to mint one is no hub. web-server.py still listens inside
+  the container network (the directory plugin and name sync on
+  OnionHome call `onionpress-tor:8083`). Before, every node ran the
+  1,900-line API as root on its own address beside the site key and the
+  control cookie. The healthcheck and redirect listeners run `socat -T
+  30 ... fork,max-children=64` (an idle connection is closed, a client
+  cannot hold thousands of root shells; the Dockerfile checks socat
+  knows the option), and the healthcheck keeps its three WordPress
+  probes' answers for `CACHE_TTL` (60 s) in `/run/healthcheck/wordpress-facts`
+  (written whole and renamed; junk or an unwritable dir just probes
+  again). The launchers' hub-address check probes `<addr>:8083/status`
+  and, on a plain node, now falls through to its port-80 probe
+  ("reachable but not running OnionHeaven"). Still open in the issue:
+  running web-server.py, the healthcheck and the redirect as a
+  dedicated uid (root's key files, the registry and the farm socket all
+  assume root). Ships in the tor image. `tests/test_tor_node_surface.py`.
+
 ## Containers Drop Every Capability
 - Every compose service (both compose files), every takeover worker
   (`worker_run_argv` in onionheaven-farm.py and the unused

@@ -897,8 +897,11 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
         finally:
             sys.path.remove(tor_dir)
         self.assertEqual(backup.ONIONHEAVEN_HUB_ADDRESS, oc.ONIONHEAVEN_HUB_ADDRESS)
+        # web-server.py takes OnionHome's address from the shared module
+        # (issue #393: the entrypoint asks it whether to expose port 8083).
+        self.assertEqual(backup.ONIONHOME_ADDRESS, oc.ONIONHOME_ADDRESS)
         web = mv._read("app/Resources/docker/tor/web-server.py")
-        self.assertIn(f'_ONIONHOME_ADDRESS = "{backup.ONIONHOME_ADDRESS}"', web)
+        self.assertIn("_ONIONHOME_ADDRESS = ONIONHOME_ADDRESS", web)
         from onionpress import onionnames_registrar
         self.assertEqual(backup.ONIONHOME_ADDRESS, onionnames_registrar.DEFAULT_ONIONHOME_ADDRESS)
 
