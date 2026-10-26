@@ -1157,6 +1157,21 @@
 - Nothing in the images uses raw sockets (no ping, arping, SOCK_RAW); a
   healthcheck or tool that needs one has to get past the same test.
 
+## The Data Dir Is the User's Alone (issue #397)
+- Both launchers `chmod 700 "$DATA_DIR"` right after `mkdir -p`, on every
+  start (an install made under a looser umask is fixed too), and every
+  creation of `config` makes it 0600 (the Mac's template copy, both
+  heredoc fallbacks, install.sh, `config.ensure_config`): it may hold
+  `CLOUDFLARE_TUNNEL_TOKEN`, and the template is a 0644 bundle resource.
+  Every `os.makedirs(... data_dir ...)` in `src/` passes `mode=0o700`
+  (a census in `tests/test_data_dir_permissions.py`, which also runs
+  the launchers' two blocks under bash). An existing config's mode is
+  left as the owner set it. Still open in the issue: the mkp224o key
+  stays in `shared/vanity-keys/` (the one folder mounted into the VM)
+  after it is seeded into the onion-keys volume; the seed helper can
+  read it only from there, and restores, imports and hub detection
+  keep the folder, so moving it is a design change of its own.
+
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
 - This limits blast radius if a container is compromised — attacker can only see vanity keys and user's published content (which is public anyway)

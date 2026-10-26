@@ -107,8 +107,11 @@ wp_cli_in() {
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
-# Ensure data dir exists
+# Ensure data dir exists, this user's alone (issue #397: config holds the
+# Cloudflare token). 0700 on every start, so an install made under a
+# looser umask is fixed too.
 mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/onionpress (Linux default)
 # or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
@@ -426,7 +429,8 @@ ensure_key_helper_image() {
     docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
 }
 
-# Create default config if it doesn't exist
+# Create default config if it doesn't exist (0600, issue #397: it may hold
+# CLOUDFLARE_TUNNEL_TOKEN).
 if [ ! -f "$DATA_DIR/config" ]; then
     cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
@@ -443,6 +447,7 @@ ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.oni
 # this machine only.
 #ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
+    chmod 600 "$DATA_DIR/config"
 fi
 
 # Read settings from config (override defaults)
