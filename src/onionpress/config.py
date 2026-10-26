@@ -291,7 +291,11 @@ def write_config(path: str, values: dict) -> None:
 
 
 def ensure_config(paths: OnionPressPaths) -> None:
-    """Create config file from template or defaults if it doesn't exist."""
+    """Create config file from template or defaults if it doesn't exist.
+
+    The file is 0600 (issue #397): it may hold CLOUDFLARE_TUNNEL_TOKEN,
+    and the template is a 0644 bundle resource.
+    """
     if os.path.exists(paths.config_file):
         return
 
@@ -302,14 +306,17 @@ def ensure_config(paths: OnionPressPaths) -> None:
         )
         if os.path.exists(template):
             import shutil
-            shutil.copy2(template, paths.config_file)
+            shutil.copyfile(template, paths.config_file)
+            os.chmod(paths.config_file, 0o600)
             return
 
     # Write minimal defaults
-    with open(paths.config_file, "w", encoding="utf-8") as f:
+    fd = os.open(paths.config_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         for key, value in DEFAULTS.items():
             if value:  # skip empty defaults
                 f.write(f"{key}={value}\n")
+    os.chmod(paths.config_file, 0o600)
 
 
 # -- Address prefix validation --

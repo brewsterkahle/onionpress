@@ -153,7 +153,11 @@ write_shared_onion_address() {
     printf '%s\n' "$addr" | wp_put /var/lib/onionpress/onion_address 644
 }
 
+# The data dir is this user's alone (issue #397): config holds the
+# Cloudflare token, shared/ the onion key. 0700 on every start, not only
+# at creation, so an install made under a looser umask is fixed too.
 mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
 # Walks the source tree recursively so an empty pre-existing subdir in
@@ -274,7 +278,9 @@ elif [ -L "$HOME/.docker/cli-plugins/docker-compose" ] && [ ! -e "$DATA_DIR/dock
     ln -sf "$HOME/.docker/cli-plugins/docker-compose" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
 fi
 
-# Create default config if it doesn't exist
+# Create default config if it doesn't exist. 0600: the template is a
+# 0644 bundle resource and the file may hold CLOUDFLARE_TUNNEL_TOKEN
+# (issue #397).
 if [ ! -f "$DATA_DIR/config" ]; then
     if [ -f "$RESOURCES_DIR/config-template.txt" ]; then
         cp "$RESOURCES_DIR/config-template.txt" "$DATA_DIR/config"
@@ -286,6 +292,7 @@ UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
+    chmod 600 "$DATA_DIR/config"
 fi
 
 # Prefer bundled binaries

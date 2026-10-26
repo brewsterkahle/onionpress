@@ -185,7 +185,7 @@ def schedule_regeneration(data_dir: str, log_func: Optional[Callable[[str], None
     """
     log = log_func or (lambda _m: None)
     path = os.path.join(data_dir, HOST_MARKER)
-    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(data_dir, mode=0o700, exist_ok=True)
     with open(path, "w") as f:
         f.write(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")
     if metadata and metadata.get("excludes_image_derivatives"):
@@ -251,7 +251,7 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
     if not (host_pending or container_pending):
         return True
 
-    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(data_dir, mode=0o700, exist_ok=True)
     lock_path = os.path.join(data_dir, LOCK_FILE)
     lock = open(lock_path, "w")
     try:
