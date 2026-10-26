@@ -253,13 +253,19 @@ def lookup_name(conn, name):
     }
 
 
+# Names one address may hold (issue #391): registration is free and
+# self-signed, so without a cap one key could take every name there is.
+MAX_NAMES_PER_ADDRESS = int(os.environ.get("ONIONHOME_MAX_NAMES_PER_ADDRESS", "10"))
+
+
 def register_name(conn, name, onionaddress):
     """Atomic register. Returns (ok, error_reason, alternatives).
 
     On success: (True, None, None) — the row was inserted.
     On failure: (False, reason, alternatives) where `reason` is one of
         'invalid_chars', 'too_short', 'too_long', 'all_numeric',
-        'reserved', 'taken', 'invalid_address'
+        'reserved', 'taken', 'invalid_address', 'too_many' (the address
+        holds MAX_NAMES_PER_ADDRESS names already)
     and `alternatives` is a list of 3 candidate names (only for 'taken'/
     'reserved').
     """
@@ -277,6 +283,12 @@ def register_name(conn, name, onionaddress):
         canonical = BRAND_NAMES.get(name.lower())
         if canonical is None or canonical != onionaddress:
             return False, "reserved", generate_alternatives(conn, name)
+
+    held = conn.execute(
+        "SELECT COUNT(*) FROM onionnames WHERE onionaddress = ?", (onionaddress,)
+    ).fetchone()[0]
+    if held >= MAX_NAMES_PER_ADDRESS:
+        return False, "too_many", None
 
     name_lower = name.lower()
     try:
@@ -619,7 +631,7 @@ def local_register(name, own_address, db_path=DB_PATH):
             "onionaddress": own_address,
             "url": f"http://{own_address}/{name}",
         }
-    status = 409 if reason in ("taken", "reserved") else 400
+    status = 409 if reason in ("taken", "reserved") else (429 if reason == "too_many" else 400)
     body = {"error": reason}
     if alternatives:
         body["suggestions"] = alternatives
