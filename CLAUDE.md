@@ -1371,6 +1371,24 @@
   on the hub follow the procedure there (count, tar the old dir, stop
   fully, update, check the log line and the counts).
 
+## The Fleet Brake (issue #390, branch `sec-390-fleet-brake`, not merged)
+- `onionheaven-heartbeat.py`'s `fleet_brake(conn, now)` runs once per
+  pass: with at least `BRAKE_MIN_SITES` (5) sites online and
+  `BRAKE_FRACTION` (0.5) or more of them stale at once, no site is taken
+  over for a missed heartbeat this pass (counted as "not acted on (fleet
+  brake: N of M online sites stale)"; a signed `/offline` the API
+  recorded is still honoured), said once as `FLEET BRAKE:`; when the
+  share drops under the line, `FLEET BRAKE released` and
+  `grant_grace_period` gives every online site a fresh
+  `PROPAGATION_DELAY`, so what is really down is taken over then, not
+  at once. Independently, at most `STALE_TAKEOVERS_PER_PASS` (25) stale
+  sites are taken over per pass, the rest "deferred to the next pass".
+  The three come from `ONIONHEAVEN_BRAKE_MIN_SITES`,
+  `ONIONHEAVEN_BRAKE_FRACTION` and `ONIONHEAVEN_STALE_TAKEOVERS_PER_PASS`
+  (compose passes them to onionheaven). The thresholds and whether the
+  hub's own healthcheck reachability should be a second brake are the
+  decision the issue is labelled with. `tests/test_hub_fleet_brake.py`.
+
 ## Registry Names Reach Docker Only as Workers'
 - The registry is data anything mounting the hub volume can write as root
   (onionpress-tor faces Tor; every takeover worker). The heartbeat holds the
