@@ -61,7 +61,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install lintian
         run: |
@@ -100,7 +100,7 @@ jobs:
           dpkg-deb --info build/onionpress.deb
           sha256sum build/onionpress.deb
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: onionpress-deb
           path: build/onionpress.deb
@@ -116,14 +116,14 @@ jobs:
       id-token: write      # the attestation's Sigstore signing identity
       attestations: write  # store the attestation with the repository
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: onionpress-deb
 
       # Signed over the file's digest, so it also verifies the versioned
       # copy uploaded below, which is byte-identical.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: onionpress.deb
 
@@ -172,7 +172,7 @@ jobs:
     outputs:
       linux: ${{ steps.filter.outputs.linux }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: filter
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The runner is a fresh Ubuntu with Docker CE from Docker's own
       # repository, which is what a user who installed Docker first has.

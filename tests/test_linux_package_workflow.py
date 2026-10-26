@@ -173,9 +173,9 @@ class LinuxPackageWorkflowTest(unittest.TestCase):
         body = self.jobs["release"]
         self.assertRegex(body, _m(r"^\s+needs:\s*deb\s*$"), f"{WORKFLOW}: release must need deb")
         self.assertRegex(
-            body, r"uses:\s*actions/attest-build-provenance@v\d+",
+            body, r"uses:\s*actions/attest-build-provenance@[0-9a-f]{40}\s+#\s*v\d+",
             f"{WORKFLOW}: the release job must use actions/attest-build-provenance "
-            f"pinned to a major version")
+            f"pinned to a commit SHA (issue #389)")
         self.assertRegex(
             body, _m(r"^\s+subject-path:\s*onionpress\.deb\s*$"),
             f"{WORKFLOW}: the attestation subject must be onionpress.deb, the file uploaded")

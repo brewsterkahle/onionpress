@@ -46,7 +46,7 @@ jobs:
       tor: ${{ steps.filter.outputs.tor }}
       wordpress: ${{ steps.filter.outputs.wordpress }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: filter
@@ -86,17 +86,17 @@ jobs:
             enabled: ${{ needs.changes.outputs.wordpress }}
     if: needs.changes.outputs.tor == 'true' || needs.changes.outputs.wordpress == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: matrix.enabled == 'true'
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: matrix.enabled == 'true'
 
       # The gha cache backend needs ACTIONS_RUNTIME_TOKEN and
       # ACTIONS_RESULTS_URL in the environment. docker/build-push-action
       # injects them; a plain `run:` step does not, and without them
       # --cache-from silently no-ops and every build starts cold on every PR.
-      - uses: crazy-max/ghaction-github-runtime@v4
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
         if: matrix.enabled == 'true'
 
       - name: Build ${{ matrix.target }}

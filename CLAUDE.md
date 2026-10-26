@@ -94,6 +94,15 @@
   fresh runner and checks the second run replaced the first (the nested
   `docker/docker`, `lib/onionpress/onionpress` of issue #316 that
   `install-tree.sh` ended).
+- **Every workflow action is pinned to a commit SHA** (issue #389):
+  `uses: owner/action@<40-hex> # vX.Y.Z`, the version comment being what
+  the SHA was resolved from. A floating major tag is whatever its
+  maintainer (or whoever holds their account) points it at, and the
+  release job holds `contents: write`. `.github/dependabot.yml` bumps the
+  SHA and the comment together, weekly, grouped. Bump by hand with
+  `gh api repos/<owner>/<action>/git/ref/tags/<tag>` (dereference an
+  annotated tag through `git/tags/<sha>`).
+  `tests/test_build_release_hygiene.py` refuses an unpinned `uses:`.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
 - **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
