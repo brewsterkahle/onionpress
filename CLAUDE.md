@@ -228,6 +228,14 @@
   release moved. The opt-in refresh paths (`update_images()`, Linux
   `onionpress update`, the menubar's Check for Updates) still pull
   unconditionally. `tests/test_image_pins.py` enforces all of it.
+- **A launch refreshes the images once** (issue #36): `UPDATE_ON_LAUNCH=yes`
+  is read by the Mac launcher's `update_images()` (in `start_containers`,
+  before the `--policy missing` pull), nowhere in the menubar; the
+  menubar's own `update-images` pass at launch (a second registry
+  contact before any container started) is gone. `update_docker_images`
+  is called by Check for Updates... only. What remains of the issue is
+  the first launch's fetch of the images themselves, which no setting
+  can avoid. `tests/test_launch_pulls_once.py`.
 - **The refresh resolves digests from the registry** (`build/base-image-digest.sh`
   on `:latest`); the local `docker images` cache only with `--local` (issue
   #327: the cache pinned stale images in 2.5.3).

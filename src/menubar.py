@@ -987,11 +987,10 @@ class OnionPressApp(rumps.App):
             self.menu["Starting..."].title = "Status: Port conflict"
             return
 
-        # Check if UPDATE_ON_LAUNCH is enabled
-        update_on_launch = self.read_config_value("UPDATE_ON_LAUNCH", "").strip().lower() == "yes"
-        if update_on_launch:
-            self.log("UPDATE_ON_LAUNCH enabled - checking for Docker image updates...")
-            self.update_docker_images(show_notifications=False)
+        # UPDATE_ON_LAUNCH is the launcher's: its `start` runs update_images()
+        # once, before the containers. The menubar used to run its own
+        # `update-images` here first, so a `yes` cost two registry passes
+        # per launch (issue #36); one is the launcher's.
 
         # First run: show welcome screen, wait for user to click "Set Up",
         # then start_service runs in the callback
