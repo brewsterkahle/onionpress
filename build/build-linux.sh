@@ -134,6 +134,9 @@ fi
 # Debian's libsodium23 has). 1.5.0 is what Debian 12 and 13, Ubuntu
 # 22.04 and 24.04 and Raspberry Pi OS Bookworm ship, and what CI tests
 # against besides the latest; it has every binding OnionPress uses.
+# rootlesskit: Debian's docker.io only suggests it, and its rootless setup
+# tool (postinst) cannot start a daemon without it; Docker CE's comes in
+# docker-ce-rootless-extras.
 # Depends is one line: a binary package's control file may not fold it
 # (lintian: multiline-field). No Description line may start with a dot
 # after the space: " .onion address" read as a control statement, and the
@@ -146,7 +149,7 @@ Version: $VERSION
 Section: web
 Priority: optional
 Architecture: $DEB_ARCH
-Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, uidmap, dbus-user-session, fuse-overlayfs, slirp4netns, jq, python3, python3-nacl (>= 1.5.0), zip, unzip, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
+Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, rootlesskit | docker-ce-rootless-extras, uidmap, dbus-user-session, fuse-overlayfs, slirp4netns, jq, python3, python3-nacl (>= 1.5.0), zip, unzip, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
 Recommends: torbrowser-launcher
 Maintainer: Brewster Kahle <brewster@archive.org>
 Homepage: https://onionpress.org
@@ -331,13 +334,54 @@ fi
 #   1. Preferred: rootless Docker (user-level daemon at
 #      /run/user/$UID/docker.sock). No docker group, no logout — same
 #      session can immediately use Docker. Requires
-#      dockerd-rootless-setuptool.sh (ships with docker.io on Debian 12 /
-#      Ubuntu 22.04+) and uidmap/dbus-user-session/fuse-overlayfs/
-#      slirp4netns (declared in Depends:). Refused if system Docker is
+#      dockerd-rootless-setuptool.sh (docker.io's contrib on Debian 12+ /
+#      Ubuntu 22.04+, or docker-ce-rootless-extras) and rootlesskit/uidmap/
+#      dbus-user-session/fuse-overlayfs/slirp4netns (declared in Depends:). Refused if system Docker is
 #      already serving other containers.
-#   2. Fallback: docker group + daemon-reexec, the legacy flow. Still
-#      tries to avoid logout via daemon-reexec; if that fails the user
-#      gets the "Log out and back in" message.
+#   2. Fallback: docker group. The user's systemd manager keeps the groups
+#      it started with (daemon-reexec does not refresh them), so it is
+#      restarted, but only while the user has no login session: a restart
+#      ends everything the manager runs, a desktop session's apps too.
+#      With a session the user gets the "Log out and back in" message.
+
+# dockerd-rootless-setuptool.sh is on PATH with Docker CE's
+# docker-ce-rootless-extras; Debian's and Ubuntu's docker.io keep it in
+# contrib, beside the dockerd-rootless.sh it looks for on PATH (and writes
+# into the rootless docker.service). Prints the directory that holds both.
+DOCKER_IO_CONTRIB="${ONIONPRESS_DOCKER_IO_CONTRIB:-/usr/share/docker.io/contrib}"
+rootless_setuptool_dir() {
+    local found
+    if found=$(command -v dockerd-rootless-setuptool.sh 2>/dev/null); then
+        echo "${found%/*}"; return 0
+    fi
+    if [ -x "$DOCKER_IO_CONTRIB/dockerd-rootless-setuptool.sh" ] && \
+       [ -x "$DOCKER_IO_CONTRIB/dockerd-rootless.sh" ]; then
+        echo "$DOCKER_IO_CONTRIB"; return 0
+    fi
+    return 1
+}
+
+# The user's manager, as the user, over its private socket
+# ($XDG_RUNTIME_DIR/systemd/private): needs no session bus.
+user_systemctl() {
+    runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+        systemctl --user "$@"
+}
+
+# The user's rootless daemon answers `docker info` (within $1 seconds).
+rootless_docker_answers() {
+    local tries="${1:-1}"
+    while :; do
+        if runuser -u "$REAL_USER" -- env DOCKER_HOST="unix://$_rootless_sock" \
+               docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        tries=$((tries - 1))
+        [ "$tries" -gt 0 ] || return 1
+        sleep 1
+    done
+}
+
 if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
     bootstrap_ok=1
     rootless_ok=0
@@ -356,20 +400,18 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
     #    .deb reinstall after dpkg -r). Probing `docker info` with
     #    DOCKER_HOST pointing at the socket confirms the daemon is
     #    actually responsive, not just that the file exists.
-    if [ -S "$_rootless_sock" ] && \
-       runuser -u "$REAL_USER" -- env DOCKER_HOST="unix://$_rootless_sock" \
-           docker info >/dev/null 2>&1; then
+    if rootless_docker_answers 1; then
         rootless_ok=1
     fi
 
-    # 3. Try fresh rootless setup. Skip if the setup tool isn't on PATH
-    #    (older Docker releases) or if system Docker is actively serving
-    #    other containers (we'd be ripping the rug out from under another
+    # 3. Try fresh rootless setup. Skip if there is no setup tool (older
+    #    Docker releases) or if system Docker is actively serving other
+    #    containers (we'd be ripping the rug out from under another
     #    user's workloads). `docker ps -q` is empty on a fresh install
     #    where apt just brought docker.service up.
     if [ "$rootless_ok" = "0" ] && \
        [ "$bootstrap_ok" = "1" ] && \
-       command -v dockerd-rootless-setuptool.sh >/dev/null 2>&1; then
+       rootless_dir=$(rootless_setuptool_dir); then
 
         system_busy=0
         if docker ps -q 2>/dev/null | grep -q .; then
@@ -382,11 +424,23 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             systemctl disable --now docker.service docker.socket 2>/dev/null || true
             rm -f /var/run/docker.sock
 
-            if runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-                   dockerd-rootless-setuptool.sh install --force >/dev/null 2>&1 && \
-               runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-                   systemctl --user enable --now docker.service >/dev/null 2>&1; then
+            # The tool's exit status is not the verdict: docker.io's ends
+            # with `$BIN/docker version`, and contrib holds no docker CLI,
+            # so it exits 127 after setting the daemon up. The verdict is
+            # the user's rootless daemon answering. Its output is kept for
+            # when that fails.
+            _rootless_log="$DATA_DIR/docker-rootless-setup.log"
+            runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+                PATH="$rootless_dir:$PATH" \
+                dockerd-rootless-setuptool.sh install --force >"$_rootless_log" 2>&1 || true
+            chown "$REAL_USER:$REAL_USER" "$_rootless_log" 2>/dev/null || true
+            if user_systemctl enable --now docker.service >>"$_rootless_log" 2>&1 && \
+               rootless_docker_answers 30; then
                 rootless_ok=1
+            else
+                echo "  Rootless Docker did not start (see $_rootless_log); using the system daemon."
+                # The group path below needs the system daemon back.
+                systemctl enable --now docker.socket docker.service 2>/dev/null || true
             fi
         fi
     fi
@@ -402,25 +456,39 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             fi
         fi
 
-        # Reload the user's systemd manager so it picks up the new
-        # docker-group membership. Without this, services launched from
-        # the existing user-manager instance inherit the old group set
-        # and can't reach /var/run/docker.sock.
-        # `systemctl --user --machine=USER@.host` requires systemd 248+
-        # (Ubuntu 22.04, Debian 12, Raspberry Pi OS Bookworm — all fine).
+        # The user's systemd manager (started by a login, or by the
+        # enable-linger above) has the groups it started with, and
+        # services it starts inherit them: without the docker group they
+        # cannot reach /var/run/docker.sock. daemon-reexec keeps them;
+        # only a new manager has the new group. Restarting it ends every
+        # process it runs, so only while the user has no login session
+        # (the lingering manager alone); with one, logging out and back
+        # in is the user's to do.
         if [ "$bootstrap_ok" = "1" ]; then
-            systemctl --user --machine="${REAL_USER}@.host" daemon-reexec 2>/dev/null || bootstrap_ok=0
+            _sessions=$(loginctl show-user "$REAL_USER" -p Sessions --value 2>/dev/null || true)
+            if [ -n "$_sessions" ]; then
+                bootstrap_ok=0
+            elif ! systemctl restart "user@$REAL_UID.service" 2>/dev/null; then
+                bootstrap_ok=0
+            fi
         fi
     fi
 
-    # 5. Enable + start the OnionPress services.
+    # 5. Enable + start the OnionPress services, through the manager's
+    #    private socket (user_systemctl), not --machine=USER@.host: that
+    #    goes through the user's session bus, and a manager started before
+    #    this install brought in dbus-user-session has none (the bridge
+    #    exits 1). The bus socket is started too, for what comes later.
+    #    --no-block: the first start pulls the images, minutes that apt
+    #    need not wait for.
     if [ "$bootstrap_ok" = "1" ]; then
-        systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null || true
-        systemctl --user --machine="${REAL_USER}@.host" enable --now \
+        user_systemctl daemon-reload 2>/dev/null || true
+        user_systemctl start dbus.socket 2>/dev/null || true
+        user_systemctl enable --now --no-block \
             onionpress.service \
             onionpress-heartbeat.service \
             onionpress-watcher.timer \
-            2>/dev/null || bootstrap_ok=0
+            >/dev/null 2>&1 || bootstrap_ok=0
     fi
 
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
