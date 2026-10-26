@@ -40,7 +40,8 @@ LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 
 # Keys the host itself acts on: (file, the expression that reads the key).
 HOST_READERS = {
-    "UPDATE_ON_LAUNCH": ("src/menubar.py", 'read_config_value("UPDATE_ON_LAUNCH"'),
+    # The launcher's, since #428 (issue #36): the menubar reads it nowhere.
+    "UPDATE_ON_LAUNCH": ("app/MacOS/onionpress", 'grep "^UPDATE_ON_LAUNCH=" "$DATA_DIR/config"'),
     "LAUNCH_ON_LOGIN": ("src/menubar.py", 'read_config_value("LAUNCH_ON_LOGIN"'),
     "START_ON_BOOT": ("linux/onionpress", 'grep "^START_ON_BOOT="'),
     "PREVENT_SLEEP": ("src/onionpress/power.py", '_read_config("PREVENT_SLEEP"'),

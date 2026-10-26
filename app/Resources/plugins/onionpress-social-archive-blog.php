@@ -1052,39 +1052,20 @@ function onionpress_blog_render_excerpt( $post, $preview_text ) {
 }
 
 /**
- * Render the source post's content.rendered. WP REST returns it as
- * HTML; unlike Mastodon, it's NOT pre-sanitized — we strip script /
- * iframe / embed / object blocks plus on*= event-handler attributes
- * before storing. Display-time wp_kses_post() handles the rest.
+ * Render the source post's content.rendered. WP REST returns it as the
+ * other site's HTML, which goes through wp_kses_post() here, at ingest
+ * (issue #403): the_content never runs kses, and the importer's own
+ * regex sanitizer (gone) missed entity-encoded `jav&#x61;script:`
+ * hrefs, `<img/onerror=...>` without whitespace, <base> and <meta
+ * refresh>. The importer runs under wp-cron, where save-time kses
+ * happened to apply, and nothing should depend on that.
  *
  * Returns array( $content_html, $preview_text ).
  */
 function onionpress_blog_render_content( $post ) {
-    $html = (string) ( $post['content']['rendered'] ?? '' );
-    $html = onionpress_blog_strip_dangerous_html( $html );
+    $html = wp_kses_post( (string) ( $post['content']['rendered'] ?? '' ) );
     $preview = trim( html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' ) );
     return array( $html, $preview );
-}
-
-/**
- * Strip executable-HTML constructs at ingest time. This is destructive
- * sanitization — we'd rather lose a working <iframe> embed than admit
- * <script> from a foreign site. Display-time wp_kses_post is the second
- * line of defense, not the first.
- */
-function onionpress_blog_strip_dangerous_html( $html ) {
-    // Drop tag-pair blocks entirely (including content between open + close).
-    $html = preg_replace( '#<(script|style|iframe|embed|object|applet|noscript|form)\b[^>]*>.*?</\1\s*>#si', '', $html );
-    // Drop unpaired / self-closing variants.
-    $html = preg_replace( '#<(script|style|iframe|embed|object|applet|noscript|form|input|button)\b[^>]*/?>#si', '', $html );
-    // Strip on*= event handlers (handles double-quoted, single-quoted, unquoted).
-    $html = preg_replace( '#\son[a-z][a-z0-9_-]*\s*=\s*"[^"]*"#i', '', $html );
-    $html = preg_replace( "#\son[a-z][a-z0-9_-]*\s*=\s*'[^']*'#i", '', $html );
-    $html = preg_replace( '#\son[a-z][a-z0-9_-]*\s*=\s*[^\s>]+#i', '', $html );
-    // Neutralize javascript: / data:text/html URLs in href/src.
-    $html = preg_replace( '#(href|src)\s*=\s*"\s*(javascript|data)\s*:[^"]*"#i', '$1=""', $html );
-    $html = preg_replace( "#(href|src)\s*=\s*'\s*(javascript|data)\s*:[^']*'#i", "$1=''", $html );
-    return $html;
 }
 
 /**

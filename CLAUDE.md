@@ -228,6 +228,14 @@
   release moved. The opt-in refresh paths (`update_images()`, Linux
   `onionpress update`, the menubar's Check for Updates) still pull
   unconditionally. `tests/test_image_pins.py` enforces all of it.
+- **A launch refreshes the images once** (issue #36): `UPDATE_ON_LAUNCH=yes`
+  is read by the Mac launcher's `update_images()` (in `start_containers`,
+  before the `--policy missing` pull), nowhere in the menubar; the
+  menubar's own `update-images` pass at launch (a second registry
+  contact before any container started) is gone. `update_docker_images`
+  is called by Check for Updates... only. What remains of the issue is
+  the first launch's fetch of the images themselves, which no setting
+  can avoid. `tests/test_launch_pulls_once.py`.
 - **The refresh resolves digests from the registry** (`build/base-image-digest.sh`
   on `:latest`); the local `docker images` cache only with `--local` (issue
   #327: the cache pinned stale images in 2.5.3).
@@ -438,6 +446,23 @@
   testing the mu-plugins and pinned plugins on the new branch first
   (docs/BUILDING.md, "Moving to a new WordPress branch").
   `tests/test_wordpress_branch_upgrade.py`. Needs an image publish.
+
+## A Core Package Is Checked Before It Is Installed (issue #395)
+- `onionpress-core-update.php`'s `download` fetches a package only from
+  `https://downloads.wordpress.org` (`op_package_url_allowed`; the offer
+  names the URL), takes the version from the package name (and the
+  audit's `$target`, which must agree), fetches WordPress.org's md5
+  list for it over Tor (`op_fetch_checksums`, shared with `verify`) and
+  holds every member of the zip to it (`op_verify_core_zip`, ZipArchive:
+  a listed file's md5 must match, a member the list lacks is refused
+  unless under `wp-content/`, a listed file outside `wp-content/` must
+  be there, nothing outside `wordpress/`) before it answers ok; a
+  refused package is removed. Before, size + `PK` was the whole check
+  and the md5 comparison ran after `wp core update`, report-only. The
+  image build checks ZipArchive is there (without it every update is
+  refused). Needs an image publish. `tests/test_core_update_verified.py`
+  (the PHP halves under a php with the zip extension; CI's runner has
+  one, `php:8.3-cli` does not).
 
 ## Settings Page Config Writes Are Allowlisted
 - The WordPress Settings page asks for config changes through
@@ -940,6 +965,21 @@
 - Never call `wp_remote_*`/`fetch_feed` directly for a follow;
   `tests/test_follow_requests.py` fails if one appears.
 
+## Imported Bodies Are Filtered at Ingest (issue #403)
+- The Mastodon importer stored the instance's `content` verbatim and
+  the blog importer ran a regex sanitizer that missed entity-encoded
+  `jav&#x61;script:` hrefs, `<img/onerror=...>` without whitespace,
+  `<base>` and `<meta refresh>`; the_content never runs kses, and what
+  protected the site was that both run under wp-cron, where save-time
+  kses happens to apply. Each foreign HTML field now goes through
+  `wp_kses_post()` where it is read (`onionpress_mastodon_render_content`,
+  both the status and the boosted status; `onionpress_blog_render_content`,
+  which insert and update share), and the regex sanitizer is gone.
+  Bluesky, Twitter and Reddit build their HTML from `esc_html`'d text.
+  `tests/test_importers_kses_at_ingest.py` keeps a census: a
+  `(string) ( $x['content'|'html'|'rendered'] ...)` read in an importer
+  is filtered on its line or cut to plain text in its function.
+
 ## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
 - `onionpress_get_aggregated_feed_items()` (sidebar, every page) only reads:
   the `onionpress_blogroll_items` transient, else each current follow's
@@ -1096,6 +1136,31 @@
   the upgrade, check `docker logs onionheaven-farm` for "listening on" and
   the first `spawn … -> ok`.
 
+## A Plain Node's Address Carries No Hub API (issue #393)
+- The tor entrypoint maps port 8083 (web-server.py: the hub API,
+  OnionHome's name and analytics endpoints) onto the node's onion
+  address only when `onionheaven_common.hub_api_exposed()` says so: a
+  hub (`is_registration_hub`: the opt-in or the canonical address) or
+  OnionHome (`ONIONHOME_ADDRESS`, now in onionheaven_common; web-server
+  imports it). The hostname is derived from the key before the
+  onion-services.json is written, so an existing address is known; a
+  node still to mint one is no hub. web-server.py still listens inside
+  the container network (the directory plugin and name sync on
+  OnionHome call `onionpress-tor:8083`). Before, every node ran the
+  1,900-line API as root on its own address beside the site key and the
+  control cookie. The healthcheck and redirect listeners run `socat -T
+  30 ... fork,max-children=64` (an idle connection is closed, a client
+  cannot hold thousands of root shells; the Dockerfile checks socat
+  knows the option), and the healthcheck keeps its three WordPress
+  probes' answers for `CACHE_TTL` (60 s) in `/run/healthcheck/wordpress-facts`
+  (written whole and renamed; junk or an unwritable dir just probes
+  again). The launchers' hub-address check probes `<addr>:8083/status`
+  and, on a plain node, now falls through to its port-80 probe
+  ("reachable but not running OnionHeaven"). Still open in the issue:
+  running web-server.py, the healthcheck and the redirect as a
+  dedicated uid (root's key files, the registry and the farm socket all
+  assume root). Ships in the tor image. `tests/test_tor_node_surface.py`.
+
 ## Containers Drop Every Capability
 - Every compose service (both compose files), every takeover worker
   (`worker_run_argv` in onionheaven-farm.py and the unused
@@ -1157,6 +1222,21 @@
   process without KILL back).
 - Nothing in the images uses raw sockets (no ping, arping, SOCK_RAW); a
   healthcheck or tool that needs one has to get past the same test.
+
+## The Data Dir Is the User's Alone (issue #397)
+- Both launchers `chmod 700 "$DATA_DIR"` right after `mkdir -p`, on every
+  start (an install made under a looser umask is fixed too), and every
+  creation of `config` makes it 0600 (the Mac's template copy, both
+  heredoc fallbacks, install.sh, `config.ensure_config`): it may hold
+  `CLOUDFLARE_TUNNEL_TOKEN`, and the template is a 0644 bundle resource.
+  Every `os.makedirs(... data_dir ...)` in `src/` passes `mode=0o700`
+  (a census in `tests/test_data_dir_permissions.py`, which also runs
+  the launchers' two blocks under bash). An existing config's mode is
+  left as the owner set it. Still open in the issue: the mkp224o key
+  stays in `shared/vanity-keys/` (the one folder mounted into the VM)
+  after it is seeded into the onion-keys volume; the seed helper can
+  read it only from there, and restores, imports and hub detection
+  keep the folder, so moving it is a design change of its own.
 
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
@@ -1376,6 +1456,27 @@
   name and log endpoints. `tests/test_onion_auth.py` keeps that census and
   keeps the three copies of onion_auth.py (src, tor image, tests/stress)
   identical.
+- **A verified request is accepted once** (issue #400): a signature is
+  good for `TIMESTAMP_TOLERANCE` (5 min) either side of the hub's clock,
+  and a captured `/offline` replayed inside that window forced a takeover
+  of a live site. `_verify_signature` now, after `verify_payload` says
+  yes, runs `onionheaven_common.note_signed_request` (the `signed_requests`
+  table, `db_ensure_schema`): per content address the latest accepted
+  timestamp and the signatures accepted at that second (clients stamp
+  to the second and may send an `/online` and the `/offline` of a
+  suspend in one; Ed25519 is deterministic, so a replay is
+  byte-identical), refused as 403 when older or already seen, in one
+  `BEGIN IMMEDIATE` so two copies cannot both pass. A forgery never
+  moves the mark (the registry is opened only after the check); a
+  registry that cannot be opened refuses. A client clock set back costs
+  at most the tolerance's worth of refused requests (`REJECT-REPLAY` in
+  the log). The peer claim and the OnionHome name endpoints have their
+  own namespaces and are not marked. A hub restore keeps only
+  `registry` and `takeover_containers`; an empty table admits what the
+  tolerance admits. Ships in the tor image. `ReplayTest` in
+  `tests/test_hub_signature_verification.py`; a harness that posts one
+  message twice in a second needs distinct timestamps
+  (`test_hub_stored_keys._online`).
 - Without PyNaCl verify raises `VerificationUnavailable`, never says yes:
   do_POST answers 503 and nothing is done; a peer claim earns nothing. No
   /online then gets through, so the heartbeat monitor takes over no site
@@ -1923,6 +2024,20 @@
 - `tests/test_wayback_network_state.py`; test_wayback_sweep.py points the
   lock and back-off at test keys through the `onionpress_wayback_net_key`
   filter so it never touches a live sweep's.
+
+## The Mac Update Installs Only a DMG Its Release Vouches For (issue #386)
+- `updater.download_and_install` downloads the release's `SHA256SUMS`
+  (`_fetch_release_sums`, the third curl through `_curl_tls_args`, 64 KiB
+  cap) and mounts the DMG only when `sha256_of` it equals the one line
+  `published_sha256` finds for the asset's name (sha256sum format, as
+  `build/release.sh` writes it and Linux's `update_find_release` reads
+  it); a release without the file, a file without exactly one line for
+  the DMG, or a mismatch stops before `hdiutil attach`. Same trust root
+  as before (TLS to GitHub) but a swapped or damaged asset is caught, as
+  on Linux. Still open in the issue: signing `SHA256SUMS` with a key the
+  app carries (with #246, the .deb side) and Developer ID + notarization
+  with `codesign --verify` on the staged bundle, which need a key the
+  maintainer holds. `DmgChecksumTest` in `tests/test_updater_staged_swap.py`.
 
 ## Auto-Update Swaps Bundles by Rename
 - `updater.download_and_install` copies the new bundle from the mounted DMG

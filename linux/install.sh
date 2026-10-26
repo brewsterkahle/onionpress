@@ -407,6 +407,9 @@ ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.oni
 # this machine only.
 #ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
+    # 0600 (issue #397): it may hold CLOUDFLARE_TUNNEL_TOKEN; the chown
+    # below makes it the real user's.
+    chmod 600 "$DATA_DIR/config"
     echo "  Default config created"
 fi
 

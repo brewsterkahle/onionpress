@@ -5,8 +5,10 @@ Multi-user aware: detects other OnionPress instances on the same Mac
 and guides the user through a safe coordinated update.
 """
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -156,6 +158,56 @@ def check_for_update(current_version, log=None):
 
 STAGING_PREFIX = ".onionpress-update-"
 
+# Every release carries SHA256SUMS ("<sha256>  <asset name>", sha256sum
+# format, written by build/release.sh); the Linux update installs only a
+# .deb matching its line, and the Mac update installs only a .dmg
+# matching its line (issue #386). Nothing else checks what the DMG is:
+# the bundle is ad-hoc signed, and the swap strips quarantine.
+RELEASE_SUMS = "SHA256SUMS"
+_SUMS_LINE = re.compile(r"^([0-9a-fA-F]{64}) [ *](\S+)$", re.M)
+
+
+def published_sha256(sums_text, asset_name):
+    """The one sha256 SHA256SUMS gives for *asset_name*, lowercase, or
+    None when it gives none or more than one."""
+    found = [m.group(1).lower() for m in _SUMS_LINE.finditer(sums_text)
+             if m.group(2) == asset_name]
+    return found[0] if len(found) == 1 else None
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fetch_release_sums(release_data, tmp_dir):
+    """Download the release's SHA256SUMS; its text. Raises when the
+    release has none or it cannot be fetched."""
+    sums_url = None
+    for asset in release_data.get("assets", []):
+        if asset.get("name") == RELEASE_SUMS:
+            sums_url = asset["browser_download_url"]
+            break
+    if not sums_url:
+        raise RuntimeError(f"The release carries no {RELEASE_SUMS}; not installing an unchecked DMG")
+    sums_path = os.path.join(tmp_dir, RELEASE_SUMS)
+    result = subprocess.run(
+        ["curl", "-L", "-s", *_curl_tls_args(),
+         "-H", "User-Agent: onionpress", "--max-time", "60",
+         "--max-filesize", "65536", "-o", sums_path, sums_url],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=90,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Could not download {RELEASE_SUMS} (curl exit {result.returncode}): "
+            f"{result.stderr.strip()}")
+    with open(sums_path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read(65536)
+
 
 def stage_new_bundle(source_app, install_path):
     """Copy *source_app* (inside the mounted DMG) into a hidden folder beside
@@ -243,9 +295,11 @@ def download_and_install(release_data, latest_version, install_path,
 
     # Find the DMG asset
     dmg_url = None
+    dmg_name = None
     for asset in release_data.get("assets", []):
         if asset["name"].endswith(".dmg"):
             dmg_url = asset["browser_download_url"]
+            dmg_name = asset["name"]
             break
 
     if not dmg_url:
@@ -282,6 +336,22 @@ def download_and_install(release_data, latest_version, install_path,
             raise RuntimeError(
                 f"Downloaded file too small ({dmg_size} bytes), "
                 "likely not a valid DMG")
+
+        # The DMG is what the release's SHA256SUMS says it is, or it is
+        # not mounted (issue #386): a swapped asset, a truncated or
+        # tampered download, or a release without the file all stop here.
+        sums_text = _fetch_release_sums(release_data, tmp_dir)
+        want = published_sha256(sums_text, dmg_name)
+        if not want:
+            raise RuntimeError(
+                f"{RELEASE_SUMS} of the release does not give one sha256 for {dmg_name}")
+        got = sha256_of(dmg_path)
+        if got != want:
+            raise RuntimeError(
+                f"{dmg_name} does not match the release's {RELEASE_SUMS} "
+                f"(sha256 {got}, published {want}); not installing it")
+        if log:
+            log(f"Auto-update: {dmg_name} matches {RELEASE_SUMS} ({want[:16]}...)")
 
         # Mount
         os.makedirs(mount_point, exist_ok=True)

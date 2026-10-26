@@ -181,4 +181,6 @@ fi
 
 # Main: start socat listener
 echo "OnionHeaven redirect service starting on port $REDIRECT_PORT..."
-exec socat TCP-LISTEN:${REDIRECT_PORT},reuseaddr,fork SYSTEM:"sh /onionheaven-redirect.sh --handle-request"
+# -T: a connection idle for 30 s is closed; max-children caps the root
+# shells one client can hold open (issue #393).
+exec socat -T 30 TCP-LISTEN:${REDIRECT_PORT},reuseaddr,fork,max-children=64 SYSTEM:"sh /onionheaven-redirect.sh --handle-request"

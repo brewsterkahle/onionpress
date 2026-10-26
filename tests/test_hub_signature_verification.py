@@ -24,12 +24,14 @@ on temp directories, and the monitor runs one pass against a temp registry.
 import base64
 import hashlib
 import importlib.util
+import json
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -148,6 +150,16 @@ class _HandlerTest(unittest.TestCase):
         data.update(extra)
         return data
 
+    def _signed_at(self, endpoint, ts, hc=None):
+        hc = self.hc if hc is None else hc
+        return {
+            "content_address": self.address,
+            "healthcheck_address": hc,
+            "timestamp": ts,
+            "signature": onion_auth.sign_payload(self.expanded, self.public, endpoint,
+                                                 self.address, hc, ts),
+        }
+
     def _named(self, endpoint, name="mysite"):
         ts = onion_auth.make_timestamp()
         return {
@@ -265,6 +277,119 @@ class WithPyNaClTest(_HandlerTest):
             data["timestamp"])
         self.assertEqual(self._post("/unregister", data)[0], 403)
         self.assertEqual(self.acted, [])
+
+
+class ReplayTest(_HandlerTest):
+    """Issue #400: a verified request is accepted once. The hub keeps,
+    per address, the latest accepted timestamp and the signatures seen
+    at that second; older, or seen, is refused with 403 and acts on
+    nothing. A forgery never reaches the registry (WithPyNaClTest)."""
+
+    def setUp(self):
+        super().setUp()
+        # One shared in-memory registry across db_connect() calls, held
+        # open by the keeper so the marks survive each handler's close().
+        uri = f"file:replay-{id(self)}?mode=memory&cache=shared"
+        self.keeper = sqlite3.connect(uri, uri=True)
+        self.addCleanup(self.keeper.close)
+
+        def connect():
+            conn = sqlite3.connect(uri, uri=True)
+            conn.row_factory = sqlite3.Row
+            return conn
+        p = mock.patch.object(ws, "db_connect", connect)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _marks(self):
+        return self.keeper.execute(
+            "SELECT content_address, last_timestamp, signatures FROM signed_requests").fetchall()
+
+    def test_the_same_offline_twice_takes_over_once(self):
+        offline = self._signed("offline")
+        status, body = self._post("/offline", offline)
+        self.assertEqual(status, 200, body)
+        self.assertEqual([what for what, _ in self.acted], ["takeover"])
+        self.acted.clear()
+        status, body = self._post("/offline", dict(offline))
+        self.assertEqual(status, 403, body)
+        self.assertIn("replay", body["error"])
+        self.assertEqual(self.acted, [])
+        self.assertTrue(any("REJECT-REPLAY /offline" in line for line in self.logged))
+        self.assertEqual(len(self._marks()), 1)
+
+    def test_an_older_request_than_the_last_accepted_is_refused(self):
+        earlier = onion_auth.make_timestamp()
+        later = (datetime.now(timezone.utc) + timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        status, body = self._post("/offline", self._signed_at("offline", later))
+        self.assertEqual(status, 200, body)
+        self.acted.clear()
+        # Another healthcheck address: a different message and signature,
+        # refused for its time alone.
+        offline = self._signed_at("offline", earlier, hc=_keypair()[2])
+        status, body = self._post("/offline", offline)
+        self.assertEqual(status, 403, body)
+        self.assertIn("older than the last accepted", body["error"])
+        self.assertEqual(self.acted, [])
+
+    def test_two_requests_in_one_second_both_pass(self):
+        ts = onion_auth.make_timestamp()
+        other_hc = _keypair()[2]
+        self.assertEqual(self._post("/offline", self._signed_at("offline", ts, hc=other_hc))[0], 200)
+        self.assertEqual(self._post("/offline", self._signed_at("offline", ts))[0], 200)
+        # And each of them only once.
+        self.assertEqual(self._post("/offline", self._signed_at("offline", ts))[0], 403)
+        self.assertEqual(self._post("/offline", self._signed_at("offline", ts, hc=other_hc))[0], 403)
+        row = self._marks()[0]
+        self.assertEqual(row[0], self.address)
+        self.assertEqual(len(json.loads(row[2])), 2)
+
+    def test_a_later_request_moves_the_mark(self):
+        t1 = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        t2 = onion_auth.make_timestamp()
+        self.assertEqual(self._post("/offline", self._signed_at("offline", t1))[0], 200)
+        self.assertEqual(self._post("/offline", self._signed_at("offline", t2))[0], 200)
+        self.assertEqual(self._post("/offline", self._signed_at("offline", t1))[0], 403)
+        self.assertEqual(self._marks()[0][1], t2)
+
+    def test_marks_are_per_address(self):
+        other_expanded, other_public, other_address = _keypair()
+        ts = onion_auth.make_timestamp()
+        mine = self._signed_at("offline", ts)
+        theirs = {
+            "content_address": other_address, "healthcheck_address": self.hc,
+            "timestamp": ts,
+            "signature": onion_auth.sign_payload(other_expanded, other_public, "offline",
+                                                 other_address, self.hc, ts),
+        }
+        self.assertEqual(self._post("/offline", mine)[0], 200)
+        self.assertEqual(self._post("/offline", theirs)[0], 200)
+        self.assertEqual(self._post("/offline", mine)[0], 403)
+        self.assertEqual(len(self._marks()), 2)
+
+    def test_a_registry_that_cannot_be_opened_refuses(self):
+        def broken():
+            raise sqlite3.OperationalError("disk I/O error")
+        with mock.patch.object(ws, "db_connect", broken):
+            status, body = self._post("/offline", self._signed("offline"))
+        self.assertEqual(status, 403, body)
+        self.assertEqual(self.acted, [])
+
+    def test_note_signed_request_is_atomic_and_bounded(self):
+        conn = ws.db_connect()
+        ws.db_ensure_schema(conn)
+        ts = onion_auth.make_timestamp()
+        for i in range(oc.SIGNED_REQUEST_MARKS_LIMIT + 5):
+            self.assertEqual(oc.note_signed_request(conn, self.address, ts, f"sig{i}"), (True, ""))
+        row = self._marks()[0]
+        self.assertEqual(len(json.loads(row[2])), oc.SIGNED_REQUEST_MARKS_LIMIT)
+        self.assertEqual(oc.note_signed_request(conn, self.address, ts, "sig0")[0], True,
+                         "the oldest signature at the second was forgotten: bounded")
+        self.assertEqual(oc.note_signed_request(conn, self.address, ts, "sig36")[0], False)
+        self.assertEqual(oc.note_signed_request(conn, self.address, "garbage", "x"),
+                         (False, "Invalid timestamp format"))
+        self.assertFalse(conn.in_transaction)
+        conn.close()
 
 
 class DockerfileTest(unittest.TestCase):

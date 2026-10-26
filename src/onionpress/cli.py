@@ -574,7 +574,8 @@ class OnionPressCLI:
 
     def __init__(self, data_dir: str = None, app_bundle: str = None):
         self.paths = resolve_paths(data_dir=data_dir, app_bundle=app_bundle)
-        os.makedirs(self.paths.data_dir, exist_ok=True)
+        # This user's alone (issue #397): config, secrets and the key.
+        os.makedirs(self.paths.data_dir, mode=0o700, exist_ok=True)
         self.log = _make_log_func(self.paths.log_file)
 
         # Ensure config exists
