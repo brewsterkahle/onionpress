@@ -61,6 +61,24 @@
   old `rm -rf "$TMPDIR"` deleted on a run from a checkout), removed by its
   `trap cleanup EXIT` and once installed. Never `rm -rf` a folder named by
   the environment. `tests/test_install_sh_clone_cleanup.py`.
+- **`linux/install.sh` installs a release and parses whole** (issue #388):
+  not run from a checkout, it clones the newest `v<x>.<y>.<z>` tag
+  (`release_ref_to_install`: `git ls-remote --tags`, `sort -V`; nothing
+  printed and the install stops when none can be read;
+  `ONIONPRESS_INSTALL_REF=<ref>` for a developer's branch), never HEAD of
+  main, so a push to main changes nothing new installs run as root and a
+  fresh install's version is a release's. The body is `main() { ... }`
+  with `main "$@"` last, so a `curl | bash` cut part-way executes
+  nothing. The system Docker is disabled only when `docker ps -q` is
+  empty (the .deb postinst's check), else left running beside the
+  rootless one; Docker's apt key is checked against the published
+  fingerprint (`DOCKER_APT_KEY_FPR`, `docker_apt_key_is_dockers`, gnupg
+  among the prerequisites) before the repository is added; the
+  postinst's fallback `usermod -aG docker` says the group is
+  root-equivalent. Installing the release's checked `.deb` instead of a
+  clone (the `update_find_release` path) is the next step and still
+  open. `tests/test_install_sh_release.py` (the functions under bash
+  with fake git and gpg; a truncated script runs nothing).
 - **The .deb's postinst restarts the site on an upgrade** (issue #357):
   with `$2` set it runs `systemctl --user --machine=<user>@.host
   daemon-reload` and `try-restart onionpress.service
