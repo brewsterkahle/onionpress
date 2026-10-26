@@ -46,6 +46,27 @@ from onionheaven_common import (
 )
 from onion_auth import verification_available
 
+# The fleet brake (issue #390). A site is taken over when its own /online
+# stops landing for PROPAGATION_DELAY, and nothing asked whether the
+# problem was the hub's: with the API hung, Tor rebootstrapping, SQLite
+# lock-starved or the hub's descriptor unreachable, every registered site
+# crosses the line together and gets queued, every visitor sees the
+# archived copy, and every site's probe sees a competing descriptor. So,
+# per pass: when at least BRAKE_MIN_SITES sites are online and the share
+# of them whose heartbeat is stale is BRAKE_FRACTION or more, no site is
+# taken over for a missed heartbeat (an /offline a site signed is still
+# honoured), said loudly once; when the share drops under the line again,
+# every online site gets a fresh grace period, so what is really down is
+# taken over PROPAGATION_DELAY later, not at once. Independently of the
+# brake, at most STALE_TAKEOVERS_PER_PASS stale sites are taken over per
+# pass; the rest wait for the next one, so a real partial outage is taken
+# over in bounded batches that the audit (10 to 300 s after each) can
+# keep up with.
+BRAKE_MIN_SITES = int(os.environ.get("ONIONHEAVEN_BRAKE_MIN_SITES", "5"))
+BRAKE_FRACTION = float(os.environ.get("ONIONHEAVEN_BRAKE_FRACTION", "0.5"))
+STALE_TAKEOVERS_PER_PASS = int(os.environ.get("ONIONHEAVEN_STALE_TAKEOVERS_PER_PASS", "25"))
+_brake_engaged = False
+
 # How many drift repairs to attempt per worker per heartbeat pass.
 # Low cap avoids overwhelming the queue manager when many addresses are stuck.
 RECONCILE_REPAIRS_PER_PASS = 2
@@ -150,6 +171,42 @@ def grant_grace_period(conn, now):
 # takeover (no /offline is accepted either); once they can again, every
 # online site gets a fresh grace period before the first stale check.
 _verification_was_unavailable = False
+
+
+def _heartbeat_is_stale(last_healthy, now):
+    if not last_healthy:
+        return True
+    try:
+        lh = datetime.fromisoformat(last_healthy.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return True
+    return (now - lh).total_seconds() > PROPAGATION_DELAY
+
+
+def fleet_brake(conn, now):
+    """(engaged, stale, online) for this pass: how many online sites have
+    a stale heartbeat, and whether that is so many at once that the
+    problem is taken to be the hub's. Logs the engage and the release;
+    on release every online site gets a fresh grace period."""
+    global _brake_engaged
+    rows = conn.execute(
+        "SELECT last_healthy FROM registry WHERE status = 'online' AND unregistered_at IS NULL"
+    ).fetchall()
+    online = len(rows)
+    stale = sum(1 for r in rows if _heartbeat_is_stale(r["last_healthy"], now))
+    engaged = online >= BRAKE_MIN_SITES and stale >= BRAKE_FRACTION * online
+    if engaged and not _brake_engaged:
+        log(f"FLEET BRAKE: {stale} of {online} online sites have missed their heartbeats "
+            f"at once ({int(BRAKE_FRACTION * 100)}% or more): the problem is likely this "
+            f"hub's (API, Tor, disk, the registry), not theirs. No site is taken over for "
+            f"a missed heartbeat until fewer are stale; a signed /offline is still honoured.")
+    elif not engaged and _brake_engaged:
+        log(f"FLEET BRAKE released: {stale} of {online} online sites stale. Every online "
+            f"site gets a fresh grace period ({PROPAGATION_DELAY}s) before a missed "
+            f"heartbeat counts again.")
+        grant_grace_period(conn, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    _brake_engaged = engaged
+    return engaged, stale, online
 
 
 def stale_takeovers_allowed(conn):
@@ -413,8 +470,11 @@ def main():
                 log(f"RECONCILE error: {e}")
 
             # No takeover for a missed heartbeat while no /online can be
-            # verified (stale_takeovers_allowed).
+            # verified (stale_takeovers_allowed), nor while so much of the
+            # fleet is stale at once that the fault is likely ours (the
+            # fleet brake, issue #390).
             takeovers_allowed = stale_takeovers_allowed(conn)
+            braked, brake_stale, brake_online = fleet_brake(conn, datetime.now(timezone.utc))
 
             # Get list of active entry keys (content_address + healthcheck_address).
             # We only fetch the keys here — each entry is re-queried fresh before
@@ -435,6 +495,8 @@ def main():
             stale_count = 0
             stale_cleanup_count = 0
             held_count = 0
+            braked_count = 0
+            deferred_count = 0
 
             for key_row in entry_keys:
                 ca = key_row["content_address"]
@@ -476,6 +538,8 @@ def main():
 
                     if last_healthy_stale and not takeovers_allowed:
                         held_count += 1
+                    elif last_healthy_stale and braked:
+                        braked_count += 1
                     elif last_healthy_stale:
                         # OnionHeaven peers get a longer grace period before takeover.
                         # They run OnionHeaven themselves, so restarts take longer and
@@ -495,6 +559,10 @@ def main():
                                 log(f"Stale heartbeat for {ha} (content: {ca}) — OnionHeaven peer, waiting ({int(peer_elapsed)}s / {ONIONHEAVEN_PEER_GRACE}s grace)")
                                 continue
                             log(f"Stale heartbeat for {ha} (content: {ca}) — OnionHeaven peer grace period exceeded ({int(peer_elapsed)}s), triggering takeover")
+                        if stale_count >= STALE_TAKEOVERS_PER_PASS:
+                            # Bounded batches: the rest next pass.
+                            deferred_count += 1
+                            continue
                         stale_count += 1
                         log(f"Stale heartbeat for {ha} (content: {ca}) — triggering takeover")
                         takeover_function(conn, ca, ha, force=False)
@@ -583,6 +651,12 @@ def main():
             if held_count:
                 parts.append(f"{held_count} stale heartbeats not acted on "
                              f"(signatures cannot be verified)")
+            if braked_count:
+                parts.append(f"{braked_count} stale heartbeats not acted on "
+                             f"(fleet brake: {brake_stale} of {brake_online} online sites stale)")
+            if deferred_count:
+                parts.append(f"{deferred_count} stale heartbeats deferred to the next pass "
+                             f"(at most {STALE_TAKEOVERS_PER_PASS} takeovers per pass)")
             log(f"heartbeat pass complete — {', '.join(parts)} in {elapsed:.1f}s")
 
             conn.close()
