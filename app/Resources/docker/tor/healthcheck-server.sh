@@ -82,7 +82,9 @@ read_cached_facts() {
     local now mtime age
     [ -f "$CACHE_FILE" ] || return 1
     now=$(date +%s)
-    mtime=$(stat -c %Y "$CACHE_FILE" 2>/dev/null) || return 1
+    # GNU stat in the image; BSD stat where the tests run on a Mac.
+    mtime=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null) || return 1
+    case "$mtime" in ""|*[!0-9]*) return 1 ;; esac
     age=$((now - mtime))
     [ "$age" -ge 0 ] && [ "$age" -lt "$CACHE_TTL" ] || return 1
     {
