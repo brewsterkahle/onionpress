@@ -2,5 +2,3 @@ pip
 py2app
 setuptools<81
 wheel
-# The DMG background fallback (build/create-dmg-background.py)
-Pillow

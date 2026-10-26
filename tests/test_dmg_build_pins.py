@@ -29,6 +29,7 @@ EXT = "build/py2app-extensions.sh"
 REBUILD = "build/rebuild-menubar.sh"
 RUNTIME_LOCK = "build/requirements-macos.lock"
 BUILD_LOCK = "build/build-requirements-macos.lock"
+DMG_BG_LOCK = "build/dmg-background-requirements-macos.lock"
 SHA = r"[0-9a-f]{64}"
 
 
@@ -165,7 +166,8 @@ class TestPythonLocks(unittest.TestCase):
                 self.assertRegex(build, rf"(?m)^{name}==\d")
         m = re.search(r"(?m)^setuptools==(\d+)", build)
         self.assertLess(int(m.group(1)), 81, "setuptools 81 removed distutils.spawn's dry_run (py2app #557)")
-        for rel in (RUNTIME_LOCK, BUILD_LOCK):
+        self.assertRegex(_read(DMG_BG_LOCK), r"(?m)^pillow==\d")
+        for rel in (RUNTIME_LOCK, BUILD_LOCK, DMG_BG_LOCK):
             text = _read(rel)
             pins = re.findall(r"(?m)^([a-z0-9_.-]+)==", text)
             for pkg in pins:
@@ -179,7 +181,28 @@ class TestPythonLocks(unittest.TestCase):
         self.assertIn("--generate-hashes", text)
         self.assertIn("-o build/requirements-macos.lock", text)
         self.assertIn("-o build/build-requirements-macos.lock", text)
+        self.assertIn("-o build/dmg-background-requirements-macos.lock", text)
         self.assertIn("src/requirements.txt", text)
+
+    def test_the_build_venv_gets_no_package_outside_the_app_and_its_tools(self):
+        # Pillow sat in the build lock, so it was installed into the venv
+        # before py2app, and make_universal looked for its x86_64 wheel in
+        # the runtime lock, which does not carry it: the first Mac build of
+        # this change failed there. Pillow is installed only in the DMG
+        # background fallback, after py2app, from a lock of its own.
+        build = _read(BUILD_LOCK)
+        self.assertNotRegex(build, r"(?mi)^pillow==")
+        dmg = _code(_read(DMG))
+        install = dmg.index("dmg-background-requirements-macos.lock")
+        self.assertGreater(install, dmg.index("setup.py py2app"))
+        self.assertIn("create-dmg-background.py", dmg[install:])
+
+    def test_make_universal_refuses_a_package_the_runtime_lock_lacks(self):
+        src = _read(EXT)
+        body = src[src.index("make_universal() {"):]
+        guard = body.index('if [ -z "$(lock_block "$dist")" ]; then')
+        self.assertLess(guard, body.index("pip\" download"))
+        self.assertIn("return 1", body[guard:body.index("pip\" download")])
 
     def test_lock_block_prints_one_packages_lines(self):
         src = _read(EXT)

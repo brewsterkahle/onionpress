@@ -891,8 +891,10 @@ else
     mkdir -p "$DMG_BG_DIR"
     LOGO_PATH="$PROJECT_DIR/assets/branding/logo.png"
     STORY_PATH="$PROJECT_DIR/assets/branding/story.png"
-    # Pillow is in the build lock (pinned by hash, issue #387).
-    "$MENUBAR_BUILD_DIR/venv/bin/pip" install --require-hashes -r "$BUILD_DIR/build-requirements-macos.lock" >/dev/null 2>&1
+    # Pillow pinned by hash (issue #387), in a lock of its own: in the
+    # build lock it sat in the venv before py2app, which then found its
+    # arm64-only extensions there.
+    "$MENUBAR_BUILD_DIR/venv/bin/pip" install --require-hashes -r "$BUILD_DIR/dmg-background-requirements-macos.lock" >/dev/null 2>&1
     "$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/create-dmg-background.py" \
         "$DMG_BG_DIR/dmg-background.png" \
         --logo "$LOGO_PATH" \

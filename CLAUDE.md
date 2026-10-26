@@ -105,10 +105,14 @@
   The Python side installs with `--require-hashes` from
   `build/requirements-macos.lock` (from `src/requirements.txt`) and
   `build/build-requirements-macos.lock` (pip, py2app, setuptools<81,
-  wheel, Pillow; from `build/build-requirements-macos.in`), both written
-  by `build/refresh-python-locks.sh` (uv); `py2app-extensions.sh` takes
+  wheel; from `build/build-requirements-macos.in`), all written by
+  `build/refresh-python-locks.sh` (uv); `py2app-extensions.sh` takes
   PyNaCl's sdist and cffi's per-arch wheels from the runtime lock
-  (`lock_block`). Bumping a version means putting its new hash in the
+  (`lock_block`) and refuses a single-arch extension of a package that
+  lock lacks. Pillow (DMG background fallback) has its own
+  `build/dmg-background-requirements-macos.lock`, installed only after
+  py2app: in the build lock it sat in the py2app venv and broke the
+  universal2 merge. Bumping a version means putting its new hash in the
   script and re-running the refresh. `tests/test_dmg_build_pins.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **CI builds and attests the `.deb` on every published release**

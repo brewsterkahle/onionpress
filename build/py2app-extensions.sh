@@ -134,6 +134,10 @@ for line in sys.stdin:
             echo "  $rel: adding the $arch slice from $dist $version"
             dir="$WORK/$dist-$arch"
             mkdir -p "$dir"
+            if [ -z "$(lock_block "$dist")" ]; then
+                echo "ERROR: $dist ($rel) is not in $LOCK; only the app's own packages belong in the build venv" >&2
+                return 1
+            fi
             "$venv/bin/pip" download --quiet --no-deps --only-binary=:all: \
                 --platform "macosx_11_0_$arch" -d "$dir" --require-hashes -r <(lock_block "$dist")
             wheels=("$dir"/*.whl)
