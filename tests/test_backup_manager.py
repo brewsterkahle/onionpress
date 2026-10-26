@@ -1643,7 +1643,10 @@ class TestPyNaClIsWiredEverywhere(unittest.TestCase):
         for script in ("build/build-dmg-simple.sh", "build/rebuild-menubar.sh"):
             text = self._read(script)
             with self.subTest(script):
-                pip = text.index('install -r "$SCRIPTS_DIR/requirements.txt"')
+                # The runtime lock, generated from src/requirements.txt
+                # (build/refresh-python-locks.sh, issue #387).
+                pip = text.index('--require-hashes -r "$')
+                self.assertIn('requirements-macos.lock"', text[pip:pip + 120])
                 prepare = text.index("py2app-extensions.sh\" prepare")
                 py2app = text.index("setup.py py2app")
                 verify = text.index("py2app-extensions.sh\" verify")
