@@ -14,6 +14,8 @@ import socket
 import subprocess
 import tempfile
 
+from . import release_signing
+
 def _parse_version(version_str):
     """Parse a version string like '2.10.3' into a tuple of ints."""
     try:
@@ -279,6 +281,31 @@ def swap_in_bundle(staged_app, install_path, log=None):
         shutil.rmtree(stale, ignore_errors=True)
 
 
+def _fetch_release_sig(release_data, tmp_dir):
+    """The release's SHA256SUMS.sig text, or None when it carries none
+    (release_signing decides what that means). A download that fails is
+    a missing signature, never a pass."""
+    sig_url = None
+    for asset in release_data.get("assets", []):
+        if asset.get("name") == release_signing.SIG_ASSET:
+            sig_url = asset["browser_download_url"]
+            break
+    if not sig_url:
+        return None
+    sig_path = os.path.join(tmp_dir, release_signing.SIG_ASSET)
+    result = subprocess.run(
+        ["curl", "-L", "-s", *_curl_tls_args(),
+         "-H", "User-Agent: onionpress", "--max-time", "60",
+         "--max-filesize", "4096", "-o", sig_path, sig_url],
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=90,
+    )
+    if result.returncode != 0:
+        return None
+    with open(sig_path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read(4096)
+
+
 def download_and_install(release_data, latest_version, install_path,
                          log=None, notify=None, before_swap=None, after_swap=None):
     """Download the DMG from *release_data*, replace the app at *install_path*.
@@ -341,6 +368,14 @@ def download_and_install(release_data, latest_version, install_path,
         # not mounted (issue #386): a swapped asset, a truncated or
         # tampered download, or a release without the file all stop here.
         sums_text = _fetch_release_sums(release_data, tmp_dir)
+        # The file's signature (issue #246): checked when a release key is
+        # embedded; said as unchecked until one is.
+        sig_text = _fetch_release_sig(release_data, tmp_dir)
+        ok, note = release_signing.check_release_sums(sums_text.encode("utf-8"), sig_text)
+        if log:
+            log(f"Auto-update: {note}")
+        if not ok:
+            raise RuntimeError(note)
         want = published_sha256(sums_text, dmg_name)
         if not want:
             raise RuntimeError(

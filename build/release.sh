@@ -112,7 +112,11 @@ sha256_line() {
     printf '%s  %s\n' "${out%% *}" "$(basename "$1")"
 }
 
-# SHA256SUMS for the files given.
+# SHA256SUMS for the files given, and SHA256SUMS.sig when
+# ONIONPRESS_RELEASE_SIGNING_KEY names the maintainer's secret key file
+# (build/release-key.py; issue #246). Without the key the release goes out
+# unsigned and this says so: an OnionPress with a public key embedded
+# refuses to install it.
 write_sums() {
     local f
     : > "$SUMS_PATH.tmp"
@@ -122,7 +126,18 @@ write_sums() {
     mv "$SUMS_PATH.tmp" "$SUMS_PATH"
     echo "  SHA256SUMS:"
     sed 's/^/    /' "$SUMS_PATH"
+    rm -f "$SUMS_PATH.sig"
+    if [ -n "${ONIONPRESS_RELEASE_SIGNING_KEY:-}" ]; then
+        python3 "$BUILD_DIR/release-key.py" sign "$SUMS_PATH" --key "$ONIONPRESS_RELEASE_SIGNING_KEY" \
+            || fail "could not sign SHA256SUMS with $ONIONPRESS_RELEASE_SIGNING_KEY"
+        SIG_ASSETS="$SUMS_PATH.sig"
+    else
+        echo "  WARNING: SHA256SUMS is not signed (ONIONPRESS_RELEASE_SIGNING_KEY unset);" >&2
+        echo "           an OnionPress with a release key embedded will refuse this release." >&2
+        SIG_ASSETS=""
+    fi
 }
+SIG_ASSETS=""
 
 # The release carries every asset named in $@, its SHA256SUMS is the one
 # written here, and its onionpress.deb matches it: the check Linux's
@@ -246,17 +261,17 @@ if [ "$OS" = "Darwin" ]; then
     echo "  $machos Mach-O files, all arm64 + x86_64 (MenubarApp python: $(lipo -archs "$MENUBAR_PYTHON"))"
 
     write_sums "$DEB_PATH" "$DMG_PATH"
-    REQUIRED_ASSETS="onionpress.dmg onionpress.deb SHA256SUMS"
+    REQUIRED_ASSETS="onionpress.dmg onionpress.deb SHA256SUMS${SIG_ASSETS:+ SHA256SUMS.sig}"
 
     echo ""
     if [ "$release_exists" = "1" ]; then
         echo "── Updating existing release $TAG (both assets + SHA256SUMS) ────────"
-        gh release upload -R "$RELEASE_REPO" "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" --clobber
+        gh release upload -R "$RELEASE_REPO" "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" $SIG_ASSETS --clobber
     else
         # A draft until verify_release passes; published below unless
         # --draft was asked for.
         echo "── Creating release $TAG with both assets + SHA256SUMS ──────────────"
-        gh release create -R "$RELEASE_REPO" "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" \
+        gh release create -R "$RELEASE_REPO" "$TAG" "$DMG_PATH" "$DEB_PATH" "$SUMS_PATH" $SIG_ASSETS \
             --draft \
             --target "$MAIN_SHA" \
             --title "$TAG" \
@@ -303,7 +318,7 @@ EOF
     fi
     echo ""
     echo "── Attaching .deb + SHA256SUMS to existing release $TAG ─────────────"
-    gh release upload -R "$RELEASE_REPO" "$TAG" "$DEB_PATH" "$SUMS_PATH" --clobber
+    gh release upload -R "$RELEASE_REPO" "$TAG" "$DEB_PATH" "$SUMS_PATH" $SIG_ASSETS --clobber
 fi
 
 # ─── Verify the assets, SHA256SUMS included, then publish ──────────────────

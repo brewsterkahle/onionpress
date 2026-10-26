@@ -63,6 +63,17 @@
   it). `tests/test_linux_release_update.py`.
 - The Mac update mounts a DMG only if it matches the release's `SHA256SUMS`.
   `DmgChecksumTest` in `tests/test_updater_staged_swap.py`.
+- **A release's `SHA256SUMS` may be signed** (issues #246 and #386 step 2,
+  branch `sec-246-signed-sums`, not merged): `release_signing.py` holds
+  `RELEASE_SIGNING_PUBLIC_KEYS` (Ed25519; empty until the maintainer runs
+  `build/release-key.py create <file>` and commits the public half) and
+  `check_release_sums`: no key embedded, nothing enforced (`NO_KEY_NOTE`);
+  a key embedded, a missing or bad `SHA256SUMS.sig` is refused, by the Mac
+  updater before the hash and by Linux `update` (`onionpress
+  release-signature verify`) before the `.deb`. `release.sh` signs when
+  `ONIONPRESS_RELEASE_SIGNING_KEY` names the secret key file. Open: CI's
+  rewrite of the `.deb` line breaks a Mac-made signature (stop rewriting,
+  or sign in CI with a secret). `tests/test_release_signing.py`.
 - Update-check curl passes `--cacert /etc/ssl/cert.pem` only where it
   exists; `--json` always exits 0 and reports `error`, which UIs show as
   failure. `tests/test_update_check_ca_bundle.py`.

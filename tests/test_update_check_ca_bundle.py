@@ -68,8 +68,9 @@ class TestCurlCaBundle(unittest.TestCase):
             if isinstance(node, ast.List) and node.elts and isinstance(node.elts[0], ast.Constant) \
                     and node.elts[0].value == "curl":
                 curls.append(node)
-        # The release check, the DMG, and the release's SHA256SUMS (#386).
-        self.assertEqual(len(curls), 3)
+        # The release check, the DMG, the release's SHA256SUMS (#386) and
+        # its SHA256SUMS.sig (#246).
+        self.assertEqual(len(curls), 4)
         for lst in curls:
             names = [e.value.func.id for e in lst.elts
                      if isinstance(e, ast.Starred) and isinstance(e.value, ast.Call)]
