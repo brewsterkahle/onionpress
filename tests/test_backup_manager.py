@@ -1645,8 +1645,8 @@ class TestPyNaClIsWiredEverywhere(unittest.TestCase):
             with self.subTest(script):
                 # The runtime lock, generated from src/requirements.txt
                 # (build/refresh-python-locks.sh, issue #387).
-                pip = text.index('--require-hashes -r "$')
-                self.assertIn('requirements-macos.lock"', text[pip:pip + 120])
+                pip = re.search(r'--require-hashes -r "\$[A-Z_]+(/build)?/requirements-macos\.lock"',
+                                text).start()
                 prepare = text.index("py2app-extensions.sh\" prepare")
                 py2app = text.index("setup.py py2app")
                 verify = text.index("py2app-extensions.sh\" verify")
@@ -1661,7 +1661,8 @@ class TestPyNaClIsWiredEverywhere(unittest.TestCase):
         helper = self._read("build/py2app-extensions.sh")
         self.assertIn('CFLAGS="-O2 $archflags"', helper)
         self.assertIn("--no-cache-dir --force-reinstall", helper)
-        self.assertIn('--no-binary PyNaCl "PyNaCl==$version"', helper)
+        # From source, at the lock's version and hash (issue #387).
+        self.assertIn('--no-binary PyNaCl --require-hashes -r <(lock_block PyNaCl)', helper)
 
     def test_linux_package_and_installer_bring_it(self):
         control = self._read("build/build-linux.sh")
