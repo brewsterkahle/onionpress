@@ -105,6 +105,24 @@
   apt-get returns (serial, never beside it). Before, the old units, daemon
   and tray kept running the old code until a reboot.
   `tests/test_deb_upgrade_restarts.py`.
+- **A first install of the .deb starts OnionPress on rootless Docker**
+  (e2e run, 2026-10-24, Debian 13): Debian's docker.io keeps
+  `dockerd-rootless-setuptool.sh` and `dockerd-rootless.sh` in
+  `/usr/share/docker.io/contrib` (not on PATH; Docker CE's are), and only
+  suggests rootlesskit (now `rootlesskit | docker-ce-rootless-extras` in
+  Depends). The tool exits 127 after a successful setup (its last step
+  runs `$BIN/docker version`; contrib has no CLI), so the verdict is the
+  rootless daemon answering `docker info`. If it does not, the system
+  daemon is re-enabled for the docker-group fallback, whose user manager
+  is restarted (daemon-reexec keeps old groups) only while the user has
+  no login session; with one, the manual step is printed. The first
+  install reaches the user's manager with `user_systemctl` (runuser +
+  `XDG_RUNTIME_DIR`, the manager's private socket), never
+  `--machine=USER@.host`: that needs the user's session bus, and
+  dbus-user-session arrives in the same apt run, after the manager
+  started (the bridge exits 1). It starts the units `--no-block`, so apt
+  does not wait for the image pulls. The upgrade path keeps `--machine`
+  (the bus exists by then). `tests/test_deb_first_install_docker.py`.
 - **Everything the Mac bundle is built from is pinned by hash** (issue
   #387, branch `sec-387-build-hashes`, not yet run on a Mac): every
   third-party download in `build-dmg-simple.sh` goes through
