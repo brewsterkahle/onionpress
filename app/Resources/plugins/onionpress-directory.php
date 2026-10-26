@@ -5,9 +5,11 @@
  *              GET /follow?name=NAME and GET /NAME lookups against the
  *              local onionnames registry on the tor container, and 302s
  *              to the target .onion when the name resolves to a
- *              different address. No-op when this instance is not
- *              OnionHome: the local registry endpoint is source-IP
- *              protected AND returns 404 off-OnionHome anyway.
+ *              different address. No-op for visitors when this node's
+ *              own address is not OnionHome's (issue #394): the Host
+ *              header is the visitor's to choose, and off OnionHome a
+ *              lookup is a request through Tor. The owner's Settings
+ *              page still calls onionpress_directory_lookup() anywhere.
  * Version:     1.0
  * Network:     true
  * License:     AGPL-3.0-or-later
@@ -63,12 +65,32 @@ function onionpress_directory_request_host() {
 }
 
 /**
+ * Whether this node is OnionHome: its own served address, read from the
+ * shared volume, is ONIONPRESS_ONIONHOME_ADDRESS. The Host header is not
+ * this (issue #394): sunrise and the domain map serve any Host, so with
+ * `Host: onionpress.org` every node answered name lookups, each one a
+ * synchronous request through Tor inside an Apache worker (30 s, no
+ * cache, no limit) and a redirect to wherever the name pointed.
+ */
+function onionpress_directory_is_onionhome_node() {
+    static $is_onionhome = null;
+    if ( $is_onionhome === null ) {
+        $is_onionhome = ( onionpress_directory_own_address() === ONIONPRESS_ONIONHOME_ADDRESS );
+    }
+    return $is_onionhome;
+}
+
+/**
  * The trimmed request path, or null when this request isn't ours to
- * handle at all: wrong host, or not a GET. Both hooks below opened with
- * the same OnionHome-host check, GET-only check, parse_url() and trim() —
- * this is the one place that logic lives, so the two cannot drift apart.
+ * handle at all: not OnionHome, wrong host, or not a GET. Both hooks
+ * below opened with the same OnionHome-host check, GET-only check,
+ * parse_url() and trim() — this is the one place that logic lives, so
+ * the two cannot drift apart.
  */
 function onionpress_directory_request_path() {
+    if ( ! onionpress_directory_is_onionhome_node() ) {
+        return null;
+    }
     if ( ! onionpress_directory_is_onionhome_host( $_SERVER['HTTP_HOST'] ?? '' ) ) {
         return null;
     }
@@ -122,7 +144,8 @@ function onionpress_directory_target_url( $addr, $suffix = '' ) {
  * launcher populates. Returns lower-case .onion or null.
  */
 function onionpress_directory_own_address() {
-    $addr_file = '/var/lib/onionpress/onion_address';
+    $addr_file = defined( 'ONIONPRESS_ONION_ADDRESS_FILE' )
+        ? ONIONPRESS_ONION_ADDRESS_FILE : '/var/lib/onionpress/onion_address';
     if ( ! is_readable( $addr_file ) ) {
         return null;
     }
@@ -195,6 +218,27 @@ function onionpress_directory_lookup( $name ) {
 }
 
 /**
+ * A visitor's lookup (the two hooks below): a name the registry did not
+ * have is not asked for again for ONIONPRESS_DIRECTORY_MISS_TTL seconds.
+ * Every 404 whose first segment looks like a name reaches the registry
+ * otherwise, and a visitor chooses how many of those to make. The
+ * Settings page calls onionpress_directory_lookup() itself, uncached.
+ */
+const ONIONPRESS_DIRECTORY_MISS_TTL = 60;
+
+function onionpress_directory_lookup_for_visitor( $name ) {
+    $key = 'op_dir_miss_' . md5( strtolower( (string) $name ) );
+    if ( get_transient( $key ) ) {
+        return null;
+    }
+    $info = onionpress_directory_lookup( $name );
+    if ( ! $info ) {
+        set_transient( $key, 1, ONIONPRESS_DIRECTORY_MISS_TTL );
+    }
+    return $info;
+}
+
+/**
  * Follow-by-name landing page. Served by OnionHome (or the clearnet face)
  * so it works reliably regardless of whether the target's theme has its
  * own /follow page — there's no guarantee alice's site has one, and
@@ -205,7 +249,7 @@ function onionpress_directory_lookup( $name ) {
  * we don't bother since search indexing of onion services isn't a thing.
  */
 function onionpress_directory_handle_follow_by_name( $name ) {
-    $info = onionpress_directory_lookup( $name );
+    $info = onionpress_directory_lookup_for_visitor( $name );
     if ( ! $info ) {
         status_header( 404 );
         nocache_headers();
@@ -280,7 +324,7 @@ function onionpress_directory_handle_name_lookup( $name, $suffix = '' ) {
     ) {
         return;
     }
-    $info = onionpress_directory_lookup( $name );
+    $info = onionpress_directory_lookup_for_visitor( $name );
     if ( ! $info ) {
         return; // Fall through; WP may serve a local blog or 404.
     }
