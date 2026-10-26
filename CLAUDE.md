@@ -1423,7 +1423,7 @@
   hub's own healthcheck reachability should be a second brake are the
   decision the issue is labelled with. `tests/test_hub_fleet_brake.py`.
 
-## Registration Caps (issue #391, branch `sec-391-registration-caps`, not merged)
+## Registration Caps (issue #391; on main since #414, the numbers still open)
 - Minting a key is instant, so web-server.py bounds what a free
   registration can take: `registration_room` (after the signature, before
   the key is looked at) refuses a new (content, healthcheck) pair for an
@@ -1441,7 +1441,8 @@
   `ONIONHEAVEN_MAX_REGISTRANTS`, `ONIONHOME_ANALYTICS_MAX_PAIRS_PER_ADDRESS`,
   `ONIONHOME_ANALYTICS_MAX_INSTANCES`, `ONIONHOME_MAX_NAMES_PER_ADDRESS`.
   The numbers, a per-address `/online` interval and whether a row must
-  pass an audit before it earns a worker slot are the issue's decision.
+  pass an audit before it earns a worker slot are still the issue's
+  decision (the code reached main on #414's branch, not by one).
   `tests/test_hub_registration_caps.py`.
 
 ## Registry Names Reach Docker Only as Workers'
