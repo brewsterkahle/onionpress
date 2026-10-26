@@ -38,7 +38,8 @@ Two channels, in order of preference:
 - The Docker container configurations
   (`app/Resources/docker/{tor,wordpress}/`).
 - The OnionHeaven hub protocol and our heartbeat client.
-- The auto-update flow (DMG download, signature checking, install).
+- The auto-update flow (DMG download and install). The DMG is checked
+  only by TLS to GitHub so far: there is no signature check yet.
 
 In particular, please report:
 

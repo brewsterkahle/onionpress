@@ -2624,11 +2624,9 @@ class TestTorServicesLogEachRequest(unittest.TestCase):
 
     def _handle(self, script_text, request, env=None):
         with tempfile.TemporaryDirectory() as tmp:
-            os.makedirs(os.path.join(tmp, "msgs"))  # the listener's main does this
             path = os.path.join(tmp, "svc.sh")
             with open(path, "w") as f:
-                f.write(script_text.replace(
-                    "/var/lib/tor/healthcheck-messages", os.path.join(tmp, "msgs")))
+                f.write(script_text)
             r = subprocess.run(["sh", path, "--handle-request"], input=request,
                                capture_output=True, text=True, timeout=30,
                                env={**os.environ, **(env or {})})
@@ -2638,11 +2636,20 @@ class TestTorServicesLogEachRequest(unittest.TestCase):
 
     def test_healthcheck_logs_method_path_and_status(self):
         hc = _read(self.SCRIPTS[0])
-        out, err = self._handle(hc, "POST /?from=hub HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+        out, err = self._handle(hc, "GET /?from=hub HTTP/1.1\r\n\r\n")
         # text=True normalises the response's CRLF to LF, so match the status line only.
         self.assertTrue(out.startswith("HTTP/1.0 200 OK\n"), out)
         self.assertNotIn("healthcheck:", out, "the log line must not leak into the response")
-        self.assertRegex(err, self.LOG_RE + r"healthcheck: POST /\?from=hub -> 200 stored\n$")
+        self.assertRegex(err, self.LOG_RE + r"healthcheck: GET /\?from=hub -> 200\n$")
+
+        # No POST: a body used to be stored as an "OnionHeaven message" and
+        # shown to the owner in a native dialog, from anyone who knew the
+        # healthcheck address.
+        out, err = self._handle(hc, "POST /?from=hub HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+        self.assertTrue(out.startswith("HTTP/1.0 405"), out)
+        self.assertRegex(err, self.LOG_RE + r"healthcheck: POST /\?from=hub -> 405\n$")
+        self.assertNotIn("healthcheck-messages", hc)
+        self.assertNotIn("handle_post", hc)
 
         out, err = self._handle(hc, "DELETE /x HTTP/1.1\r\n\r\n")
         self.assertTrue(out.startswith("HTTP/1.0 405"), out)
@@ -2656,7 +2663,7 @@ class TestTorServicesLogEachRequest(unittest.TestCase):
         self.assertEqual(err.count("\n"), 1, "control characters must not add log lines")
 
         out, err = self._handle(hc, "POST /" + "a" * 1000 + " HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
-        self.assertTrue(out.startswith("HTTP/1.0 400"), out)
+        self.assertTrue(out.startswith("HTTP/1.0 405"), out)
         self.assertLess(len(err), 300, "a 1000-byte path must be cut down in the log")
         self.assertIn("/" + "a" * 199 + " ->", err)
 

@@ -2,7 +2,7 @@
 """The app's remaining functions as `onionpress` subcommands (issue #382,
 src/onionpress/app_commands.py): version, address --url/--copy,
 check-reachability, logs --app/--launcher/--web, open, onionname show|set
-and onionheaven alerts, each against a fake docker and a sandbox data
+each against a fake docker and a sandbox data
 dir; the launchers' import-key --file under bash; and the literals the
 Mac daemon and the Linux tray share with the module."""
 
@@ -407,54 +407,6 @@ class TestOnionname(Sandbox):
 
     def test_the_markers_are_the_daemons(self):
         self.assertEqual(app_commands.ONIONNAME_RETRY_MARKER, daemon.ONIONNAME_RETRY_MARKER)
-        self.assertEqual(app_commands.DISMISS_ALERTS_MARKER, daemon.DISMISS_ALERTS_MARKER)
-
-
-LS = f"exec onionpress-tor ls {onionheaven.HUB_MESSAGES_DIR}/"
-RM = f"exec onionpress-tor sh -c rm -f {onionheaven.HUB_MESSAGES_DIR}/*.json"
-
-
-class TestAlerts(Sandbox):
-
-    def _docker(self, messages):
-        answers = {LS: "\n".join(f"m{i}.json" for i in range(len(messages))) + "\n", RM: ""}
-        for i, m in enumerate(messages):
-            answers[f"exec onionpress-tor cat {onionheaven.HUB_MESSAGES_DIR}/m{i}.json"] = json.dumps(m)
-        return FakeDocker(answers)
-
-    def test_none(self):
-        rc = app_commands.alerts_command(self._docker([]), self.dir, "linux", out=self.out)
-        self.assertEqual((rc, self.out.getvalue()), (0, "No OnionHeaven alerts.\n"))
-
-    def test_list_and_dismiss(self):
-        msgs = [{"type": "takeover_ended", "message": "Your site is back online"},
-                {"type": "info", "message": "hello"}]
-        docker = self._docker(msgs)
-        rc = app_commands.alerts_command(docker, self.dir, "linux", out=self.out)
-        self.assertEqual(rc, 0)
-        self.assertEqual(self.out.getvalue(),
-                         "[Takeover Ended] Your site is back online\n[Info] hello\n")
-        self.assertNotIn(RM, docker.calls)
-        out = io.StringIO()
-        rc = app_commands.alerts_command(docker, self.dir, "macos", dismiss=True, json_output=True,
-                                         out=out)
-        self.assertEqual(rc, 0)
-        self.assertEqual(json.loads(out.getvalue()), {"alerts": msgs, "dismissed": True})
-        self.assertIn(RM, docker.calls)
-        self.assertTrue(os.path.exists(os.path.join(self.dir, app_commands.DISMISS_ALERTS_MARKER)))
-
-    def test_without_the_container(self):
-        rc = app_commands.alerts_command(FakeDocker(), self.dir, "linux", out=self.out)
-        self.assertEqual(rc, 1)
-        self.assertIsNone(onionheaven.read_hub_messages(FakeDocker()))
-
-    def test_the_tray_and_the_daemon_read_the_same_folder(self):
-        tray = _read("linux/onionpress-tray")
-        self.assertIn(f'ALERT_MSG_DIR = "{onionheaven.HUB_MESSAGES_DIR}"', tray)
-        src = _read("src/onionpress/daemon.py")
-        self.assertNotIn("healthcheck-messages", src)
-        self.assertIn("onionheaven.read_hub_messages(self._docker)", src)
-        self.assertIn("onionheaven.remove_hub_messages(self._docker)", src)
 
 
 # ---- import-key --file, under bash ----

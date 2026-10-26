@@ -3,7 +3,7 @@
 What the Mac menubar, the Linux tray and the WordPress Settings page offer
 and the command line did not: `version`, `address --url/--copy`,
 `check-reachability`, `logs --app/--launcher/--web`, `open
-site|admin|settings|onion`, `onionname show|set` and `onionheaven alerts`.
+site|admin|settings|onion` and `onionname show|set`.
 One implementation for both platforms; both launchers hand the subcommand
 to onionpress.cli, which calls in here. None of these constructs
 OnionPressCLI (its setup creates config and secrets and probes ports):
@@ -33,10 +33,9 @@ ONIONHEAVEN_CONTAINER = "onionheaven"
 
 # The daemon's cache of the served address (the menubar's too).
 ADDRESS_CACHE = "onion_address"
-# daemon.ONIONNAME_RETRY_MARKER / daemon.DISMISS_ALERTS_MARKER (a test
-# keeps them equal): what the Mac daemon takes on its next tick.
+# daemon.ONIONNAME_RETRY_MARKER (a test keeps them equal): what the Mac
+# daemon takes on its next tick.
 ONIONNAME_RETRY_MARKER = ".onionname-retry"
-DISMISS_ALERTS_MARKER = ".dismiss-onionheaven-alerts"
 
 # The daemon's web log capture skips the app's own probes the same way.
 HEALTHCHECK_LOG_MARK = "OnionPress-HealthCheck"
@@ -450,43 +449,4 @@ def onionname_set(name, paths, docker, os_name, log, *, json_output=False, out=N
         print(f"Registered '{name}': {record['url']}", file=out)
     else:
         print(f"Recorded '{name}'. {note}", file=out)
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# onionheaven alerts [--dismiss]
-# ---------------------------------------------------------------------------
-
-def alerts_command(docker, data_dir, os_name, *, dismiss=False, json_output=False, out=None):
-    """`onionpress onionheaven alerts [--dismiss] [--json]`: the messages
-    the hub left (the menubar's and tray's OnionHeaven Alerts item), and
-    Dismiss All."""
-    from . import onionheaven
-    out = out or sys.stdout
-    messages = onionheaven.read_hub_messages(docker)
-    if messages is None:
-        print("Could not read the hub's messages (is OnionPress running?).", file=sys.stderr)
-        return 1
-    dismissed = False
-    if dismiss and messages:
-        dismissed = onionheaven.remove_hub_messages(docker)
-        if dismissed and os_name == "macos":
-            # The daemon drops them from its state on its next tick.
-            try:
-                with open(os.path.join(data_dir, DISMISS_ALERTS_MARKER), "w") as f:
-                    f.write(str(datetime.datetime.now(datetime.timezone.utc).timestamp()))
-            except OSError:
-                pass
-    if json_output:
-        print(json.dumps({"alerts": messages, "dismissed": dismissed}), file=out)
-        return 0 if (dismissed or not dismiss or not messages) else 1
-    if not messages:
-        print("No OnionHeaven alerts.", file=out)
-        return 0
-    for msg in messages:
-        kind = str(msg.get("type", "unknown")).replace("_", " ").title()
-        print(f"[{kind}] {msg.get('message', '')}", file=out)
-    if dismiss:
-        print("Dismissed." if dismissed else "Could not dismiss the alerts.", file=out)
-        return 0 if dismissed else 1
     return 0
