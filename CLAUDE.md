@@ -1940,6 +1940,20 @@
   lock and back-off at test keys through the `onionpress_wayback_net_key`
   filter so it never touches a live sweep's.
 
+## The Mac Update Installs Only a DMG Its Release Vouches For (issue #386)
+- `updater.download_and_install` downloads the release's `SHA256SUMS`
+  (`_fetch_release_sums`, the third curl through `_curl_tls_args`, 64 KiB
+  cap) and mounts the DMG only when `sha256_of` it equals the one line
+  `published_sha256` finds for the asset's name (sha256sum format, as
+  `build/release.sh` writes it and Linux's `update_find_release` reads
+  it); a release without the file, a file without exactly one line for
+  the DMG, or a mismatch stops before `hdiutil attach`. Same trust root
+  as before (TLS to GitHub) but a swapped or damaged asset is caught, as
+  on Linux. Still open in the issue: signing `SHA256SUMS` with a key the
+  app carries (with #246, the .deb side) and Developer ID + notarization
+  with `codesign --verify` on the staged bundle, which need a key the
+  maintainer holds. `DmgChecksumTest` in `tests/test_updater_staged_swap.py`.
+
 ## Auto-Update Swaps Bundles by Rename
 - `updater.download_and_install` copies the new bundle from the mounted DMG
   into a hidden sibling folder (`/Applications/.onionpress-update-*`,

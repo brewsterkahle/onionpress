@@ -17,6 +17,7 @@ when the second rename fails.
 No docker.
 """
 
+import hashlib
 import os
 import shutil
 import stat
@@ -31,14 +32,23 @@ from onionpress import updater  # noqa: E402
 
 
 FAKE_CURL = """#!/bin/bash
-# The updater's download: write 1.1 MB to the -o target (it refuses < 1 MB).
+# The updater's downloads: the DMG is 1.1 MB of zeros to the -o target (it
+# refuses < 1 MB); SHA256SUMS (a URL ending in it) is $FAKE_SUMS.
 out=""
+url=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  url="$1"
   shift
 done
-head -c 1100000 /dev/zero > "$out"
+case "$url" in
+  */SHA256SUMS) printf '%s' "$FAKE_SUMS" > "$out" ;;
+  *) head -c 1100000 /dev/zero > "$out" ;;
+esac
 """
+
+# sha256 of the 1.1 MB of zeros the fake curl writes.
+ZEROS_SHA256 = hashlib.sha256(b"\0" * 1100000).hexdigest()
 
 FAKE_HDIUTIL = """#!/bin/bash
 # attach <dmg> -mountpoint <dir> ...: put the fixture bundle at the mount
@@ -107,6 +117,8 @@ class StagedSwapTest(unittest.TestCase):
         env = {
             "PATH": fake_bin + ":/usr/bin:/bin",
             "TMPDIR": tmp,
+            "FAKE_SUMS": f"{ZEROS_SHA256}  onionpress.dmg\n"
+                         f"{'0' * 64}  onionpress.deb\n",
             "FAKE_DMG_APP": self.dmg_app,
             "INSTALL_PATH": self.install_path,
             "CP_LOG": self.cp_log,
@@ -122,7 +134,9 @@ class StagedSwapTest(unittest.TestCase):
         self.addCleanup(setattr, tempfile, "tempdir", self._old_tempdir)
 
         self.release = {"assets": [{"name": "onionpress.dmg",
-                                    "browser_download_url": "https://x/y.dmg"}]}
+                                    "browser_download_url": "https://x/y.dmg"},
+                                   {"name": "SHA256SUMS",
+                                    "browser_download_url": "https://x/SHA256SUMS"}]}
         self.logged = []
 
     def _install(self):
@@ -211,3 +225,49 @@ class StagedSwapTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DmgChecksumTest(StagedSwapTest):
+    """Issue #386: the DMG is mounted only when its sha256 is the one the
+    release's SHA256SUMS gives for it. Nothing else checks what it is."""
+
+    def _entries(self):
+        return sorted(os.listdir(self.apps))
+
+    def test_a_matching_dmg_installs(self):
+        self._install()
+        self.assertTrue(any("matches SHA256SUMS" in line for line in self.logged))
+
+    def test_a_dmg_that_does_not_match_is_not_mounted(self):
+        os.environ["FAKE_SUMS"] = f"{'1' * 64}  onionpress.dmg\n"
+        with self.assertRaisesRegex(RuntimeError, "does not match the release's SHA256SUMS"):
+            self._install()
+        self.assertFalse(os.path.exists(self.cp_log))   # never staged
+        self.assertEqual(self._entries(), ["OnionPress.app"])
+
+    def test_a_release_without_sums_is_refused(self):
+        self.release["assets"] = self.release["assets"][:1]
+        with self.assertRaisesRegex(RuntimeError, "carries no SHA256SUMS"):
+            self._install()
+        self.assertFalse(os.path.exists(self.cp_log))
+
+    def test_sums_without_the_dmg_line_or_with_two_are_refused(self):
+        for sums in (f"{ZEROS_SHA256}  onionpress.deb\n",
+                     f"{ZEROS_SHA256}  onionpress.dmg\n{'2' * 64}  onionpress.dmg\n"):
+            with self.subTest(sums=sums[:20]):
+                os.environ["FAKE_SUMS"] = sums
+                with self.assertRaisesRegex(RuntimeError, "does not give one sha256"):
+                    self._install()
+        self.assertFalse(os.path.exists(self.cp_log))
+
+    def test_the_line_format_is_sha256sums(self):
+        text = (f"{ZEROS_SHA256}  onionpress.dmg\n"
+                f"{'a' * 64} *onionpress.deb\n"
+                f"{'B' * 64}  other.dmg\n")
+        self.assertEqual(updater.published_sha256(text, "onionpress.dmg"), ZEROS_SHA256)
+        self.assertEqual(updater.published_sha256(text, "onionpress.deb"), "a" * 64)
+        self.assertEqual(updater.published_sha256(text, "other.dmg"), "b" * 64)
+        self.assertIsNone(updater.published_sha256(text, "onionpress-2.dmg"))
+        self.assertIsNone(updater.published_sha256("junk  onionpress.dmg\n", "onionpress.dmg"))
+        self.assertIsNone(updater.published_sha256(
+            f"{ZEROS_SHA256}  onionpress.dmg\n{ZEROS_SHA256}  onionpress.dmg\n", "onionpress.dmg"))
