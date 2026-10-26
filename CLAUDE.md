@@ -489,6 +489,19 @@
   the log goes back to WordPress as recent-logs.txt and out with
   analytics sharing. `TestBoundedReads`, `TestThrottle` in
   `tests/test_handle_action.py` (its `_Case` zeroes the intervals).
+- **The owner's GETs with a side effect carry a nonce** (issue #402):
+  `wp_ajax_onionpress_poll_action` (unlinks service-result.json once
+  read) and `wp_ajax_onionpress_check_update` (a request through Tor, a
+  transient) `check_ajax_referer` their own action right after the owner
+  check, the page's script sending `_wpnonce`; `/onionpress-status-json`
+  writes `requested-action=refresh-status` only with the status page's
+  nonce (`onionpress_status_refresh_allowed`, `wp_verify_nonce` on
+  `_wpnonce`) and never over a request already there (it clobbered a
+  pending owner action), and every reply carries `refresh_nonce` so a
+  page left open keeps a fresh one. Without the nonce the data still
+  comes back; only the write is skipped. A new `wp_ajax_` handler in the
+  settings plugin needs a `check_ajax_referer`
+  (`tests/test_settings_page_nonces.py`, a census).
 - **The page's Stop and Restart are the launcher's** (issue #354): on
   Linux they reach its `stop)`/`restart)` cases, which stop the heartbeat
   client before the containers (so it sends /offline to the hub) and start
