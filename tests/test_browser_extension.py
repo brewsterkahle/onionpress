@@ -170,6 +170,84 @@ class TestProxy(unittest.TestCase):
                          "Brave Browser")
         self.assertFalse([l for l in self.proxy.logs if "/status" in l], self.proxy.logs)
 
+    # What a browser adds to another site's page's request, and what the
+    # extension's own fetch carries.
+    PAGE = {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}
+    EXT = {"Origin": "chrome-extension://abcdefghijklmnopabcdefghijklmnop"}
+
+    def test_status_answers_the_extension_and_no_other_sites_page(self):
+        resp, body = self.proxy.request("GET", "/status")
+        self.assertEqual(resp.status, 200)
+        self.assertIsNone(resp.getheader("Access-Control-Allow-Origin"))
+        self.assertEqual(resp.getheader("X-Content-Type-Options"), "nosniff")
+        resp, body = self.proxy.request("GET", "/status", self.EXT)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("Access-Control-Allow-Origin"), self.EXT["Origin"])
+        self.assertIn("onion_address", json.loads(body))
+        port = self.proxy.server.server_port
+        for headers in ({"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"},   # the setup page
+                        {"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"},      # the address bar
+                        {"Origin": f"http://127.0.0.1:{port}"},
+                        {"Referer": f"http://localhost:{port}/setup"}):
+            with self.subTest(headers=headers):
+                resp, body = self.proxy.request("GET", "/status", headers)
+                self.assertEqual(resp.status, 200)
+                self.assertIsNone(resp.getheader("Access-Control-Allow-Origin"))
+        for headers in (self.PAGE,
+                        {"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "no-cors",
+                         "Sec-Fetch-Dest": "image"},                       # localhost:8080's page
+                        {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate",
+                         "Sec-Fetch-Dest": "iframe"},
+                        {"Referer": "https://evil.example/"},
+                        {"Origin": "http://localhost:8080"}):
+            with self.subTest(headers=headers):
+                resp, body = self.proxy.request("GET", "/status", headers)
+                self.assertEqual(resp.status, 403)
+                self.assertIsNone(resp.getheader("Access-Control-Allow-Origin"))
+                self.assertNotIn(b"onion_address", body)
+
+    def test_proxy_path_is_not_for_another_sites_page(self):
+        def fetch(*a, **k):
+            return 200, {"content-type": "text/plain"}, b"hello"
+        with mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch):
+            for headers in ({}, self.EXT, {"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate"}):
+                with self.subTest(headers=headers):
+                    resp, body = self.proxy.request("GET", f"/proxy/{ONION}/x", headers)
+                    self.assertEqual((resp.status, body), (200, b"hello"))
+            for headers in (self.PAGE, {"Sec-Fetch-Site": "same-site", "Sec-Fetch-Dest": "image"}):
+                with self.subTest(headers=headers):
+                    resp, body = self.proxy.request("GET", f"/proxy/{ONION}/x", headers)
+                    self.assertEqual(resp.status, 403)
+                    self.assertNotEqual(body, b"hello")
+
+    def test_the_proxy_carries_onion_sites_only(self):
+        fetched = []
+        def fetch(*a, **k):
+            fetched.append(a[1])
+            return 200, {}, b""
+        with mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch):
+            for path in ("http://example.com/", "http://127.0.0.1:8080/wp-admin/",
+                         "http://192.168.1.1/", "http://localhost:9051/"):
+                with self.subTest(path=path):
+                    resp, _ = self.proxy.request("GET", path)
+                    self.assertEqual(resp.status, 403)
+            for path in ("/proxy/example.com/", "/proxy/127.0.0.1/"):
+                with self.subTest(path=path):
+                    resp, _ = self.proxy.request("GET", path)
+                    self.assertEqual(resp.status, 400)
+            for target in ("example.com:443", "127.0.0.1:8080", f"{ONION}:443"):
+                with self.subTest(target=target):
+                    resp, _ = self.proxy.request("CONNECT", target)
+                    self.assertEqual(resp.status, 403)
+            resp, _ = self.proxy.request("GET", f"http://{ONION}/")
+            self.assertEqual(resp.status, 200)
+        self.assertEqual(fetched, [f"http://{ONION}/"])
+        self.assertFalse(hasattr(onion_proxy.OnionProxyHandler, "_fetch_direct"))
+        src = open(onion_proxy.__file__).read()
+        self.assertNotIn("create_connection", src)
+        self.assertNotIn("'Access-Control-Allow-Origin', '*'", src)
+
     def _fetch_onion(self, accept, fetch):
         with mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch):
             return self.proxy.request("GET", f"http://{ONION}/a?b=<x>",

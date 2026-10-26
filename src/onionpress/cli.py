@@ -2361,15 +2361,12 @@ def main(argv: list[str] = None) -> int:
     p_oh = sub.add_parser(
         "onionheaven",
         help="Keep the site reachable through OnionHeaven: enable | disable | "
-             "status [--json] | overview [--json] | alerts [--dismiss] [--json]")
+             "status [--json] | overview [--json]")
     p_oh.add_argument("onionheaven_command", nargs="?", default="status",
-                      metavar="{enable,disable,status,overview,alerts}")
+                      metavar="{enable,disable,status,overview}")
     p_oh.add_argument("--json", action="store_true",
                       help="status as JSON (enabled, choice, hub, registered, may_hold_key); "
-                           "overview as JSON (client, hub, known_hosts); "
-                           "alerts as JSON (alerts, dismissed)")
-    p_oh.add_argument("--dismiss", action="store_true",
-                      help="alerts: dismiss them all (the menu's Dismiss All)")
+                           "overview as JSON (client, hub, known_hosts)")
 
     p_rconf = sub.add_parser(
         "restore-config",
@@ -2508,16 +2505,6 @@ def main(argv: list[str] = None) -> int:
         return _config.run_config_command(
             args, data_dir, _file_log_func(paths.log_file),
             os_name=detect_os().value, app_bundle=paths.app_bundle)
-
-    if args.command == "onionheaven" and args.onionheaven_command == "alerts":
-        # The hub's messages in the tor container (the OnionHeaven Alerts
-        # item): the paths and a Docker wrapper, no OnionPressCLI setup.
-        from . import app_commands
-        paths = resolve_paths(data_dir=args.data_dir)
-        docker = Docker(paths, log_func=_file_log_func(paths.log_file))
-        return app_commands.alerts_command(docker, paths.data_dir, detect_os().value,
-                                           dismiss=args.dismiss, json_output=args.json,
-                                           out=sys.stdout)
 
     if args.command == "onionheaven":
         # The same: the config file and the registration record, no network.
