@@ -34,8 +34,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
-    analytics_sharing, backup, cli, config, confirm, containers, daemon, derivatives,
-    handle_action, launcher_ops, multisite, onionheaven, redact, scrub, wordpress_egress,
+    analytics_sharing, app_commands, backup, cli, config, confirm, containers, daemon,
+    derivatives, handle_action, launcher_ops, multisite, onionheaven, redact, scrub,
+    wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -132,8 +133,33 @@ ROWS = [
     Row("stop", ["stop"], "CLI().cmd_stop", mock.call()),
     Row("restart", ["restart"], "CLI().cmd_restart", mock.call()),
     Row("status", ["status"], "CLI().cmd_status", mock.call()),
-    Row("address", ["address"], "CLI().cmd_address", mock.call()),
     Row("logs", ["logs"], "CLI().cmd_logs", mock.call()),
+    # The app's functions as subcommands (issue #382, onionpress.app_commands):
+    # the paths and a Docker wrapper, never OnionPressCLI.
+    Row("version", ["version", "--json"], "app_commands.version_command",
+        mock.call("linux", json_output=True, out=ANY), rc=0, returns=0),
+    Row("address", ["address"], "app_commands.address_command",
+        mock.call(ANY, ANY, "linux", url=False, copy=False, out=ANY), rc=0, returns=0,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].data_dir, t.dir)),
+    Row("address", ["address", "--url", "--copy"], "app_commands.address_command",
+        mock.call(ANY, ANY, "macos", url=True, copy=True, out=ANY), rc=1, returns=1,
+        os_name="macos"),
+    Row("logs", ["logs", "--web", "-n", "50", "-f"], "app_commands.logs_command",
+        mock.call(ANY, ANY, "linux", "web", lines=50, follow=True, out=ANY), rc=0, returns=0),
+    Row("logs", ["logs", "--launcher"], "app_commands.logs_command",
+        mock.call(ANY, ANY, "linux", "launcher", lines=200, follow=False, out=ANY),
+        rc=1, returns=1),
+    Row("check-reachability", ["check-reachability", "--json"],
+        "app_commands.check_reachability_command",
+        mock.call(ANY, ANY, json_output=True, out=ANY), rc=2, returns=2),
+    Row("open", ["open", "onion"], "app_commands.open_command",
+        mock.call("onion", ANY, ANY, out=ANY), rc=0, returns=0),
+    Row("onionname show", ["onionname", "show", "--json"], "app_commands.onionname_show",
+        mock.call(ANY, json_output=True, out=ANY), rc=0, returns=0),
+    Row("onionname set", ["onionname", "set", "my-name"], "app_commands.onionname_set",
+        mock.call("my-name", ANY, ANY, "linux", ANY, json_output=False, out=ANY),
+        rc=2, returns=2,
+        check=lambda t, m: cli._hub_context.assert_called_once()),
     Row("get", ["get", "-i", "--max-time", "5", f"http://{ONION}/x"],
         "CLI().cmd_get", mock.call(f"http://{ONION}/x", headers=True, max_time=5)),
     Row("get", ["get", ONION], "CLI().cmd_get",
@@ -239,6 +265,8 @@ ROWS = [
         mock.call("status", ANY, json_output=False)),
     Row("onionheaven", ["onionheaven", "disable", "--json"], "onionheaven.run_onionheaven_command",
         mock.call("disable", ANY, json_output=True)),
+    Row("onionheaven", ["onionheaven", "overview", "--json"], "onionheaven.run_onionheaven_command",
+        mock.call("overview", ANY, json_output=True)),
     Row("onionheaven-unregister", ["onionheaven-unregister", "--reason", "reset",
                                    "--keep-address", ONION], "cli.release_onionheaven",
         mock.call("reset", keep_address=ONION, data_dir=D("")), rc=0, returns=[]),
@@ -411,13 +439,13 @@ MODULES = {
     "multisite": multisite, "scrub": scrub, "redact": redact, "backup": backup,
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
-    "analytics_sharing": analytics_sharing,
+    "analytics_sharing": analytics_sharing, "app_commands": app_commands,
 }
 
 
 # Subcommands that only group others: without a subcommand each prints
 # its help and exits 1 (TestDispatch); their children are the census's.
-PARENTS = {("config",), ("hub-recovery-key",)}
+PARENTS = {("config",), ("hub-recovery-key",), ("onionname",)}
 
 
 def leaves(tree):
@@ -444,6 +472,7 @@ class TestCensus(unittest.TestCase):
         tree = parser_tree()
         self.assertIn(("config", "set"), tree)
         self.assertIn(("hub-recovery-key", "restore"), tree)
+        self.assertIn(("onionname", "set"), tree)
         self.assertGreater(len(tree), 60)
 
     def test_confirm_flags_sit_on_the_commands_with_questions(self):

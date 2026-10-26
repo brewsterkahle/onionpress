@@ -66,11 +66,89 @@ from urllib.parse import parse_qs, urlparse
 from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
+    note_signed_request, ONIONHOME_ADDRESS,
     takeover_function, release_function,
     is_registration_hub, registrations_opted_in, write_key_file,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR, OWN_HOSTNAME_PATH,
 )
 import onionnames
+
+# What a free registration may take (issue #391). Minting a key is
+# instant, so without these a Tor client could hold thousands of registry
+# rows and key dirs, fill the hub's workers and OnionHome's analytics
+# disk, and direct the hub's audit fetches. A content address keeps at
+# most MAX_ROWS_PER_ADDRESS (content, healthcheck) rows that are not
+# unregistered; the hub takes at most MAX_REGISTRANTS content addresses
+# (a new one past that is told the hub is full, before anything is
+# verified or written); OnionHome stores analytics for at most
+# ANALYTICS_MAX_PAIRS_PER_ADDRESS pairs per content address and
+# ANALYTICS_MAX_INSTANCES pairs in all. A pair that already exists is
+# never refused by these: heartbeats and uploads of the registered keep
+# landing when the hub is full.
+MAX_ROWS_PER_ADDRESS = int(os.environ.get("ONIONHEAVEN_MAX_ROWS_PER_ADDRESS", "4"))
+MAX_REGISTRANTS = int(os.environ.get("ONIONHEAVEN_MAX_REGISTRANTS", "5000"))
+ANALYTICS_MAX_PAIRS_PER_ADDRESS = int(os.environ.get("ONIONHOME_ANALYTICS_MAX_PAIRS_PER_ADDRESS", "4"))
+ANALYTICS_MAX_INSTANCES = int(os.environ.get("ONIONHOME_ANALYTICS_MAX_INSTANCES", "10000"))
+
+
+def registration_room(conn, content_address, healthcheck_address):
+    """(status, error) refusing a registration the caps leave no room for,
+    or (None, None). A pair already in the registry (not unregistered)
+    always has room: its heartbeats are what keeps it reachable."""
+    if healthcheck_address:
+        row = conn.execute(
+            "SELECT 1 FROM registry WHERE content_address = ? AND healthcheck_address = ? "
+            "AND unregistered_at IS NULL", (content_address, healthcheck_address)).fetchone()
+        if row:
+            return None, None
+    rows = conn.execute(
+        "SELECT COUNT(*) FROM registry WHERE content_address = ? AND unregistered_at IS NULL",
+        (content_address,)).fetchone()[0]
+    if rows:
+        if rows >= MAX_ROWS_PER_ADDRESS:
+            return 429, (f"This content address already has {rows} healthcheck addresses "
+                         f"registered (the limit is {MAX_ROWS_PER_ADDRESS}); unregister one first")
+        return None, None
+    registrants = conn.execute(
+        "SELECT COUNT(DISTINCT content_address) FROM registry WHERE unregistered_at IS NULL"
+    ).fetchone()[0]
+    if registrants >= MAX_REGISTRANTS:
+        return 503, (f"This hub is full ({registrants} registered sites); "
+                     f"it takes no new site. Use another OnionHeaven hub.")
+    return None, None
+
+
+def analytics_room(content_address, healthcheck_address, analytics_dir=None):
+    """(status, error) refusing a new analytics pair the caps leave no room
+    for, or (None, None). An existing pair's directory always has room."""
+    base = ANALYTICS_DIR if analytics_dir is None else analytics_dir
+    site_dir = os.path.join(base, content_address, healthcheck_address)
+    if os.path.isdir(site_dir):
+        return None, None
+    addr_dir = os.path.join(base, content_address)
+    try:
+        pairs_here = sum(1 for e in os.scandir(addr_dir) if e.is_dir(follow_symlinks=False))
+    except OSError:
+        pairs_here = 0
+    if pairs_here >= ANALYTICS_MAX_PAIRS_PER_ADDRESS:
+        return 429, (f"analytics are kept for at most {ANALYTICS_MAX_PAIRS_PER_ADDRESS} "
+                     f"healthcheck addresses per site")
+    total = 0
+    try:
+        for addr in os.scandir(base):
+            if not addr.is_dir(follow_symlinks=False):
+                continue
+            try:
+                total += sum(1 for e in os.scandir(addr.path) if e.is_dir(follow_symlinks=False))
+            except OSError:
+                continue
+            if total >= ANALYTICS_MAX_INSTANCES:
+                break
+    except OSError:
+        total = 0
+    if total >= ANALYTICS_MAX_INSTANCES:
+        return 507, f"analytics storage is full ({total} sites); no new site is taken"
+    return None, None
 
 
 def _load_key_convert():
@@ -101,7 +179,7 @@ LISTEN_PORT = 8083
 # /var/lib/onionpress/onion_address path depended on the launcher's
 # docker-exec running after readiness checks, which silently never happened
 # on boots that timed out — leaving op2home permanently returning 403/404.
-_ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.onion"
+_ONIONHOME_ADDRESS = ONIONHOME_ADDRESS     # onionheaven_common's
 _is_onionhome_cache = None
 
 
@@ -481,10 +559,30 @@ def _verify_signature(handler, data, endpoint):
     timestamp = data.get("timestamp", "")
     signature = data.get("signature", "")
 
-    return verify_payload(
+    ok, err = verify_payload(
         content_address, endpoint, healthcheck_address,
         timestamp, signature
     )
+    if not ok:
+        return ok, err
+    # Verified, and not seen before (issue #400): a captured /offline
+    # replayed within the timestamp tolerance forced a takeover of a live
+    # site. The mark moves only on a verified signature, so this comes
+    # after the check, and the registry is opened only here.
+    try:
+        conn = db_connect()
+        try:
+            db_ensure_schema(conn)
+            fresh, why = note_signed_request(conn, content_address, timestamp, signature)
+        finally:
+            conn.close()
+    except Exception as e:
+        log(f"REJECT-REPLAY-CHECK /{endpoint}: {content_address}: {e}")
+        return False, "Could not check the request against replay"
+    if not fresh:
+        log(f"REJECT-REPLAY /{endpoint}: {content_address}: {why}")
+        return False, why
+    return True, ""
 
 
 # Endpoint label of the signature that backs an is_onionheaven claim on
@@ -1227,6 +1325,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": err})
             return
 
+        # Room under the caps (issue #391), once the signature is good and
+        # before anything is stored: a new pair for an address at its row
+        # cap, or a new address on a full hub, is refused here; an
+        # existing pair's heartbeat never is. (After the signature: the
+        # registry is opened for no unverified request.)
+        try:
+            room_conn = db_connect()
+            try:
+                db_ensure_schema(room_conn)
+                status, err = registration_room(room_conn, content_address, healthcheck_address)
+            finally:
+                room_conn.close()
+        except Exception as e:
+            log(f"REJECT-CAPS /online: {content_address}: {e}")
+            self._send_json(503, {"error": "Could not check the registry's room"})
+            return
+        if status:
+            log(f"REJECT-CAPS /online: {content_address}: {err}")
+            self._send_json(status, {"error": err})
+            return
+
         # arti_key_pem is required on every /online request — proves the sender
         # has the private key and allows takeover if the site goes offline.
         arti_key_stored = False
@@ -1554,6 +1673,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+        # Room under the caps (issue #391) before a new pair's directory.
+        status, err = analytics_room(content_address, healthcheck_address)
+        if status:
+            self.log_message("Analytics: refusing %s: %s", content_address[:12], err)
+            self._send_json(status, {"error": err})
+            return
+
         # Persist instance metadata with dated filename
         site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
         os.makedirs(site_dir, exist_ok=True)
@@ -1681,6 +1807,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     return
         except OSError:
             pass
+
+        # Room under the caps (issue #391) before a new pair's directory.
+        status, err = analytics_room(content_address, healthcheck_address)
+        if status:
+            self.log_message("Analytics: refusing %s: %s", content_address[:12], err)
+            self._send_json(status, {"error": err})
+            return
 
         # Write the file
         site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)

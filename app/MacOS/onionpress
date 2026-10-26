@@ -153,7 +153,11 @@ write_shared_onion_address() {
     printf '%s\n' "$addr" | wp_put /var/lib/onionpress/onion_address 644
 }
 
+# The data dir is this user's alone (issue #397): config holds the
+# Cloudflare token, shared/ the onion key. 0700 on every start, not only
+# at creation, so an install made under a looser umask is fixed too.
 mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/OnionPress → ~/OnionPress.
 # Walks the source tree recursively so an empty pre-existing subdir in
@@ -274,7 +278,9 @@ elif [ -L "$HOME/.docker/cli-plugins/docker-compose" ] && [ ! -e "$DATA_DIR/dock
     ln -sf "$HOME/.docker/cli-plugins/docker-compose" "$DATA_DIR/docker-config/cli-plugins/docker-compose"
 fi
 
-# Create default config if it doesn't exist
+# Create default config if it doesn't exist. 0600: the template is a
+# 0644 bundle resource and the file may hold CLOUDFLARE_TUNNEL_TOKEN
+# (issue #397).
 if [ ! -f "$DATA_DIR/config" ]; then
     if [ -f "$RESOURCES_DIR/config-template.txt" ]; then
         cp "$RESOURCES_DIR/config-template.txt" "$DATA_DIR/config"
@@ -286,6 +292,7 @@ UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
+    chmod 600 "$DATA_DIR/config"
 fi
 
 # Prefer bundled binaries
@@ -932,9 +939,10 @@ generate_vanity_address() {
 
 # Function to import a pre-generated onion service key
 import_key() {
-    # import-key [<key>|-] [--check] [--json] [--confirmed address-change],
-    # in any order; the key (or "-") is the one argument that is not a
-    # flag. The check/confirm protocol (onionpress.confirm, issue #366):
+    # import-key [<key>|-|--file <hs_ed25519_secret_key>] [--check] [--json]
+    # [--confirmed address-change], in any order; the key (or "-", or
+    # --file's) is the one argument that is not a flag. The check/confirm
+    # protocol (onionpress.confirm, issue #366):
     # --check --json answers {"ok": true, "address": ...} or {"confirm":
     # "address-change", "current": ..., "new": ...} (exit 4) without
     # changing anything; the import then needs --confirmed address-change
@@ -948,6 +956,12 @@ import_key() {
             --json) ik_json=yes ;;
             --confirmed)
                 [ "${2:-}" = "address-change" ] && ik_confirmed=yes
+                shift ;;
+            --file)
+                # C Tor's hs_ed25519_secret_key (or the bare 64-byte key)
+                # as base32; a file that is not a usable key is refused
+                # here, before anything else happens.
+                key_b32=$(bundled_python "$SCRIPTS_DIR/key_manager.py" encode-key-file "${2:-}") || return 1
                 shift ;;
             --help|-h) key_b32="--help" ;;
             --*) echo "Unknown import-key option: $1" >&2; return 2 ;;
@@ -974,6 +988,8 @@ import_key() {
         cat <<HELPEOF
 Usage: onionpress import-key <base32-secret-key> [--check] [--json]
                              [--confirmed address-change]
+       onionpress import-key --file <hs_ed25519_secret_key> [...]
+       onionpress import-key - [...]        (the key on stdin)
 
 Import a pre-generated ed25519 key for your onion service.
 
@@ -2975,7 +2991,18 @@ main() {
             ;;
 
         address)
-            get_onion_address
+            # The address, its shareable URL (--url) or that URL on the
+            # clipboard (--copy): onionpress.app_commands (issue #382).
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" address "${@:2}"
+            ;;
+
+        version|check-reachability|open|onionname)
+            # The app's remaining functions as subcommands (issue #382):
+            # the About box's version, the Settings page's reachability
+            # test through the onionheaven Tor client, the menu's Open
+            # Local Site / Open in Tor Browser / Settings (logged in), and
+            # the onionname (show | set NAME).
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$1" "${@:2}"
             ;;
 
         start-tor)
@@ -3007,8 +3034,14 @@ main() {
             ;;
 
         logs)
-            cd "$DOCKER_DIR"
-            docker compose logs -f
+            # Bare: the container logs. --app, --launcher or --web (-n N,
+            # -f): the end of that OnionPress log (issue #382).
+            if [ $# -gt 1 ]; then
+                bundled_python -m onionpress.cli --data-dir "$DATA_DIR" logs "${@:2}"
+            else
+                cd "$DOCKER_DIR"
+                docker compose logs -f
+            fi
             ;;
 
         launch)
@@ -3486,8 +3519,16 @@ User commands:
                 proxy), a launchd agent: daemon start | stop | status [--json]
   restart       Restart all containers
   status        Show container status
-  address       Show your .onion address
-  logs          Tail container logs
+  version       Show the OnionPress version (--json)
+  address       Show your .onion address (--url: the site's shareable URL
+                with its /<onionname>/ path; --copy: put it on the clipboard)
+  open          Open the site in a browser, logged in: open site | admin |
+                settings | onion (the .onion address, in Tor Browser)
+  logs          Tail container logs; logs --app | --launcher | --web prints
+                the end of that OnionPress log (-n N lines, -f to follow)
+  check-reachability
+                Test the site through the independent onionheaven Tor
+                client, as the Settings page does (--json)
   get           Fetch a URL over Tor and print the body (is this .onion up?)
                 (-i to include response headers, --max-time SECONDS)
   update        Check GitHub for a new release and install it
@@ -3497,12 +3538,15 @@ User commands:
   backup        Create an encrypted backup zip
   restore       Restore from an encrypted backup zip
   setup         Run the first-time WordPress setup
-  import-key    Import an existing onion service key
+  import-key    Import an existing onion service key (base32, - for stdin,
+                or --file <hs_ed25519_secret_key>)
+  onionname     The site's onionname: onionname show | set NAME [--json]
   config        Read and change settings: config get KEY | set KEY VALUE |
                 unset KEY | list [--json]  (a secret: set KEY - with the
                 value on stdin; run 'config list --help' for the keys)
   onionheaven   Keep the site reachable through OnionHeaven:
-                onionheaven enable | disable | status [--json]
+                onionheaven enable | disable | status [--json];
+                onionheaven alerts [--dismiss] (the hub's messages)
   hub-recovery-key
                 An OnionHeaven hub's backup recovery key
                 (create, show, check, restore)
@@ -3527,7 +3571,10 @@ Advanced / internal (used by the menubar app or scripts):
 
 Examples:
   $0 status
-  $0 address
+  $0 address --url
+  $0 open site
+  $0 logs --web -n 50
+  $0 check-reachability
   $0 get http://<some-address>.onion/
   $0 update --check
   $0 update -y

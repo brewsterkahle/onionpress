@@ -252,7 +252,6 @@ class OnionPressApp(rumps.App):
         self._last_painted = None
         self._asked_question = None
         self._asking_question = False
-        self._relaunch_handled = None
         self._collision_handled = None
         self._settings_error_shown = ""
         self._port_conflict_shown = False
@@ -337,7 +336,6 @@ class OnionPressApp(rumps.App):
         self._wp_installed = None  # None = unknown, True/False = checked (the daemon's)
         self._last_bootstrap_pct = 0       # Last observed Tor bootstrap percentage
         self.healthcheck_address = None    # Healthcheck .onion address
-        self.onionheaven_messages = []          # Messages received from OnionHeaven (the daemon's)
         # True if this instance is the OnionHeaven hub. Identity, so it is
         # known with the address (cached one here, live one from the daemon).
         self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)
@@ -350,8 +348,6 @@ class OnionPressApp(rumps.App):
         # Store reference to browser menu item so we can update its title
         self.browser_menu_item = rumps.MenuItem("Open in Tor Browser", callback=self.open_tor_browser)
         self.local_site_item = rumps.MenuItem("Open Local Site", callback=self.open_local_site)
-        self.onionheaven_alert_item = rumps.MenuItem("OnionHeaven Alerts", callback=self.view_onionheaven_alerts)
-        self._onionheaven_alert_in_menu = False
         self.clearnet_status_item = rumps.MenuItem("", callback=None)
 
         self.menu = [
@@ -473,7 +469,7 @@ class OnionPressApp(rumps.App):
                     self.log("Daemon state is stale — reconnecting")
             self.ensure_daemon_running(now)
 
-        painted = (self.display_state, self.onion_address, len(self.onionheaven_messages),
+        painted = (self.display_state, self.onion_address,
                    self.cloudflare_tunnel_enabled, self._last_bootstrap_pct, self.wp_port,
                    self._start_failed_rc, self.read_config_value("ONIONNAME", "").strip())
         if painted != self._last_painted or now - getattr(self, "_last_paint_ts", 0) > 30:
@@ -518,7 +514,6 @@ class OnionPressApp(rumps.App):
         self.healthcheck_address = state.get("healthcheck_address") or None
         self._last_bootstrap_pct = int(state.get("bootstrap_pct") or 0)
         self.cloudflare_tunnel_enabled = bool(state.get("cloudflare_tunnel_enabled"))
-        self.onionheaven_messages = list(state.get("onionheaven_messages") or [])
         self._wp_installed = state.get("wp_installed")
         ports = state.get("ports") or {}
         if ports.get("offset") is not None and int(ports["offset"]) != self.port_offset:
@@ -559,12 +554,6 @@ class OnionPressApp(rumps.App):
                              args=(question,), daemon=True).start()
         elif not question:
             self._asked_question = None
-
-        relaunch = state.get("relaunch")
-        if relaunch and relaunch != self._relaunch_handled:
-            self._relaunch_handled = relaunch
-            self.log(f"Daemon asks for a relaunch (update to v{relaunch.get('version') or '?'})")
-            self._relaunch_app(os.path.dirname(self.contents_dir))
 
         collision = state.get("onionname_collision")
         if collision and collision != self._collision_handled:
@@ -634,8 +623,6 @@ class OnionPressApp(rumps.App):
             if r.returncode != 0 or result is None:
                 detail = (r.stderr or r.stdout).strip()[-400:]
                 self.log(f"Settings page: onionpress handle-action failed (rc {r.returncode}): {detail}")
-            if result and result.get("relaunch"):
-                self._relaunch_app(os.path.dirname(self.contents_dir))
         except Exception as e:
             self.log(f"Settings page: {e}")
         finally:
@@ -987,11 +974,10 @@ class OnionPressApp(rumps.App):
             self.menu["Starting..."].title = "Status: Port conflict"
             return
 
-        # Check if UPDATE_ON_LAUNCH is enabled
-        update_on_launch = self.read_config_value("UPDATE_ON_LAUNCH", "").strip().lower() == "yes"
-        if update_on_launch:
-            self.log("UPDATE_ON_LAUNCH enabled - checking for Docker image updates...")
-            self.update_docker_images(show_notifications=False)
+        # UPDATE_ON_LAUNCH is the launcher's: its `start` runs update_images()
+        # once, before the containers. The menubar used to run its own
+        # `update-images` here first, so a `yes` cost two registry passes
+        # per launch (issue #36); one is the launcher's.
 
         # First run: show welcome screen, wait for user to click "Set Up",
         # then start_service runs in the callback
@@ -3169,27 +3155,6 @@ License: AGPL v3 or later"""
         def do_update():
             state = self.display_state
 
-            # OnionHeaven alert indicator: show "!" next to icon when messages exist.
-            # Track insertion with a flag because the item's title changes with the
-            # alert count, which invalidates any `title in self.menu` lookup and
-            # would otherwise re-insert an already-attached NSMenuItem (raises
-            # NSInternalInconsistencyException).
-            if self.onionheaven_messages:
-                self.title = "!"
-                count = len(self.onionheaven_messages)
-                self.onionheaven_alert_item.title = f"OnionHeaven Alerts ({count})"
-                self.onionheaven_alert_item.set_callback(self.view_onionheaven_alerts)
-                if not self._onionheaven_alert_in_menu:
-                    self.menu.insert_after("Copy Onion Address", self.onionheaven_alert_item)
-                    self._onionheaven_alert_in_menu = True
-            else:
-                self.title = ""
-                if self._onionheaven_alert_in_menu:
-                    for key in list(self.menu.keys()):
-                        if isinstance(key, str) and key.startswith("OnionHeaven Alerts"):
-                            del self.menu[key]
-                    self._onionheaven_alert_in_menu = False
-
             # Show/hide clearnet status based on tunnel config and state
             show_clearnet = (state == "available" and self.cloudflare_tunnel_enabled)
             if show_clearnet:
@@ -3282,39 +3247,6 @@ License: AGPL v3 or later"""
 
         # Execute on main thread
         _main_thread(do_update)
-
-    def view_onionheaven_alerts(self, _):
-        """Show OnionHeaven alert messages and offer to dismiss them."""
-        if not self.onionheaven_messages:
-            rumps.alert("No OnionHeaven alerts.")
-            return
-
-        # Build summary of all messages
-        lines = []
-        for msg in self.onionheaven_messages:
-            msg_type = str(msg.get("type", "unknown")).replace("_", " ").title()
-            msg_text = msg.get("message", "")
-            lines.append(f"[{msg_type}] {msg_text}")
-        summary = "\n".join(lines)
-
-        response = rumps.alert(
-            title=f"OnionHeaven Alerts ({len(self.onionheaven_messages)})",
-            message=summary,
-            ok="Dismiss All",
-            cancel="Close"
-        )
-
-        if response == 1:  # "Dismiss All" clicked
-            self.log("Dismissing OnionHeaven alerts")
-            self.onionheaven_messages = []
-            # The daemon deletes the message files from the tor container
-            # on its next tick (.dismiss-onionheaven-alerts).
-            try:
-                with open(os.path.join(self.app_support, op_daemon.DISMISS_ALERTS_MARKER), "w") as f:
-                    f.write(str(time.time()))
-            except OSError as e:
-                self.log(f"Could not ask the daemon to dismiss the alerts: {e}")
-            self.update_menu()
 
     def _register_terminate_notification(self):
         """App termination (osascript quit, Apple Event, the launcher's

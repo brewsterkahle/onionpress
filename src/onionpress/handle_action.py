@@ -35,6 +35,15 @@ last run's result file is still there when the next request is made
 (issue #356). The id is opaque; it is checked (REQUEST_ID_RE) before it
 is echoed, as anything in WordPress can write the file. The action's own
 earlier result is removed with the request, before the action runs.
+
+Three limits on what the page can make the host do (issue #396): a read
+of a request file stops at READ_LIMITS bytes (a multi-GB file is not
+read into the daemon); each action runs at most once per MIN_INTERVAL
+seconds (stop and restart a minute, so code in WordPress cannot bounce
+the site in a loop), the last times kept in $DATA_DIR/THROTTLE_FILE;
+and the request's text reaches the log only once it is one of ACTIONS,
+an unknown one as its byte count, since the log is republished to
+WordPress as recent-logs.txt and uploaded by analytics sharing.
 """
 
 import datetime
@@ -59,6 +68,25 @@ REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 ACTIONS = ("start", "restart", "stop", "check-reachability", "import-key-file",
            "create-backup", "restore-backup", "refresh-status", "update")
+
+# The most bytes read from a request file (issue #396): `head -c` in the
+# container, and a file over its limit is dropped, never truncated into
+# a shorter value. Everything the page writes is small: an action name,
+# a 16-character id, a password, a key (a PEM or base32, under a KiB),
+# config-updates.json (a few keys).
+READ_LIMIT = 64 * 1024
+READ_LIMITS = {REQUEST_FILE: 256, REQUEST_ID_FILE: 256,
+               "backup-password": 4096, "restore-password": 4096}
+
+# Seconds between two runs of one action (issue #396): the last run's
+# time per action is kept in THROTTLE_FILE under the data dir, since on
+# Linux every run is a new process. A request inside the interval is
+# dropped with a result the page can show. refresh-status is free: it
+# only rewrites status.json, and the Linux watcher runs every 10 s.
+MIN_INTERVAL = {"start": 60, "restart": 60, "stop": 60,
+                "create-backup": 60, "restore-backup": 60, "import-key-file": 60,
+                "update": 60, "check-reachability": 30, "refresh-status": 0}
+THROTTLE_FILE = ".handle-action-times.json"
 
 # Each action's result file for the page (what its poll reads). Removed
 # when the request is taken, so the page can never find the last run's.
@@ -95,7 +123,6 @@ MISSING_UPLOAD_MSG = "Missing password or backup file"
 BACKUP_FAILED_MSG = "Backup failed — check logs"
 RESTORE_FAILED_MSG = "Restore failed — wrong password or invalid backup"
 HANDOFF_FAILED_MSG = "Could not hand the backup to the Settings page"
-UPDATE_CHECK_FAILED_MSG = "Could not check for updates"
 
 
 def now_iso():
@@ -145,9 +172,18 @@ class Host:
     # -- the shared volume, as www-data --
 
     def read_shared(self, name, timeout=5):
-        r = self.docker.run(wp_files.exec_args("cat", f"{SHARED}/{name}"),
+        """The file's text, at most its READ_LIMITS entry (else READ_LIMIT)
+        bytes: one byte more is read, and a file that long is dropped as
+        too large, logged by name, never handed on cut short."""
+        limit = READ_LIMITS.get(name, READ_LIMIT)
+        r = self.docker.run(wp_files.exec_args("head", "-c", str(limit + 1), f"{SHARED}/{name}"),
                             timeout=timeout, quiet=True)
-        return r.output if r.ok else ""
+        if not r.ok:
+            return ""
+        if len(r.stdout.encode("utf-8", "replace")) > limit:
+            self.log(f"Settings page: {name} ignored: over {limit} bytes")
+            return ""
+        return r.output
 
     def shared_size(self, name):
         r = self.docker.run(wp_files.exec_args("stat", "-c", "%s", f"{SHARED}/{name}"),
@@ -312,8 +348,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
     """One run of `onionpress handle-action`. Returns what the caller (the
     menubar) needs to know: {"handled": <action or None>}, with
     {"confirm": <question>, ...facts} when the Mac must ask, {"pending":
-    <question>} while one is unanswered, {"relaunch": true} after the Mac
-    installed an update."""
+    <question>} while one is unanswered."""
     pending = _pending_load(host)
     if cancel:
         if pending:
@@ -341,6 +376,12 @@ def handle(host, confirmed=frozenset(), cancel=False):
         if host.os_name == "linux":
             write_recent_logs(host)
         return {"handled": None, **extra}
+    if action not in ACTIONS:
+        # Not logged as written: the log is republished to WordPress.
+        host.remove_shared(REQUEST_FILE, REQUEST_ID_FILE)
+        size = len(action.encode("utf-8", "replace"))
+        host.log(f"Settings page: unknown action dropped ({size} bytes)")
+        return {"handled": None, "unknown": size, **extra}
     host.request_id = checked_request_id(host.read_shared(REQUEST_ID_FILE), host.log)
     # The request, its id, and the action's earlier result: the page's
     # poll must never find the last run's answer (issue #356).
@@ -348,6 +389,17 @@ def handle(host, confirmed=frozenset(), cancel=False):
     if RESULT_FILES.get(action) not in (None, "service-result.json"):
         stale.append(RESULT_FILES[action])
     host.remove_shared(*stale)
+    wait = throttle(host, action)
+    if wait:
+        host.log(f"Settings page: {action} dropped: ran {MIN_INTERVAL[action] - wait} s ago, "
+                 f"at most once per {MIN_INTERVAL[action]} s")
+        if RESULT_FILES.get(action):
+            host.write_result(RESULT_FILES[action], {
+                "success": False, "action": action,
+                "message": f"{action} ran less than {MIN_INTERVAL[action]} seconds ago; "
+                           f"try again in {wait} seconds",
+                "completed_at": now_iso()})
+        return {"handled": None, "throttled": action, "retry_in": wait, **extra}
     if action != "refresh-status":
         host.log(f"Settings page: handling action '{action}'")
 
@@ -362,10 +414,7 @@ def handle(host, confirmed=frozenset(), cancel=False):
         "refresh-status": lambda: _refresh_status(host),
         "update": lambda: _update(host),
     }
-    fn = handlers.get(action)
-    if fn is None:
-        host.log(f"Settings page: unknown action '{action}'")
-        return {"handled": None, "unknown": action, **extra}
+    fn = handlers[action]
     try:
         extra.update(fn() or {})
     except Exception as e:
@@ -407,6 +456,47 @@ def _resume(host, pending, confirmed):
         return {"handled": action, "error": str(e)}
     _pending_clear(host)
     return {"handled": None}
+
+
+# -- the per-action interval (issue #396) --
+
+def throttle(host, action, now=None):
+    """Seconds until *action* may run again, 0 when it may run now (and
+    then its time is recorded). The file is this host's own (the data
+    dir, no container mounts it); an unreadable one counts as empty."""
+    interval = MIN_INTERVAL.get(action, 0)
+    if interval <= 0:
+        return 0
+    now = time.time() if now is None else now
+    path = os.path.join(host.paths.data_dir, THROTTLE_FILE)
+    times = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            times = {k: float(v) for k, v in loaded.items()
+                     if k in ACTIONS and isinstance(v, (int, float))}
+    except (OSError, ValueError):
+        pass
+    last = times.get(action)
+    wait = 0
+    if last is not None and last > now:
+        # A clock set back: one more interval from now, not from then.
+        times[action] = now
+        wait = interval
+    elif last is not None and now - last < interval:
+        return max(1, int(interval - (now - last) + 0.999))
+    else:
+        times[action] = now
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(times, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as e:
+        host.log(f"Settings page: could not record the time of {action}: {e}")
+    return wait
 
 
 # -- start / restart / stop --
@@ -463,16 +553,13 @@ def _check_reachability(host):
             "reachable": False, "error": "No onion address found", "tested_at": now_iso()})
         host.log("Settings page: reachability test: no onion address")
         return
-    r = host.docker.run(
-        ["exec", "onionheaven", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-         "--max-time", "60", "--socks5-hostname", "127.0.0.1:9050", f"http://{addr}/"],
-        timeout=75, quiet=True)
-    code = r.output.strip() if r.ok else ""
-    code = code if code.isdigit() else "000"
-    reachable = 200 <= int(code) < 500
-    host.write_result("reachability-result.json", {
-        "reachable": reachable, "http_code": code, "address": addr, "tested_at": now_iso()})
-    host.log(f"Settings page: reachability test -> HTTP {code} (reachable={reachable})")
+    # The same probe as `onionpress check-reachability`: through the
+    # independent onionheaven Tor client.
+    from .app_commands import reachability_test
+    result = reachability_test(host.docker, addr)
+    host.write_result("reachability-result.json", result)
+    host.log(f"Settings page: reachability test -> HTTP {result['http_code']} "
+             f"(reachable={result['reachable']})")
 
 
 # -- key import --
@@ -699,18 +786,30 @@ def _settings_page_restore(host, local_zip, password, confirmed, work):
 
 # -- update --
 
+
+UPDATE_CHECK_FAILED_MSG = "Could not check for updates"
+# The Mac page's answer when a release is newer than the installed one.
+MAC_UPDATE_AVAILABLE_MSG = ("OnionPress {latest} is available. To install it, choose "
+                            "Check for Updates... in the OnionPress menu on this Mac, "
+                            "or run `onionpress update` there.")
+
+
 def _update(host):
+    """Report only, on both platforms: anything running in WordPress can
+    write requested-action, so this never installs anything. The page
+    learns whether a release is newer than the installed one and how to
+    install it. Linux: the launcher's settings-page-update-check (one
+    GitHub lookup per 5 minutes; it writes update-result.json). macOS:
+    `update --check --json`; installing is the menubar's Check for
+    Updates..., which asks the person at the Mac, or `onionpress update`.
+    Through 2.5.6 the Mac ran `update --yes` here: an unattended download
+    and install of the latest release on the page's say-so."""
+    host.log("Settings page: update check requested")
     if host.os_name != "macos":
-        # Report only: anything running in WordPress can ask for this. The
-        # page learns whether a release is available and that `onionpress
-        # update` on this machine installs it (the launcher writes
-        # update-result.json, one GitHub lookup per 5 minutes).
         # The launcher writes the result: the request's id goes with it.
-        host.log("Settings page: update check requested")
         host.run_launcher(["settings-page-update-check"], timeout=300,
                           env={"ONIONPRESS_REQUEST_ID": host.request_id})
         return
-    host.log("Settings page: install update requested")
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
     if r.returncode != 0 or ans.get("error") or "update_available" not in ans:
@@ -720,8 +819,8 @@ def _update(host):
             "current": ans.get("current"), "latest": ans.get("latest"),
             "update_available": False, "completed_at": now_iso()})
         return
+    current = ans.get("current") or host.version
     if not ans.get("update_available"):
-        current = ans.get("current") or host.version
         host.write_result("update-result.json", {
             "success": True, "update_available": False,
             "message": f"OnionPress {current} is up to date.",
@@ -729,23 +828,13 @@ def _update(host):
             "completed_at": now_iso()})
         return
     latest = ans.get("latest", "")
-    r = host.run_launcher(["update", "--yes", "--json"])
-    ans = confirm.last_json_line(r.stdout) or {}
-    if r.returncode != 0:
-        error = ans.get("error") or r.stderr.strip() or r.stdout.strip() or "Update failed"
-        host.log(f"Settings page: update install failed: {error}")
-        host.write_result("update-result.json", {
-            "success": False, "error": error, "completed_at": now_iso()})
-        return
+    host.log(f"Settings page: update check: installed {current}, latest {latest}; "
+             "the page never installs")
     host.write_result("update-result.json", {
-        "success": True, "version": latest,
-        "message": f"Installed v{latest}. OnionPress is restarting to apply the update.",
+        "success": True, "update_available": True, "installable": True,
+        "message": MAC_UPDATE_AVAILABLE_MSG.format(latest=latest),
+        "current": current, "latest": latest,
         "completed_at": now_iso()})
-    host.log(f"Settings page: installed v{latest}, relaunching")
-    # Give the polling page a moment to see the result before the
-    # WordPress container goes down for the relaunch (the menubar's).
-    time.sleep(2)
-    return {"relaunch": True, "version": latest}
 
 
 # -- recent logs (Linux's quiet tick) --

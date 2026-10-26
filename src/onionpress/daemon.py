@@ -5,7 +5,7 @@ linux/onionpress-heartbeat.py).
 Until this module the menubar process (src/menubar.py) was both the view
 and the service: the status loop with the dual probe and the
 RepublishTrigger, the OnionHeaven heartbeat and registration upkeep, the
-Settings page's handle-action tick, the OnionHeaven message poll, the log
+Settings page's handle-action tick, the log
 captures, caffeinate, the My Creations thumbnails and the browser
 extension's HTTP proxy all ran as threads inside the rumps app. They run
 here now, in one per-user launchd agent
@@ -13,7 +13,7 @@ here now, in one per-user launchd agent
 menubar reads what this process writes:
 
   ~/.onionpress/daemon-state.json   what the menu shows (address, state,
-                                    ports, alerts, the pending question),
+                                    ports, the pending question),
                                     rewritten atomically on every change
   ~/.onionpress/daemon.pid          this process
   status.json in the volume         as before, for the WordPress pages
@@ -21,7 +21,6 @@ menubar reads what this process writes:
 
 and asks for the few things the view decides, through files it writes:
 
-  .dismiss-onionheaven-alerts       Dismiss All in the alerts dialog
   .onionname-retry                  a new onionname was chosen after a
                                     collision; register it now
   .reopen                           is the menubar's own (it opens the
@@ -83,7 +82,6 @@ from .system_metrics import host_metrics, container_metrics
 STATE_FILENAME = "daemon-state.json"
 PID_FILENAME = "daemon.pid"
 AGENT_LABEL = "org.onionpress.daemon"
-DISMISS_ALERTS_MARKER = ".dismiss-onionheaven-alerts"
 ONIONNAME_RETRY_MARKER = ".onionname-retry"
 OFFLINE_ACK_MARKER = ".daemon-offline-ack"
 UPLOAD_TRIGGER_MARKER = ".upload-analytics"
@@ -551,7 +549,6 @@ class Daemon:
         self._settings_page_failed_at = 0.0
         self._settings_page_error = ""
         self._pending_question = None
-        self._relaunch = None
         self.startup_time = time.time()
 
         # Ports: resolved in run() (the running stack's, else the first
@@ -595,8 +592,7 @@ class Daemon:
         self._onionheaven_reclaim_in_flight = False
         self._onionheaven_reclaim_last_attempt = 0
         self._wordpress_confirmed = False
-        self.onionheaven_messages = []
-        self._onionheaven_alert_shown = False
+        self._onionheaven_overview = None   # onionheaven.overview(), from check_status
         self._onionheaven_checked = False
         self._onionheaven_registration_succeeded = False
         self._onionheaven_heartbeat_succeeded = False
@@ -740,9 +736,8 @@ class Daemon:
             "images_present": dict(self._images_present),
             "proxy_running": self.proxy_server is not None,
             "sleeping": self._sleeping,
-            "onionheaven_messages": list(self.onionheaven_messages),
+            "onionheaven": self._onionheaven_overview,
             "pending_question": self._pending_question,
-            "relaunch": self._relaunch,
             "onionname_collision": self._onionname_collision,
             "settings_page_error": self._settings_page_error,
             "wedge_warning": self._wedge_warning_fired,
@@ -1135,9 +1130,7 @@ class Daemon:
                 self.log("Upload-analytics trigger detected")
                 threading.Thread(target=self._manual_analytics_upload, daemon=True).start()
 
-            # The menubar's Dismiss All, and a new onionname after a collision
-            if self._take_marker(DISMISS_ALERTS_MARKER):
-                self.dismiss_onionheaven_alerts()
+            # A new onionname after a collision
             if self._take_marker(ONIONNAME_RETRY_MARKER):
                 self._onionname_retry_giveup = False
                 self._onionname_collision = None
@@ -1227,9 +1220,6 @@ class Daemon:
                 if self.healthcheck_address is None and self._tor_internally_ready:
                     self.read_healthcheck_address()
 
-                if self.is_ready:
-                    self.poll_onionheaven_messages()
-
                 if self.is_ready and self._pending_manual_upload:
                     self._pending_manual_upload = False
                     self.log("Analytics upload: running queued Share Now request")
@@ -1256,8 +1246,6 @@ class Daemon:
                 self._consecutive_fail_count = 0
                 self._wedge_warning_fired = False
                 self.healthcheck_address = None
-                self.onionheaven_messages = []
-                self._onionheaven_alert_shown = False
                 self._onionheaven_checked = False
                 self._onionheaven_registration_succeeded = False
                 self._onionheaven_heartbeat_succeeded = False
@@ -1681,55 +1669,6 @@ class Daemon:
         except Exception as e:
             self.log(f"Failed to read healthcheck address: {e}")
 
-    def poll_onionheaven_messages(self):
-        """Messages the hub left through the healthcheck service, into the
-        state for the menubar's alert item."""
-        try:
-            r = self._docker.run(["exec", "onionpress-tor", "ls", "/var/lib/tor/healthcheck-messages/"],
-                                 timeout=10, quiet=True)
-            files = r.output.split() if r.ok else []
-            json_files = [f for f in files if f.endswith(".json")]
-            if not json_files:
-                if self.onionheaven_messages:
-                    self.onionheaven_messages = []
-                    self._onionheaven_alert_shown = False
-                return
-            messages = []
-            for fname in json_files:
-                try:
-                    rr = self._docker.run(["exec", "onionpress-tor", "cat",
-                                           f"/var/lib/tor/healthcheck-messages/{fname}"],
-                                          timeout=5, quiet=True)
-                    if rr.ok and rr.output.strip():
-                        msg = json.loads(rr.output.strip())
-                        if isinstance(msg, dict):
-                            messages.append(msg)
-                except Exception:
-                    continue
-            if messages and messages != self.onionheaven_messages:
-                self.onionheaven_messages = messages
-                if not self._onionheaven_alert_shown:
-                    self._onionheaven_alert_shown = True
-                    self.log(f"Received {len(messages)} message(s) from OnionHeaven")
-                    latest = messages[-1]
-                    self.log(f"OnionHeaven alert: {latest.get('type', 'unknown')} - "
-                             f"{latest.get('message', 'New message from OnionHeaven')}")
-        except Exception:
-            pass
-
-    def dismiss_onionheaven_alerts(self):
-        """The menubar's Dismiss All (.dismiss-onionheaven-alerts)."""
-        self.log("Dismissing OnionHeaven alerts")
-        self.onionheaven_messages = []
-        self._onionheaven_alert_shown = False
-        try:
-            self._docker.run(["exec", "onionpress-tor", "sh", "-c",
-                              "rm -f /var/lib/tor/healthcheck-messages/*.json"],
-                             timeout=10, quiet=True)
-        except Exception:
-            pass
-        self.publish_state()
-
     # -- analytics -------------------------------------------------------
 
     def _manual_analytics_upload(self):
@@ -1832,30 +1771,19 @@ class Daemon:
             uptime_seconds = int(time.time() - self.startup_time) if self.is_running else 0
             bootstrap_pct = 100 if self.is_ready else self._last_bootstrap_pct
             onion_reachable, onion_http_code = self._last_reachability
+            # Both OnionHeaven roles, for the OnionHeaven screen (the Mac
+            # dialog reads it from the state file, the WordPress page from
+            # status.json): the registry is asked only on a hub.
+            try:
+                oh_overview = onionheaven.overview(self)
+            except Exception as e:
+                self.log(f"OnionHeaven: overview error: {e}")
+                oh_overview = onionheaven.overview(self, hub=False)
+            self._onionheaven_overview = oh_overview
+            # status.json's server_active stays the Mac's rule: the node
+            # serving the hub's address (tests/test_linux_hub_mode.py).
             oh_server_active = bool(self.is_onionheaven)
-            oh_stats = {"server_active": oh_server_active, "client_registered": False,
-                        "client_enabled": True, "client_hub": "", "registered_count": 0,
-                        "online_count": 0, "taken_over_count": 0, "takeover_containers": 0}
-            if oh_server_active:
-                rr = self._docker.run(
-                    ["exec", "onionheaven", "sqlite3", "/var/lib/onionheaven/registry.db",
-                     "SELECT COUNT(*), SUM(CASE WHEN status='online' THEN 1 ELSE 0 END), "
-                     "SUM(CASE WHEN status='taken-over' THEN 1 ELSE 0 END) FROM registry"],
-                    timeout=5, quiet=True)
-                if rr.ok and rr.output.strip():
-                    try:
-                        parts = rr.output.strip().split("|")
-                        oh_stats["registered_count"] = int(parts[0] or 0)
-                        oh_stats["online_count"] = int(parts[1] or 0)
-                        oh_stats["taken_over_count"] = int(parts[2] or 0)
-                    except (ValueError, IndexError):
-                        pass
-                rr = self._docker.run(["ps", "--format", "{{.Names}}", "--filter", "name=onionheaven-takeover"],
-                                      timeout=5, quiet=True)
-                if rr.ok:
-                    oh_stats["takeover_containers"] = len([l for l in rr.output.splitlines() if l.strip()])
-            oh_stats["client_enabled"] = onionheaven.get_registration_choice(self) == "yes"
-            oh_stats["client_hub"] = onionheaven.ONIONHEAVEN_ADDRESS
+            oh_stats = onionheaven.status_block(oh_overview, server_active=oh_server_active)
             onion_addr = self.onion_address if key_manager.is_valid_onion_address(self.onion_address) else ""
             load_avg = list(os.getloadavg())
             host_uptime = int(time.time() - self._host_boot_time())
@@ -1942,9 +1870,6 @@ class Daemon:
             if result.get("handled") or result.get("config"):
                 self.apply_config_changes(op_config.take_config_changes(self.app_support))
                 self.write_status_to_volume()
-            if result.get("relaunch"):
-                self._relaunch = {"version": result.get("version") or "", "at": time.time()}
-                self.publish_state()
         except Exception as e:
             self.log(f"Settings page: {e}")
         finally:

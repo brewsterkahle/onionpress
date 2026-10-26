@@ -44,6 +44,21 @@
   - `src/onionpress/` — shared package: backup, key_manager, setup_window, onion_proxy, onion_auth, onionheaven, updater, install_native_messaging, native_messaging_host, power, health, docker, colima, platform, config, containers, ui_helpers, settings_ui, browser, log_rotation, analytics_sharing, onionnames_*
   - `setup.py` — py2app config. Adding a new submodule to `onionpress` just means one new line in the `includes` list — no build-script change needed. Build scripts only copy the whole `onionpress` package into site-packages.
 - **Release via GitHub releases only** (`gh release create`). Do NOT upload to Internet Archive.
+- **Every release goes on `brewsterkahle/onionpress`, never a fork, and
+  `build/release.sh` enforces it.** In a checkout whose `origin` is a fork
+  (`ivar/onionpress`, upstream as the `brewster` remote), `gh` defaults to
+  the fork: v2.5.4 was first published on `ivar/onionpress`, tagged at the
+  fork's stale `main`; the Mac updater, Linux `onionpress update` and the
+  README all read brewsterkahle's releases, so no user saw it, and the
+  fork's CI ran the stale tag's workflows. release.sh passes
+  `-R "$RELEASE_REPO"` (`brewsterkahle/onionpress`; `ONIONPRESS_RELEASE_REPO`
+  only for testing) to every `gh release` call, and before creating a
+  release, before anything is built, refuses unless HEAD is the tip of that
+  repo's `main` (`gh api repos/…/commits/main`) and any existing tag of that
+  name points there; it creates the tag with `--target <that sha>`. Check
+  out upstream `main` (`git fetch brewster && git checkout brewster/main`)
+  to release. Hand-run `gh release` commands need `-R brewsterkahle/onionpress`
+  too. `tests/test_release_sha256sums.py`.
 - **Cut releases with `build/release.sh`** — it builds BOTH artifacts and uploads both to one release, so the Linux `.deb` can't be forgotten. (It was: v2.4.101–v2.4.106 shipped only the `.dmg`, which 404'd the README's `releases/latest/download/onionpress.deb` link — that link resolves to the *Latest* release's asset of that name.) Bump + commit first, then run it. Cross-platform rule it enforces: the `.dmg` can only be built on macOS, so on **macOS** it builds `.dmg`+`.deb` and creates/updates the release with both; on **Linux** it builds only the `.deb` and *refuses to create* a release (a `.dmg`-less "Latest" would break the Mac link) — it only attaches the `.deb` to an existing release that already carries the matching `.dmg`. Always run the Mac side first.
 - **Every release carries `SHA256SUMS`** (`<sha256>  onionpress.deb` / `onionpress.dmg`, sha256sum format), written by `build/release.sh` (on Linux it downloads the release's `.dmg` to hash it). A new release is created as a draft; the script downloads `SHA256SUMS` and the `.deb` back, checks them, and only then publishes. It fails instead of finishing a release without them (`tests/test_release_sha256sums.py`). Linux's `onionpress update` installs **only** a release's `onionpress.deb` whose sha256 is its `SHA256SUMS` line, whose package is `onionpress` of the tag's version, and that is newer than the installed one (`--force` reinstalls/downgrades; drafts never; pre-releases only with `--pre`; `--version X.Y.Z`; `--check` reports only), with `sudo apt-get install -y --no-remove`; a git checkout only with `--from-checkout` (developers). So a release without `SHA256SUMS` cannot be installed that way. The Settings page's update button on Linux only checks: handle-action `update` writes `update-result.json` (one GitHub lookup per 5 min) and never installs, since anything in WordPress can write `requested-action` (`tests/test_linux_release_update.py`). Signing `SHA256SUMS` with a pinned key is the planned next step.
 - **The update check's curl names macOS's CA bundle only where it exists**
@@ -61,6 +76,24 @@
   old `rm -rf "$TMPDIR"` deleted on a run from a checkout), removed by its
   `trap cleanup EXIT` and once installed. Never `rm -rf` a folder named by
   the environment. `tests/test_install_sh_clone_cleanup.py`.
+- **`linux/install.sh` installs a release and parses whole** (issue #388):
+  not run from a checkout, it clones the newest `v<x>.<y>.<z>` tag
+  (`release_ref_to_install`: `git ls-remote --tags`, `sort -V`; nothing
+  printed and the install stops when none can be read;
+  `ONIONPRESS_INSTALL_REF=<ref>` for a developer's branch), never HEAD of
+  main, so a push to main changes nothing new installs run as root and a
+  fresh install's version is a release's. The body is `main() { ... }`
+  with `main "$@"` last, so a `curl | bash` cut part-way executes
+  nothing. The system Docker is disabled only when `docker ps -q` is
+  empty (the .deb postinst's check), else left running beside the
+  rootless one; Docker's apt key is checked against the published
+  fingerprint (`DOCKER_APT_KEY_FPR`, `docker_apt_key_is_dockers`, gnupg
+  among the prerequisites) before the repository is added; the
+  postinst's fallback `usermod -aG docker` says the group is
+  root-equivalent. Installing the release's checked `.deb` instead of a
+  clone (the `update_find_release` path) is the next step and still
+  open. `tests/test_install_sh_release.py` (the functions under bash
+  with fake git and gpg; a truncated script runs nothing).
 - **The .deb's postinst restarts the site on an upgrade** (issue #357):
   with `$2` set it runs `systemctl --user --machine=<user>@.host
   daemon-reload` and `try-restart onionpress.service
@@ -90,6 +123,30 @@
   started (the bridge exits 1). It starts the units `--no-block`, so apt
   does not wait for the image pulls. The upgrade path keeps `--machine`
   (the bus exists by then). `tests/test_deb_first_install_docker.py`.
+- **Everything the Mac bundle is built from is pinned by hash** (issue
+  #387, branch `sec-387-build-hashes`, not yet run on a Mac): every
+  third-party download in `build-dmg-simple.sh` goes through
+  `fetch_checked <sha256> <dest> <url>` against the `*_SHA256_*`
+  constants at the top (Colima's from its release's `*.sha256sum`
+  files, Lima's from its `SHA256SUMS`, Compose's from `checksums.txt`;
+  the Docker CLI tarballs and the libsodium tarball hashed from a
+  download, since neither publishes sums), and the binary cache's keys
+  carry those hashes, so a cache made from other bytes is a miss.
+  mkp224o is cloned at its tag and held to `MKP224O_COMMIT` with no
+  fallback to master; libsodium is `SODIUM_VERSION` + `SODIUM_SHA256`,
+  fetched outside the mkp224o subshell so a bad tarball ends the build.
+  The Python side installs with `--require-hashes` from
+  `build/requirements-macos.lock` (from `src/requirements.txt`) and
+  `build/build-requirements-macos.lock` (pip, py2app, setuptools<81,
+  wheel; from `build/build-requirements-macos.in`), all written by
+  `build/refresh-python-locks.sh` (uv); `py2app-extensions.sh` takes
+  PyNaCl's sdist and cffi's per-arch wheels from the runtime lock
+  (`lock_block`) and refuses a single-arch extension of a package that
+  lock lacks. Pillow (DMG background fallback) has its own
+  `build/dmg-background-requirements-macos.lock`, installed only after
+  py2app: in the build lock it sat in the py2app venv and broke the
+  universal2 merge. Bumping a version means putting its new hash in the
+  script and re-running the refresh. `tests/test_dmg_build_pins.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **CI builds and attests the `.deb` on every published release**
   (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
@@ -112,8 +169,17 @@
   fresh runner and checks the second run replaced the first (the nested
   `docker/docker`, `lib/onionpress/onionpress` of issue #316 that
   `install-tree.sh` ended).
+- **Every workflow action is pinned to a commit SHA** (issue #389):
+  `uses: owner/action@<40-hex> # vX.Y.Z`, the version comment being what
+  the SHA was resolved from. A floating major tag is whatever its
+  maintainer (or whoever holds their account) points it at, and the
+  release job holds `contents: write`. `.github/dependabot.yml` bumps the
+  SHA and the comment together, weekly, grouped. Bump by hand with
+  `gh api repos/<owner>/<action>/git/ref/tags/<tag>` (dereference an
+  annotated tag through `git/tags/<sha>`).
+  `tests/test_build_release_hygiene.py` refuses an unpinned `uses:`.
 - **Version bumping**: run `build/bump-version.sh X.Y.Z` — it updates all version locations automatically. The 2 canonical sources are `src/menubar.py` (`self.version`) and `app/Info.plist` (`CFBundleShortVersionString`). Derived locations (`src/onionpress/__init__.py`, `setup.py` which reads menubar.py dynamically, MenubarApp plist) are updated by the bump script or at build time. The quit log in menubar.py uses `self.version` dynamically. Docker containers get the version via `ONIONPRESS_VERSION` env var from the launcher script (which reads Info.plist).
-- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 still uses. The build script (`build/build-dmg-simple.sh`) handles this automatically: it tries the build first, and falls back to `setuptools<81` only if py2app fails. Once py2app ships a fix, the fallback stops being needed. Track upstream: https://github.com/ronaldoussoren/py2app/issues/557
+- **py2app vs setuptools 81+ incompatibility** — setuptools 81 (released 2026-02-06) removed `dry_run` from `distutils.spawn()`, which py2app 0.28.9 passed. The build lock pins `setuptools<81` (from `build/build-requirements-macos.in`), and the build scripts' "py2app failed" retry reinstalls from that lock. py2app 0.28.10 (in the lock) no longer passes `dry_run`, so the pin is probably obsolete, but no build has tried setuptools 81+; it is kept on purpose until one does. Re-check it whenever the locks are refreshed: the steps to drop it are in the `.in` file's comment. Upstream: https://github.com/ronaldoussoren/py2app/issues/557
 
 ## Local Build Path
 - **`docs/BUILDING.md` is the map** — every component, its command, its host-OS
@@ -237,6 +303,14 @@
   release moved. The opt-in refresh paths (`update_images()`, Linux
   `onionpress update`, the menubar's Check for Updates) still pull
   unconditionally. `tests/test_image_pins.py` enforces all of it.
+- **A launch refreshes the images once** (issue #36): `UPDATE_ON_LAUNCH=yes`
+  is read by the Mac launcher's `update_images()` (in `start_containers`,
+  before the `--policy missing` pull), nowhere in the menubar; the
+  menubar's own `update-images` pass at launch (a second registry
+  contact before any container started) is gone. `update_docker_images`
+  is called by Check for Updates... only. What remains of the issue is
+  the first launch's fetch of the images themselves, which no setting
+  can avoid. `tests/test_launch_pulls_once.py`.
 - **The refresh resolves digests from the registry** (`build/base-image-digest.sh`
   on `:latest`); the local `docker images` cache only with `--local` (issue
   #327: the cache pinned stale images in 2.5.3).
@@ -406,11 +480,25 @@
 - `make coverage` is the same run under `coverage` (`.coveragerc`:
   branches; src/onionpress, linux and the tor image's scripts; tests,
   tests/stress and setup.py left out), then `build/coverage-floors.sh`:
-  total 60 %, `cli.py` 69, `handle_action.py` 85, `confirm.py` 90,
-  `config.py` 85, each a point or two under the measured value. Raise a
-  floor when the tests catch up; never lower one to pass. CI runs the
-  three steps on the Linux job and uploads `coverage.xml` + the HTML
-  report. `tests/test_coverage_gate.py` holds the wiring.
+  total 63 %, `cli.py` 97, `app_commands.py` 94, `handle_action.py` 95,
+  `confirm.py` 98, `config.py` 85, each a point or two under the measured
+  value. Raise a floor when the tests catch up; never lower one to pass.
+  CI runs the three steps on the Linux job and uploads `coverage.xml` +
+  the HTML report. `tests/test_coverage_gate.py` holds the wiring.
+- **Every `onionpress` command handler has a test of its own**:
+  `tests/test_cli_dispatch.py` is the census (main() reaches each handler
+  with the parsed arguments); `tests/test_cli_commands.py` runs the
+  handlers in `cli.py` against stubs (OnionPressCLI built with Docker,
+  the port probe and secrets patched, each module patched where the
+  handler imports it: update, uninstall and reset at a terminal, the
+  lifecycle commands, restore's four hub-data fates and its JSON answer,
+  the staging helpers, the hub recovery key, update-images,
+  generate-vanity, the Settings page's commands, the password and
+  recovery-key readers); `tests/test_cli_edges.py` covers the paths
+  app_commands, confirm and handle_action leave out, reusing the
+  harnesses of `test_cli_app_commands.py` and `test_handle_action.py`.
+  A new handler or branch gets its case there; coverage of `cli.py`
+  (99 % on 2026-10-25) is held by the floors above.
 - **A new `onionpress` subcommand needs a row in
   `tests/test_cli_dispatch.py`**: the census walks the parser
   `cli.main()` builds (nested subparsers too) and fails on an
@@ -433,6 +521,23 @@
   testing the mu-plugins and pinned plugins on the new branch first
   (docs/BUILDING.md, "Moving to a new WordPress branch").
   `tests/test_wordpress_branch_upgrade.py`. Needs an image publish.
+
+## A Core Package Is Checked Before It Is Installed (issue #395)
+- `onionpress-core-update.php`'s `download` fetches a package only from
+  `https://downloads.wordpress.org` (`op_package_url_allowed`; the offer
+  names the URL), takes the version from the package name (and the
+  audit's `$target`, which must agree), fetches WordPress.org's md5
+  list for it over Tor (`op_fetch_checksums`, shared with `verify`) and
+  holds every member of the zip to it (`op_verify_core_zip`, ZipArchive:
+  a listed file's md5 must match, a member the list lacks is refused
+  unless under `wp-content/`, a listed file outside `wp-content/` must
+  be there, nothing outside `wordpress/`) before it answers ok; a
+  refused package is removed. Before, size + `PK` was the whole check
+  and the md5 comparison ran after `wp core update`, report-only. The
+  image build checks ZipArchive is there (without it every update is
+  refused). Needs an image publish. `tests/test_core_update_verified.py`
+  (the PHP halves under a php with the zip extension; CI's runner has
+  one, `php:8.3-cli` does not).
 
 ## Settings Page Config Writes Are Allowlisted
 - The WordPress Settings page asks for config changes through
@@ -458,8 +563,14 @@
   settings-page-update-check, update), so the Linux launcher keeps its bash
   bodies behind those internal cases and the Mac launcher delegates them to
   `onionpress.cli` (`cmd_settings_page_backup`, `cmd_settings_page_restore`).
-  Linux refuses import-key-file and a restore of another address, and only
-  checks on update; on the Mac those stop at `{"confirm": "address-change"}`
+  Linux refuses import-key-file and a restore of another address; `update`
+  only checks on **both** platforms (through 2.5.6 the Mac ran `update
+  --yes` from the page's request: an unattended download and install of
+  the latest GitHub release, whose DMG nothing verifies beyond TLS, on the
+  say-so of anything running in WordPress; now `update --check --json`
+  and `MAC_UPDATE_AVAILABLE_MSG` pointing to Check for Updates..., which
+  asks the person at the Mac; the `relaunch` state key is gone with it);
+  on the Mac the first two stop at `{"confirm": "address-change"}`
   (kept in `~/.onionpress/pending-action/`, 0700, dropped after 10 minutes
   without an answer) until the menubar asks and runs `handle-action
   --confirmed address-change` or `--cancel` (the daemon puts the question
@@ -485,6 +596,32 @@
   the last run's file for this run's and stopped.
   `tests/test_settings_page_results.py` (the PHP rule under php where
   installed), `TestRequestId` in `test_handle_action.py`.
+- **The page can make the host do only so much** (issue #396): `Host.read_shared`
+  reads a request file through `head -c` up to `READ_LIMITS[name]` (else
+  `READ_LIMIT`, 64 KiB; the action and id 256 bytes, passwords 4 KiB) and
+  drops, by name in the log, a file over its limit, never a cut-short
+  value; each action runs at most once per `MIN_INTERVAL[action]` seconds
+  (stop, start, restart and the long ones 60, check-reachability 30,
+  refresh-status free), the last times in `$DATA_DIR/.handle-action-times.json`
+  (`throttle`; a request inside the interval gets a failed result naming
+  the wait); and the request's text reaches the log only once it is in
+  `ACTIONS`, an unknown one as `unknown action dropped (N bytes)`, since
+  the log goes back to WordPress as recent-logs.txt and out with
+  analytics sharing. `TestBoundedReads`, `TestThrottle` in
+  `tests/test_handle_action.py` (its `_Case` zeroes the intervals).
+- **The owner's GETs with a side effect carry a nonce** (issue #402):
+  `wp_ajax_onionpress_poll_action` (unlinks service-result.json once
+  read) and `wp_ajax_onionpress_check_update` (a request through Tor, a
+  transient) `check_ajax_referer` their own action right after the owner
+  check, the page's script sending `_wpnonce`; `/onionpress-status-json`
+  writes `requested-action=refresh-status` only with the status page's
+  nonce (`onionpress_status_refresh_allowed`, `wp_verify_nonce` on
+  `_wpnonce`) and never over a request already there (it clobbered a
+  pending owner action), and every reply carries `refresh_nonce` so a
+  page left open keeps a fresh one. Without the nonce the data still
+  comes back; only the write is skipped. A new `wp_ajax_` handler in the
+  settings plugin needs a `check_ajax_referer`
+  (`tests/test_settings_page_nonces.py`, a census).
 - **The page's Stop and Restart are the launcher's** (issue #354): on
   Linux they reach its `stop)`/`restart)` cases, which stop the heartbeat
   client before the containers (so it sends /offline to the hub) and start
@@ -678,7 +815,7 @@
   config-current.json and recent-logs.txt to the volume as www-data), the
   OnionHeaven heartbeat and upkeep (`onionheaven.*` with the daemon as the
   `app`, under `_HUB_LOCK`), the handle-action tick (`poll_settings_page`,
-  one run at a time), the hub's messages, the image monitor, the three log
+  one run at a time), the image monitor, the three log
   captures (`RotatingLog`), caffeinate (`onionpress.power`), the My
   Creations thumbnails, the browser extension's HTTP proxy, port-offset
   detection at start, and sleep/wake through IOKit
@@ -686,8 +823,7 @@
   second at a time, `mac_power.run_loop_once`, so Python's signal
   handlers still run). The menubar (`src/menubar.py`) is a view: menu,
   dialogs, notifications, the browser items, the welcome and setup
-  windows, the OnionHeaven alerts view, and starting the daemon when
-  there is none. `tests/test_mac_daemon.py` (the daemon against stub
+  windows, and starting the daemon when there is none. `tests/test_mac_daemon.py` (the daemon against stub
   docker/health/launcher; the menubar census: no loop that names docker,
   the hub or Tor, no timer but the splash tips).
 - **launchd**: `~/Library/LaunchAgents/org.onionpress.daemon.plist`
@@ -713,14 +849,14 @@
   pid, version, ports, runtime_ready, is_running/is_ready/has_internet/
   yellow_since/last_check_complete (the `display_state` inputs, shared
   as `daemon.display_state_of`), address, healthcheck address, bootstrap
-  %, images_present, wordpress_up, wp_installed, proxy_running, the hub's
-  messages, `pending_question`, `relaunch`, `onionname_collision`,
+  %, images_present, wordpress_up, wp_installed, proxy_running,
+  `pending_question`, `onionname_collision`,
   `settings_page_error`, the probe's last code), `daemon.pid`,
   `onion_address` (the cache, as before), `.setup_complete`. The menubar
   reads the state every 2 s (`_view_tick`); a state older than 90 s or
   from a dead pid is "Reconnecting to the OnionPress service..." (icon
   starting), never "Stopped". Markers the menubar writes for the daemon:
-  `.dismiss-onionheaven-alerts`, `.onionname-retry`; `.upload-analytics`
+  `.onionname-retry`; `.upload-analytics`
   and `.config-changed` are taken by the daemon's tick; `.reopen` stays
   the menubar's. The Settings page's question the handler stops at goes
   into `pending_question`; the menubar asks and runs `handle-action
@@ -757,6 +893,38 @@
   `onionpress.cli` command. A daemon started from a bundle at another
   path keeps that path in its plist (`install_agent` rewrites it when it
   differs).
+
+## The App's Functions as Subcommands (issue #382)
+- The rows #350 left after its four phases live in
+  `src/onionpress/app_commands.py`, one implementation for both platforms,
+  none constructing `OnionPressCLI` (its setup creates config and secrets
+  and probes ports): `version [--json]`; `address [--url] [--copy]` (the
+  served address from the tor container, else the daemon's `onion_address`
+  cache; the URL is the menu's Copy Onion Address, `/<ONIONNAME>/` and no
+  token; the clipboard through pbcopy / wl-copy / xclip / xsel);
+  `check-reachability [--json]` (`reachability_test`, the one probe through
+  the `onionheaven` Tor client, which handle-action's check-reachability
+  runs too; exit 0/1/2); `logs --app|--launcher|--web [-n N] [-f]` (the Mac
+  daemon's `logs/onionpress-*.log`, the flat `onionpress.log`, the
+  `wordpress-visitors` capture or, without it, `docker logs
+  onionpress-wordpress` with the `OnionPress-HealthCheck` lines dropped as
+  the daemon drops them; bare `logs` stays the compose follow);
+  `open site|admin|settings|onion` (the browser gets
+  `launcher_ops.login_target`'s file:// page, never the token; the port from
+  `$ONIONPRESS_WP_PORT`, else `config.resolve_port_offset`; `onion` prefers
+  Tor Browser, on a Mac `open -a` of `launcher_ops.TOR_BROWSER_APPS`);
+  `onionname show|set NAME [--json]` (checked by `setup_logic.validate_onionname`,
+  registered with OnionHome under the served address when the site is up,
+  then recorded through `config.set_config_value`; a taken name is refused
+  with its suggestions, exit 2, nothing recorded; one not registered now is
+  recorded `ONIONNAME_REGISTERED=no` and on a Mac `.onionname-retry` has the
+  daemon retry it). `import-key --file
+  <hs_ed25519_secret_key>` is bash in both launchers over `key_manager.py
+  encode-key-file` (96-byte C Tor file or the bare 64-byte key, checked
+  before anything happens); Linux's `import-key` takes `-` now too. Both
+  launchers delegate `address`, `logs` with flags and the new names to
+  `onionpress.cli`. `tests/test_cli_app_commands.py`; rows in
+  `tests/test_cli_dispatch.py`.
 
 ## Check/Confirm Protocol
 - Every destructive command speaks it (`src/onionpress/confirm.py`, issue
@@ -839,6 +1007,18 @@
   `onionpress-uploads.ini` (needs an image publish); the form checks the
   limits before sending and posts `creations_upload_count`, and
   `handle_upload` reports refused, failed, unmoved and dropped files.
+- **What the folder serves is sandboxed** (issue #399): both paths, the
+  page's `serve_file` and the image's `onionpress-creations.conf` for
+  the raw `/wp-content/creations/...` path, send
+  `X-Content-Type-Options: nosniff`, and `Content-Security-Policy:
+  sandbox` for a document a browser could run script from
+  (`OnionPress_Creations::SANDBOXED_EXTENSIONS`: HTML, XHTML, SHTML,
+  MHTML, SVG, XML, XSL, by extension or by type; the conf's `FilesMatch`
+  lists the same extensions, test-tied). A saved web page or an SVG
+  dropped into My Creations opened at localhost:8080 ran script with
+  the owner's cookies. The sandbox has no `allow-scripts`: a published
+  page keeps its markup and loses its script. Needs an image publish for
+  the raw path. `tests/test_creations_sandboxed_serving.py`.
 - The Mac thumbnail generator starts at launch; `onionpress.thumbnails`
   decides what to make and removes thumbnails of files that are gone
   (never when part of the folder could not be read).
@@ -859,6 +1039,21 @@
   with `gethostbyname()` in the container, a clearnet DNS query.
 - Never call `wp_remote_*`/`fetch_feed` directly for a follow;
   `tests/test_follow_requests.py` fails if one appears.
+
+## Imported Bodies Are Filtered at Ingest (issue #403)
+- The Mastodon importer stored the instance's `content` verbatim and
+  the blog importer ran a regex sanitizer that missed entity-encoded
+  `jav&#x61;script:` hrefs, `<img/onerror=...>` without whitespace,
+  `<base>` and `<meta refresh>`; the_content never runs kses, and what
+  protected the site was that both run under wp-cron, where save-time
+  kses happens to apply. Each foreign HTML field now goes through
+  `wp_kses_post()` where it is read (`onionpress_mastodon_render_content`,
+  both the status and the boosted status; `onionpress_blog_render_content`,
+  which insert and update share), and the regex sanitizer is gone.
+  Bluesky, Twitter and Reddit build their HTML from `esc_html`'d text.
+  `tests/test_importers_kses_at_ingest.py` keeps a census: a
+  `(string) ( $x['content'|'html'|'rendered'] ...)` read in an importer
+  is filtered on its line or cut to plain text in its function.
 
 ## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
 - `onionpress_get_aggregated_feed_items()` (sidebar, every page) only reads:
@@ -1016,6 +1211,31 @@
   the upgrade, check `docker logs onionheaven-farm` for "listening on" and
   the first `spawn … -> ok`.
 
+## A Plain Node's Address Carries No Hub API (issue #393)
+- The tor entrypoint maps port 8083 (web-server.py: the hub API,
+  OnionHome's name and analytics endpoints) onto the node's onion
+  address only when `onionheaven_common.hub_api_exposed()` says so: a
+  hub (`is_registration_hub`: the opt-in or the canonical address) or
+  OnionHome (`ONIONHOME_ADDRESS`, now in onionheaven_common; web-server
+  imports it). The hostname is derived from the key before the
+  onion-services.json is written, so an existing address is known; a
+  node still to mint one is no hub. web-server.py still listens inside
+  the container network (the directory plugin and name sync on
+  OnionHome call `onionpress-tor:8083`). Before, every node ran the
+  1,900-line API as root on its own address beside the site key and the
+  control cookie. The healthcheck and redirect listeners run `socat -T
+  30 ... fork,max-children=64` (an idle connection is closed, a client
+  cannot hold thousands of root shells; the Dockerfile checks socat
+  knows the option), and the healthcheck keeps its three WordPress
+  probes' answers for `CACHE_TTL` (60 s) in `/run/healthcheck/wordpress-facts`
+  (written whole and renamed; junk or an unwritable dir just probes
+  again). The launchers' hub-address check probes `<addr>:8083/status`
+  and, on a plain node, now falls through to its port-80 probe
+  ("reachable but not running OnionHeaven"). Still open in the issue:
+  running web-server.py, the healthcheck and the redirect as a
+  dedicated uid (root's key files, the registry and the farm socket all
+  assume root). Ships in the tor image. `tests/test_tor_node_surface.py`.
+
 ## Containers Drop Every Capability
 - Every compose service (both compose files), every takeover worker
   (`worker_run_argv` in onionheaven-farm.py and the unused
@@ -1077,6 +1297,21 @@
   process without KILL back).
 - Nothing in the images uses raw sockets (no ping, arping, SOCK_RAW); a
   healthcheck or tool that needs one has to get past the same test.
+
+## The Data Dir Is the User's Alone (issue #397)
+- Both launchers `chmod 700 "$DATA_DIR"` right after `mkdir -p`, on every
+  start (an install made under a looser umask is fixed too), and every
+  creation of `config` makes it 0600 (the Mac's template copy, both
+  heredoc fallbacks, install.sh, `config.ensure_config`): it may hold
+  `CLOUDFLARE_TUNNEL_TOKEN`, and the template is a 0644 bundle resource.
+  Every `os.makedirs(... data_dir ...)` in `src/` passes `mode=0o700`
+  (a census in `tests/test_data_dir_permissions.py`, which also runs
+  the launchers' two blocks under bash). An existing config's mode is
+  left as the owner set it. Still open in the issue: the mkp224o key
+  stays in `shared/vanity-keys/` (the one folder mounted into the VM)
+  after it is seeded into the onion-keys volume; the seed helper can
+  read it only from there, and restores, imports and hub detection
+  keep the folder, so moving it is a design change of its own.
 
 ## Colima VM Sandboxing
 - The VM has two narrow mounts: `~/.onionpress/shared:w` and `~/OnionPress:w`
@@ -1227,6 +1462,28 @@
   on the hub follow the procedure there (count, tar the old dir, stop
   fully, update, check the log line and the counts).
 
+## Registration Caps (issue #391; on main since #414, the numbers still open)
+- Minting a key is instant, so web-server.py bounds what a free
+  registration can take: `registration_room` (after the signature, before
+  the key is looked at) refuses a new (content, healthcheck) pair for an
+  address at `MAX_ROWS_PER_ADDRESS` (4) with 429 and a new address on a
+  hub at `MAX_REGISTRANTS` (5000) with 503 "hub full"; an existing pair
+  always has room, so the registered keep heartbeating. `analytics_room`
+  refuses a new analytics pair past `ANALYTICS_MAX_PAIRS_PER_ADDRESS` (4)
+  per address or `ANALYTICS_MAX_INSTANCES` (10000) in all (manifest and
+  upload, before the directory is made). `onionnames.register_name`
+  refuses the `MAX_NAMES_PER_ADDRESS` (10) + 1th name of an address as
+  `too_many` (429 from `local_register`); the migration script goes
+  through `validate_name` only, so a legacy registry is not cut. Tests
+  that build big registries lift the cap (`MAX_NAMES_PER_ADDRESS`
+  patched). Env: `ONIONHEAVEN_MAX_ROWS_PER_ADDRESS`,
+  `ONIONHEAVEN_MAX_REGISTRANTS`, `ONIONHOME_ANALYTICS_MAX_PAIRS_PER_ADDRESS`,
+  `ONIONHOME_ANALYTICS_MAX_INSTANCES`, `ONIONHOME_MAX_NAMES_PER_ADDRESS`.
+  The numbers, a per-address `/online` interval and whether a row must
+  pass an audit before it earns a worker slot are still the issue's
+  decision (the code reached main on #414's branch, not by one).
+  `tests/test_hub_registration_caps.py`.
+
 ## Registry Names Reach Docker Only as Workers'
 - The registry is data anything mounting the hub volume can write as root
   (onionpress-tor faces Tor; every takeover worker). The heartbeat holds the
@@ -1296,6 +1553,27 @@
   name and log endpoints. `tests/test_onion_auth.py` keeps that census and
   keeps the three copies of onion_auth.py (src, tor image, tests/stress)
   identical.
+- **A verified request is accepted once** (issue #400): a signature is
+  good for `TIMESTAMP_TOLERANCE` (5 min) either side of the hub's clock,
+  and a captured `/offline` replayed inside that window forced a takeover
+  of a live site. `_verify_signature` now, after `verify_payload` says
+  yes, runs `onionheaven_common.note_signed_request` (the `signed_requests`
+  table, `db_ensure_schema`): per content address the latest accepted
+  timestamp and the signatures accepted at that second (clients stamp
+  to the second and may send an `/online` and the `/offline` of a
+  suspend in one; Ed25519 is deterministic, so a replay is
+  byte-identical), refused as 403 when older or already seen, in one
+  `BEGIN IMMEDIATE` so two copies cannot both pass. A forgery never
+  moves the mark (the registry is opened only after the check); a
+  registry that cannot be opened refuses. A client clock set back costs
+  at most the tolerance's worth of refused requests (`REJECT-REPLAY` in
+  the log). The peer claim and the OnionHome name endpoints have their
+  own namespaces and are not marked. A hub restore keeps only
+  `registry` and `takeover_containers`; an empty table admits what the
+  tolerance admits. Ships in the tor image. `ReplayTest` in
+  `tests/test_hub_signature_verification.py`; a harness that posts one
+  message twice in a second needs distinct timestamps
+  (`test_hub_stored_keys._online`).
 - Without PyNaCl verify raises `VerificationUnavailable`, never says yes:
   do_POST answers 503 and nothing is done; a peer claim earns nothing. No
   /online then gets through, so the heartbeat monitor takes over no site
@@ -1366,6 +1644,45 @@
   files. Needs a tor image publish; on
   OnionHome compare the name count before and after, and never downgrade it
   afterwards (docs/DOCKER-SOCKET.md, "The OnionHome name registry").
+
+## No Message Channel From the Hub (removed 2026-10-25)
+- The healthcheck onion service (tor image, `healthcheck-server.sh`) is
+  GET-only. Through 2.5.6 a POST to it stored any body under
+  `/var/lib/tor/healthcheck-messages/`, and the Mac daemon, the menubar,
+  the Linux tray and `onionpress onionheaven alerts` showed each file's
+  `type` and `message` in a native "OnionHeaven Alerts" dialog. Nothing
+  checked who sent it, nothing in OnionHeaven ever sent one, and the hub
+  hands out healthcheck addresses on `/status/<address>`: a phishing
+  channel to the owner's desktop for anyone. Both ends are gone (the
+  handler, `onionheaven.read_hub_messages`/`remove_hub_messages`,
+  `app_commands.alerts_command`, the `alerts` subcommand, the daemon's
+  poll and `.dismiss-onionheaven-alerts`, the menubar item, the tray's
+  poll). The GET's `"messages":[]` stays for an older hub's reader. A hub
+  that wants to tell an owner something needs a signed channel designed
+  for it. The image side needs a tor image publish; until then an old
+  image still stores POSTs that nothing reads.
+  `tests/test_install_invariants` (the handler under sh),
+  `tests/test_mac_daemon` (the menubar census names `healthcheck-messages`).
+
+## The Directory Answers Visitors Only on OnionHome (issue #394)
+- `onionpress-directory.php` is a mu-plugin on every node, and its two
+  request hooks (`/follow?name=` on parse_request, the `/NAME[/REST]`
+  dispatch of a 404 on template_redirect) used to run for any request
+  whose Host header was OnionHome's or onionpress.org: the Host is the
+  visitor's to choose, so every node looked names up through Tor (30 s
+  in an Apache worker, no cache) and redirected.
+  `onionpress_directory_request_path()` now returns null unless
+  `onionpress_directory_is_onionhome_node()` (the node's own served
+  address, from the shared volume's `onion_address`, is
+  `ONIONPRESS_ONIONHOME_ADDRESS`), before the Host check; the visitor
+  handlers go through `onionpress_directory_lookup_for_visitor` (a miss
+  is not asked again for 60 s, a transient). The Settings page's own
+  `onionpress_directory_lookup()` calls (the owner's Following form, on
+  every node) are untouched. `ONIONPRESS_ONION_ADDRESS_FILE` lets a test
+  point the address read elsewhere. onionpress-status-hint.php (a 302
+  to the hub's fixed address) and onionpress-user-path.php
+  (`/<onionname>/` on every install, by design) stay on every node.
+  `tests/test_onionname_redirect.py` (the gate under php where installed).
 
 ## OnionHeaven Is On by Default
 - **`REGISTER_WITH_ONIONHEAVEN`: `yes` or unset/empty registers, `no` opts
@@ -1768,6 +2085,18 @@
 - Re-pinning either plugin means re-reading these against its internals
   (docs/BUILDING.md). `tests/test_bundled_plugins.py`.
 
+## The Hit Counter Has One Writer (issue #398)
+- `onionpress-hit-counter.php` is the plugin folder's only PHP: anything
+  else under wp-content/plugins is reachable directly, and
+  `standalone-counter.php` (SHORTINIT, a raw UPDATE of the main site's
+  wp_options for anyone) was a second, unauthenticated writer. The
+  increment checks the nonce it mints for its script
+  (`check_ajax_referer('onionpress_counter_nonce', 'nonce', false)`) and
+  on failure answers the current count without counting, so a page
+  served from the cache past the nonce's life still shows a counter.
+  The legacy `/var/lib/onionpress/hit-counter.txt` migration is gone
+  (nothing wrote it since the option). `tests/test_hit_counter.py`.
+
 ## The Wayback Sweep Is the Network's (issue #322)
 - One sweep walks every site, so its state is the network's, never a blog's:
   - **archive.org keys** live in the main site's options. Setup, the
@@ -1792,6 +2121,20 @@
 - `tests/test_wayback_network_state.py`; test_wayback_sweep.py points the
   lock and back-off at test keys through the `onionpress_wayback_net_key`
   filter so it never touches a live sweep's.
+
+## The Mac Update Installs Only a DMG Its Release Vouches For (issue #386)
+- `updater.download_and_install` downloads the release's `SHA256SUMS`
+  (`_fetch_release_sums`, the third curl through `_curl_tls_args`, 64 KiB
+  cap) and mounts the DMG only when `sha256_of` it equals the one line
+  `published_sha256` finds for the asset's name (sha256sum format, as
+  `build/release.sh` writes it and Linux's `update_find_release` reads
+  it); a release without the file, a file without exactly one line for
+  the DMG, or a mismatch stops before `hdiutil attach`. Same trust root
+  as before (TLS to GitHub) but a swapped or damaged asset is caught, as
+  on Linux. Still open in the issue: signing `SHA256SUMS` with a key the
+  app carries (with #246, the .deb side) and Developer ID + notarization
+  with `codesign --verify` on the staged bundle, which need a key the
+  maintainer holds. `DmgChecksumTest` in `tests/test_updater_staged_swap.py`.
 
 ## Auto-Update Swaps Bundles by Rename
 - `updater.download_and_install` copies the new bundle from the mounted DMG
@@ -1847,6 +2190,23 @@
 - `~/.onionpress/extension-connected` is JSON `{timestamp, browser}` from
   both writers (`browser.write_extension_marker`; the native host's own
   copy, test-tied). The extension polls `/status` every 5 s (not logged).
+- **The proxy carries `.onion` only and answers no other site's page**
+  (2026-10-25). Any web page in any browser on the Mac can send requests
+  to 127.0.0.1, and `/status` answered them with the served onion address
+  under `Access-Control-Allow-Origin: *`: a clearnet site could learn
+  which onion site its visitor publishes. Now `/status` and `/proxy/`
+  refuse a request made for another site's page
+  (`OnionProxyHandler._from_a_web_page`: an `Origin` that is not the
+  extension's or the proxy's own, a `Sec-Fetch-Site` other than
+  `same-origin`/`none` (`same-site` is localhost:8080's page), a foreign
+  `Referer`; the extension's fetch, the setup page, the address bar and
+  curl pass), `/status` echoes only an extension `Origin` and sends
+  `nosniff`, and every non-onion target is refused: no clearnet fetch
+  (`_fetch_direct` is gone), no `CONNECT` relay (it tunnelled to any
+  host:port for any local client, the LAN and the Mac's loopback
+  included). The extension routes only `.onion` here, so nothing shipped
+  used either. `tests/test_browser_extension.TestProxy`,
+  `tests/test_strict_onion_addresses.TestOnionProxyRouting`.
 - Fallback: `.onion` while OnionPress is down → `offline.html`; onion
   service not answering → the proxy's `ONION_UNREACHABLE_PAGE`. Both only
   *link* the Wayback Machine (clearnet, said on the page), never redirect.
@@ -1882,3 +2242,29 @@
   - Or install `curl` in the tor container and use `curl --socks5-hostname 127.0.0.1:9050`
 - WordPress container has `curl`
 - Test onion service path (internal): `docker exec onionpress-tor wget -q -O /dev/null http://wordpress:80/`
+
+## The OnionHeaven Overview (one view of both roles)
+- **`onionheaven.overview(app)` says which hub keeps this site reachable
+  and whom this install keeps reachable**: `client` (the choice, the hub,
+  `hub_known_as` from `KNOWN_HOSTS`: the Internet Archive's OnionHeaven
+  and OnionHome; the record's `registered_at` / `last_heartbeat_at`; the
+  served and health-check addresses; `left_on_hubs` with `key_here`, whether
+  the key that could ask for the copy's deletion is still here), `hub`
+  (`active` = `ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes` or the canonical
+  address; counts; `sites` from the registry capped at `HUB_SITES_LIMIT`;
+  the takeover settings) and `known_hosts`. `status_block()` is status.json's
+  `onionheaven` object: the flat keys onionpress-status.php always read (the
+  platform's `server_active`: the Mac's stays `bool(self.is_onionheaven)`,
+  `tests/test_linux_hub_mode.py` pins the line) plus the nested view.
+- **Who carries it**: the Mac daemon computes it in `check_status` (the
+  registry is asked only on a hub) and publishes it in daemon-state.json
+  (`"onionheaven"`) and status.json; Linux's `write_status` merges `op_py
+  onionheaven overview --json` into the block; `onionpress onionheaven
+  overview [--json]` prints it. `_mark_registered` (Mac) and
+  `_record_registered` (Linux) write `registered_at` (kept across beats)
+  and `last_heartbeat_at` (every beat). A UI reads the overview; it never
+  asks docker itself.
+- **Registry rows are checked before they are shown** (`hub_sites`: a v3
+  address, a status from a fixed set, short printable timestamps and
+  versions): the registry is data anything on the hub volume can write.
+  `tests/test_onionheaven_overview.py`.

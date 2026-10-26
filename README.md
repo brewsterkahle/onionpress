@@ -56,6 +56,15 @@ systemctl --user start onionpress
 ```
 
 After install: `onionpress status`, `onionpress address`, `onionpress logs`.
+Everything the menu and the Settings page offer is a command too (on a Mac
+the command is `/Applications/OnionPress.app/Contents/MacOS/onionpress`):
+`onionpress version`; `onionpress address --url` (the site's shareable URL,
+`--copy` puts it on the clipboard); `onionpress open site|admin|settings|onion`
+(a browser, logged in; `onion` opens Tor Browser where it is installed);
+`onionpress logs --app|--launcher|--web` (`-n N` lines, `-f` to follow);
+`onionpress check-reachability` (the Settings page's test, through the
+independent onionheaven Tor client); `onionpress import-key --file
+hs_ed25519_secret_key`; `onionpress onionname show|set NAME`.
 Settings: `onionpress config list` shows every setting, `onionpress config set KEY VALUE`
 changes one (`config list --help` describes the keys; on a Mac the command is
 `/Applications/OnionPress.app/Contents/MacOS/onionpress`).
@@ -94,12 +103,41 @@ your site. When you come back online, your live site takes over again.
 
 It is **on by default**. It sends a copy of your onion service
 private key to the hub (run by the Internet Archive) so it can publish
-your address while you are away. The key is used only to keep your site
-reachable. Without it, visitors get a connection error whenever your
-computer is off. Disabling it, uninstalling, resetting,
+your address while you are away. Without it, visitors get a connection
+error whenever your computer is off. Disabling it, uninstalling, resetting,
 importing another key, restoring another site's backup or changing the hub
 asks the hub to delete its copy of the key (OnionPress has to be running for
 that; it tells you if a copy may remain).
+
+**What the hub can do with your key.** The key *is* your address: whoever
+holds it can publish anything at your `.onion`, not only the archived copy,
+and nobody on the Tor network can tell the difference. So:
+
+- **You are trusting the hub's operator and the hub's security** with your
+  site's identity for as long as the hub holds the key. OnionPress stores
+  the key on the hub unencrypted; there is no split, escrow or
+  hardware key that would stop the hub itself from using it.
+- **A compromised hub is every registered site's identity at once.** The
+  hub holds every registrant's key under one root.
+- **You can notice, but not win.** While your site is up, OnionPress
+  checks what the Tor network serves for your address; another publisher
+  of your address shows up in its log as `desc-other`, and a takeover page
+  carries an `X-OnionHeaven-Takeover` header. But two publishers of one
+  address alternate on the Tor directories, so your live site cannot push
+  a hub that misbehaves out of the way.
+- **Deleting the copy is a request.** `/unregister` asks the hub to delete
+  its copy; OnionPress cannot verify that it did.
+- **The hub's own protections** are the ones in this repository: the
+  heartbeat is signed with your key, the hub checks the key belongs to the
+  address before storing it, registry writes are checked, the hub's own
+  containers drop every capability, and the hub's data volume is mounted by
+  no web-facing container. They protect the hub from outsiders, not you
+  from the hub.
+
+If that trade is not right for your site, turn OnionHeaven off before the
+first start (below), or run your own hub (`ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes`
+on a node you control) and point your sites at it. Either way your site is
+unreachable while your computer is off.
 
 - **Mac:** menu bar → Settings… → *Keep site reachable via OnionHeaven*, or
   `/Applications/OnionPress.app/Contents/MacOS/onionpress onionheaven enable`

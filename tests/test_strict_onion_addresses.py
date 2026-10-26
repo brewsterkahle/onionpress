@@ -419,12 +419,7 @@ def _proxy_handler(path, command="GET"):
         fetched.append(("tor", url))
         return 200, {}, b""
 
-    def direct(url, *a, **kw):
-        fetched.append(("clearnet", url))
-        return 200, {}, b""
-
     h._fetch_via_php = via_php
-    h._fetch_direct = direct
     return h, sent, fetched
 
 
@@ -462,19 +457,24 @@ class TestOnionProxyRouting(unittest.TestCase):
         h._handle_request()
         self.assertEqual(fetched, [])
         self.assertEqual(sent[0][:2], ("error", 400))
+        # And a clearnet name never goes out at all: the proxy carries
+        # .onion sites only (it used to fetch these directly, LAN and
+        # loopback included).
         h, sent, fetched = _proxy_handler("http://example.com/x")
         h._handle_request()
-        self.assertEqual(fetched, [("clearnet", "http://example.com/x")])
+        self.assertEqual(fetched, [])
+        self.assertEqual(sent[0][:2], ("error", 403))
 
-    def test_connect_refuses_every_onion_name(self):
-        for target in (f"{SITE}:443", f"{SITE.upper()}.:443", "x.onion:443"):
+    def test_connect_refuses_every_target(self):
+        for target in (f"{SITE}:443", f"{SITE.upper()}.:443", "x.onion:443",
+                       "example.com:443", "127.0.0.1:8080"):
             with self.subTest(target=target):
                 h, sent, _ = _proxy_handler(target, "CONNECT")
                 with mock.patch.object(onion_proxy.socket, "create_connection",
                                        side_effect=OSError("connected")) as conn:
                     h.do_CONNECT()
                 conn.assert_not_called()
-                self.assertEqual(sent[0], ("error", 502, "Use http:// for .onion sites"))
+                self.assertEqual(sent[0][:2], ("error", 403))
 
 
 class TestPhpForwarder(unittest.TestCase):

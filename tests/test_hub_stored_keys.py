@@ -37,6 +37,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -276,7 +277,12 @@ class OnlineStoresKeysTest(unittest.TestCase):
                                      "ks_hs_id.ed25519_expanded_private")
 
     def _online(self, pem):
-        ts = onion_auth.make_timestamp()
+        # Each request a second later than the last: a verified request
+        # is accepted once per address and timestamp (issue #400), and a
+        # client never sends two heartbeats in one second.
+        self._tick = getattr(self, "_tick", 0) + 1
+        ts = (datetime.now(timezone.utc) + timedelta(seconds=self._tick)
+              ).strftime("%Y-%m-%dT%H:%M:%SZ")
         data = {
             "content_address": self.address,
             "healthcheck_address": self.hc,

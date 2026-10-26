@@ -136,7 +136,6 @@ class _DaemonCase(unittest.TestCase):
             "images --format {{.Repository}}": "ghcr.io/x/onionpress-wordpress\nmariadb\nghcr.io/x/onionpress-tor\n",
             "exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname": ADDR + "\n",
             "exec onionpress-tor cat /var/lib/tor/hidden_service/healthcheck/hostname": HC + "\n",
-            "exec onionpress-tor ls /var/lib/tor/healthcheck-messages/": "",
             "exec onionpress-wordpress sh -c test -f /var/lib/onionpress/.upload-analytics && rm /var/lib/onionpress/.upload-analytics": (1, ""),
             "exec -u www-data": "",
             "exec -i -u www-data": "",
@@ -241,12 +240,6 @@ class TestStatusPass(_DaemonCase):
         self.tick()
         self.assertIsNone(self.state()["pending_question"])
 
-    def test_a_relaunch_request_is_published(self):
-        self.launcher_answers["handle-action"] = (
-            0, '{"handled": "update", "relaunch": true, "version": "9.10"}\n')
-        self.tick()
-        self.assertEqual(self.state()["relaunch"]["version"], "9.10")
-
     def test_a_failed_handle_action_is_said_once_an_hour(self):
         self.launcher_answers["handle-action"] = (1, "boom\n")
         self.tick()
@@ -299,24 +292,6 @@ class TestStatusPass(_DaemonCase):
         self.assertFalse(s["has_internet"])
         self.assertEqual(s["display_state"], "offline")
         self.d._republish_trigger.reset.assert_called()
-
-    def test_dismiss_marker_removes_the_hubs_messages(self):
-        self.d.onionheaven_messages = [{"type": "x", "message": "y"}]
-        with open(os.path.join(self.dir, op_daemon.DISMISS_ALERTS_MARKER), "w") as f:
-            f.write("1")
-        self.tick()
-        self.assertEqual(self.state()["onionheaven_messages"], [])
-        rm = [c for c in self.docker.calls if "rm -f /var/lib/tor/healthcheck-messages/*.json" in " ".join(c[0])]
-        self.assertEqual(len(rm), 1)
-        self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.DISMISS_ALERTS_MARKER)))
-
-    def test_hub_messages_reach_the_state(self):
-        self.docker.answers["exec onionpress-tor ls /var/lib/tor/healthcheck-messages/"] = "m1.json\n"
-        self.docker.answers["exec onionpress-tor cat /var/lib/tor/healthcheck-messages/m1.json"] = \
-            '{"type": "takeover", "message": "we took over"}'
-        self.tick()
-        self.assertEqual(self.state()["onionheaven_messages"],
-                         [{"type": "takeover", "message": "we took over"}])
 
     def test_the_config_marker_is_taken_by_the_daemon(self):
         op_config.note_config_changed(self.dir, ["PREVENT_SLEEP"])
@@ -668,6 +643,9 @@ class TestUpdateOrder(unittest.TestCase):
                                   side_effect=lambda s, i: order.append("stage") or "/tmp/staged"), \
                 mock.patch.object(updater, "swap_in_bundle",
                                   side_effect=lambda *a, **k: order.append("swap")), \
+                mock.patch.object(updater, "_fetch_release_sums",
+                                  return_value=f"{'a' * 64}  x.dmg\n"), \
+                mock.patch.object(updater, "sha256_of", return_value="a" * 64), \
                 mock.patch.object(updater.shutil, "rmtree"):
             updater.download_and_install(
                 {"assets": [{"name": "x.dmg", "browser_download_url": "https://x/x.dmg"}]},
@@ -716,7 +694,7 @@ class TestMenubarIsAView(unittest.TestCase):
         for name in ("HealthChecker", "RepublishTrigger", "CaffeineManager", "Docker(",
                      "onion_proxy.", "thumbnails.", "analytics_sharing.", "_health_checker",
                      "_docker.", "check_tor_reachability", "write_status_to_volume",
-                     "poll_onionheaven_messages", "start_registration_thread",
+                     "healthcheck-messages", "start_registration_thread",
                      "register_wake_notification", "handle_sleep", "handle_wake",
                      "start_container_log_capture", "start_web_log_capture",
                      "start_clearnet_log_capture", "monitor_image_downloads",
@@ -780,11 +758,6 @@ class TestMenubarIsAView(unittest.TestCase):
         self.assertNotIn("colima_bin", body)
         self.assertNotIn('"stop"]', body)
         self.assertNotIn("notify_onionheaven_offline", self.src)
-
-    def test_dismiss_all_is_a_marker_for_the_daemon(self):
-        body = self.methods["view_onionheaven_alerts"]
-        self.assertIn("op_daemon.DISMISS_ALERTS_MARKER", body)
-        self.assertNotIn("docker", body)
 
     def test_menubar_log_is_its_own(self):
         self.assertIn('RotatingLog(\n            self.logs_dir, "menubar"', self.src)

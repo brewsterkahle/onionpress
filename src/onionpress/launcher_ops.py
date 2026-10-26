@@ -153,6 +153,12 @@ def _launch_default_web_browser(uri: str) -> bool:
         return False
 
 
+# Where Tor Browser is on a Mac (onionpress.browser.TOR_BROWSER_PATH, and
+# the user's own Applications folder).
+TOR_BROWSER_APPS = ("/Applications/Tor Browser.app",
+                    os.path.expanduser("~/Applications/Tor Browser.app"))
+
+
 def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
     """Spawn a browser at `url`. Detached — does not wait.
 
@@ -183,7 +189,11 @@ def open_in_browser(url: str, *, prefer_tor: bool = False) -> None:
         elif shutil.which("torbrowser-launcher"):
             cmd = ["torbrowser-launcher", url]
         elif sys.platform == "darwin":
-            cmd = ["open", url]
+            # Tor Browser when it is installed (`onionpress open onion`);
+            # the default browser otherwise (the browser extension's
+            # proxy may route .onion there).
+            tor_app = next((a for a in TOR_BROWSER_APPS if os.path.isdir(a)), None)
+            cmd = ["open", "-a", tor_app, url] if tor_app else ["open", url]
         else:
             cmd = ["xdg-open", url]
     elif sys.platform == "darwin":

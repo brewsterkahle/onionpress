@@ -107,8 +107,11 @@ wp_cli_in() {
 # Per-user lock file to prevent double-starting
 PIDFILE="$DATA_DIR/onionpress.pid"
 
-# Ensure data dir exists
+# Ensure data dir exists, this user's alone (issue #397: config holds the
+# Cloudflare token). 0700 on every start, so an install made under a
+# looser umask is fixed too.
 mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
 
 # One-time host-side migration: ~/Documents/onionpress (Linux default)
 # or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
@@ -426,7 +429,8 @@ ensure_key_helper_image() {
     docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1
 }
 
-# Create default config if it doesn't exist
+# Create default config if it doesn't exist (0600, issue #397: it may hold
+# CLOUDFLARE_TUNNEL_TOKEN).
 if [ ! -f "$DATA_DIR/config" ]; then
     cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
@@ -443,6 +447,7 @@ ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.oni
 # this machine only.
 #ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
+    chmod 600 "$DATA_DIR/config"
 fi
 
 # Read settings from config (override defaults)
@@ -669,13 +674,33 @@ echo "Success: password set for ", $u->user_login, "\n";
 # ─── Key import ──────────────────────────────────────────────────────
 
 import_key() {
-    local key_b32="$1"
+    # import-key [<key>|-|--file <hs_ed25519_secret_key>]: the key as
+    # base32; "-" reads it from stdin (so a caller keeps it out of this
+    # process's argv, which ps shows to every user); --file reads C Tor's
+    # key file (key_manager.py encode-key-file checks it first).
+    local key_b32=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                key_b32=$(python3 "$SCRIPTS_DIR/key_manager.py" encode-key-file "${2:-}") || return 1
+                shift ;;
+            --help|-h) key_b32="--help" ;;
+            --*) echo "Unknown import-key option: $1" >&2; return 2 ;;
+            *) key_b32="$1" ;;
+        esac
+        shift
+    done
+    if [ "$key_b32" = "-" ]; then
+        IFS= read -r key_b32 || true
+    fi
 
     mkdir -p "$DATA_DIR"
 
     if [ -z "$key_b32" ] || [ "$key_b32" = "--help" ] || [ "$key_b32" = "-h" ]; then
         cat <<HELPEOF
 Usage: onionpress import-key <base32-secret-key>
+       onionpress import-key --file <hs_ed25519_secret_key>
+       onionpress import-key -        (the key on stdin)
 
 Import a pre-generated ed25519 key for your onion service.
 
@@ -3306,10 +3331,21 @@ except: print('false')
         serving_from_wayback="true"
     fi
 
+    # Both OnionHeaven roles for the OnionHeaven page (onionheaven.overview:
+    # the record, the config, and the registry's rows on a hub).
+    local oh_overview_json
+    oh_overview_json=$(op_py --data-dir "$DATA_DIR" onionheaven overview --json 2>/dev/null || echo '{}')
+
     # Build status.json
     local status_json
     status_json=$(python3 -c "
 import json, sys
+try:
+    _ov = json.loads(sys.argv[26])
+    if not isinstance(_ov, dict):
+        _ov = {}
+except (ValueError, IndexError):
+    _ov = {}
 status = {
     'state': sys.argv[1],
     'version': sys.argv[2],
@@ -3331,6 +3367,7 @@ status = {
         'client_registered': sys.argv[14] == 'true',
         'client_hub': sys.argv[15],
         'client_enabled': sys.argv[16] == 'yes',
+        **{k: v for k, v in _ov.items() if k in ('client', 'hub', 'known_hosts', 'generated_at')},
     },
     'wp_installed': sys.argv[19] == 'true',
     'onboarded': sys.argv[20] == 'true',
@@ -3347,7 +3384,7 @@ print(json.dumps(status, indent=2))
   "$load_avg_json" "$host_uptime_seconds" \
   "$wp_installed_str" "$onboarded" "$mkp224o_available" \
   "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback" \
-  "${ONIONPRESS_WP_PORT:-8080}")
+  "${ONIONPRESS_WP_PORT:-8080}" "$oh_overview_json")
 
     # Write to shared volume (consumed by the WP settings/status page): only
     # the fields those pages show (redact.WORDPRESS_STATUS_KEYS, shared with
@@ -4183,7 +4220,18 @@ main() {
             ;;
 
         address)
-            get_onion_address
+            # The address, its shareable URL (--url) or that URL on the
+            # clipboard (--copy): onionpress.app_commands (issue #382).
+            op_py --data-dir "$DATA_DIR" address "${@:2}"
+            ;;
+
+        version|check-reachability|open|onionname)
+            # The app's remaining functions as subcommands (issue #382):
+            # the version, the Settings page's reachability test through
+            # the onionheaven Tor client, the tray's Open Local Site /
+            # Open in Tor Browser / Settings (logged in), and the
+            # onionname (show | set NAME).
+            op_py --data-dir "$DATA_DIR" "$1" "${@:2}"
             ;;
 
         dashboard)
@@ -4324,7 +4372,7 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         import-key)
-            import_key "$2"
+            import_key "${@:2}"
             ;;
 
         sleep-pre|sleep-post)
@@ -4372,8 +4420,14 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         logs)
-            cd "$DOCKER_DIR"
-            docker compose "${CF_COMPOSE[@]}" logs -f
+            # Bare: the container logs. --app, --launcher or --web (-n N,
+            # -f): the end of that OnionPress log (issue #382).
+            if [ $# -gt 1 ]; then
+                op_py --data-dir "$DATA_DIR" logs "${@:2}"
+            else
+                cd "$DOCKER_DIR"
+                docker compose "${CF_COMPOSE[@]}" logs -f
+            fi
             ;;
 
         backup)
@@ -4906,7 +4960,9 @@ sys.exit(0 if provision_interactive() else 1)
             ;;
 
         *)
-            echo "Usage: $0 {start|stop|restart|status|address|get|setup|config|onionheaven|reset|reset-onionheaven|import-key|backup|restore|hub-recovery-key|update|logs|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+            echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+            echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
+            echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME; onionheaven alerts [--dismiss]"
             exit 1
             ;;
     esac

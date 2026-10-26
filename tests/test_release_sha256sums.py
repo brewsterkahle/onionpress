@@ -17,6 +17,7 @@ that write small files. Nothing reaches GitHub.
 """
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -41,8 +42,17 @@ def _sha256(data):
 GH_STUB = r'''#!/bin/bash
 echo "gh $*" >> "$CALLS"
 S="$GH_STATE"
+if [ "$1" = "api" ]; then
+    case "$2" in
+        "repos/$EXPECT_REPO/commits/main") echo "$FAKE_MAIN_SHA" ;;
+        "repos/$EXPECT_REPO/git/matching-refs/tags/"*) echo "${FAKE_TAG_SHA:-}" ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
 [ "$1" = "release" ] || exit 2
-cmd="$2"; tag="$3"; shift 3
+[ "$3" = "-R" ] && [ "$4" = "$EXPECT_REPO" ] || { echo "gh: wrong repo: $*" >&2; exit 3; }
+cmd="$2"; tag="$5"; shift 5
 case "$cmd" in
     view)
         [ -f "$S/exists" ] || exit 1
@@ -128,6 +138,15 @@ class TestReleaseScript(unittest.TestCase):
         open(self.calls_file, "w").close()
         self.tmpdir = os.path.join(self.tmp, "tmpdir")
         os.makedirs(self.tmpdir)
+        # A new release is tagged at the release repository's main, which
+        # HEAD must be: the scratch project is a one-commit repository.
+        git = ["git", "-C", self.proj, "-c", "user.name=t", "-c", "user.email=t@t",
+               "-c", "commit.gpgsign=false"]
+        subprocess.run(git[:3] + ["init", "-q"], check=True)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "release"], check=True)
+        self.head = subprocess.run(git[:3] + ["rev-parse", "HEAD"], check=True,
+                                   capture_output=True, text=True).stdout.strip()
 
     def existing_release(self, **assets):
         open(os.path.join(self.state, "exists"), "w").close()
@@ -141,7 +160,9 @@ class TestReleaseScript(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
             env={"PATH": self.bin + os.pathsep + os.environ["PATH"], "HOME": self.tmp,
                  "TMPDIR": self.tmpdir, "CALLS": self.calls_file, "GH_STATE": self.state,
-                 "FAKE_OS": os_name, "BUILD_ID": "1", **env})
+                 "FAKE_OS": os_name, "BUILD_ID": "1",
+                 "EXPECT_REPO": "brewsterkahle/onionpress", "FAKE_MAIN_SHA": self.head,
+                 **env})
 
     @property
     def calls(self):
@@ -171,7 +192,7 @@ class TestReleaseScript(unittest.TestCase):
         self.assertIn("/build/SHA256SUMS", calls[create])
         check = next(i for i, c in enumerate(calls)
                      if c.startswith("gh release download") and "SHA256SUMS" in c)
-        publish = calls.index("gh release edit v9.8.7 --draft=false")
+        publish = calls.index("gh release edit -R brewsterkahle/onionpress v9.8.7 --draft=false")
         self.assertLess(create, check)
         self.assertLess(check, publish)
         self.assertFalse(self.is_draft())
@@ -229,6 +250,87 @@ class TestReleaseScript(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse([c for c in self.calls if c.startswith(("gh release create",
                                                                  "gh release upload"))])
+
+
+    # ─── The release goes on brewsterkahle/onionpress, tagged at its main ───
+
+    def test_a_new_release_is_tagged_at_the_release_repos_main(self):
+        r = self.run_release()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        create = next(c for c in self.calls if c.startswith("gh release create"))
+        self.assertIn("-R brewsterkahle/onionpress v9.8.7 ", create)
+        self.assertIn("--target " + self.head, create)
+        for c in self.calls:
+            if c.startswith("gh release"):
+                self.assertTrue(c.startswith(c.split()[0] + " release " + c.split()[2]
+                                             + " -R brewsterkahle/onionpress "), c)
+
+    def test_a_head_that_is_not_main_is_refused_before_building(self):
+        r = self.run_release(FAKE_MAIN_SHA="1" * 40)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is not the tip of brewsterkahle/onionpress's main", r.stderr)
+        self.assertFalse([c for c in self.calls if c.startswith(("gh release create",
+                                                                 "gh release upload"))])
+        self.assertFalse(os.path.exists(os.path.join(self.proj, "build", "onionpress.deb")))
+
+    def test_an_unreadable_main_is_refused(self):
+        r = self.run_release(FAKE_MAIN_SHA="")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse([c for c in self.calls if c.startswith("gh release create")])
+
+    def test_an_existing_tag_elsewhere_is_refused(self):
+        r = self.run_release(FAKE_TAG_SHA="2" * 40)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("already has a tag v9.8.7", r.stderr)
+        self.assertFalse([c for c in self.calls if c.startswith("gh release create")])
+
+    def test_an_existing_tag_at_main_is_used(self):
+        r = self.run_release(FAKE_TAG_SHA=self.head)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_repository_is_not_the_checkouts_default(self):
+        # A fork's checkout: gh's default would be the fork. Only the
+        # explicit override moves the release, for testing.
+        r = self.run_release(ONIONPRESS_RELEASE_REPO="ivar/onionpress",
+                             EXPECT_REPO="ivar/onionpress")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(any(c.startswith("gh release create -R ivar/onionpress ")
+                            for c in self.calls))
+
+
+class TestReleaseRepoInSource(unittest.TestCase):
+    """Every gh release call in release.sh names RELEASE_REPO, whose default
+    is brewsterkahle/onionpress: gh's own default is the checkout's origin,
+    a fork on a maintainer's Mac (v2.5.4 was first published there)."""
+
+    def setUp(self):
+        with open(os.path.join(PROJECT_DIR, "build", "release.sh")) as f:
+            self.src = f.read()
+
+    def test_default_repo(self):
+        self.assertIn('RELEASE_REPO="${ONIONPRESS_RELEASE_REPO:-brewsterkahle/onionpress}"',
+                      self.src)
+        self.assertEqual(self.src.count("RELEASE_REPO="), 1)
+
+    def test_every_gh_release_call_names_the_repo(self):
+        calls = []
+        for n, line in enumerate(self.src.splitlines(), 1):
+            code = line.split("#", 1)[0] if line.lstrip().startswith("#") else line
+            if re.search(r"\bgh release\b", code):
+                calls.append((n, line))
+                self.assertRegex(code, r'\bgh release \w+ -R "?\$RELEASE_REPO\b',
+                                 "release.sh:%d: %s" % (n, line.strip()))
+        self.assertGreaterEqual(len(calls), 8)
+
+    def test_every_gh_api_call_names_the_repo(self):
+        for n, line in enumerate(self.src.splitlines(), 1):
+            if re.search(r"\bgh api\b", line):
+                self.assertIn('"repos/$RELEASE_REPO/', line, "release.sh:%d" % n)
+
+    def test_create_targets_main(self):
+        create = self.src[self.src.index("gh release create"):]
+        create = create[:create.index("--generate-notes")]
+        self.assertIn('--target "$MAIN_SHA"', create)
 
 
 if __name__ == "__main__":

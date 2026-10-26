@@ -1351,15 +1351,17 @@ function onionpress_mastodon_import_status( $status, $opts, $as_context = false 
 /**
  * Turn a status into ( $content_html, $preview_text ).
  *
- * Mastodon already returns sanitized HTML in `content`. We keep it as
- * is (wp_kses_post on display, no double-escape) and build the
- * preview by stripping tags. For boost shells, the outer content is
- * empty; we render a small "boosted by" wrapper above the boosted
- * post's content so the card conveys what's going on.
+ * The instance's `content` is HTML that instance chose, and the_content
+ * never runs kses: it goes through wp_kses_post() here, at ingest
+ * (issue #403). Mastodon's own sanitizing is its business, not this
+ * site's safety; the importer runs under wp-cron, where save-time kses
+ * happened to apply, and nothing should depend on that. For boost
+ * shells the outer content is empty; a small "boosted by" wrapper of
+ * our own goes above the boosted post's (filtered) content.
  */
 function onionpress_mastodon_render_content( $status ) {
     if ( ! empty( $status['reblog'] ) ) {
-        $inner = (string) ( $status['reblog']['content'] ?? '' );
+        $inner = wp_kses_post( (string) ( $status['reblog']['content'] ?? '' ) );
         $boosted_acct = (string) ( $status['reblog']['account']['acct'] ?? '' );
         $boosted_url  = (string) ( $status['reblog']['url']             ?? '' );
         $header = $boosted_acct
@@ -1371,7 +1373,7 @@ function onionpress_mastodon_render_content( $status ) {
             : '<p><em>Boosted:</em></p>';
         $html = $header . $inner;
     } else {
-        $html = (string) ( $status['content'] ?? '' );
+        $html = wp_kses_post( (string) ( $status['content'] ?? '' ) );
     }
     // The Mastodon `content` field wraps paragraphs in <p>; that's fine
     // for direct insertion as post_content (theme + wpautop won't re-wrap).

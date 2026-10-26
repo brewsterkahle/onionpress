@@ -486,7 +486,7 @@ def mark_setup_complete(data_dir: str, log: Callable[[str], None] | None = None)
     it cannot be written (the setup itself has succeeded by then)."""
     path = os.path.join(data_dir, SETUP_COMPLETE_MARKER)
     try:
-        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(data_dir, mode=0o700, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write("1")
     except OSError as e:

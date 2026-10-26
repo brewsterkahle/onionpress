@@ -10,8 +10,17 @@
 
 set -e
 
+# Everything is inside main(), run by the last line (issue #388): bash
+# parses the whole function before it runs any of it, so a `curl | bash`
+# whose connection drops part-way executes nothing rather than a prefix.
+main() {
+
 INSTALL_DIR="/opt/onionpress"
 REPO_URL="https://github.com/brewsterkahle/onionpress"
+# The fingerprint of Docker's apt signing key (docs.docker.com, "Install
+# using the apt repository"): the key is fetched over TLS and checked
+# against this before apt is pointed at the repository (issue #388).
+DOCKER_APT_KEY_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 
 # Resolve real user (not root when run via sudo)
 if [ -n "$SUDO_USER" ]; then
@@ -101,6 +110,35 @@ fi
 
 # ─── Install Docker (rootless) ──────────────────────────────────────
 
+# True when the armored key file $1 has exactly Docker's published
+# fingerprint (DOCKER_APT_KEY_FPR), read with gpg without importing it.
+docker_apt_key_is_dockers() {
+    local fpr
+    fpr=$(gpg --batch --with-colons --import-options show-only --import "$1" 2>/dev/null \
+          | awk -F: '$1 == "fpr" { print $10; exit }') || fpr=""
+    [ -n "$fpr" ] && [ "$fpr" = "$DOCKER_APT_KEY_FPR" ]
+}
+
+# The ref to install when not run from a checkout (issue #388): the newest
+# release tag (v<major>.<minor>.<patch>), never HEAD of main, so a push to
+# main does not change what every new install runs as root, and a fresh
+# install's version is a release's (what `onionpress update` compares
+# against). ONIONPRESS_INSTALL_REF names another ref (a developer's
+# branch). Fails with nothing printed when no release tag can be read.
+release_ref_to_install() {
+    local tag
+    if [ -n "${ONIONPRESS_INSTALL_REF:-}" ]; then
+        printf '%s\n' "$ONIONPRESS_INSTALL_REF"
+        return 0
+    fi
+    tag=$(git ls-remote --tags --refs "$REPO_URL" 'refs/tags/v*' 2>/dev/null \
+          | sed 's#.*refs/tags/##' \
+          | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+          | sort -V | tail -n 1) || tag=""
+    [ -n "$tag" ] || return 1
+    printf '%s\n' "$tag"
+}
+
 # Helper to run a command as the real user (not root)
 run_as_user() {
     if [ "$REAL_USER" = "$(whoami)" ]; then
@@ -124,16 +162,25 @@ if [ "$_docker_is_rootless" = "true" ]; then
 else
     echo "  Installing Docker (rootless mode)..."
 
-    # Install prerequisites for rootless Docker
+    # Install prerequisites for rootless Docker (gnupg: to read the apt
+    # key's fingerprint below)
     $SUDO apt-get update -qq
-    $SUDO apt-get install -y -qq uidmap dbus-user-session curl ca-certificates
+    $SUDO apt-get install -y -qq uidmap dbus-user-session curl ca-certificates gnupg
 
     # Install Docker engine packages (needed for rootless setup tool)
     if ! command -v dockerd >/dev/null 2>&1; then
-        # Add Docker's official GPG key and repository
+        # Add Docker's official GPG key and repository. The key is what
+        # apt trusts for every Docker package from here on: its
+        # fingerprint must be the published one, or nothing is added.
         $SUDO install -m 0755 -d /etc/apt/keyrings
         $SUDO curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg \
             -o /etc/apt/keyrings/docker.asc
+        if ! docker_apt_key_is_dockers /etc/apt/keyrings/docker.asc; then
+            $SUDO rm -f /etc/apt/keyrings/docker.asc
+            echo "ERROR: the Docker apt key fetched from download.docker.com does not have"
+            echo "       the published fingerprint $DOCKER_APT_KEY_FPR; not adding the repository."
+            exit 1
+        fi
         $SUDO chmod a+r /etc/apt/keyrings/docker.asc
 
         echo \
@@ -146,11 +193,19 @@ else
         $SUDO apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-ce-rootless-extras
     fi
 
-    # Disable the system-wide (rootful) Docker daemon — we use rootless instead
-    $SUDO systemctl disable --now docker.service docker.socket 2>/dev/null || true
-    # Remove the socket file if it lingers after stopping (the rootless setup
-    # tool refuses to proceed while /var/run/docker.sock exists)
-    $SUDO rm -f /var/run/docker.sock
+    # Disable the system-wide (rootful) Docker daemon — we use rootless
+    # instead — unless it is running someone's containers (issue #388; the
+    # .deb's postinst makes the same check). Then it stays, and the
+    # rootless setup below runs beside it (--force).
+    if $SUDO docker ps -q 2>/dev/null | grep -q .; then
+        echo "  The system Docker daemon runs containers: leaving it enabled."
+        echo "  OnionPress uses its own rootless Docker beside it."
+    else
+        $SUDO systemctl disable --now docker.service docker.socket 2>/dev/null || true
+        # Remove the socket file if it lingers after stopping (the rootless setup
+        # tool refuses to proceed while /var/run/docker.sock exists)
+        $SUDO rm -f /var/run/docker.sock
+    fi
 
     # Enable lingering so the user's systemd services run at boot without login
     $SUDO loginctl enable-linger "$REAL_USER"
@@ -286,10 +341,15 @@ if [ -f "$SCRIPT_DIR/onionpress" ] && [ -d "$SCRIPT_DIR/../src/onionpress" ]; th
     REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     echo "  Source: local repo at $REPO_DIR"
 else
-    # Download from GitHub
-    echo "  Downloading from GitHub..."
+    # Download the latest release from GitHub (never HEAD of main).
+    if ! INSTALL_REF=$(release_ref_to_install); then
+        echo "ERROR: could not read the latest release tag from $REPO_URL."
+        echo "       Check the network, or set ONIONPRESS_INSTALL_REF=<tag> and rerun."
+        exit 1
+    fi
+    echo "  Downloading $INSTALL_REF from GitHub..."
     CLONE_DIR=$(mktemp -d)
-    git clone --depth 1 "$REPO_URL" "$CLONE_DIR/onionpress"
+    git clone --depth 1 --branch "$INSTALL_REF" "$REPO_URL" "$CLONE_DIR/onionpress"
     REPO_DIR="$CLONE_DIR/onionpress"
 fi
 
@@ -407,6 +467,9 @@ ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.oni
 # this machine only.
 #ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
+    # 0600 (issue #397): it may hold CLOUDFLARE_TUNNEL_TOKEN; the chown
+    # below makes it the real user's.
+    chmod 600 "$DATA_DIR/config"
     echo "  Default config created"
 fi
 
@@ -728,3 +791,7 @@ if { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
         run_as_user "$INSTALL_DIR/onionpress" dashboard >/dev/null 2>&1 &
     fi
 fi
+
+}
+
+main "$@"

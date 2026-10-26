@@ -574,7 +574,8 @@ class OnionPressCLI:
 
     def __init__(self, data_dir: str = None, app_bundle: str = None):
         self.paths = resolve_paths(data_dir=data_dir, app_bundle=app_bundle)
-        os.makedirs(self.paths.data_dir, exist_ok=True)
+        # This user's alone (issue #397): config, secrets and the key.
+        os.makedirs(self.paths.data_dir, mode=0o700, exist_ok=True)
         self.log = _make_log_func(self.paths.log_file)
 
         # Ensure config exists
@@ -684,15 +685,6 @@ class OnionPressCLI:
         }
         print(json.dumps(output, indent=2))
         return 0
-
-    def cmd_address(self) -> int:
-        """Print the onion address."""
-        addr = self.containers.get_onion_address()
-        if addr:
-            print(addr)
-            return 0
-        print("No onion address available", file=sys.stderr)
-        return 1
 
     def cmd_logs(self) -> int:
         """Follow container logs."""
@@ -1897,8 +1889,56 @@ def main(argv: list[str] = None) -> int:
     sub.add_parser("stop", help="Stop OnionPress")
     sub.add_parser("restart", help="Restart OnionPress")
     sub.add_parser("status", help="Show container status (JSON)")
-    sub.add_parser("address", help="Print onion address")
-    sub.add_parser("logs", help="Follow container logs")
+    p_version = sub.add_parser("version", help="Print the OnionPress version (About)")
+    p_version.add_argument("--json", action="store_true", help="As JSON (version, platform)")
+    p_address = sub.add_parser(
+        "address",
+        help="Print the onion address (--url: the site's shareable URL with its "
+             "/<onionname>/ path; --copy: put that URL on the clipboard)")
+    p_address.add_argument("--url", action="store_true",
+                           help="The shareable URL, as the menu's Copy Onion Address")
+    p_address.add_argument("--copy", action="store_true",
+                           help="Copy the URL to the clipboard (pbcopy, wl-copy, xclip or xsel)")
+    p_logs = sub.add_parser(
+        "logs",
+        help="Follow the container logs; with --app, --launcher or --web print "
+             "the end of that OnionPress log instead (-n N lines, -f to follow)")
+    which = p_logs.add_mutually_exclusive_group()
+    which.add_argument("--app", dest="which", action="store_const", const="app",
+                       help="The app's log (the Mac daemon's loops; on Linux onionpress.log)")
+    which.add_argument("--launcher", dest="which", action="store_const", const="launcher",
+                       help="The launcher's onionpress.log (every start's steps and errors)")
+    which.add_argument("--web", dest="which", action="store_const", const="web",
+                       help="The web usage log: the site's visits, the app's own probes left out")
+    p_logs.add_argument("-n", "--lines", type=int, default=200, metavar="N",
+                        help="How many lines from the end (default 200; 0: all)")
+    p_logs.add_argument("-f", "--follow", action="store_true",
+                        help="Keep printing as the log grows")
+    p_reach = sub.add_parser(
+        "check-reachability",
+        help="Test the site through the independent onionheaven Tor client, as the "
+             "Settings page's Test Reachability does (exit 0 reachable, 1 not, 2 no address)")
+    p_reach.add_argument("--json", action="store_true",
+                         help="The result as JSON (reachable, http_code, address, tested_at)")
+    p_open = sub.add_parser(
+        "open",
+        help="Open the site in a browser, logged in as the owner: site (local), "
+             "admin (wp-admin), settings (the OnionPress Settings page) or onion "
+             "(the .onion address, in Tor Browser where it is installed)")
+    p_open.add_argument("what", choices=("site", "admin", "settings", "onion"))
+    p_onionname = sub.add_parser(
+        "onionname",
+        help="The site's onionname (its OnionHome name): show | set NAME [--json]")
+    onionname_sub = p_onionname.add_subparsers(dest="onionname_command")
+    p_on_show = onionname_sub.add_parser("show", help="The recorded name, address and "
+                                                      "whether it is registered")
+    p_on_show.add_argument("--json", action="store_true", help="As JSON")
+    p_on_set = onionname_sub.add_parser(
+        "set", help="Pick (another) onionname: checked, registered with OnionHome "
+                    "while the site is running, recorded in the config; a taken "
+                    "name is refused with suggestions (exit 2)")
+    p_on_set.add_argument("name", metavar="NAME")
+    p_on_set.add_argument("--json", action="store_true", help="As JSON")
 
     p_get = sub.add_parser(
         "get",
@@ -2320,11 +2360,13 @@ def main(argv: list[str] = None) -> int:
 
     p_oh = sub.add_parser(
         "onionheaven",
-        help="Keep the site reachable through OnionHeaven: enable | disable | status [--json]")
+        help="Keep the site reachable through OnionHeaven: enable | disable | "
+             "status [--json] | overview [--json]")
     p_oh.add_argument("onionheaven_command", nargs="?", default="status",
-                      metavar="{enable,disable,status}")
+                      metavar="{enable,disable,status,overview}")
     p_oh.add_argument("--json", action="store_true",
-                      help="status as JSON (enabled, choice, hub, registered, may_hold_key)")
+                      help="status as JSON (enabled, choice, hub, registered, may_hold_key); "
+                           "overview as JSON (client, hub, known_hosts)")
 
     p_rconf = sub.add_parser(
         "restore-config",
@@ -2413,6 +2455,44 @@ def main(argv: list[str] = None) -> int:
     from .hub_backup import RECOVERY_KEY_ENV
     hub_recovery_key = os.environ.pop(RECOVERY_KEY_ENV, "")
     data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+
+    if args.command == "version":
+        from . import app_commands
+        return app_commands.version_command(detect_os().value, json_output=args.json,
+                                            out=sys.stdout)
+
+    if (args.command in ("address", "check-reachability", "open", "onionname")
+            or (args.command == "logs" and args.which)):
+        # The app's functions as subcommands (issue #382, onionpress.app_commands):
+        # the paths and a Docker wrapper, no OnionPressCLI setup (config and
+        # secrets creation, port probing).
+        from . import app_commands
+        paths = resolve_paths(data_dir=args.data_dir)
+        log = _file_log_func(paths.log_file)
+        docker = Docker(paths, log_func=log)
+        os_name = detect_os().value
+        if args.command == "address":
+            return app_commands.address_command(paths, docker, os_name, url=args.url,
+                                                copy=args.copy, out=sys.stdout)
+        if args.command == "check-reachability":
+            return app_commands.check_reachability_command(paths, docker, json_output=args.json,
+                                                           out=sys.stdout)
+        if args.command == "logs":
+            return app_commands.logs_command(paths, docker, os_name, args.which,
+                                             lines=args.lines, follow=args.follow,
+                                             out=sys.stdout)
+        if args.command == "open":
+            return app_commands.open_command(args.what, paths, docker, out=sys.stdout)
+        if not args.onionname_command:
+            p_onionname.print_help()
+            return 1
+        if args.onionname_command == "show":
+            return app_commands.onionname_show(paths, json_output=args.json, out=sys.stdout)
+        # The registrar signs with the served key (key_manager.extract_keys:
+        # plain `docker`), so the docker environment _hub_context sets up.
+        _hub_context(args.data_dir, log)
+        return app_commands.onionname_set(args.name, paths, docker, os_name, log,
+                                          json_output=args.json, out=sys.stdout)
 
     if args.command == "config":
         # Only the config file, its change marker and the login item /
@@ -2767,7 +2847,6 @@ def main(argv: list[str] = None) -> int:
         "stop": cli.cmd_stop,
         "restart": cli.cmd_restart,
         "status": cli.cmd_status,
-        "address": cli.cmd_address,
         "logs": cli.cmd_logs,
     }
 

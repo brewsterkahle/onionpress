@@ -946,9 +946,15 @@ def _record_registered(hub_addr, content_addr):
                         "address this install had before; this install no "
                         "longer has that key", previous[1], previous[0])
     _forget_left_on_hub(state, content_addr, hub_addr)
+    now = datetime.now(timezone.utc).isoformat()
+    if previous != (content_addr, hub_addr) or not state.get("registered_at"):
+        # When this registration began; kept across the beats that
+        # follow (the OnionHeaven screen shows it).
+        state["registered_at"] = now
     state.update({
         "registered": True,
-        "last_attempt": datetime.now(timezone.utc).isoformat(),
+        "last_attempt": now,
+        "last_heartbeat_at": now,
         "onionheaven_address": hub_addr,
         "content_address": content_addr,
     })
