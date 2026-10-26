@@ -89,6 +89,51 @@ LIMA_VERSION="2.0.3"
 DOCKER_VERSION="27.5.1"
 DOCKER_COMPOSE_VERSION="v2.40.2"  # >=2.40.2 closes CVE-2025-62725 (HIGH)
 MKP224O_VERSION="v1.7.0"
+# The commit the tag names (git rev-parse v1.7.0); a clone whose HEAD is
+# another commit is refused, and there is no fallback to master.
+MKP224O_COMMIT="3e7aaf8a3a9cbbed56872afeef88c7a9d538d51a"
+# libsodium, statically linked into mkp224o's x86_64 half: pinned here,
+# not read off the build host's Homebrew.
+SODIUM_VERSION="1.0.20"
+
+# ─── What every download must hash to (issue #387) ──────────────────────
+# fetch_checked refuses a file whose sha256 is not the one here, and the
+# binary cache's keys carry these too, so a cache made from other bytes is
+# a miss. Bumping a version means putting its new sums here: Colima's are
+# its release's *.sha256sum files, Lima's its SHA256SUMS, Compose's its
+# checksums.txt; download.docker.com and libsodium publish none for the
+# tarballs (libsodium signs with minisign), so those two are hashed from a
+# download: `shasum -a 256 <file>`. Recorded 2026-10-26.
+COLIMA_SHA256_X86_64="791330c62c60389f70e5e1c33a56c35502a9e36e544a418daea0273e539acbf4"
+COLIMA_SHA256_ARM64="c266fcb272b39221ef6152d2093bb02a1ebadc26042233ad359e1ae52d5d5922"
+LIMA_SHA256_X86_64="0806bcb83a08411e9d878b43b2c4203f1556fe14f9f8ba1e5f0d5d9a3c2c0bd8"
+LIMA_SHA256_ARM64="22aee997df59e4fd448041b2d1214e48bd8eaf705d2d48a4307d65c1b179dc97"
+DOCKER_SHA256_X86_64="425560a99d1231433ae4b7149a4d1235461cb28783af32481741a367bd1a9f6a"
+DOCKER_SHA256_ARM64="b0366bf473b9b97b0c5556c4c2fd6d92ea63e4848af2f869c93a98d2e2e1d3fa"
+COMPOSE_SHA256_X86_64="f6b1a46b31647077a1b707f223ec80d21015d948c821338fec3477418b3d6f6c"
+COMPOSE_SHA256_ARM64="cc3a8774fdadf65b53a12ef54b3e0e63f2267e1e843ebfa46c4976fc4f80b46b"
+SODIUM_SHA256="ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19"
+
+# fetch_checked <sha256> <dest> <url> [curl options] — download, then
+# keep the file only if it hashes to <sha256>; anything else ends the
+# build with both hashes said. Every third-party download goes through it.
+fetch_checked() {
+    local want="$1" dest="$2" url="$3" got
+    shift 3
+    rm -f "$dest"
+    if ! curl -fL "$@" -o "$dest" "$url"; then
+        echo "ERROR: could not download $url" >&2
+        exit 1
+    fi
+    got=$(shasum -a 256 "$dest" | cut -d' ' -f1)
+    if [ "$got" != "$want" ]; then
+        rm -f "$dest"
+        echo "ERROR: $url hashes to $got, not the pinned $want" >&2
+        echo "       (build/build-dmg-simple.sh); not using it." >&2
+        exit 1
+    fi
+    echo "  ✓ $(basename "$dest") sha256 ${got:0:12}…"
+}
 
 # GitHub anonymously throttles release-asset downloads to ~30 KB/s, which
 # turns the bundling step below into a 20+ minute affair. Authenticated
@@ -198,20 +243,21 @@ notice_section() {
 }
 
 # Colima universal binary (download both arches, lipo, cache result)
-if cache_get "colima-${COLIMA_VERSION}-universal" "$TEMP_BIN_DIR/colima"; then
+COLIMA_CACHE_KEY="colima-${COLIMA_VERSION}-${COLIMA_SHA256_ARM64:0:12}${COLIMA_SHA256_X86_64:0:12}-universal"
+if cache_get "$COLIMA_CACHE_KEY" "$TEMP_BIN_DIR/colima"; then
     echo "  Colima ${COLIMA_VERSION}: cache hit"
 else
     echo "  Downloading Colima ${COLIMA_VERSION}..."
-    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/colima-darwin-amd64" \
-      "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-x86_64"
-    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/colima-darwin-arm64" \
-      "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-arm64"
+    fetch_checked "$COLIMA_SHA256_X86_64" "$TEMP_BIN_DIR/colima-darwin-amd64" \
+      "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-x86_64" "${GH_DL[@]}"
+    fetch_checked "$COLIMA_SHA256_ARM64" "$TEMP_BIN_DIR/colima-darwin-arm64" \
+      "https://github.com/abiosoft/colima/releases/download/$COLIMA_VERSION/colima-Darwin-arm64" "${GH_DL[@]}"
     chmod +x "$TEMP_BIN_DIR"/colima-*
     lipo -create \
       "$TEMP_BIN_DIR/colima-darwin-arm64" \
       "$TEMP_BIN_DIR/colima-darwin-amd64" \
       -output "$TEMP_BIN_DIR/colima"
-    cache_put "colima-${COLIMA_VERSION}-universal" "$TEMP_BIN_DIR/colima"
+    cache_put "$COLIMA_CACHE_KEY" "$TEMP_BIN_DIR/colima"
 fi
 license_file colima "$COLIMA_VERSION" LICENSE "" \
   "https://raw.githubusercontent.com/abiosoft/colima/${COLIMA_VERSION}/LICENSE"
@@ -221,15 +267,16 @@ license_file colima "$COLIMA_VERSION" LICENSE "" \
 # arm64 extracted dirs). Cache them together as a single .tar.gz so a
 # single cache hit gives us everything.
 mkdir -p "$TEMP_BIN_DIR/lima-amd64" "$TEMP_BIN_DIR/lima-arm64"
-if cache_get "lima-${LIMA_VERSION}-bundle.tar.gz" "$TEMP_BIN_DIR/lima-bundle.tar.gz"; then
+LIMA_CACHE_KEY="lima-${LIMA_VERSION}-${LIMA_SHA256_ARM64:0:12}${LIMA_SHA256_X86_64:0:12}-bundle.tar.gz"
+if cache_get "$LIMA_CACHE_KEY" "$TEMP_BIN_DIR/lima-bundle.tar.gz"; then
     echo "  Lima ${LIMA_VERSION}: cache hit"
     tar xzf "$TEMP_BIN_DIR/lima-bundle.tar.gz" -C "$TEMP_BIN_DIR"
 else
     echo "  Downloading Lima ${LIMA_VERSION}..."
-    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/lima-amd64.tar.gz" \
-      "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-x86_64.tar.gz"
-    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/lima-arm64.tar.gz" \
-      "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-arm64.tar.gz"
+    fetch_checked "$LIMA_SHA256_X86_64" "$TEMP_BIN_DIR/lima-amd64.tar.gz" \
+      "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-x86_64.tar.gz" "${GH_DL[@]}"
+    fetch_checked "$LIMA_SHA256_ARM64" "$TEMP_BIN_DIR/lima-arm64.tar.gz" \
+      "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-arm64.tar.gz" "${GH_DL[@]}"
     tar xzf "$TEMP_BIN_DIR/lima-amd64.tar.gz" -C "$TEMP_BIN_DIR/lima-amd64"
     tar xzf "$TEMP_BIN_DIR/lima-arm64.tar.gz" -C "$TEMP_BIN_DIR/lima-arm64"
     lipo -create \
@@ -243,7 +290,7 @@ else
         lima-amd64/share/lima \
         lima-arm64/share/lima \
         lima-arm64/share/doc/lima/LICENSE)
-    cache_put "lima-${LIMA_VERSION}-bundle.tar.gz" "$TEMP_BIN_DIR/lima-bundle.tar.gz"
+    cache_put "$LIMA_CACHE_KEY" "$TEMP_BIN_DIR/lima-bundle.tar.gz"
 fi
 license_file lima "$LIMA_VERSION" LICENSE "$TEMP_BIN_DIR/lima-arm64/share/doc/lima/LICENSE" \
   "https://raw.githubusercontent.com/lima-vm/lima/v${LIMA_VERSION}/LICENSE"
@@ -251,13 +298,14 @@ license_file lima "$LIMA_VERSION" NOTICE "" \
   "https://raw.githubusercontent.com/lima-vm/lima/v${LIMA_VERSION}/NOTICE"
 
 # Docker CLI universal binary
-if cache_get "docker-${DOCKER_VERSION}-universal" "$TEMP_BIN_DIR/docker"; then
+DOCKER_CACHE_KEY="docker-${DOCKER_VERSION}-${DOCKER_SHA256_ARM64:0:12}${DOCKER_SHA256_X86_64:0:12}-universal"
+if cache_get "$DOCKER_CACHE_KEY" "$TEMP_BIN_DIR/docker"; then
     echo "  Docker ${DOCKER_VERSION}: cache hit"
 else
     echo "  Downloading Docker CLI ${DOCKER_VERSION}..."
-    curl -L -o "$TEMP_BIN_DIR/docker-amd64.tgz" \
+    fetch_checked "$DOCKER_SHA256_X86_64" "$TEMP_BIN_DIR/docker-amd64.tgz" \
       "https://download.docker.com/mac/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz"
-    curl -L -o "$TEMP_BIN_DIR/docker-arm64.tgz" \
+    fetch_checked "$DOCKER_SHA256_ARM64" "$TEMP_BIN_DIR/docker-arm64.tgz" \
       "https://download.docker.com/mac/static/stable/aarch64/docker-${DOCKER_VERSION}.tgz"
     mkdir -p "$TEMP_BIN_DIR/docker-amd64" "$TEMP_BIN_DIR/docker-arm64"
     tar xzf "$TEMP_BIN_DIR/docker-amd64.tgz" -C "$TEMP_BIN_DIR/docker-amd64"
@@ -267,7 +315,7 @@ else
       "$TEMP_BIN_DIR/docker-amd64/docker/docker" \
       -output "$TEMP_BIN_DIR/docker"
     rm -rf "$TEMP_BIN_DIR/docker-arm64" "$TEMP_BIN_DIR/docker-amd64"
-    cache_put "docker-${DOCKER_VERSION}-universal" "$TEMP_BIN_DIR/docker"
+    cache_put "$DOCKER_CACHE_KEY" "$TEMP_BIN_DIR/docker"
 fi
 license_file docker-cli "$DOCKER_VERSION" LICENSE "" \
   "https://raw.githubusercontent.com/docker/cli/v${DOCKER_VERSION}/LICENSE"
@@ -275,20 +323,21 @@ license_file docker-cli "$DOCKER_VERSION" NOTICE "" \
   "https://raw.githubusercontent.com/docker/cli/v${DOCKER_VERSION}/NOTICE"
 
 # Docker Compose universal binary
-if cache_get "docker-compose-${DOCKER_COMPOSE_VERSION}-universal" "$TEMP_BIN_DIR/docker-compose"; then
+COMPOSE_CACHE_KEY="docker-compose-${DOCKER_COMPOSE_VERSION}-${COMPOSE_SHA256_ARM64:0:12}${COMPOSE_SHA256_X86_64:0:12}-universal"
+if cache_get "$COMPOSE_CACHE_KEY" "$TEMP_BIN_DIR/docker-compose"; then
     echo "  Docker Compose ${DOCKER_COMPOSE_VERSION}: cache hit"
 else
     echo "  Downloading Docker Compose ${DOCKER_COMPOSE_VERSION}..."
-    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/docker-compose-arm64" \
-      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-aarch64"
-    curl -L "${GH_DL[@]}" -o "$TEMP_BIN_DIR/docker-compose-x86_64" \
-      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64"
+    fetch_checked "$COMPOSE_SHA256_ARM64" "$TEMP_BIN_DIR/docker-compose-arm64" \
+      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-aarch64" "${GH_DL[@]}"
+    fetch_checked "$COMPOSE_SHA256_X86_64" "$TEMP_BIN_DIR/docker-compose-x86_64" \
+      "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-x86_64" "${GH_DL[@]}"
     chmod +x "$TEMP_BIN_DIR"/docker-compose-*
     lipo -create \
       "$TEMP_BIN_DIR/docker-compose-arm64" \
       "$TEMP_BIN_DIR/docker-compose-x86_64" \
       -output "$TEMP_BIN_DIR/docker-compose"
-    cache_put "docker-compose-${DOCKER_COMPOSE_VERSION}-universal" "$TEMP_BIN_DIR/docker-compose"
+    cache_put "$COMPOSE_CACHE_KEY" "$TEMP_BIN_DIR/docker-compose"
 fi
 license_file docker-compose "$DOCKER_COMPOSE_VERSION" LICENSE "" \
   "https://raw.githubusercontent.com/docker/compose/${DOCKER_COMPOSE_VERSION}/LICENSE"
@@ -322,7 +371,7 @@ license_file docker-compose "$DOCKER_COMPOSE_VERSION" NOTICE "" \
 # The cache key carries these flags so an existing cache entry built without
 # them is not silently reused.
 MKP_OPT="-O3 -fomit-frame-pointer"
-MKP_CACHE_KEY="mkp224o-${MKP224O_VERSION}-O3-universal"
+MKP_CACHE_KEY="mkp224o-${MKP224O_VERSION}-${MKP224O_COMMIT:0:12}-libsodium-${SODIUM_SHA256:0:12}-O3-universal"
 if cache_get "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"; then
     echo "  mkp224o ${MKP224O_VERSION}: cache hit"
     # The libsodium version it was built against (cached with it below;
@@ -330,15 +379,26 @@ if cache_get "$MKP_CACHE_KEY" "$TEMP_BIN_DIR/mkp224o"; then
     cache_get "$MKP_CACHE_KEY.libsodium-version" "$TEMP_BIN_DIR/libsodium-version" || true
 elif command -v git >/dev/null 2>&1; then
     echo "  Building mkp224o ${MKP224O_VERSION} for custom onion address prefixes..."
+    # The sources first, outside the subshell below: what goes into the
+    # bundle is the pinned commit and the pinned tarball or nothing, and
+    # a wrong one ends the build (the subshell only isolates build
+    # failures). No fallback to a clone of master: a tag's commit is what
+    # was reviewed, master is whatever is there today.
+    rm -rf "$TEMP_BIN_DIR/mkp224o-src"
+    git clone --branch "${MKP224O_VERSION}" --depth 1 \
+        https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src"
+    _mkp_head=$(git -C "$TEMP_BIN_DIR/mkp224o-src" rev-parse HEAD)
+    if [ "$_mkp_head" != "$MKP224O_COMMIT" ]; then
+        echo "ERROR: mkp224o ${MKP224O_VERSION} is commit $_mkp_head, not the pinned $MKP224O_COMMIT" >&2
+        exit 1
+    fi
+    echo "  ✓ mkp224o ${MKP224O_VERSION} is commit ${_mkp_head:0:12}"
+    fetch_checked "$SODIUM_SHA256" "$TEMP_BIN_DIR/libsodium.tar.gz" \
+      "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz"
     # Run the entire mkp224o build in a subshell so any failure is isolated
     # and does not abort the DMG build via set -e in the outer shell.
     (
     set -e
-    # Clone mkp224o at the pinned tag — shallow clone, saves most of the
-    # git fetch cost relative to a full clone of the master history.
-    git clone --branch "${MKP224O_VERSION}" --depth 1 \
-        https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null || \
-        git clone https://github.com/cathugger/mkp224o.git "$TEMP_BIN_DIR/mkp224o-src" 2>/dev/null
 
     # Check for required dependencies
     if command -v brew >/dev/null 2>&1; then
@@ -353,12 +413,9 @@ elif command -v git >/dev/null 2>&1; then
     echo "  Building libsodium for x86_64 cross-compilation..."
     SODIUM_X86_DIR="$TEMP_BIN_DIR/libsodium-x86_64"
     SODIUM_X86_SRC="$TEMP_BIN_DIR/libsodium-src"
-    SODIUM_VERSION=$(pkg-config --modversion libsodium 2>/dev/null || echo "1.0.20")
+    # The pinned version, fetched and checked above (not the build host's
+    # Homebrew version, which floated with the host).
     echo "$SODIUM_VERSION" > "$TEMP_BIN_DIR/libsodium-version"
-    curl -L -o "$TEMP_BIN_DIR/libsodium.tar.gz" \
-      "https://download.libsodium.org/libsodium/releases/libsodium-${SODIUM_VERSION}.tar.gz" 2>/dev/null || \
-    curl -L -o "$TEMP_BIN_DIR/libsodium.tar.gz" \
-      "https://download.libsodium.org/libsodium/releases/libsodium-1.0.20-stable.tar.gz" 2>/dev/null
     mkdir -p "$SODIUM_X86_SRC"
     tar xzf "$TEMP_BIN_DIR/libsodium.tar.gz" -C "$SODIUM_X86_SRC" --strip-components=1
     cd "$SODIUM_X86_SRC"
@@ -445,7 +502,7 @@ fi
 # build uses). The texts come from the clone and the tarball when this build
 # fetched them, else from the repositories at those versions' tags.
 SODIUM_VERSION=$(cat "$TEMP_BIN_DIR/libsodium-version" 2>/dev/null \
-    || pkg-config --modversion libsodium 2>/dev/null || echo "1.0.20")
+    || echo "${SODIUM_VERSION:-1.0.20}")
 license_file mkp224o "$MKP224O_VERSION" COPYING.txt "$TEMP_BIN_DIR/mkp224o-src/COPYING.txt" \
   "https://raw.githubusercontent.com/cathugger/mkp224o/${MKP224O_VERSION}/COPYING.txt"
 license_file libsodium "$SODIUM_VERSION" LICENSE "$TEMP_BIN_DIR/libsodium-src/LICENSE" \
@@ -639,9 +696,12 @@ else
     echo "  src/onionpress/ uses PEP 604 \`X | None\` syntax." >&2
     exit 1
 fi
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install --upgrade pip
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt"
+# Every Python package by pinned version and hash (issue #387): the two
+# locks under build/ are generated from src/requirements.txt and
+# build/build-requirements-macos.in by build/refresh-python-locks.sh,
+# and pip refuses anything that is not in them or does not hash.
+"$MENUBAR_BUILD_DIR/venv/bin/python3" -m pip install --require-hashes -r "$BUILD_DIR/build-requirements-macos.lock"
+"$MENUBAR_BUILD_DIR/venv/bin/pip" install --require-hashes -r "$BUILD_DIR/requirements-macos.lock"
 # PyNaCl (backup encryption): rebuild it from source with an optimised
 # libsodium (PyPI's macOS wheels carry an unoptimised one), and give cffi's
 # _cffi_backend, which it loads and which ships per-arch wheels only, both
@@ -664,8 +724,10 @@ if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
     2>&1; then
     # py2app uses distutils.spawn(dry_run=...) which setuptools 81+ removed.
     # Retry with older setuptools until py2app ships a fix.
-    echo "py2app failed — retrying with setuptools<81..."
-    "$MENUBAR_BUILD_DIR/venv/bin/pip" install 'setuptools<81'
+    # The build lock pins setuptools below 81 already; this retry is
+    # for a venv that somehow lost that pin, from the same lock.
+    echo "py2app failed — retrying with the locked setuptools..."
+    "$MENUBAR_BUILD_DIR/venv/bin/pip" install --require-hashes -r "$BUILD_DIR/build-requirements-macos.lock"
     rm -rf "$MENUBAR_BUILD_DIR/build" "$MENUBAR_BUILD_DIR/dist"
     "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
         --dist-dir "$MENUBAR_BUILD_DIR/dist" \
@@ -829,7 +891,8 @@ else
     mkdir -p "$DMG_BG_DIR"
     LOGO_PATH="$PROJECT_DIR/assets/branding/logo.png"
     STORY_PATH="$PROJECT_DIR/assets/branding/story.png"
-    "$MENUBAR_BUILD_DIR/venv/bin/pip" install Pillow >/dev/null 2>&1
+    # Pillow is in the build lock (pinned by hash, issue #387).
+    "$MENUBAR_BUILD_DIR/venv/bin/pip" install --require-hashes -r "$BUILD_DIR/build-requirements-macos.lock" >/dev/null 2>&1
     "$MENUBAR_BUILD_DIR/venv/bin/python3" "$BUILD_DIR/create-dmg-background.py" \
         "$DMG_BG_DIR/dmg-background.png" \
         --logo "$LOGO_PATH" \

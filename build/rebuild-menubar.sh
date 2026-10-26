@@ -26,9 +26,9 @@ else
     echo "WARNING: universal2 Python not found, using system python3 (app may be arm64-only)"
     python3 -m venv "$MENUBAR_BUILD_DIR/venv"
 fi
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install --upgrade pip -q
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install py2app -q
-"$MENUBAR_BUILD_DIR/venv/bin/pip" install -r "$SCRIPTS_DIR/requirements.txt" -q
+# Pinned by version and hash (issue #387): the locks build/refresh-python-locks.sh writes.
+"$MENUBAR_BUILD_DIR/venv/bin/python3" -m pip install -q --require-hashes -r "$PROJECT_DIR/build/build-requirements-macos.lock"
+"$MENUBAR_BUILD_DIR/venv/bin/pip" install -q --require-hashes -r "$PROJECT_DIR/build/requirements-macos.lock"
 # PyNaCl (backup encryption) from source, optimised; cffi made universal2.
 "$PROJECT_DIR/build/py2app-extensions.sh" prepare "$MENUBAR_BUILD_DIR/venv"
 
@@ -42,8 +42,8 @@ if ! "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
     --dist-dir "$MENUBAR_BUILD_DIR/dist" \
     --bdist-base "$MENUBAR_BUILD_DIR/build" \
     2>&1 | tail -5; then
-    echo "py2app failed — retrying with setuptools<81..."
-    "$MENUBAR_BUILD_DIR/venv/bin/pip" install 'setuptools<81' -q
+    echo "py2app failed — retrying with the locked setuptools..."
+    "$MENUBAR_BUILD_DIR/venv/bin/pip" install -q --require-hashes -r "$PROJECT_DIR/build/build-requirements-macos.lock"
     rm -rf "$MENUBAR_BUILD_DIR/build" "$MENUBAR_BUILD_DIR/dist"
     "$MENUBAR_BUILD_DIR/venv/bin/python3" setup.py py2app \
         --dist-dir "$MENUBAR_BUILD_DIR/dist" \

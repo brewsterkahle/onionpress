@@ -72,6 +72,26 @@
   apt-get returns (serial, never beside it). Before, the old units, daemon
   and tray kept running the old code until a reboot.
   `tests/test_deb_upgrade_restarts.py`.
+- **Everything the Mac bundle is built from is pinned by hash** (issue
+  #387, branch `sec-387-build-hashes`, not yet run on a Mac): every
+  third-party download in `build-dmg-simple.sh` goes through
+  `fetch_checked <sha256> <dest> <url>` against the `*_SHA256_*`
+  constants at the top (Colima's from its release's `*.sha256sum`
+  files, Lima's from its `SHA256SUMS`, Compose's from `checksums.txt`;
+  the Docker CLI tarballs and the libsodium tarball hashed from a
+  download, since neither publishes sums), and the binary cache's keys
+  carry those hashes, so a cache made from other bytes is a miss.
+  mkp224o is cloned at its tag and held to `MKP224O_COMMIT` with no
+  fallback to master; libsodium is `SODIUM_VERSION` + `SODIUM_SHA256`,
+  fetched outside the mkp224o subshell so a bad tarball ends the build.
+  The Python side installs with `--require-hashes` from
+  `build/requirements-macos.lock` (from `src/requirements.txt`) and
+  `build/build-requirements-macos.lock` (pip, py2app, setuptools<81,
+  wheel, Pillow; from `build/build-requirements-macos.in`), both written
+  by `build/refresh-python-locks.sh` (uv); `py2app-extensions.sh` takes
+  PyNaCl's sdist and cffi's per-arch wheels from the runtime lock
+  (`lock_block`). Bumping a version means putting its new hash in the
+  script and re-running the refresh. `tests/test_dmg_build_pins.py`.
 - **A release's Mac app must be universal** (issue #326): 2.5.2 and 2.5.3 shipped an Apple-Silicon-only MenubarApp because `build-dmg-simple.sh` fell back to uv's single-arch Python without python.org's universal2 3.14. `release.sh` sets `ONIONPRESS_RELEASE_BUILD=1`, which makes the build refuse that fallback, then fails if any Mach-O in `OnionPress.app` lacks arm64 or x86_64 (`lipo -archs`). The `.deb`'s files are root's (`dpkg-deb --root-owner-group`; the manual path's tar too). CI runs on pinned `ubuntu-24.04` and Node 24 action majors. `tests/test_build_release_hygiene.py`.
 - **CI builds and attests the `.deb` on every published release**
   (`.github/workflows/linux-package.yml`): `build/build-linux.sh` with the
