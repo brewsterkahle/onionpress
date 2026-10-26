@@ -891,6 +891,18 @@
   `onionpress-uploads.ini` (needs an image publish); the form checks the
   limits before sending and posts `creations_upload_count`, and
   `handle_upload` reports refused, failed, unmoved and dropped files.
+- **What the folder serves is sandboxed** (issue #399): both paths, the
+  page's `serve_file` and the image's `onionpress-creations.conf` for
+  the raw `/wp-content/creations/...` path, send
+  `X-Content-Type-Options: nosniff`, and `Content-Security-Policy:
+  sandbox` for a document a browser could run script from
+  (`OnionPress_Creations::SANDBOXED_EXTENSIONS`: HTML, XHTML, SHTML,
+  MHTML, SVG, XML, XSL, by extension or by type; the conf's `FilesMatch`
+  lists the same extensions, test-tied). A saved web page or an SVG
+  dropped into My Creations opened at localhost:8080 ran script with
+  the owner's cookies. The sandbox has no `allow-scripts`: a published
+  page keeps its markup and loses its script. Needs an image publish for
+  the raw path. `tests/test_creations_sandboxed_serving.py`.
 - The Mac thumbnail generator starts at launch; `onionpress.thumbnails`
   decides what to make and removes thumbnails of files that are gone
   (never when part of the folder could not be read).
