@@ -1387,6 +1387,27 @@
   on the hub follow the procedure there (count, tar the old dir, stop
   fully, update, check the log line and the counts).
 
+## Registration Caps (issue #391, branch `sec-391-registration-caps`, not merged)
+- Minting a key is instant, so web-server.py bounds what a free
+  registration can take: `registration_room` (after the signature, before
+  the key is looked at) refuses a new (content, healthcheck) pair for an
+  address at `MAX_ROWS_PER_ADDRESS` (4) with 429 and a new address on a
+  hub at `MAX_REGISTRANTS` (5000) with 503 "hub full"; an existing pair
+  always has room, so the registered keep heartbeating. `analytics_room`
+  refuses a new analytics pair past `ANALYTICS_MAX_PAIRS_PER_ADDRESS` (4)
+  per address or `ANALYTICS_MAX_INSTANCES` (10000) in all (manifest and
+  upload, before the directory is made). `onionnames.register_name`
+  refuses the `MAX_NAMES_PER_ADDRESS` (10) + 1th name of an address as
+  `too_many` (429 from `local_register`); the migration script goes
+  through `validate_name` only, so a legacy registry is not cut. Tests
+  that build big registries lift the cap (`MAX_NAMES_PER_ADDRESS`
+  patched). Env: `ONIONHEAVEN_MAX_ROWS_PER_ADDRESS`,
+  `ONIONHEAVEN_MAX_REGISTRANTS`, `ONIONHOME_ANALYTICS_MAX_PAIRS_PER_ADDRESS`,
+  `ONIONHOME_ANALYTICS_MAX_INSTANCES`, `ONIONHOME_MAX_NAMES_PER_ADDRESS`.
+  The numbers, a per-address `/online` interval and whether a row must
+  pass an audit before it earns a worker slot are the issue's decision.
+  `tests/test_hub_registration_caps.py`.
+
 ## Registry Names Reach Docker Only as Workers'
 - The registry is data anything mounting the hub volume can write as root
   (onionpress-tor faces Tor; every takeover worker). The heartbeat holds the

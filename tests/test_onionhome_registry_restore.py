@@ -101,9 +101,12 @@ def _make_registry(directory, names=(("alice", ALICE), ("brewster", BOB)),
     os.makedirs(directory, exist_ok=True)
     conn = onionnames.db_connect(os.path.join(directory, "onionnames.db"))
     onionnames.db_init(conn)
-    for name, address in names:
-        ok, reason, _ = onionnames.register_name(conn, name, address)
-        assert ok, reason
+    # Big registries here give one address hundreds of names; the
+    # per-address cap (issue #391) is a registration rule, not a registry one.
+    with mock.patch.object(onionnames, "MAX_NAMES_PER_ADDRESS", 10 ** 6):
+        for name, address in names:
+            ok, reason, _ = onionnames.register_name(conn, name, address)
+            assert ok, reason
     for sql in extra_sql:
         conn.execute(sql)
     conn.commit()
