@@ -16,7 +16,7 @@
 #
 # The digest must be the multi-arch INDEX digest — a per-platform manifest
 # digest resolves on amd64 and 404s on the arm64 builder.
-ARG WORDPRESS_IMAGE=wordpress:latest@sha256:18b73b2dad9c0cdced35c5200dd6562c937a8e994762b4f2b43b1ece9fb317c9
+ARG WORDPRESS_IMAGE=wordpress:latest@sha256:e5a724ec7ad9055f48b2941ac1b674b08e77ed60edb8937a6254fb89ec45ddf7
 FROM ${WORDPRESS_IMAGE}
 
 # The WordPress branch this image is built and tested on. The build fails
