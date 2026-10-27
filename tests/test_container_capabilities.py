@@ -106,9 +106,8 @@ DOCKER_RUN_SITES = {
     # launchers' migrate_key_volume runs it, Phase 4 #120).
     ("src/onionpress/containers.py", "migrate_key_volume"): [READ_USER_KEY],
     ("app/MacOS/onionpress", "start_containers"): [READ_USER_KEY],
-    ("linux/onionpress", "start_containers"): [
-        READ_USER_KEY, COPY_INTO_TOR_STATE, COPY_INTO_TOR_STATE],
-    # create_backup's seven reads of debian-tor's (or arti's) key files out
+    ("linux/onionpress", "start_containers"): [READ_USER_KEY, COPY_INTO_TOR_STATE],
+    # create_backup's four reads of debian-tor's (or arti's) key files out
     # of the volumes.
     ("linux/onionpress", "key_volume_cat"): [READ_USER_KEY],
     ("src/onionpress/cli.py", "cmd_restore"): [READ_USER_KEY],
@@ -367,7 +366,7 @@ class TestDockerRunCensus(unittest.TestCase):
         expected = {site: len(caps) for site, caps in DOCKER_RUN_SITES.items()}
         expected.update(PRIVILEGED_SITES)
         self.assertEqual(found, expected)
-        self.assertGreaterEqual(sum(found.values()), 12)
+        self.assertGreaterEqual(sum(found.values()), 11)
 
     def test_only_the_listed_sites_are_privileged(self):
         for site, runs in self.sites.items():

@@ -548,9 +548,12 @@
 - Zip-bomb limits (`check_archive_size`); format 2's inner zip is extracted
   by zipfile only; format 1's `unzip -P` under `ulimit -f` and a disk
   watchdog. `tests/test_backup_extract_limits.py`.
-- Restored keys (site and Linux healthcheck) are checked before use; the
-  hostname is written from the key. `tests/test_backup_healthcheck_key_restore.py`,
-  `tests/test_tor_watchdog_service_ids.py`.
+- A restored site key is checked before use; the hostname is written from
+  the key. `tests/test_tor_watchdog_service_ids.py`.
+- **The healthcheck key is in no backup on either platform**: a start makes
+  a new one and the heartbeat tells the hub; a restore takes none and
+  removes a key an older restore staged.
+  `tests/test_healthcheck_key_never_backed_up.py`.
 - **A restored dump runs only SQL**: `backup.db_import` streams it on stdin
   to a client run `--sandbox --binary-mode --local-infile=0` (refuse a
   client without `--sandbox`); the DB password re-set uses the host

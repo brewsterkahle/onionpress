@@ -1732,33 +1732,6 @@ def staged_backup_address(staging, log_func):
     return address
 
 
-def staged_healthcheck_address(hc_dir):
-    """The onion address of a backup's healthcheck key (*hc_dir*, its
-    tor-keys/healthcheck/), checked; raises ValueError.
-
-    Linux backups carry the healthcheck onion service's key files and its
-    hostname. A restore puts them where the next start installs them into
-    the tor container, where tor-watchdog.py takes the service's id from the
-    hostname file for DEL_ONION on the control port, and the heartbeat sends
-    the hub that address. Like the site's key (staged_key_address), every
-    key file must parse and agree, and a hostname file must name exactly
-    the address the key derives to: the restore then writes the hostname
-    itself, from the key.
-    """
-    if not os.path.isfile(os.path.join(hc_dir, 'hs_ed25519_secret_key')):
-        raise ValueError("The backup holds no healthcheck key")
-    address = key_manager.staged_key_address(hc_dir)
-    hostname = os.path.join(hc_dir, 'hostname')
-    if os.path.lexists(hostname):
-        if not os.path.isfile(hostname) or os.path.islink(hostname):
-            raise ValueError("The healthcheck hostname is not a file")
-        with open(hostname, 'rb') as f:
-            data = f.read(128)
-        if data not in (address.encode(), address.encode() + b"\n"):
-            raise ValueError("The healthcheck hostname does not belong to its key")
-    return address
-
-
 @contextmanager
 def _wrong_password_as_valueerror(zf):
     """Report every way zipfile can fail on a wrong password as one ValueError.

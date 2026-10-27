@@ -1186,14 +1186,6 @@ class TestStagingHelpers(Sandbox):
         self.assertEqual(self.out.getvalue(), ADDR + "\n")
         self.assertIn("refusing the backup: bad metadata", self.err.getvalue())
 
-    def test_healthcheck_key_address(self):
-        with mock.patch("onionpress.backup.staged_healthcheck_address",
-                        side_effect=[ADDR, ValueError("hostname differs")]):
-            self.assertEqual(OnionPressCLI.cmd_healthcheck_key_address("/hc"), 0)
-            self.assertEqual(OnionPressCLI.cmd_healthcheck_key_address("/hc"), 1)
-        self.assertEqual(self.out.getvalue(), ADDR + "\n")
-        self.assertIn("healthcheck key is left out: hostname differs", self.err.getvalue())
-
     def test_restore_config(self):
         with mock.patch("onionpress.backup.restore_backup_config",
                         side_effect=[None, None, OSError("ro")]) as restore:
