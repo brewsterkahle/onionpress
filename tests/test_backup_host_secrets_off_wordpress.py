@@ -277,13 +277,15 @@ sys.exit(2)' "$@"
         meta = json.loads(members["metadata.json"])
         self.assertIs(meta["excludes_host_secrets"], True)
         self.assertEqual(meta["secret_config_left_out"], [TOKEN_KEY])
-        self.assertIn("healthcheck keys left out", log)
 
-    def test_the_owners_backup_keeps_it(self):
+    def test_the_owners_backup_keeps_the_token_but_no_healthcheck_key(self):
+        # The healthcheck key is in no backup, as on the Mac: a start makes
+        # a new one (tests/test_healthcheck_key_never_backed_up.py).
         members, _ = self._run()
         self.assertIn(f"{TOKEN_KEY}={TOKEN}".encode(), members["config"])
-        self.assertEqual(members["tor-keys/healthcheck/hs_ed25519_secret_key"],
-                         HEALTHCHECK_SECRET)
+        self.assertFalse([n for n in members if n.startswith("tor-keys/healthcheck")],
+                         sorted(members))
+        self.assertFalse([n for n, d in members.items() if HEALTHCHECK_SECRET in d])
         meta = json.loads(members["metadata.json"])
         self.assertNotIn("excludes_host_secrets", meta)
 

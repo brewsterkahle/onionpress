@@ -1458,23 +1458,6 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         return 0
 
     @staticmethod
-    def cmd_healthcheck_key_address(hc_dir: str) -> int:
-        """Print the onion address of a backup's healthcheck key folder
-        (*hc_dir*); exit 1, printing nothing, unless its key files parse and
-        agree and its hostname names that address
-        (backup.staged_healthcheck_address). For the Linux launcher's
-        restore_backup, which writes the hostname from this."""
-        from .backup import staged_healthcheck_address
-        log = _make_log_func()
-        try:
-            address = staged_healthcheck_address(hc_dir)
-        except Exception as e:
-            log(f"Restore: the backup's healthcheck key is left out: {str(e)[:300]}")
-            return 1
-        print(address)
-        return 0
-
-    @staticmethod
     def cmd_restore_config(staging: str, config_path: str, address: str = "") -> int:
         """Merge an extracted backup's user preferences into *config_path*
         (backup.restore_backup_config: an allowlist; every other key keeps
@@ -2318,14 +2301,6 @@ def main(argv: list[str] = None) -> int:
         "--staging", required=True,
         help="Directory the backup was extracted into")
 
-    p_hcaddr = sub.add_parser(
-        "healthcheck-key-address",
-        help="Check a backup's healthcheck key folder and print its onion "
-             "address (restore helper; exit 1 if it does not check out)")
-    p_hcaddr.add_argument(
-        "--dir", required=True,
-        help="The backup's tor-keys/healthcheck/ folder")
-
     p_config = sub.add_parser(
         "config",
         help="Read and change settings in ~/.onionpress/config "
@@ -2611,8 +2586,6 @@ def main(argv: list[str] = None) -> int:
     # setup (config/secrets creation, port probing).
     if args.command == "backup-address":
         return OnionPressCLI.cmd_backup_address(args.staging)
-    if args.command == "healthcheck-key-address":
-        return OnionPressCLI.cmd_healthcheck_key_address(args.dir)
     if args.command == "restore-config":
         return OnionPressCLI.cmd_restore_config(
             args.staging, args.config, args.address)

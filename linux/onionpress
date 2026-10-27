@@ -1968,37 +1968,6 @@ start_containers() {
             log "WARNING: No C Tor key file (hs_ed25519_secret_key) -- C Tor will generate a random address"
         fi
 
-        # Restore healthcheck keys if present (saved by backup)
-        local hc_keys="$DATA_DIR/shared/healthcheck-keys"
-        if [ -d "$hc_keys" ] && [ -f "$hc_keys/hs_ed25519_secret_key" ]; then
-            docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
-            # As for the address key above.
-            if docker run --rm \
-                --network none \
-                --cap-drop ALL \
-                --cap-add CHOWN \
-                --cap-add DAC_OVERRIDE \
-                --cap-add FOWNER \
-                --security-opt no-new-privileges:true \
-                -v onionpress-tor-state:/dest \
-                --mount type=bind,source="$hc_keys",target=/src,readonly \
-                --entrypoint sh \
-                "$KEY_HELPER_IMAGE" -c '
-                    set -e
-                    mkdir -p /dest/hidden_service/healthcheck
-                    cp /src/hs_ed25519_secret_key /dest/hidden_service/healthcheck/
-                    cp /src/hs_ed25519_public_key /dest/hidden_service/healthcheck/ 2>/dev/null || true
-                    cp /src/hostname /dest/hidden_service/healthcheck/ 2>/dev/null || true
-                    chown -R debian-tor:debian-tor /dest/hidden_service/healthcheck
-                    chmod 700 /dest/hidden_service/healthcheck
-                    chmod 600 /dest/hidden_service/healthcheck/hs_ed25519_secret_key
-                ' >> "$LOG_FILE" 2>&1; then
-                log "Healthcheck key installed to tor-state volume"
-            else
-                log "WARNING: Failed to copy healthcheck key to tor-state volume"
-            fi
-        fi
-
         log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
     elif $FIRST_RUN; then
         log "No imported key found -- using random onion address"
@@ -2606,25 +2575,9 @@ create_backup() {
         log "WARNING: No Tor keys found — backup will not include keys"
     fi
 
-    # Healthcheck onion service keys (separate address, random per install).
-    # Not in a backup handed to WordPress (--without-host-secrets): a start
-    # makes new ones, and the heartbeat gives the hub the new address.
-    if [ "$with_host_secrets" = "no" ]; then
-        log "Backup: healthcheck keys left out of this backup, which is handed to WordPress (a restore makes new ones)"
-    else
-        mkdir -p "$staging/tor-keys/healthcheck"
-        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hs_ed25519_secret_key > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
-        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hs_ed25519_public_key > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
-        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hostname > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
-        # Clean up empty files
-        find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
-        if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then
-            log "Backup: healthcheck keys saved"
-        else
-            rmdir "$staging/tor-keys/healthcheck" 2>/dev/null || true
-            log "Backup: no healthcheck keys found (will be regenerated)"
-        fi
-    fi
+    # The healthcheck onion service's key is never backed up, as on the
+    # Mac: a start makes a new one and the heartbeat gives the hub its
+    # address (one restore path, one secret fewer in every backup).
 
     # 2. Dump WordPress database
     log "Backup: exporting database..."
@@ -2938,32 +2891,13 @@ restore_backup() {
         log "WARNING: No Tor keys in backup — skipping key restore"
     fi
 
-    # Restore healthcheck keys if present in backup. The next start puts
-    # them in the tor container, where tor-watchdog.py takes the service id
-    # from the hostname for DEL_ONION on the control port (a CR/LF there
-    # would add a command) and the heartbeat sends the hub that address.
-    # Never from the Settings page (the upload is WordPress's to make; a
-    # start makes new keys). Otherwise only a key whose files agree and
-    # whose hostname names its address (healthcheck-key-address), and only
-    # those files, the hostname written from the checked address.
-    local hc_backup="$staging/tor-keys/healthcheck"
-    if [ -d "$hc_backup" ] && [ -f "$hc_backup/hs_ed25519_secret_key" ]; then
-        local hc_addr=""
-        if [ "$from_settings_page" = "true" ]; then
-            log "Restore: the backup's healthcheck keys left out (the Settings page's restore; a start makes new ones)"
-        elif hc_addr=$(op_py healthcheck-key-address --dir "$hc_backup" 2>>"$LOG_FILE") \
-                && is_onion_address "$hc_addr"; then
-            local hc_dest="$DATA_DIR/shared/healthcheck-keys"
-            rm -rf "$hc_dest"
-            mkdir -p "$hc_dest"
-            cp "$hc_backup/hs_ed25519_secret_key" "$hc_dest/"
-            [ -f "$hc_backup/hs_ed25519_public_key" ] && cp "$hc_backup/hs_ed25519_public_key" "$hc_dest/"
-            echo "$hc_addr" > "$hc_dest/hostname"
-            log "Restore: healthcheck keys restored"
-        else
-            log "WARNING: the backup's healthcheck keys do not check out; left out (a start makes new ones)"
-        fi
+    # A healthcheck key in the backup (Linux backups through 2.5.x) is not
+    # restored: a start makes a new one, as on the Mac. A key an older
+    # restore staged for the next start goes too.
+    if [ -d "$staging/tor-keys/healthcheck" ]; then
+        log "Restore: the backup's healthcheck key left out (a start makes a new one)"
     fi
+    rm -rf "$DATA_DIR/shared/healthcheck-keys"
 
     # 2. Restore database
     local sql_file="$staging/database/wordpress.sql"

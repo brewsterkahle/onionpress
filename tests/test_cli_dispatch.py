@@ -109,8 +109,6 @@ class _DataDirPath(str):
     pass
 
 
-HRK_PATH = os.path.join("tor-keys", "healthcheck")
-
 # `ha_host` checks handle-action's Host: built without OnionPressCLI, from
 # the launcher given or default_launcher's answer.
 def ha_host(launcher):
@@ -294,8 +292,6 @@ ROWS = [
     # ---- the launchers' backup and restore helpers ----
     Row("backup-address", ["backup-address", "--staging", "/st"],
         "CLI.cmd_backup_address", mock.call("/st")),
-    Row("healthcheck-key-address", ["healthcheck-key-address", "--dir", HRK_PATH],
-        "CLI.cmd_healthcheck_key_address", mock.call(HRK_PATH)),
     Row("restore-config", ["restore-config", "--staging", "/st", "--config", "/c", "--address", ONION],
         "CLI.cmd_restore_config", mock.call("/st", "/c", ONION)),
     Row("scrub-staging", ["scrub-staging", "--dir", "/st/wp-content"],
