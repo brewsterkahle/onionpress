@@ -9,6 +9,82 @@ has none.
 Each section's heading is `## X.Y.Z — YYYY-MM-DD`. Full lists of changes are
 on each [GitHub release](https://github.com/brewsterkahle/onionpress/releases).
 
+## 2.6.0 — 2026-10-26
+
+A large security round and a new way the Mac app runs.
+
+### Highlights
+- **On a Mac, OnionPress now runs as a background service** (#367). The
+  status checks, the OnionHeaven heartbeat, Tor recovery and the Settings
+  page's requests run in `onionpress daemon`, a per-user launchd agent; the
+  menu bar icon only shows its state. If the icon says "Reconnecting to the
+  OnionPress service...", the service is restarting; it does not mean your
+  site stopped. Quit still takes the site down, unless you set
+  `onionpress config set QUIT_KEEPS_SITE_RUNNING yes`.
+- **Everything the app does is an `onionpress` command** (#365, #366, #382):
+  `onionpress config get|set|unset|list`, `onionpress onionheaven
+  enable|disable|status|overview`, `address`, `version`, `logs`, `open`,
+  `check-reachability`, `onionname`, `backup`, `restore`. The Mac menu and
+  the Linux tray call the same commands, and destructive ones ask before
+  they act.
+- **Updates are checked before they are installed.** A Mac update mounts
+  the new DMG only if it matches the release's published `SHA256SUMS`, and
+  WordPress core updates come only from downloads.wordpress.org and must
+  match WordPress.org's checksums (#395).
+- **The Settings page can no longer install an update on a Mac**; it reports
+  a newer release and points you to Check for Updates… in the menu, which
+  asks you at the Mac.
+
+### Security fixes
+- The local proxy the browser extension uses carries `.onion` only: no
+  other website can read your onion address from it or use it to reach your
+  network.
+- The healthcheck service's message channel is gone: nothing a stranger
+  sends to your healthcheck address is shown to you as a message.
+- Your `~/.onionpress` folder is readable only by you, and its config file
+  only by you, on every path that creates them (#397).
+- Settings page requests are size-limited and throttled (#396); actions
+  with a side effect need a fresh nonce (#402).
+- Imported posts (blog, Reddit and other importers) are filtered as they
+  come in (#403); the hit counter checks its nonce (#398); My Creations
+  serves documents that could run scripts in a sandbox (#399).
+- A plain node's onion address no longer exposes the hub API (#393).
+- Every input of the Mac build, every GitHub Actions step and every image
+  the stack runs is pinned by hash.
+
+### Also in this release
+- **Fresh images:** new tor and WordPress images (still WordPress 7.1 on
+  PHP 8.3.36), and re-pinned MariaDB 13.0.2 and autoheal.
+- **A launch downloads only what a release moved.** `UPDATE_ON_LAUNCH` now
+  defaults to `no` everywhere; launches no longer contact the image
+  registry for nothing (#36).
+- **Linux:** the `.deb` finishes its own setup on Debian 13 with rootless
+  Docker; upgrades restart the site (#357); `install.sh` installs the
+  newest release, not the development branch; the healthcheck key is left
+  out of backups, as on the Mac; Share Now and the tray's Backup… and
+  Restore… work like the Mac's (#351, #375).
+- **Mac:** a first start on a new account no longer puts Colima's files in
+  `~/.colima` (#370); a headless `onionpress setup` no longer shows the
+  welcome screen afterwards (#374).
+- **Docs:** the README says what an OnionHeaven hub can do with your key
+  and how to opt out.
+
+### Worth knowing
+- Mac users: this update installs the background service. After updating,
+  the first launch starts it; you do not need to do anything.
+- If you set `UPDATE_ON_LAUNCH=yes` yourself, it is kept.
+- Backups still use format 2; older backups still restore.
+
+### OnionHeaven hub and OnionHome operators
+- Free registrations are capped: 4 registrations per address, 5,000
+  addresses per hub, 10 names per address on OnionHome (#391). Existing
+  registrations always keep their place. Each cap can be changed with an
+  `ONIONHEAVEN_MAX_*` / `ONIONHOME_*` environment variable.
+- A signed request is accepted only once (#400); the hub API answers only on
+  a hub's or OnionHome's own address (#393).
+- As before: take a backup and note the registry and name counts before
+  updating, compare them afterwards, and never downgrade.
+
 ## 2.5.6 — 2026-10-21
 
 - **Existing sites move to WordPress 7.1**, the version the WordPress image
