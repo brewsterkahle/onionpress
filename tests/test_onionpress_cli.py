@@ -228,7 +228,7 @@ class TestPIDLock(unittest.TestCase):
         mock_secrets.return_value = Secrets("p1", "p2", "p3")
         MockDocker.return_value = mock.Mock()
 
-        cli = OnionPressCLI(data_dir=self.tmpdir)
+        cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
 
         # No lock initially
         self.assertFalse(cli._check_pid_lock())
@@ -256,7 +256,7 @@ class TestPIDLock(unittest.TestCase):
         mock_secrets.return_value = Secrets("p1", "p2", "p3")
         MockDocker.return_value = mock.Mock()
 
-        cli = OnionPressCLI(data_dir=self.tmpdir)
+        cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
         pid_file = os.path.join(self.tmpdir, "onionpress.pid")
 
         # Write a stale PID (very unlikely to be a real process)
@@ -327,7 +327,7 @@ class TestCmdGet(unittest.TestCase):
                         return_value=Secrets("p1", "p2", "p3")), \
              mock.patch("onionpress.cli.Docker") as MockDocker:
             MockDocker.return_value = mock.Mock()
-            cli = OnionPressCLI(data_dir=self.tmpdir)
+            cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
         cli.docker = mock.Mock()
         cli.docker.exec.return_value = result
         return cli
@@ -416,7 +416,7 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
              mock.patch("onionpress.cli.ensure_secrets",
                         return_value=Secrets("p1", "p2", "p3")), \
              mock.patch("onionpress.cli.Docker"):
-            self.cli = OnionPressCLI(data_dir=self.tmpdir)
+            self.cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
         self.cli.log = mock.Mock()
         self.cli.docker = mock.Mock()
         self.calls = []
@@ -501,7 +501,7 @@ class TestCmdStartWaitsForTheKeyVolume(unittest.TestCase):
              mock.patch("onionpress.cli.ensure_secrets",
                         return_value=Secrets("p1", "p2", "p3")), \
              mock.patch("onionpress.cli.Docker"):
-            cli = OnionPressCLI(data_dir=self.tmpdir)
+            cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
         cli.log = mock.Mock()
         cli.containers = mock.Mock()
         cli.containers.key_volume_not_ready.return_value = "the key is still in onionpress-arti-state"

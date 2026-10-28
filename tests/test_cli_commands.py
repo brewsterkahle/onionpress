@@ -62,7 +62,7 @@ def make_cli(data_dir):
                        return_value=Secrets("p1", "p2", "p3")), \
             mock.patch("onionpress.cli.Docker") as MockDocker:
         MockDocker.return_value = mock.Mock()
-        obj = OnionPressCLI(data_dir=data_dir)
+        obj = OnionPressCLI(data_dir=data_dir, app_bundle="")
     obj.docker = mock.Mock()
     obj.docker.docker_bin = "/stub/docker"
     obj.docker.run.return_value = DockerResult(0, "", "")
