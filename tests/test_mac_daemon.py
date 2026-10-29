@@ -376,17 +376,40 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(s["display_state"], "starting")
         self.assertIsNotNone(s["yellow_since"])
         self.assertEqual(s["probe"]["code"], "000:rc=28")
-        self.assertEqual(self.d._republish_trigger.failing_since, self.d._republish_trigger.failing_since)
+        self.assertIsNotNone(self.d._recovery.trigger.failing_since)
+
+    def test_the_daemon_runs_the_shared_recovery_step(self):
+        """Issue #480: one #266 driver. The daemon's trigger is a
+        reachability.RecoveryWindow's, and a due request reaches the
+        watchdog through it (or only the log with
+        REPUBLISH_ON_UNREACHABLE=no)."""
+        from onionpress.health import RepublishTrigger
+        from onionpress.reachability import RecoveryWindow
+        self.assertIsInstance(self.d._recovery, RecoveryWindow)
+        self.d._recovery.trigger = RepublishTrigger(failing_for=0, fast_for=0, cooldown=0)
+        self.tick()
+        self.health.external = (False, "000:rc=28")
+        with mock.patch("onionpress.launcher_ops.request_watchdog_republish",
+                        return_value="requested") as req:
+            self.tick()
+        req.assert_called_once()
+        self.assertEqual(req.call_args.args[1], "onionpress-tor")
+        with open(os.path.join(self.dir, "config"), "a") as f:
+            f.write("REPUBLISH_ON_UNREACHABLE=no\n")
+        with mock.patch("onionpress.launcher_ops.request_watchdog_republish") as req:
+            self.tick()
+        req.assert_not_called()
+        self.assertIn("log-only", "".join(self._log_text()))
 
     def test_no_internet_is_offline_and_resets_the_window(self):
         self.tick()
         self.health.internet = False
-        self.d._republish_trigger.reset = mock.Mock()
+        self.d._recovery.trigger.reset = mock.Mock()
         self.tick()
         s = self.state()
         self.assertFalse(s["has_internet"])
         self.assertEqual(s["display_state"], "offline")
-        self.d._republish_trigger.reset.assert_called()
+        self.d._recovery.trigger.reset.assert_called()
 
     def test_the_config_marker_is_taken_by_the_daemon(self):
         op_config.note_config_changed(self.dir, ["PREVENT_SLEEP"])
@@ -491,11 +514,11 @@ class TestSleepWake(_DaemonCase):
 
     def test_wake_resets_the_window_and_supersedes_the_heartbeat(self):
         self.tick()
-        self.d._republish_trigger.reset = mock.Mock()
+        self.d._recovery.trigger.reset = mock.Mock()
         gen = self.d._heartbeat_generation
         with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True) as sig:
             self.d.handle_wake()
-        self.d._republish_trigger.reset.assert_called_once()
+        self.d._recovery.trigger.reset.assert_called_once()
         self.assertEqual(self.d._heartbeat_generation, gen + 1)
         self.assertFalse(self.d._sleeping)
         self.assertFalse(self.d.is_ready)

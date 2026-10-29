@@ -1,18 +1,28 @@
-"""Linux's onion service recovery loop (issues #266, #310).
+"""The onion service recovery step both platforms run (issues #266, #310,
+#480), and Linux's loop around it.
 
-The Mac menubar runs the dual probe and the RepublishTrigger inline in
-check_status(). On Linux nothing ran them: the code lived in
-linux/onionpress-service.py, which no installer shipped and no unit
-started. The heartbeat daemon (linux/onionpress-heartbeat.py) is the
-long-running per-user service every install already has, so it runs this
-loop in a thread:
+RecoveryWindow is the one #266 decision: each cycle's dual-probe outcome
+goes to the RepublishTrigger; when a request is due it asks onionpress-tor's
+watchdog for DEL_ONION + ADD_ONION (launcher_ops.request_watchdog_republish),
+or with REPUBLISH_ON_UNREACHABLE=no only logs that it would have. The
+window is reset on wake (note_wake) and on every cycle where no probe ran
+(note_offline: no internet, stack stopped). The Mac daemon
+(onionpress.daemon) and ReachabilityLoop below each own one; neither
+touches the trigger directly.
+
+What stays per platform is the probe and what is done with its result:
+the daemon runs its own check_tor_reachability (which also drives the
+menu's colours, ReachabilityStats and the VM-wedge probe), Linux runs
+HealthChecker.full_check here.
+
+ReachabilityLoop is Linux's driver. The heartbeat daemon
+(linux/onionpress-heartbeat.py) is the long-running per-user service every
+install already has, so it runs this loop in a thread:
 
   - HealthChecker.full_check() every POLL_READY_SECONDS: WordPress, Tor
     bootstrap, hostname, Tor → WordPress, then the dual probe of
     /.onionpress-health through onionheaven's tor;
-  - HealthMonitor.should_request_republish() (the shared RepublishTrigger);
-  - launcher_ops.request_watchdog_republish() when it is due, or only a log
-    line with REPUBLISH_ON_UNREACHABLE=no;
+  - RecoveryWindow.decide() / request_republish();
   - the window is reset on wake (note_wake, and a wall-clock vs monotonic
     gap for a suspend no D-Bus signal reported) and while offline, as on
     the Mac.
@@ -31,6 +41,7 @@ from typing import Callable, Optional
 from . import launcher_ops
 from .health import (
     HealthChecker, HealthMonitor, HealthResult, POLL_READY_SECONDS,
+    RepublishTrigger,
 )
 
 STATUS_FILENAME = "reachability.json"
@@ -41,11 +52,85 @@ STATUS_FILENAME = "reachability.json"
 SUSPEND_GAP_SECONDS = 60
 
 
-def _republish_enabled(read_config_value: Callable[[str, str], str]) -> bool:
+def republish_enabled(read_config_value: Callable[[str, str], str]) -> bool:
     """REPUBLISH_ON_UNREACHABLE in ~/.onionpress/config; default on.
-    "no" keeps the trigger in log-only mode — same knob as the Mac."""
+    "no" keeps the trigger in log-only mode, on both platforms."""
     value = read_config_value("REPUBLISH_ON_UNREACHABLE", "yes")
     return str(value).strip().lower() not in ("no", "0", "false", "off")
+
+
+class RecoveryWindow:
+    """The #266 recovery decision, shared by the Mac daemon and Linux.
+
+    One instance per process, fed one dual-probe outcome per cycle. It
+    owns the RepublishTrigger (rate-based window, cooldown: see its
+    docstring) and the request to the watchdog; the caller owns the probe.
+    """
+
+    def __init__(
+        self,
+        docker,
+        log_func: Callable[[str], None],
+        read_config_value: Callable[[str, str], str],
+        container: str = "onionpress-tor",
+        trigger: Optional[RepublishTrigger] = None,
+    ):
+        self.docker = docker
+        self.log = log_func
+        self.read_config_value = read_config_value
+        self.container = container
+        self.trigger = trigger if trigger is not None else RepublishTrigger()
+
+    def republish_enabled(self) -> bool:
+        return republish_enabled(self.read_config_value)
+
+    def decide(self, internally_ready: bool, reachable: Optional[bool],
+               http_code: Optional[str], wedge_class: Optional[str] = None) -> str:
+        """Feed one probe outcome to the trigger. Returns the reason when
+        a republish is due this cycle, else "". Sends nothing."""
+        now = time.time()
+        if not self.trigger.observe(now, internally_ready, reachable,
+                                    http_code, wedge_class):
+            return ""
+        return self.trigger.describe(now)
+
+    def decide_result(self, hr: HealthResult) -> str:
+        """decide() for a HealthChecker.full_check() result."""
+        return self.decide(hr.tor_internally_ready, hr.tor_externally_reachable,
+                           hr.external_http_code, hr.wedge_class)
+
+    def request_republish(self, reason: str) -> None:
+        """The trigger fired: ask the watchdog for DEL+ADD, or only log
+        it with REPUBLISH_ON_UNREACHABLE=no."""
+        if not self.republish_enabled():
+            self.log(f"reachability: {reason} — would request descriptor "
+                     f"republish (REPUBLISH_ON_UNREACHABLE=no, log-only)")
+            return
+        status = launcher_ops.request_watchdog_republish(
+            self.docker, self.container, reason)
+        self.log(f"reachability: {reason} — "
+                 f"{launcher_ops.describe_republish_request(status)}")
+
+    def step(self, internally_ready: bool, reachable: Optional[bool],
+             http_code: Optional[str], wedge_class: Optional[str] = None) -> bool:
+        """decide() and, when due, request_republish(). True if it fired."""
+        reason = self.decide(internally_ready, reachable, http_code, wedge_class)
+        if reason:
+            self.request_republish(reason)
+        return bool(reason)
+
+    def note_wake(self) -> None:
+        """Back from suspend. Issue #266: forget any pre-sleep failure
+        window so the first probe after wake can't look like 10+ min of
+        unreachability and trigger DEL+ADD on top of the watchdog's own
+        wake ADD."""
+        self.trigger.reset()
+
+    def note_offline(self) -> None:
+        """No probe ran this cycle (no internet, stack stopped): it is
+        evidence of nothing, so an offline gap never counts towards a
+        republish."""
+        self.trigger.reset()
 
 
 class ReachabilityLoop:
@@ -70,6 +155,8 @@ class ReachabilityLoop:
         self.container = container
         self.checker = HealthChecker(docker, log_func=log_func)
         self.monitor = HealthMonitor(log_func=log_func)
+        self.recovery = RecoveryWindow(docker, log_func, read_config_value,
+                                       container=container)
         self.onion_address = ""
         self._lock = threading.Lock()
         self._sleeping = False
@@ -89,16 +176,13 @@ class ReachabilityLoop:
             self._epoch += 1
 
     def note_wake(self) -> None:
-        """Back from suspend (mirrors src/menubar.py handle_wake).
-
-        Issue #266: forget any pre-sleep failure window so the first probe
-        after wake can't look like 10+ min of unreachability and trigger
-        DEL+ADD on top of the watchdog's own wake ADD.
-        """
+        """Back from suspend (the Mac's is daemon.handle_wake): the
+        republish window reset (RecoveryWindow.note_wake), WordPress
+        rechecked, and the next cycle run now."""
         with self._lock:
             self._sleeping = False
             self._epoch += 1
-            self.monitor.republish.reset()
+            self.recovery.note_wake()
             self.monitor.state.wordpress_confirmed = False
         self._kick.set()
 
@@ -128,7 +212,7 @@ class ReachabilityLoop:
             # No probe ran, so this cycle is evidence of nothing: don't let
             # an offline gap count towards a republish.
             with self._lock:
-                self.monitor.republish.reset()
+                self.recovery.note_offline()
             self._write_status(None)
             return None
 
@@ -139,7 +223,6 @@ class ReachabilityLoop:
         if hr.onion_address:
             self.onion_address = hr.onion_address
 
-        due = False
         with self._lock:
             if self._sleeping or epoch != self._epoch:
                 return None
@@ -147,22 +230,11 @@ class ReachabilityLoop:
             # Issue #266: unreachable through the Tor network for the
             # trigger's window with Tor internally healthy means the HSDirs
             # hold a descriptor whose intro points no longer answer for us.
-            due = self.monitor.should_request_republish(hr)
-            reason = self.monitor.republish.describe(time.time()) if due else ""
-        if due:
-            self._request_republish(reason)
+            reason = self.recovery.decide_result(hr)
+        if reason:
+            self.recovery.request_republish(reason)
         self._write_status(hr)
         return hr
-
-    def _request_republish(self, reason: str) -> None:
-        if not _republish_enabled(self.read_config_value):
-            self.log(f"reachability: {reason} — would request descriptor "
-                     f"republish (REPUBLISH_ON_UNREACHABLE=no, log-only)")
-        else:
-            status = launcher_ops.request_watchdog_republish(
-                self.docker, self.container, reason)
-            self.log(f"reachability: {reason} — "
-                     f"{launcher_ops.describe_republish_request(status)}")
 
     def _write_status(self, hr: Optional[HealthResult]) -> None:
         """~/.onionpress/reachability.json, atomically. `reachable` is

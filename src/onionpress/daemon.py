@@ -42,8 +42,10 @@ Everything that talks to the hub is onionpress.onionheaven's, unchanged:
 this object is the `app` those functions take (the attributes they read
 are set in __init__), so the Mac and the CLI's HubContext share one
 implementation and one lock (_hub_lock). The dual probe is
-onionpress.health's, the republish request onionpress.launcher_ops's,
-shared with Linux's onionpress.reachability.
+onionpress.health's; the #266 recovery step on its outcome (the
+RepublishTrigger, the request to the watchdog, the wake and offline
+resets) is onionpress.reachability's RecoveryWindow, the one Linux's
+ReachabilityLoop runs too.
 """
 
 import json
@@ -69,7 +71,6 @@ from . import wp_files
 from .docker import Docker
 from .health import (
     HealthChecker,
-    RepublishTrigger,
     WEDGE_LOAD_WARN,
     WEDGE_LOAD_ALARM,
     WEDGE_FAILING_STREAK_ALARM,
@@ -77,6 +78,7 @@ from .health import (
 )
 from .log_rotation import RotatingLog
 from .power import CaffeineManager
+from .reachability import RecoveryWindow
 from .reachability_stats import ReachabilityStats
 from .system_metrics import host_metrics, container_metrics
 
@@ -322,7 +324,11 @@ class Daemon:
         self._last_status_payload = None
 
         self._reachability_stats = ReachabilityStats()
-        self._republish_trigger = RepublishTrigger()
+        # The #266 recovery step (onionpress.reachability, shared with
+        # Linux). Late-bound, so a replaced log or config reader is seen.
+        self._recovery = RecoveryWindow(
+            self._docker, lambda m: self.log(m),
+            read_config_value=lambda k, d: self.read_config_value(k, d))
         self._last_probe_code = ""
         self._last_probe_why = ""
         self._last_probe_ms = 0
@@ -811,7 +817,7 @@ class Daemon:
                     "WEDGE WARNING: onion service unreachable for 10+ min. "
                     "Automatic recovery: see the `probe verdict=` and "
                     "`descriptor republish` lines (REPUBLISH_ON_UNREACHABLE="
-                    f"{'yes' if self._republish_on_unreachable_enabled() else 'no'}).")
+                    f"{'yes' if self._recovery.republish_enabled() else 'no'}).")
                 self._wedge_warning_fired = True
 
             if not self.runtime_ready:
@@ -896,7 +902,7 @@ class Daemon:
                         self.log("Going offline — no internet connection")
                     self.is_ready = False
                     self._last_reachability = (None, None)
-                    self._republish_trigger.reset()
+                    self._recovery.note_offline()
                     if self._yellow_since is None:
                         self._yellow_since = time.time()
                 else:
@@ -939,7 +945,7 @@ class Daemon:
                     self.onion_address = "Not running"
                 self.is_ready = False
                 self._last_reachability = (None, None)
-                self._republish_trigger.reset()
+                self._recovery.note_offline()
                 self._wp_installed = None
                 self._was_ready = False
                 self._last_bootstrap_pct = 0
@@ -989,7 +995,8 @@ class Daemon:
     _port_conflict_logged = False
 
     def _full_health_pass(self):
-        """Internet is there: WordPress, then the dual probe and the trigger."""
+        """Internet is there: WordPress, then the dual probe and the #266
+        recovery step (RecoveryWindow, shared with Linux)."""
         current_status = (self.is_running, self.onion_address)
         should_log = (current_status != self.last_status_logged) or not self.is_ready
         if not self._wordpress_confirmed:
@@ -1000,10 +1007,8 @@ class Daemon:
             wordpress_ready = True
         tor_reachable = self.check_tor_reachability(log_result=should_log)
         self._reachability_stats.record_probe(tor_reachable, self._last_probe_code, self._last_probe_ms)
-        if self._republish_trigger.observe(time.time(), self._tor_internally_ready,
-                                           tor_reachable, self._last_probe_code,
-                                           self._last_probe_why):
-            self._request_descriptor_republish()
+        self._recovery.step(self._tor_internally_ready, tor_reachable,
+                            self._last_probe_code, self._last_probe_why)
 
         previous_ready = self.is_ready
         ready_now = wordpress_ready and tor_reachable
@@ -1253,21 +1258,6 @@ class Daemon:
     def _signal_watchdog(self, container, sig):
         return launcher_ops.signal_watchdog(self._docker, container, sig)
 
-    def _republish_on_unreachable_enabled(self):
-        value = self.read_config_value("REPUBLISH_ON_UNREACHABLE", "yes")
-        return str(value).strip().lower() not in ("no", "0", "false", "off")
-
-    def _request_descriptor_republish(self):
-        """The RepublishTrigger fired: ask onionpress-tor's watchdog for
-        DEL+ADD (issue #266), or only log it with REPUBLISH_ON_UNREACHABLE=no."""
-        reason = self._republish_trigger.describe(time.time())
-        if not self._republish_on_unreachable_enabled():
-            self.log(f"reachability: {reason} — would request descriptor republish "
-                     "(REPUBLISH_ON_UNREACHABLE=no, log-only)")
-            return
-        status = launcher_ops.request_watchdog_republish(self._docker, "onionpress-tor", reason)
-        self.log(f"reachability: {reason} — {launcher_ops.describe_republish_request(status)}")
-
     def _maybe_emit_snapshot(self, force=False, fast=False):
         now = time.time()
         if not force and now - self._last_snapshot_ts < self._snapshot_interval_seconds:
@@ -1320,7 +1310,7 @@ class Daemon:
         self.log("System wake detected — marking Tor as reconnecting")
         self._maybe_emit_snapshot(force=True)
         self._reachability_stats.reset_session(time.time())
-        self._republish_trigger.reset()
+        self._recovery.note_wake()
         self._sleeping = False
         self.startup_time = time.time()
         self.caffeine.start()
