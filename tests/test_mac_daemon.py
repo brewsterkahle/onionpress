@@ -26,6 +26,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import daemon as op_daemon  # noqa: E402
+from onionpress import daemon_client as op_daemon_client  # noqa: E402
 from onionpress import config as op_config  # noqa: E402
 from onionpress.docker import DockerResult  # noqa: E402
 from onionpress.platform import resolve_paths  # noqa: E402
@@ -44,6 +45,100 @@ def _methods(src):
     cls = [n for n in tree.body if isinstance(n, ast.ClassDef)][0]
     return {n.name: ast.get_source_segment(src, n)
             for n in cls.body if isinstance(n, ast.FunctionDef)}
+
+
+# The UI processes' code: the menubar and the windows it opens.
+UI_SOURCES = {"menubar": "src/menubar.py",
+              "onionpress.setup_window": "src/onionpress/setup_window.py",
+              "onionpress.settings_ui": "src/onionpress/settings_ui.py"}
+
+# Run in a fresh interpreter: AppKit, rumps and objc are stand-ins (any
+# attribute is a class or a pass-through decorator), so the UI modules
+# import headless, without PyObjC and without touching the window server;
+# prints the onionpress modules the imports loaded.
+_UI_IMPORT_PROBE = r"""
+import importlib, json, sys, types
+
+class _Meta(type):
+    def __getattr__(cls, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub
+
+class _Stub(metaclass=_Meta):
+    def __init__(self, *a, **k):
+        pass
+    def __call__(self, *a, **k):
+        return _Stub()
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub()
+
+def _decorator(*a, **k):
+    if len(a) == 1 and callable(a[0]) and not k:
+        return a[0]
+    return lambda f: f
+
+class _Mod(types.ModuleType):
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub if name[:1].isupper() else _decorator
+
+for name in ("rumps", "AppKit", "objc", "Foundation", "Quartz",
+             "PyObjCTools", "PyObjCTools.AppHelper"):
+    sys.modules[name] = _Mod(name)
+sys.path.insert(0, sys.argv[1])
+for target in sys.argv[2:]:
+    importlib.import_module(target)
+print(json.dumps(sorted(m for m in sys.modules
+                        if m == "onionpress" or m.startswith("onionpress."))))
+"""
+
+
+def _named_onionpress_modules(rel):
+    """Every onionpress module *rel* names in an import statement, at the
+    top or inside a function (a lazy import still runs in that process)."""
+    names = set()
+    for node in ast.walk(ast.parse(_read(rel))):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names if a.name.startswith("onionpress."))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative: inside the onionpress package
+                base = "onionpress" + (f".{node.module}" if node.module else "")
+            elif node.module and (node.module == "onionpress"
+                                  or node.module.startswith("onionpress.")):
+                base = node.module
+            else:
+                continue
+            names.add(base)
+            if base == "onionpress":
+                names.update(f"onionpress.{a.name}" for a in node.names)
+    names.discard("onionpress")
+    return names
+
+
+_UI_CLOSURE = []
+
+
+def ui_import_closure():
+    """The onionpress modules a UI process loads: the closure of importing
+    menubar, setup_window and settings_ui, and every onionpress module they
+    import lazily, in a subprocess (issue #475). Cached: one run per suite."""
+    if not _UI_CLOSURE:
+        targets = set(UI_SOURCES)
+        for rel in UI_SOURCES.values():
+            targets |= _named_onionpress_modules(rel)
+        env = dict(os.environ, DOCKER_HOST="unix:///var/empty/no-docker-for-tests.sock")
+        r = subprocess.run([sys.executable, "-c", _UI_IMPORT_PROBE,
+                            os.path.join(PROJECT_ROOT, "src"), *sorted(targets)],
+                           capture_output=True, text=True, timeout=120, env=env,
+                           cwd=PROJECT_ROOT)
+        if r.returncode != 0:
+            raise AssertionError(f"importing the UI modules failed:\n{r.stderr}")
+        _UI_CLOSURE.append(frozenset(json.loads(r.stdout.strip().splitlines()[-1])))
+    return _UI_CLOSURE[0]
 
 
 class FakeDocker:
@@ -533,18 +628,18 @@ class TestLaunchdAgent(unittest.TestCase):
         def launchctl(args, timeout=20):
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: next(states)), \
-                mock.patch.object(op_daemon, "_gui_domain", lambda: "gui/501"):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: next(states)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
         self.assertEqual(calls, [["bootstrap", "gui/501", self.plist]])
         # Loaded but not running: kickstart
         calls.clear()
         states = iter([(True, None), (True, 7)])
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: next(states)), \
-                mock.patch.object(op_daemon, "_gui_domain", lambda: "gui/501"):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: next(states)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
         self.assertEqual(calls, [["kickstart", "gui/501/org.onionpress.daemon"]])
@@ -557,9 +652,9 @@ class TestLaunchdAgent(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "", "")
         with open(op_daemon.pid_path(self.dir), "w") as f:
             f.write(str(2 ** 22 - 1))      # not alive: nothing to wait for
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (True, None)), \
-                mock.patch.object(op_daemon, "_gui_domain", lambda: "gui/501"):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (True, None)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.stop_agent(self.dir, self.lines.append, self.plist, offline=True)
         self.assertTrue(ok)
         self.assertEqual(calls, [["bootout", "gui/501/org.onionpress.daemon"]])
@@ -567,26 +662,26 @@ class TestLaunchdAgent(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
         with open(op_daemon.pid_path(self.dir), "w") as f:
             f.write(str(os.getpid()))
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (False, None)), \
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)), \
                 mock.patch.object(op_daemon.os, "kill") as kill:
             op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=True)
         self.assertTrue(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
         kill.assert_any_call(os.getpid(), op_daemon.signal.SIGTERM)
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (False, None)), \
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)), \
                 mock.patch.object(op_daemon.os, "kill"):
             op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=False)
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
 
     def test_status_and_the_cli(self):
-        with mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (False, None)):
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)):
             doc = op_daemon.agent_status(self.dir)
         self.assertFalse(doc["loaded"])
         self.assertFalse(doc["state_fresh"])
         out = io.StringIO()
         paths = resolve_paths(data_dir=self.dir, app_bundle="")
-        with mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (True, 77)):
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (True, 77)):
             rc = op_daemon.run_daemon_command("status", paths, self.lines.append,
                                               json_output=True, out=out)
         self.assertEqual(rc, 0)
@@ -701,6 +796,47 @@ class TestMenubarIsAView(unittest.TestCase):
                      "start_thumbnail_generator", "start_status_checker"):
             with self.subTest(name=name):
                 self.assertNotIn(name, self.src)
+
+    # Still loaded, through the menubar's containers.using_local_images
+    # (containers imports docker); deferred in issue #475. Drop from here
+    # when that call goes through the launcher.
+    TRANSITIVE_DEFERRED = ("docker",)
+
+    def test_loop_modules_are_not_imported_transitively(self):
+        """Issue #475: what the UI modules import, and what those import.
+        The menubar reads the state through daemon_client, never
+        onionpress.daemon (which loads every loop)."""
+        loaded = ui_import_closure()
+        self.assertIn("onionpress.daemon_client", loaded)
+        self.assertNotIn("onionpress.daemon", loaded)
+        for name in self.LOOP_MODULES:
+            if name in self.TRANSITIVE_DEFERRED:
+                continue
+            with self.subTest(module=name):
+                self.assertNotIn(f"onionpress.{name}", loaded)
+
+    @unittest.expectedFailure
+    def test_docker_is_not_imported_transitively(self):
+        """Deferred (issue #475): the menubar imports containers for
+        using_local_images, and containers imports docker. Passing here
+        (an unexpected success) means it is fixed: drop the decorator and
+        TRANSITIVE_DEFERRED."""
+        self.assertNotIn("onionpress.docker", ui_import_closure())
+
+    def test_daemon_client_imports_the_standard_library_only(self):
+        tree = ast.parse(_read("src/onionpress/daemon_client.py"))
+        self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        self.assertEqual(imported, {"json", "os", "plistlib", "signal", "subprocess", "time"})
+
+    def test_daemon_reexports_the_client(self):
+        from onionpress import daemon_client
+        for name in ("read_state", "state_is_fresh", "display_state_of", "daemon_pid",
+                     "agent_loaded_pid", "start_agent", "stop_agent", "remove_agent",
+                     "agent_status", "request_offline", "ONIONNAME_RETRY_MARKER",
+                     "STALE_AFTER_SECONDS", "QUITTING_MARKER", "PID_FILENAME"):
+            with self.subTest(name=name):
+                self.assertIs(getattr(op_daemon, name), getattr(daemon_client, name))
 
     def test_no_timer_but_the_splash_tips(self):
         timers = [m.start() for m in re.finditer(r"rumps\.Timer\(|NSTimer\.", self.src)]

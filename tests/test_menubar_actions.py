@@ -18,6 +18,10 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import confirm  # noqa: E402
 
+# The UI processes' import closure is computed once, in test_mac_daemon.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_mac_daemon import ui_import_closure  # noqa: E402
+
 MENUBAR = os.path.join(PROJECT_ROOT, "src", "menubar.py")
 
 # What the menubar may still use these modules for: reading the address
@@ -75,6 +79,32 @@ class TestImports(unittest.TestCase):
                 self.assertNotIn(name, imported)
         for alias in ("backup_manager", "hub_backup", "updater"):
             self.assertNotRegex(self.src, rf"\b{alias}\.")
+
+    # Still loaded: setup_window's restore step peeks at a backup's
+    # metadata with backup.peek_backup_metadata in the menubar process,
+    # and backup imports hub_backup. Deferred in issue #475 (it becomes a
+    # launcher subcommand); drop from here when it does.
+    TRANSITIVE_DEFERRED = ("backup", "hub_backup")
+
+    def test_action_modules_are_not_imported_transitively(self):
+        """Issue #475: neither by the menubar, nor the windows it opens,
+        nor anything those import, at the top or lazily (a subprocess
+        imports them headless; test_mac_daemon.ui_import_closure)."""
+        loaded = ui_import_closure()
+        for name in NEVER_IMPORTED:
+            if name in self.TRANSITIVE_DEFERRED:
+                continue
+            with self.subTest(name=name):
+                self.assertNotIn(f"onionpress.{name}", loaded)
+
+    @unittest.expectedFailure
+    def test_backup_is_not_imported_transitively(self):
+        """Deferred (issue #475): setup_window imports backup (and so
+        hub_backup) for peek_backup_metadata. Passing here (an unexpected
+        success) means it is fixed: drop the decorator and
+        TRANSITIVE_DEFERRED."""
+        loaded = ui_import_closure()
+        self.assertFalse({"onionpress.backup", "onionpress.hub_backup"} & loaded)
 
     def test_the_remaining_uses_only_read(self):
         for module, allowed in ALLOWED.items():

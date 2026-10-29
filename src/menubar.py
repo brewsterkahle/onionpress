@@ -44,7 +44,7 @@ from onionpress import install_native_messaging
 from onionpress import onionheaven
 from onionpress import key_manager
 from onionpress import login_item
-from onionpress import daemon as op_daemon
+from onionpress import daemon_client as op_daemon
 try:
     from onionpress import setup_window
 except ImportError:
