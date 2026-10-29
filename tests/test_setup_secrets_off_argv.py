@@ -230,7 +230,8 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             self.assertTrue(setup_logic.provision_existing_wordpress(
                 site_title="t", onionname="alice", password=pw,
-                log_func=self.logs.append, data_dir=self.tmpdir))
+                log_func=self.logs.append, data_dir=self.tmpdir,
+                adopt_existing=True))
         rec.assert_not_in_argv(self, pw)
         self.assertEqual([i for _, i in rec.eval_calls()], [f"alice\n{pw}"])
         self.assertIn("Password updated", self.logs)
@@ -244,7 +245,8 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             setup_logic.provision_existing_wordpress(
                 site_title="t", onionname="alice", password="hunter22",
-                log_func=self.logs.append, data_dir=self.tmpdir)
+                log_func=self.logs.append, data_dir=self.tmpdir,
+                adopt_existing=True)
         self.assertEqual([i for _, i in rec.eval_calls()],
                          ["alice\nhunter22", "admin\nhunter22"])
         self.assertIn("Password updated (via admin fallback)", self.logs)

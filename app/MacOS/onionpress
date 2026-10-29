@@ -63,7 +63,11 @@ COLIMA_HOME="$DATA_DIR/colima"
 # environment for docker, docker compose, and other child processes.
 _BUNDLED_PYTHON_BIN="$RESOURCES_DIR/MenubarApp/Contents/MacOS/python"
 _BUNDLED_PYTHONHOME="$RESOURCES_DIR/MenubarApp/Contents/Resources"
-bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" "$_BUNDLED_PYTHON_BIN" "$@"; }
+# PYTHONSAFEPATH: `-m` and `-c` would otherwise put the current directory
+# first on sys.path, and WordPress can write one directory the owner may
+# run `onionpress` from, My Creations (issue #470). Not -I: it would
+# ignore PYTHONHOME too.
+bundled_python() { PYTHONHOME="$_BUNDLED_PYTHONHOME" PYTHONSAFEPATH=1 "$_BUNDLED_PYTHON_BIN" "$@"; }
 
 # True only for a well-formed v3 onion address: 56 lowercase base32
 # characters, then ".onion", and nothing else (no newline, no "/"). The
@@ -335,7 +339,7 @@ detect_port_offset() {
             break
         fi
         # Try to bind the port — fails with EADDRINUSE regardless of which user owns it
-        if bundled_python -c "
+        if bundled_python -P -c "
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
@@ -548,6 +552,18 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# OnionPress installed the WordPress now in the container (issue #464):
+# the marker setup_logic.wordpress_installed_by_onionpress reads, user 1's
+# registration time as WordPress records it (setup_logic writes the same
+# file from install_fresh_wordpress; a test keeps the two equal).
+WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"
+note_wordpress_installed_by_onionpress() {
+    local stamp
+    stamp=$(wp_cli user get 1 --field=user_registered 2>/dev/null | head -1 | tr -d '\r')
+    [[ "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || stamp=unknown
+    printf '%s\n' "$stamp" > "$DATA_DIR/$WP_INSTALLED_BY_ONIONPRESS_MARKER"
+}
+
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
     local rc=0
@@ -664,9 +680,14 @@ detect_container_runtime() {
                     _tmp_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
                     [ -n "$_tmp_mem" ] && _cfg_mem="$_tmp_mem"
                 fi
-                # Get actual VM memory in GB (MemTotal is in kB)
+                # Get actual VM memory in GB (MemTotal is in kB). The value
+                # is the tor container's to choose (root there faces the
+                # network), and bash evaluates a variable inside $(( ))
+                # or [[ -gt ]] as an expression, where `a[$(cmd)]` runs
+                # cmd on the Mac (issue #466): only a plain number is
+                # taken, anything else counts as unknown.
                 _vm_mem_kb=$(docker exec onionpress-tor awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d ' \n\r')
-                _vm_mem_kb="${_vm_mem_kb:-0}"
+                [[ "$_vm_mem_kb" =~ ^[0123456789]{1,12}$ ]] || _vm_mem_kb=0
                 _vm_mem_gb=$(( (_vm_mem_kb + 524288) / 1048576 ))  # round to nearest GB
                 # Read configured CPU count
                 _cfg_cpu=2
@@ -676,7 +697,7 @@ detect_container_runtime() {
                 fi
                 # Get actual VM CPU count
                 _vm_cpus=$(docker exec onionpress-tor nproc 2>/dev/null | tr -d ' \n\r')
-                _vm_cpus="${_vm_cpus:-0}"
+                [[ "$_vm_cpus" =~ ^[0123456789]{1,6}$ ]] || _vm_cpus=0
 
                 _need_restart=false
                 if [ "$_cfg_mem" -gt 0 ] 2>/dev/null && [ "$_vm_mem_gb" -gt 0 ] 2>/dev/null && [ "$_cfg_mem" -ne "$_vm_mem_gb" ]; then
@@ -2734,6 +2755,7 @@ setup_wordpress_cli() {
         --admin_email="$wp_email" \
         --skip-email >/dev/null 2>>"$LOG_FILE"; then
         log "WordPress multisite installed successfully via WP-CLI"
+        note_wordpress_installed_by_onionpress
     else
         log "ERROR: WP-CLI core multisite-install failed"
         echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."

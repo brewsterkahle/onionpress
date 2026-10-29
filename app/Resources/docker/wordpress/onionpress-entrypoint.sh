@@ -39,5 +39,29 @@
     done
 ) &
 
+# This container's default gateway from the kernel's routing table (hex,
+# host byte order), for onionpress-install-page.conf: the only source but
+# loopback that may reach WordPress's installer (issue #464). The same
+# parse as onionpress-auto-login.php's onionpress_auto_login_gateway().
+# Each field is checked before the arithmetic sees it. Nothing found: the
+# variable is empty and the conf admits loopback only.
+gateway_from_route() {
+    local table="${1:-/proc/net/route}" iface dest gw flags rest
+    [ -r "$table" ] || return 1
+    while read -r iface dest gw flags rest; do
+        [ "$dest" = "00000000" ] || continue
+        [ "$gw" != "00000000" ] || continue
+        [[ "$gw" =~ ^[0-9A-Fa-f]{8}$ ]] || continue
+        [[ "$flags" =~ ^[0-9A-Fa-f]{1,4}$ ]] || continue
+        [ $(( 16#$flags & 3 )) -eq 3 ] || continue
+        printf '%d.%d.%d.%d\n' "$(( 16#${gw:6:2} ))" "$(( 16#${gw:4:2} ))" \
+            "$(( 16#${gw:2:2} ))" "$(( 16#${gw:0:2} ))"
+        return 0
+    done < "$table"
+    return 1
+}
+ONIONPRESS_WP_GATEWAY=$(gateway_from_route) || ONIONPRESS_WP_GATEWAY=""
+export ONIONPRESS_WP_GATEWAY
+
 # Hand off to the standard WordPress entrypoint
 exec docker-entrypoint.sh "$@"

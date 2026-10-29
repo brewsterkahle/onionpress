@@ -496,6 +496,79 @@ def mark_setup_complete(data_dir: str, log: Callable[[str], None] | None = None)
     return True
 
 
+# Who installed this WordPress (issue #464). Until WordPress is installed,
+# its own installer (wp-admin/install.php) takes the first visitor's choice
+# of admin account, and a setup that found WordPress installed used to
+# adopt it: rename and re-password the existing admin, keeping whatever
+# else that visitor added. Every OnionPress install writes this marker
+# beside .setup_complete, holding user 1's registration time as WordPress
+# records it; a setup that finds WordPress installed provisions it only
+# when the marker matches the live install (or the operator says
+# --adopt-existing). The bash setups (`onionpress setup` in both
+# launchers) write the same file the same way; a test keeps them equal.
+INSTALLED_BY_ONIONPRESS_MARKER = ".wordpress-installed-by-onionpress"
+INSTALLED_BY_UNKNOWN = "unknown"
+# user_registered as WordPress stores it; the launchers' bash check is the
+# same shape (note_wordpress_installed_by_onionpress).
+_USER_REGISTERED_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$")
+FOREIGN_INSTALL_MSG = (
+    "ERROR: this WordPress was not installed by OnionPress (no "
+    f"{INSTALLED_BY_ONIONPRESS_MARKER} marker for it): someone may have "
+    "reached WordPress's own installer before setup ran. Check its users "
+    "and plugins, or reset and set up again. To keep it anyway, run "
+    "`onionpress provision --adopt-existing`."
+)
+
+
+def _wp_user_1_registered(docker_bin: str) -> str:
+    """User 1's `user_registered` as WordPress stores it ('' when it
+    cannot be read)."""
+    r = _run_wp(docker_bin, ("user", "get", "1", "--field=user_registered"),
+                timeout=30)
+    if r.returncode != 0:
+        return ""
+    value = (r.stdout or "").split("\n", 1)[0].strip()
+    return value if _USER_REGISTERED_RE.fullmatch(value) else ""
+
+
+def mark_wordpress_installed_by_onionpress(
+    data_dir: str, docker_bin: str = "docker",
+    log: Callable[[str], None] | None = None,
+) -> bool:
+    """Record that OnionPress installed the WordPress now in the container.
+    False, logged, when the marker cannot be written."""
+    stamp = _wp_user_1_registered(docker_bin) or INSTALLED_BY_UNKNOWN
+    path = os.path.join(data_dir, INSTALLED_BY_ONIONPRESS_MARKER)
+    try:
+        os.makedirs(data_dir, mode=0o700, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(stamp + "\n")
+    except OSError as e:
+        if log:
+            log(f"WARNING: could not write {path}: {e}")
+        return False
+    return True
+
+
+def wordpress_installed_by_onionpress(data_dir: str, docker_bin: str = "docker") -> bool:
+    """True when the marker says OnionPress installed the WordPress in the
+    container: its stamp is user 1's registration time (or 'unknown', a
+    stamp the install could not read), never a stale marker of an earlier
+    install."""
+    path = os.path.join(data_dir, INSTALLED_BY_ONIONPRESS_MARKER)
+    try:
+        with open(path, encoding="utf-8") as f:
+            stamp = f.read(256).strip()
+    except OSError:
+        return False
+    if stamp == INSTALLED_BY_UNKNOWN:
+        return True
+    if not _USER_REGISTERED_RE.fullmatch(stamp):
+        return False
+    live = _wp_user_1_registered(docker_bin)
+    return bool(live) and live == stamp
+
+
 def install_fresh_wordpress(
     *,
     site_title: str,
@@ -577,6 +650,12 @@ def install_fresh_wordpress(
             f"{r.stderr.strip()[:200]}")
     else:
         log("Admin password set")
+
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    # OnionPress installed this one (issue #464): what a later setup
+    # that finds WordPress installed checks before adopting it.
+    mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log)
 
     # 2. Per-user subsite URL on the user's profile — matches Mac UX where
     # the "Website" link on profile.php points somewhere useful.
@@ -687,6 +766,7 @@ def provision_existing_wordpress(
     docker_bin: str = "docker",
     log_func: Callable[[str], None] | None = None,
     data_dir: str | None = None,
+    adopt_existing: bool = False,
 ) -> bool:
     """Apply setup choices to an already-installed WordPress and provision
     the primary subsite.
@@ -720,6 +800,17 @@ def provision_existing_wordpress(
 
     if _refuse_invalid_onionname(onionname, log):
         return False
+
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    # Only a WordPress OnionPress installed is adopted (issue #464): one
+    # installed through wp-admin/install.php is whoever got there first's.
+    if not adopt_existing and not wordpress_installed_by_onionpress(data_dir, docker_bin):
+        log(FOREIGN_INSTALL_MSG)
+        return False
+    if adopt_existing:
+        log("Adopting the installed WordPress as the operator asked (--adopt-existing)")
+        mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log)
 
     log(f"Provisioning WordPress: title={site_title!r} onionname={onionname!r}")
 
@@ -785,13 +876,16 @@ def provision_existing_wordpress(
     return True
 
 
-def provision_interactive(data_dir: str | None = None) -> bool:
+def provision_interactive(data_dir: str | None = None, *,
+                          adopt_existing: bool = False) -> bool:
     """Interactive terminal setup for headless / SSH installs.
 
     Called by `onionpress provision` on systems where WordPress has already
     been auto-installed by the container (systemd path).  Prompts for site
     title, username, and password, then delegates to
-    provision_existing_wordpress().
+    provision_existing_wordpress(), which adopts an installed WordPress
+    only when OnionPress installed it or *adopt_existing* says to
+    (`onionpress provision --adopt-existing`, issue #464).
     """
     import getpass
 
@@ -841,6 +935,7 @@ def provision_interactive(data_dir: str | None = None) -> bool:
             password=pw,
             data_dir=data_dir,
             log_func=log_fn,
+            adopt_existing=adopt_existing,
         )
     else:
         # Fresh install path — same as the GTK SetupDialog and Mac

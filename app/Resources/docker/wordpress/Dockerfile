@@ -93,7 +93,10 @@ COPY onionpress-health.txt /usr/local/share/onionpress/health.txt
 COPY onionpress-creations.conf /etc/apache2/conf-available/
 # The same for wp-content/uploads: media, never code.
 COPY onionpress-uploads.conf /etc/apache2/conf-available/
-RUN a2enconf onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations onionpress-uploads
+# WordPress's installer (install.php, setup-config.php) answers loopback
+# and the gateway only: never a Tor visitor (issue #464).
+COPY onionpress-install-page.conf /etc/apache2/conf-available/
+RUN a2enconf onionpress-xmlrpc-block onionpress-log-format onionpress-health onionpress-creations onionpress-uploads onionpress-install-page
 # A conf Apache rejects would take every site down at the next image pull;
 # fail the build instead. The php_module check keeps the creations and
 # uploads confs' `php_admin_flag engine off` from being skipped silently by
