@@ -22,6 +22,7 @@ from .config import (
     ensure_config, ensure_secrets, read_value, detect_port_offset,
     validate_address_prefix, DEFAULTS,
 )
+from .ports import port_environ
 from .docker import Docker
 from .containers import ContainerManager
 from .launcher_ops import BACKUP_PASSWORD_ENV
@@ -514,10 +515,7 @@ class OnionPressCLI:
         # Build env for Docker
         secrets = ensure_secrets(self.paths.secrets_file)
         extra_env = secrets.as_env()
-        extra_env["ONIONPRESS_WP_PORT"] = str(self.port_config.wp_port)
-        extra_env["ONIONPRESS_SOCKS_PORT"] = str(self.port_config.socks_port)
-        extra_env["ONIONPRESS_PROXY_PORT"] = str(self.port_config.proxy_port)
-        extra_env["ONIONPRESS_PORT_OFFSET"] = str(self.port_config.offset)
+        extra_env.update(port_environ(self.port_config))
         extra_env["TZ"] = detect_timezone()
         extra_env["ONIONPRESS_VERSION"] = __version__
 

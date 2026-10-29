@@ -79,6 +79,7 @@ from .health import (
     decode_curl_reason,
 )
 from .log_rotation import RotatingLog
+from .ports import PortAttributes, port_environ
 from .power import CaffeineManager
 from .reachability import RecoveryWindow
 from .reachability_stats import ReachabilityStats
@@ -197,7 +198,7 @@ def run_daemon_command(sub, paths, log, *, launcher_script="", json_output=False
 # The daemon
 # ---------------------------------------------------------------------------
 
-class Daemon:
+class Daemon(PortAttributes):
     """The loops. One instance per process; `run()` blocks until TERM."""
 
     is_onionheaven = False
@@ -259,12 +260,10 @@ class Daemon:
 
         # Ports: resolved in run() (the running stack's, else the first
         # free offset). Until then the environment's or the default.
-        pc = op_config.PortConfig.from_offset(
+        # self.ports is the one holder; port_offset, wp_port, socks_port and
+        # proxy_port read it (PortAttributes).
+        self.ports = op_config.PortConfig.from_offset(
             int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0") or 0))
-        self.port_offset = pc.offset
-        self.wp_port = pc.wp_port
-        self.socks_port = pc.socks_port
-        self.proxy_port = pc.proxy_port
         self.runtime_ready = False
         self.port_conflict = []
 
@@ -688,16 +687,13 @@ class Daemon:
                  f"SOCKS {self.socks_port}, proxy {self.proxy_port})")
 
     def _apply_ports(self, pc):
-        self.port_offset = pc.offset
-        self.wp_port = pc.wp_port
-        self.socks_port = pc.socks_port
-        self.proxy_port = pc.proxy_port
-        os.environ["ONIONPRESS_PORT_OFFSET"] = str(pc.offset)
-        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
-        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
-        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
-        onion_proxy.PROXY_PORT = self.proxy_port
-        onion_proxy.PHP_PROXY_PORT = self.wp_port
+        """Make *pc* this daemon's ports: self.ports (which the proxy
+        server reads at each request), the environment the launcher and
+        other children inherit, and onion_proxy's defaults."""
+        self.ports = pc
+        os.environ.update(port_environ(pc))
+        onion_proxy.PROXY_PORT = pc.proxy_port
+        onion_proxy.PHP_PROXY_PORT = pc.wp_port
 
     def _resync_ports(self):
         """After the stack came up: the port Docker actually published,
@@ -1628,7 +1624,8 @@ class Daemon:
         def run_proxy():
             try:
                 server = onion_proxy.ThreadingHTTPServer(("127.0.0.1", self.proxy_port),
-                                                         onion_proxy.OnionProxyHandler)
+                                                         onion_proxy.OnionProxyHandler,
+                                                         ports=lambda: self.ports)
                 server.docker_bin = docker_bin
                 server.docker_env = docker_env
                 server.onion_address = self.onion_address

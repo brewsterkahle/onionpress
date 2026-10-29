@@ -446,6 +446,33 @@ class TestStatusPass(_DaemonCase):
         self.assertFalse(self.d.checking)
 
 
+class TestPorts(_DaemonCase):
+    """Issue #476: the daemon's ports are one PortConfig (self.ports);
+    _apply_ports replaces it, exports it to the environment the launcher
+    inherits and keeps onion_proxy's defaults in step."""
+
+    def test_apply_ports_moves_all_of_them_together(self):
+        from onionpress import onion_proxy
+        for name in ("PROXY_PORT", "PHP_PROXY_PORT"):
+            self.addCleanup(setattr, onion_proxy, name, getattr(onion_proxy, name))
+        pc = op_config.PortConfig.from_offset(10000)
+        with mock.patch.dict(os.environ):
+            self.d._apply_ports(pc)
+            self.assertEqual(os.environ["ONIONPRESS_PORT_OFFSET"], "10000")
+            self.assertEqual(os.environ["ONIONPRESS_WP_PORT"], "18080")
+            self.assertEqual(os.environ["ONIONPRESS_SOCKS_PORT"], "19050")
+            self.assertEqual(os.environ["ONIONPRESS_PROXY_PORT"], "19077")
+        self.assertIs(self.d.ports, pc)
+        self.assertEqual((self.d.port_offset, self.d.wp_port, self.d.socks_port,
+                          self.d.proxy_port), (10000, 18080, 19050, 19077))
+        self.assertEqual((onion_proxy.PROXY_PORT, onion_proxy.PHP_PROXY_PORT),
+                         (19077, 18080))
+
+    def test_the_port_attributes_are_views(self):
+        with self.assertRaises(AttributeError):
+            self.d.wp_port = 1
+
+
 class TestHubLoopsGate(_DaemonCase):
     """The heartbeat starts only on "yes" (unset = yes), once Tor is
     bootstrapped and the address is known; the opt-out and the upkeep run

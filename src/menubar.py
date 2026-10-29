@@ -52,6 +52,7 @@ except ImportError:
     setup_window = None
 from onionpress.platform import resolve_paths
 from onionpress import config as op_config
+from onionpress.ports import PortAttributes, port_environ
 from onionpress import confirm as op_confirm
 from onionpress import image_overrides
 from onionpress.ui_helpers import (
@@ -74,7 +75,7 @@ from onionpress import splash_tips
 
 
 
-class OnionPressApp(rumps.App):
+class OnionPressApp(PortAttributes, rumps.App):
     # The daemon (onionpress.daemon, `onionpress daemon` under launchd) runs
     # every loop; this process shows its state file and sends commands
     # through the launcher. How often the state is read and the menu
@@ -407,14 +408,10 @@ class OnionPressApp(rumps.App):
     # ── The view of the daemon's state ───────────────────────────────
 
     def _apply_ports(self, pc):
-        self.port_offset = pc.offset
-        self.wp_port = pc.wp_port
-        self.socks_port = pc.socks_port
-        self.proxy_port = pc.proxy_port
-        os.environ["ONIONPRESS_PORT_OFFSET"] = str(pc.offset)
-        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
-        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
-        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
+        """The daemon's ports as this process's: self.ports (port_offset,
+        wp_port… read it) and the environment the launcher inherits."""
+        self.ports = pc
+        os.environ.update(port_environ(pc))
 
     @property
     def display_state(self):

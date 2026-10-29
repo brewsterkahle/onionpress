@@ -11,9 +11,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class PortConfig:
-    """Port configuration for multi-user support."""
+    """Port configuration for multi-user support. Frozen: a process that
+    learns a new offset builds a new one (issue #476)."""
     offset: int
     wp_port: int
     socks_port: int
@@ -29,6 +30,40 @@ class PortConfig:
             socks_port=9050 + offset,
             proxy_port=9077 + offset,
         )
+
+
+def port_environ(pc) -> dict:
+    """The ONIONPRESS_*_PORT entries for *pc*: what the launcher, compose
+    and the scripts it runs read the ports from. The one place the four
+    names are spelt for a child's environment."""
+    return {
+        "ONIONPRESS_PORT_OFFSET": str(pc.offset),
+        "ONIONPRESS_WP_PORT": str(pc.wp_port),
+        "ONIONPRESS_SOCKS_PORT": str(pc.socks_port),
+        "ONIONPRESS_PROXY_PORT": str(pc.proxy_port),
+    }
+
+
+class PortAttributes:
+    """port_offset / wp_port / socks_port / proxy_port as read-only views
+    of ``self.ports`` (a PortConfig), for the daemon and the menubar: the
+    four can only change together, by replacing ``self.ports``."""
+
+    @property
+    def port_offset(self):
+        return self.ports.offset
+
+    @property
+    def wp_port(self):
+        return self.ports.wp_port
+
+    @property
+    def socks_port(self):
+        return self.ports.socks_port
+
+    @property
+    def proxy_port(self):
+        return self.ports.proxy_port
 
 
 def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int]:

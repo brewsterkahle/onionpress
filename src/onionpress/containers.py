@@ -20,6 +20,7 @@ from .config import (
     PortConfig, detect_port_offset,
 )
 from .platform import OnionPressPaths
+from .ports import port_environ
 # Re-exported: their home is image_overrides, which imports no docker code
 # so the menubar can ask without loading it (issue #475).
 from .image_overrides import (  # noqa: F401
@@ -233,10 +234,7 @@ class ContainerManager:
     def _build_env(self) -> dict:
         """Build extra environment for docker compose."""
         env = self._secrets_env()
-        env["ONIONPRESS_WP_PORT"] = str(self.port_config.wp_port)
-        env["ONIONPRESS_SOCKS_PORT"] = str(self.port_config.socks_port)
-        env["ONIONPRESS_PROXY_PORT"] = str(self.port_config.proxy_port)
-        env["ONIONPRESS_PORT_OFFSET"] = str(self.port_config.offset)
+        env.update(port_environ(self.port_config))
         # The Creations bind mount in docker-compose.yml; unset, compose
         # falls back to a throwaway /tmp path.
         env["ONIONPRESS_DOCUMENTS_DIR"] = self.paths.documents_dir

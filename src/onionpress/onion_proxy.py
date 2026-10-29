@@ -51,6 +51,10 @@ from socketserver import ThreadingMixIn
 from html import escape as html_escape
 from urllib.parse import urlparse, parse_qs
 
+# The ports this process found in its environment at import: the defaults
+# for a server built without its own (ThreadingHTTPServer's *ports*) and
+# for check_php_proxy. The Mac daemon passes its server the live ports
+# and keeps these in step (Daemon._apply_ports).
 PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
 PHP_PROXY_PORT = int(os.environ.get("ONIONPRESS_WP_PORT", 8080))
 PHP_PROXY_PATH = "/__op_proxy.php"
@@ -417,10 +421,13 @@ def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
         return False
 
 
-def check_php_proxy(log_func=None):
-    """Verify the PHP proxy is responding."""
+def check_php_proxy(log_func=None, wp_port=None):
+    """Verify the PHP proxy is responding on WordPress's published port
+    (*wp_port*, default PHP_PROXY_PORT)."""
+    if wp_port is None:
+        wp_port = PHP_PROXY_PORT
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", wp_port, timeout=5)
         conn.request("GET", PHP_PROXY_PATH,
                      headers={"X-OnionPress-Action": "status",
                               "X-OnionPress-Token": PHP_PROXY_TOKEN})
@@ -757,8 +764,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         method = "HEAD" if head_only else ("POST" if post_data else "GET")
 
+        wp_port = self.server.wp_port
         try:
-            conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=60)
+            conn = http.client.HTTPConnection("127.0.0.1", wp_port, timeout=60)
             conn.request(method, PHP_PROXY_PATH, body=post_data, headers=headers)
             resp = conn.getresponse()
             body = resp.read()
@@ -768,7 +776,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         except OSError as e:
             # Log once on first failure, then every 5 minutes while down.
             # OSError covers ConnectionRefusedError, timeout, etc. — all signs
-            # that the Lima SSH port forward for localhost:PHP_PROXY_PORT has dropped.
+            # that the Lima SSH port forward for localhost:wp_port has dropped.
             srv = self.server
             now = time.time()
             if srv._wp_unreachable_since is None:
@@ -777,14 +785,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 if srv.log_func:
                     srv.log_func(
                         "WARNING: WordPress unreachable on localhost:%d — "
-                        "Lima port forward may be down (%s)", PHP_PROXY_PORT, e)
+                        "Lima port forward may be down (%s)", wp_port, e)
             elif now - srv._wp_unreachable_last_log >= 300:
                 srv._wp_unreachable_last_log = now
                 elapsed = int(now - srv._wp_unreachable_since)
                 if srv.log_func:
                     srv.log_func(
                         "WARNING: WordPress still unreachable on localhost:%d — "
-                        "%ds elapsed (%s)", PHP_PROXY_PORT, elapsed, e)
+                        "%ds elapsed (%s)", wp_port, elapsed, e)
             raise
 
         # Recovery: log once when WordPress comes back after a failure.
@@ -793,7 +801,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 elapsed = int(time.time() - self.server._wp_unreachable_since)
                 self.server.log_func(
                     "WordPress reachable again on localhost:%d after %ds down",
-                    PHP_PROXY_PORT, elapsed)
+                    wp_port, elapsed)
             self.server._wp_unreachable_since = None
             self.server._wp_unreachable_last_log = None
 
@@ -1115,7 +1123,12 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, ports=None, **kwargs):
+        # *ports*: a callable returning this install's PortConfig, read at
+        # each request, so a port resync reaches a running server. None:
+        # the ports of this process's environment (PROXY_PORT,
+        # PHP_PROXY_PORT).
+        self._ports = ports
         self.onion_address = None
         self.healthcheck_address = None
         self.tor_ready = False
@@ -1129,6 +1142,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self._wp_unreachable_since = None   # time.time() of first failure, or None
         self._wp_unreachable_last_log = None  # time.time() of last warning log
         super().__init__(*args, **kwargs)
+
+    @property
+    def wp_port(self):
+        """WordPress's published port, which /__op_proxy.php is fetched on."""
+        if self._ports is None:
+            return PHP_PROXY_PORT
+        return self._ports().wp_port
 
 
 def stop_proxy(server):

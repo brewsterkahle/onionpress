@@ -209,11 +209,13 @@ class TestCallersSendTheToken(unittest.TestCase):
     def test_fetch_via_php(self):
         conn = self._conn()
         h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-        h.server = types.SimpleNamespace(_wp_unreachable_since=None, log_func=None)
+        h.server = types.SimpleNamespace(_wp_unreachable_since=None, log_func=None,
+                                         wp_port=18080)
         with mock.patch.object(onion_proxy.http.client, "HTTPConnection",
                                return_value=conn) as cls:
             h._fetch_via_php("http://" + "a" * 56 + ".onion/")
-        cls.assert_called_once_with("127.0.0.1", onion_proxy.PHP_PROXY_PORT, timeout=60)
+        # The server's own port (a second user's +10000), not the module's.
+        cls.assert_called_once_with("127.0.0.1", 18080, timeout=60)
         headers = conn.request.call_args.kwargs["headers"]
         self.assertEqual(headers["X-OnionPress-Token"], TOKEN)
         self.assertEqual(conn.request.call_args.args[1], onion_proxy.PHP_PROXY_PATH)
@@ -224,6 +226,35 @@ class TestCallersSendTheToken(unittest.TestCase):
             self.assertTrue(onion_proxy.check_php_proxy())
         headers = conn.request.call_args.kwargs["headers"]
         self.assertEqual(headers["X-OnionPress-Token"], TOKEN)
+
+    def test_check_php_proxy_on_a_given_port(self):
+        conn = self._conn()
+        with mock.patch.object(onion_proxy.http.client, "HTTPConnection",
+                               return_value=conn) as cls:
+            self.assertTrue(onion_proxy.check_php_proxy(wp_port=28080))
+        self.assertEqual(cls.call_args.args, ("127.0.0.1", 28080))
+
+
+class TestServerPorts(unittest.TestCase):
+    """The server reads its ports from what it was given, at each request
+    (issue #476), so a port resync reaches a running proxy."""
+
+    def _server(self, **kwargs):
+        server = onion_proxy.ThreadingHTTPServer(
+            ("127.0.0.1", 0), onion_proxy.OnionProxyHandler, **kwargs)
+        self.addCleanup(server.server_close)
+        return server
+
+    def test_given_ports_are_read_live(self):
+        from onionpress.ports import PortConfig
+        holder = [PortConfig.from_offset(10000)]
+        server = self._server(ports=lambda: holder[0])
+        self.assertEqual(server.wp_port, 18080)
+        holder[0] = PortConfig.from_offset(20000)
+        self.assertEqual(server.wp_port, 28080)
+
+    def test_without_ports_the_environment_default(self):
+        self.assertEqual(self._server().wp_port, onion_proxy.PHP_PROXY_PORT)
 
 
 if __name__ == "__main__":

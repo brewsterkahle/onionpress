@@ -307,6 +307,17 @@ class TestPortDetection(unittest.TestCase):
         self.assertEqual(pc.offset, 10000)
         self.assertEqual(pc.wp_port, 18080)
 
+    def test_port_config_is_frozen(self):
+        pc = PortConfig.from_offset(0)
+        with self.assertRaises(AttributeError):
+            pc.wp_port = 1
+
+    def test_port_environ_names_all_four(self):
+        from onionpress.ports import port_environ
+        self.assertEqual(port_environ(PortConfig.from_offset(20000)), {
+            "ONIONPRESS_PORT_OFFSET": "20000", "ONIONPRESS_WP_PORT": "28080",
+            "ONIONPRESS_SOCKS_PORT": "29050", "ONIONPRESS_PROXY_PORT": "29077"})
+
     def test_from_offset_derives_all_three_ports(self):
         pc = PortConfig.from_offset(10000)
         self.assertEqual(
