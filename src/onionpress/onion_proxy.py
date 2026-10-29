@@ -22,8 +22,19 @@ another site's page made (_from_a_web_page): /status named the onion
 address this Mac serves with Access-Control-Allow-Origin: *, which tied
 the person's clearnet browsing to their onion site, and /proxy/ let a
 page send the person's Tor to any onion URL.
+
+A request's Host must name this proxy too (own_hosts, issue #465): a
+clear-web page whose name's DNS is pointed at 127.0.0.1 (DNS rebinding)
+reaches this port with its own name as Host, and its fetches carry what
+the proxy's own page's carry. Only an absolute-form request (GET
+http://x.onion/ HTTP/1.1, the extension's proxy setting) names its target
+there. And a /proxy/ page is sandboxed (PROXIED_PAGE_CSP): a visited onion
+site's script was otherwise same-origin with /status and /setup. The links
+the proxy rewrites into such a page carry PROXY_PAGE_TOKEN, which is how
+the page's own requests are told from another site's.
 """
 
+import hmac
 import os
 import re
 import secrets
@@ -52,6 +63,20 @@ PHP_PROXY_TOKEN = secrets.token_urlsafe(32)
 PHP_PROXY_TOKEN_PLACEHOLDER = "__ONIONPRESS_PROXY_TOKEN__"
 # How onion-forward.php's body starts when Tor could not fetch the URL.
 PHP_PROXY_FETCH_FAILED = b"Tor fetch failed"
+# /proxy/ serves any onion site's page at this proxy's own origin, so every
+# response under it carries a CSP sandbox without allow-same-origin: the
+# browser gives the page an opaque origin, and its script is no longer
+# same-origin with /status (the onion address) or /setup. The site's
+# scripts, forms, links, popups and downloads keep working.
+PROXIED_PAGE_CSP = ("sandbox allow-forms allow-scripts allow-popups "
+                    "allow-modals allow-downloads")
+# A sandboxed page's own requests (its images, scripts, links, forms and
+# fetches) all arrive as Sec-Fetch-Site: cross-site with Origin null or
+# none, exactly what another site's page sends, so _from_a_web_page cannot
+# tell them apart. The links the proxy rewrites into a proxied page carry
+# this token instead (/proxy/<token>/<host>/...): a page the proxy served
+# knows it, a page from elsewhere does not. New for each run of the app.
+PROXY_PAGE_TOKEN = secrets.token_urlsafe(16)
 WAYBACK_PREFIX = "https://web.archive.org/web/"
 
 # Shown for a page load whose onion service did not answer (_send_onion_unreachable).
@@ -428,6 +453,18 @@ def _script_json(value):
             .replace('&', '\\u0026'))
 
 
+def own_hosts(port):
+    """The Host values that name this proxy: its loopback names with its
+    port (a bare name only when the port is 80, which it never is). A
+    request for any other Host was made for a name whose DNS a page
+    pointed at 127.0.0.1, and is refused."""
+    names = ("127.0.0.1", "localhost", "[::1]")
+    own = {f"{name}:{port}" for name in names}
+    if port == 80:
+        own.update(names)
+    return own
+
+
 def _onion_host(host):
     """Classify a request's target host: (host, is_onion, ok).
 
@@ -475,6 +512,34 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             return origin
         return None
 
+    def _own_origins(self):
+        port = getattr(self.server, 'server_port', None)
+        return tuple(sorted("http://" + host for host in own_hosts(port)))
+
+    def _host_is_own(self):
+        """True when the request's Host names this proxy (own_hosts). A
+        page at a name its DNS rebinds to 127.0.0.1 reaches this port with
+        that name as Host, and its same-origin fetches carry no Origin and
+        Sec-Fetch-Site: same-origin, what _from_a_web_page takes for the
+        proxy's own page."""
+        host = self.headers.get('Host')
+        if host is None:
+            return False
+        port = getattr(self.server, 'server_port', None)
+        return host.strip().lower() in own_hosts(port)
+
+    def _refuse_host(self):
+        # Nothing of the request goes into the body or the log.
+        self.send_error(403, "Not this proxy's host")
+
+    def end_headers(self):
+        # Every response under /proxy/ (a page, a subresource, a cached
+        # copy, the unreachable page, an error) is a document at this
+        # proxy's origin when a browser renders it: sandbox it.
+        if getattr(self, 'path', '').startswith('/proxy/'):
+            self.send_header('Content-Security-Policy', PROXIED_PAGE_CSP)
+        super().end_headers()
+
     def _from_a_web_page(self):
         """True for a request a browser made on behalf of another site's
         page. Browsers add Origin to cross-origin fetches and Sec-Fetch-Site
@@ -486,8 +551,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         so same-site counts as another site's page."""
         if self._get_cors_origin():
             return False
-        port = getattr(self.server, 'server_port', None)
-        own = (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+        own = self._own_origins()
         origin = self.headers.get('Origin')
         if origin is not None:
             return origin not in own
@@ -504,6 +568,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         """Handle CORS preflight requests (browser extensions only)."""
+        if not self._host_is_own():
+            self._refuse_host()
+            return
         self.send_response(204)
         cors_origin = self._get_cors_origin()
         if cors_origin:
@@ -521,6 +588,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.send_error(403, "This proxy carries .onion sites only (http://)")
 
     def _handle_request(self, head_only=False):
+        # An absolute-form request names its target in Host; every other
+        # request must name this proxy there, whatever it asks for.
+        if not self.path.startswith('http://') and not self._host_is_own():
+            self._refuse_host()
+            return
+
         # Status endpoint
         if self.path == '/status':
             if self._from_a_web_page():
@@ -548,10 +621,17 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 target_path += '?' + parsed.query
             target_port = parsed.port
         elif self.path.startswith('/proxy/'):
-            if self._from_a_web_page():
+            rest = self.path[len('/proxy/'):]
+            token, slash, tail = rest.partition('/')
+            if slash and hmac.compare_digest(token.encode('latin-1'),
+                                             PROXY_PAGE_TOKEN.encode('ascii')):
+                # A link the proxy rewrote into a page it served
+                # (_rewrite_onion_links): the sandboxed page's own request.
+                rest = tail
+            elif self._from_a_web_page():
                 self._refuse_web_page()
                 return
-            parts = self.path[len('/proxy/'):].split('/', 1)
+            parts = rest.split('/', 1)
             target_host = parts[0].lower()
             target_path = '/' + parts[1] if len(parts) > 1 else '/'
             target_port = None
@@ -738,7 +818,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         except Exception:
             return body_bytes
 
-        proxy_prefix = f"/proxy/{onion_host}"
+        # The rewritten links carry the token: a sandboxed page's requests
+        # cannot otherwise be told from another site's (PROXY_PAGE_TOKEN).
+        proxy_prefix = f"/proxy/{PROXY_PAGE_TOKEN}/{onion_host}"
 
         ONION_URL_RE = re.compile(
             r'(https?://)((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)((?:/[^\s"\'<>]*)?)',
@@ -748,7 +830,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         def replace_abs_onion(match):
             host = match.group(2)
             path = match.group(3) or ''
-            return f"/proxy/{host}{path}"
+            return f"/proxy/{PROXY_PAGE_TOKEN}/{host}{path}"
 
         text = ONION_URL_RE.sub(replace_abs_onion, text)
 
@@ -844,15 +926,19 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _setup_post_same_origin(self):
-        """False for a POST a browser sent from any page but this proxy's
-        own: browsers send Origin with every cross-origin POST, so any web
-        page could otherwise submit the setup form to 127.0.0.1. A client
-        that sends no Origin is not a browser."""
+        """False for a POST a browser sent from any page but the setup page
+        this proxy served: browsers send Origin with every POST, so any web
+        page could otherwise submit the setup form to 127.0.0.1, and a
+        proxied onion page (/proxy/, sandboxed: Origin null, every request
+        cross-site) is not the setup page either. A client that sends no
+        Origin is not a browser."""
         origin = self.headers.get('Origin')
         if origin is None:
             return True
-        port = getattr(self.server, 'server_port', None)
-        return origin in (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+        if origin not in self._own_origins():
+            return False
+        site = self.headers.get('Sec-Fetch-Site')
+        return site is None or site == 'same-origin'
 
     def _wp_installed(self):
         """True if WordPress is installed, None if that can't be told."""
