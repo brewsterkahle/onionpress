@@ -186,8 +186,8 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
         <tr>
           <th><label for="user_name">Username</label></th>
           <td>
-            <input type="text" name="user_name" id="user_name" value="admin" autocomplete="username" />
-            <p class="description">Usernames cannot be changed later.</p>
+            <input type="text" name="user_name" id="user_name" value="{{SUGGESTED_USERNAME}}" autocomplete="username" />
+            <p class="description">Also your site's address (/username/). Usernames cannot be changed later.</p>
           </td>
         </tr>
         <tr>
@@ -200,9 +200,6 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
             <div class="strength-indicator"><div class="strength-bar strength-strong" id="strength-bar"></div></div>
             <p class="description">Save this password somewhere safe.</p>
           </td>
-        </tr>
-        <tr style="display:none;">
-          <td><input type="hidden" name="admin_email" id="admin_email" value="admin@onionpress.local" /></td>
         </tr>
         <tr>
           <th>Site Type</th>
@@ -877,6 +874,11 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         import html as html_mod
         html = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}',
                                        html_mod.escape(generated_password))
+        # The user name is the onionname: setup_logic suggests one, as the
+        # setup window does ("admin", the form's old default, without one).
+        from onionpress import setup_logic
+        html = html.replace('{{SUGGESTED_USERNAME}}',
+                            html_mod.escape(setup_logic.suggest_onionname() or 'admin'))
         html = html.replace('{{ERROR_BANNER}}', '')
         body = html.encode('utf-8')
         self.send_response(200)
@@ -900,11 +902,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         admin_password = html_mod.escape(params.get('admin_password', [''])[0])
 
         page = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', admin_password)
+        page = page.replace('{{SUGGESTED_USERNAME}}', '')
         page = page.replace('{{ERROR_BANNER}}', banner)
 
         # Also preserve other field values via JavaScript
         blog_title = params.get('blog_title', ['My OnionPress Site'])[0]
-        user_name = params.get('user_name', ['admin'])[0]
+        user_name = params.get('user_name', [''])[0]
         theme = params.get('theme_choice', ['blog'])[0]
 
         # Inject script to restore form values
@@ -951,14 +954,24 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             return None
         return result.returncode == 0
 
+    def _send_setup_result(self, status, body):
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle_setup_post(self):
-        """Process the WordPress setup form submission."""
+        """Process the WordPress setup form submission.
+
+        The install itself is setup_logic.install_fresh_wordpress, the one
+        install path every setup front end shares; this handles the form,
+        refuses what must not reach it, and reports the result."""
         if not self._setup_post_same_origin():
             self.send_error(403, "Cross-origin setup request refused")
             return
-        # First run only. On an installed site `wp core multisite-install`
-        # changes nothing and exits 0, and the password step below would
-        # then set the password of whichever existing user the form names.
+        # First run only. On an installed site the password step would set
+        # the password of whichever existing user the form names.
         installed = self._wp_installed()
         if installed is not False:
             if self.server.log_func:
@@ -983,253 +996,89 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         title = params.get('blog_title', ['My OnionPress Site'])[0]
         username = params.get('user_name', [''])[0]
         password = params.get('admin_password', [''])[0]
-        email = params.get('admin_email', ['admin@example.com'])[0]
         # theme_choice captured for future use
         # theme = params.get('theme_choice', ['standard'])[0]
 
+        import html as html_mod
         if not username or not password:
-            body = b'<html><body><h1>Error</h1><p>Username and password are required.</p><p><a href="/setup">Go back</a></p></body></html>'
-            self.send_response(400)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_setup_result(400, b'<html><body><h1>Error</h1><p>Username and password are required.</p><p><a href="/setup">Go back</a></p></body></html>')
             return
 
-        # Validate setup inputs — reject values that could be misinterpreted
-        # as CLI flags or contain control characters.
+        # Validate setup inputs. The user name is the onionname (the admin
+        # login and the site's /<name>/ path), held to setup_logic's rule;
+        # the rest must carry no control characters.
         import re
+        from onionpress import setup_logic
         _ctrl_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
         errors = []
-        if not re.fullmatch(r'[a-zA-Z0-9_.\-]+', username):
-            errors.append("Username may only contain letters, numbers, underscores, dots, and hyphens.")
+        name_ok, reason = setup_logic.validate_onionname(username)
+        if not name_ok:
+            errors.append("Username: " + setup_logic.onionname_error_message(reason) + ".")
         if _ctrl_re.search(password):
             errors.append("Password must not contain control characters.")
-        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
-            errors.append("Please enter a valid email address.")
         if _ctrl_re.search(title) or title.startswith('-'):
             errors.append("Site title must not start with a dash or contain control characters.")
-        if len(title) > 200 or len(username) > 60 or len(email) > 254:
+        if len(title) > 200:
             errors.append("One or more fields are too long.")
         if errors:
-            import html as html_mod
             msg = '<br>'.join(html_mod.escape(e) for e in errors)
-            body = f'<html><body><h1>Error</h1><p>{msg}</p><p><a href="/setup">Go back</a></p></body></html>'.encode()
-            self.send_response(400)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_setup_result(400, f'<html><body><h1>Error</h1><p>{msg}</p><p><a href="/setup">Go back</a></p></body></html>'.encode())
             return
 
-        # Use the shared archive.org credentials for Wayback Machine
-        # archiving; multisite.py holds the one copy, so rotating them is
-        # a single edit.
-        from onionpress import multisite as _multisite
-        archive_s3_keys = self._fetch_archive_s3_keys(
-            _multisite._ARCHIVE_LOGIN_EMAIL, _multisite._ARCHIVE_LOGIN_PASS
-        )
-        if archive_s3_keys is None and self.server.log_func:
-            self.server.log_func("Warning: could not fetch archive.org S3 keys — Wayback archiving may not work")
+        launcher = getattr(self.server, 'launcher_script', None)
+        if not launcher:
+            # Without the launcher the install would skip the multisite
+            # conversion, mu-plugins and theme (provision-post-install).
+            if self.server.log_func:
+                self.server.log_func("Setup form refused: no launcher to provision the site")
+            self.send_error(503, "OnionPress launcher not available")
+            return
 
-        # Run wp core multisite-install (subdirectory mode)
+        # Every step's message goes to the OnionPress log; the errors are
+        # kept for the failure page.
+        errors_logged = []
+
+        def log(msg):
+            if self.server.log_func:
+                self.server.log_func(msg)
+            if msg.startswith("ERROR"):
+                errors_logged.append(msg)
+
         try:
-            from onionpress import wp_files
-            docker = self.server.docker_bin
-            denv = self.server.docker_env
-
-            # sunrise.php is installed by provision-post-install before WordPress
-            # exists. It queries wp_site on load, which fails during a fresh install
-            # because multisite tables don't exist yet. Move it aside for the install
-            # (as www-data, whose folder wp-content is).
-            subprocess.run(
-                [docker] + wp_files.exec_args("bash", "-c",
-                    "[ -f wp-content/sunrise.php ] && "
-                    "mv wp-content/sunrise.php wp-content/sunrise.php.bak || true"),
-                env=denv, capture_output=True, timeout=10
+            ok = setup_logic.install_fresh_wordpress(
+                site_title=title,
+                onionname=username,
+                password=password,
+                onion_addr=self.server.onion_address or "localhost",
+                docker_bin=self.server.docker_bin,
+                docker_env=self.server.docker_env,
+                launcher_bin=launcher,
+                log_func=log,
+                data_dir=self.server.data_dir,
             )
-
-            # No --admin_password: argv is visible to every local user (ps)
-            # and a subprocess error quotes it. wp-cli generates a password
-            # (printed on the stdout we drop) and the user's goes in on
-            # stdin once the install is done.
-            cmd = [docker] + wp_files.wp_cli_args(
-                "core", "multisite-install",
-                "--url=http://localhost",
-                f"--title={title}",
-                f"--admin_user={username}",
-                f"--admin_email={email}",
-                "--skip-email",
-            )
-            result = subprocess.run(
-                cmd, env=denv,
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
-            )
-
-            subprocess.run(
-                [docker] + wp_files.exec_args("bash", "-c",
-                    "[ -f wp-content/sunrise.php.bak ] && "
-                    "mv wp-content/sunrise.php.bak wp-content/sunrise.php || true"),
-                env=denv, capture_output=True, timeout=10
-            )
-
-            if result.returncode == 0:
-                if self.server.log_func:
-                    self.server.log_func("WordPress multisite installed via setup page")
-
-                from onionpress.setup_logic import set_wp_user_password
-                pw_result = set_wp_user_password(
-                    username, password, docker_bin=docker, env=denv)
-                password_set = pw_result.returncode == 0
-                if self.server.log_func:
-                    self.server.log_func(
-                        "Admin password set" if password_set else
-                        "ERROR: setting the admin password failed: "
-                        + pw_result.stderr.strip()[:200])
-
-                # Set multisite constants in wp-config.php
-                multisite_constants = [
-                    ("MULTISITE", "true"),
-                    ("SUBDOMAIN_INSTALL", "false"),
-                    ("DOMAIN_CURRENT_SITE", "'localhost'"),
-                    ("PATH_CURRENT_SITE", "'/'"),
-                    ("SITE_ID_CURRENT_SITE", "1"),
-                    ("BLOG_ID_CURRENT_SITE", "1"),
-                    ("SUNRISE", "true"),
-                ]
-                for const_name, const_value in multisite_constants:
-                    subprocess.run(
-                        [docker] + wp_files.wp_cli_args(
-                            "config", "set", const_name, const_value,
-                            "--raw", "--type=constant"),
-                        env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
-                    )
-
-                # Write .htaccess with multisite rewrite rules
-                htaccess_content = (
-                    "# Privacy: prevent onion address leaking in Referer headers\n"
-                    "<IfModule mod_headers.c>\n"
-                    'Header set Referrer-Policy "no-referrer"\n'
-                    "</IfModule>\n"
-                    "\n"
-                    "# My Creations is a publishing folder: serve its files, never run them\n"
-                    "RewriteEngine On\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/creations/ [NC]\n"
-                    "RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "# ...and never its hidden files and folders (.git/, .DS_Store, .thumbs/)\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\\. [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "\n"
-                    "# Blog importer snapshots (drafts, private posts, author emails) went to\n"
-                    "# blog-archives/ through 2.5.2. They live in the hidden .blog-archives/ now;\n"
-                    "# until the importer has moved the old folder there, refuse it as well.\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/creations/blog-archives(/|$) [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "\n"
-                    "# Uploads are media: serve them, never run them\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/uploads/ [NC]\n"
-                    "RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "\n"
-                    "# BEGIN WordPress Multisite\n"
-                    "RewriteEngine On\n"
-                    "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"
-                    "RewriteBase /\n"
-                    "RewriteRule ^index\\.php$ - [L]\n"
-                    "\n"
-                    "# add a trailing slash to /wp-admin\n"
-                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\n"
-                    "\n"
-                    "RewriteCond %{REQUEST_FILENAME} -f [OR]\n"
-                    "RewriteCond %{REQUEST_FILENAME} -d\n"
-                    "RewriteRule ^ - [L]\n"
-                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?(wp-(content|admin|includes).*) $2 [L]\n"
-                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?(.*\\.php)$ $2 [L]\n"
-                    "RewriteRule . index.php [L]\n"
-                    "# END WordPress Multisite\n"
-                )
-                # As www-data (wp_files), whose folder the web root is.
-                wp_files.put_file("/var/www/html/.htaccess", htaccess_content,
-                                  "644", docker_bin=docker, env=denv, timeout=10)
-
-                if self.server.log_func:
-                    self.server.log_func("Multisite constants and .htaccess configured")
-
-                # Save archive.org S3 keys if credentials were validated earlier.
-                # `wp option update <key>` reads the value from stdin, so the
-                # secret key stays out of argv.
-                if archive_s3_keys:
-                    for key, val in [('onionpress_archive_s3_access', archive_s3_keys['access']),
-                                     ('onionpress_archive_s3_secret', archive_s3_keys['secret'])]:
-                        subprocess.run(
-                            [docker] + wp_files.wp_cli_args(
-                                "option", "update", key, stdin=True),
-                            input=val,
-                            env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
-                        )
-                    if self.server.log_func:
-                        self.server.log_func("Archive.org S3 keys saved for Wayback archiving")
-
-                if password_set:
-                    body = SETUP_SUCCESS_HTML.encode('utf-8')
-                    self.send_response(200)
-                else:
-                    body = (b'<html><body><h1>Setup Incomplete</h1>'
-                            b'<p>WordPress was installed, but your admin password '
-                            b'could not be set. See the OnionPress log.</p>'
-                            b'</body></html>')
-                    self.send_response(500)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            else:
-                if self.server.log_func:
-                    self.server.log_func(f"wp core multisite-install failed: {result.stderr}")
-                # wp-cli's stderr quotes the submitted title, user name and
-                # email back: escape it, or the form is a script injection.
-                import html as html_mod
-                error_msg = html_mod.escape(result.stderr.strip() or "Unknown error")
-                body = f'<html><body><h1>Setup Failed</h1><p>{error_msg}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
-                self.send_response(500)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
         except Exception as e:
             # A subprocess error's message quotes its whole argv; name the
             # error instead.
-            import html as html_mod
             detail = (type(e).__name__ if isinstance(e, subprocess.SubprocessError)
                       else str(e))
-            if self.server.log_func:
-                self.server.log_func(f"Setup error: {detail}")
-            body = f'<html><body><h1>Setup Error</h1><p>{html_mod.escape(detail)}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
-            self.send_response(500)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            log(f"Setup error: {detail}")
+            self._send_setup_result(500, f'<html><body><h1>Setup Error</h1><p>{html_mod.escape(detail)}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8'))
+            return
 
-    def _fetch_archive_s3_keys(self, email, password):
-        """Log in to archive.org and return its S3 keys as a dict with
-        'access' and 'secret', or None on failure.
-
-        The same login as the per-launch reconcile
-        (multisite.fetch_archive_s3_keys): archive.org's onion, from the
-        onionheaven container's Tor, form and cookie on curl's stdin. Setup
-        used to log in to clearnet archive.org through a Tor exit, which
-        archive.org turns most exits away from (issue #322).
-        """
-        from onionpress import multisite as _multisite
-        return _multisite.fetch_archive_s3_keys(
-            email, password,
-            docker_bin=self.server.docker_bin,
-            env=self.server.docker_env,
-            log_func=self.server.log_func,
-        )
+        if ok:
+            log("WordPress installed via setup page")
+            self._send_setup_result(200, SETUP_SUCCESS_HTML.encode('utf-8'))
+        elif self._wp_installed():
+            # Installed, but the admin password was not set.
+            self._send_setup_result(500, b'<html><body><h1>Setup Incomplete</h1>'
+                                    b'<p>WordPress was installed, but your admin password '
+                                    b'could not be set. See the OnionPress log.</p>'
+                                    b'</body></html>')
+        else:
+            # wp-cli's stderr quotes the submitted title and user name back:
+            # escape it, or the form is a script injection.
+            error_msg = html_mod.escape("\n".join(errors_logged) or "Unknown error")
+            self._send_setup_result(500, f'<html><body><h1>Setup Failed</h1><p>{error_msg}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8'))
 
     def _handle_status(self):
         """Return proxy status as JSON."""

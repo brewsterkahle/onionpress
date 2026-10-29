@@ -9,7 +9,6 @@ orchestration glue: right wp-cli calls in the right order, right
 docker cp invocations, right error handling.
 """
 
-import ast
 import pathlib
 import re
 import subprocess
@@ -430,21 +429,6 @@ def _wp_content_strip_rule():
     return re.compile("^" + m.group(1) + "/")
 
 
-def _extract_onion_proxy_htaccess():
-    """Pull the hand-duplicated .htaccess string out of onion_proxy.py's
-    setup-wizard flow, so it can be compared against multisite.HTACCESS_BODY.
-    """
-    path = (pathlib.Path(__file__).resolve().parent.parent
-            / "src" / "onionpress" / "onion_proxy.py")
-    tree = ast.parse(path.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "htaccess_content" for t in node.targets
-        ):
-            return ast.literal_eval(node.value)
-    raise AssertionError("could not find htaccess_content assignment in onion_proxy.py")
-
-
 def _extract_mac_launcher_htaccess():
     """Pull the heredoc the Mac launcher writes when .htaccess is missing
     or empty (app/MacOS/onionpress, before provision-post-install runs).
@@ -497,20 +481,19 @@ class TestHtaccessMatchesOnionnameCharset(unittest.TestCase):
 
 class TestHtaccessDuplicatesStayInSync(unittest.TestCase):
     """The .htaccess rewrite rules are hand-duplicated in multisite.py
-    (Linux / generic-static path), onion_proxy.py (Mac setup-wizard
-    path) and the Mac launcher's missing-.htaccess fallback. Nothing
-    else enforces the copies match, so a fix applied to one and not the
-    others silently reintroduces the bug on the other platform.
+    (Linux / generic-static path) and the Mac launcher's missing-.htaccess
+    fallback. Nothing else enforces the copies match, so a fix applied to
+    one and not the others silently reintroduces the bug on the other
+    platform.
     """
 
-    def test_onion_proxy_htaccess_matches_multisite(self):
-        onion_proxy_content = _extract_onion_proxy_htaccess()
-        self.assertEqual(
-            multisite.HTACCESS_BODY.strip(),
-            onion_proxy_content.strip(),
-            "onion_proxy.py's htaccess_content has drifted from "
-            "multisite.HTACCESS_BODY - keep the two in sync"
-        )
+    def test_onion_proxy_has_no_copy(self):
+        # Its /setup goes through setup_logic.install_fresh_wordpress and
+        # provision-post-install (issue #481), which write HTACCESS_BODY.
+        text = (pathlib.Path(__file__).resolve().parent.parent
+                / "src" / "onionpress" / "onion_proxy.py").read_text()
+        self.assertNotIn("BEGIN WordPress Multisite", text)
+        self.assertNotIn("multisite-install", text)
 
     def test_mac_launcher_htaccess_matches_multisite(self):
         self.assertEqual(

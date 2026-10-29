@@ -217,6 +217,7 @@ def install_welcome_post(
     *,
     blog_url: str,
     docker_bin: str = "docker",
+    docker_env: dict | None = None,
     log_func: Callable[[str], None] | None = None,
 ) -> bool:
     """Replace WordPress's stock "Hello world!" post on a freshly created
@@ -235,6 +236,7 @@ def install_welcome_post(
     def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
         return subprocess.run(
             [docker_bin] + wp_files.wp_cli_args(*args),
+            env=docker_env,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout,
@@ -335,6 +337,7 @@ def provision_primary_subsite(
     site_title: str,
     onion_addr: str = "localhost",
     docker_bin: str = "docker",
+    docker_env: dict | None = None,
     log_func: Callable[[str], None] | None = None,
 ) -> bool:
     """Create the primary subsite at /<onionname>/ and configure it.
@@ -364,7 +367,7 @@ def provision_primary_subsite(
            stdin: str | None = None) -> subprocess.CompletedProcess:
         return subprocess.run(
             [docker_bin] + wp_files.wp_cli_args(*args, stdin=stdin is not None),
-            input=stdin,
+            input=stdin, env=docker_env,
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout,
@@ -443,6 +446,7 @@ def provision_primary_subsite(
     install_welcome_post(
         blog_url=f"http://localhost/{onionname}/",
         docker_bin=docker_bin,
+        docker_env=docker_env,
         log_func=log_func,
     )
 
@@ -577,6 +581,7 @@ def install_fresh_wordpress(
     language: str = "en_US",
     onion_addr: str = "localhost",
     docker_bin: str = "docker",
+    docker_env: dict | None = None,
     launcher_bin: str | None = None,
     log_func: Callable[[str], None] | None = None,
     data_dir: str | None = None,
@@ -586,7 +591,12 @@ def install_fresh_wordpress(
     The cross-platform replacement for the old "bash auto-bootstraps with a
     random password, wizard then renames the user" dance on Linux: now the
     GTK SetupDialog, Mac SetupWindow, and `onionpress setup` SSH path all
-    funnel through this single function with the user-typed creds.
+    funnel through this single function with the user-typed creds, as
+    does the browser extension proxy's /setup form (onion_proxy).
+
+    *docker_env* is the environment docker runs with (None: this
+    process's); the launcher hop and the background archive.org key
+    fetch use this process's environment.
 
     Steps:
       1. wp core install (admin_user=onionname), then set the password on
@@ -613,7 +623,7 @@ def install_fresh_wordpress(
             log_func(msg)
 
     def wp(*args, timeout: int = 60) -> subprocess.CompletedProcess:
-        return _run_wp(docker_bin, args, timeout=timeout)
+        return _run_wp(docker_bin, args, env=docker_env, timeout=timeout)
 
     if _refuse_invalid_onionname(onionname, log):
         return False
@@ -643,7 +653,8 @@ def install_fresh_wordpress(
     # reaches wp-admin without a password), but the result is False so the
     # caller reports it.
     password_set = True
-    r = set_wp_user_password(onionname, password, docker_bin=docker_bin)
+    r = set_wp_user_password(onionname, password, docker_bin=docker_bin,
+                             env=docker_env)
     if r.returncode != 0:
         password_set = False
         log(f"ERROR: setting the admin password failed: "
@@ -706,6 +717,7 @@ def install_fresh_wordpress(
         site_title=site_title,
         onion_addr=onion_addr,
         docker_bin=docker_bin,
+        docker_env=docker_env,
         log_func=log_func,
     )
 
