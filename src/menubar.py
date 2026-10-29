@@ -3066,6 +3066,22 @@ License: AGPL v3 or later"""
                 buttons=["Cancel", "Reset"], default_button=0, cancel_button=0,
                 style="critical")
             return choice == 1
+        if what == "clearnet-tunnel":
+            # Only the Settings page asks this (handle_action, #463): code in
+            # WordPress could have written the token.
+            choice = self.show_native_alert(
+                title=("Replace the Cloudflare Tunnel token?" if facts.get("replace")
+                       else "Put this site on the regular internet?"),
+                message=("The OnionPress Settings page in WordPress asked to "
+                         f"{'replace' if facts.get('replace') else 'set'} the Cloudflare "
+                         "Tunnel token.\n\n"
+                         "A tunnel puts this site on the regular internet. Whoever owns the "
+                         "tunnel in Cloudflare sees this Mac's IP address, which the onion "
+                         "service otherwise hides, and decides what the tunnel reaches.\n\n"
+                         "Set it only if you pasted this token yourself."),
+                buttons=["Cancel", "Set Token"], default_button=0, cancel_button=0,
+                style="critical")
+            return choice == 1
         if what == "prefix-change":
             choice = self.show_native_alert(
                 title="Change the Address Prefix?",
@@ -3090,11 +3106,17 @@ License: AGPL v3 or later"""
     def _ask_settings_page_question(self, result):
         """The question `onionpress handle-action` stopped at, asked of the
         person at this Mac; True only for an explicit Replace/Restore.
-        Today one question: "address-change" (handle_action.py), for a key
-        import or a restore of another address from the page."""
+        Two questions (handle_action.py): "address-change", for a key
+        import or a restore of another address from the page, and
+        "clearnet-tunnel", for a Cloudflare Tunnel token (#463)."""
         what = result.get("confirm")
         current = result.get("current") or ""
         new_address = result.get("new") or ""
+        if what == "clearnet-tunnel":
+            confirmed = self._ask_cli_question("clearnet-tunnel", result)
+            self.log("Settings page: Cloudflare Tunnel token "
+                     f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
+            return confirmed
         if what != "address-change":
             self.log(f"Settings page: unknown question '{what}' (cancelled)")
             return False

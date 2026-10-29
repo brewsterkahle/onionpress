@@ -229,6 +229,10 @@
   `CLOUDFLARE_TUNNEL_TOKEN` (write-only field). Log changes via
   `describe_change`/`loggable_value`. Every page key reaches a reader
   (`tests/test_settings_page_keys_are_read.py`).
+- **The page never sets `CLOUDFLARE_TUNNEL_TOKEN` unattended** (#463; its
+  tunnel's owner sees the host's IP): `PAGE_HELD_KEYS` values are held,
+  asked on a Mac ("clearnet-tunnel"), refused on Linux; removal is
+  applied. `TestTunnelToken` in `tests/test_handle_action.py`.
 - **Page requests are handled only by `onionpress handle-action`**
   (`handle_action.py`, both platforms): fixed verbs (`ACTIONS`), each run
   through the launcher; `update` only checks on both platforms; on a Mac an

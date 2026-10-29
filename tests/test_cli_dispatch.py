@@ -324,7 +324,8 @@ ROWS = [
         mock.call({"a": 1}), rc=0, returns={"a": 1}, stdin='{"a": 1}'),
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
-        returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"])),
+        returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"],
+                         held={"CLOUDFLARE_TUNNEL_TOKEN": "t"})),
     # Share Now from the command line (#351): analytics_sharing.request_upload
     # with this run's paths and the platform; no OnionPressCLI (it reads the
     # config and leaves a marker). Its status is main's.
@@ -562,7 +563,8 @@ class TestDispatch(unittest.TestCase):
         out, _ = self.run_row(next(r for r in ROWS if r.key == ("wordpress-status",)))
         self.assertEqual(json.loads(out), {"a": 1})
         out, _ = self.run_row(next(r for r in ROWS if r.key == ("apply-settings-updates",)))
-        self.assertEqual(out.splitlines(), ["changed VM_CPU", "rejected X"])
+        self.assertEqual(out.splitlines(),
+                         ["changed VM_CPU", "rejected X", "held CLOUDFLARE_TUNNEL_TOKEN"])
         out, _ = self.run_row(next(r for r in ROWS if r.key == ("onionheaven-registrations",)))
         self.assertEqual(out, f"{ONION} hub.onion\n")
 

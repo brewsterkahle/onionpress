@@ -2661,6 +2661,8 @@ def main(argv: list[str] = None) -> int:
             print(f"{'changed' if key in changed else 'unchanged'} {key}")
         for key in applied.rejected:
             print(f"rejected {key}")
+        for key in applied.held:
+            print(f"held {key}")
         return 0
 
     if args.command in ("retire-old-onionheaven-containers", "migrate-tor-network"):

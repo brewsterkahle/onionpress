@@ -849,12 +849,25 @@ add_action( 'admin_init', function () {
     // so the field is always empty and blank means "keep the current token";
     // removing it takes the explicit checkbox.
     $cf_token = isset( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN'] ) ? trim( wp_unslash( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN'] ) ) : '';
+    // The host never sets a token from here by itself (#463): a tunnel's
+    // owner sees the host's IP. On a Mac the person at the Mac is asked;
+    // on Linux it is set on the machine. status.json picks the wording only.
+    $cf_status_raw = @file_get_contents( '/var/lib/onionpress/status.json' );
+    $cf_status     = ( false !== $cf_status_raw ) ? json_decode( $cf_status_raw, true ) : null;
+    $cf_on_linux   = is_array( $cf_status ) && isset( $cf_status['platform'] ) && 'linux' === $cf_status['platform'];
     if ( $cf_token !== '' ) {
-        if ( preg_match( '#^[A-Za-z0-9+/_-]{32,2048}={0,2}$#D', $cf_token ) ) {
-            $updates['CLOUDFLARE_TUNNEL_TOKEN'] = $cf_token;
-        } else {
+        if ( ! preg_match( '#^[A-Za-z0-9+/_-]{32,2048}={0,2}$#D', $cf_token ) ) {
             add_action( 'admin_notices', function () {
                 echo '<div class="notice notice-error"><p>That does not look like a Cloudflare Tunnel token. Paste only the token itself: the long string at the end of the <code>cloudflared</code> command Cloudflare shows. The saved token was not changed.</p></div>';
+            } );
+        } elseif ( $cf_on_linux ) {
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-warning"><p>The Cloudflare Tunnel token was not saved: it puts this site on the regular internet, so it is set only on the computer running OnionPress. There, run <code>onionpress config set CLOUDFLARE_TUNNEL_TOKEN -</code> and paste the token, then restart OnionPress.</p></div>';
+            } );
+        } else {
+            $updates['CLOUDFLARE_TUNNEL_TOKEN'] = $cf_token;
+            add_action( 'admin_notices', function () {
+                echo '<div class="notice notice-info"><p>OnionPress asks on the Mac before it uses this Cloudflare Tunnel token: click Set Token in the dialog there.</p></div>';
             } );
         }
     } elseif ( ! empty( $_POST['op_CLOUDFLARE_TUNNEL_TOKEN_remove'] ) ) {
@@ -1210,7 +1223,7 @@ function onionpress_settings_fields() {
         ),
         'CLOUDFLARE_TUNNEL_TOKEN' => array(
             'label'       => 'Cloudflare Tunnel Token',
-            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. In the tunnel\'s public hostname, set the service to HTTP, URL wordpress:80. Privacy note: this reveals your IP to Cloudflare. Do NOT install cloudflared yourself — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
+            'description' => 'Expose your site on the regular internet via Cloudflare Tunnel. In the tunnel\'s public hostname, set the service to HTTP, URL wordpress:80. Privacy note: this reveals your IP to Cloudflare and to whoever owns the tunnel, so OnionPress sets a token only with you at the computer (a dialog on a Mac; on Linux, onionpress config set CLOUDFLARE_TUNNEL_TOKEN -). Do NOT install cloudflared yourself — OnionPress runs it automatically inside Docker. The saved token is never shown: paste a token to set or replace it, or leave the field blank to keep the current one.',
             'type'        => 'secret',
             'placeholder' => 'Paste a new token, or leave blank',
         ),

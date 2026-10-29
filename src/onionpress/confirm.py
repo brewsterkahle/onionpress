@@ -38,7 +38,9 @@ another address replaces this site's onion address: current, new),
 key: key_id), "hub-holds-key" (an OnionHeaven hub may still hold the key
 and OnionPress cannot ask it to let go now: hubs), "prefix-change" (an
 ADDRESS_PREFIX the live address does not start with: current, new,
-address), "uninstall" and "reset" (everything is deleted).
+address), "uninstall" and "reset" (everything is deleted),
+"clearnet-tunnel" (the Settings page asked to set or replace the Cloudflare
+Tunnel token, which puts the site on the clear web: replace).
 """
 
 import json
@@ -62,6 +64,7 @@ QUESTIONS = (
     "prefix-change",
     "uninstall",
     "reset",
+    "clearnet-tunnel",
 )
 
 NOT_CONFIRMED_MSG = ("Not done: this needs a confirmation. Run it with "
