@@ -736,8 +736,7 @@ def install_fresh_wordpress(
 
     if data_dir is None:
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
-    _write_config(data_dir, "ONIONNAME", onionname)
-    log(f"Onionname saved to config: {onionname}")
+    _write_config(data_dir, "ONIONNAME", onionname, log)
     if password_set:
         mark_setup_complete(data_dir, log)
 
@@ -881,8 +880,7 @@ def provision_existing_wordpress(
     # 7. Persist onionname to config so wp-cli calls and tray can reuse it
     if data_dir is None:
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
-    _write_config(data_dir, "ONIONNAME", onionname)
-    log(f"Onionname saved to config: {onionname}")
+    _write_config(data_dir, "ONIONNAME", onionname, log)
     mark_setup_complete(data_dir, log)
 
     return True
@@ -1004,22 +1002,13 @@ def _read_onion_address() -> str:
         return ""
 
 
-def _write_config(data_dir: str, key: str, value: str) -> None:
-    config_path = os.path.join(data_dir, "config")
+def _write_config(data_dir: str, key: str, value: str,
+                  log: Callable[[str], None]) -> None:
+    """Record KEY=VALUE through config's checked writer (issue #474):
+    the key's check, a 0600 file if it is new, the log line and the
+    change marker, as `onionpress config set` does them."""
+    from onionpress import config as op_config
     try:
-        lines = []
-        found = False
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                for line in f:
-                    if line.startswith(f"{key}="):
-                        lines.append(f"{key}={value}\n")
-                        found = True
-                    else:
-                        lines.append(line)
-        if not found:
-            lines.append(f"{key}={value}\n")
-        with open(config_path, "w") as f:
-            f.writelines(lines)
-    except OSError:
-        pass
+        op_config.set_checked_value(data_dir, key, value, log)
+    except OSError as e:
+        log(f"WARNING: could not write {key} to the config: {e}")

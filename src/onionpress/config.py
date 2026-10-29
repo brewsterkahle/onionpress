@@ -295,8 +295,16 @@ def write_value(path: str, key: str, value: str) -> None:
     if not found:
         lines.append(f"{key}={value}\n")
 
-    with open(path, "w", encoding="utf-8") as f:
+    with _open_for_writing(path) as f:
         f.writelines(lines)
+
+
+def _open_for_writing(path: str):
+    """Open the config file for rewriting. A file this creates is 0600
+    (issue #397: it may hold CLOUDFLARE_TUNNEL_TOKEN), whatever the umask;
+    an existing file keeps its mode."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 def remove_value(path: str, key: str) -> None:
@@ -307,7 +315,7 @@ def remove_value(path: str, key: str) -> None:
         lines = f.readlines()
     kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
     if len(kept) != len(lines):
-        with open(path, "w", encoding="utf-8") as f:
+        with _open_for_writing(path) as f:
             f.writelines(kept)
 
 
@@ -595,6 +603,22 @@ def set_config_value(path: str, key: str, value: str) -> ConfigChange:
     if changed:
         write_value(path, key, value)
     return ConfigChange(key, old, value, key in current, changed)
+
+
+def set_checked_value(data_dir: str, key: str, value: str, log) -> ConfigChange | None:
+    """`config set KEY VALUE` for host code that runs in-process (setup,
+    the CLI's own commands): the key's check, the write, the log line and
+    the change marker, as run_config_command does them. A UI process runs
+    the subcommand instead. None, logged, when the check refuses."""
+    reason = check_config_value(key, value)
+    if reason:
+        log(f"WARNING: config set {key} refused: {reason}")
+        return None
+    change = set_config_value(os.path.join(data_dir, "config"), key, value)
+    log(f"config set: {change.describe()}")
+    if change.changed:
+        note_config_changed(data_dir, [key])
+    return change
 
 
 def unset_config_value(path: str, key: str) -> ConfigChange:

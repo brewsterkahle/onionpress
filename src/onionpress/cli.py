@@ -675,7 +675,7 @@ class OnionPressCLI:
         from .backup import (create_backup, backup_filename, verify_wp_admin,
                              get_admin_username, unchecked_notes, served_onion_address)
         if not username:
-            username = get_admin_username(data_dir=self.paths.data_dir)
+            username = get_admin_username(data_dir=self.paths.data_dir, log=self.log)
         ok, err = verify_wp_admin(username, password)
         if not ok:
             return _confirm.answer_error(err, json_output)
@@ -1694,7 +1694,7 @@ def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
     log = _settings_page_log(data_dir)
     try:
         metadata = create_backup(
-            served_onion_address() or "unknown", get_admin_username(data_dir=data_dir),
+            served_onion_address() or "unknown", get_admin_username(data_dir=data_dir, log=log),
             password, output_path, __version__, log,
             include_hub_data=False, include_host_secrets=False,
             include_onion_key=False)

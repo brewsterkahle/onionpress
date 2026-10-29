@@ -456,18 +456,20 @@ def verify_wp_admin_password_any(password):
         return (False, f"Error verifying password: {e}")
 
 
-def get_admin_username(data_dir=None):
-    """Return the WordPress admin user's login.
+def find_admin_username(data_dir=None):
+    """The WordPress admin user's login, and whether it was found in
+    WordPress (so the caller may record it as ONIONNAME).
 
     Order: ONIONNAME in config → first admin from `wp user list
-    --role=administrator` (cached back to config) → "admin" as a last
-    resort.
+    --role=administrator` → "admin" as a last resort. Writes nothing
+    (issue #474): a caller that wants the login recorded does it through
+    config's checked writer (config.set_checked_value).
     """
     data_dir = data_dir or _default_data_dir()
     config_path = os.path.join(data_dir, "config")
     name = read_value(config_path, "ONIONNAME", "").strip()
     if name:
-        return name
+        return name, False
     try:
         result = subprocess.run(
             ['docker'] + wp_files.wp_cli_args('user', 'list', '--role=administrator',
@@ -479,11 +481,25 @@ def get_admin_username(data_dir=None):
             for line in result.stdout.splitlines():
                 login = line.strip()
                 if login:
-                    write_value(config_path, "ONIONNAME", login)
-                    return login
+                    return login, True
     except Exception:
         pass
-    return "admin"
+    return "admin", False
+
+
+def get_admin_username(data_dir=None, log=None):
+    """find_admin_username's login. With *log*, a login found in WordPress
+    is recorded as ONIONNAME through config's checked writer, so the next
+    call takes the fast path."""
+    data_dir = data_dir or _default_data_dir()
+    login, found = find_admin_username(data_dir)
+    if found and log is not None:
+        from . import config as op_config
+        try:
+            op_config.set_checked_value(data_dir, "ONIONNAME", login, log)
+        except OSError as e:
+            log(f"WARNING: could not record ONIONNAME: {e}")
+    return login
 
 
 # ─── wp-content in and out of the WordPress container ──────────────────
@@ -1127,32 +1143,9 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
             hf.write(onion_address + '\n')
         log_func(f"Restore: synced vanity-keys for {onion_address}")
 
-        addr_base = onion_address.replace('.onion', '')
-        restored_username = metadata.get('username', '').strip()
-        config_path = os.path.join(_data_dir, 'config')
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as cf:
-                clines = cf.readlines()
-            found_prefix = found_onionname = False
-            for i, line in enumerate(clines):
-                if line.strip().startswith('ADDRESS_PREFIX='):
-                    old_prefix = line.strip().split('=', 1)[1]
-                    if not addr_base.startswith(old_prefix):
-                        plen = min(max(len(old_prefix), 3), 6)
-                        clines[i] = f'ADDRESS_PREFIX={addr_base[:plen]}\n'
-                        log_func(f"Restore: updated ADDRESS_PREFIX to {addr_base[:plen]}")
-                    found_prefix = True
-                elif line.strip().startswith('ONIONNAME=') and restored_username:
-                    clines[i] = f'ONIONNAME={restored_username}\n'
-                    log_func(f"Restore: updated ONIONNAME to {restored_username}")
-                    found_onionname = True
-            if not found_prefix:
-                clines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
-            if not found_onionname and restored_username:
-                clines.append(f'ONIONNAME={restored_username}\n')
-                log_func(f"Restore: set ONIONNAME to {restored_username}")
-            with open(config_path, 'w', encoding='utf-8') as cf:
-                cf.writelines(clines)
+        match_config_to_restored_address(
+            os.path.join(_data_dir, 'config'), onion_address,
+            metadata.get('username', '').strip(), log_func)
 
     return onion_address
 
@@ -1460,34 +1453,9 @@ def _restore_backup_key(tor_dir, metadata, log_func, data_dir, _data_dir,
             # Update ADDRESS_PREFIX and ONIONNAME in config to match
             # restored address/username so the prefix mismatch detector
             # doesn't regenerate and backup filenames are correct.
-            addr_base = onion_address.replace('.onion', '')
-            restored_username = metadata.get('username', '').strip()
-            config_path = os.path.join(_data_dir, 'config')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as cf:
-                    lines = cf.readlines()
-                found_prefix = False
-                found_onionname = False
-                for i, line in enumerate(lines):
-                    if line.strip().startswith('ADDRESS_PREFIX='):
-                        old_prefix = line.strip().split('=', 1)[1]
-                        if not addr_base.startswith(old_prefix):
-                            plen = min(max(len(old_prefix), 3), 6)
-                            new_prefix = addr_base[:plen]
-                            lines[i] = f'ADDRESS_PREFIX={new_prefix}\n'
-                            log_func(f"Restore: updated ADDRESS_PREFIX to {new_prefix}")
-                        found_prefix = True
-                    elif line.strip().startswith('ONIONNAME=') and restored_username:
-                        lines[i] = f'ONIONNAME={restored_username}\n'
-                        log_func(f"Restore: updated ONIONNAME to {restored_username}")
-                        found_onionname = True
-                if not found_prefix:
-                    lines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
-                if not found_onionname and restored_username:
-                    lines.append(f'ONIONNAME={restored_username}\n')
-                    log_func(f"Restore: set ONIONNAME to {restored_username}")
-                with open(config_path, 'w', encoding='utf-8') as cf:
-                    cf.writelines(lines)
+            match_config_to_restored_address(
+                os.path.join(_data_dir, 'config'), onion_address,
+                metadata.get('username', '').strip(), log_func)
 
 
 def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True,
@@ -1866,6 +1834,40 @@ RESTORABLE_CONFIG = {
     "VM_CPU": _whole_number(1, 64),
     "ADDRESS_PREFIX": _prefix_of_restored_address,
 }
+
+
+def match_config_to_restored_address(config_path, onion_address, username, log_func):
+    """Point an existing config's ADDRESS_PREFIX and ONIONNAME at a restored
+    address and the backup's (validated) metadata username. One of the two
+    restore paths' config writes (with restore_backup_config) outside
+    config.py: the prefix may be 6 characters here, which `config set`
+    refuses."""
+    if not os.path.exists(config_path):
+        return
+    addr_base = onion_address.replace('.onion', '')
+    with open(config_path, 'r', encoding='utf-8') as cf:
+        lines = cf.readlines()
+    found_prefix = found_onionname = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith('ADDRESS_PREFIX='):
+            old_prefix = line.strip().split('=', 1)[1]
+            if not addr_base.startswith(old_prefix):
+                plen = min(max(len(old_prefix), 3), 6)
+                lines[i] = f'ADDRESS_PREFIX={addr_base[:plen]}\n'
+                log_func(f"Restore: updated ADDRESS_PREFIX to {addr_base[:plen]}")
+            found_prefix = True
+        elif line.strip().startswith('ONIONNAME=') and username:
+            lines[i] = f'ONIONNAME={username}\n'
+            log_func(f"Restore: updated ONIONNAME to {username}")
+            found_onionname = True
+    if not found_prefix:
+        lines.append(f'ADDRESS_PREFIX={addr_base[:3]}\n')
+    if not found_onionname and username:
+        lines.append(f'ONIONNAME={username}\n')
+        log_func(f"Restore: set ONIONNAME to {username}")
+    # The file exists: it keeps its mode (0600).
+    with open(config_path, 'w', encoding='utf-8') as cf:
+        cf.writelines(lines)
 
 
 def restore_backup_config(staging, config_path, log_func, onion_address=''):

@@ -946,7 +946,7 @@ def _set_tunnel_token(host, token):
         host.log(f"Settings page: {TUNNEL_TOKEN_KEY} not set: the held token is gone or invalid")
         return {}
     old = op_config.read_value(host.paths.config_file, TUNNEL_TOKEN_KEY)
-    op_config.write_value(host.paths.config_file, TUNNEL_TOKEN_KEY, token)
+    op_config.set_config_value(host.paths.config_file, TUNNEL_TOKEN_KEY, token)
     host.log(f"  {op_config.describe_change(TUNNEL_TOKEN_KEY, old, token)}")
     op_config.note_config_changed(host.paths.data_dir, [TUNNEL_TOKEN_KEY])
     for line in op_config.apply_side_effects(

@@ -1983,11 +1983,8 @@ class OnionPressApp(rumps.App):
         unless *confirmed* already names it (the welcome screen's prefix:
         the person just chose it).
         """
-        if not os.path.exists(self.config_file):
-            config_template = os.path.join(self.resources_dir, "config-template.txt")
-            if os.path.exists(config_template):
-                import shutil
-                shutil.copy2(config_template, self.config_file)
+        # A missing config is made by the launcher (from the template,
+        # 0600) before it runs the subcommand: nothing is copied here.
         argv = [self.launcher_script, "config", "set", key]
         stdin = None
         if key in op_config.SECRET_CONFIG_KEYS and value:
@@ -2034,12 +2031,16 @@ class OnionPressApp(rumps.App):
         """Show GUI settings dialog."""
         from onionpress.settings_ui import show_settings_dialog
 
-        # Create default config if it doesn't exist
+        # A missing config is made by the launcher (from the template,
+        # 0600) before any subcommand runs; `config list` changes nothing
+        # else (issue #474: the menubar writes no config itself).
         if not os.path.exists(self.config_file):
-            config_template = os.path.join(self.parent_resources_dir, "config-template.txt")
-            if os.path.exists(config_template):
-                import shutil
-                shutil.copy2(config_template, self.config_file)
+            try:
+                subprocess.run([self.launcher_script, "config", "list"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=60)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(f"config list failed to run: {e}")
 
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
 
