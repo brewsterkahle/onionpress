@@ -83,6 +83,7 @@ OPTIONS = {
                  '_cffi_backend',
                  'onionpress', 'onionpress.backup', 'onionpress.backup_crypto',
                  'onionpress.hub_backup',
+                 'onionpress.backup_archive', 'onionpress.db_import',
                  'onionpress.key_manager',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',

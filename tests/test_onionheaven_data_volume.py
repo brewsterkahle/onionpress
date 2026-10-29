@@ -253,7 +253,8 @@ class TestPaths(unittest.TestCase):
     def test_backup_and_restore_use_the_onionheaven_container(self):
         from onionpress import backup as backup_module
         self.assertEqual(backup_module.ONIONHEAVEN_DATA_DIR, HUB_DIR)
-        backup = _read("src/onionpress/backup.py")
+        # The hub data's staging and restore moved into hub_backup (#484).
+        backup = _read("src/onionpress/backup.py") + _read("src/onionpress/hub_backup.py")
         self.assertEqual(backup.count("['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]"), 2)
         self.assertIn("['docker', 'cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/']", backup)
         self.assertIn("['docker', 'exec', '-i', 'onionheaven', 'sh', '-c',\n"

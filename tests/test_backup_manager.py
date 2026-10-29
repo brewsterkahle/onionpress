@@ -1611,7 +1611,7 @@ class TestBashBackupHelpers(unittest.TestCase):
         self.assertIn('op_py pack-backup --staging "$staging" --output "$output_path"', body)
 
     def test_python_writer_does_not_use_zip_encryption(self):
-        src = self._read("src/onionpress/backup.py")
+        src = self._read("src/onionpress/backup_archive.py")
         pack = src[src.index("\ndef pack_backup("):src.index("\n_WRONG_PASSWORD_MSG")]
         self.assertIn("['zip', '-r'", pack)
         self.assertNotIn("'-P'", pack)

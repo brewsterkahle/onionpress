@@ -26,7 +26,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from onionpress import backup, cli, scrub  # noqa: E402
+from onionpress import backup, backup_archive, cli, scrub  # noqa: E402
 from onionpress.launcher_ops import BACKUP_PASSWORD_ENV  # noqa: E402
 
 SECRET = "s3cret pass'word"
@@ -353,8 +353,8 @@ class TestUnzipTimeoutLog(unittest.TestCase):
 
         with mock.patch("shutil.which", return_value="/usr/bin/unzip"), \
              mock.patch.object(backup.subprocess, "Popen", return_value=_Stuck()), \
-             mock.patch.object(backup, "_UNZIP_TIMEOUT_S", 0), \
-             mock.patch.object(backup, "_free_bytes", return_value=0):
+             mock.patch.object(backup_archive, "_UNZIP_TIMEOUT_S", 0), \
+             mock.patch.object(backup_archive, "_free_bytes", return_value=0):
             self.assertFalse(backup._unzip_cli_extract(
                 "/b.zip", SECRET, "/tmp/x", logs.append,
                 max_file_bytes=1, max_total_bytes=1))
