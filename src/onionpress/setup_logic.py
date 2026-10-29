@@ -524,11 +524,11 @@ FOREIGN_INSTALL_MSG = (
 )
 
 
-def _wp_user_1_registered(docker_bin: str) -> str:
+def _wp_user_1_registered(docker_bin: str, docker_env: dict | None = None) -> str:
     """User 1's `user_registered` as WordPress stores it ('' when it
     cannot be read)."""
     r = _run_wp(docker_bin, ("user", "get", "1", "--field=user_registered"),
-                timeout=30)
+                env=docker_env, timeout=30)
     if r.returncode != 0:
         return ""
     value = (r.stdout or "").split("\n", 1)[0].strip()
@@ -538,10 +538,11 @@ def _wp_user_1_registered(docker_bin: str) -> str:
 def mark_wordpress_installed_by_onionpress(
     data_dir: str, docker_bin: str = "docker",
     log: Callable[[str], None] | None = None,
+    docker_env: dict | None = None,
 ) -> bool:
     """Record that OnionPress installed the WordPress now in the container.
     False, logged, when the marker cannot be written."""
-    stamp = _wp_user_1_registered(docker_bin) or INSTALLED_BY_UNKNOWN
+    stamp = _wp_user_1_registered(docker_bin, docker_env) or INSTALLED_BY_UNKNOWN
     path = os.path.join(data_dir, INSTALLED_BY_ONIONPRESS_MARKER)
     try:
         os.makedirs(data_dir, mode=0o700, exist_ok=True)
@@ -666,7 +667,8 @@ def install_fresh_wordpress(
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
     # OnionPress installed this one (issue #464): what a later setup
     # that finds WordPress installed checks before adopting it.
-    mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log)
+    mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log,
+                                           docker_env=docker_env)
 
     # 2. Per-user subsite URL on the user's profile — matches Mac UX where
     # the "Website" link on profile.php points somewhere useful.
