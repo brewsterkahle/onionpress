@@ -48,6 +48,9 @@ class FakeDocker:
             return DockerResult(0, self.answers[key], "")
         return DockerResult(1, "", "no such container")
 
+    def exec(self, container, command, timeout=30, quiet=False, **kw):
+        return self.run(["exec", container, *command], timeout=timeout, quiet=quiet)
+
 
 def _read(rel):
     with open(os.path.join(PROJECT_ROOT, rel), encoding="utf-8") as f:

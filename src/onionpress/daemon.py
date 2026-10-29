@@ -64,6 +64,7 @@ from . import config as op_config
 from . import confirm as op_confirm
 from . import key_manager
 from . import launcher_ops
+from . import onion_hostname
 from . import onion_proxy
 from . import onionheaven
 from . import redact
@@ -792,10 +793,7 @@ class Daemon:
                 self.log(f"Image downloaded: {name}")
 
     def _read_served_address(self):
-        r = self._docker.run(["exec", "onionpress-tor", "cat", wp_files.TOR_HOSTNAME_FILE],
-                             timeout=10, quiet=True)
-        addr = r.output.strip() if r.ok else ""
-        return addr if key_manager.is_valid_onion_address(addr) else ""
+        return onion_hostname.read_served_address(self._docker)
 
     def check_status(self):
         """One pass: containers, address, internet, WordPress, the dual

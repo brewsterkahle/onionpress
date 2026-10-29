@@ -141,7 +141,7 @@ class TestSettingsPageFileName(unittest.TestCase):
         self.assertIn("addr = host.served_address()", branch)
         self.assertIn('onion_short = addr.replace(".onion", "")[:8] if addr else "site"', branch)
         served = text[text.index("    def served_address(self):"):text.index("    def containers(self):")]
-        self.assertIn('return addr if is_valid_onion_address(addr) else ""', served)
+        self.assertIn("return onion_hostname.read_served_address(self.docker)", served)
         self.assertNotIn("\n                create-backup)\n", _read(LINUX))
 
 

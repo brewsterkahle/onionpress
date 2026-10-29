@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import key_manager, wordpress_egress
+from . import onion_hostname, wordpress_egress
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
@@ -587,16 +587,7 @@ class ContainerManager:
         """Fetch the current onion address from the Tor container, or ""
         when there is none or the file holds anything but a well-formed v3
         address (it names a backup file and goes into backup metadata)."""
-        result = self.docker.exec(
-            "onionpress-tor",
-            ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-            timeout=10,
-        )
-        if result.ok:
-            addr = result.output.strip()
-            if key_manager.is_valid_onion_address(addr):
-                return addr
-        return ""
+        return onion_hostname.read_served_address(self.docker, quiet=False)
 
     def get_status(self) -> ContainerStatus:
         """Get the current container stack status."""

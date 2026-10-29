@@ -43,6 +43,7 @@ sys.path.insert(0, script_dir)
 from onionpress import install_native_messaging
 from onionpress import onionheaven
 from onionpress import key_manager
+from onionpress import onion_hostname
 from onionpress import login_item
 from onionpress import daemon_client as op_daemon
 try:
@@ -1482,15 +1483,9 @@ class OnionPressApp(rumps.App):
     def _read_onion_address(self):
         """Return the local wordpress .onion address, or None if not yet written."""
         try:
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            result = subprocess.run(
-                [docker_bin, "exec", "onionpress-tor", "cat",
-                 "/var/lib/tor/hidden_service/wordpress/hostname"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10,
-            )
-            addr = result.stdout.strip()
-            if key_manager.is_valid_onion_address(addr):
+            addr = onion_hostname.read_served_address_with(
+                os.path.join(self.bin_dir, "docker"))
+            if addr:
                 return addr
         except Exception as e:
             self.log(f"onionname: can't read onion address: {e}")
@@ -1701,13 +1696,9 @@ class OnionPressApp(rumps.App):
         try:
             from onionpress.setup_logic import install_fresh_wordpress
             docker_bin = os.path.join(self.bin_dir, "docker")
-            addr_result = subprocess.run(
-                [docker_bin, "exec", "onionpress-tor", "cat",
-                 "/var/lib/tor/hidden_service/wordpress/hostname"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10
-            )
-            onion_addr = addr_result.stdout.strip() or "localhost"
+            # One whole v3 address or "localhost": it becomes the site URL.
+            onion_addr = (onion_hostname.read_served_address_with(docker_bin)
+                          or "localhost")
 
             def _log(msg):
                 self.log(msg)

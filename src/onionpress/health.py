@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
-from . import key_manager
+from . import onion_hostname
 from .docker import Docker
 
 
@@ -353,13 +353,8 @@ class HealthChecker:
         address: the address goes into the probe URLs and into control-port
         commands (classify_wedge), and on Linux into status.json.
         """
-        result = self.docker.exec(
-            "onionpress-tor",
-            ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-            timeout=10,
-        )
-        addr = result.output.strip() if result.ok else ""
-        if addr and not key_manager.is_valid_onion_address(addr):
+        addr = onion_hostname.read_hostname_text(self.docker, quiet=False)
+        if addr and not onion_hostname.served_address(addr):
             self._log("WARNING: the hostname file does not hold a valid onion address")
             return ""
         if expected_address and addr and addr != expected_address:

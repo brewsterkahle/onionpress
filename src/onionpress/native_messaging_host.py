@@ -13,6 +13,7 @@ Provides:
 
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -25,6 +26,12 @@ DEFAULT_WP_PORT = 8080
 # Same list as onionpress.browser.ALLOWED_BROWSERS (test-enforced): this
 # script is started by the browser, outside the app's Python package.
 ALLOWED_BROWSERS = {"Firefox", "Google Chrome", "Brave Browser", "Microsoft Edge", "Safari"}
+
+# The served address goes to the browser extension only as one well-formed
+# v3 address. The same rule and path as onionpress.onion_hostname
+# (test-enforced), copied for the same reason.
+HOSTNAME_FILE = "/var/lib/tor/hidden_service/wordpress/hostname"
+ONION_ADDRESS_RE = re.compile(r"[a-z2-7]{56}\.onion")
 
 
 def read_message():
@@ -50,18 +57,20 @@ def send_message(msg):
 
 
 def get_onion_address():
-    """Read the user's .onion address from the Tor container."""
+    """Read the user's .onion address from the Tor container: one
+    well-formed v3 address, else None."""
     try:
         # Try reading from the hostname file via docker
         docker_bin = _find_docker()
         env = _docker_env()
         result = subprocess.run(
-            [docker_bin, "exec", "onionpress-tor",
-             "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
+            [docker_bin, "exec", "onionpress-tor", "cat", HOSTNAME_FILE],
             capture_output=True, text=True, timeout=5, env=env
         )
         if result.returncode == 0:
-            return result.stdout.strip()
+            addr = result.stdout.strip()
+            if ONION_ADDRESS_RE.fullmatch(addr):
+                return addr
     except Exception:
         pass
     return None

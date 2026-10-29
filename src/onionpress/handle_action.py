@@ -56,8 +56,7 @@ import subprocess
 import tempfile
 import time
 
-from . import confirm, redact, wp_files
-from .key_manager import is_valid_onion_address
+from . import confirm, onion_hostname, redact, wp_files
 from .launcher_ops import BACKUP_PASSWORD_ENV
 
 SHARED = wp_files.SHARED_DIR
@@ -220,10 +219,7 @@ class Host:
 
     def served_address(self):
         """The onion address the tor container serves, or ''."""
-        r = self.docker.run(["exec", "onionpress-tor", "cat", wp_files.TOR_HOSTNAME_FILE],
-                            timeout=10, quiet=True)
-        addr = r.output.strip() if r.ok else ""
-        return addr if is_valid_onion_address(addr) else ""
+        return onion_hostname.read_served_address(self.docker)
 
     def containers(self):
         """[(name, status)] of the onionpress containers."""

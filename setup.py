@@ -96,6 +96,7 @@ OPTIONS = {
                  'onionpress.onion_proxy', 'onionpress.onion_auth',
                  'onionpress.onionheaven', 'onionpress.updater',
                  'onionpress.install_native_messaging', 'onionpress.native_messaging_host',
+                 'onionpress.onion_hostname',
                  'onionpress.onionnames_client',
                  'onionpress.onionnames_registrar',
                  'onionpress.reachability_stats',

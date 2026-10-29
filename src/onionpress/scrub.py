@@ -218,16 +218,11 @@ def _get_onion_address() -> str:
     not the compose project directory — and `docker compose` would
     silently fail without a docker-compose.yml in cwd.
     """
-    r = _run(
-        ["docker", "exec", "onionpress-tor",
-         "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-        capture=True, timeout=10,
-    )
+    from . import onion_hostname
+    r = _run(["docker"] + onion_hostname.exec_args(), capture=True, timeout=10)
     if r.returncode != 0:
         return ""
-    addr = (r.stdout or "").strip()
-    from . import key_manager
-    return addr if key_manager.is_valid_onion_address(addr) else ""
+    return onion_hostname.served_address(r.stdout)
 
 
 def _find_repo_dir() -> str:

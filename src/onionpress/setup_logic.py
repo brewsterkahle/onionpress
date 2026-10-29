@@ -13,7 +13,7 @@ import re
 import subprocess
 from typing import Callable, Optional
 
-from onionpress import key_manager, wp_files
+from onionpress import key_manager, onion_hostname, wp_files
 
 try:
     from onionpress import onionnames_client as _onc
@@ -993,13 +993,7 @@ def _wp_is_installed() -> bool:
 
 def _read_onion_address() -> str:
     try:
-        r = subprocess.run(
-            ["docker", "exec", "onionpress-tor",
-             "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-            capture_output=True, text=True, timeout=10,
-        )
-        addr = r.stdout.strip()
-        return addr if key_manager.is_valid_onion_address(addr) else ""
+        return onion_hostname.read_served_address_with("docker")
     except Exception:
         return ""
 
