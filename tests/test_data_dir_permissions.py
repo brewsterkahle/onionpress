@@ -25,6 +25,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAC = os.path.join(PROJECT_ROOT, "app/MacOS/onionpress")
 LINUX = os.path.join(PROJECT_ROOT, "linux/onionpress")
 INSTALL = os.path.join(PROJECT_ROOT, "linux/install.sh")
+# The .deb's postinst, a heredoc in the build script (issue #471; its
+# behaviour is in tests/test_deb_postinst_data_dir.py).
+BUILD = os.path.join(PROJECT_ROOT, "build/build-linux.sh")
 
 
 def _read(path):
@@ -46,7 +49,7 @@ class TestLaunchersStatic(unittest.TestCase):
                 self.assertRegex(text, r'mkdir -p "\$DATA_DIR"\nchmod 700 "\$DATA_DIR"\n')
 
     def test_every_config_creation_sets_0600(self):
-        for path in (MAC, LINUX, INSTALL):
+        for path in (MAC, LINUX, INSTALL, BUILD):
             with self.subTest(file=os.path.relpath(path, PROJECT_ROOT)):
                 text = _read(path)
                 block = _block(text, 'if [ ! -f "$DATA_DIR/config" ]; then', "\nfi\n")

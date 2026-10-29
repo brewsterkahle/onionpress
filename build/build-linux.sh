@@ -214,29 +214,59 @@ REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)
 [ -z "$REAL_HOME" ] && REAL_HOME="/root"
 DATA_DIR="$REAL_HOME/.onionpress"
 
-# Idempotent: data dir creation runs on every postinst trigger.
-if [ "$REAL_USER" != "root" ]; then
-    install -d -o "$REAL_USER" -g "$REAL_USER" "$DATA_DIR"
-    install -d -o "$REAL_USER" -g "$REAL_USER" "$DATA_DIR/shared"
-    install -d -o "$REAL_USER" -g "$REAL_USER" "$DATA_DIR/shared/vanity-keys"
-else
-    mkdir -p "$DATA_DIR/shared/vanity-keys"
-fi
-
-# First-install-only: random secrets + default config.
-if [ "$1" = "configure" ] && [ -z "$2" ]; then
+# ~/.onionpress, secrets and config are the user's alone (issues #397,
+# #471): made as the user, never by root, so a link planted at one of
+# those names leads root nowhere; the folder is 0700 and both files are
+# 0600 from their first byte (umask 077; `set -C` makes `>` create only,
+# so a name that holds a link, dangling or not, fails instead of being
+# followed). A name holding a link, or anything but a folder / regular
+# file, is left alone with a message: the launcher makes what is missing
+# at the first start. An existing secrets or config is never rewritten
+# (the running database's passwords are in it).
+plain_path() {   # 0: $1 is absent, or a $2 (-d / -f) that is no link
+    [ ! -L "$1" ] && { [ ! -e "$1" ] || [ "$2" "$1" ]; }
+}
+data_dir_setup() {
+    umask 077
+    local d
+    for d in "$DATA_DIR" "$DATA_DIR/shared" "$DATA_DIR/shared/vanity-keys"; do
+        if ! plain_path "$d" -d; then
+            echo "  $d is a link or not a folder; left alone" >&2
+            return 1
+        fi
+    done
+    install -d -m 700 "$DATA_DIR"
+    install -d "$DATA_DIR/shared" "$DATA_DIR/shared/vanity-keys"
+}
+first_install_files() {
+    umask 077
+    set -C
+    local f
+    if [ -L "$DATA_DIR" ] || [ ! -d "$DATA_DIR" ]; then
+        echo "  $DATA_DIR is a link or not a folder; secrets and config not written" >&2
+        return 1
+    fi
+    for f in "$DATA_DIR/secrets" "$DATA_DIR/config"; do
+        if ! plain_path "$f" -f; then
+            echo "  $f is a link or not a regular file; left alone" >&2
+            return 1
+        fi
+    done
     if [ ! -f "$DATA_DIR/secrets" ]; then
         WP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
         ROOT_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32)
         cat > "$DATA_DIR/secrets" <<EOF
 # Database passwords - generated on $(date)
+# DO NOT SHARE THESE PASSWORDS
 WORDPRESS_DB_PASSWORD='$WP_PASS'
 MYSQL_PASSWORD='$WP_PASS'
 MYSQL_ROOT_PASSWORD='$ROOT_PASS'
 EOF
         chmod 600 "$DATA_DIR/secrets"
+        echo "  Database passwords generated"
+    else
+        echo "  Existing secrets preserved"
     fi
-
     if [ ! -f "$DATA_DIR/config" ]; then
         cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
@@ -253,12 +283,33 @@ ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.oni
 # this machine only.
 #ONIONPRESS_BIND_HOST=127.0.0.1
 EOF
+        # Already 0600 from the umask; said again where the file is made.
+        chmod 600 "$DATA_DIR/config"
+        echo "  Default config created"
     fi
-fi
+}
+# The shell that runs one of the functions above as the user: `set -e`,
+# the functions, DATA_DIR, the call. The caller runs it under that user.
+data_dir_script() {
+    printf 'set -e; %s; DATA_DIR=%q; %s' \
+        "$(declare -f plain_path data_dir_setup first_install_files)" "$DATA_DIR" "$1"
+}
+as_real_user() {   # $1: data_dir_setup or first_install_files, as $REAL_USER
+    if [ "$REAL_USER" = "root" ]; then
+        bash -c "$(data_dir_script "$1")"
+    else
+        runuser -u "$REAL_USER" -- bash -c "$(data_dir_script "$1")"
+    fi
+}
 
-# Ownership fixup is idempotent.
-if [ "$REAL_USER" != "root" ]; then
-    chown -R "$REAL_USER:$REAL_USER" "$DATA_DIR"
+# Idempotent: data dir creation runs on every postinst trigger.
+as_real_user data_dir_setup \
+    || echo "  Could not set up $DATA_DIR for $REAL_USER; onionpress start makes it." >&2
+
+# First-install-only: random secrets + default config.
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    as_real_user first_install_files \
+        || echo "  Could not write secrets and config in $DATA_DIR; onionpress start makes them." >&2
 fi
 
 # Reload the user-unit catalog and enable units for any user on next

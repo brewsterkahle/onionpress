@@ -290,6 +290,18 @@ def _get(url):
         return e.code, json.loads(e.read())
 
 
+def _signed_status(expanded, pub, addr):
+    """The per-address detail: POST /status/<addr> signed by the address's
+    own key (issue #469: the plain GET answers only coarse fields)."""
+    ts = onion_auth.make_timestamp()
+    return _post(f"{server.base_url}/status/{addr}", {
+        "content_address": addr,
+        "healthcheck_address": "",
+        "timestamp": ts,
+        "signature": onion_auth.sign_payload(expanded, pub, "status", addr, "", ts),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Test cases
 # ---------------------------------------------------------------------------
@@ -482,6 +494,9 @@ class TestFullLifecycle(unittest.TestCase):
         # Check status shows taken-over
         code, data = _get(f"{server.base_url}/status/{self.addr}")
         self.assertEqual(code, 200)
+        self.assertEqual(data["status"], "taken-over")
+        code, data = _signed_status(self.expanded, self.pub, self.addr)
+        self.assertEqual(code, 200, data)
         self.assertEqual(data["entries"][0]["status"], "taken-over")
 
         # Come back online. /online now requires arti_key_pem on every call
@@ -498,7 +513,7 @@ class TestFullLifecycle(unittest.TestCase):
         # Check status shows online again
         code, data = _get(f"{server.base_url}/status/{self.addr}")
         self.assertEqual(code, 200)
-        self.assertEqual(data["entries"][0]["status"], "online")
+        self.assertEqual(data["status"], "online")
 
     def test_unregister(self):
         code, data = self._signed_post("unregister")
@@ -562,47 +577,68 @@ class TestFullLifecycle(unittest.TestCase):
 
 
 class TestStatusLookup(unittest.TestCase):
-    """Test /status/<address> lookups."""
+    """Test /status/<address> lookups: the plain GET is coarse, the detail
+    is for the address's own key (issue #469)."""
 
-    def test_lookup_by_content_address(self):
+    def _register(self):
         expanded, pub, addr = _make_test_keypair()
         hc_addr = _make_test_keypair()[2]
         pem = _make_arti_pem(expanded, pub)
 
         ts = onion_auth.make_timestamp()
         sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
-        _post(f"{server.base_url}/online", {
+        code, data = _post(f"{server.base_url}/online", {
             "content_address": addr,
             "healthcheck_address": hc_addr,
             "arti_key_pem": base64.b64encode(pem).decode('ascii'),
+            "version": "test-lookup",
             "timestamp": ts,
             "signature": sig,
         })
+        self.assertEqual(code, 200, data)
+        return expanded, pub, addr, hc_addr
 
+    def test_lookup_by_content_address_is_coarse(self):
+        _, _, addr, hc_addr = self._register()
         code, data = _get(f"{server.base_url}/status/{addr}")
         self.assertEqual(code, 200)
+        self.assertEqual(data, {"address": addr, "registered": True, "status": "online"})
+        self.assertNotIn(hc_addr, json.dumps(data))
+
+    def test_lookup_by_healthcheck_address_names_nothing(self):
+        _, _, _, hc_addr = self._register()
+        code, data = _get(f"{server.base_url}/status/{hc_addr}")
+        self.assertEqual(code, 404)
+
+    def test_the_detail_answers_the_addresss_own_key(self):
+        expanded, pub, addr, hc_addr = self._register()
+        code, data = _signed_status(expanded, pub, addr)
+        self.assertEqual(code, 200, data)
         self.assertEqual(data["lookup_type"], "content_address")
         self.assertEqual(data["count"], 1)
         self.assertEqual(data["entries"][0]["content_address"], addr)
-
-    def test_lookup_by_healthcheck_address(self):
-        expanded, pub, addr = _make_test_keypair()
-        hc_addr = _make_test_keypair()[2]
-        pem = _make_arti_pem(expanded, pub)
-
+        self.assertEqual(data["entries"][0]["healthcheck_address"], hc_addr)
+        self.assertEqual(data["entries"][0]["version"], "test-lookup")
+        self.assertIn("recent_logs", data)
+        # Another key, and the same key under another label, get nothing.
+        other_expanded, other_pub, _ = _make_test_keypair()
         ts = onion_auth.make_timestamp()
-        sig = onion_auth.sign_payload(expanded, pub, "online", addr, hc_addr, ts)
-        _post(f"{server.base_url}/online", {
-            "content_address": addr,
-            "healthcheck_address": hc_addr,
-            "arti_key_pem": base64.b64encode(pem).decode('ascii'),
-            "timestamp": ts,
-            "signature": sig,
-        })
+        for expanded_, pub_, endpoint in ((other_expanded, other_pub, "status"),
+                                          (expanded, pub, "offline")):
+            code, data = _post(f"{server.base_url}/status/{addr}", {
+                "content_address": addr, "healthcheck_address": "", "timestamp": ts,
+                "signature": onion_auth.sign_payload(expanded_, pub_, endpoint, addr, "", ts)})
+            self.assertEqual(code, 403, data)
+        # An address the hub never registered: 404, from its own key too.
+        expanded, pub, addr = _make_test_keypair()
+        self.assertEqual(_signed_status(expanded, pub, addr)[0], 404)
 
-        code, data = _get(f"{server.base_url}/status/{hc_addr}")
+    def test_the_summary_names_no_worker(self):
+        code, data = _get(f"{server.base_url}/status")
         self.assertEqual(code, 200)
-        self.assertEqual(data["lookup_type"], "healthcheck_address")
+        self.assertNotIn("takeover_workers", data)
+        self.assertIn("takeover_containers", data)
+        self.assertIn("takeover_queued", data)
 
     def test_not_found(self):
         fake = "a" * 56 + ".onion"
@@ -644,7 +680,7 @@ class TestOnionOriginAuth(unittest.TestCase):
     def _status(self):
         code, data = _get(f"{server.base_url}/status/{self.addr}")
         self.assertEqual(code, 200)
-        return data["entries"][0]["status"]
+        return data["status"]
 
     def test_unsigned_offline_from_loopback_rejected(self):
         code, data = _post(f"{server.base_url}/offline", {
@@ -957,8 +993,8 @@ class TestPeerClaim(unittest.TestCase):
         code, data = _post(f"{server.base_url}/online", _signed(
             "online", self.expanded, self.pub, self.addr, self.hc_addr, **extra))
         self.assertEqual(code, 200, data)
-        code, data = _get(f"{server.base_url}/status/{self.addr}")
-        self.assertEqual(code, 200)
+        code, data = _signed_status(self.expanded, self.pub, self.addr)
+        self.assertEqual(code, 200, data)
         return data["entries"][0]["is_onionheaven"]
 
     def _peer_sig(self, endpoint="onionheaven-peer"):

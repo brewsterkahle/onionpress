@@ -140,6 +140,34 @@ class _HandlerTest(unittest.TestCase):
         self.expanded, self.public, self.address = _keypair()
         self.hc = _keypair()[2]
 
+    def _registry(self):
+        """One shared in-memory registry across db_connect() calls, held
+        open by the keeper so rows and marks survive each handler's
+        close(); the keeper is returned."""
+        uri = f"file:registry-{id(self)}?mode=memory&cache=shared"
+        keeper = sqlite3.connect(uri, uri=True)
+        self.addCleanup(keeper.close)
+
+        def connect():
+            conn = sqlite3.connect(uri, uri=True)
+            conn.row_factory = sqlite3.Row
+            return conn
+        p = mock.patch.object(ws, "db_connect", connect)
+        p.start()
+        self.addCleanup(p.stop)
+        oc.db_ensure_schema(keeper)
+        return keeper
+
+    def _row(self, keeper, address=None, hc=None, status="online"):
+        """A registry row: /offline, /unregister and the signed status
+        query answer 404 for an address without one (issue #467)."""
+        keeper.execute(
+            "INSERT OR IGNORE INTO registry (content_address, healthcheck_address, "
+            "registered_at, last_healthy, status) VALUES (?, ?, 'x', 'x', ?)",
+            (self.address if address is None else address,
+             self.hc if hc is None else hc, status))
+        keeper.commit()
+
     def _signed(self, endpoint, hc=None, **extra):
         hc = self.hc if hc is None else hc
         ts = onion_auth.make_timestamp()
@@ -234,13 +262,8 @@ class WithoutPyNaClTest(_HandlerTest):
 class WithPyNaClTest(_HandlerTest):
 
     def test_genuine_requests_are_acted_on(self):
-        def memory_db():
-            conn = sqlite3.connect(":memory:")
-            conn.row_factory = sqlite3.Row
-            return conn
-
-        with mock.patch.object(ws, "db_connect", memory_db):
-            status, body = self._post("/offline", self._signed("offline"))
+        self._row(self._registry())
+        status, body = self._post("/offline", self._signed("offline"))
         self.assertEqual(status, 200, body)
         self.assertEqual([what for what, _ in self.acted], ["takeover"])
         self.acted.clear()
@@ -257,7 +280,9 @@ class WithPyNaClTest(_HandlerTest):
         ts = onion_auth.make_timestamp()
         for path, endpoint in (("/offline", "offline"), ("/unregister", "unregister"),
                                ("/logs/manifest", "logs")):
-            data = {"content_address": SMALL_ORDER_ADDRESS, "healthcheck_address": "",
+            # /logs/* refuse an empty healthcheck address before the
+            # signature (#468): a real one here, so the forgery is what is refused.
+            data = {"content_address": SMALL_ORDER_ADDRESS, "healthcheck_address": self.hc,
                     "timestamp": ts, "signature": FORGED, "files": []}
             status, body = self._post(path, data)
             self.assertEqual(status, 403, (path, body))
@@ -290,19 +315,8 @@ class ReplayTest(_HandlerTest):
 
     def setUp(self):
         super().setUp()
-        # One shared in-memory registry across db_connect() calls, held
-        # open by the keeper so the marks survive each handler's close().
-        uri = f"file:replay-{id(self)}?mode=memory&cache=shared"
-        self.keeper = sqlite3.connect(uri, uri=True)
-        self.addCleanup(self.keeper.close)
-
-        def connect():
-            conn = sqlite3.connect(uri, uri=True)
-            conn.row_factory = sqlite3.Row
-            return conn
-        p = mock.patch.object(ws, "db_connect", connect)
-        p.start()
-        self.addCleanup(p.stop)
+        self.keeper = self._registry()
+        self._row(self.keeper)
 
     def _marks(self):
         return self.keeper.execute(
@@ -329,7 +343,9 @@ class ReplayTest(_HandlerTest):
         self.acted.clear()
         # Another healthcheck address: a different message and signature,
         # refused for its time alone.
-        offline = self._signed_at("offline", earlier, hc=_keypair()[2])
+        other_hc = _keypair()[2]
+        self._row(self.keeper, hc=other_hc)
+        offline = self._signed_at("offline", earlier, hc=other_hc)
         status, body = self._post("/offline", offline)
         self.assertEqual(status, 403, body)
         self.assertIn("older than the last accepted", body["error"])
@@ -338,6 +354,7 @@ class ReplayTest(_HandlerTest):
     def test_two_requests_in_one_second_both_pass(self):
         ts = onion_auth.make_timestamp()
         other_hc = _keypair()[2]
+        self._row(self.keeper, hc=other_hc)
         self.assertEqual(self._post("/offline", self._signed_at("offline", ts, hc=other_hc))[0], 200)
         self.assertEqual(self._post("/offline", self._signed_at("offline", ts))[0], 200)
         # And each of them only once.
@@ -357,6 +374,7 @@ class ReplayTest(_HandlerTest):
 
     def test_marks_are_per_address(self):
         other_expanded, other_public, other_address = _keypair()
+        self._row(self.keeper, address=other_address)
         ts = onion_auth.make_timestamp()
         mine = self._signed_at("offline", ts)
         theirs = {
@@ -393,6 +411,113 @@ class ReplayTest(_HandlerTest):
                          (False, "Invalid timestamp format"))
         self.assertFalse(conn.in_transaction)
         conn.close()
+
+    def test_expired_marks_are_pruned_on_insert(self):
+        """Issue #467: a mark older than the tolerance refuses nothing the
+        tolerance does not, and one row per address that ever signed was
+        disk a free key could take."""
+        conn = ws.db_connect()
+        ws.db_ensure_schema(conn)
+        old = (datetime.now(timezone.utc) - timedelta(seconds=oc.SIGNED_REQUEST_MARK_TTL + 5)
+               ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        recent = (datetime.now(timezone.utc) - timedelta(seconds=oc.SIGNED_REQUEST_MARK_TTL - 60)
+                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        future = (datetime.now(timezone.utc) + timedelta(seconds=60)
+                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for address, ts in (("expired", old), ("recent", recent), ("ahead", future)):
+            self.keeper.execute(
+                "INSERT INTO signed_requests (content_address, last_timestamp, signatures) "
+                "VALUES (?, ?, '[]')", (address, ts))
+        self.keeper.commit()
+        self.assertEqual(oc.note_signed_request(conn, self.address, onion_auth.make_timestamp(),
+                                                "sig"), (True, ""))
+        kept = sorted(row[0] for row in self._marks())
+        self.assertEqual(kept, sorted(["ahead", "recent", self.address]))
+        self.assertEqual(oc.SIGNED_REQUEST_MARK_TTL, onion_auth.TIMESTAMP_TOLERANCE)
+        self.assertIn("signed_requests_last_timestamp",
+                      [r[0] for r in self.keeper.execute(
+                          "SELECT name FROM sqlite_master WHERE type = 'index'")])
+        conn.close()
+
+
+class UnknownAddressTest(_HandlerTest):
+    """Issue #467: any key signs for its own address, so /offline,
+    /unregister and the signed status query from a key the registry has
+    never seen answer 404 and leave nothing behind: no replay mark, no
+    address log line, no action. The signature is checked first (a
+    forgery never opens the registry: WithPyNaClTest), the row next."""
+
+    def setUp(self):
+        super().setUp()
+        self.keeper = self._registry()
+        self.lines = []
+        p = mock.patch.object(oc, "addr_log", lambda addr, msg: self.lines.append((addr, msg)))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _marks(self):
+        return self.keeper.execute("SELECT content_address FROM signed_requests").fetchall()
+
+    def _requests(self):
+        return [("/offline", self._signed("offline")),
+                ("/unregister", self._signed("unregister")),
+                ("/offline", self._signed("offline", hc="")),
+                ("/unregister", self._signed("unregister", hc="")),
+                (f"/status/{self.address}", self._signed(ws.STATUS_ENDPOINT, hc=""))]
+
+    def test_a_fresh_key_gets_404_and_leaves_nothing(self):
+        for path, data in self._requests():
+            with self.subTest(path=path):
+                status, body = self._post(path, data)
+                self.assertEqual(status, 404, body)
+                self.assertEqual(body["error"], ws.NOT_REGISTERED_ERROR)
+        self.assertEqual(self.acted, [])
+        self.assertEqual(self.lines, [])
+        self.assertEqual(self._marks(), [])
+
+    def test_a_pair_the_registry_lacks_is_404_too(self):
+        self._row(self.keeper, hc=_keypair()[2])
+        status, body = self._post("/offline", self._signed("offline"))
+        self.assertEqual(status, 404, body)
+        self.assertEqual(self.acted, [])
+        self.assertEqual(self._marks(), [])
+
+    def test_a_registered_address_is_marked_logged_and_acted_on(self):
+        self._row(self.keeper)
+        status, body = self._post("/offline", self._signed("offline"))
+        self.assertEqual(status, 200, body)
+        self.assertEqual([what for what, _ in self.acted], ["takeover"])
+        self.assertEqual([addr for addr, _ in self.lines], [self.address])
+        self.assertEqual([row[0] for row in self._marks()], [self.address])
+
+    def test_an_unregistered_row_still_counts_as_known(self):
+        """The hub keeps a row it unregistered; its key may still speak."""
+        self._row(self.keeper, status="unregistered")
+        self.keeper.execute("UPDATE registry SET unregistered_at = 'x'")
+        self.keeper.commit()
+        self.assertEqual(self._post("/offline", self._signed("offline"))[0], 200)
+
+    def test_the_offline_log_line_is_short_whatever_the_version(self):
+        self._row(self.keeper)
+        status, _ = self._post("/offline", self._signed("offline", version="v" * 100_000 + "\n\x00"))
+        self.assertEqual(status, 200)
+        (_, line), = self.lines
+        self.assertLess(len(line), 300)
+        self.assertIn("version=" + "v" * oc.SHORT_TEXT_LIMIT + ")", line)
+        self.assertNotIn("\n", line)
+
+    def test_the_row_check_follows_the_signature_and_precedes_the_mark(self):
+        src = open(os.path.join(DOCKER_TOR_DIR, "web-server.py"), encoding="utf-8").read()
+        body = src[src.index("def _verify_signature("):src.index("def _signed_peer_claim(")]
+        self.assertLess(body.index("verify_payload("), body.index("_registry_has(conn"))
+        self.assertLess(body.index("_registry_has(conn"), body.index("note_signed_request(conn"))
+        for fn in ("_handle_offline", "_handle_unregister", "_handle_status_signed"):
+            b = src[src.index(f"def {fn}(self"):]
+            b = b[:b.index("\n    def ", 10)]
+            with self.subTest(handler=fn):
+                self.assertIn("registered_only=True", b)
+        offline = src[src.index("def _handle_offline(self"):src.index("def _handle_reset_onionheaven(")]
+        self.assertLess(offline.index("registered_only=True"), offline.index("addr_log("))
 
 
 class DockerfileTest(unittest.TestCase):

@@ -404,10 +404,10 @@ class TestAutoLoginScope(unittest.TestCase):
 def _proxy_handler(path, command="GET"):
     sent, fetched = [], []
     h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-    h.server = types.SimpleNamespace(cache=None, log_func=None)
+    h.server = types.SimpleNamespace(cache=None, log_func=None, server_port=9077)
     h.path = path
     h.command = command
-    h.headers = {}
+    h.headers = {"Host": "127.0.0.1:9077"}
     h.rfile = io.BytesIO()
     h.wfile = io.BytesIO()
     h.send_response = lambda *a: sent.append(("response",) + a)
@@ -447,6 +447,28 @@ class TestOnionProxyRouting(unittest.TestCase):
         h, sent, fetched = _proxy_handler(f"/proxy/{SITE}/a/b?c=1")
         h._handle_request()
         self.assertEqual(fetched, [("tor", f"http://{SITE}/a/b?c=1")])
+
+    def test_proxy_format_needs_this_proxys_host(self):
+        # Issue #465: a request for another Host (a name a page's DNS
+        # points at 127.0.0.1) is refused before the path is looked at.
+        for host in (None, "rebind.attacker.example:9077", "127.0.0.1:19077", "127.0.0.1"):
+            with self.subTest(host=host):
+                h, sent, fetched = _proxy_handler(f"/proxy/{SITE}/x")
+                h.headers = {} if host is None else {"Host": host}
+                h._handle_request()
+                self.assertEqual(fetched, [])
+                self.assertEqual(sent[0][:2], ("error", 403))
+        for host in ("localhost:9077", "[::1]:9077"):
+            with self.subTest(host=host):
+                h, sent, fetched = _proxy_handler(f"/proxy/{SITE}/x")
+                h.headers = {"Host": host}
+                h._handle_request()
+                self.assertEqual(fetched, [("tor", f"http://{SITE}/x")])
+        # An absolute-form request's Host is its target.
+        h, sent, fetched = _proxy_handler(f"http://{SITE}/x")
+        h.headers = {"Host": SITE}
+        h._handle_request()
+        self.assertEqual(fetched, [("tor", f"http://{SITE}/x")])
 
     def test_an_onion_name_never_goes_out_clearnet(self):
         # A trailing dot or upper case used to read as a clearnet name.

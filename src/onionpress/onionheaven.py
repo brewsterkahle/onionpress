@@ -710,11 +710,19 @@ def _check_wordpress_healthy(app):
         return False
 
 
+# Endpoint label of the signed per-address status query (POST
+# /status/<address>): web-server.py's STATUS_ENDPOINT, a test ties them.
+STATUS_ENDPOINT = "status"
+
+
 def _heartbeat_landed(app, content_addr, freshness_seconds=180):
     """Did an earlier POST /online actually land on the hub, even though
     we timed out waiting for the ACK?
 
-    Calls GET /status/<content_addr> and checks the most-recent
+    Posts a signed status query (POST /status/<content_addr>, signed by
+    the site's own key under STATUS_ENDPOINT: since issue #469 the plain
+    GET says only whether the address is registered, and the detail
+    goes to the address's own key) and checks the most-recent
     last_healthy across all registered entries. If that timestamp is
     within *freshness_seconds* of now, the server received and
     processed our heartbeat — our POST timeout was only on the return
@@ -728,13 +736,29 @@ def _heartbeat_landed(app, content_addr, freshness_seconds=180):
     if url is None:
         return False
     try:
+        from onionpress import onion_auth
+        secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        if onion_auth.derive_onion_address(public_key_raw) != content_addr:
+            return False  # the key is another address's (see _send_heartbeat_locked)
+        timestamp = onion_auth.make_timestamp()
+        payload = json.dumps({
+            "content_address": content_addr,
+            "healthcheck_address": "",
+            "timestamp": timestamp,
+            "signature": onion_auth.sign_payload(
+                secret_key_bytes, public_key_raw,
+                STATUS_ENDPOINT, content_addr, "", timestamp),
+        })
         args = [
-            "exec", "onionpress-tor",
-            "curl", "-s", "--max-time", "30",
+            "exec", "-i", "onionpress-tor",
+            "curl", "-s", "-X", "POST",
             "--socks5-hostname", "127.0.0.1:9050",
+            "-H", "Content-Type: application/json",
+            "--data-binary", "@-",
+            "--max-time", "30",
             url,
         ]
-        rc, output = _run_docker_rc(app, args, timeout=45)
+        rc, output = _run_docker_rc(app, args, timeout=45, input=payload)
         if rc != 0 or not output:
             return False
         data = json.loads(output)
