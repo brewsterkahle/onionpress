@@ -860,8 +860,9 @@ class TestCli(unittest.TestCase):
         self.assertIsNone(leaked)
         src = _read("src/onionpress/cli.py")
         pop = src.index("hub_recovery_key = os.environ.pop(RECOVERY_KEY_ENV")
-        self.assertLess(pop, src.index("cli = OnionPressCLI(data_dir=args.data_dir)"))
-        self.assertLess(pop, src.index('if args.command == "backup-address":'))
+        main = src.index("\ndef main(")
+        self.assertLess(main, pop)
+        self.assertLess(pop, src.index("return handlers[args.command](", main))
 
     def test_restore_gets_the_key_from_the_environment(self):
         with mock.patch("onionpress.cli.OnionPressCLI") as M, \
