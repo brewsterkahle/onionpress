@@ -114,6 +114,19 @@ class ContentLengthTest(unittest.TestCase):
             self.assertLess(time.monotonic() - start, 5)
 
 
+class DeadlineToleratesSlowCircuitsTest(unittest.TestCase):
+    """Onion circuits stall for minutes: the body deadline is never
+    shorter than the old per-read idle timeout, and a 10 MB log upload
+    gets time at a slow circuit's rate."""
+
+    def test_the_floor_is_at_least_the_idle_timeout(self):
+        self.assertGreaterEqual(ws.BODY_DEADLINE_FLOOR, ws.OnionHeavenHandler.timeout)
+
+    def test_a_full_log_upload_gets_slow_circuit_time(self):
+        seconds = ws.BODY_DEADLINE_FLOOR + ws.MAX_LOG_UPLOAD_BODY / ws.BODY_MIN_RATE
+        self.assertGreaterEqual(seconds, ws.MAX_LOG_UPLOAD_BODY / 4096)
+
+
 class ConnectionCapTest(unittest.TestCase):
     def test_connections_beyond_the_cap_are_closed(self):
         with mock.patch.object(ws, "MAX_CONNECTIONS", 2):

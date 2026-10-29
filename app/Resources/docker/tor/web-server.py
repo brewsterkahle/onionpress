@@ -54,11 +54,14 @@ MAX_LOG_UPLOAD_BODY = 10_485_760  # 10 MB, /logs/upload only
 # Bounds on what an unauthenticated client can hold (#461). Every node keeps
 # one keep-alive connection to its hub, so the connection cap sits well
 # above the node count; bodies are read under a deadline, never just an
-# idle timeout, and only a few large ones at a time.
+# idle timeout, and only a few large ones at a time. The deadline is
+# generous: onion circuits stall for minutes, so a body gets at least the
+# handler's idle timeout (300 s) and a slow circuit's rate; memory is
+# bounded by the two caps, not by it.
 MAX_CONNECTIONS = 1024
 MAX_LARGE_BODIES = 4  # concurrent bodies above MAX_REQUEST_BODY
-BODY_DEADLINE_FLOOR = 60  # seconds, plus one per BODY_MIN_RATE bytes
-BODY_MIN_RATE = 32_768
+BODY_DEADLINE_FLOOR = 300  # seconds, plus one per BODY_MIN_RATE bytes
+BODY_MIN_RATE = 4096
 
 import base64
 import hashlib
