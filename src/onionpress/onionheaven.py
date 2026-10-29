@@ -88,13 +88,25 @@ def configured_hub_address(value, log_func=None):
     return DEFAULT_ONIONHEAVEN_ADDRESS
 
 
+def use_configured_hub(value, log_func=None):
+    """Make the hub for ONIONHEAVEN_ADDRESS=*value* this process's
+    (ONIONHEAVEN_ADDRESS, and REJECTED_HUB_ADDRESS through
+    configured_hub_address) and return it. The one writer of the global
+    outside tests: the daemon at start and on a settings change, the
+    CLI's _hub_context (issue #476)."""
+    global ONIONHEAVEN_ADDRESS
+    ONIONHEAVEN_ADDRESS = configured_hub_address(value, log_func)
+    return ONIONHEAVEN_ADDRESS
+
+
 def _hub_url(path, hub=None):
     """http://<hub>:<port>/<path>, or None when the hub is not a well-formed
     onion address.
 
     *hub* defaults to ONIONHEAVEN_ADDRESS. Every request to a hub is built
-    here. ONIONHEAVEN_ADDRESS is a module global that callers assign, so it
-    is checked where it is used, not only where the config is read.
+    here. ONIONHEAVEN_ADDRESS is a module global (set by
+    use_configured_hub, and by tests), so it is checked where it is used,
+    not only where the config is read.
     """
     if hub is None:
         hub = ONIONHEAVEN_ADDRESS
@@ -2017,12 +2029,10 @@ def _hub_context(data_dir=None, log_func=None):
     environment key_manager.extract_keys (plain `docker`, this process's
     environment) can use: the launchers export DOCKER_HOST, a direct run
     gets the socket resolve_paths finds."""
-    global ONIONHEAVEN_ADDRESS
     paths = resolve_paths(data_dir=data_dir)
     log = log_func or _file_log_func(paths.log_file)
     ctx = HubContext(paths, log)
-    ONIONHEAVEN_ADDRESS = configured_hub_address(
-        ctx.read_config_value("ONIONHEAVEN_ADDRESS", ""), log)
+    use_configured_hub(ctx.read_config_value("ONIONHEAVEN_ADDRESS", ""), log)
     os.environ.setdefault("DOCKER_HOST", f"unix://{paths.docker_socket}")
     if paths.bin_dir and os.path.isdir(paths.bin_dir):
         path_dirs = os.environ.get("PATH", "").split(os.pathsep)

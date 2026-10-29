@@ -326,7 +326,7 @@ class Daemon(PortAttributes):
         self._last_snapshot_ts = time.time()
         self._snapshot_interval_seconds = 12 * 3600
 
-        onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
+        onionheaven.use_configured_hub(
             self.read_config_value("ONIONHEAVEN_ADDRESS", ""), self.log)
         # The OnionHeaven client: registration, heartbeat, /offline, the
         # opt-out and the record's upkeep. Its hooks are late-bound, so a
@@ -1405,7 +1405,7 @@ class Daemon(PortAttributes):
             if "CLOUDFLARE_TUNNEL_TOKEN" in keys:
                 self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
             if "ONIONHEAVEN_ADDRESS" in keys:
-                onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
+                onionheaven.use_configured_hub(
                     self.read_config_value("ONIONHEAVEN_ADDRESS", ""), self.log)
             if self.is_running:
                 self.write_status_to_volume()

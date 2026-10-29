@@ -189,9 +189,41 @@ class TestConfiguredHubAddress(unittest.TestCase):
         # The hub address is read by the daemon (onionpress.daemon, #367),
         # at start and when `config set ONIONHEAVEN_ADDRESS` leaves the marker.
         src = _read("src/onionpress/daemon.py")
-        self.assertEqual(src.count("onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address("), 2)
+        self.assertEqual(src.count("onionheaven.use_configured_hub("), 2)
         self.assertNotIn("onionheaven.ONIONHEAVEN_ADDRESS = oh_addr", src)
         self.assertNotIn("onionheaven.ONIONHEAVEN_ADDRESS =", _read("src/menubar.py"))
+
+    def test_only_use_configured_hub_assigns_the_hub(self):
+        """Issue #476: no module assigns ONIONHEAVEN_ADDRESS from outside;
+        inside onionheaven only use_configured_hub does, through
+        configured_hub_address."""
+        pkg = os.path.join(PROJECT_DIR, "src", "onionpress")
+        rels = ["src/menubar.py"] + [f"src/onionpress/{n}" for n in sorted(os.listdir(pkg))
+                                     if n.endswith(".py")]
+        writers = []
+        for rel in rels:
+            tree = ast.parse(_read(rel))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    for sub in ast.walk(node):
+                        if isinstance(sub, ast.Global) and "ONIONHEAVEN_ADDRESS" in sub.names:
+                            writers.append((rel, node.name))
+                if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for t in targets:
+                        if isinstance(t, ast.Attribute) and t.attr == "ONIONHEAVEN_ADDRESS":
+                            writers.append((rel, "attribute"))
+        self.assertEqual(writers, [("src/onionpress/onionheaven.py", "use_configured_hub")])
+
+    def test_use_configured_hub_sets_and_returns_it(self):
+        self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS",
+                        onionheaven.ONIONHEAVEN_ADDRESS)
+        self.addCleanup(setattr, onionheaven, "REJECTED_HUB_ADDRESS", "")
+        self.assertEqual(onionheaven.use_configured_hub(OTHER_HUB), OTHER_HUB)
+        self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, OTHER_HUB)
+        self.assertEqual(onionheaven.use_configured_hub(LOOSE[0]), HUB)
+        self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, HUB)
+        self.assertEqual(onionheaven.REJECTED_HUB_ADDRESS, LOOSE[0])
 
 
 class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
