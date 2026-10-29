@@ -384,6 +384,10 @@
 - Port 8083 (web-server.py) is mapped onto the onion address only when
   `hub_api_exposed()` (hub or OnionHome). socat listeners are
   `-T 30 … max-children=64`. `tests/test_tor_node_surface.py`.
+- **do_POST checks every body's length before a handler runs** (digits
+  only, the path's limit, no chunked); bodies are read under a deadline,
+  at most `MAX_CONNECTIONS` connections (#461). Handlers read only via
+  `_read_json` and check `is False`. `tests/test_hub_request_limits.py`.
 
 ## Containers Drop Every Capability
 - **Every compose service, takeover worker and one-shot `docker run` has

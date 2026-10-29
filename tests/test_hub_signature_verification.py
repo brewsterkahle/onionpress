@@ -88,6 +88,9 @@ class _Handler(ws.OnionHeavenHandler):
     def _name_registry_ready(self):
         return True
 
+    def _body_length(self, max_size):
+        return 0  # do_POST's length gate: test_hub_request_limits.py
+
     def _read_json(self, max_size=None):
         return self._data
 
