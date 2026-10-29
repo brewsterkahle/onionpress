@@ -460,29 +460,41 @@ class TestHubLoopsGate(_DaemonCase):
     def _run(self, choice):
         with open(os.path.join(self.dir, "config"), "w") as f:
             f.write(f"REGISTER_WITH_ONIONHEAVEN={choice}\n" if choice is not None else "")
-        with mock.patch("onionpress.onionheaven.start_registration_thread") as start, \
-                mock.patch("onionpress.onionheaven.maybe_unregister_after_opt_out") as optout, \
-                mock.patch("onionpress.onionheaven.maintain_registration") as maintain, \
+        client = self.d.hub_client
+        with mock.patch.object(client, "start_registration_thread") as start, \
+                mock.patch.object(client, "maybe_unregister_after_opt_out") as optout, \
+                mock.patch.object(client, "maintain_registration") as maintain, \
                 mock.patch("onionpress.analytics_sharing.start_analytics_sharing") as analytics:
             self.d._hub_loops()
         return start, optout, maintain, analytics
 
+    def test_the_daemon_holds_one_client_of_itself(self):
+        from onionpress import onionheaven
+        client = self.d.hub_client
+        self.assertIsInstance(client, onionheaven.OnionHeavenClient)
+        self.assertIs(client.app, self.d)
+        self.assertIs(onionheaven.client_of(self.d), client)
+        self.assertTrue(client.drives_own_snapshot)
+        self.d._sleeping = True
+        self.assertTrue(client._sleeping())
+
     def test_yes_and_unset_start_the_heartbeat(self):
         for choice in ("yes", None):
             with self.subTest(choice=choice):
-                self.d._onionheaven_registration_in_flight = False
+                self.d.hub_client.registration_in_flight = False
                 start, optout, maintain, analytics = self._run(choice)
-                start.assert_called_once_with(self.d)
-                optout.assert_called_once_with(self.d)
-                maintain.assert_called_once_with(self.d)
+                start.assert_called_once_with()
+                optout.assert_called_once_with()
+                maintain.assert_called_once_with()
+                self.assertTrue(self.d.hub_client.registration_in_flight)
 
     def test_no_and_a_typo_never_start_it(self):
         for choice in ("no", "nope"):
             with self.subTest(choice=choice):
-                self.d._onionheaven_registration_in_flight = False
+                self.d.hub_client.registration_in_flight = False
                 start, optout, maintain, analytics = self._run(choice)
                 start.assert_not_called()
-                optout.assert_called_once_with(self.d)
+                optout.assert_called_once_with()
 
     def test_not_before_bootstrap(self):
         self.d._last_bootstrap_pct = 50
@@ -502,8 +514,8 @@ class TestSleepWake(_DaemonCase):
     def test_sleep_signals_the_watchdogs_and_pauses(self):
         self.tick()
         with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True) as sig, \
-                mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
-            self.d._onionheaven_registration_succeeded = True
+                mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
+            self.d.hub_client.registration_succeeded = True
             self.d.handle_sleep()
         self.assertTrue(self.d._sleeping)
         self.assertEqual([c.args[1:] for c in sig.call_args_list],
@@ -515,11 +527,13 @@ class TestSleepWake(_DaemonCase):
     def test_wake_resets_the_window_and_supersedes_the_heartbeat(self):
         self.tick()
         self.d._recovery.trigger.reset = mock.Mock()
-        gen = self.d._heartbeat_generation
+        gen = self.d.hub_client.heartbeat_generation
+        self.d.hub_client.registration_succeeded = True
         with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True) as sig:
             self.d.handle_wake()
         self.d._recovery.trigger.reset.assert_called_once()
-        self.assertEqual(self.d._heartbeat_generation, gen + 1)
+        self.assertEqual(self.d.hub_client.heartbeat_generation, gen + 1)
+        self.assertFalse(self.d.hub_client.registration_succeeded)
         self.assertFalse(self.d._sleeping)
         self.assertFalse(self.d.is_ready)
         self.assertEqual([c.args[1:] for c in sig.call_args_list],
@@ -527,23 +541,23 @@ class TestSleepWake(_DaemonCase):
 
     def test_usr1_sends_offline_and_acknowledges(self):
         self.tick()
-        with mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
-            self.d._onionheaven_registration_succeeded = True
+        with mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
+            self.d.hub_client.registration_succeeded = True
             self.d._offline_now()
         off.assert_called_once()
         self.assertTrue(os.path.exists(os.path.join(self.dir, op_daemon.OFFLINE_ACK_MARKER)))
 
     def test_shutdown_sends_offline_only_for_a_quit(self):
         self.tick()
-        self.d._onionheaven_registration_succeeded = True
+        self.d.hub_client.registration_succeeded = True
         self.d.stop_onion_proxy = lambda: None
-        with mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
+        with mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
             self.d._shutdown()
         off.assert_not_called()                        # launchd restart / update: coming back
         with open(os.path.join(self.dir, op_daemon.QUITTING_MARKER), "w") as f:
             f.write("1")
         self.d._quitting = False
-        with mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
+        with mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
             self.d._shutdown()
         off.assert_called_once()                       # `daemon stop` for a quit
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))

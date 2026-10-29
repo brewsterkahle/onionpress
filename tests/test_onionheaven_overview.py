@@ -45,7 +45,6 @@ class FakeApp:
         self.version = "0.0.0"
         self.logs = []
         self._config = dict(config or {})
-        self._onionheaven_registration_succeeded = False
 
     def read_config_value(self, key, default=""):
         return self._config.get(key, default)

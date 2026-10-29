@@ -365,7 +365,7 @@ class TestRecord(_MacCase):
         for previous, reason_address in ((OTHER_HUB, SITE), (HUB, ELSEWHERE)):
             with self.subTest(previous=previous):
                 self.registered(hub=previous, address=reason_address)
-                app._onionheaven_registration_succeeded = True
+                onionheaven.client_of(app).registration_succeeded = True
                 with mock.patch.object(onionheaven.subprocess, "run", rec):
                     self.assertTrue(onionheaven._send_heartbeat(app))
                 status = self.saved()
@@ -484,10 +484,12 @@ class TestMaintain(_MacCase):
 
     def test_menubar_wiring(self):
         # The loops are the daemon's (onionpress.daemon, issue #367): the
-        # opt-out and the upkeep run from its status pass.
-        src = _read("src/onionpress/daemon.py")
-        i = src.index("onionheaven.maybe_unregister_after_opt_out(self)")
-        self.assertIn("onionheaven.maintain_registration(self)", src[i:i + 200])
+        # opt-out and the upkeep run from its status pass, in its
+        # OnionHeavenClient's tick (issue #479).
+        self.assertIn("self.hub_client.tick(", _read("src/onionpress/daemon.py"))
+        src = _read("src/onionpress/onionheaven.py")
+        i = src.index("            self.maybe_unregister_after_opt_out()")
+        self.assertIn("self.maintain_registration()", src[i:i + 200])
         menubar = _read("src/menubar.py")
         for name in ("maybe_unregister_after_opt_out", "maintain_registration",
                      "start_registration_thread", "end_hub_traffic",

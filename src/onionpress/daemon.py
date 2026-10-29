@@ -38,10 +38,11 @@ another address: onionpress.handle_action's pending-action/) is not
 answered here: it goes into the state file and the menubar asks the person
 at the Mac, then runs `handle-action --confirmed … | --cancel` itself.
 
-Everything that talks to the hub is onionpress.onionheaven's, unchanged:
-this object is the `app` those functions take (the attributes they read
-are set in __init__), so the Mac and the CLI's HubContext share one
-implementation and one lock (_hub_lock). The dual probe is
+Everything that talks to the hub is onionpress.onionheaven's: the daemon
+holds one OnionHeavenClient (hub_client, issue #479), which owns the
+session's registration state and reads this object as its host, so the
+Mac and the CLI's HubContext share one implementation and one lock
+(_hub_lock). The dual probe is
 onionpress.health's; the #266 recovery step on its outcome (the
 RepublishTrigger, the request to the watchdog, the wake and offline
 resets) is onionpress.reachability's RecoveryWindow, the one Linux's
@@ -292,24 +293,13 @@ class Daemon:
         self._last_check_complete_ts = time.time()
         self._was_ready = False
         self._tor_internally_ready = False
-        self._onionheaven_reclaim_succeeded = False
-        self._onionheaven_reclaim_in_flight = False
-        self._onionheaven_reclaim_last_attempt = 0
         self._wordpress_confirmed = False
         self._onionheaven_overview = None   # onionheaven.overview(), from check_status
         self._onionheaven_checked = False
-        self._onionheaven_registration_succeeded = False
-        self._onionheaven_heartbeat_succeeded = False
         self._pending_manual_upload = False
-        self._onionheaven_registration_in_flight = False
-        self._onionheaven_opt_out_in_flight = False
-        self._onionheaven_opt_out_last_attempt = 0
-        self._onionheaven_opt_out_gave_up = False
         self._onionname_retry_in_flight = False
         self._onionname_retry_giveup = False
         self._onionname_collision = None
-        self._heartbeat_generation = 0
-        self._heartbeat_loop_running = False
         self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
         self._quitting = False
         self._stopping = False
@@ -338,6 +328,15 @@ class Daemon:
 
         onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
             self.read_config_value("ONIONHEAVEN_ADDRESS", ""), self.log)
+        # The OnionHeaven client: registration, heartbeat, /offline, the
+        # opt-out and the record's upkeep. Its hooks are late-bound, so a
+        # replaced health checker or docker is seen.
+        self.hub_client = onionheaven.OnionHeavenClient(
+            self,
+            sleeping=lambda: self._sleeping,
+            wordpress_healthy=lambda: self._health_checker.check_wordpress_local(),
+            docker=lambda: self._docker,
+            drives_own_snapshot=True)
 
     # -- small helpers -----------------------------------------------------
 
@@ -577,10 +576,10 @@ class Daemon:
         except OSError:
             pass
         try:
-            if (self._onionheaven_registration_succeeded and not self.is_onionheaven
+            if (self.hub_client.registration_succeeded and not self.is_onionheaven
                     and self._take_marker(QUITTING_MARKER)):
                 try:
-                    onionheaven.notify_onionheaven_offline(self)
+                    self.hub_client.notify_offline()
                 except Exception:
                     pass
         except Exception:
@@ -597,9 +596,9 @@ class Daemon:
         tell the hub /offline now, as the menubar's Stop did before
         stopping the containers, and acknowledge."""
         try:
-            if self._onionheaven_registration_succeeded and not self.is_onionheaven:
+            if self.hub_client.registration_succeeded and not self.is_onionheaven:
                 try:
-                    ok = bool(onionheaven.notify_onionheaven_offline(self))
+                    ok = bool(self.hub_client.notify_offline())
                     self.log(f"daemon: /offline before stop {'landed' if ok else 'MISSED'}")
                 except Exception as e:
                     self.log(f"daemon: /offline before stop failed: {e}")
@@ -955,12 +954,7 @@ class Daemon:
                 self._wedge_warning_fired = False
                 self.healthcheck_address = None
                 self._onionheaven_checked = False
-                self._onionheaven_registration_succeeded = False
-                self._onionheaven_heartbeat_succeeded = False
-                self._onionheaven_registration_in_flight = False
-                self._onionheaven_reclaim_succeeded = False
-                self._onionheaven_reclaim_in_flight = False
-                self._onionheaven_reclaim_last_attempt = 0
+                self.hub_client.reset_session()
                 self._tor_internally_ready = False
                 if self.web_log_process is not None:
                     self.stop_web_log_capture()
@@ -1023,9 +1017,7 @@ class Daemon:
                 self._reachability_stats.reset_session(_now)
             self.is_ready = True
             self._was_ready = True
-            self._onionheaven_reclaim_succeeded = False
-            self._onionheaven_reclaim_in_flight = False
-            self._onionheaven_reclaim_last_attempt = 0
+            self.hub_client.reset_reclaim()
             self._bootstrap_stall_count = 0
             self._yellow_since = None
             self._consecutive_fail_count = 0
@@ -1063,7 +1055,7 @@ class Daemon:
                     _trip_ts = time.time()
                     self._yellow_since = _trip_ts
                     self._bootstrap_stall_count = 0
-                    self._onionheaven_heartbeat_succeeded = False
+                    self.hub_client.heartbeat_succeeded = False
                     self.startup_time = _trip_ts
                     self._reachability_stats.enter_yellow(_trip_ts)
                     self.log(f"reachability: purple → yellow (http={self._last_probe_code}, "
@@ -1100,21 +1092,9 @@ class Daemon:
                 self.caffeine.start()
 
         tor_bootstrapped = self._last_bootstrap_pct >= 100 or self.is_ready
-        if (tor_bootstrapped and self._address_known()
-                and not self.is_onionheaven
-                and not self._onionheaven_registration_succeeded
-                and not self._onionheaven_registration_in_flight):
-            # On by default: "yes" or unset registers; "no" never does
-            # (the opt-out below asks the hub to forget an earlier
-            # registration). Re-read every cycle.
-            if onionheaven.get_registration_choice(self) == "yes":
-                self._onionheaven_registration_in_flight = True
-                onionheaven.start_registration_thread(self)
-
-        if (tor_bootstrapped and not self.is_onionheaven
-                and key_manager.is_valid_onion_address(self.onion_address)):
-            onionheaven.maybe_unregister_after_opt_out(self)
-            onionheaven.maintain_registration(self)
+        # The heartbeat on "yes" (or unset), the opt-out's /unregister on
+        # "no", and the record's upkeep: the client's, re-read every cycle.
+        self.hub_client.tick(tor_bootstrapped, self._address_known())
 
         if tor_bootstrapped and self._address_known() and not self._analytics_sharing_started:
             self._analytics_sharing_started = True
@@ -1284,18 +1264,18 @@ class Daemon:
         self.log("System going to sleep")
         self._maybe_emit_snapshot(force=True, fast=True)
         self._sleeping = True
-        self._onionheaven_heartbeat_succeeded = False
+        self.hub_client.heartbeat_succeeded = False
         if not self.is_onionheaven:
             for container in ("onionpress-tor", "onionheaven"):
                 if self._signal_watchdog(container, "USR1"):
                     self.log(f"Sent USR1 (sleep) to {container} watchdog")
                 else:
                     self.log(f"Failed to send USR1 to {container} watchdog")
-            if self.is_ready and self._onionheaven_registration_succeeded:
+            if self.is_ready and self.hub_client.registration_succeeded:
                 t0 = time.monotonic()
                 ok = False
                 try:
-                    ok = bool(onionheaven.notify_onionheaven_offline(self, max_time=5))
+                    ok = bool(self.hub_client.notify_offline(max_time=5))
                 except Exception:
                     ok = False
                 self._record_suspend_offline(ok, int((time.monotonic() - t0) * 1000))
@@ -1315,11 +1295,7 @@ class Daemon:
         self.startup_time = time.time()
         self.caffeine.start()
         self._onionheaven_checked = False
-        self._onionheaven_registration_succeeded = False
-        self._onionheaven_heartbeat_succeeded = False
-        self._onionheaven_registration_in_flight = False
-        self._heartbeat_loop_running = False
-        self._heartbeat_generation += 1
+        self.hub_client.wake()
         self._wordpress_confirmed = False
         if self.is_ready:
             self.is_ready = False
@@ -1370,7 +1346,7 @@ class Daemon:
             self.log("Analytics upload queued — will run when online")
             return
         try:
-            result = analytics_sharing._do_upload_cycle(self, include_active=True) or {}
+            result = analytics_sharing.upload_cycle(self, include_active=True) or {}
             status = result.get("status", "unknown")
             if status == "ok":
                 w, u = result.get("wanted", 0), result.get("uploaded", 0)

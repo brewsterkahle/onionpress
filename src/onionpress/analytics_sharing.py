@@ -6,7 +6,7 @@ set ``SHARE_ANALYTICS_WITH_ONIONHOME=yes`` in their config.
 
 The loop is host-agnostic: it talks to an ``app`` object that supplies
 config, logging, the onion addresses, the log files and a way to reach
-``docker``.  On macOS that object is the menubar app; on Linux it is the
+``docker``.  On macOS that object is the daemon; on Linux it is the
 ``AnalyticsHost`` adapter in ``linux/onionpress-heartbeat.py`` (the
 heartbeat daemon runs the same loop on the same daily cadence).  Before
 that adapter existed no Linux install ever uploaded, whatever the opt-in
@@ -74,7 +74,8 @@ def daemon_running(data_dir, os_name):
     heartbeat client (its user unit, else an old install's system unit,
     active)."""
     if os_name == "macos":
-        from onionpress.daemon import PID_FILENAME
+        # daemon_client, not daemon: the daemon imports this module.
+        from onionpress.daemon_client import PID_FILENAME
         try:
             with open(os.path.join(data_dir, PID_FILENAME)) as fh:
                 pid = int(fh.read().strip())
@@ -121,7 +122,7 @@ def request_upload(paths, os_name, out=sys.stdout):
 def start_analytics_sharing(app):
     """Start the analytics sharing daemon thread.
 
-    Called once from menubar.py after services are running.
+    Called once by the Mac daemon after services are running.
     """
     thread = threading.Thread(target=_sharing_loop, args=(app,), daemon=True)
     thread.start()
@@ -249,6 +250,11 @@ def _pick_upload_hour(app):
     # Fallback: random hour per process
     import random
     return random.randint(0, 23)
+
+
+def upload_cycle(app, include_active=False):
+    """One upload now (Share Now on the Mac daemon): _do_upload_cycle."""
+    return _do_upload_cycle(app, include_active=include_active)
 
 
 def _do_upload_cycle(app, include_active=False):

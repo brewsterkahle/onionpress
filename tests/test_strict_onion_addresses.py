@@ -171,11 +171,12 @@ class TestConfiguredHubAddress(unittest.TestCase):
                     onionheaven.ONIONHEAVEN_ADDRESS = \
                         onionheaven.configured_hub_address(value)
                     app = _FakeApp(tmp)
+                    client = onionheaven.OnionHeavenClient
                     with mock.patch.object(onionheaven, "_check_wordpress_healthy",
                                            return_value=True), \
-                            mock.patch.object(onionheaven, "_send_heartbeat"), \
+                            mock.patch.object(client, "send_heartbeat"), \
                             mock.patch.object(onionheaven.time, "sleep"), \
-                            mock.patch.object(onionheaven, "_heartbeat_loop"):
+                            mock.patch.object(client, "heartbeat_loop"):
                         onionheaven.register_with_onionheaven(app)
                     hits = [m for m in app.logs if "WARNING" in m and HUB in m]
                     self.assertEqual(bool(hits), warned, app.logs)

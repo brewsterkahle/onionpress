@@ -113,12 +113,13 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
 
     def test_mac_gates_go_through_get_registration_choice(self):
         # The loop, every /online and every /offline re-read the choice.
+        # OnionHeavenClient's methods (issue #479).
         src = _read("src/onionpress/onionheaven.py")
-        for fn in ("def _heartbeat_loop(", "def _send_heartbeat_locked(",
-                   "def _send_onionheaven_notification("):
+        for fn in ("    def heartbeat_loop(", "    def _send_heartbeat_locked(",
+                   "    def _send_notification("):
             body = src[src.index(fn):]
-            body = body[:body.index("\ndef ", 1)]
-            self.assertIn('get_registration_choice(app)', body, fn)
+            body = body[:body.index("\n    def ", 1)]
+            self.assertIn('get_registration_choice(self.app)', body, fn)
             self.assertIn('!= "yes"', body, fn)
 
 
@@ -127,9 +128,14 @@ class TestNoStartupPrompt(unittest.TestCase):
         text = _read("src/menubar.py")
         self.assertNotIn("prompt_enable_onionheaven", text)
         self.assertNotIn("_onionheaven_prompt_shown", text)
-        # The gate is the daemon's status pass (onionpress.daemon).
+        # The gate is the daemon's status pass (onionpress.daemon), through
+        # its OnionHeavenClient's tick.
         daemon = _read("src/onionpress/daemon.py")
-        self.assertIn('if onionheaven.get_registration_choice(self) == "yes":', daemon)
+        self.assertIn("self.hub_client.tick(", daemon)
+        src = _read("src/onionpress/onionheaven.py")
+        tick = src[src.index("    def tick("):]
+        tick = tick[:tick.index("\n    def ", 1)]
+        self.assertIn('if get_registration_choice(self.app) == "yes":', tick)
         self.assertNotIn("prompt_enable_onionheaven", daemon)
         self.assertNotIn("REGISTRATION_PROMPT", _read("src/onionpress/onionheaven.py"))
 
