@@ -26,7 +26,7 @@ import time
 from datetime import datetime, timezone
 
 from onionpress import key_manager
-from onionpress.platform import resolve_paths
+from onionpress.platform import docker_env, find_docker_bin, resolve_paths
 
 # The default hub (run by the Internet Archive), and what a malformed
 # ONIONHEAVEN_ADDRESS falls back to.
@@ -110,24 +110,20 @@ def _docker_env(app):
     own *docker_socket* (HubContext: the CLI on either platform, where
     Linux uses the system or rootless daemon) gets that one instead.
     """
-    env = os.environ.copy()
     socket_path = (getattr(app, "docker_socket", None)
                    or f"{app.colima_home}/default/docker.sock")
-    env["DOCKER_HOST"] = f"unix://{socket_path}"
-    env["DOCKER_CONFIG"] = os.path.join(app.app_support, "docker-config")
-    return env
+    return docker_env(socket_path,
+                      os.path.join(app.app_support, "docker-config"))
 
 
 def _docker_bin(app):
     """Return path to docker binary: the bundled one in app.bin_dir, or
-    "docker" from PATH when there is no bundle (Linux)."""
+    "docker" from PATH when there is no bundle (Linux). An app that names
+    no docker_socket (the menubar's) always gets the bundled path."""
     bin_dir = getattr(app, "bin_dir", "") or ""
-    if not bin_dir:
-        return "docker"
-    bundled = os.path.join(bin_dir, "docker")
-    if getattr(app, "docker_socket", None) and not os.path.isfile(bundled):
-        return "docker"
-    return bundled
+    if bin_dir and not getattr(app, "docker_socket", None):
+        return os.path.join(bin_dir, "docker")
+    return find_docker_bin(bin_dir)
 
 
 def _run_docker(app, args, timeout=15, input=None):

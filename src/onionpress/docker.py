@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import wp_files
-from .platform import OnionPressPaths, detect_timezone
+from .platform import (OnionPressPaths, detect_timezone, docker_env,
+                       find_docker_bin)
 
 
 @dataclass
@@ -75,18 +76,12 @@ class Docker:
     @staticmethod
     def _find_docker(paths: OnionPressPaths) -> str:
         """Resolve the docker binary path."""
-        if paths.bin_dir:
-            bundled = os.path.join(paths.bin_dir, "docker")
-            if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
-                return bundled
-        return "docker"  # fall back to PATH
+        return find_docker_bin(paths.bin_dir)
 
     @staticmethod
     def _build_env(paths: OnionPressPaths, extra_env: dict | None = None) -> dict:
         """Build the environment dict for docker subprocesses."""
-        env = os.environ.copy()
-        env["DOCKER_HOST"] = f"unix://{paths.docker_socket}"
-        env["DOCKER_CONFIG"] = paths.docker_config_dir
+        env = docker_env(paths.docker_socket, paths.docker_config_dir)
         env["COLIMA_HOME"] = paths.colima_home
         env["LIMA_HOME"] = os.path.join(paths.colima_home, "_lima")
         env["LIMA_INSTANCE"] = "onionpress"
