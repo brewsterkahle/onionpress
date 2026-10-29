@@ -276,7 +276,7 @@ class OnlineStoresKeysTest(unittest.TestCase):
         self.key_path = os.path.join(self.keys, self.address,
                                      "ks_hs_id.ed25519_expanded_private")
 
-    def _online(self, pem):
+    def _online(self, pem, **extra):
         # Each request a second later than the last: a verified request
         # is accepted once per address and timestamp (issue #400), and a
         # client never sends two heartbeats in one second.
@@ -291,6 +291,7 @@ class OnlineStoresKeysTest(unittest.TestCase):
                                                  self.address, self.hc, ts),
             "arti_key_pem": base64.b64encode(pem).decode(),
         }
+        data.update(extra)
         handler = _Handler(data)
         handler._handle_online()
         self.assertEqual(len(handler.replies), 1)
@@ -317,6 +318,34 @@ class OnlineStoresKeysTest(unittest.TestCase):
         self.assertEqual((again.st_ino, again.st_mtime_ns), (st.st_ino, st.st_mtime_ns))
         self.assertEqual(sorted(os.listdir(os.path.dirname(self.key_path))),
                          ["hostname", "ks_hs_id.ed25519_expanded_private"])
+
+    def test_the_stored_version_is_a_short_printable_string(self):
+        """Issue #467: the body is 1 MB and version went into the row as
+        sent, so 5000 x 4 rows x 1 MB of registry.db was a client's to
+        fill; the signed status answer echoes it too."""
+        pem = _pem(self.expanded, self.public)
+        cases = (("v" * 100_000 + "\n\x00end", "v" * oc.SHORT_TEXT_LIMIT),
+                 ({"a": ["b"] * 1000}, "unknown"),
+                 ("", "unknown"),
+                 (None, "unknown"),
+                 ("2.6.0", "2.6.0"))
+        for sent, stored in cases:
+            with self.subTest(sent=str(sent)[:20]):
+                status, body = self._online(pem, version=sent)
+                self.assertEqual(status, 200, body)
+                conn = sqlite3.connect(oc.DB_PATH)
+                row = conn.execute("SELECT version FROM registry WHERE content_address = ?",
+                                   (self.address,)).fetchone()
+                conn.close()
+                self.assertEqual(row[0], stored if stored != "unknown" else row[0])
+                self.assertLessEqual(len(row[0]), oc.SHORT_TEXT_LIMIT)
+        # "unknown" keeps the version a heartbeat recorded before.
+        self.assertEqual(self._online(pem, version="2.6.1")[0], 200)
+        self.assertEqual(self._online(pem, version="")[0], 200)
+        conn = sqlite3.connect(oc.DB_PATH)
+        self.assertEqual(conn.execute("SELECT version FROM registry WHERE content_address = ?",
+                                      (self.address,)).fetchone()[0], "2.6.1")
+        conn.close()
 
     def test_a_doctored_key_never_replaces_a_good_one(self):
         good = _pem(self.expanded, self.public)
