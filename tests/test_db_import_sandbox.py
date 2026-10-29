@@ -39,11 +39,13 @@ for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
-from onionpress import backup, cli, wp_files  # noqa: E402
+from onionpress import backup, cli, db_import, wp_files  # noqa: E402
 
 MAC = os.path.join(PROJECT_DIR, "app", "MacOS", "onionpress")
 LINUX = os.path.join(PROJECT_DIR, "linux", "onionpress")
 BACKUP_PY = os.path.join(PROJECT_DIR, "src", "onionpress", "backup.py")
+# The import itself (backup.db_import is a re-export of it).
+DB_IMPORT_PY = os.path.join(PROJECT_DIR, "src", "onionpress", "db_import.py")
 
 
 def _read(path):
@@ -73,7 +75,7 @@ class TestNoInsecureImportInSources(unittest.TestCase):
                              f"{path}: still sources a dump file")
 
     def test_backup_py_has_no_docker_cp_of_a_dump(self):
-        text = _read(BACKUP_PY)
+        text = _read(BACKUP_PY) + _read(DB_IMPORT_PY)
         self.assertNotIn("onionpress-db:/tmp/wordpress.sql", text)
         self.assertNotIn("/tmp/wordpress.sql", text)
         self.assertNotIn("source /tmp/wordpress.sql", text)
@@ -373,7 +375,7 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
 
         with mock.patch.object(backup, "check_staged_tree"), \
-             mock.patch.object(backup, "_assert_db_client_sandboxed"), \
+             mock.patch.object(db_import, "_assert_db_client_sandboxed"), \
              mock.patch.object(backup, "_get_db_credentials",
                                return_value={"name": db_name, "user": db_user,
                                              "password": "wpconfig-pw-ignored"}), \

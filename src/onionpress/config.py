@@ -1,23 +1,37 @@
-"""Configuration, secrets, and port detection for OnionPress.
+"""Configuration for OnionPress.
 
 Handles:
 - Reading/writing the shell-style config file (~/.onionpress/config)
-- Generating and loading database secrets (~/.onionpress/secrets)
-- Detecting available port offsets for multi-user support
+- The Settings page allowlist and `onionpress config` (CLI_CONFIG_KEYS)
 - Validating onion address prefixes
+
+Database secrets live in secrets_file.py, port selection in ports.py and
+stop_stale_colima in colima.py (issue #482); their names are re-exported
+here so existing `config.X` callers keep working.
 """
 
-import logging
 import os
 import re
-import secrets
-import socket
-import subprocess
 import sys
 from dataclasses import dataclass, field
 
-from . import launcher_ops
 from .platform import OnionPressPaths
+from .ports import (  # noqa: F401  (re-exported, #482)
+    PortConfig, detect_port_offset, get_running_wp_port, resolve_port_offset,
+)
+from .secrets_file import (  # noqa: F401  (re-exported, #482)
+    Secrets, _generate_password, ensure_secrets, load_secrets,
+)
+
+
+def __getattr__(name):
+    # colima.py imports this module, so its stop_stale_colima is
+    # re-exported lazily rather than imported at the top.
+    if name == "stop_stale_colima":
+        from .colima import stop_stale_colima
+        return stop_stale_colima
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Default config values matching config-template.txt
 DEFAULTS = {
@@ -281,8 +295,16 @@ def write_value(path: str, key: str, value: str) -> None:
     if not found:
         lines.append(f"{key}={value}\n")
 
-    with open(path, "w", encoding="utf-8") as f:
+    with _open_for_writing(path) as f:
         f.writelines(lines)
+
+
+def _open_for_writing(path: str):
+    """Open the config file for rewriting. A file this creates is 0600
+    (issue #397: it may hold CLOUDFLARE_TUNNEL_TOKEN), whatever the umask;
+    an existing file keeps its mode."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 def remove_value(path: str, key: str) -> None:
@@ -293,7 +315,7 @@ def remove_value(path: str, key: str) -> None:
         lines = f.readlines()
     kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
     if len(kept) != len(lines):
-        with open(path, "w", encoding="utf-8") as f:
+        with _open_for_writing(path) as f:
             f.writelines(kept)
 
 
@@ -583,6 +605,22 @@ def set_config_value(path: str, key: str, value: str) -> ConfigChange:
     return ConfigChange(key, old, value, key in current, changed)
 
 
+def set_checked_value(data_dir: str, key: str, value: str, log) -> ConfigChange | None:
+    """`config set KEY VALUE` for host code that runs in-process (setup,
+    the CLI's own commands): the key's check, the write, the log line and
+    the change marker, as run_config_command does them. A UI process runs
+    the subcommand instead. None, logged, when the check refuses."""
+    reason = check_config_value(key, value)
+    if reason:
+        log(f"WARNING: config set {key} refused: {reason}")
+        return None
+    change = set_config_value(os.path.join(data_dir, "config"), key, value)
+    log(f"config set: {change.describe()}")
+    if change.changed:
+        note_config_changed(data_dir, [key])
+    return change
+
+
 def unset_config_value(path: str, key: str) -> ConfigChange:
     """Remove KEY's line: the default applies again."""
     current = read_config(path)
@@ -851,211 +889,3 @@ def prefix_change_question(key: str, value: str, data_dir: str, confirmed) -> No
         return
     _confirm.require("prefix-change", confirmed,
                      current=current or DEFAULTS["ADDRESS_PREFIX"], new=new, address=addr)
-
-# -- Secrets --
-
-@dataclass
-class Secrets:
-    """Database secrets for docker compose."""
-    wordpress_db_password: str
-    mysql_password: str
-    mysql_root_password: str
-
-    def as_env(self) -> dict:
-        """Return as environment variables for docker compose."""
-        return {
-            "WORDPRESS_DB_PASSWORD": self.wordpress_db_password,
-            "MYSQL_PASSWORD": self.mysql_password,
-            "MYSQL_ROOT_PASSWORD": self.mysql_root_password,
-        }
-
-
-def _generate_password(length: int = 32) -> str:
-    """Generate a random alphanumeric password."""
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-def load_secrets(path: str) -> Secrets:
-    """Load secrets from a shell-style secrets file.
-
-    Format: KEY='value' (single-quoted) or KEY=value (bare).
-    """
-    values = {}
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, val = line.split("=", 1)
-                key = key.strip()
-                val = val.strip()
-                # Strip single quotes
-                if val.startswith("'") and val.endswith("'"):
-                    val = val[1:-1]
-                values[key] = val
-
-    return Secrets(
-        wordpress_db_password=values.get("WORDPRESS_DB_PASSWORD", ""),
-        mysql_password=values.get("MYSQL_PASSWORD", ""),
-        mysql_root_password=values.get("MYSQL_ROOT_PASSWORD", ""),
-    )
-
-
-def ensure_secrets(path: str) -> Secrets:
-    """Generate secrets file if missing, then load and return Secrets.
-
-    Sets file permissions to 600 (owner-only read/write).
-    """
-    if not os.path.exists(path):
-        wp_pass = _generate_password()
-        root_pass = _generate_password()
-
-        # Create with restricted permissions
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write("# Database passwords - auto-generated\n")
-            f.write("# DO NOT SHARE THESE PASSWORDS\n")
-            f.write(f"WORDPRESS_DB_PASSWORD='{wp_pass}'\n")
-            f.write(f"MYSQL_PASSWORD='{wp_pass}'\n")
-            f.write(f"MYSQL_ROOT_PASSWORD='{root_pass}'\n")
-
-    return load_secrets(path)
-
-
-# -- Port detection --
-
-@dataclass
-class PortConfig:
-    """Port configuration for multi-user support."""
-    offset: int
-    wp_port: int
-    socks_port: int
-    proxy_port: int
-
-    @classmethod
-    def from_offset(cls, offset: int) -> "PortConfig":
-        """Build the port triple from an offset — the one place 8080/9050/9077
-        get added to it, so the three ports can't drift apart across callers."""
-        return cls(
-            offset=offset,
-            wp_port=8080 + offset,
-            socks_port=9050 + offset,
-            proxy_port=9077 + offset,
-        )
-
-
-def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str,
-                      log_func=None) -> None:
-    """Stop an orphaned Colima VM left over from a crash or force-quit.
-
-    If our Colima VM is running but the MenubarApp PID file is stale (or
-    missing), the VM is orphaned and holding ports.  Stop it so the next
-    launch gets port 8080 instead of needlessly offsetting.
-
-    log_func receives the progress lines; the MenubarApp passes its own
-    logger. Without one they go to the "onionpress" logging logger, which
-    has no handler in the app, so they only ever reached stderr.
-    """
-    _logger = logging.getLogger("onionpress")
-
-    def warn(msg: str) -> None:
-        if log_func:
-            log_func(msg)
-        else:
-            _logger.warning(msg)
-
-    # If a live MenubarApp already owns these ports, leave them alone
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)  # raises if not alive
-            return  # another instance is running — not stale
-        except (ProcessLookupError, ValueError, OSError):
-            pass  # stale PID file — fall through
-
-    # Check if the onionpress Colima VM is running
-    env = os.environ.copy()
-    env["COLIMA_HOME"] = colima_home
-    env["LIMA_HOME"] = os.path.join(colima_home, "_lima")
-    env["LIMA_INSTANCE"] = "onionpress"
-
-    try:
-        result = subprocess.run(
-            [colima_bin, "list", "--json"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10, env=env,
-        )
-        if result.returncode != 0 or "Running" not in result.stdout:
-            return  # VM not running — nothing to clean up
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return
-
-    warn("Found orphaned Colima VM from a previous crash — stopping it (up to 60s)")
-    try:
-        subprocess.run(
-            [colima_bin, "stop"],
-            capture_output=True, timeout=60, env=env,
-        )
-        warn("Orphaned Colima VM stopped successfully")
-    except (subprocess.TimeoutExpired, OSError) as e:
-        warn(f"Failed to stop orphaned Colima VM: {e}")
-
-
-def detect_port_offset() -> PortConfig:
-    """Detect available port offset for multi-user / port-conflict support.
-
-    Probes all three host-exposed ports (WP 8080, SOCKS 9050, PROXY 9077);
-    if ANY is in use, bumps the offset by 10000 and retries. Uses real
-    socket binding so it detects ports bound by other users or system
-    services (e.g. a system tor on 9050 from torbrowser-launcher's apt
-    deps) — not just other OnionPress instances. lsof would only show
-    the current user's processes.
-    """
-    offset = 0
-    while True:
-        pc = PortConfig.from_offset(offset)
-        if max(pc.wp_port, pc.socks_port, pc.proxy_port) > 65535:
-            return PortConfig.from_offset(0)  # fall back to default
-        all_free = True
-        for p in (pc.wp_port, pc.socks_port, pc.proxy_port):
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            except OSError:
-                # Can't even create a socket — give up
-                return PortConfig.from_offset(0)
-            try:
-                s.bind(("127.0.0.1", p))
-            except OSError:
-                all_free = False
-                s.close()
-                break
-            s.close()
-        if all_free:
-            return pc
-        offset += 10000
-
-
-def resolve_port_offset() -> PortConfig:
-    """Return the port offset our own stack is actually using.
-
-    detect_port_offset() allocates: it binds candidate ports and returns
-    the first free one, which is correct before anything is running. Once
-    our WordPress container is up, its ports are bound (by the container
-    itself), so a fresh bind test just reports "in use" without saying
-    which port that is — including the mundane case where the caller is
-    asking about the very stack it's part of.
-
-    Read the running container's published port first (authoritative —
-    Docker already made this mapping) and only fall back to allocation
-    when nothing is running yet. Callers that need the multi-user
-    allocation behavior with no risk of misreading a foreign container
-    (e.g. a first-launch check before anything of ours exists) should call
-    detect_port_offset() directly instead.
-    """
-    running_port = launcher_ops.get_running_wp_port()
-    if running_port is not None:
-        return PortConfig.from_offset(running_port - 8080)
-    return detect_port_offset()

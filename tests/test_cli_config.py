@@ -548,6 +548,7 @@ class TestCallers(unittest.TestCase):
             src = _read(rel)
             self.assertNotRegex(src, r"\bwrite_value\(", rel)
             self.assertNotRegex(src, r"op_config\.write_config\(", rel)
+        self.assertEqual(config_writers("src/menubar.py"), [])
         menubar = _read("src/menubar.py")
         self.assertNotIn("op_config.write_value(", menubar)
         self.assertNotIn("op_config.write_config(", menubar)
@@ -566,6 +567,212 @@ class TestCallers(unittest.TestCase):
         self.assertIn("login_item.install(", menubar)
         self.assertIn("login_item.remove(", menubar)
         self.assertNotIn("plistlib.dump", menubar)
+
+
+# The census of config writers (issue #474). A write is a call of
+# config's raw writers (write_value, remove_value, write_config), or an
+# open for writing, os.open, copy, rename or replace whose target is the
+# config file: a name or attribute called config_file/config_path, a name
+# assigned os.path.join(..., "config") in the same function, or that join
+# itself. config.py is the writer; the backup restore's two helpers put a
+# restored backup's settings back (RESTORABLE_CONFIG, the restored
+# address's prefix and login); nothing else writes.
+CONFIG_WRITER_MODULE = "src/onionpress/config.py"
+CONFIG_WRITES_ALLOWED = {
+    ("src/onionpress/backup.py", "restore_backup_config"),
+    ("src/onionpress/backup.py", "match_config_to_restored_address"),
+}
+_RAW_WRITERS = {"write_value", "remove_value", "write_config"}
+_CONFIG_NAMES = {"config_file", "config_path"}
+
+
+def _call_name(func):
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        prefix = _call_name(func.value)
+        return f"{prefix}.{func.attr}" if prefix else func.attr
+    return ""
+
+
+def _joins_config(node):
+    return (isinstance(node, ast.Call) and _call_name(node.func) == "os.path.join"
+            and node.args and isinstance(node.args[-1], ast.Constant)
+            and node.args[-1].value == "config")
+
+
+def _write_mode(call):
+    mode = call.args[1] if len(call.args) > 1 else next(
+        (k.value for k in call.keywords if k.arg == "mode"), None)
+    return (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
+            and any(c in mode.value for c in "wax+"))
+
+
+def config_writers(rel):
+    """[(function, line)] of config writes in *rel* (see above)."""
+    tree = ast.parse(_read(rel))
+    found = []
+    # A bare write_value() is config's when imported from it (settings_ui's
+    # write_config is the callback that runs the subcommand).
+    imported = {a.asname or a.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom)
+                and (node.module or "").rsplit(".", 1)[-1] == "config"
+                for a in node.names}
+
+    def scan(func_node, name):
+        config_vars = set(_CONFIG_NAMES)
+        for node in ast.walk(func_node):
+            if (isinstance(node, ast.Assign) and _joins_config(node.value)):
+                config_vars.update(t.id for t in node.targets if isinstance(t, ast.Name))
+
+        def is_config(node):
+            if isinstance(node, ast.Name):
+                return node.id in config_vars
+            if isinstance(node, ast.Attribute):
+                return node.attr in _CONFIG_NAMES
+            return _joins_config(node)
+
+        for node in ast.walk(func_node):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = _call_name(node.func)
+            short = callee.rsplit(".", 1)[-1]
+            target = None
+            if short in _RAW_WRITERS and (isinstance(node.func, ast.Attribute)
+                                          or short in imported):
+                found.append((name, node.lineno))
+                continue
+            if callee == "open" and node.args and _write_mode(node):
+                target = node.args[0]
+            elif callee == "os.open" and node.args:
+                target = node.args[0]
+            elif short in ("copy", "copy2", "copyfile", "move", "replace", "rename") \
+                    and len(node.args) > 1:
+                target = node.args[1]
+            if target is not None and is_config(target):
+                found.append((name, node.lineno))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Innermost function owns the call: scan only its own body.
+            body = ast.Module(body=[n for n in node.body
+                                    if not isinstance(n, (ast.FunctionDef,
+                                                          ast.AsyncFunctionDef))],
+                              type_ignores=[])
+            scan(body, node.name)
+    return sorted(set(found))
+
+
+class TestConfigWriterCensus(unittest.TestCase):
+    """Issue #474: `onionpress config` (config.py) is the one writer of
+    ~/.onionpress/config; every other module in src/onionpress and the
+    menubar goes through it (set_config_value, set_checked_value,
+    apply_settings_updates, or the subcommand through the launcher)."""
+
+    def _modules(self):
+        rels = ["src/menubar.py"]
+        pkg = os.path.join(SRC, "onionpress")
+        for fn in sorted(os.listdir(pkg)):
+            if fn.endswith(".py"):
+                rels.append(f"src/onionpress/{fn}")
+        return rels
+
+    def test_no_module_but_config_writes_the_config(self):
+        offenders = []
+        for rel in self._modules():
+            if rel == CONFIG_WRITER_MODULE:
+                continue
+            for func, line in config_writers(rel):
+                if (rel, func) not in CONFIG_WRITES_ALLOWED:
+                    offenders.append(f"{rel}:{line} in {func}()")
+        self.assertEqual(offenders, [], "config written outside config.py "
+                         "(use config.set_checked_value / set_config_value, or "
+                         "`onionpress config set` from a UI)")
+
+    def test_the_census_sees_a_write(self):
+        # The census finds what it looks for: config.py's own writers and
+        # the allowed restore helpers.
+        own = {f for f, _ in config_writers(CONFIG_WRITER_MODULE)}
+        self.assertIn("ensure_config", own)
+        self.assertEqual({f for f, _ in config_writers("src/onionpress/backup.py")},
+                         {f for _, f in CONFIG_WRITES_ALLOWED})
+
+    def test_the_census_sees_each_kind_of_write(self):
+        sample = textwrap.dedent("""
+            import os, shutil
+            from onionpress.config import write_value
+            from onionpress import config as op_config
+
+            def a(path):
+                op_config.write_value(path, "K", "v")
+
+            def b(path):
+                write_value(path, "K", "v")
+
+            def c(self, t):
+                shutil.copy2(t, self.config_file)
+
+            def d(data_dir):
+                cfg = os.path.join(data_dir, "config")
+                with open(cfg, "a") as f:
+                    f.write("K=v")
+
+            def e(config_path):
+                os.replace(config_path + ".tmp", config_path)
+
+            def reads(config_path, data_dir):
+                with open(config_path) as f:
+                    f.read()
+                with open(os.path.join(data_dir, "config-overrides.json"), "w") as f:
+                    pass
+                op_config.set_config_value(config_path, "K", "v")
+        """)
+        tmp = tempfile.mkdtemp(prefix="op-census-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = os.path.join(tmp, "sample.py")
+        with open(path, "w") as f:
+            f.write(sample)
+        self.assertEqual([f for f, _ in config_writers(path)], ["a", "b", "c", "d", "e"])
+
+    def test_the_allowed_writers_still_exist(self):
+        for rel, func in CONFIG_WRITES_ALLOWED:
+            self.assertRegex(_read(rel), rf"\ndef {func}\(", rel)
+
+
+class TestAdminUsernameIsAReadUnlessAsked(unittest.TestCase):
+    """backup.get_admin_username reads; a login found in WordPress is
+    recorded as ONIONNAME only when the caller passes its log, through
+    config.set_checked_value (issue #474)."""
+
+    def setUp(self):
+        from onionpress import backup
+        self.backup = backup
+        self.dir = tempfile.mkdtemp(prefix="op-admin-name-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.cfg = os.path.join(self.dir, "config")
+        done = mock.Mock(returncode=0, stdout="owner\nother\n")
+        p = mock.patch("onionpress.backup.subprocess.run", return_value=done)
+        self.run = p.start()
+        self.addCleanup(p.stop)
+
+    def test_a_plain_call_writes_nothing(self):
+        self.assertEqual(self.backup.find_admin_username(self.dir), ("owner", True))
+        self.assertEqual(self.backup.get_admin_username(self.dir), "owner")
+        self.assertFalse(os.path.exists(self.cfg))
+
+    def test_with_a_log_the_login_is_recorded_once(self):
+        logged = []
+        self.assertEqual(self.backup.get_admin_username(self.dir, log=logged.append), "owner")
+        self.assertEqual(op_config.read_value(self.cfg, "ONIONNAME"), "owner")
+        self.assertEqual(op_config.take_config_changes(self.dir), ["ONIONNAME"])
+        self.run.reset_mock()
+        self.assertEqual(self.backup.find_admin_username(self.dir), ("owner", False))
+        self.run.assert_not_called()
+
+    def test_the_fallback_is_never_recorded(self):
+        self.run.return_value = mock.Mock(returncode=1, stdout="")
+        self.assertEqual(self.backup.get_admin_username(self.dir, log=lambda m: None), "admin")
+        self.assertFalse(os.path.exists(self.cfg))
 
 
 class TestMenubarWriteConfigValue(unittest.TestCase):

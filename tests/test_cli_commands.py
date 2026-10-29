@@ -301,7 +301,7 @@ class TestHubContext(Sandbox):
                                     bin_dir=bin_dir)
         saved = onionheaven.ONIONHEAVEN_ADDRESS
         self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS", saved)
-        with mock.patch("onionpress.cli.resolve_paths", return_value=paths), \
+        with mock.patch("onionpress.onionheaven.resolve_paths", return_value=paths), \
                 mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
             ctx = cli._hub_context(self.dir, self.log)
             self.assertEqual(os.environ["DOCKER_HOST"], f"unix://{paths.docker_socket}")
@@ -1688,6 +1688,42 @@ class TestPrepareRestore(Sandbox):
         self.assertIn("extracting", text)
         self.assertIn("prepare failed: wrong password", text)
         self.assertEqual(cli.cmd_prepare_restore("/b.zip", "pw", self.dir, False), 1)
+        self.assertIn("ERROR: ", self.err.getvalue())
+
+
+class TestPrepareRestoreCheck(Sandbox):
+    """`prepare-restore --check` (issue #475): the welcome screen's
+    backup opened by the CLI, nothing written."""
+
+    def _check(self, **kw):
+        with mock.patch("onionpress.backup.peek_backup_metadata", **kw) as peek, \
+                mock.patch("onionpress.backup.prepare_install_from_backup") as prepare:
+            rc = cli.cmd_prepare_restore_check("/b.zip", "pw", True)
+        prepare.assert_not_called()
+        if peek.called:
+            peek.assert_called_once_with("/b.zip", "pw")
+        return rc
+
+    def test_a_backup_with_its_key(self):
+        self.assertEqual(self._check(return_value={"onion_address": ADDR}), 0)
+        self.assertEqual(self.answer(), {"ok": True, "onion_address": ADDR,
+                                         "excludes_onion_key": False})
+
+    def test_a_settings_page_backup_says_its_key_is_left_out(self):
+        meta = {"onion_address": ADDR, "excludes_onion_key": True}
+        self.assertEqual(self._check(return_value=meta), 0)
+        self.assertIs(self.answer()["excludes_onion_key"], True)
+
+    def test_only_a_true_excludes_and_a_text_address_pass(self):
+        meta = {"onion_address": 7, "excludes_onion_key": "yes"}
+        self.assertEqual(self._check(return_value=meta), 0)
+        self.assertEqual(self.answer(), {"ok": True, "onion_address": "",
+                                         "excludes_onion_key": False})
+
+    def test_a_wrong_password_is_the_error(self):
+        self.assertEqual(self._check(side_effect=ValueError("wrong password")), 1)
+        self.assertIn("wrong password", self.answer()["error"])
+        self.assertEqual(cli.cmd_prepare_restore_check("/nonexistent.zip", "pw", False), 1)
         self.assertIn("ERROR: ", self.err.getvalue())
 
 

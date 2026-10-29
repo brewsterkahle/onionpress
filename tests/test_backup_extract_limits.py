@@ -29,7 +29,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from onionpress import backup  # noqa: E402
+from onionpress import backup, backup_archive  # noqa: E402
 import test_backup_archive_members as am  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 
@@ -118,7 +118,7 @@ class TestListedLimits(_Base):
             with open(os.path.join(tree, f"f{i}"), "w") as f:
                 f.write("x")
         am._ExtractorsOff(self)
-        with mock.patch.object(backup, "_MAX_ARCHIVE_MEMBERS", 5):
+        with mock.patch.object(backup_archive, "_MAX_ARCHIVE_MEMBERS", 5):
             for fmt, path in self._both_formats(tree, "many").items():
                 with self.subTest(fmt):
                     dest = self._dest()
@@ -128,8 +128,8 @@ class TestListedLimits(_Base):
 
     def test_too_much_listed_data(self):
         am._ExtractorsOff(self)
-        with mock.patch.object(backup, "_MIN_UNPACK_BUDGET", 1 << 20), \
-                mock.patch.object(backup, "_MAX_EXPANSION", 2):
+        with mock.patch.object(backup_archive, "_MIN_UNPACK_BUDGET", 1 << 20), \
+                mock.patch.object(backup_archive, "_MAX_EXPANSION", 2):
             for fmt, path in self._both_formats(self._liar_tree(), "big").items():
                 with self.subTest(fmt):
                     dest = self._dest()
@@ -144,7 +144,7 @@ class TestListedLimits(_Base):
                 for i, size in enumerate(sizes):
                     zf.writestr(f"f{i}", b"\0" * size)
             return zipfile.ZipFile(io.BytesIO(buf.getvalue()))
-        with mock.patch.object(backup, "_MIN_UNPACK_BUDGET", 1000):
+        with mock.patch.object(backup_archive, "_MIN_UNPACK_BUDGET", 1000):
             self.assertEqual(backup.check_archive_size(listing(400, 600), 10), (1000, 600))
             # 50x the archive's size when that is larger than the floor.
             self.assertEqual(backup.check_archive_size(listing(1500), 30), (1500, 1500))
@@ -168,7 +168,7 @@ class TestLyingSizes(_Base):
         _misstate_size(inner, "big.bin", LISTED)
         path = am._format2(os.path.join(self.tmp, "liar-2.zip"), inner)
         dest = self._dest()
-        with mock.patch.object(backup, "_unzip_cli_extract",
+        with mock.patch.object(backup_archive, "_unzip_cli_extract",
                                side_effect=AssertionError("unzip ran")):
             with self.assertRaisesRegex(ValueError, "does not match its listed size"):
                 backup.extract_archive(path, PW, dest, self.logs.append)
@@ -189,7 +189,7 @@ class TestLyingSizes(_Base):
         path = self._format1(self._liar_tree(), "liar-1z.zip")
         _misstate_size(path, "big.bin", LISTED)
         dest = self._dest()
-        with mock.patch.object(backup, "_unzip_cli_extract", return_value=False):
+        with mock.patch.object(backup_archive, "_unzip_cli_extract", return_value=False):
             with self.assertRaises(ValueError):
                 backup.extract_archive(path, PW, dest, self.logs.append)
         self.assertLessEqual(_largest_file(dest), LISTED)
@@ -232,7 +232,7 @@ class TestUnzipWatchdog(_Base):
     def test_unzip_is_stopped_past_the_total(self):
         free = iter([10 << 30] + [(10 << 30) - 5000] * 1000)
         start = time.monotonic()
-        with mock.patch.object(backup, "_free_bytes", side_effect=lambda _p: next(free)):
+        with mock.patch.object(backup_archive, "_free_bytes", side_effect=lambda _p: next(free)):
             with self.assertRaisesRegex(ValueError, "more data than it lists"):
                 backup._unzip_cli_extract("/nonexistent.zip", PW, self._dest(),
                                           self.logs.append, max_file_bytes=10,

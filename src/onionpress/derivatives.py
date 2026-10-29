@@ -220,12 +220,9 @@ def regeneration_pending(data_dir: str, docker_bin: str = "docker") -> bool:
 def _site_urls(docker_bin: str, container: str) -> list[Optional[str]]:
     """Every site's URL on a multisite, else [None] (run without --url)."""
     try:
-        r = subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args("site", "list", "--field=url",
-                                                container=container),
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=60,
-        )
+        r = wp_files.wp_cli("site", "list", "--field=url",
+                            docker_bin=docker_bin, timeout=60,
+                            container=container)
     except (OSError, subprocess.SubprocessError):
         return [None]
     urls = [u.strip() for u in (r.stdout or "").splitlines() if u.strip()]
@@ -261,11 +258,9 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
             log("Image derivatives: a regeneration sweep is already running — not starting another")
             return True
 
-        installed = subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args("core", "is-installed",
-                                                container=container),
-            capture_output=True, timeout=60,
-        )
+        installed = wp_files.wp_cli("core", "is-installed",
+                                    docker_bin=docker_bin, timeout=60,
+                                    container=container)
         if installed.returncode != 0:
             log("Image derivatives: WordPress is not up — leaving the marker for the next start")
             return False
@@ -286,13 +281,10 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
             args = ["media", "regenerate", "--only-missing", "--yes"]
             if url:
                 args.append(f"--url={url}")
-            cmd = [docker_bin] + wp_files.wp_cli_args(*args, nice=True,
-                                                      container=container)
             try:
-                r = subprocess.run(
-                    cmd, capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=REGENERATE_TIMEOUT,
-                )
+                r = wp_files.wp_cli(*args, docker_bin=docker_bin, nice=True,
+                                    timeout=REGENERATE_TIMEOUT,
+                                    container=container)
             except (OSError, subprocess.SubprocessError) as e:
                 log(f"Image derivatives: regenerate failed for {url or 'site'}: {e} — will resume on next start")
                 return False

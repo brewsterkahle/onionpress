@@ -95,13 +95,9 @@ def mint(scope: str, *, docker_bin: str = "docker", env=None,
         raise ValueError(f"unknown auto-login scope {scope!r}")
     token = new_token()
     try:
-        result = subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args("eval", MINT_PHP, stdin=True,
-                                                container=container),
-            input=f"{token}\n{scope}\n",
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, env=env,
-        )
+        result = wp_files.wp_cli("eval", MINT_PHP, docker_bin=docker_bin,
+                                 env=env, input=f"{token}\n{scope}\n",
+                                 timeout=timeout, container=container)
     except (subprocess.SubprocessError, OSError) as e:
         if log_func:
             log_func(f"Auto-login token error: {type(e).__name__}")

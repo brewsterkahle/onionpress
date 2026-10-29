@@ -29,11 +29,7 @@ def _wp(args: list, url: str = None, **kwargs) -> subprocess.CompletedProcess:
     cmd = args + ["--path=/var/www/html"]
     if url:
         cmd.append("--url=" + url)
-    return subprocess.run(
-        ["docker"] + wp_files.wp_cli_args(*cmd, container=_WORDPRESS_CONTAINER),
-        capture_output=True, text=True, encoding='utf-8',
-        errors='replace', **kwargs,
-    )
+    return wp_files.wp_cli(*cmd, container=_WORDPRESS_CONTAINER, **kwargs)
 
 
 def _get_post_wayback_state(post_id: str, site_url: str) -> dict:

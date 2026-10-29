@@ -176,9 +176,9 @@ class TestPythonSide(unittest.TestCase):
         # ...and a junk one is unknown too: the stamp must be WordPress's
         # datetime, nothing a planted answer chooses.
         rec = _Recorder(registered="x\ny")
-        self.assertTrue(setup_logic.mark_wordpress_installed_by_onionpress(self.tmp, "docker"))
         with mock.patch.object(setup_logic.subprocess, "run", rec):
-            setup_logic.mark_wordpress_installed_by_onionpress(self.tmp, "docker")
+            self.assertTrue(
+                setup_logic.mark_wordpress_installed_by_onionpress(self.tmp, "docker"))
         with open(self.marker) as f:
             self.assertEqual(f.read().strip(), "unknown")
 

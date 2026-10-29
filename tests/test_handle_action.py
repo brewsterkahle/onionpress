@@ -108,6 +108,10 @@ class FakeDocker:
         text = self.get(name)
         return json.loads(text) if text else None
 
+    def exec(self, container, command, timeout=30, check=False, quiet=False, user=None):
+        return self.run(["exec"] + (["-u", user] if user else []) + [container, *command],
+                        timeout=timeout, check=check, quiet=quiet)
+
     def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False):
         args = [str(a) for a in args]
         self.calls.append(args)
