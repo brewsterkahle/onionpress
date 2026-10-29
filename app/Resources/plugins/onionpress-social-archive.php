@@ -21,6 +21,20 @@ if ( ! defined( 'ABSPATH' ) ) {
 const ONIONPRESS_SOCIAL_ADMIN_SLUG = 'onionpress-social-archive';
 
 /**
+ * wp_insert_comment() for every importer comment (#462). Unlike
+ * wp_new_comment() it runs no comment filter (wp_filter_comment), and
+ * WordPress does not kses comment_text on output, so the author, its URL
+ * and the content are cleaned here, before they are stored. The author
+ * may be anyone's display name (Bluesky/Mastodon thread ancestors).
+ */
+function onionpress_social_insert_comment( $args ) {
+    $args['comment_author']     = sanitize_text_field( (string) ( $args['comment_author'] ?? '' ) );
+    $args['comment_author_url'] = esc_url_raw( (string) ( $args['comment_author_url'] ?? '' ) );
+    $args['comment_content']    = wp_kses_post( (string) ( $args['comment_content'] ?? '' ) );
+    return wp_insert_comment( $args );
+}
+
+/**
  * Canonical list of supported sources. Each entry carries:
  *   - label:    human-facing platform name (e.g. "Twitter / X")
  *   - cat_name: display name for the WP category

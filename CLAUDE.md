@@ -229,6 +229,10 @@
   `CLOUDFLARE_TUNNEL_TOKEN` (write-only field). Log changes via
   `describe_change`/`loggable_value`. Every page key reaches a reader
   (`tests/test_settings_page_keys_are_read.py`).
+- **The page never sets `CLOUDFLARE_TUNNEL_TOKEN` unattended** (#463; its
+  tunnel's owner sees the host's IP): `PAGE_HELD_KEYS` values are held,
+  asked on a Mac ("clearnet-tunnel"), refused on Linux; removal is
+  applied. `TestTunnelToken` in `tests/test_handle_action.py`.
 - **Page requests are handled only by `onionpress handle-action`**
   (`handle_action.py`, both platforms): fixed verbs (`ACTIONS`), each run
   through the launcher; `update` only checks on both platforms; on a Mac an
@@ -333,6 +337,11 @@
   (no `allow-scripts`) and `nosniff`, on both paths.
   `tests/test_creations_sandboxed_serving.py`.
 - Thumbnails are never removed when part of a folder could not be read.
+- **Host code that walks the Creations mount follows no link** (#460):
+  `.thumbs` must be a real folder, linked sources are skipped, removals and
+  writes go through `O_NOFOLLOW` folder fds (`thumbnails.prune`/`install`),
+  qlmanage renders into a private temp folder.
+  `tests/test_creations_thumbnails.py`.
 
 ## Follow Requests Stay Off the Container Network
 - **Never call `wp_remote_*`/`fetch_feed` directly for a follow**: use
@@ -342,6 +351,10 @@
 ## Imported Bodies Are Filtered at Ingest (issue #403)
 - Every foreign HTML field goes through `wp_kses_post()` where it is read.
   `tests/test_importers_kses_at_ingest.py` (census).
+- **Every importer comment goes through `onionpress_social_insert_comment`**
+  (#462; `wp_insert_comment` runs no comment filter): author, URL and
+  content are cleaned before storing. Tweet text is escaped first.
+  Same test.
 
 ## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
 - The serve path only reads cached items and schedules
@@ -379,6 +392,10 @@
 - Port 8083 (web-server.py) is mapped onto the onion address only when
   `hub_api_exposed()` (hub or OnionHome). socat listeners are
   `-T 30 … max-children=64`. `tests/test_tor_node_surface.py`.
+- **do_POST checks every body's length before a handler runs** (digits
+  only, the path's limit, no chunked); bodies are read under a deadline,
+  at most `MAX_CONNECTIONS` connections (#461). Handlers read only via
+  `_read_json` and check `is False`. `tests/test_hub_request_limits.py`.
 
 ## Containers Drop Every Capability
 - **Every compose service, takeover worker and one-shot `docker run` has

@@ -3387,6 +3387,11 @@ apply_config_updates() {
     rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
     [ -z "$changed" ] || log "Settings page changed: ${changed% }"
     [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
+    # A tunnel token is never set from the page (#463): its owner would
+    # see this host's IP. Removing it is applied above.
+    if printf '%s\n' "$result" | grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'; then
+        log "WARNING: Settings page asked to set CLOUDFLARE_TUNNEL_TOKEN; not set. On this computer run: onionpress config set CLOUDFLARE_TUNNEL_TOKEN -"
+    fi
 
     # Clear the updates file
     wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"

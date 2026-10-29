@@ -509,7 +509,7 @@ function onionpress_twitter_create_self_reply_comment( $tweet, $parent_post_id, 
     }
 
     $gmt = gmdate( 'Y-m-d H:i:s', $ts );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -551,7 +551,7 @@ function onionpress_twitter_convert_post_to_comment( $post_id, $parent_post_id )
     if ( $author === '' ) $author = 'me';
     $author_url = (string) get_post_meta( $post_id, '_source_url', true );
     $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -760,11 +760,18 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
 /**
  * Render a tweet's content: expand t.co links, make @mentions clickable,
  * strip trailing media t.co links (they'll be re-added as attachments),
- * and wrap in safe HTML. Output is safe for direct insertion as
- * post_content (no <script> etc.).
+ * and wrap in safe HTML. The text is escaped first, so the only markup
+ * is what this function adds.
  */
 function onionpress_twitter_render_content( $tweet ) {
-    $text = $tweet['full_text'] ?? $tweet['text'] ?? '';
+    // The archive's text is plain text with &lt; &gt; &amp; encoded: decode
+    // and escape it before anything adds markup (#462). t.co links and
+    // @handles contain nothing esc_html changes, so the substitutions
+    // below still find them.
+    $text = esc_html( html_entity_decode(
+        (string) ( $tweet['full_text'] ?? $tweet['text'] ?? '' ),
+        ENT_QUOTES | ENT_HTML5, 'UTF-8'
+    ) );
 
     // Strip media short-URLs from tail — the attached media will be
     // re-rendered as <img>/<video> in sideload_media.

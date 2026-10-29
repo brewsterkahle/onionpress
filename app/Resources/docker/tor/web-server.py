@@ -49,6 +49,19 @@ Endpoints:
 """
 
 MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
+MAX_LOG_UPLOAD_BODY = 10_485_760  # 10 MB, /logs/upload only
+
+# Bounds on what an unauthenticated client can hold (#461). Every node keeps
+# one keep-alive connection to its hub, so the connection cap sits well
+# above the node count; bodies are read under a deadline, never just an
+# idle timeout, and only a few large ones at a time. The deadline is
+# generous: onion circuits stall for minutes, so a body gets at least the
+# handler's idle timeout (300 s) and a slow circuit's rate; memory is
+# bounded by the two caps, not by it.
+MAX_CONNECTIONS = 1024
+MAX_LARGE_BODIES = 4  # concurrent bodies above MAX_REQUEST_BODY
+BODY_DEADLINE_FLOOR = 300  # seconds, plus one per BODY_MIN_RATE bytes
+BODY_MIN_RATE = 4096
 
 import base64
 import hashlib
@@ -59,6 +72,7 @@ import shutil
 import struct
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -630,6 +644,36 @@ def _note_verification_unavailable(error):
 # Request handler
 # ---------------------------------------------------------------------------
 
+_large_bodies = threading.BoundedSemaphore(MAX_LARGE_BODIES)
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with at most MAX_CONNECTIONS connections; one
+    more is closed at once rather than given a thread (#461)."""
+
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 class OnionHeavenHandler(BaseHTTPRequestHandler):
     # HTTP/1.1 with keep-alive so clients can hold a persistent socket
     # to the hub and send /offline within milliseconds during system
@@ -670,27 +714,85 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         """
         if _accepts_registrations():
             return False
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-        except ValueError:
-            length = -1
-        if 0 <= length <= MAX_REQUEST_BODY:
-            self.rfile.read(length)
-        else:
-            self.close_connection = True
+        if self._read_body() is None:
+            return True  # answered already
         self._send_json(403, {"error": NOT_A_HUB_ERROR})
         return True
 
-    def _read_json(self, max_size=None):
-        if max_size is None:
-            max_size = MAX_REQUEST_BODY
-        length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
+    def _body_length(self, max_size):
+        """The request's body length, or None with the answer sent.
+
+        Content-Length must be plain digits (a ``-1`` once read to EOF,
+        #461); chunked bodies are refused. Missing means no body. Nothing
+        is read on a refusal and the connection is closed.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            self._send_json(411, {"error": "Content-Length required"})
             return None
+        values = self.headers.get_all("Content-Length") or []
+        if not values:
+            return 0
+        if len(values) != 1 or not re.fullmatch(r"[0-9]{1,12}", values[0].strip()):
+            self.close_connection = True
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return None
+        length = int(values[0])
         if length > max_size:
+            self.close_connection = True
             self._send_json(413, {"error": "Request body too large"})
-            return False  # distinguishes from None (no body) — caller must check
-        body = self.rfile.read(length)
+            return None
+        return length
+
+    def _read_body(self):
+        """The body do_POST admitted, read once under a deadline; None, with
+        the answer sent, when it does not arrive in time."""
+        if self._body is not None:
+            return self._body
+        length = self._body_len
+        deadline = time.monotonic() + BODY_DEADLINE_FLOOR + length / BODY_MIN_RATE
+        large = length > MAX_REQUEST_BODY
+        if large and not _large_bodies.acquire(blocking=False):
+            self.close_connection = True
+            self._send_json(503, {"error": "Busy, try again later"})
+            return None
+        chunks = []
+        try:
+            left = length
+            while left > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                self.connection.settimeout(remaining)
+                chunk = self.rfile.read1(min(left, 65536))
+                if not chunk:
+                    raise ConnectionError("body cut short")
+                chunks.append(chunk)
+                left -= len(chunk)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            try:
+                self._send_json(408, {"error": "Request body not received in time"})
+            except OSError:
+                pass
+            return None
+        finally:
+            if large:
+                _large_bodies.release()
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
+        self._body = b"".join(chunks)
+        return self._body
+
+    def _read_json(self, max_size=None):
+        # The length was checked against this path's limit in do_POST.
+        body = self._read_body()
+        if body is None:
+            return False  # answered already — caller must check
+        if not body:
+            return None
         try:
             return json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -935,7 +1037,14 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         }
         handler = handlers.get(path)
         if handler is None:
+            self.close_connection = True  # the body is never read
             self._send_json(404, {"error": "Not found"})
+            return
+        # Every POST's length is checked here, before any handler (#461).
+        self._body = None
+        self._body_len = self._body_length(
+            MAX_LOG_UPLOAD_BODY if path == "/logs/upload" else MAX_REQUEST_BODY)
+        if self._body_len is None:
             return
         try:
             handler()
@@ -948,6 +1057,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.log_message("ERROR in %s: %s", path, e)
             self._send_json(500, {"error": str(e)})
+        finally:
+            if self._body_len and self._body is None:
+                # A handler that answered without reading the body: the
+                # unread bytes must not be taken for the next request.
+                self.close_connection = True
 
     # -- Name registry -----------------------------------------------------
     #
@@ -1757,7 +1871,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "Not an OnionHome instance"})
             return
 
-        data = self._read_json(max_size=10_485_760)  # 10 MB for log uploads
+        data = self._read_json(max_size=MAX_LOG_UPLOAD_BODY)
         if data is False:
             return  # 413 already sent
         if not data:
@@ -2032,7 +2146,7 @@ def main():
     # 30s waiting on Tor. Single-threaded serving would stall every other
     # endpoint (heartbeats, status) during that window. Existing handlers
     # are safe under concurrency (SQLite WAL, per-request connections).
-    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
+    server = BoundedThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] web-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
     try:

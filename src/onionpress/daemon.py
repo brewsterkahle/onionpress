@@ -52,6 +52,7 @@ import plistlib
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -2191,11 +2192,20 @@ class Daemon:
 
         def generator():
             failed = {}
+            warned_unsafe = False
             if self._stop.wait(10):
                 return
             while not self._stop.is_set():
                 try:
                     if os.path.isdir(creations_dir):
+                        if not thumbnails.thumbs_dir_ok(creations_dir):
+                            if not warned_unsafe:
+                                self.log("My Creations/.thumbs is not a real folder "
+                                         "(a link?); no thumbnails until it is removed")
+                            warned_unsafe = True
+                            self._stop.wait(60)
+                            continue
+                        warned_unsafe = False
                         stale, orphans, _complete = thumbnails.scan(creations_dir)
                         removed = thumbnails.prune(creations_dir, orphans)
                         if removed:
@@ -2203,22 +2213,25 @@ class Daemon:
                         for src, rel, mtime in stale:
                             if failed.get(src) == mtime:
                                 continue
-                            thumb = thumbnails.thumb_path(creations_dir, rel)
-                            os.makedirs(os.path.dirname(thumb), exist_ok=True)
-                            try:
-                                subprocess.run(["qlmanage", "-t", "-s", "400", "-o",
-                                                os.path.dirname(thumb), src],
-                                               capture_output=True, timeout=30)
-                            except subprocess.TimeoutExpired:
-                                failed[src] = mtime
+                            # Rendered into a private folder, then copied in
+                            # through no-follow fds (onionpress.thumbnails, #460).
+                            if not thumbnails.source_ok(creations_dir, src):
                                 continue
-                            ql_output = os.path.join(os.path.dirname(thumb), os.path.basename(src) + ".png")
-                            if os.path.exists(ql_output) and ql_output != thumb:
-                                os.rename(ql_output, thumb)
-                            elif not os.path.exists(thumb):
-                                failed[src] = mtime
-                            else:
-                                failed.pop(src, None)
+                            with tempfile.TemporaryDirectory(prefix="onionpress-thumb-") as tmp:
+                                try:
+                                    subprocess.run(["qlmanage", "-t", "-s", "400", "-o",
+                                                    tmp, src],
+                                                   capture_output=True, timeout=30)
+                                except subprocess.TimeoutExpired:
+                                    failed[src] = mtime
+                                    continue
+                                ql_output = os.path.join(tmp, os.path.basename(src) + ".png")
+                                if (os.path.isfile(ql_output)
+                                        and not os.path.islink(ql_output)
+                                        and thumbnails.install(creations_dir, rel, ql_output)):
+                                    failed.pop(src, None)
+                                else:
+                                    failed[src] = mtime
                 except Exception as e:
                     self.log(f"Thumbnail generation error: {e}")
                 self._stop.wait(60)

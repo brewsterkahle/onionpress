@@ -832,16 +832,17 @@ class TestApplyConfig(_Case):
                                side_effect=lambda keys, *a, **k: effects.append(sorted(keys)) or []):
             with open(os.devnull, "w") as devnull:
                 accepted = ha.apply_config(self.host(), out=devnull)
-        self.assertEqual(sorted(accepted), ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN"])
+        # The token is held for the person at the Mac (TestTunnelToken).
+        self.assertEqual(sorted(accepted), ["LAUNCH_ON_LOGIN"])
         values = op_config.read_config(config)
         self.assertEqual(values["LAUNCH_ON_LOGIN"], "no")
         self.assertEqual(values["PREVENT_SLEEP"], "normal")
         self.assertNotIn("ONIONPRESS_TOR_IMAGE", values)
-        self.assertEqual(values["CLOUDFLARE_TUNNEL_TOKEN"], "A" * 40)
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", values)
         self.assertIsNone(self.docker.get("config-updates.json"))
         self.assertEqual(sorted(op_config.take_config_changes(self.data_dir)),
-                         ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN"])
-        self.assertEqual(effects, [["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN"]])
+                         ["LAUNCH_ON_LOGIN"])
+        self.assertEqual(effects, [["LAUNCH_ON_LOGIN"]])
         log = "\n".join(self.logs)
         self.assertNotIn("A" * 40, log)
         self.assertNotIn("evil", log)
@@ -885,6 +886,107 @@ class TestApplyConfig(_Case):
             result = ha.handle(self.host("macos"))
         self.assertEqual(result, {"handled": "check-reachability", "config": ["UPDATE_ON_LAUNCH"]})
         self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "yes")
+
+
+class TestTunnelToken(_Case):
+    """#463: a Cloudflare Tunnel token from the page is never set
+    unattended. Its tunnel's owner sees this host's IP address and chooses
+    what the tunnel reaches. On a Mac the person at the Mac is asked
+    ("clearnet-tunnel"); on Linux it is refused. Removing it is applied."""
+
+    TOKEN = "T" * 48
+
+    def setUp(self):
+        super().setUp()
+        from onionpress import config as op_config
+        self.cfg = op_config
+        self.config = os.path.join(self.data_dir, "config")
+        p = mock.patch.object(op_config, "apply_side_effects", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _page_sets(self, token):
+        self.docker.put("config-updates.json", json.dumps({"CLOUDFLARE_TUNNEL_TOKEN": token}))
+
+    def test_the_mac_asks_and_keeps_the_token_privately(self):
+        self._page_sets(self.TOKEN)
+        self.request("stop")
+        result = ha.handle(self.host())
+        self.assertEqual(result, {"handled": None, "confirm": "clearnet-tunnel",
+                                  "action": ha.SET_TUNNEL_TOKEN, "replace": False})
+        self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+        self.assertEqual(self.launcher_calls(), [])
+        pending = os.path.join(self.data_dir, ha.PENDING_DIR)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(pending, "token")).st_mode), 0o600)
+        with open(os.path.join(pending, "request.json")) as f:
+            self.assertNotIn(self.TOKEN, f.read())
+        self.assertNotIn(self.TOKEN, "\n".join(self.logs))
+        # While it waits nothing else is handled
+        result = ha.handle(self.host())
+        self.assertEqual(result["pending"], "clearnet-tunnel")
+        self.assertEqual(self.docker.get("requested-action"), "stop\n")
+
+    def test_set_token_writes_it(self):
+        with open(self.config, "w") as f:
+            f.write("CLOUDFLARE_TUNNEL_TOKEN=" + "O" * 40 + "\n")
+        self._page_sets(self.TOKEN)
+        self.assertTrue(ha.handle(self.host())["replace"])
+        result = ha.handle(self.host(), confirmed=frozenset({"clearnet-tunnel"}))
+        self.assertEqual(result, {"handled": ha.SET_TUNNEL_TOKEN,
+                                  "config": ["CLOUDFLARE_TUNNEL_TOKEN"]})
+        self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), self.TOKEN)
+        self.assertEqual(self.cfg.take_config_changes(self.data_dir), ["CLOUDFLARE_TUNNEL_TOKEN"])
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, ha.PENDING_DIR)))
+        self.assertNotIn(self.TOKEN, "\n".join(self.logs))
+
+    def test_cancel_or_no_answer_sets_nothing(self):
+        self._page_sets(self.TOKEN)
+        ha.handle(self.host())
+        self.assertEqual(ha.handle(self.host(), cancel=True),
+                         {"handled": ha.SET_TUNNEL_TOKEN, "cancelled": "clearnet-tunnel"})
+        self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, ha.PENDING_DIR)))
+
+    def test_another_question_is_not_the_answer(self):
+        self._page_sets(self.TOKEN)
+        ha.handle(self.host())
+        result = ha.handle(self.host(), confirmed=frozenset({"address-change"}))
+        self.assertEqual(result["pending"], "clearnet-tunnel")
+        self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+
+    def test_removing_is_applied_unattended(self):
+        with open(self.config, "w") as f:
+            f.write("CLOUDFLARE_TUNNEL_TOKEN=" + "O" * 40 + "\n")
+        self._page_sets("")
+        result = ha.handle(self.host())
+        self.assertEqual(result, {"handled": None, "config": ["CLOUDFLARE_TUNNEL_TOKEN"]})
+        self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+
+    def test_the_same_token_again_asks_nothing(self):
+        with open(self.config, "w") as f:
+            f.write(f"CLOUDFLARE_TUNNEL_TOKEN={self.TOKEN}\n")
+        self._page_sets(self.TOKEN)
+        self.assertNotIn("confirm", ha.handle(self.host()))
+
+    def test_linux_refuses_and_says_how(self):
+        applied = self.cfg.apply_settings_updates(
+            self.config, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN, "UPDATE_ON_LAUNCH": "no"})
+        self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN})
+        self.assertEqual(list(applied.accepted), ["UPDATE_ON_LAUNCH"])
+        self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
+        with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
+            launcher = f.read()
+        self.assertIn("grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'", launcher)
+        self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", launcher)
+        ha._hold_tunnel_token(self.host("linux"), self.TOKEN)
+        self.assertFalse(os.path.exists(os.path.join(self.data_dir, ha.PENDING_DIR)))
+        self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", self.logs[-1])
+
+    def test_the_cli_reports_held(self):
+        from onionpress import cli
+        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "cli.py"), encoding="utf-8") as f:
+            self.assertIn('print(f"held {key}")', f.read())
+        self.assertTrue(cli)
 
 
 class TestBoundedReads(_Case):

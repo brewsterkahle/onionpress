@@ -141,7 +141,8 @@ class TestDialogs(unittest.TestCase):
                  "hub-holds-key": {"hubs": [{"content_address": "a" * 56 + ".onion",
                                              "onionheaven_address": "h" * 56 + ".onion"}]},
                  "reset": {"deletes": []},
-                 "prefix-change": {"current": "op2", "new": "abc", "address": "op2" + "a" * 53 + ".onion"}}
+                 "prefix-change": {"current": "op2", "new": "abc", "address": "op2" + "a" * 53 + ".onion"},
+                 "clearnet-tunnel": {"replace": True}}
         for what, f in facts.items():
             for answer, want in ((1, True), (0, False), (None, False)):
                 with self.subTest(what=what, answer=answer):

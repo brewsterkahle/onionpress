@@ -14,7 +14,7 @@ import secrets
 import socket
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import launcher_ops
 from .platform import OnionPressPaths
@@ -137,6 +137,13 @@ SETTINGS_PAGE_KEYS = {
     "ONIONHEAVEN_PROPAGATION_DELAY": _int_between(60, 3600),
 }
 
+# Keys the page may clear but never set or replace by itself (#463): a
+# tunnel token puts the site on the clear web through a tunnel whose owner
+# sees this host's IP address and chooses what the tunnel reaches. ""
+# (remove) is applied; a new value is held for the person at the host (the
+# Mac's "clearnet-tunnel" dialog, handle_action) or refused (Linux).
+PAGE_HELD_KEYS = frozenset({"CLOUDFLARE_TUNNEL_TOKEN"})
+
 # Keys whose values never appear in a log.
 SECRET_CONFIG_KEYS = frozenset({"CLOUDFLARE_TUNNEL_TOKEN"})
 
@@ -177,6 +184,7 @@ class SettingsUpdate:
     accepted: dict  # every allowed key/value, changed or not
     changes: list   # (key, old, new) for each value it wrote
     rejected: list  # log-safe names of the keys it dropped (capped)
+    held: dict = field(default_factory=dict)  # PAGE_HELD_KEYS values not written
 
 
 def filter_settings_updates(updates) -> tuple[dict, list]:
@@ -204,10 +212,15 @@ def filter_settings_updates(updates) -> tuple[dict, list]:
 
 
 def apply_settings_updates(path: str, updates) -> SettingsUpdate:
-    """Write the acceptable part of a Settings page payload to the config."""
+    """Write the acceptable part of a Settings page payload to the config.
+    A new value for a PAGE_HELD_KEYS key is not written: it comes back in
+    ``held`` (and not in ``accepted``)."""
     accepted, rejected = filter_settings_updates(updates)
     current = read_config(path)
-    result = SettingsUpdate(accepted=accepted, changes=[], rejected=rejected)
+    held = {key: value for key, value in accepted.items()
+            if key in PAGE_HELD_KEYS and value and value != current.get(key, "")}
+    accepted = {k: v for k, v in accepted.items() if k not in held}
+    result = SettingsUpdate(accepted=accepted, changes=[], rejected=rejected, held=held)
     for key, value in accepted.items():
         old = current.get(key, "")
         if old != value:
