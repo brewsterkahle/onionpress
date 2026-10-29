@@ -301,7 +301,7 @@ class TestHubContext(Sandbox):
                                     bin_dir=bin_dir)
         saved = onionheaven.ONIONHEAVEN_ADDRESS
         self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS", saved)
-        with mock.patch("onionpress.cli.resolve_paths", return_value=paths), \
+        with mock.patch("onionpress.onionheaven.resolve_paths", return_value=paths), \
                 mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
             ctx = cli._hub_context(self.dir, self.log)
             self.assertEqual(os.environ["DOCKER_HOST"], f"unix://{paths.docker_socket}")

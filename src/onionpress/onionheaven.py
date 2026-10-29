@@ -20,11 +20,13 @@ import json
 import os
 import random
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
 
 from onionpress import key_manager
+from onionpress.platform import resolve_paths
 
 # The default hub (run by the Internet Archive), and what a malformed
 # ONIONHEAVEN_ADDRESS falls back to.
@@ -1811,6 +1813,78 @@ def registration_status(app):
         "registered_with": main[1] if main else None,
         "may_hold_key": [list(pair) for pair in _registrations(record, app)],
     }
+
+
+def _file_log_func(log_file):
+    """A log function that writes to the log file only (the terminal gets
+    a summary instead)."""
+    def log(msg):
+        if not log_file:
+            return
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(log_file, "a") as f:
+                f.write(f"[{ts}] {msg}\n")
+        except OSError:
+            pass
+    return log
+
+
+def _hub_context(data_dir=None, log_func=None):
+    """HubContext for this install, with the configured hub and a docker
+    environment key_manager.extract_keys (plain `docker`, this process's
+    environment) can use: the launchers export DOCKER_HOST, a direct run
+    gets the socket resolve_paths finds."""
+    global ONIONHEAVEN_ADDRESS
+    paths = resolve_paths(data_dir=data_dir)
+    log = log_func or _file_log_func(paths.log_file)
+    ctx = HubContext(paths, log)
+    ONIONHEAVEN_ADDRESS = configured_hub_address(
+        ctx.read_config_value("ONIONHEAVEN_ADDRESS", ""), log)
+    os.environ.setdefault("DOCKER_HOST", f"unix://{paths.docker_socket}")
+    if paths.bin_dir and os.path.isdir(paths.bin_dir):
+        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+        if paths.bin_dir not in path_dirs:
+            os.environ["PATH"] = os.pathsep.join([paths.bin_dir] + path_dirs)
+    return ctx
+
+
+# Remaining items the user can do something about: start OnionPress (the
+# key could not be read) or try again later (the hub did not answer).
+_RETRYABLE = ("key-unreadable", "unanswered", "busy")
+
+
+def release_onionheaven(reason, keep_address=None, data_dir=None, log_func=None, out=None):
+    """Before this install forgets an onion service key (reset, key
+    import, restore, uninstall): ask every OnionHeaven hub that may hold
+    one of its keys to delete its copy (release_registration: a signed
+    /unregister, the hub the record names), and tell the user on *out*
+    (stdout) what happened. Nothing is printed when no hub holds
+    anything. Returns what may remain on a hub ([] = nothing).
+    """
+    out = out or sys.stdout
+    ctx = _hub_context(data_dir, log_func)
+    pairs = [p for p in registrations_left(ctx) if p[0] != keep_address]
+    if not pairs:
+        return []
+    print("Asking the OnionHeaven hub to delete its copy of this site's "
+          "onion service key (this can take a few minutes over Tor)...", file=out)
+    remaining = release_registration(ctx, reason, keep_address=keep_address)
+    left = {(i["content_address"], i["onionheaven_address"]) for i in remaining}
+    for addr, hub in pairs:
+        if (addr, hub) not in left:
+            print(f"  Done: the hub {hub} no longer holds the key of {addr}.", file=out)
+    if remaining:
+        print("", file=out)
+        print("WARNING: " + describe_remaining(remaining).replace(
+            "\n", "\nWARNING: "), file=out)
+        if any(i["why"] in _RETRYABLE for i in remaining):
+            print("To have it deleted, make sure OnionPress is running and "
+                  "try again before the key is gone.", file=out)
+        print("OnionPress keeps a note of it in "
+              f"{os.path.join(ctx.app_support, REGISTRATION_RECORD)}.",
+              file=out)
+    return remaining
 
 
 def run_onionheaven_command(sub, app, json_output=False, out=None):
