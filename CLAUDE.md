@@ -347,6 +347,10 @@
 ## Imported Bodies Are Filtered at Ingest (issue #403)
 - Every foreign HTML field goes through `wp_kses_post()` where it is read.
   `tests/test_importers_kses_at_ingest.py` (census).
+- **Every importer comment goes through `onionpress_social_insert_comment`**
+  (#462; `wp_insert_comment` runs no comment filter): author, URL and
+  content are cleaned before storing. Tweet text is escaped first.
+  Same test.
 
 ## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
 - The serve path only reads cached items and schedules
