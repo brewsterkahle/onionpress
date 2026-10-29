@@ -850,11 +850,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         # Check if WordPress is already installed
         try:
             from onionpress import wp_files
-            result = subprocess.run(
-                [self.server.docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
-                env=self.server.docker_env,
-                capture_output=True, timeout=10
-            )
+            result = wp_files.wp_cli("core", "is-installed",
+                                     docker_bin=self.server.docker_bin,
+                                     env=self.server.docker_env, timeout=10)
             if result.returncode == 0:
                 body = b'<html><head><meta http-equiv="refresh" content="0;url=/status"></head><body>WordPress is already configured.</body></html>'
                 self.send_response(302)
@@ -947,9 +945,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         """True if WordPress is installed, None if that can't be told."""
         from onionpress import wp_files
         try:
-            result = subprocess.run(
-                [self.server.docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
-                env=self.server.docker_env, capture_output=True, timeout=10)
+            result = wp_files.wp_cli("core", "is-installed",
+                                     docker_bin=self.server.docker_bin,
+                                     env=self.server.docker_env, timeout=10)
         except (subprocess.SubprocessError, OSError):
             return None
         return result.returncode == 0

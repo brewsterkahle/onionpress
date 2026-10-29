@@ -234,13 +234,8 @@ def install_welcome_post(
             log_func(msg)
 
     def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args(*args),
-            env=docker_env,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=docker_env,
+                               timeout=timeout)
 
     url_arg = f"--url={blog_url}"
     r = wp("post", "get", "1", "--field=post_title", url_arg)
@@ -306,18 +301,14 @@ def _run_wp(docker_bin, args, *, input=None, env=None, timeout=60):
     stderr names the wp command, not the argv: a TimeoutExpired's message
     quotes the whole command line, and callers log what they catch.
     """
-    argv = [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None)
     try:
-        return subprocess.run(
-            argv, input=input, env=env,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=env,
+                               input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
         name = " ".join(a for a in list(args)[:2] if a.isalpha())
         return subprocess.CompletedProcess(
-            argv, 124, "", f"wp {name} timed out after {timeout}s")
+            [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None),
+            124, "", f"wp {name} timed out after {timeout}s")
 
 
 def set_wp_user_password(login, password, *, docker_bin="docker", env=None,
@@ -365,13 +356,8 @@ def provision_primary_subsite(
 
     def wp(*args, timeout: int = 30,
            stdin: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args(*args, stdin=stdin is not None),
-            input=stdin, env=docker_env,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=docker_env,
+                               input=stdin, timeout=timeout)
 
     onion_addr = _site_address(onion_addr, log)
 
@@ -982,11 +968,8 @@ def provision_interactive(data_dir: str | None = None, *,
 def _wp_is_installed() -> bool:
     """Cheap wp-cli probe for the SSH/CLI setup path."""
     try:
-        r = subprocess.run(
-            ["docker"] + wp_files.wp_cli_args("core", "is-installed"),
-            capture_output=True, text=True, timeout=15,
-        )
-        return r.returncode == 0
+        return wp_files.wp_cli("core", "is-installed",
+                               timeout=15).returncode == 0
     except Exception:
         return False
 

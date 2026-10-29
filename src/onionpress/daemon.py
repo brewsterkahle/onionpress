@@ -1126,7 +1126,7 @@ class Daemon:
 
     def check_wp_installed(self):
         try:
-            r = self._docker.run(wp_files.wp_cli_args("core", "is-installed"), timeout=10, quiet=True)
+            r = self._docker.wp("core", "is-installed", timeout=10, quiet=True)
             return r.ok
         except Exception:
             return None

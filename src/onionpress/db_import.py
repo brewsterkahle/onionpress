@@ -174,10 +174,7 @@ def _get_db_credentials():
     """
     creds = {}
     for field in ('DB_NAME', 'DB_USER', 'DB_PASSWORD'):
-        result = subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('config', 'get', field),
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
-        )
+        result = wp_files.wp_cli('config', 'get', field, timeout=15)
         if result.returncode != 0:
             raise Exception(f"Could not read {field} from WordPress config")
         creds[field] = result.stdout.strip()

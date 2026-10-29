@@ -179,6 +179,22 @@ def wp_cli_args(*args: str, stdin: bool = False, nice: bool = False,
             + ["wp", *args])
 
 
+def wp_cli(*args: str, docker_bin: str = "docker", env: Optional[dict] = None,
+           input: Optional[str] = None, timeout: int = 60,
+           nice: bool = False, offline: bool = False,
+           container: str = WP_CONTAINER) -> subprocess.CompletedProcess:
+    """Run wp-cli *args* as www-data (wp_cli_args) with *docker_bin* and
+    *env*: docker.Docker.wp for a caller that holds those rather than a
+    Docker. *input* goes to wp-cli's stdin (`docker exec -i`), the way
+    values and secrets reach it, never argv. Output is decoded as UTF-8,
+    errors replaced; a timeout raises subprocess.TimeoutExpired."""
+    return subprocess.run(
+        [docker_bin] + wp_cli_args(*args, stdin=input is not None, nice=nice,
+                                   offline=offline, container=container),
+        input=input, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout)
+
+
 def own_args(path: str, recursive: bool = False,
              container: str = WP_CONTAINER) -> list[str]:
     """`docker` arguments (no binary) that give *path* (and, *recursive*,

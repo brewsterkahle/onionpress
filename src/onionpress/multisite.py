@@ -153,13 +153,8 @@ def _wp(
     wp_update_themes(), an update check through Tor; with Tor down each
     such request hung until the proxy's timeout, the call expired, and the
     start reported provision-post-install failed (issue #373)."""
-    return subprocess.run(
-        [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None,
-                                            offline=offline),
-        input=input,
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
-    )
+    return wp_files.wp_cli(*args, docker_bin=docker_bin, input=input,
+                           timeout=timeout, offline=offline)
 
 
 def _exec_sh(

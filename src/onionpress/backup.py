@@ -371,11 +371,8 @@ def verify_wp_admin(username, password):
     """
     # Verify user exists and has administrator role
     try:
-        result = subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('user', 'get', username,
-                                              '--field=roles'),
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
-        )
+        result = wp_files.wp_cli('user', 'get', username, '--field=roles',
+                                 timeout=15)
         if result.returncode != 0:
             stderr = result.stderr.strip()
             if 'Invalid user' in stderr:
@@ -401,11 +398,8 @@ def verify_wp_admin(username, password):
         "echo 'ok';"
     )
     try:
-        result = subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('eval', php_code, stdin=True),
-            input=username + "\n" + password,
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
-        )
+        result = wp_files.wp_cli('eval', php_code,
+                                 input=username + "\n" + password, timeout=15)
         if result.returncode != 0:
             return (False, f"Incorrect password for '{username}'.")
     except subprocess.TimeoutExpired:
@@ -441,12 +435,7 @@ def verify_wp_admin_password_any(password):
         "exit(1);"
     )
     try:
-        result = subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('eval', php_code, stdin=True),
-            input=password,
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=15,
-        )
+        result = wp_files.wp_cli('eval', php_code, input=password, timeout=15)
         if result.returncode == 0 and result.stdout.strip():
             return (True, result.stdout.strip())
         return (False, "Password does not match any administrator account.")
@@ -471,12 +460,8 @@ def find_admin_username(data_dir=None):
     if name:
         return name, False
     try:
-        result = subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('user', 'list', '--role=administrator',
-                                              '--field=user_login'),
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=10,
-        )
+        result = wp_files.wp_cli('user', 'list', '--role=administrator',
+                                 '--field=user_login', timeout=10)
         if result.returncode == 0:
             for line in result.stdout.splitlines():
                 login = line.strip()
@@ -1998,11 +1983,8 @@ def _ensure_multisite_constants(log_func):
     """
     # Check if the database has multisite tables before adding constants
     try:
-        result = subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('db', 'query',
-                                              "SHOW TABLES LIKE 'wp_blogs';"),
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15
-        )
+        result = wp_files.wp_cli('db', 'query', "SHOW TABLES LIKE 'wp_blogs';",
+                                 timeout=15)
         if result.returncode != 0 or 'wp_blogs' not in result.stdout:
             return  # Not a multisite install, nothing to do
     except (subprocess.TimeoutExpired, Exception):
@@ -2010,11 +1992,8 @@ def _ensure_multisite_constants(log_func):
 
     log_func("Restore: re-adding multisite constants to wp-config.php...")
     for name, value in _MULTISITE_CONSTANTS.items():
-        subprocess.run(
-            ['docker'] + wp_files.wp_cli_args('config', 'set', name, value,
-                                              '--raw', '--type=constant'),
-            capture_output=True, timeout=15
-        )
+        wp_files.wp_cli('config', 'set', name, value, '--raw',
+                        '--type=constant', timeout=15)
 
 
 def _restore_db_password(data_dir, fallback):

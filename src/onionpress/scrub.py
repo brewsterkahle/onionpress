@@ -400,11 +400,8 @@ def _hub_registered(timeout_s: int = 90) -> bool:
 def _wayback_creds_present(timeout_s: int = 90) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        r = subprocess.run(
-            ["docker"] + wp_files.wp_cli_args(
-                "option", "get", "onionpress_archive_s3_access"),
-            capture_output=True, text=True, timeout=10,
-        )
+        r = wp_files.wp_cli("option", "get", "onionpress_archive_s3_access",
+                            timeout=10)
         if r.returncode == 0 and (r.stdout or "").strip():
             return True
         time.sleep(10)
