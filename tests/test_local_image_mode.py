@@ -136,7 +136,7 @@ class TestImageOverrideReadsTheConfigFile(unittest.TestCase):
         self.assertIn("onionheaven_image(self.paths.config_file)", containers)
         menubar = _read("src/menubar.py")
         self.assertEqual(
-            1, menubar.count("containers.using_local_images(self._paths.config_file)"),
+            1, menubar.count("image_overrides.using_local_images(self._paths.config_file)"),
             "The menubar's call site must pass the resolved config path.",
         )
         # The pull itself is the CLI's (onionpress update-images, #366).

@@ -87,6 +87,7 @@ OPTIONS = {
                  'onionpress.key_manager',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',
+                 'onionpress.image_overrides',
                  'onionpress.colima',
                  'onionpress.ports', 'onionpress.secrets_file',
                  'onionpress.ui_helpers', 'onionpress.settings_ui',

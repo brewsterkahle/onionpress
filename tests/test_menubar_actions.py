@@ -38,6 +38,7 @@ ACTIONS = (
     '["backup", "--check", "--json", "--user", username]',
     '["backup", "--json", "-o", output_path, "--user", username]',
     '["restore", zip_path, "--check", "--json"]',
+    '["prepare-restore", zip_path, "--check", "--json"]',
     'launcher_ops.run_launcher_restore(',
     '["update", "--check", "--json"]',
     '["update", "--yes", "--json"]',
@@ -80,31 +81,26 @@ class TestImports(unittest.TestCase):
         for alias in ("backup_manager", "hub_backup", "updater"):
             self.assertNotRegex(self.src, rf"\b{alias}\.")
 
-    # Still loaded: setup_window's restore step peeks at a backup's
-    # metadata with backup.peek_backup_metadata in the menubar process,
-    # and backup imports hub_backup. Deferred in issue #475 (it becomes a
-    # launcher subcommand); drop from here when it does.
-    TRANSITIVE_DEFERRED = ("backup", "hub_backup")
-
     def test_action_modules_are_not_imported_transitively(self):
         """Issue #475: neither by the menubar, nor the windows it opens,
         nor anything those import, at the top or lazily (a subprocess
-        imports them headless; test_mac_daemon.ui_import_closure)."""
+        imports them headless; test_mac_daemon.ui_import_closure). The
+        welcome screen's restore opens the backup through `onionpress
+        prepare-restore --check`, never backup.peek_backup_metadata."""
         loaded = ui_import_closure()
         for name in NEVER_IMPORTED:
-            if name in self.TRANSITIVE_DEFERRED:
-                continue
             with self.subTest(name=name):
                 self.assertNotIn(f"onionpress.{name}", loaded)
 
-    @unittest.expectedFailure
-    def test_backup_is_not_imported_transitively(self):
-        """Deferred (issue #475): setup_window imports backup (and so
-        hub_backup) for peek_backup_metadata. Passing here (an unexpected
-        success) means it is fixed: drop the decorator and
-        TRANSITIVE_DEFERRED."""
-        loaded = ui_import_closure()
-        self.assertFalse({"onionpress.backup", "onionpress.hub_backup"} & loaded)
+    def test_the_welcome_restore_opens_the_backup_through_the_launcher(self):
+        body = _method(self.src, "_check_welcome_backup")
+        self.assertIn('["prepare-restore", zip_path, "--check", "--json"]', body)
+        self.assertIn("launcher_ops.BACKUP_PASSWORD_ENV: password", body)
+        with open(os.path.join(os.path.dirname(MENUBAR), "onionpress", "setup_window.py"),
+                  encoding="utf-8") as f:
+            setup_window = f.read()
+        self.assertNotIn("peek_backup_metadata", setup_window)
+        self.assertIn("sw.set_on_check_backup(self._check_welcome_backup)", self.src)
 
     def test_the_remaining_uses_only_read(self):
         for module, allowed in ALLOWED.items():

@@ -238,6 +238,10 @@ ROWS = [
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
     Row("prepare-restore", ["prepare-restore", "/b.zip"], "cli.cmd_prepare_restore",
         mock.call("/b.zip", "pw", D(""), False), stdin="pw\n"),
+    # Issue #475: the welcome screen opens the backup through this.
+    Row("prepare-restore", ["prepare-restore", "/b.zip", "--check", "--json"],
+        "cli.cmd_prepare_restore_check", mock.call("/b.zip", "pw", True),
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- config and OnionHeaven: the config file only (issue #365) ----
     Row("config get", ["config", "get", "VM_CPU"], "config.run_config_command",
@@ -608,6 +612,11 @@ class TestDispatch(unittest.TestCase):
                 rc, out, _ = self._main(argv)
                 self.assertEqual(rc, confirm.EXIT_FAILED)
                 self.assertIn("password", json.loads(out.strip().splitlines()[-1])["error"])
+
+    def test_prepare_restore_check_without_a_password_asks_for_one(self):
+        rc, out, _ = self._main(["prepare-restore", "/b.zip", "--check", "--json"])
+        self.assertEqual(rc, confirm.EXIT_ASK)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]), {"ask": "password"})
 
     def test_hub_recovery_key_restore_needs_a_password_and_no_subcommand_is_help(self):
         rc, _, err = self._main(["hub-recovery-key", "restore", "/b.zip"])

@@ -1783,6 +1783,27 @@ def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
     return _confirm.answer_ok(json_output, text="Staged; start OnionPress to restore.", **facts)
 
 
+def cmd_prepare_restore_check(backup_file: str, password: str,
+                              json_output: bool = False) -> int:
+    """`onionpress prepare-restore <zip> --check`: the welcome screen's
+    Restore from backup opens the backup here, before it starts, rather
+    than in the menubar's process (issue #475): the password checked and
+    the metadata read (backup.peek_backup_metadata), nothing written. The
+    answer is the backup's onion address and whether its key is left out
+    (a Settings page backup, which cannot set up a new install)."""
+    from . import confirm as _confirm
+    from .backup import peek_backup_metadata
+    try:
+        meta = peek_backup_metadata(backup_file, password)
+    except Exception as e:
+        return _confirm.answer_error(f"Could not open the backup: {e}", json_output)
+    address = meta.get("onion_address")
+    return _confirm.answer_ok(
+        json_output, text="The backup opens.",
+        onion_address=address if isinstance(address, str) else "",
+        excludes_onion_key=meta.get("excludes_onion_key") is True)
+
+
 # ---------------------------------------------------------------------------
 # The subcommands (issue #483): _COMMANDS at the end is the table, one row
 # per subcommand: its name, the function that adds its parser (and its
@@ -2875,6 +2896,9 @@ def _add_prepare_restore(sub, name):
              "config overrides and write the .install-from-backup marker; the "
              "password from $ONIONPRESS_BACKUP_PASSWORD or stdin")
     p.add_argument("backup_file", help="The backup zip")
+    p.add_argument("--check", action="store_true",
+                   help="Only open the backup and answer its onion address and "
+                        "whether its key is left out; change nothing")
     p.add_argument("--json", action="store_true",
                    help="Answer with one JSON object on the last line")
 
@@ -2893,6 +2917,10 @@ def _add_settings_page_restore(sub, name):
 def _run_settings_page_command(run):
     args, data_dir = run.args, run.data_dir
     password = read_backup_password()
+    if args.command == "prepare-restore" and args.check:
+        if not password:
+            return _confirm.answer_ask("password", args.json)
+        return cmd_prepare_restore_check(args.backup_file, password, args.json)
     if not password:
         return _confirm.answer_error("a password is required", args.json)
     if args.command == "prepare-restore":

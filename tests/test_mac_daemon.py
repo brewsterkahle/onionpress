@@ -820,11 +820,6 @@ class TestMenubarIsAView(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotIn(name, self.src)
 
-    # Still loaded, through the menubar's containers.using_local_images
-    # (containers imports docker); deferred in issue #475. Drop from here
-    # when that call goes through the launcher.
-    TRANSITIVE_DEFERRED = ("docker",)
-
     def test_loop_modules_are_not_imported_transitively(self):
         """Issue #475: what the UI modules import, and what those import.
         The menubar reads the state through daemon_client, never
@@ -833,18 +828,16 @@ class TestMenubarIsAView(unittest.TestCase):
         self.assertIn("onionpress.daemon_client", loaded)
         self.assertNotIn("onionpress.daemon", loaded)
         for name in self.LOOP_MODULES:
-            if name in self.TRANSITIVE_DEFERRED:
-                continue
             with self.subTest(module=name):
                 self.assertNotIn(f"onionpress.{name}", loaded)
 
-    @unittest.expectedFailure
     def test_docker_is_not_imported_transitively(self):
-        """Deferred (issue #475): the menubar imports containers for
-        using_local_images, and containers imports docker. Passing here
-        (an unexpected success) means it is fixed: drop the decorator and
-        TRANSITIVE_DEFERRED."""
+        """Issue #475: the menubar asks image_overrides, not containers
+        (which imports docker), whether the images are local builds."""
         self.assertNotIn("onionpress.docker", ui_import_closure())
+        self.assertNotIn("onionpress.containers", ui_import_closure())
+        tree = ast.parse(_read("src/onionpress/image_overrides.py"))
+        self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
 
     def test_daemon_client_imports_the_standard_library_only(self):
         tree = ast.parse(_read("src/onionpress/daemon_client.py"))

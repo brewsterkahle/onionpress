@@ -52,7 +52,7 @@ except ImportError:
 from onionpress.platform import resolve_paths
 from onionpress import config as op_config
 from onionpress import confirm as op_confirm
-from onionpress import containers
+from onionpress import image_overrides
 from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
     parse_version,
@@ -985,6 +985,7 @@ class OnionPressApp(rumps.App):
             self.dismiss_launch_splash()
             sw = setup_window.get_setup_window()
             sw.set_on_setup(lambda: self._first_run_after_welcome())
+            sw.set_on_check_backup(self._check_welcome_backup)
             setup_window.show_welcome_screen()
             return  # Don't call start_service — the callback will
 
@@ -1395,6 +1396,22 @@ class OnionPressApp(rumps.App):
             self.update_menu()
 
         threading.Thread(target=start, daemon=True).start()
+
+    def _check_welcome_backup(self, zip_path, password):
+        """The welcome screen's Restore from backup, before it starts:
+        `onionpress prepare-restore <zip> --check` opens the backup (the
+        password in the environment, never on argv) and answers its facts
+        (onion_address, excludes_onion_key), changing nothing. None when it
+        could not: a wrong password or not an OnionPress backup."""
+        rc, ans, out, err = self._run_launcher_json(
+            ["prepare-restore", zip_path, "--check", "--json"],
+            env={launcher_ops.BACKUP_PASSWORD_ENV: password}, timeout=300)
+        if rc != 0 or not ans or not ans.get("ok"):
+            failure = (ans or {}).get("error") or self._launcher_failure(
+                out, err, "could not read it")
+            self.log(f"Restore from backup: could not open the backup: {failure}")
+            return None
+        return ans
 
     def _first_run_after_welcome(self):
         """Called after the user clicks Set Up (new site) or Restore from backup.
@@ -2738,7 +2755,7 @@ class OnionPressApp(rumps.App):
         # locally built images — update_docker_images() has already said so,
         # and "all container images are up to date" would be a lie.
         if (not app_update_available and not images_updated
-                and not containers.using_local_images(self._paths.config_file)):
+                and not image_overrides.using_local_images(self._paths.config_file)):
             version = self.version
             self.show_native_alert(
                 "No Updates Available",
