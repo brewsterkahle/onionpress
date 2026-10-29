@@ -333,6 +333,11 @@
   (no `allow-scripts`) and `nosniff`, on both paths.
   `tests/test_creations_sandboxed_serving.py`.
 - Thumbnails are never removed when part of a folder could not be read.
+- **Host code that walks the Creations mount follows no link** (#460):
+  `.thumbs` must be a real folder, linked sources are skipped, removals and
+  writes go through `O_NOFOLLOW` folder fds (`thumbnails.prune`/`install`),
+  qlmanage renders into a private temp folder.
+  `tests/test_creations_thumbnails.py`.
 
 ## Follow Requests Stay Off the Container Network
 - **Never call `wp_remote_*`/`fetch_feed` directly for a follow**: use
