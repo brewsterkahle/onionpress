@@ -18,7 +18,7 @@ The trace is every `log` line, docker call, recorded Python step and
 recorded function, in order, then the detached steps (sorted: they race
 the rest), then the outcome: start_containers' status, START_ERRORS (Mac),
 which markers are left in the data dir and which volumes exist. Paths
-under the scratch tree read `$TMP`, mktemp names `tmp.X`.
+under the scratch tree read `$TMP`, temporary folders `$TEMPDIR`.
 
 Fixtures are tests/fixtures/start-traces/<platform>/<scenario>.trace.
 OP_UPDATE_START_TRACES=1 rewrites them; a slice of #442 changes one only
@@ -38,6 +38,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURES = os.path.join(HERE, "fixtures", "start-traces")
 ADDRESS = "op2" + "a" * 53 + ".onion"
 GENERATED = "op2" + "b" * 53 + ".onion"
+
+# A temporary folder (bash mktemp -d, Python tempfile.mkdtemp), wherever
+# this machine keeps them.
+TEMP_DIR = re.compile(r"(?:[^\s=]*/)?tmp(?:\.[A-Za-z0-9]{6,}|[a-z0-9_]{8})(?=/|\s|$)")
 
 MARKERS = (".import-key-pending", ".key-volume-migration-pending",
            ".install-from-backup", ".wordpress-installed")
@@ -164,7 +168,7 @@ def run(test, platform, scenario):
 def render(calls, tmp, platform, volumes, markers):
     body, detached, tail = [], [], []
     for line in calls:
-        line = re.sub(r"\btmp\.[A-Za-z0-9]+", "tmp.X", line.replace(tmp, "$TMP"))
+        line = TEMP_DIR.sub("$TEMPDIR", line.replace(tmp, "$TMP"))
         if line.startswith("bin curl"):
             continue
         if line.startswith("detached "):

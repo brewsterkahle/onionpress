@@ -24,7 +24,7 @@ log Installing Internet Archive Wayback Machine Link Fixer 1.4.2...
 docker exec onionpress-wordpress true
 docker exec onionpress-wordpress mktemp -d /tmp/onionpress-plugin-XXXXXX
 docker exec onionpress-wordpress curl -sSL -f --max-time 300 --speed-limit 1024 --speed-time 30 --socks5-hostname onionheaven:9050 -o /tmp/onionpress-plugin-abcdef/plugin.zip https://downloads.wordpress.org/plugin/internet-archive-wayback-machine-link-fixer.1.4.2.zip
-docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip /var/folders/0b/m6s28dfs5tlb1k4zvft3b06r0000gp/T/tmp.X/internet-archive-wayback-machine-link-fixer.zip
+docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip $TEMPDIR/internet-archive-wayback-machine-link-fixer.zip
 docker exec onionpress-wordpress rm -rf /tmp/onionpress-plugin-abcdef
 log Failed to download and verify Internet Archive Wayback Machine Link Fixer - check log for details
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
@@ -32,7 +32,7 @@ log Installing Cache Enabler 1.8.17...
 docker exec onionpress-wordpress true
 docker exec onionpress-wordpress mktemp -d /tmp/onionpress-plugin-XXXXXX
 docker exec onionpress-wordpress curl -sSL -f --max-time 300 --speed-limit 1024 --speed-time 30 --socks5-hostname onionheaven:9050 -o /tmp/onionpress-plugin-abcdef/plugin.zip https://downloads.wordpress.org/plugin/cache-enabler.1.8.17.zip
-docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip /var/folders/0b/m6s28dfs5tlb1k4zvft3b06r0000gp/T/tmp.X/cache-enabler.zip
+docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip $TEMPDIR/cache-enabler.zip
 docker exec onionpress-wordpress rm -rf /tmp/onionpress-plugin-abcdef
 log Failed to download and verify Cache Enabler - check log for details
 py deactivate-wp-statistics
