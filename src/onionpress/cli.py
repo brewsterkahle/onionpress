@@ -524,80 +524,12 @@ class OnionPressCLI:
             self.docker, self.paths, self.port_config, log_func=self.log,
         )
 
-    def cmd_start(self) -> int:
-        """Start OnionPress containers."""
-        # Check PID lock
-        if self._check_pid_lock():
-            print("OnionPress is already running.", file=sys.stderr)
-            return 1
-        self._write_pid_lock()
-
-        try:
-            # Detect container runtime (may start Colima on macOS)
-            if detect_os() == OS.MACOS:
-                from .colima import detect_container_runtime
-                runtime = detect_container_runtime(self.paths, log_func=self.log)
-                self.log(f"Container runtime: {runtime}")
-
-            # This start has no key volume migration (the launcher's
-            # migrate_key_volume): refuse while one is due, before anything
-            # starts.
-            why = self.containers.key_volume_not_ready()
-            if why:
-                self.log(f"ERROR: not starting: {why}")
-                return 1
-
-            # Pull images if configured
-            if read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "no") == "yes":
-                self.containers.pull_images()
-
-            # Start core services
-            if not self.containers.start_core():
-                return 1
-
-            # Wait for WordPress
-            if not self.containers.wait_for_wordpress():
-                self.log("WARNING: WordPress not ready, continuing anyway")
-
-            # Start Tor if WordPress is installed
-            if self.containers.wp_is_installed():
-                # A restore may have left image sizes to rebuild (#257);
-                # runs detached, resumable, no-op without the marker.
-                from . import derivatives
-                derivatives.spawn_regeneration(
-                    self.paths.data_dir, self.log, self.paths.log_file)
-                self.containers.start_tor()
-
-                # Wait for Tor
-                if self.containers.wait_for_tor():
-                    addr = self.containers.get_onion_address()
-                    if addr:
-                        self.log(f"Onion address: {addr}")
-                        print(f"  Onion address: {addr}")
-            else:
-                self.log("WordPress not installed — skipping Tor startup")
-                print("  WordPress not installed. Run: onionpress setup")
-
-            wp_url = f"http://localhost:{self.port_config.wp_port}"
-            self.log(f"OnionPress is running! Local: {wp_url}")
-            print(f"  Local access: {wp_url}")
-            return 0
-
-        except Exception as e:
-            self.log(f"ERROR: {e}")
-            return 1
-
     def cmd_stop(self) -> int:
         """Stop OnionPress containers."""
         self.containers.stop()
         self._remove_pid_lock()
         self.log("OnionPress stopped")
         return 0
-
-    def cmd_restart(self) -> int:
-        """Restart OnionPress containers."""
-        self.containers.stop()
-        return self.cmd_start()
 
     def cmd_status(self) -> int:
         """Print container status as JSON."""
@@ -3021,9 +2953,7 @@ def _run_settings_page_command(run):
 # each one through here.
 _COMMANDS = [
     # (name, adds its parser: build(sub, name), its handler: run(_Run) -> exit code)
-    ("start", _plain("Start OnionPress"), lambda run: _cli(run).cmd_start()),
     ("stop", _plain("Stop OnionPress"), lambda run: _cli(run).cmd_stop()),
-    ("restart", _plain("Restart OnionPress"), lambda run: _cli(run).cmd_restart()),
     ("status", _plain("Show container status (JSON)"), lambda run: _cli(run).cmd_status()),
     ("version", _add_version, _run_version),
     ("address", _add_address, _run_address),
@@ -3207,7 +3137,10 @@ def main(argv: list[str] = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.command:
-        args.command = "start"
+        # Starting is the launcher's (`onionpress start`); this CLI has no
+        # third copy of it (issue #405).
+        parser.print_help()
+        return 2
 
     # A hub's backup recovery key leaves the environment at once, whatever
     # the command: OnionPressCLI's Docker wrapper hands os.environ to every

@@ -44,8 +44,11 @@ setup_db_passwords() { WORDPRESS_DB_PASSWORD=x; }
 db_client() { echo "-- dump"; }
 op_py() {
     case "$1" in
+        backup-metadata) shift; PYTHONPATH="$SRC" "$PY" -c 'import sys
+from onionpress.cli import main
+sys.exit(main(sys.argv[1:]))' backup-metadata "$@" ;;
         pack-backup) cat >/dev/null; cp "$3/metadata.json" "$META_OUT"; : > "$5" ;;
-        --data-dir) [ "$3" != using-local-images ] ;;   # the predicate: published images
+        --data-dir) if [ "$3" = backup-metadata ]; then shift 2; op_py "$@"; else [ "$3" != using-local-images ]; fi ;;   # the predicate: published images
         *) return 0 ;;
     esac
 }
@@ -93,7 +96,7 @@ class TestCreateBackupAddress(unittest.TestCase):
                   + 'rc=0; create_backup pw "$OUT" || rc=$?; echo "rc=$rc"\n')
         with tempfile.TemporaryDirectory() as tmp:
             env = {"PATH": "/usr/bin:/bin", "HOME": tmp, "TMPDIR": tmp,
-                   "PY": sys.executable, "DATA_DIR": os.path.join(tmp, "data"),
+                   "PY": sys.executable, "SRC": os.path.join(PROJECT_DIR, "src"), "ONIONPRESS_VERSION": "1", "DATA_DIR": os.path.join(tmp, "data"),
                    "LOG_FILE": os.path.join(tmp, "log"), "CALLS": os.path.join(tmp, "calls"),
                    "META_OUT": os.path.join(tmp, "metadata.json"),
                    "OUT": os.path.join(tmp, "backup.zip"), "FAKE_HOSTNAME": hostname}

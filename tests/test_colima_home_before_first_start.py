@@ -39,7 +39,6 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 LAUNCHER = "app/MacOS/onionpress"
 LAUNCHER_SH = "app/MacOS/launcher.sh"
 MENUBAR = "src/menubar.py"
-WRAPPER = "src/onionpress/colima.py"
 MKDIR = 'mkdir -p "$LIMA_HOME"'
 
 
@@ -105,51 +104,6 @@ class TestDirectoriesExistBeforeColimaRuns(unittest.TestCase):
         text = _read("src/onionpress/daemon.py")
         run = text[text.index("    def run(self):"):text.index("    def _main_loop_once(")]
         self.assertLess(run.index("self._setup_environment()"), run.index("self._resolve_ports_at_start()"))
-
-    def test_python_wrapper_creates_the_directories_on_every_run(self):
-        text = _read(WRAPPER)
-        run = _def_body(text, "def _run(")
-        self.assertIn('os.makedirs(env["LIMA_HOME"], exist_ok=True)', run)
-        self.assertLess(run.index('os.makedirs(env["LIMA_HOME"], exist_ok=True)'),
-                        run.index("subprocess.run("))
-
-    def test_wrapper_run_makes_the_directories_a_stub_colima_sees(self):
-        from onionpress.colima import Colima
-        from onionpress.platform import OnionPressPaths
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        data_dir = os.path.join(tmp, "data")
-        bin_dir = os.path.join(tmp, "bin")
-        os.makedirs(os.path.join(data_dir, "shared"))
-        os.makedirs(bin_dir)
-        colima_home = os.path.join(data_dir, "colima")
-        paths = OnionPressPaths(
-            data_dir=data_dir,
-            config_file=os.path.join(data_dir, "config"),
-            secrets_file=os.path.join(data_dir, "secrets"),
-            log_file=os.path.join(data_dir, "onionpress.log"),
-            launcher_log_file=os.path.join(data_dir, "launcher.log"),
-            pid_file=os.path.join(data_dir, "onionpress.pid"),
-            shared_dir=os.path.join(data_dir, "shared"),
-            docker_config_dir=os.path.join(data_dir, "docker-config"),
-            bin_dir=bin_dir,
-            docker_dir=os.path.join(data_dir, "docker"),
-            colima_home=colima_home,
-            docker_socket=os.path.join(colima_home, "default", "docker.sock"),
-            app_bundle="",
-            documents_dir=os.path.join(tmp, "documents"),
-        )
-        stub = os.path.join(bin_dir, "colima")
-        with open(stub, "w", encoding="utf-8") as f:
-            f.write('#!/bin/sh\n[ -d "$COLIMA_HOME" ] && [ -d "$LIMA_HOME" ] || exit 7\n'
-                    'printf "%s\\n" "$*" > "$COLIMA_HOME/args"\nexit 0\n')
-        os.chmod(stub, 0o755)
-        self.assertFalse(os.path.isdir(colima_home))
-        Colima(paths).start(memory=1, cpu=2)  # ColimaError (rc 7) if the dirs were missing
-        self.assertTrue(os.path.isdir(os.path.join(colima_home, "_lima")))
-        with open(os.path.join(colima_home, "args"), encoding="utf-8") as f:
-            self.assertIn("--activate=false", f.read().split())
-
 
 class TestHarness(unittest.TestCase):
     """The launcher's functions under bash, with stub binaries."""

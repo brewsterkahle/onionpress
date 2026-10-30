@@ -59,7 +59,7 @@ def parser_tree():
 
     with mock.patch.object(argparse.ArgumentParser, "parse_args", grab):
         with contextlib.suppress(Captured):
-            cli.main(["start"])
+            cli.main(["stop"])
     tree = {}
 
     def walk(parser, path):
@@ -126,10 +126,7 @@ def positional_launcher(test, m):
 
 ROWS = [
     # ---- OnionPressCLI's own commands (constructed with the data dir) ----
-    Row("start", [], "CLI().cmd_start", mock.call()),
-    Row("start", ["start"], "CLI().cmd_start", mock.call()),
     Row("stop", ["stop"], "CLI().cmd_stop", mock.call()),
-    Row("restart", ["restart"], "CLI().cmd_restart", mock.call()),
     Row("status", ["status"], "CLI().cmd_status", mock.call()),
     Row("logs", ["logs"], "CLI().cmd_logs", mock.call()),
     # The app's functions as subcommands (issue #382, onionpress.app_commands):
@@ -208,7 +205,7 @@ ROWS = [
     Row("backup-metadata", ["backup-metadata", "--version", "1"],
         "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
         excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
-        with_host_secrets=True, secrets_left_out=[]), returns={"a": 1}),
+        with_host_secrets=True, secrets_left_out=[]), rc=0, returns={"a": 1}),
     Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
         "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 
