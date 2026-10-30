@@ -1,0 +1,29 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log Pulling pre-built images (missing only)...
+docker compose pull --policy missing
+log WARNING: WordPress network egress block not in place: error: refused (test). WordPress and MariaDB can reach the network directly, and the Tor-side containers this machine and its LAN.
+docker ps -a --format {{.Names}}
+docker network inspect --format {{json .Options}} onionpress-network
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
+log WordPress, DB, and Tor client containers starting
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+log WordPress is installed -- starting Tor
+docker port onionpress-wordpress 80/tcp
+log WordPress is installed: moving its port 8080 from 127.0.0.1 to 0.0.0.0 (ONIONPRESS_BIND_HOST)
+docker compose up -d wordpress [BIND=0.0.0.0]
+bin systemctl --user is-enabled onionpress-heartbeat.service
+docker compose up -d tor onionheaven [BIND=0.0.0.0]
+docker port onionpress-tor 9050/tcp
+docker container inspect onionpress-cloudflared
+fn start_onionheaven_activation_watcher
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
+log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
+log Cache Enabler 1.8.17 already installed
+py deactivate-wp-statistics
+rc=1
+markers=.wordpress-installed
+volumes=onionpress-onion-keys onionpress-tor-state

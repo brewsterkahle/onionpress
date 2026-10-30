@@ -1,0 +1,10 @@
+log Starting OnionPress containers...
+fn wait_for_docker_or_recover_vm 180 start
+fn ensure_vm_fsck_repair
+docker volume ls --format {{.Name}}
+log ERROR: Docker did not say whether onionpress-onion-keys exists; not starting
+log ERROR: cannot start without the onion service key volume
+rc=1
+START_ERRORS=[]
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state
