@@ -1787,6 +1787,18 @@ save_previous_boot_journal() {
     log "$who: previous boot: fsck-root=$fsck emergency=$emergency sysinit=$sysinit ssh=$ssh — journal saved to $path"
     return 0
 }
+# Finish a key import that Docker was not running for (.import-key-pending,
+# written by import_key and a restore of another address): remove the old
+# key, migration-era and C Tor keystore volumes, force-removing what holds
+# one, each confirmed absent by Docker, then the marker. The body is
+# onionpress.cli's (ContainerManager.apply_pending_key_import, #442.4),
+# its lines tee'd into the log; its status stops the start, and the marker
+# stays, whenever an old keystore survives or Docker could not say.
+apply_pending_key_import() {
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" apply-pending-key-import 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
+}
+
 
 # One-time migration of the onion service key volume from its historical
 # name, onionpress-arti-state (until 2026-09-25), to onionpress-onion-keys:
@@ -1846,37 +1858,10 @@ start_containers() {
     # exists for; see ensure_vm_fsck_repair). Best effort, never blocks.
     ensure_vm_fsck_repair
 
-    # Handle pending key import (volume couldn't be removed when Docker wasn't running)
-    if [ -f "$DATA_DIR/.import-key-pending" ]; then
-        log "Pending key import detected — removing old key and tor-state volumes..."
-        # Both keystores must be wiped: onion-keys holds the delivered PEM key,
-        # tor-state holds C Tor's /var/lib/tor/hidden_service/<name>/ pair. The
-        # entrypoint only converts PEM→C Tor when CTOR_SECRET is missing, so a
-        # stale tor-state would silently override the imported identity. The
-        # pre-2026-09-25 volume name goes too, or the migration below would
-        # bring the replaced identity back.
-        for vol in onionpress-onion-keys onionpress-arti-state onionpress-tor-state; do
-            docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-            vol_state=0; docker_volume_state "$vol" || vol_state=$?
-            if [ "$vol_state" -eq 0 ]; then
-                log "Volume $vol still in use — force-removing containers using it..."
-                docker rm -f $(docker ps -aq --filter "volume=$vol") >> "$LOG_FILE" 2>&1 || true
-                docker volume rm "$vol" >> "$LOG_FILE" 2>&1 || true
-                vol_state=0; docker_volume_state "$vol" || vol_state=$?
-            fi
-            # Only a confirmed absence counts. Dropping the marker while an
-            # old keystore survives (or could not be checked) would silently
-            # keep the replaced identity, so leave it for the next start.
-            if [ "$vol_state" -ne 1 ]; then
-                log "ERROR: could not remove the old $vol volume; keeping the pending key import and not starting"
-                return 1
-            fi
-        done
-        # Also remove old tor-keys volume if it exists (migration leftover)
-        docker volume rm onionpress-tor-keys >> "$LOG_FILE" 2>&1 || true
-        # No unfinished key volume migration survives a replaced identity.
-        rm -f "$DATA_DIR/.key-volume-migration-pending"
-        rm -f "$DATA_DIR/.import-key-pending"
+    # A key import Docker was not up for: the old keystores go first, each
+    # confirmed absent, or the start stops with the import still pending.
+    if ! apply_pending_key_import; then
+        return 1
     fi
 
     # Upgraded installs: bring the key volume over from its old name before

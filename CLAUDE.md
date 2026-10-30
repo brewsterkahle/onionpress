@@ -310,6 +310,11 @@
   page's import needs the person at the Mac (native dialog, Cancel default,
   5 min = Cancel); Linux refuses it from the page.
   `tests/test_onion_key_replacement.py`.
+- An import Docker was not up for (`.import-key-pending`) is finished by
+  the next start, first: `ContainerManager.apply_pending_key_import` wipes
+  the old key, migration-era and C Tor volumes, each confirmed absent;
+  anything else keeps the marker and stops the start.
+  `tests/test_pending_key_import.py`.
 - **Code in WordPress never reads or replaces the site's onion key without
   the owner at the host**: the Mac page's backup excludes it
   (`include_onion_key=False`; every `create_backup` call says which); a

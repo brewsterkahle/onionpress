@@ -17,6 +17,7 @@ import tempfile
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 
 def _read(rel_path):
@@ -1469,7 +1470,7 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # VM recovery, see TestStartRecoversWedgedLimaVM); Linux has
                 # no VM and waits directly.
                 wait = body.index("if ! wait_for_docker")
-                for later in (".import-key-pending",
+                for later in ("apply_pending_key_import",
                               "if ! migrate_key_volume; then",
                               "docker_volume_state onionpress-onion-keys"):
                     self.assertLess(
@@ -1982,6 +1983,7 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
 
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
+                 "apply_pending_key_import",
                  "using_local_images", "ensure_key_helper_image",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
@@ -2051,15 +2053,19 @@ exit 0
                 'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
                 "sleep() { :; }\n"  # wait_for_docker's 180 s pass instantly
                 # using_local_images delegates to onionpress.cli (Phase 4):
-                # the launchers' runners, on this interpreter and src/.
-                'bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
-                'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
+                # the launchers' runners, on this interpreter and src/, with
+                # no app bundle (Docker() runs the stub, never a real one).
+                'bundled_python() { "$PY" "$SHIM" "$@"; }\n'
+                'op_py() { "$PY" "$SHIM" "$@"; }\n'
                 + functions + snippet + "\n")
             run_env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
                        "STUB_MODE": mode, "STUB_VOLUMES": volumes,
                        "STUB_CALLS": calls, "STUB_FAIL": fail,
                        "STUB_IMAGE": image,
-                       "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src")}
+                       "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src"),
+                       "SHIM": os.path.join(PROJECT_ROOT, "tests", "cli_on_stub_docker.py"),
+                       "HOME": tmp,
+                       "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"}
             run_env.update(env or {})
             out = subprocess.run(["bash", "-c", script], env=run_env,
                                  capture_output=True, text=True, timeout=60)
@@ -2090,21 +2096,9 @@ exit 0
                                  "only an exact name may match")
                 self.assertEqual(self._state_of(f, "onionpress-onion-keys", mode="down"), 2)
 
-    @staticmethod
-    def _python_uses_the_stub_docker():
-        """The delegation's Docker() takes the bundle's docker when there is
-        one (a Mac with OnionPress installed), not the stub on PATH; the
-        end-to-end runs below are only meaningful on the PATH fallback."""
-        from onionpress.docker import Docker
-        from onionpress.platform import resolve_paths
-        with tempfile.TemporaryDirectory() as tmp:
-            return Docker(resolve_paths(data_dir=tmp)).docker_bin == "docker"
-
     def test_migration_refuses_when_docker_does_not_answer(self):
         """End to end through the delegation (Phase 4, #120): the Python's
         exit status is the bash function's, and its lines reach the log."""
-        if not self._python_uses_the_stub_docker():
-            self.skipTest("the bundle's docker would be run, not the stub")
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
                 state = {}
@@ -2120,8 +2114,6 @@ exit 0
                               state["log"])
 
     def test_migration_copies_only_when_just_the_old_volume_exists(self):
-        if not self._python_uses_the_stub_docker():
-            self.skipTest("the bundle's docker would be run, not the stub")
         cases = {
             "onionpress-arti-state": True,                          # upgrade
             "onionpress-onion-keys onionpress-arti-state": False,   # already migrated
@@ -2161,7 +2153,9 @@ exit 0
                 out, calls, marker_left = self._run(
                     f, "rc=0; start_containers || rc=$?; echo $rc",
                     volumes="onionpress-tor-state", pending=True)
-                self.assertEqual(out.strip(), "1")
+                # The tee'd lines come first (apply_pending_key_import, #442.4).
+                self.assertEqual(out.strip().splitlines()[-1], "1")
+                self.assertIn("ERROR: could not remove the old onionpress-tor-state volume", out)
                 self.assertTrue(marker_left,
                                 "the key import must be retried on the next start")
                 self.assertNotIn("volume create onionpress-onion-keys", calls)

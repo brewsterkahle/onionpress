@@ -370,6 +370,15 @@ ROWS = [
             t.assertEqual(m.call_args.args[2].wp_port, 8080))),
     # Phase 4 (#120): the launchers' migrate_key_volume() is ContainerManager's;
     # unlike the two above its status matters: 1 stops the start.
+    # #442.4: the launchers' apply_pending_key_import() is ContainerManager's;
+    # 1 stops the start (an old keystore survived, the marker stays).
+    Row("apply-pending-key-import", ["apply-pending-key-import"],
+        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
+        returns=mock.Mock(**{"apply_pending_key_import.return_value": True}),
+        check=lambda t, m: m.return_value.apply_pending_key_import.assert_called_once_with()),
+    Row("apply-pending-key-import", ["apply-pending-key-import"],
+        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
+        returns=mock.Mock(**{"apply_pending_key_import.return_value": False})),
     Row("migrate-key-volume", ["migrate-key-volume"],
         "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
         returns=mock.Mock(**{"migrate_key_volume.return_value": True}),

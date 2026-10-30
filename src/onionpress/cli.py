@@ -2592,6 +2592,15 @@ def _run_bundled_plugins(run):
     return 0
 
 
+def _run_apply_pending_key_import(run):
+    # The launchers' apply_pending_key_import() (#442.4): ContainerManager's,
+    # logged in the launcher's format; no OnionPressCLI setup (it runs
+    # before the stack is up). 1 stops the start: an old keystore survived,
+    # or Docker could not say, and the marker stays for the next start.
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    return 0 if _start_step_manager(paths).apply_pending_key_import() else 1
+
+
 def _add_db_import(sub, name):
     p = sub.add_parser(
         name,
@@ -3139,6 +3148,12 @@ _COMMANDS = [
             "OnionPress's own containers on it and disconnecting anything "
             "else; always exits 0"),
      _run_start_step),
+    ("apply-pending-key-import",
+     _plain("Finish a key import Docker was not up for (.import-key-pending): "
+            "remove the old key and C Tor volumes, confirmed absent, then the "
+            "marker; exit 1 (the start must stop, the marker stays) when one "
+            "survives or Docker does not answer"),
+     _run_apply_pending_key_import),
     ("migrate-key-volume",
      _plain("Before anything starts Tor: copy the onion service key out of "
             "onionpress-arti-state (its name until 2026-09-25) into "

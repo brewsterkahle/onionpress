@@ -354,3 +354,22 @@ scripts in docker's environment. Fast paths `install-bundled-plugins` and
 functions are `… 2>&1 | tee -a "$LOG_FILE"; return 0`, and the six helpers
 (`plugin_wanted` … `install_cache_enabler`) are gone. Delta: put-wp-tree's
 stdout now goes to the log, not the terminal. Traces unchanged.
+
+### The pending key import (#446)
+
+`ContainerManager.apply_pending_key_import` (`containers.IMPORT_KEY_PENDING`,
+`TOR_STATE_VOLUME`, `OLD_TOR_KEYS_VOLUME`): the bash block, step for step,
+including the `docker rm -f` with no ids when `ps` finds none; docker's own
+output goes to the log file only (`_to_log_file`, the bash `>> "$LOG_FILE"
+2>&1`), so the trace and the terminal stay as they were. The "—" / "--"
+of the two launchers' lines follows `platform.detect_os()`. Fast path
+`apply-pending-key-import` (exit 1 stops the start); the bash function is
+the slice-5 shape (`tee`, `return "${PIPESTATUS[0]}"`) and
+`start_containers` runs it every start (it returns at once without the
+marker). The marker is only a regular file (`isfile`, as `[ -f ]`).
+`tests/test_install_invariants.py`'s bash harness now runs the CLI
+through `tests/cli_on_stub_docker.py` (no app bundle, so `Docker()` takes
+the stub on PATH, never an installed OnionPress.app's docker) with
+`DOCKER_HOST` at the no-docker socket and HOME at its scratch folder: the
+two migration end-to-end tests no longer skip on a Mac with the app.
+Traces unchanged.

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import onion_hostname, wordpress_egress
+from . import onion_hostname, platform, wordpress_egress
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
@@ -72,6 +72,14 @@ def tor_image(config_file: str | None = None) -> str:
 KEY_VOLUME = "onionpress-onion-keys"
 OLD_KEY_VOLUME = "onionpress-arti-state"
 KEY_VOLUME_MIGRATION_PENDING = ".key-volume-migration-pending"
+# Written by a key import or a restore of another address that could not
+# wipe the old keystores (Docker was not running): the next start does it
+# (ContainerManager.apply_pending_key_import) before anything else.
+IMPORT_KEY_PENDING = ".import-key-pending"
+# C Tor's keystore (/var/lib/tor/hidden_service/<name>/), and the volume a
+# migration of long ago left behind.
+TOR_STATE_VOLUME = "onionpress-tor-state"
+OLD_TOR_KEYS_VOLUME = "onionpress-tor-keys"
 
 
 def forget_key_volume_migration(data_dir: str) -> None:
@@ -323,6 +331,64 @@ class ContainerManager:
         for line in (result.stdout + result.stderr).splitlines():
             if line.strip():
                 self._log(line.rstrip())
+
+    def _to_log_file(self, result) -> None:
+        """A docker call's output, appended to the log file only (the bash
+        `>> "$LOG_FILE" 2>&1`)."""
+        text = result.stdout + result.stderr
+        if not text:
+            return
+        try:
+            with open(self.paths.log_file, "a", encoding="utf-8") as f:
+                f.write(text if text.endswith("\n") else text + "\n")
+        except OSError:
+            pass
+
+    def apply_pending_key_import(self) -> bool:
+        """Finish a key import Docker was not up for: with the
+        IMPORT_KEY_PENDING marker in the data dir, remove the old
+        keystores (KEY_VOLUME, which holds the delivered PEM; OLD_KEY_VOLUME,
+        or the migration would bring the replaced identity back;
+        TOR_STATE_VOLUME, C Tor's copy, which the entrypoint would keep
+        over the imported key), force-removing any container that holds
+        one, then drop the leftover OLD_TOR_KEYS_VOLUME, an unfinished
+        migration's marker and the import marker. False stops the start:
+        only Docker's confirmed "no such volume" counts as removed, and
+        the marker stays for the next start whenever a keystore survives
+        or could not be checked (a dropped marker beside an old keystore
+        would keep the replaced identity). Both launchers' start ran this
+        as bash until #442.4 (`onionpress apply-pending-key-import`)."""
+        data_dir = self.paths.data_dir
+        marker = os.path.join(data_dir, IMPORT_KEY_PENDING)
+        if not os.path.isfile(marker):
+            return True
+        dash = "—" if platform.detect_os() == platform.OS.MACOS else "--"
+        self._log(f"Pending key import detected {dash} removing old key and tor-state volumes...")
+        for vol in (KEY_VOLUME, OLD_KEY_VOLUME, TOR_STATE_VOLUME):
+            self._to_log_file(self.docker.run(["volume", "rm", vol], timeout=60, quiet=True))
+            state = self.volume_state(vol)
+            if state == 0:
+                self._log(f"Volume {vol} still in use {dash} force-removing containers using it...")
+                holders = self.docker.run(["ps", "-aq", "--filter", f"volume={vol}"],
+                                          timeout=30, quiet=True)
+                self._to_log_file(self.docker.run(
+                    ["rm", "-f", *(holders.stdout.split() if holders.ok else [])],
+                    timeout=60, quiet=True))
+                self._to_log_file(self.docker.run(["volume", "rm", vol], timeout=60, quiet=True))
+                state = self.volume_state(vol)
+            if state != 1:
+                self._log(f"ERROR: could not remove the old {vol} volume; keeping the "
+                          "pending key import and not starting")
+                return False
+        self._to_log_file(self.docker.run(["volume", "rm", OLD_TOR_KEYS_VOLUME],
+                                          timeout=60, quiet=True))
+        # No unfinished key volume migration survives a replaced identity.
+        forget_key_volume_migration(data_dir)
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
+        return True
 
     def migrate_key_volume(self) -> bool:
         """One-time migration of the onion service key volume from its
