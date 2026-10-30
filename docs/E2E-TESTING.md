@@ -60,17 +60,24 @@ container names are fixed, so two installs cannot share one daemon).
 | Kind | Provided by | How several fit on one host |
 |---|---|---|
 | `mac` | a macOS host: the build under test (`OnionPress.app` from `make dmg`, or the checkout's launcher) | one scratch `HOME` each (`/tmp/ope2e/mac-N`: short, for the 104-char socket limit), its own Colima VM, `COLIMA_HOME` created before the first start (#370), `ONIONPRESS_PORT_OFFSET` 31000, 41000, … |
-| `linux-vm` | Lima on a Mac (vz); Lima, incus or libvirt on a Linux host with KVM | one VM each, no home mount, only the share dir mounted; Debian 13 (§9) |
+| `linux-vm` | Lima on a Mac (vz); Lima + QEMU + KVM on a Linux host | one VM each, no home mount, only the share dir mounted; Debian 13 by default, Ubuntu 24.04 LTS with `--guest ubuntu-24.04` (§9) |
 | `linux-user` | a Linux host without nested virtualisation (a CI runner, a Pi) | one throwaway local user each with its own rootless Docker daemon — how two installs coexist on Linux anyway |
-| `linux-host` | the Linux host itself, when it is a disposable Debian machine | one only |
+| `linux-host` | the Linux host itself, when it is a disposable Debian-based machine | one only |
 
-The Linux target is **Debian 13** (§9). A Linux host that is not Debian
-(an Ubuntu CI runner, a developer's Fedora box) is used only to run Debian
-VMs; `linux-user` and `linux-host` nodes require the host itself to be
-Debian, and the probe says so rather than testing another distribution.
+The Linux target is **Debian-based** (§9): the `.deb`, `install.sh`,
+rootless Docker and the systemd user units are the same on Debian, Ubuntu,
+Raspberry Pi OS or Mint. The platform is `linux` (the report's column);
+which distro ran is a fact of the node (`Debian GNU/Linux 13`,
+`Ubuntu 24.04.5 LTS`), so a test marked `platform("linux")` runs on every
+guest. A VM guest is Debian 13 unless `--guest ubuntu-24.04` is passed.
+`linux-user` and `linux-host` nodes need the host itself to be Debian-based
+(`/etc/os-release` `ID=debian`, or `ID_LIKE` containing `debian`); a Fedora
+or Arch host is used only to run VMs, and the probe says so rather than
+testing another family.
 
-Within Debian, the flavour is a node attribute, not a kind: the two ways
-OnionPress gets Docker there, and the arch (whatever the host or VM runs):
+Within the family, the flavour is a node attribute, not a kind: the two
+ways OnionPress gets Docker there, and the arch (whatever the host or VM
+runs):
 
 | Flavour | What it is | Default |
 |---|---|---|
@@ -82,8 +89,8 @@ What each host can offer:
 | Host | Node kinds available |
 |---|---|
 | macOS | `mac`, and `linux-vm` when Lima is installed |
-| Linux with KVM | `linux-vm`, `linux-user`, `linux-host` if disposable |
-| Linux without KVM (most CI) | `linux-user`, `linux-host` if disposable |
+| Linux with KVM (`limactl`, `/dev/kvm` read-write, `qemu-system-<arch>`, UEFI firmware) | `linux-vm`; `linux-user` and `linux-host` if Debian-based (and disposable) |
+| Linux without KVM (most CI) | `linux-user`, `linux-host` if Debian-based and disposable |
 
 macOS cannot be virtualised on non-Apple hardware, so a Linux-only run
 never tests the Mac app; it says so instead of failing.
@@ -120,7 +127,7 @@ e2e/                       top-level, so `unittest discover tests` never finds i
                            config_set(k, v), logs(), wait_until(pred, timeout),
                            facts() (os, version, arch, docker flavour, install method)
     mac.py                 MacNode: scratch HOME, Colima, app bundle / launcher
-    linux_vm.py            LinuxNode in a Lima/incus/libvirt VM
+    linux_vm.py            LinuxVMNode in a Lima VM (--guest debian-13 | ubuntu-24.04)
     linux_user.py          LinuxNode as a throwaway user with rootless Docker
     linux_host.py          LinuxNode on a disposable host (CI runner)
   tor.py                   descriptor/HS_DESC helpers over the control port,
@@ -150,7 +157,8 @@ e2e/                       top-level, so `unittest discover tests` never finds i
   available platform: a backup/restore test runs on the Mac node and on a
   Linux node if both exist), `@platform("mac")` (menubar, updater swap,
   Colima VM events) or `@platform("linux")` (systemd units, tray,
-  `onionpress update`, sleep hook). Platform-neutral behaviour is written
+  `onionpress update`, sleep hook; every Debian-based guest, never one
+  distro). Platform-neutral behaviour is written
   once against `Node`; only the setup differs.
 - **Stateful ordering**: a module is one scenario on one long-lived node
   (e.g. "install → back up → reset → restore → address unchanged"); tests
@@ -162,12 +170,18 @@ e2e/                       top-level, so `unittest discover tests` never finds i
 The report opens with what was tested on, before any result:
 
 ```
-OnionPress e2e — build 2.5.6 (onionpress.dmg sha256 …, onionpress.deb sha256 …)
-Host: macOS 27.0 arm64 · Tor: public network
-Tested:     macOS 27.0 arm64 (mac, Colima 0.9)  ·  Debian 13 arm64 (linux-vm, deb: docker.io)
-Not tested: Debian 13 amd64 · Debian install-sh (rootless Docker CE)
-Roles: node=mac-1  peer=linux-vm-1  hub=linux-vm-1  home=linux-vm-2
+Build:      deb: built in the VM from the checkout (v2.4.84-652-g09630837)
+Host:       Ubuntu 24.04 x86_64 · Tor: public network · Tiers: t0
+Tested:     Linux — app_version 2.6.0, arch x86_64, docker Docker 26.1.5+dfsg1 (rootless),
+            guest debian-13, install deb (source), kind linux-vm, os Debian GNU/Linux 13 (trixie)
+Not tested: macOS — mac: not a Mac host (macOS cannot run in a VM on other hardware)
+Roles:      node[linux]=linux-1
 ```
+
+(the "Tested:" line of the 2026-10-30 T0 run from the Ubuntu host, §10).
+The platform is the OS family; which distro, guest and install flavour
+actually ran are node facts on that line, so "Linux" never reads as more
+than the one guest listed.
 
 Then one matrix, a row per test and a column per platform tested:
 `pass`, `fail`, `skip (reason)`, or `—` (does not apply: a Linux-only test
@@ -412,9 +426,10 @@ Anywhere one of the §2 hosts is, with whatever it offers:
   ran this way, beside a live install, through scratch-HOME isolation).
   GitHub's macOS runners cannot run Colima VMs, so macOS is covered only
   from a local or self-hosted Mac.
-- **A Linux machine alone** covers Debian: Debian VMs with KVM on any
-  distribution, throwaway users on a Debian host without. A Mac-only test
-  shows as not run, never as passed.
+- **A Linux machine alone** covers Linux: Debian or Ubuntu VMs with KVM
+  on any distribution (the Ubuntu dev box, §10), throwaway users on a
+  Debian-based host without. A Mac-only test shows as not run, never as
+  passed.
 - **GitHub's Linux runners** are Ubuntu, so they would run Debian VMs
   (where the runner exposes KVM) for amd64 and arm64, by
   `workflow_dispatch` only. Optional; nothing depends on it.
@@ -451,8 +466,12 @@ what this host could test without starting anything.
 2. **No scheduled runs yet.** Regular (nightly) testing is wanted, but there
    is no hardware for it; runs are on demand (§7). Revisit when a machine
    is available.
-3. **Debian is the only Linux target.** Debian 13, both Docker flavours
-   available, `deb` by default (§2). Recommendations below.
+3. **Debian-based is the Linux target** (widened from "Debian only" on
+   2026-10-29, #486). Debian 13 is the default guest and the reference;
+   Ubuntu 24.04 LTS is a second `linux-vm` guest (`--guest`), and a
+   Debian-based host counts as a Debian host for `linux-user`/`linux-host`.
+   Both Docker flavours available, `deb` by default (§2). Recommendations
+   below.
 4. **Releases need no e2e run.** The release cadence is too high for a
    multi-hour suite. Stricter release requirements come once development
    slows and the product matures.
@@ -472,9 +491,13 @@ what this host could test without starting anything.
 - **Raspberry Pi OS later, if Pi users appear.** It is Debian-based, and
   the backup format was sized for a 1-GB Pi; Debian 13 arm64 in a VM
   with 1 GB of RAM covers most of that before real hardware.
-- **Not Ubuntu for now**, even though CI runners are Ubuntu: running Debian
-  VMs on them keeps one target. If Ubuntu users show up, it is one more
-  VM image, not a harness change.
+- **Ubuntu as a second guest, not a second target.** Debian 13 stays the
+  default and the one a plain `make e2e` runs; `--guest ubuntu-24.04`
+  exercises the package on the distro most servers run. What differs there
+  is what the distro ships (docker.io's version, Python 3.12, apt sources),
+  not the harness. The `.deb`'s `Depends` are satisfied by Ubuntu 24.04's
+  `main` and `universe` (both enabled in its cloud image): `docker.io`,
+  `uidmap`, `python3-nacl` 1.5.0.
 
 ## 10. Running it
 
@@ -482,7 +505,8 @@ what this host could test without starting anything.
 make e2e-probe                  # what this host could test; starts nothing
 make dmg                        # a Mac build to test (or pass one, below)
 make e2e                        # T0 on every platform the host offers
-e2e/run.sh --tier t0 --platforms debian
+e2e/run.sh --tier t0 --platforms linux
+e2e/run.sh --guest ubuntu-24.04 # the Linux VM runs Ubuntu 24.04 LTS instead of Debian 13
 e2e/run.sh --release latest     # a published release's .dmg/.deb (checked against SHA256SUMS)
 e2e/run.sh --mac-app /Applications/OnionPress.app --deb build/onionpress.deb
 e2e/run.sh --keep -x            # stop at the first failure, leave the nodes up
@@ -491,7 +515,7 @@ e2e/merge-results.py e2e-results/A/results.json e2e-results/B/results.json
 
 Builds: the Mac node copies `--mac-app`/`--mac-dmg`/the release's DMG,
 else the checkout's `OnionPress.app` or `build/onionpress.dmg`; without
-one, macOS is reported as not tested. A Debian node installs `--deb`/the
+one, macOS is reported as not tested. A Linux node installs `--deb`/the
 release's `.deb`, else builds one inside the VM from the checkout's
 tracked files as they are on disk. Lima comes from `PATH`, `--limactl`,
 or the `limactl` bundled in an OnionPress.app (the build under test, or
@@ -507,3 +531,83 @@ whatever a killed or `--keep` run left there (VMs included).
 Code: `e2e/harness/` (probe, safety, nodes, report, session; no pytest
 in it, so `tests/test_e2e_harness.py` checks it in the unit suite),
 `e2e/conftest.py` (pytest wiring), `e2e/test_t<N>_*.py` (tiers).
+
+### Linux host setup
+
+`make doctor` lists the four host tools the Linux VM node needs, and
+`make e2e-probe` says whether `linux-vm` is offered. On a Debian-based
+host (the Ubuntu 24.04 dev box, 2026-10-29):
+
+1. **QEMU and its UEFI firmware**: `sudo apt-get install qemu-system-x86
+   ovmf` (arm64: `qemu-system-arm qemu-efi-aarch64`). Lima's QEMU driver
+   boots x86_64 guests from `/usr/share/OVMF/OVMF_CODE_4M.fd` (or the other
+   paths `platforms.UEFI_FIRMWARE_PATHS` lists) and fails after the image
+   download without one.
+2. **KVM**: `/dev/kvm` must be readable and writable by you. A console
+   login usually has it already (logind grants the seat's user an ACL);
+   an SSH session or a service does not, so for those
+   `sudo usermod -aG kvm "$USER"` and log in again. Without `/dev/kvm`
+   the probe does not offer `linux-vm`: QEMU without KVM is far too slow
+   for a Docker stack.
+3. **Lima** has no Debian or Ubuntu package. Install a pinned release
+   tarball from `lima-vm/lima` after checking its `SHA256SUMS`
+   (the Mac app bundles Lima 2.x the same way):
+
+   ```bash
+   v=2.2.1; a=$(uname -m)
+   cd "$(mktemp -d)"
+   curl -fsSLO "https://github.com/lima-vm/lima/releases/download/v$v/lima-$v-Linux-$a.tar.gz"
+   curl -fsSLO "https://github.com/lima-vm/lima/releases/download/v$v/SHA256SUMS"
+   sha256sum -c --ignore-missing SHA256SUMS      # must print: lima-2.2.1-Linux-x86_64.tar.gz: OK
+   tar xzf "lima-$v-Linux-$a.tar.gz" -C ~/.local  # bin/limactl, share/lima/templates
+   ```
+
+   `~/.local/bin` is usually on `PATH`; else pass `--limactl ~/.local/bin/limactl`
+   to `e2e/run.sh`. Lima 2.2.1's `SHA256SUMS` (2026-10-03) says
+   `b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb` for
+   the Linux x86_64 tarball.
+4. **Room for the VM.** The scratch root defaults to `/tmp/ope2e`; the VM's
+   disk and Lima's state live below it and grow to several GiB. The
+   harness refuses to start a VM with less than 10 GiB free there. On a
+   host whose `/` is small, pass a root on another filesystem, outside your
+   home and at most 40 characters (`sudo install -d -o "$USER" /home/ope2e`,
+   then `E2E_ARGS="--scratch-root /home/ope2e"`); `/dev/shm/ope2e` works
+   for one run from RAM on a 32 GB machine. Lima's image cache
+   (`~/.cache/lima`, a few hundred MB per guest) is in your home as usual.
+
+Then:
+
+```bash
+make e2e-probe                                   # linux-vm available
+make e2e                                         # T0 on Debian 13 amd64
+make e2e E2E_ARGS="--guest ubuntu-24.04"         # T0 on Ubuntu 24.04 amd64
+```
+
+Hosts this has run on: see the "Tested:" line in §3.1 and the entries
+below.
+
+- 2026-10-25: macOS 27.0 arm64 (mac), Debian 13 arm64 (linux-vm from a
+  Mac). T0.
+- 2026-10-30: Ubuntu 24.04 x86_64 host (Lima 2.2.1 + QEMU 8.2 + KVM,
+  `--scratch-root /dev/shm/ope2e`), Debian 13 amd64 guest (linux-vm, .deb
+  built in the VM from the checkout at 09630837, rootless Docker 26.1.5).
+  T0: 9/9 pass in 6 min (VM create + build + install 2 min 14 s).
+- 2026-10-30: same host, Ubuntu 24.04.5 amd64 guest (`--guest ubuntu-24.04`,
+  linux-vm). With the .deb of that morning: **FAIL**, 1 pass, 2 fail, 6
+  skipped, in 3 min, every failure the package's on Ubuntu (PR #495 fixed
+  them the same day): `Depends` let apt pick Compose v1 (Ubuntu's
+  `docker-compose` is the Python 1.29.2; its v2 is `docker-compose-v2`),
+  so `docker compose` was missing; Ubuntu's `docker.io` 29.1.3 ships no
+  `dockerd-rootless-setuptool.sh`, so the postinst fell back to the docker
+  group without a word; Ubuntu's RootlessKit 1.1.1 refuses the
+  `--detach-netns` Docker's wrapper passes; and `Recommends:
+  torbrowser-launcher` brought the system `tor` on to 127.0.0.1:9050
+  (Ubuntu installs Recommends by default, the Debian cloud image does
+  not), which made the launcher move every port up by 10000, so the site
+  answered on 18080 while the harness waited on 8080. With PR #495's .deb
+  (`--deb`): **9/9 pass in 4 min 46 s**, rootless Docker 29.1.3; Debian 13
+  with the same package 9/9 in 6 min 49 s. Since then a Linux node's
+  local-site probe reads the port from the launcher's `status.json`
+  (`wp_port`, 8080 + 10000 per bump) instead of assuming 8080, and the
+  report's node facts carry it, so a guest with its own tor on 9050 is
+  tested on 18080 rather than failed.

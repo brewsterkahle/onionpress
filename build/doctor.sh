@@ -137,6 +137,68 @@ report gh "creating the GitHub release" \
     "https://cli.github.com — then: gh auth login"
 echo ""
 
+# The end-to-end suite runs throwaway installs in VMs (docs/E2E-TESTING.md
+# §2). `e2e/run.sh --probe` is the authority on what this host can test;
+# this lists the host tools it looks for, with what each missing one needs.
+echo "End-to-end suite — e2e/run.sh (docs/E2E-TESTING.md)"
+report uv "running the suite (fetches pytest and PyNaCl itself)" \
+    "curl -LsSf https://astral.sh/uv/install.sh | sh   (or: brew install uv)"
+if [ "$OS" = "Darwin" ]; then
+    if command -v limactl >/dev/null 2>&1; then
+        printf '  \033[32m✓\033[0m %-14s %s\n' "limactl" "Linux VMs (Lima)"
+        have=$((have + 1))
+    elif [ -x /Applications/OnionPress.app/Contents/Resources/bin/limactl ]; then
+        printf '  \033[32m✓\033[0m %-14s %s\n' "limactl" "Linux VMs — the one bundled in /Applications/OnionPress.app"
+        have=$((have + 1))
+    else
+        printf '  \033[33m!\033[0m %-14s %s\n' "limactl" "absent — Linux is not tested from this Mac (macOS still is)"
+        printf '      brew install lima, or pass --mac-app with an OnionPress.app (it bundles Lima).\n'
+    fi
+else
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+        aarch64|arm64) QEMU_BIN=qemu-system-aarch64; FW_PKG="qemu-efi-aarch64";
+                       FW_PATHS="/usr/share/AAVMF/AAVMF_CODE.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/edk2/aarch64/QEMU_CODE.fd /usr/share/qemu/edk2-aarch64-code.fd" ;;
+        *)             QEMU_BIN="qemu-system-$ARCH"; FW_PKG="ovmf";
+                       FW_PATHS="/usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/qemu/edk2-x86_64-code.fd /usr/share/qemu/ovmf-x86_64-code.bin" ;;
+    esac
+    report limactl "Linux VMs (Lima 2.x, with its debian-13 and ubuntu-24.04 templates)" \
+        "Pinned release tarball: docs/E2E-TESTING.md §10 (Linux host setup); no distro package yet."
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+        printf '  \033[32m✓\033[0m %-14s %s\n' "/dev/kvm" "hardware virtualisation for the VMs"
+        have=$((have + 1))
+    elif [ -e /dev/kvm ]; then
+        printf '  \033[31m✗\033[0m %-14s %s\n' "/dev/kvm" "present but not writable by you"
+        printf '      sudo usermod -aG kvm "$USER", then log in again (a console login often\n'
+        printf '      has it already through logind; an SSH session does not).\n'
+        missing=$((missing + 1))
+    else
+        printf '  \033[31m✗\033[0m %-14s %s\n' "/dev/kvm" "absent — no KVM (nested virtualisation off, or no VT-x/SVM)"
+        printf '      Without KVM, Lima VMs are not offered here (QEMU alone is far too slow).\n'
+        missing=$((missing + 1))
+    fi
+    report "$QEMU_BIN" "the VM machine emulator" \
+        "apt-get install qemu-system-$( [ "$ARCH" = x86_64 ] && echo x86 || echo arm )   (Fedora: qemu-system-$ARCH)"
+    fw_found=""
+    for f in $FW_PATHS; do
+        [ -f "$f" ] && fw_found="$f" && break
+    done
+    if [ -n "$fw_found" ]; then
+        printf '  \033[32m✓\033[0m %-14s %s\n' "UEFI firmware" "$fw_found"
+        have=$((have + 1))
+    else
+        printf '  \033[31m✗\033[0m %-14s %s\n' "UEFI firmware" "Lima's QEMU VMs boot with it ($FW_PKG)"
+        printf '      apt-get install %s\n' "$FW_PKG"
+        missing=$((missing + 1))
+    fi
+    tmp_free_kib="$(df -Pk /tmp 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [ -n "$tmp_free_kib" ] && [ "$tmp_free_kib" -lt $((10 * 1024 * 1024)) ]; then
+        printf '  \033[33m!\033[0m %-14s %s\n' "/tmp space" "$((tmp_free_kib / 1024 / 1024)) GiB free — a VM needs ~10 GiB"
+        printf '      Pass E2E_ARGS="--scratch-root DIR" with DIR outside your home on a bigger filesystem.\n'
+    fi
+fi
+echo ""
+
 echo "Consistency"
 if "$PROJECT_DIR/build/refresh-image-digests.sh" --check >/dev/null 2>&1; then
     printf '  \033[32m✓\033[0m %-14s %s\n' "image pins" "every consumer matches build/image-pins.env"

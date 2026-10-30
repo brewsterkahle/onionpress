@@ -202,6 +202,11 @@
 - **A new `onionpress` subcommand needs a row in `tests/test_cli_dispatch.py`**
   (the census fails otherwise; grouping commands go in `PARENTS`), and its
   handler a case in `tests/test_cli_commands.py` / `test_cli_edges.py`.
+- The e2e suite's platforms are OS families, `macos` and `linux`
+  (`e2e/harness/platforms.py`); the distro is a node fact. Linux-host gates
+  use `HostFacts.debian_based` (`ID` or `ID_LIKE`), never `distro ==
+  "debian"`; a `linux-vm` guest is one of `LINUX_GUESTS` (Debian 13 the
+  default). `tests/test_e2e_harness.py`.
 
 ## Security
 - Database passwords are random per install (`ensure_secrets`,
