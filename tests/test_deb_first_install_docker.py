@@ -199,6 +199,26 @@ exec /bin/rm "$@"
         "usermod": '''#!/bin/bash
 echo "usermod $*" >> "$STUB_LOG"
 ''',
+        # The package's `onionpress check-docker` (warn_old_docker): fine
+        # unless STUB_OLD_DOCKER=1, when it is too old (exit 1), or
+        # STUB_NO_DOCKER_ANSWER=1, when docker did not answer (exit 2).
+        "python3": '''#!/bin/bash
+echo "python3 $*" >> "$STUB_LOG"
+case "$*" in
+    *"/opt/onionpress/lib check-docker --json")
+        if [ "${STUB_OLD_DOCKER:-}" = "1" ]; then
+            echo '{"ok": false, "engine": "29.1.3", "compose": "1.29.2", "problems": ["OnionPress needs Docker Compose 2.22 or later; this machine has 1.29.2. Debian 13: apt install docker-compose", "second line"]}'
+            exit 1
+        fi
+        if [ "${STUB_NO_DOCKER_ANSWER:-}" = "1" ]; then
+            echo '{"ok": false, "engine": "", "compose": "", "problems": ["Docker did not say its version"]}'
+            exit 2
+        fi
+        echo '{"ok": true, "engine": "29.1.3", "compose": "2.40.3", "problems": []}'
+        exit 0 ;;
+esac
+exit 0
+''',
         # Ubuntu 24.04's RootlessKit 1.1.1 knows no --detach-netns;
         # STUB_ROOTLESSKIT_V2=1 answers like 2.x, which does.
         "rootlesskit": '''#!/bin/bash
@@ -222,7 +242,7 @@ exit 127
 '''
 
     TOOLS = ("bash", "sh", "env", "grep", "awk", "cut", "cat", "mkdir",
-             "tr", "head", "date", "chmod", "touch", "printf", "echo", "true")
+             "tr", "head", "date", "chmod", "touch", "printf", "echo", "true", "jq")
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="op-postinst-first-")
@@ -350,6 +370,29 @@ exit 127
         self.assertFalse(os.path.exists(os.path.join(self.home, ".config", "systemd", "user",
                                                      "docker.service.d")))
         self.assertNotIn("predates", r.stdout)
+
+    def test_too_old_a_docker_is_warned_about_and_the_install_goes_on(self):
+        self._docker_io_layout()
+        r, calls = self._run(STUB_OLD_DOCKER=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # The stub logs the multi-line -c program as several lines.
+        check = [c for c in calls if c.endswith("/opt/onionpress/lib check-docker --json")]
+        self.assertEqual(len(check), 1, calls)
+        self.assertTrue(any(c.startswith("python3 -I -B -c") for c in calls),
+                        "the package's Python, path injected through argv")
+        self.assertIn("WARNING: OnionPress will not start on this machine's Docker", r.stdout)
+        self.assertIn("  OnionPress needs Docker Compose 2.22 or later; this machine has 1.29.2", r.stdout)
+        self.assertIn("\n  second line\n", r.stdout)
+        self.assertIn("onionpress check-docker", r.stdout)
+        self.assertTrue(self._enabled_onionpress(calls), "the install still finishes")
+
+    def test_a_new_enough_or_silent_docker_gets_no_warning(self):
+        self._docker_io_layout()
+        for env in ({}, {"STUB_NO_DOCKER_ANSWER": 1}):
+            with self.subTest(env):
+                r, _calls = self._run(**env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("WARNING: OnionPress will not start", r.stdout)
 
     def test_the_distros_copy_comes_before_the_packages(self):
         self._docker_io_layout()

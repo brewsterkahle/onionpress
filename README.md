@@ -28,7 +28,9 @@ OnionPress turns your Mac or Linux computer into a web server running WordPress,
 ## Requirements
 
 - **Mac**: macOS 13.0 (Ventura) or later
-- **Linux**: Docker and Docker Compose
+- **Linux**: Docker Engine 20.10 or later and Docker Compose 2.22 or later
+  (`onionpress check-docker` says what you have; the Python `docker-compose`
+  1.x package of Ubuntu and Debian 12 is not Compose 2)
 - Internet connection
 
 ## Installation

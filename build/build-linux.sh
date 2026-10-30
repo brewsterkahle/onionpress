@@ -366,8 +366,33 @@ spawn_tray() {
 # `onionpress update` (the launcher's release install) runs apt-get and
 # then restarts the containers itself once more: two restarts, never two
 # at once, since try-restart returns only once the site is up again.
+# Too old a Docker or Compose for OnionPress (onionpress.docker_versions:
+# Engine 20.10+, Compose 2.22+, and `docker compose` at all): said here,
+# at install time, with what `onionpress start` will refuse on and how to
+# upgrade. The package's own Python runs the check (python3 -I ignores
+# PYTHONPATH, so the path goes in through argv, as the launcher's op_py
+# does); its JSON is read by jq (a Depends), so only a real verdict with
+# docker answering is worth a word: a docker that does not answer, or a
+# Python that fails, says nothing. Never fails the install.
+warn_old_docker() {
+    local out problems
+    out=$(python3 -I -B -c 'import sys, runpy
+sys.path[:0] = [sys.argv.pop(1)]
+runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' \
+        /opt/onionpress/lib check-docker --json 2>/dev/null) || true
+    problems=$(printf '%s' "$out" | jq -r 'select(.ok == false and .engine != "") | .problems[]' 2>/dev/null) || true
+    if [ -n "$problems" ]; then
+        echo
+        echo "WARNING: OnionPress will not start on this machine's Docker until it is upgraded:"
+        while IFS= read -r line; do echo "  $line"; done <<< "$problems"
+        echo "  Check again with: onionpress check-docker"
+    fi
+    return 0
+}
+
 if [ "$1" = "configure" ] && [ -n "$2" ] && [ "$REAL_USER" != "root" ]; then
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
+    warn_old_docker
     echo "  OnionPress $VERSION_INSTALLED installed over $2. Restarting the site for $REAL_USER (the running one is still version $2)..."
     if systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null \
        && systemctl --user --machine="${REAL_USER}@.host" try-restart \
@@ -606,6 +631,8 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             onionpress-watcher.timer \
             >/dev/null 2>&1 || bootstrap_ok=0
     fi
+
+    warn_old_docker
 
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
     if [ "$bootstrap_ok" = "1" ]; then

@@ -3052,12 +3052,13 @@ main() {
             bundled_python -m onionpress.cli --data-dir "$DATA_DIR" address "${@:2}"
             ;;
 
-        version|check-reachability|open|onionname)
+        version|check-reachability|check-docker|open|onionname)
             # The app's remaining functions as subcommands (issue #382):
             # the About box's version, the Settings page's reachability
-            # test through the onionheaven Tor client, the menu's Open
-            # Local Site / Open in Tor Browser / Settings (logged in), and
-            # the onionname (show | set NAME).
+            # test through the onionheaven Tor client, whether Docker and
+            # Compose are new enough, the menu's Open Local Site / Open in
+            # Tor Browser / Settings (logged in), and the onionname (show
+            # | set NAME).
             bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$1" "${@:2}"
             ;;
 
@@ -3597,6 +3598,8 @@ User commands:
   check-reachability
                 Test the site through the independent onionheaven Tor
                 client, as the Settings page does (--json)
+  check-docker  Say whether Docker Engine and Compose are new enough for
+                OnionPress (--json)
   get           Fetch a URL over Tor and print the body (is this .onion up?)
                 (-i to include response headers, --max-time SECONDS)
   update        Check GitHub for a new release and install it

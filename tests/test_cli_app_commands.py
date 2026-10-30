@@ -545,7 +545,7 @@ docker() { return 1; }
     def test_the_launchers_list_the_new_commands(self):
         mac = _read("app/MacOS/onionpress")
         linux = _read("linux/onionpress")
-        for name in ("version", "check-reachability", "open", "onionname"):
+        for name in ("version", "check-reachability", "check-docker", "open", "onionname"):
             self.assertIn(f"  {name}", mac + "\n")
             self.assertIn(name + "|", linux)
         self.assertIn('--data-dir "$DATA_DIR" address "${@:2}"', mac)

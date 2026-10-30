@@ -96,6 +96,11 @@
   system `tor` on to 9050 (Ubuntu installs Recommends by default) and the
   site moved to 18080. `tests/test_docker_rootless_vendored.py`,
   `tests/test_deb_first_install_docker.py`.
+- **Docker Engine 20.10+ and Compose 2.22+ are the floors**
+  (`docker_versions.py`, `onionpress check-docker`): the Linux launcher's
+  `start` refuses older ones with what was found and how to upgrade, the
+  postinst warns at install time (never fails). Moving a floor means new
+  evidence in that module's docstring. `tests/test_docker_versions.py`.
 - **Every Mac build input is pinned by hash**: downloads through
   `fetch_checked` against the `*_SHA256_*` constants; Python from the
   `build/*-macos.lock` files with `--require-hashes`
