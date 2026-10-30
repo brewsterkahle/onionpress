@@ -29,13 +29,27 @@ class TestCoverageConfig(unittest.TestCase):
 
     def test_floors(self):
         script = _read("build/coverage-floors.sh")
-        self.assertIn("TOTAL_FLOOR=63", script)
+        self.assertIn("TOTAL_FLOOR=69", script)
         floors = dict(re.findall(r"(?m)^(src/onionpress/\S+\.py) (\d+)$", script))
         self.assertEqual(floors, {"src/onionpress/cli.py": "97",
                                   "src/onionpress/app_commands.py": "94",
                                   "src/onionpress/handle_action.py": "95",
                                   "src/onionpress/confirm.py": "98",
-                                  "src/onionpress/config.py": "85"})
+                                  "src/onionpress/config.py": "85",
+                                  "src/onionpress/backup_archive.py": "92",
+                                  "src/onionpress/db_import.py": "93",
+                                  "src/onionpress/hub_backup.py": "85",
+                                  "src/onionpress/ports.py": "86",
+                                  "src/onionpress/secrets_file.py": "96",
+                                  "src/onionpress/onion_hostname.py": "98",
+                                  "src/onionpress/reachability.py": "87",
+                                  "src/onionpress/image_overrides.py": "95",
+                                  "src/onionpress/daemon.py": "81",
+                                  "src/onionpress/launcher_ops.py": "84",
+                                  "src/onionpress/scrub.py": "90",
+                                  "src/onionpress/key_manager.py": "87",
+                                  "src/onionpress/updater.py": "81",
+                                  "src/onionpress/colima.py": "93"})
         for path in floors:
             self.assertTrue(os.path.exists(os.path.join(PROJECT_ROOT, path)), path)
         # macOS /bin/bash is 3.2: no associative arrays.

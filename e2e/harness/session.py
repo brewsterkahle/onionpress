@@ -14,8 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import PROJECT_DIR, platforms, safety
-from .nodes.linux_vm import DebianVMNode, lima_instances
+from .nodes.linux_vm import LinuxVMNode, lima_instances
 from .nodes.mac import MacNode, pick_port_offset
+from .platforms import DEFAULT_LINUX_GUEST
 from .proc import NodeLog, run
 from .report import RunReport
 
@@ -35,7 +36,14 @@ class Options:
     results_dir: str = ""
     keep: bool = False
     limactl: str = ""
+    guest: str = DEFAULT_LINUX_GUEST   # the linux-vm node's distro
     tiers: list = field(default_factory=list)
+
+
+# A linux-vm node's disk grows to several GiB on the host (Docker, the
+# images, the .deb build); a scratch root with less than this free would
+# fill its filesystem mid-run.
+MIN_SCRATCH_FREE_GIB = 10
 
 
 def real_home():
@@ -92,9 +100,11 @@ class Session:
                 del chosen["macos"]
             else:
                 self.report.build["mac"] = self._describe_source(source)
-        if "debian" in chosen:
+        if "linux" in chosen:
             source = self._deb_build()
             self.report.build["deb"] = self._describe_source(source)
+            if chosen["linux"].kind == "linux-vm":
+                self._check_scratch_space()
         self.report.not_tested.update(not_tested)
 
         self._cleanup_leftovers(facts.tools.get("limactl"))
@@ -116,16 +126,31 @@ class Session:
                     name, self._node_log(name), self.results_dir, root=self.root,
                     real_home=self.real_home, app_source=self._mac_source,
                     port_offset=pick_port_offset())
-            elif plat == "debian":
-                name = "debian-1"
-                self.nodes[plat] = DebianVMNode(
+            elif plat == "linux":
+                name = "linux-1"
+                self.nodes[plat] = LinuxVMNode(
                     name, self._node_log(name), self.results_dir, root=self.root,
-                    limactl=facts.tools["limactl"], deb_source=self._deb_source)
+                    limactl=facts.tools["limactl"], deb_source=self._deb_source,
+                    guest=self.opts.guest)
             self.report.roles[f"node[{plat}]"] = name
         return self
 
     def _node_log(self, name):
         return NodeLog(os.path.join(self.results_dir, "nodes", name, "harness.log"))
+
+    def _check_scratch_space(self):
+        """Refuse a scratch root whose filesystem cannot hold a VM: filling
+        it (often /, where /tmp lives) would hurt the host, not just the run."""
+        probe = self.root
+        while not os.path.exists(probe):
+            probe = os.path.dirname(probe)
+        free_gib = shutil.disk_usage(probe).free / (1 << 30)
+        if free_gib < MIN_SCRATCH_FREE_GIB:
+            raise safety.UnsafeTarget(
+                f"{free_gib:.1f} GiB free at {self.root}; a Linux VM needs about "
+                f"{MIN_SCRATCH_FREE_GIB} GiB there. Pass --scratch-root on a filesystem with "
+                "room (outside your home, at most 40 characters; e.g. a folder under "
+                "/home made for it, or /dev/shm/ope2e for one run from RAM)")
 
     def _claim_root(self):
         """The scratch root is the harness's alone: refuse one that exists

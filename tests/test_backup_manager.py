@@ -1611,7 +1611,7 @@ class TestBashBackupHelpers(unittest.TestCase):
         self.assertIn('op_py pack-backup --staging "$staging" --output "$output_path"', body)
 
     def test_python_writer_does_not_use_zip_encryption(self):
-        src = self._read("src/onionpress/backup.py")
+        src = self._read("src/onionpress/backup_archive.py")
         pack = src[src.index("\ndef pack_backup("):src.index("\n_WRONG_PASSWORD_MSG")]
         self.assertIn("['zip', '-r'", pack)
         self.assertNotIn("'-P'", pack)
@@ -1666,7 +1666,7 @@ class TestPyNaClIsWiredEverywhere(unittest.TestCase):
 
     def test_linux_package_and_installer_bring_it(self):
         control = self._read("build/build-linux.sh")
-        depends = control[control.index("Depends:"):control.index("Recommends:")]
+        depends = control[control.index("Depends:"):control.index("Suggests:")]
         self.assertIn("python3-nacl (>= 1.5.0)", depends)
         self.assertRegex(self._read("linux/install.sh"),
                          r"apt-get install -y -qq python3-nacl\b")

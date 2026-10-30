@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, cli, config, confirm, containers, daemon,
-    derivatives, handle_action, launcher_ops, multisite, onionheaven, redact, scrub,
-    wordpress_egress,
+    derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
+    redact, scrub, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -150,6 +150,8 @@ ROWS = [
     Row("check-reachability", ["check-reachability", "--json"],
         "app_commands.check_reachability_command",
         mock.call(ANY, ANY, json_output=True, out=ANY), rc=2, returns=2),
+    Row("check-docker", ["check-docker", "--json"], "docker_versions.check_command",
+        mock.call(ANY, json_output=True, out=ANY), rc=1, returns=1, setup_cli=False),
     Row("open", ["open", "onion"], "app_commands.open_command",
         mock.call("onion", ANY, ANY, out=ANY), rc=0, returns=0),
     Row("onionname show", ["onionname", "show", "--json"], "app_commands.onionname_show",
@@ -238,6 +240,10 @@ ROWS = [
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
     Row("prepare-restore", ["prepare-restore", "/b.zip"], "cli.cmd_prepare_restore",
         mock.call("/b.zip", "pw", D(""), False), stdin="pw\n"),
+    # Issue #475: the welcome screen opens the backup through this.
+    Row("prepare-restore", ["prepare-restore", "/b.zip", "--check", "--json"],
+        "cli.cmd_prepare_restore_check", mock.call("/b.zip", "pw", True),
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- config and OnionHeaven: the config file only (issue #365) ----
     Row("config get", ["config", "get", "VM_CPU"], "config.run_config_command",
@@ -429,6 +435,14 @@ ROWS = [
         mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
         mock.call(password=None, clean=True), setup_cli=True),
+    # The password as backup's: from the environment (then gone from it),
+    # the old positional with a warning (TestScrubPassword).
+    Row("scrub", ["scrub"], "scrub.run_scrub",
+        mock.call(password="pw", clean=False), setup_cli=True,
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
+    Row("scrub", ["scrub", "argvpw"], "scrub.run_scrub",
+        mock.call(password="argvpw", clean=False), setup_cli=True,
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 ]
 
 MODULES = {
@@ -437,6 +451,7 @@ MODULES = {
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
+    "docker_versions": docker_versions,
 }
 
 
@@ -548,6 +563,13 @@ class TestDispatch(unittest.TestCase):
             with self.subTest(row=repr(row)):
                 self.run_row(row)
 
+    def test_scrub_warns_only_about_a_password_on_argv(self):
+        scrub_rows = [r for r in ROWS if r.argv[:1] == ["scrub"]]
+        _, err = self.run_row(next(r for r in scrub_rows if "argvpw" in r.argv))
+        self.assertIn("visible to other users", err)
+        _, err = self.run_row(next(r for r in scrub_rows if r.argv == ["scrub"]))
+        self.assertNotIn("visible to other users", err)
+
     def test_handle_action_prints_the_result_as_json_only_when_asked(self):
         out, _ = self.run_row(ROWS[[r.argv[:1] == ["handle-action"] for r in ROWS].index(True)])
         self.assertEqual(json.loads(out.strip().splitlines()[-1]), {"handled": "restore-backup"})
@@ -608,6 +630,11 @@ class TestDispatch(unittest.TestCase):
                 rc, out, _ = self._main(argv)
                 self.assertEqual(rc, confirm.EXIT_FAILED)
                 self.assertIn("password", json.loads(out.strip().splitlines()[-1])["error"])
+
+    def test_prepare_restore_check_without_a_password_asks_for_one(self):
+        rc, out, _ = self._main(["prepare-restore", "/b.zip", "--check", "--json"])
+        self.assertEqual(rc, confirm.EXIT_ASK)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]), {"ask": "password"})
 
     def test_hub_recovery_key_restore_needs_a_password_and_no_subcommand_is_help(self):
         rc, _, err = self._main(["hub-recovery-key", "restore", "/b.zip"])

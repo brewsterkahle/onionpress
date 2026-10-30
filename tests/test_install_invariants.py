@@ -603,7 +603,7 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         for path, py_cmd in (
             ("linux/onionpress", r'op_py\s+provision-post-install'),
             ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+             r'bundled_python\s+-m\s+onionpress\.cli\s+--data-dir\s+"\$DATA_DIR"\s+provision-post-install'),
         ):
             script = _read(path)
             m = re.search(
@@ -637,7 +637,7 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         for path, py_cmd in (
             ("linux/onionpress", r'op_py\s+provision-post-install'),
             ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+             r'bundled_python\s+-m\s+onionpress\.cli\s+--data-dir\s+"\$DATA_DIR"\s+provision-post-install'),
         ):
             script = _read(path)
             m = re.search(
@@ -1670,20 +1670,16 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
         self.assertIn('env["DOCKER_CONFIG"] = self.paths.docker_config_dir',
                       ast.get_source_segment(wrapper, run))
 
-        # The daemon builds every colima env from os.environ (its stop and
-        # delete would remove a "colima" context too), so it must set it
-        # first (onionpress.daemon: _setup_environment before
-        # _resolve_ports_at_start's stop_stale_colima).
+        # The daemon builds every colima and docker env from os.environ (a
+        # stop or delete would remove a "colima" context too), so it must
+        # set it first (onionpress.daemon: _setup_environment before
+        # _resolve_ports_at_start's docker query).
         daemon = _read("src/onionpress/daemon.py")
-        self.assertLess(
-            daemon.index('os.environ["DOCKER_CONFIG"] = docker_config_dir'),
-            daemon.index("stop_stale_colima("))
         run = daemon[daemon.index("    def run(self):"):daemon.index("    def _main_loop_once(")]
         self.assertLess(run.index("self._setup_environment()"),
                         run.index("self._resolve_ports_at_start()"))
         # The menubar runs nothing of colima itself any more.
         menubar = _read("src/menubar.py")
-        self.assertNotIn("stop_stale_colima(", menubar)
         self.assertNotIn("[colima_bin,", menubar)
 
 
@@ -2697,7 +2693,7 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
     or the command exists on one platform only."""
 
     def test_both_launchers_forward_get(self):
-        self.assertIn('bundled_python -m onionpress.cli get "${@:2}"',
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" get "${@:2}"',
                       _read("app/MacOS/onionpress"))
         self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
 

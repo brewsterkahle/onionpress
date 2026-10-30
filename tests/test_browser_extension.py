@@ -13,6 +13,10 @@ an offline fallback (issue #318).
 - A .onion page load while OnionPress is down opens offline.html; one whose
   onion service does not answer gets the proxy's page. Both link to the
   Wayback Machine (issue #99).
+- The proxy answers only a request whose Host names it (issue #465: a
+  page at a name its DNS points at 127.0.0.1 looks like the proxy's own
+  page), and a /proxy/ page is sandboxed off the proxy's origin; the links
+  rewritten into it carry a token so its own requests still pass.
 """
 import http.client
 import json
@@ -137,9 +141,15 @@ class _ProxyServer:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
-    def request(self, method, path, headers=None):
+    def request(self, method, path, headers=None, host=True):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
-        conn.request(method, path, headers=headers or {})
+        if host:
+            conn.request(method, path, headers=headers or {})
+        else:   # no Host header at all
+            conn.putrequest(method, path, skip_host=True)
+            for name, value in (headers or {}).items():
+                conn.putheader(name, value)
+            conn.endheaders()
         resp = conn.getresponse()
         body = resp.read()
         conn.close()
@@ -247,6 +257,155 @@ class TestProxy(unittest.TestCase):
         src = open(onion_proxy.__file__).read()
         self.assertNotIn("create_connection", src)
         self.assertNotIn("'Access-Control-Allow-Origin', '*'", src)
+
+    # Issue #465: a page at a name its DNS points at 127.0.0.1 reaches the
+    # proxy with that name as Host, and its same-origin fetches carry no
+    # Origin and Sec-Fetch-Site: same-origin, what the setup page's carry.
+    REBOUND = {"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"}
+
+    def _hello_and_installed(self):
+        def fetch(*a, **k):
+            return 200, {"content-type": "text/plain"}, b"hello"
+        return (mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch),
+                mock.patch.object(onion_proxy.OnionProxyHandler, "_wp_installed",
+                                  lambda self: True))
+
+    def test_a_request_for_another_host_is_refused(self):
+        port = self.proxy.server.server_port
+        fetch, installed = self._hello_and_installed()
+        requests = (("GET", "/status"), ("HEAD", "/status"), ("OPTIONS", "/status"),
+                    ("GET", f"/proxy/{ONION}/x"),
+                    ("GET", f"/proxy/{onion_proxy.PROXY_PAGE_TOKEN}/{ONION}/x"),
+                    ("GET", "/setup"), ("POST", "/setup"), ("GET", "/nothing"))
+        with fetch, installed:
+            for host in (f"rebind.attacker.example:{port}", "rebind.attacker.example",
+                         f"evil.example:{port}", "127.0.0.1", f"127.0.0.1:{port + 1}",
+                         "localhost", f"localhost:{port}x"):
+                for method, path in requests:
+                    with self.subTest(host=host, method=method, path=path):
+                        resp, body = self.proxy.request(method, path,
+                                                        {"Host": host, **self.REBOUND})
+                        self.assertEqual(resp.status, 403)
+                        self.assertNotIn(b"onion_address", body)
+                        self.assertNotIn(b"hello", body)
+                        self.assertNotIn(host.encode(), body)
+            for method, path in requests:   # no Host at all
+                with self.subTest(method=method, path=path):
+                    resp, body = self.proxy.request(method, path, self.REBOUND, host=False)
+                    self.assertEqual(resp.status, 403)
+                    self.assertNotIn(b"onion_address", body)
+                    self.assertNotIn(b"hello", body)
+            # The Hosts a browser sends for the proxy's own pages.
+            for host in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}",
+                         f"LOCALHOST:{port}"):
+                with self.subTest(host=host):
+                    resp, body = self.proxy.request("GET", "/status",
+                                                    {"Host": host, **self.REBOUND})
+                    self.assertEqual(resp.status, 200)
+                    self.assertIn("onion_address", json.loads(body))
+                    resp, body = self.proxy.request("GET", f"/proxy/{ONION}/x", {"Host": host})
+                    self.assertEqual((resp.status, body), (200, b"hello"))
+                    resp, body = self.proxy.request(
+                        "POST", "/setup", {"Host": host, "Origin": f"http://127.0.0.1:{port}",
+                                           "Sec-Fetch-Site": "same-origin"})
+                    self.assertEqual(resp.status, 409)   # past the origin check
+                    resp, body = self.proxy.request("OPTIONS", "/status",
+                                                    {"Host": host, **self.EXT})
+                    self.assertEqual(resp.status, 204)
+            # An absolute-form request names its target in Host.
+            resp, body = self.proxy.request("GET", f"http://{ONION}/x", {"Host": ONION})
+            self.assertEqual((resp.status, body), (200, b"hello"))
+        self.assertFalse([l for l in self.proxy.logs if "attacker" in l or "evil" in l],
+                         self.proxy.logs)
+
+    def test_proxied_pages_are_sandboxed_off_the_proxys_origin(self):
+        port = self.proxy.server.server_port
+        page = (f'<a href="http://{ONION}/p">x</a><img src="/i.png">'
+                '<form action="/post"></form>').encode()
+
+        def fetch(self_, url, **k):
+            if url.endswith("/i.png"):
+                return 200, {"content-type": "image/png"}, b"\x89PNG"
+            if url.endswith("/down"):
+                return 502, {"content-type": "text/plain"}, b"Tor fetch failed: timeout"
+            return 200, {"content-type": "text/html; charset=utf-8"}, page
+
+        with mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch):
+            resp, body = self.proxy.request("GET", f"/proxy/{ONION}/")
+            self.assertEqual(resp.status, 200)
+            csp = resp.getheader("Content-Security-Policy")
+            self.assertEqual(csp, onion_proxy.PROXIED_PAGE_CSP)
+            self.assertTrue(csp.startswith("sandbox "), csp)
+            self.assertNotIn("allow-same-origin", csp)
+            for needed in ("allow-scripts", "allow-forms", "allow-popups"):
+                self.assertIn(needed, csp.split())
+            # Every response under /proxy/: a subresource, the unreachable
+            # page, an error, a refusal. Not the proxy's own pages, nor an
+            # absolute-form request's (that page is the onion's own origin).
+            for path, headers, status in (
+                    (f"/proxy/{ONION}/i.png", {}, 200),
+                    (f"/proxy/{ONION}/down", {"Accept": "text/html"}, 502),
+                    ("/proxy/example.com/", {}, 400),
+                    (f"/proxy/{ONION}/x", self.PAGE, 403),
+                    (f"/proxy/{ONION}/x", {"Host": f"evil.example:{port}"}, 403)):
+                with self.subTest(path=path, status=status):
+                    resp, _ = self.proxy.request("GET", path, headers)
+                    self.assertEqual(resp.status, status)
+                    self.assertEqual(resp.getheader("Content-Security-Policy"), csp)
+            for path, headers in (("/status", {}), (f"http://{ONION}/", {"Host": ONION}),
+                                  (f"http://{ONION}/down", {"Host": ONION, "Accept": "text/html"})):
+                with self.subTest(path=path):
+                    resp, _ = self.proxy.request("GET", path, headers)
+                    self.assertIsNone(resp.getheader("Content-Security-Policy"))
+
+            # The links the proxy rewrote carry the token, and the sandboxed
+            # page's own requests (an opaque origin: cross-site, Origin null
+            # or none, as another site's page sends) pass only with it.
+            resp, body = self.proxy.request("GET", f"/proxy/{ONION}/")
+            token = onion_proxy.PROXY_PAGE_TOKEN
+            self.assertIn(f'href="/proxy/{token}/{ONION}/p"'.encode(), body)
+            self.assertIn(f'src="/proxy/{token}/{ONION}/i.png"'.encode(), body)
+            self.assertIn(f'action="/proxy/{token}/{ONION}/post"'.encode(), body)
+            self.assertNotIn(f'"/proxy/{ONION}/'.encode(), body)
+            for headers in ({"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors",
+                             "Sec-Fetch-Dest": "image"},
+                            {"Origin": "null", "Sec-Fetch-Site": "cross-site",
+                             "Sec-Fetch-Mode": "cors"},
+                            {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate",
+                             "Sec-Fetch-Dest": "document"}):
+                with self.subTest(headers=headers):
+                    resp, body = self.proxy.request("GET", f"/proxy/{token}/{ONION}/i.png", headers)
+                    self.assertEqual((resp.status, body), (200, b"\x89PNG"))
+                    self.assertEqual(resp.getheader("Content-Security-Policy"), csp)
+                    for path in (f"/proxy/{ONION}/i.png",
+                                 f"/proxy/{'x' * len(token)}/{ONION}/i.png",
+                                 f"/proxy/{token[:-1]}/{ONION}/i.png"):
+                        resp, body = self.proxy.request("GET", path, headers)
+                        self.assertEqual(resp.status, 403, path)
+                        self.assertNotEqual(body, b"\x89PNG")
+            resp, _ = self.proxy.request("GET", f"/proxy/{'x' * len(token)}/{ONION}/i.png")
+            self.assertEqual(resp.status, 400)   # a tool's request: not an onion host
+
+    def test_setup_form_takes_only_the_setup_pages_own_post(self):
+        port = self.proxy.server.server_port
+        own = f"http://127.0.0.1:{port}"
+        fetch, installed = self._hello_and_installed()
+        with fetch, installed:
+            for headers in ({"Origin": own, "Sec-Fetch-Site": "same-origin"},
+                            {"Origin": f"http://localhost:{port}", "Sec-Fetch-Site": "same-origin"},
+                            {"Origin": own},   # an older browser
+                            {}):               # not a browser
+                with self.subTest(headers=headers):
+                    resp, _ = self.proxy.request("POST", "/setup", headers)
+                    self.assertEqual(resp.status, 409)   # past the origin check
+            for headers in ({"Origin": "null", "Sec-Fetch-Site": "cross-site"},   # a /proxy/ page
+                            {"Origin": own, "Sec-Fetch-Site": "cross-site"},
+                            {"Origin": own, "Sec-Fetch-Site": "same-site"},
+                            {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+                            {"Origin": "http://localhost:8080", "Sec-Fetch-Site": "same-site"}):
+                with self.subTest(headers=headers):
+                    resp, _ = self.proxy.request("POST", "/setup", headers)
+                    self.assertEqual(resp.status, 403)
 
     def _fetch_onion(self, accept, fetch):
         with mock.patch.object(onion_proxy.OnionProxyHandler, "_fetch_via_php", fetch):

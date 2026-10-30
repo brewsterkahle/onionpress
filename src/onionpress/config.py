@@ -1,23 +1,31 @@
-"""Configuration, secrets, and port detection for OnionPress.
+"""Configuration for OnionPress.
 
 Handles:
 - Reading/writing the shell-style config file (~/.onionpress/config)
-- Generating and loading database secrets (~/.onionpress/secrets)
-- Detecting available port offsets for multi-user support
+- The Settings page allowlist and `onionpress config` (CLI_CONFIG_KEYS)
 - Validating onion address prefixes
+
+Database secrets live in secrets_file.py and port selection in ports.py
+(issue #482); their names are re-exported here so existing `config.X`
+callers keep working.
 """
 
-import logging
+import contextlib
+import fcntl
 import os
 import re
-import secrets
-import socket
-import subprocess
+import stat
 import sys
 from dataclasses import dataclass, field
 
-from . import launcher_ops
 from .platform import OnionPressPaths
+from .ports import (  # noqa: F401  (re-exported, #482)
+    PortConfig, detect_port_offset, get_running_wp_port, resolve_port_offset,
+)
+from .secrets_file import (  # noqa: F401  (re-exported, #482)
+    Secrets, _generate_password, ensure_secrets, load_secrets,
+)
+
 
 # Default config values matching config-template.txt
 DEFAULTS = {
@@ -229,78 +237,133 @@ def apply_settings_updates(path: str, updates) -> SettingsUpdate:
     return result
 
 
-def read_config(path: str) -> dict:
-    """Read all key=value pairs from a config file.
+# One rule for reading the config file, here and in the launchers'
+# `config_value` (issue #404; tests/test_config_one_reader.py holds them
+# together): a line is KEY's when, stripped, it starts with `KEY=`; the
+# first such line wins (the one write_value sets; #323 read the token so);
+# the value is everything after its first `=`, stripped. Comments (#) and blank lines are skipped. Values are NOT
+# unquoted: the format is bare KEY=value, not shell quoting.
+def _config_line(line: str):
+    """(key, value) of a config line, or None for a comment or blank."""
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    key, value = line.split("=", 1)
+    return key, value.strip()
 
-    Skips comments (#) and blank lines. Values are NOT unquoted —
-    the config format uses bare values (KEY=value), not shell quoting.
-    """
+
+def _read_lines(path: str) -> list:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.readlines()
+    except FileNotFoundError:
+        return []
+
+
+def read_config(path: str) -> dict:
+    """Every KEY=value of the config file, by the rule above."""
     result = {}
-    if not os.path.exists(path):
+    try:
+        lines = _read_lines(path)
+    except OSError:
         return result
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, value = line.split("=", 1)
-                result[key.strip()] = value.strip()
+    for line in lines:
+        parsed = _config_line(line)
+        if parsed:
+            result.setdefault(parsed[0], parsed[1])
     return result
 
 
 def read_value(path: str, key: str, default: str = "") -> str:
-    """Read a single value from the config file."""
-    if not os.path.exists(path):
-        return default
+    """One value of the config file, by the rule above."""
+    return read_config(path).get(key, default)
+
+
+@contextlib.contextmanager
+def _config_lock(path: str):
+    """An flock on `.config.lock` next to *path* around a read-modify-write
+    (issue #404): two writers no longer lose each other's change. Going on
+    without it when the lock file cannot be used, as before it existed."""
+    fd = None
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith(f"{key}="):
-                    return line.split("=", 1)[1]
+        fd = os.open(os.path.join(os.path.dirname(os.path.abspath(path)), CONFIG_LOCK),
+                     os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
     except OSError:
-        pass
-    return default
+        if fd is not None:
+            os.close(fd)
+        fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _replace_file(path: str, text: str) -> None:
+    """Write *path* whole by a temp file and a rename (issue #404): a reader
+    sees the old file or the new one, never a truncated one. A file this
+    creates is 0600 (issue #397: it may hold CLOUDFLARE_TUNNEL_TOKEN),
+    whatever the umask; an existing file keeps its mode."""
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fchmod(f.fileno(), mode)
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _with_values(lines: list, values: dict) -> list:
+    """*lines* with each KEY's first line set to KEY=value and its later
+    lines (duplicates a hand edit left) dropped; a new KEY is appended."""
+    out, done = [], set()
+    for line in lines:
+        parsed = _config_line(line)
+        if parsed and parsed[0] in values:
+            if parsed[0] not in done:
+                out.append(f"{parsed[0]}={values[parsed[0]]}\n")
+                done.add(parsed[0])
+            continue
+        out.append(line)
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    out += [f"{k}={v}\n" for k, v in values.items() if k not in done]
+    return out
 
 
 def write_value(path: str, key: str, value: str) -> None:
-    """Write a single key=value to the config file, updating in place or appending."""
-    lines = []
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-
-    found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-
-    if not found:
-        lines.append(f"{key}={value}\n")
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    """Set KEY=value in the config file: one line for KEY, where it was."""
+    write_config(path, {key: value})
 
 
 def remove_value(path: str, key: str) -> None:
     """Remove every KEY= line from the config file (comments stay)."""
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-    kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
-    if len(kept) != len(lines):
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(kept)
+    with _config_lock(path):
+        lines = _read_lines(path)
+        kept = [line for line in lines if (_config_line(line) or ("",))[0] != key]
+        if len(kept) != len(lines):
+            _replace_file(path, "".join(kept))
 
 
 def write_config(path: str, values: dict) -> None:
-    """Write multiple key=value pairs, updating existing or appending new."""
-    for key, value in values.items():
-        write_value(path, key, value)
+    """Set several KEY=value pairs in one locked rewrite."""
+    if not values:
+        return
+    with _config_lock(path):
+        _replace_file(path, "".join(_with_values(_read_lines(path), dict(values))))
 
 
 def ensure_config(paths: OnionPressPaths) -> None:
@@ -583,6 +646,22 @@ def set_config_value(path: str, key: str, value: str) -> ConfigChange:
     return ConfigChange(key, old, value, key in current, changed)
 
 
+def set_checked_value(data_dir: str, key: str, value: str, log) -> ConfigChange | None:
+    """`config set KEY VALUE` for host code that runs in-process (setup,
+    the CLI's own commands): the key's check, the write, the log line and
+    the change marker, as run_config_command does them. A UI process runs
+    the subcommand instead. None, logged, when the check refuses."""
+    reason = check_config_value(key, value)
+    if reason:
+        log(f"WARNING: config set {key} refused: {reason}")
+        return None
+    change = set_config_value(os.path.join(data_dir, "config"), key, value)
+    log(f"config set: {change.describe()}")
+    if change.changed:
+        note_config_changed(data_dir, [key])
+    return change
+
+
 def unset_config_value(path: str, key: str) -> ConfigChange:
     """Remove KEY's line: the default applies again."""
     current = read_config(path)
@@ -616,40 +695,45 @@ def hand_edit_keys_present(path: str) -> list:
 # that its status loop reads and removes (take_config_changes), listing
 # the keys that changed.
 CONFIG_CHANGED_MARKER = ".config-changed"
+# The flock writers of the config file and of the marker take (#404).
+CONFIG_LOCK = ".config.lock"
 
 
 def note_config_changed(data_dir: str, keys) -> None:
-    """Add *keys* to the marker (kept if a reader has not taken it yet)."""
+    """Add *keys* to the marker (kept if a reader has not taken it yet).
+    Writers hold the config lock, so two never lose each other's keys."""
     keys = [k for k in keys if re.fullmatch(r"[A-Z][A-Z0-9_]*", k)]
     if not keys:
         return
     path = os.path.join(data_dir, CONFIG_CHANGED_MARKER)
-    present = take_config_changes(data_dir)
-    for k in keys:
-        if k not in present:
-            present.append(k)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(present) + "\n")
-        os.replace(tmp, path)
-    except OSError:
+    with _config_lock(path):
+        present = take_config_changes(data_dir)
+        for k in keys:
+            if k not in present:
+                present.append(k)
         try:
-            os.remove(tmp)
+            _replace_file(path, "\n".join(present) + "\n")
         except OSError:
             pass
 
 
 def take_config_changes(data_dir: str) -> list:
-    """The keys the marker names, removing it; [] without one."""
+    """The keys the marker names, removing it; [] without one. The marker
+    is renamed away before it is read, so a writer's new marker is either
+    taken whole or left for the next reader."""
     path = os.path.join(data_dir, CONFIG_CHANGED_MARKER)
+    taken = f"{path}.{os.getpid()}.taken"
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            names = f.read().split()
+        os.rename(path, taken)
     except OSError:
         return []
     try:
-        os.remove(path)
+        with open(taken, "r", encoding="utf-8", errors="replace") as f:
+            names = f.read().split()
+    except OSError:
+        names = []
+    try:
+        os.remove(taken)
     except OSError:
         pass
     return [n for n in names if re.fullmatch(r"[A-Z][A-Z0-9_]*", n)]
@@ -851,211 +935,3 @@ def prefix_change_question(key: str, value: str, data_dir: str, confirmed) -> No
         return
     _confirm.require("prefix-change", confirmed,
                      current=current or DEFAULTS["ADDRESS_PREFIX"], new=new, address=addr)
-
-# -- Secrets --
-
-@dataclass
-class Secrets:
-    """Database secrets for docker compose."""
-    wordpress_db_password: str
-    mysql_password: str
-    mysql_root_password: str
-
-    def as_env(self) -> dict:
-        """Return as environment variables for docker compose."""
-        return {
-            "WORDPRESS_DB_PASSWORD": self.wordpress_db_password,
-            "MYSQL_PASSWORD": self.mysql_password,
-            "MYSQL_ROOT_PASSWORD": self.mysql_root_password,
-        }
-
-
-def _generate_password(length: int = 32) -> str:
-    """Generate a random alphanumeric password."""
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-def load_secrets(path: str) -> Secrets:
-    """Load secrets from a shell-style secrets file.
-
-    Format: KEY='value' (single-quoted) or KEY=value (bare).
-    """
-    values = {}
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, val = line.split("=", 1)
-                key = key.strip()
-                val = val.strip()
-                # Strip single quotes
-                if val.startswith("'") and val.endswith("'"):
-                    val = val[1:-1]
-                values[key] = val
-
-    return Secrets(
-        wordpress_db_password=values.get("WORDPRESS_DB_PASSWORD", ""),
-        mysql_password=values.get("MYSQL_PASSWORD", ""),
-        mysql_root_password=values.get("MYSQL_ROOT_PASSWORD", ""),
-    )
-
-
-def ensure_secrets(path: str) -> Secrets:
-    """Generate secrets file if missing, then load and return Secrets.
-
-    Sets file permissions to 600 (owner-only read/write).
-    """
-    if not os.path.exists(path):
-        wp_pass = _generate_password()
-        root_pass = _generate_password()
-
-        # Create with restricted permissions
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write("# Database passwords - auto-generated\n")
-            f.write("# DO NOT SHARE THESE PASSWORDS\n")
-            f.write(f"WORDPRESS_DB_PASSWORD='{wp_pass}'\n")
-            f.write(f"MYSQL_PASSWORD='{wp_pass}'\n")
-            f.write(f"MYSQL_ROOT_PASSWORD='{root_pass}'\n")
-
-    return load_secrets(path)
-
-
-# -- Port detection --
-
-@dataclass
-class PortConfig:
-    """Port configuration for multi-user support."""
-    offset: int
-    wp_port: int
-    socks_port: int
-    proxy_port: int
-
-    @classmethod
-    def from_offset(cls, offset: int) -> "PortConfig":
-        """Build the port triple from an offset — the one place 8080/9050/9077
-        get added to it, so the three ports can't drift apart across callers."""
-        return cls(
-            offset=offset,
-            wp_port=8080 + offset,
-            socks_port=9050 + offset,
-            proxy_port=9077 + offset,
-        )
-
-
-def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str,
-                      log_func=None) -> None:
-    """Stop an orphaned Colima VM left over from a crash or force-quit.
-
-    If our Colima VM is running but the MenubarApp PID file is stale (or
-    missing), the VM is orphaned and holding ports.  Stop it so the next
-    launch gets port 8080 instead of needlessly offsetting.
-
-    log_func receives the progress lines; the MenubarApp passes its own
-    logger. Without one they go to the "onionpress" logging logger, which
-    has no handler in the app, so they only ever reached stderr.
-    """
-    _logger = logging.getLogger("onionpress")
-
-    def warn(msg: str) -> None:
-        if log_func:
-            log_func(msg)
-        else:
-            _logger.warning(msg)
-
-    # If a live MenubarApp already owns these ports, leave them alone
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)  # raises if not alive
-            return  # another instance is running — not stale
-        except (ProcessLookupError, ValueError, OSError):
-            pass  # stale PID file — fall through
-
-    # Check if the onionpress Colima VM is running
-    env = os.environ.copy()
-    env["COLIMA_HOME"] = colima_home
-    env["LIMA_HOME"] = os.path.join(colima_home, "_lima")
-    env["LIMA_INSTANCE"] = "onionpress"
-
-    try:
-        result = subprocess.run(
-            [colima_bin, "list", "--json"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10, env=env,
-        )
-        if result.returncode != 0 or "Running" not in result.stdout:
-            return  # VM not running — nothing to clean up
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return
-
-    warn("Found orphaned Colima VM from a previous crash — stopping it (up to 60s)")
-    try:
-        subprocess.run(
-            [colima_bin, "stop"],
-            capture_output=True, timeout=60, env=env,
-        )
-        warn("Orphaned Colima VM stopped successfully")
-    except (subprocess.TimeoutExpired, OSError) as e:
-        warn(f"Failed to stop orphaned Colima VM: {e}")
-
-
-def detect_port_offset() -> PortConfig:
-    """Detect available port offset for multi-user / port-conflict support.
-
-    Probes all three host-exposed ports (WP 8080, SOCKS 9050, PROXY 9077);
-    if ANY is in use, bumps the offset by 10000 and retries. Uses real
-    socket binding so it detects ports bound by other users or system
-    services (e.g. a system tor on 9050 from torbrowser-launcher's apt
-    deps) — not just other OnionPress instances. lsof would only show
-    the current user's processes.
-    """
-    offset = 0
-    while True:
-        pc = PortConfig.from_offset(offset)
-        if max(pc.wp_port, pc.socks_port, pc.proxy_port) > 65535:
-            return PortConfig.from_offset(0)  # fall back to default
-        all_free = True
-        for p in (pc.wp_port, pc.socks_port, pc.proxy_port):
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            except OSError:
-                # Can't even create a socket — give up
-                return PortConfig.from_offset(0)
-            try:
-                s.bind(("127.0.0.1", p))
-            except OSError:
-                all_free = False
-                s.close()
-                break
-            s.close()
-        if all_free:
-            return pc
-        offset += 10000
-
-
-def resolve_port_offset() -> PortConfig:
-    """Return the port offset our own stack is actually using.
-
-    detect_port_offset() allocates: it binds candidate ports and returns
-    the first free one, which is correct before anything is running. Once
-    our WordPress container is up, its ports are bound (by the container
-    itself), so a fresh bind test just reports "in use" without saying
-    which port that is — including the mundane case where the caller is
-    asking about the very stack it's part of.
-
-    Read the running container's published port first (authoritative —
-    Docker already made this mapping) and only fall back to allocation
-    when nothing is running yet. Callers that need the multi-user
-    allocation behavior with no risk of misreading a foreign container
-    (e.g. a first-launch check before anything of ours exists) should call
-    detect_port_offset() directly instead.
-    """
-    running_port = launcher_ops.get_running_wp_port()
-    if running_port is not None:
-        return PortConfig.from_offset(running_port - 8080)
-    return detect_port_offset()

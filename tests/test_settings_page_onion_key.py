@@ -373,8 +373,17 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         body = src[src.index("def restoreFromBackupClicked_"):]
         body = body[:body.index("\n    def ", 10)]
         check = body.index('meta.get("excludes_onion_key") is True')
-        self.assertLess(body.index("peek_backup_metadata"), check)
+        self.assertLess(body.index("self._on_check_backup(zip_path, password)"), check)
         self.assertLess(check, body.index("self.restore_mode = True"))
+        # The facts come from `onionpress prepare-restore --check --json`
+        # (issue #475), which reads the backup with peek_backup_metadata.
+        self.assertIn('["prepare-restore", zip_path, "--check", "--json"]',
+                      mv._read("src/menubar.py"))
+        cli_src = mv._read("src/onionpress/cli.py")
+        body = cli_src[cli_src.index("def cmd_prepare_restore_check"):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("peek_backup_metadata(backup_file, password)", body)
+        self.assertIn('excludes_onion_key=meta.get("excludes_onion_key") is True', body)
 
     def test_the_apps_restore_dialog_says_so(self):
         src = mv._read("src/menubar.py")

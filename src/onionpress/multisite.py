@@ -18,7 +18,7 @@ import os
 import subprocess
 from typing import Callable, Optional
 
-from . import wp_files
+from . import onion_hostname, wp_files
 
 
 # Files installed into the WordPress container by install_multisite_domain_map.
@@ -153,13 +153,8 @@ def _wp(
     wp_update_themes(), an update check through Tor; with Tor down each
     such request hung until the proxy's timeout, the call expired, and the
     start reported provision-post-install failed (issue #373)."""
-    return subprocess.run(
-        [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None,
-                                            offline=offline),
-        input=input,
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
-    )
+    return wp_files.wp_cli(*args, docker_bin=docker_bin, input=input,
+                           timeout=timeout, offline=offline)
 
 
 def _exec_sh(
@@ -552,11 +547,8 @@ def write_shared_onion_address(
     any file in the tor container (its onion service key, say).
     """
     log = log_func or _noop_log
-    r = subprocess.run(
-        [docker_bin, "exec", "onionpress-tor", "cat", wp_files.TOR_HOSTNAME_FILE],
-        capture_output=True, text=True, timeout=15,
-    )
-    content = wp_files.shared_onion_address(r.stdout) if r.returncode == 0 else None
+    addr = onion_hostname.read_served_address_with(docker_bin, timeout=15)
+    content = addr + "\n" if addr else None
     if content is None:
         # Caller may not care — this can fail benignly when tor isn't up yet.
         return False

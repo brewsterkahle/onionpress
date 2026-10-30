@@ -296,6 +296,30 @@ add_action( 'rest_api_init', function () {
 } );
 
 /**
+ * RFC 4648 base32 with padding, what Python's base64.b32encode writes and
+ * the host's key import decodes (issue #401: the image has no python3).
+ */
+function onionpress_base32_encode( $raw ) {
+    $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    $out = '';
+    $buffer = 0;
+    $bits = 0;
+    $len = strlen( $raw );
+    for ( $i = 0; $i < $len; $i++ ) {
+        $buffer = ( ( $buffer << 8 ) | ord( $raw[ $i ] ) ) & 0xFFFF;
+        $bits += 8;
+        while ( $bits >= 5 ) {
+            $bits -= 5;
+            $out .= $alphabet[ ( $buffer >> $bits ) & 31 ];
+        }
+    }
+    if ( $bits > 0 ) {
+        $out .= $alphabet[ ( $buffer << ( 5 - $bits ) ) & 31 ];
+    }
+    return str_pad( $out, (int) ( ceil( strlen( $out ) / 8 ) * 8 ), '=' );
+}
+
+/**
  * Handle service control actions (restart/stop) on Linux.
  */
 add_action( 'admin_init', function () {
@@ -412,9 +436,7 @@ add_action( 'admin_init', function () {
                 } );
                 return;
             }
-            $key_data = base64_encode( $raw ); // PHP doesn't have base32, use base64 then convert
-            // Use Python-compatible base32 encoding
-            $key_data = trim( shell_exec( "echo " . escapeshellarg( bin2hex( $raw ) ) . " | python3 -c \"import base64,sys; print(base64.b32encode(bytes.fromhex(sys.stdin.read().strip())).decode())\"" ) );
+            $key_data = onionpress_base32_encode( $raw );
             if ( empty( $key_data ) ) {
                 add_action( 'admin_notices', function () {
                     echo '<div class="notice notice-error"><p>Failed to encode key file.</p></div>';

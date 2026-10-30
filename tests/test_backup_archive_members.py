@@ -36,7 +36,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from onionpress import backup, backup_crypto, cli  # noqa: E402
+from onionpress import backup, backup_archive, backup_crypto, cli  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 
 PW = mv.PW
@@ -310,7 +310,7 @@ class _ExtractorsOff:
     """Spies on both extractors; the test fails if either runs."""
 
     def __init__(self, test):
-        p = mock.patch.object(backup, "_unzip_cli_extract",
+        p = mock.patch.object(backup_archive, "_unzip_cli_extract",
                               side_effect=AssertionError("unzip ran"))
         test.unzip = p.start()
         test.addCleanup(p.stop)
@@ -444,7 +444,7 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
         return {"format 1": f1, "format 2": f2}
 
     def _extractors(self):
-        yield "zipfile", mock.patch.object(backup, "_unzip_cli_extract",
+        yield "zipfile", mock.patch.object(backup_archive, "_unzip_cli_extract",
                                            return_value=False)
         if HAVE_UNZIP:
             yield "unzip", mock.patch.object(
@@ -475,7 +475,7 @@ class TestEachExtractorOnLegitBackups(unittest.TestCase):
         legacy = _zip_tree(staging, os.path.join(self.tmp, "evil.zip"), PW)
         dest = os.path.join(self.tmp, "dest")
         os.makedirs(dest)
-        with mock.patch.object(backup, "validate_archive_members"), \
+        with mock.patch.object(backup_archive, "validate_archive_members"), \
                 mock.patch.object(zipfile.ZipFile, "extractall",
                                   side_effect=AssertionError("fell back")):
             with self.assertRaisesRegex(ValueError, "symbolic link"):

@@ -30,7 +30,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -80,10 +80,51 @@ CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "")
 import collections
 import threading
 
-# Per-address log ring buffer — last 20 entries per address
-_addr_logs = {}
+# Per-address log ring buffer: the last _ADDR_LOG_MAX lines of each
+# address, for at most _ADDR_LOGS_MAX_ADDRESSES addresses (issue #467).
+# The dict is an LRU: a line for one more address drops the address
+# written to longest ago. Keys are free (any ed25519 key signs for its
+# own address), so an unbounded dict was a few thousand requests from
+# exhausting the hub's memory; the cap sits above MAX_REGISTRANTS, so
+# every registered address keeps its lines.
+_addr_logs = collections.OrderedDict()
 _addr_logs_lock = threading.Lock()
 _ADDR_LOG_MAX = 10
+_ADDR_LOGS_MAX_ADDRESSES = 8192
+
+# Unregistered registry rows the hub keeps (issue #492). Every start of a
+# node makes a new healthcheck key, so register/unregister cycles left a
+# dead row each, and #391's caps count only live rows. unregister_entry
+# keeps the newest MAX_DEAD_ROWS_PER_ADDRESS dead rows of an address (at
+# least one, so /offline and /unregister still know it, #467) and the
+# newest MAX_DEAD_ROWS hub-wide (MAX_REGISTRANTS times the per-address
+# number). The registry then holds at most
+# MAX_REGISTRANTS * MAX_ROWS_PER_ADDRESS live rows plus MAX_DEAD_ROWS.
+MAX_DEAD_ROWS_PER_ADDRESS = max(1, int(os.environ.get(
+    "ONIONHEAVEN_MAX_DEAD_ROWS_PER_ADDRESS", "4")))
+MAX_DEAD_ROWS = int(os.environ.get("ONIONHEAVEN_MAX_DEAD_ROWS", "20000"))
+
+# A free-text field of a request body (a version, an OS name) as the
+# hub stores or logs it: this many characters at most (issue #467).
+SHORT_TEXT_LIMIT = 64
+
+
+def short_text(value, limit=SHORT_TEXT_LIMIT, default=""):
+    """`value` as a short printable string: a str (a number is written
+    out) with every non-printable character (control characters,
+    newlines) dropped and cut to `limit` characters; `default` for
+    None, a bool or a nested structure. Every free-text body field the
+    hub keeps (the registry's version, the address log lines, the
+    analytics metadata) goes through this, so no request grows the
+    hub's memory, disk or log by more than a line."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        value = str(value)
+    if not isinstance(value, str):
+        return default
+    text = "".join(c for c in value[:limit * 4] if c.isprintable())
+    return text[:limit]
 
 
 def log(msg):
@@ -107,9 +148,14 @@ def addr_log(address, msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = f"[{ts}] {msg}"
     with _addr_logs_lock:
-        if address not in _addr_logs:
-            _addr_logs[address] = collections.deque(maxlen=_ADDR_LOG_MAX)
-        _addr_logs[address].append(entry)
+        lines = _addr_logs.get(address)
+        if lines is None:
+            lines = _addr_logs[address] = collections.deque(maxlen=_ADDR_LOG_MAX)
+            while len(_addr_logs) > _ADDR_LOGS_MAX_ADDRESSES:
+                _addr_logs.popitem(last=False)
+        else:
+            _addr_logs.move_to_end(address)
+        lines.append(entry)
 
 
 def get_addr_logs(address):
@@ -352,6 +398,12 @@ def db_ensure_schema(conn):
         signatures      TEXT NOT NULL,
         updated_at      TEXT
     )""")
+    # prune_dead_rows orders unregistered rows by this column (#492).
+    conn.execute("CREATE INDEX IF NOT EXISTS registry_unregistered_at "
+                 "ON registry (unregistered_at)")
+    # note_signed_request prunes expired marks by this column (#467).
+    conn.execute("CREATE INDEX IF NOT EXISTS signed_requests_last_timestamp "
+                 "ON signed_requests (last_timestamp)")
 
     db_commit_with_retry(conn)
 
@@ -374,10 +426,19 @@ def db_ensure_schema(conn):
 # requests, said in the log. The marks are not registry rows: a restore
 # keeps only registry and takeover_containers, and the tolerance still
 # bounds what an empty table admits.
+#
+# A mark whose timestamp is more than the tolerance in the past refuses
+# nothing the tolerance does not refuse already, so every insert also
+# deletes those (issue #467: one row per address that ever signed, kept
+# forever, was disk a free key could take). The table holds at most the
+# addresses heard from in the last tolerance window.
 
 # Signatures remembered at one timestamp; more than this at one second
 # is nothing a client does.
 SIGNED_REQUEST_MARKS_LIMIT = 32
+
+# How long a mark is kept past its timestamp: onion_auth's tolerance.
+from onion_auth import TIMESTAMP_TOLERANCE as SIGNED_REQUEST_MARK_TTL  # noqa: E402
 
 
 def _signed_request_time(timestamp):
@@ -425,13 +486,19 @@ def note_signed_request(conn, content_address, timestamp, signature):
                     return False, "Request already accepted (replay)"
                 signatures = [s for s in seen if isinstance(s, str)][-SIGNED_REQUEST_MARKS_LIMIT + 1:]
         signatures.append(signature)
+        now = datetime.now(timezone.utc)
         conn.execute(
             "INSERT INTO signed_requests (content_address, last_timestamp, signatures, updated_at) "
             "VALUES (?, ?, ?, ?) ON CONFLICT(content_address) DO UPDATE SET "
             "last_timestamp = excluded.last_timestamp, signatures = excluded.signatures, "
             "updated_at = excluded.updated_at",
             (content_address, ts_text, json.dumps(signatures),
-             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
+             now.strftime("%Y-%m-%dT%H:%M:%SZ")))
+        # Expired marks go in the same transaction (the timestamps are
+        # one fixed format, so they compare as text; the index makes
+        # this a range scan).
+        expired = (now - timedelta(seconds=SIGNED_REQUEST_MARK_TTL)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute("DELETE FROM signed_requests WHERE last_timestamp < ?", (expired,))
         db_commit_with_retry(conn)
     except Exception:
         conn.rollback()
@@ -1580,6 +1647,7 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, reason, content_address, healthcheck_address)
     )
+    prune_dead_rows(conn, content_address)
     db_commit_with_retry(conn)
 
     # Delete key directory if no other active rows use this content_address
@@ -1595,6 +1663,21 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
             shutil.rmtree(key_dir, ignore_errors=True)
             log(f"Deleted keys for {content_address}")
         purge_kept_keys(content_address)
+
+
+def prune_dead_rows(conn, content_address):
+    """Delete unregistered rows past MAX_DEAD_ROWS_PER_ADDRESS for the
+    address and past MAX_DEAD_ROWS hub-wide, oldest first (issue #492).
+    Live rows are never touched. The caller commits."""
+    conn.execute(
+        "DELETE FROM registry WHERE content_address = ? AND unregistered_at IS NOT NULL "
+        "AND rowid NOT IN (SELECT rowid FROM registry WHERE content_address = ? "
+        "AND unregistered_at IS NOT NULL ORDER BY unregistered_at DESC, rowid DESC LIMIT ?)",
+        (content_address, content_address, MAX_DEAD_ROWS_PER_ADDRESS))
+    conn.execute(
+        "DELETE FROM registry WHERE rowid IN (SELECT rowid FROM registry "
+        "WHERE unregistered_at IS NOT NULL ORDER BY unregistered_at DESC, rowid DESC "
+        "LIMIT -1 OFFSET ?)", (MAX_DEAD_ROWS,))
 
 
 def _key_dir(content_address):

@@ -1377,7 +1377,9 @@ function onionpress_mastodon_render_content( $status ) {
     }
     // The Mastodon `content` field wraps paragraphs in <p>; that's fine
     // for direct insertion as post_content (theme + wpautop won't re-wrap).
-    $preview = trim( html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' ) );
+    // The preview becomes post_title and post_excerpt: plain text, never
+    // entity-decoded after the tags are stripped (#472).
+    $preview = onionpress_social_plain_text( $html );
     return array( $html, $preview );
 }
 

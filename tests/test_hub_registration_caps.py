@@ -14,8 +14,10 @@ never refused by these.
 """
 
 import base64
+import collections
 import hashlib
 import importlib.util
+import json
 import os
 import shutil
 import sqlite3
@@ -28,6 +30,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKER_TOR_DIR = os.path.join(PROJECT_ROOT, "app", "Resources", "docker", "tor")
 sys.path.insert(0, DOCKER_TOR_DIR)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load(name, filename):
@@ -42,6 +45,7 @@ import onionheaven_common as oc  # noqa: E402
 import onionnames  # noqa: E402
 from onionpress import onion_auth  # noqa: E402
 from nacl import bindings as sodium  # noqa: E402
+import test_hub_stored_keys as stored_keys  # noqa: E402
 
 
 def _keypair():
@@ -74,7 +78,7 @@ class _Handler(ws.OnionHeavenHandler):
         self.replies.append((status_code, data))
 
 
-class OnlineCapsTest(unittest.TestCase):
+class _RegistryCase(unittest.TestCase):
 
     def setUp(self):
         self.base = tempfile.mkdtemp(prefix="op-hub-caps-")
@@ -121,6 +125,9 @@ class OnlineCapsTest(unittest.TestCase):
             "last_healthy, status, unregistered_at) VALUES (?, ?, 'x', 'x', 'online', ?)",
             (address, hc, "2026-01-01T00:00:00Z" if unregistered else None))
         self.keeper.commit()
+
+
+class OnlineCapsTest(_RegistryCase):
 
     def test_a_fifth_healthcheck_address_is_refused_before_any_write(self):
         expanded, public, address = _keypair()
@@ -190,6 +197,121 @@ class OnlineCapsTest(unittest.TestCase):
                                 b.index("os.makedirs(site_dir, exist_ok=True)"))
 
 
+class DeadRowsTest(_RegistryCase):
+    """Issue #492: unregistered rows were never deleted, and every start of
+    a node makes a new healthcheck key, so register/unregister cycles grew
+    the registry past #391's caps (which count live rows). unregister_entry
+    now keeps MAX_DEAD_ROWS_PER_ADDRESS dead rows of an address and
+    MAX_DEAD_ROWS hub-wide; the #467 404 still holds."""
+
+    def setUp(self):
+        super().setUp()
+        for name, value in (("release_function", lambda *a, **k: None),
+                            ("purge_kept_keys", lambda *a, **k: None),
+                            ("KEYS_DIR", os.path.join(self.base, "keys")),
+                            ("db_commit_with_retry", lambda conn: conn.commit())):
+            p = mock.patch.object(oc, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        # Replay marks are test_hub_signature_verification.py's: here a cycle
+        # sends several requests a second for one address.
+        p = mock.patch.object(ws, "note_signed_request", lambda *a: (True, ""))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _online(self, expanded, public, address, hc):
+        ts = onion_auth.make_timestamp()
+        data = {"content_address": address, "healthcheck_address": hc, "timestamp": ts,
+                "signature": onion_auth.sign_payload(expanded, public, "online", address, hc, ts),
+                "arti_key_pem": base64.b64encode(stored_keys._pem(expanded, public)).decode()}
+        h = _Handler("/online", data)
+        h.do_POST()
+        return h.replies[0]
+
+    def _signed_post(self, path, endpoint, expanded, public, address, hc):
+        ts = onion_auth.make_timestamp()
+        data = {"content_address": address, "healthcheck_address": hc, "timestamp": ts,
+                "signature": onion_auth.sign_payload(expanded, public, endpoint, address, hc, ts)}
+        h = _Handler(path, data)
+        h.do_POST()
+        return h.replies[0]
+
+    def _rows(self, address=None, dead=None):
+        sql, args = "SELECT COUNT(*) FROM registry WHERE 1", []
+        if address:
+            sql += " AND content_address = ?"
+            args.append(address)
+        if dead is not None:
+            sql += " AND unregistered_at IS " + ("NOT NULL" if dead else "NULL")
+        return self.keeper.execute(sql, args).fetchone()[0]
+
+    def test_defaults(self):
+        self.assertEqual(oc.MAX_DEAD_ROWS_PER_ADDRESS, 4)
+        self.assertEqual(oc.MAX_DEAD_ROWS, ws.MAX_REGISTRANTS * oc.MAX_DEAD_ROWS_PER_ADDRESS)
+
+    def test_a_hundred_cycles_leave_a_fixed_number_of_rows(self):
+        expanded, public, address = _keypair()
+        for _ in range(100):
+            hc = _keypair()[2]
+            status, body = self._online(expanded, public, address, hc)
+            self.assertEqual(status, 200, body)
+            status, body = self._signed_post("/unregister", "unregister", expanded, public, address, hc)
+            self.assertEqual(status, 200, body)
+            self.assertLessEqual(self._rows(address), oc.MAX_DEAD_ROWS_PER_ADDRESS)
+        self.assertEqual(self._rows(address, dead=True), oc.MAX_DEAD_ROWS_PER_ADDRESS)
+        # The address is still known (#467): /unregister for it is not 404.
+        status, body = self._signed_post("/unregister", "unregister", expanded, public, address, "")
+        self.assertEqual(status, 200, body)
+        # A key the registry never saw still is.
+        e2, p2, a2 = _keypair()
+        status, _body = self._signed_post("/unregister", "unregister", e2, p2, a2, "")
+        self.assertEqual(status, 404)
+
+    def test_the_newest_dead_rows_are_kept_and_live_rows_never_go(self):
+        address = _keypair()[2]
+        live = [_keypair()[2] for _ in range(2)]
+        for hc in live:
+            self._row(address, hc)
+        dead = []
+        for i in range(10):
+            hc = _keypair()[2]
+            dead.append(hc)
+            self.keeper.execute(
+                "INSERT INTO registry (content_address, healthcheck_address, registered_at, "
+                "status, unregistered_at) VALUES (?, ?, 'x', 'unregistered', ?)",
+                (address, hc, f"2026-01-01T00:00:{i:02d}Z"))
+        self.keeper.commit()
+        conn = ws.db_connect()
+        oc.prune_dead_rows(conn, address)
+        conn.commit()
+        conn.close()
+        kept = {r[0] for r in self.keeper.execute(
+            "SELECT healthcheck_address FROM registry WHERE unregistered_at IS NOT NULL")}
+        self.assertEqual(kept, set(dead[-oc.MAX_DEAD_ROWS_PER_ADDRESS:]))
+        self.assertEqual(self._rows(address, dead=False), 2)
+
+    def test_the_hub_keeps_at_most_max_dead_rows(self):
+        p = mock.patch.object(oc, "MAX_DEAD_ROWS", 5)
+        p.start()
+        self.addCleanup(p.stop)
+        live_address = _keypair()[2]
+        self._row(live_address, _keypair()[2])
+        for i in range(12):
+            expanded, public, address = _keypair()
+            hc = _keypair()[2]
+            self.assertEqual(self._online(expanded, public, address, hc)[0], 200)
+            status, _ = self._signed_post("/unregister", "unregister", expanded, public, address, hc)
+            self.assertEqual(status, 200)
+            self.assertLessEqual(self._rows(dead=True), 5)
+        self.assertEqual(self._rows(dead=True), 5)
+        self.assertEqual(self._rows(live_address, dead=False), 1)
+
+    def test_at_least_one_dead_row_per_address(self):
+        with mock.patch.dict(os.environ, {"ONIONHEAVEN_MAX_DEAD_ROWS_PER_ADDRESS": "0"}):
+            fresh = _load("onionheaven_common_zero", "onionheaven_common.py")
+        self.assertEqual(fresh.MAX_DEAD_ROWS_PER_ADDRESS, 1)
+
+
 class AnalyticsRoomTest(unittest.TestCase):
 
     def setUp(self):
@@ -252,6 +374,213 @@ class NamesPerAddressTest(unittest.TestCase):
             status, body = onionnames.local_register("second", self.addr, db_path=db)
         self.assertEqual(status, 429)
         self.assertEqual(body["error"], "too_many")
+
+
+class BoundedGrowthTest(unittest.TestCase):
+    """Issue #467: what a request may leave in the hub's memory is a line
+    per address, for a bounded number of addresses."""
+
+    def setUp(self):
+        for target, name, value in ((oc, "log", lambda *a: None),
+                                    (oc, "_addr_logs", collections.OrderedDict())):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_short_text(self):
+        limit = oc.SHORT_TEXT_LIMIT
+        self.assertEqual(limit, 64)
+        self.assertEqual(oc.short_text("2.6.0"), "2.6.0")
+        self.assertEqual(oc.short_text("v" * 1_000_000), "v" * limit)
+        self.assertEqual(oc.short_text("a\nb\x00c\x1b[31md\te"), "abc[31mde")
+        self.assertEqual(oc.short_text("\x00" * 1000 + "x"), "")  # looks no further than 4x limit
+        self.assertEqual(oc.short_text(12), "12")
+        self.assertEqual(oc.short_text(None), "")
+        self.assertEqual(oc.short_text(None, default="unknown"), "unknown")
+        self.assertEqual(oc.short_text(True), "")
+        self.assertEqual(oc.short_text({"a": 1}), "")
+        self.assertEqual(oc.short_text(["a"] * 1000, default="d"), "d")
+        self.assertEqual(oc.short_text("abcdef", limit=3), "abc")
+
+    def test_the_address_logs_are_an_lru_with_a_cap(self):
+        cap = oc._ADDR_LOGS_MAX_ADDRESSES
+        self.assertGreaterEqual(cap, ws.MAX_REGISTRANTS, "every registered address keeps its lines")
+        for i in range(cap):
+            oc.addr_log(f"a{i}", "x")
+        self.assertEqual(len(oc._addr_logs), cap)
+        oc.addr_log("a0", "y")  # written to again: the most recent now
+        for i in range(5):
+            oc.addr_log(f"b{i}", "x")
+        self.assertEqual(len(oc._addr_logs), cap)
+        self.assertEqual(oc.get_addr_logs("a0")[1][-1:], "y")
+        for i in range(1, 6):
+            self.assertEqual(oc.get_addr_logs(f"a{i}"), [], "the oldest went")
+        self.assertEqual(len(oc.get_addr_logs("a6")), 1)
+        for _ in range(oc._ADDR_LOG_MAX + 5):
+            oc.addr_log("a6", "z")
+        self.assertEqual(len(oc.get_addr_logs("a6")), oc._ADDR_LOG_MAX)
+
+
+class AnalyticsQuotaTest(unittest.TestCase):
+    """Issue #468: /logs/manifest and /logs/upload take a v3 healthcheck
+    address only (with "" the files landed in the content address's own
+    folder, where the per-instance quota never looked), hold the pair's
+    folder to ANALYTICS_PER_INSTANCE_QUOTA before every write, and
+    measure the analytics folder's disk, not the container's."""
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp(prefix="op-analytics-quota-")
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.logged = []
+        # The disk this runs on may well be past the threshold.
+        self.real_disk_full = ws.analytics_disk_full
+        for target, name, value in ((ws, "ANALYTICS_DIR", self.base),
+                                    (ws, "_is_onionhome", lambda: True),
+                                    (ws, "analytics_disk_full", lambda: False),
+                                    (ws, "log", self.logged.append),
+                                    (oc, "log", lambda *a: None)):
+            p = mock.patch.object(target, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.expanded, self.public, self.address = _keypair()
+        self.hc = _keypair()[2]
+        self.site = os.path.join(self.base, self.address, self.hc)
+
+    def _signed(self, hc, **extra):
+        ts = onion_auth.make_timestamp()
+        data = {"content_address": self.address, "healthcheck_address": hc, "timestamp": ts,
+                "signature": onion_auth.sign_payload(self.expanded, self.public, "logs",
+                                                     self.address, hc, ts)}
+        data.update(extra)
+        return data
+
+    def _post(self, path, data):
+        h = _Handler(path, data)
+        h.do_POST()
+        self.assertEqual(len(h.replies), 1, h.replies)
+        return h.replies[0]
+
+    def _manifest(self, files, hc=None, **extra):
+        hc = self.hc if hc is None else hc
+        return self._post("/logs/manifest", self._signed(hc, files=files, **extra))
+
+    def _upload(self, name, content, hc=None):
+        hc = self.hc if hc is None else hc
+        return self._post("/logs/upload", self._signed(
+            hc, file_name=name, file_content=base64.b64encode(content).decode()))
+
+    def _write(self, name, size, where=None):
+        where = self.site if where is None else where
+        os.makedirs(where, exist_ok=True)
+        with open(os.path.join(where, name), "wb") as f:
+            f.write(b"x" * size)
+
+    def test_an_empty_or_malformed_healthcheck_address_is_refused_before_the_signature(self):
+        for hc in ("", "x.onion", 5, None, self.hc.upper()):
+            for path, extra in (("/logs/manifest", {"files": [{"name": "a.log", "size": 1}]}),
+                                ("/logs/upload", {"file_name": "a.log",
+                                                  "file_content": base64.b64encode(b"x").decode()})):
+                with self.subTest(hc=hc, path=path):
+                    unsigned = {"content_address": self.address, "healthcheck_address": hc,
+                                **extra}
+                    status, body = self._post(path, unsigned)
+                    self.assertEqual(status, 400, body)
+                    self.assertEqual(body["error"], "Invalid healthcheck_address")
+        # Signed for "" by the key itself: refused the same way.
+        self.assertEqual(self._manifest([{"name": "a.log", "size": 1}], hc="")[0], 400)
+        self.assertEqual(self._upload("a.log", b"x", hc="")[0], 400)
+        self.assertEqual(os.listdir(self.base), [], "nothing written")
+
+    def test_an_upload_past_the_pairs_quota_is_refused(self):
+        quota = 1000
+        with mock.patch.object(ws, "ANALYTICS_PER_INSTANCE_QUOTA", quota):
+            self._write("old.log", 900)
+            status, body = self._upload("new.log", b"n" * 200)
+            self.assertEqual(status, 507, body)
+            self.assertIn("quota", body["error"])
+            self.assertFalse(os.path.exists(os.path.join(self.site, "new.log")))
+            self.assertEqual(self._upload("new.log", b"n" * 50)[0], 200)
+            # Replacing a file frees its size first (a grown .log). The
+            # audit lines count too, so the room is measured.
+            room = quota - ws.analytics_pair_bytes(self.site) + 900
+            self.assertEqual(self._upload("old.log", b"o" * room)[0], 200)
+            room = quota - ws.analytics_pair_bytes(self.site) + room
+            self.assertEqual(self._upload("old.log", b"o" * (room + 1))[0], 507)
+        self.assertEqual(self._upload("big.log", b"b" * 5000)[0], 200, "the real quota")
+
+    def test_a_manifest_past_the_quota_writes_nothing(self):
+        with mock.patch.object(ws, "ANALYTICS_PER_INSTANCE_QUOTA", 1000):
+            self._write("old.log", 1000)
+            status, body = self._manifest([{"name": "a.log", "size": 1}])
+            self.assertEqual(status, 507, body)
+            self.assertEqual(os.listdir(self.site), ["old.log"], "no meta, no audit")
+            os.remove(os.path.join(self.site, "old.log"))
+            status, body = self._manifest([{"name": "a.log", "size": 1}])
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["wanted"], ["a.log"])
+            self.assertTrue(any(n.startswith("meta-") for n in os.listdir(self.site)))
+
+    def test_the_disk_check_measures_the_analytics_folder(self):
+        asked = []
+
+        def disk_usage(path):
+            asked.append(path)
+            return shutil._ntuple_diskusage(total=100, used=90, free=10)  # 90 %: full
+        cleaned = []
+        with mock.patch.object(ws.shutil, "disk_usage", disk_usage), \
+                mock.patch.object(ws, "analytics_disk_full", self.real_disk_full), \
+                mock.patch.object(ws.OnionHeavenHandler, "_analytics_cleanup",
+                                  staticmethod(lambda: cleaned.append(1))):
+            status, body = self._manifest([{"name": "a.log", "size": 1}])
+            self.assertEqual((status, body), (200, {"wanted": []}))
+            status, body = self._upload("a.log", b"x")
+            self.assertEqual(status, 507, body)
+            self.assertEqual(body["error"], "Disk full")
+            self.assertEqual(cleaned, [1])
+        self.assertTrue(asked)
+        self.assertEqual(set(asked), {self.base})
+        self.assertFalse(os.path.exists(self.site))
+        src = open(os.path.join(DOCKER_TOR_DIR, "web-server.py"), encoding="utf-8").read()
+        self.assertNotIn('disk_usage("/")', src)
+        self.assertEqual(src.count("shutil.disk_usage("), 1, "one reader: analytics_disk_full")
+
+    def test_a_missing_folder_counts_as_not_full(self):
+        with mock.patch.object(ws, "ANALYTICS_DIR", os.path.join(self.base, "absent")):
+            self.assertFalse(self.real_disk_full())
+
+    def test_the_cleanup_holds_stray_files_to_the_quota_too(self):
+        """Files an older server left directly under the content address."""
+        content = os.path.join(self.base, self.address)
+        with mock.patch.object(ws, "ANALYTICS_PER_INSTANCE_QUOTA", 100):
+            self._write("older.log", 60, where=content)
+            self._write("newer.log", 60, where=content)
+            os.utime(os.path.join(content, "older.log"), (1_000_000, 1_000_000))
+            self._write("pair.log", 60)  # the pair's own, under quota
+            ws.OnionHeavenHandler._analytics_cleanup()
+        self.assertEqual(sorted(os.listdir(content)), sorted([self.hc, "newer.log"]))
+        self.assertEqual(os.listdir(self.site), ["pair.log"])
+
+    def test_odd_file_entries_do_not_break_a_manifest(self):
+        files = [1, "x", {"name": 5}, {"name": "a.log", "size": "big"},
+                 {"name": "b.log", "size": 3}, {"name": "../c", "size": 1}]
+        status, body = self._manifest(files, version="v" * 1000, os_version="mac\nos")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["wanted"], ["a.log", "b.log"])
+        names = os.listdir(self.site)
+        audit = [n for n in names if n.startswith("audit-")]
+        meta = [n for n in names if n.startswith("meta-")]
+        self.assertEqual((len(audit), len(meta)), (1, 1))
+        with open(os.path.join(self.site, audit[0])) as f:
+            record = json.loads(f.read().splitlines()[0])
+        self.assertEqual(record["offered"], ["<empty>", "<empty>", "5", "a.log", "b.log", "../c"])
+        self.assertEqual(record["rejected"], ["<empty>", "<empty>", "5", "../c"])
+        self.assertEqual(record["version"], "v" * oc.SHORT_TEXT_LIMIT)
+        with open(os.path.join(self.site, meta[0])) as f:
+            stored = json.load(f)
+        self.assertEqual(stored["version"], "v" * oc.SHORT_TEXT_LIMIT)
+        self.assertEqual(stored["os_version"], "macos")
+        self.assertEqual(self._manifest([{"name": "a.log", "size": 1}] * (ws.MAX_MANIFEST_FILES + 1))[0], 400)
+        self.assertEqual(self._manifest({"name": "a.log"})[0], 400)
 
 
 if __name__ == "__main__":

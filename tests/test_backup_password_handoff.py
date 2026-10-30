@@ -26,7 +26,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from onionpress import backup, cli, scrub  # noqa: E402
+from onionpress import backup, backup_archive, cli, scrub  # noqa: E402
 from onionpress.launcher_ops import BACKUP_PASSWORD_ENV  # noqa: E402
 
 SECRET = "s3cret pass'word"
@@ -353,8 +353,8 @@ class TestUnzipTimeoutLog(unittest.TestCase):
 
         with mock.patch("shutil.which", return_value="/usr/bin/unzip"), \
              mock.patch.object(backup.subprocess, "Popen", return_value=_Stuck()), \
-             mock.patch.object(backup, "_UNZIP_TIMEOUT_S", 0), \
-             mock.patch.object(backup, "_free_bytes", return_value=0):
+             mock.patch.object(backup_archive, "_UNZIP_TIMEOUT_S", 0), \
+             mock.patch.object(backup_archive, "_free_bytes", return_value=0):
             self.assertFalse(backup._unzip_cli_extract(
                 "/b.zip", SECRET, "/tmp/x", logs.append,
                 max_file_bytes=1, max_total_bytes=1))
@@ -376,8 +376,10 @@ class TestLaunchers(unittest.TestCase):
                               f"{path}: xtrace would print the password")
 
     def test_no_password_in_backup_or_restore_argv(self):
-        call = re.compile(r"(?:op_py|onionpress\.cli)\s+(?:backup|restore)\b([^\n]*)")
+        call = re.compile(r'(?:op_py|onionpress\.cli)\s+(?:--data-dir\s+"\$DATA_DIR"\s+)?'
+                          r"(?:backup|restore)\b([^\n]*)")
         for path in LAUNCHERS:
+            self.assertGreaterEqual(len(call.findall(_read(path))), 3, path)
             for m in call.finditer(_read(path)):
                 self.assertNotRegex(m.group(1), r"(?i)\$\{?\w*pass",
                                     f"{path}: {m.group(0).strip()}")
@@ -386,7 +388,8 @@ class TestLaunchers(unittest.TestCase):
         for path in LAUNCHERS:
             self.assertTrue(re.search(
                 r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '
-                r'(?:op_py|bundled_python -m onionpress\.cli) restore "\$restore_path"',
+                r'(?:op_py|bundled_python -m onionpress\.cli) --data-dir "\$DATA_DIR" '
+                r'restore "\$restore_path"',
                 _read(path)), path)
 
     def _run_helper(self, arg="", env_pw=None, stdin=""):

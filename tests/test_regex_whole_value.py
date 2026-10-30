@@ -274,8 +274,9 @@ class TestOtherNameChecks(unittest.TestCase):
                 h._handle_setup_post()
             return sent, run, h.wfile.getvalue().decode()
 
-        for user, email in (("alice\n", "alice@example.org"),
-                            ("alice", "alice@example.org\n")):
+        # The form has no email field since issue #481 (setup_logic uses a
+        # fixed one); the user name is the onionname.
+        for user, email in (("alice\n", "alice@example.org"),):
             sent, run, page = post(user, email)
             self.assertEqual(sent, [400], (user, email, page))
             run.assert_not_called()

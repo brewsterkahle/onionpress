@@ -1,4 +1,10 @@
-"""A Debian 13 node in a Lima VM (on a Mac: vz; on Linux: QEMU + KVM).
+"""A Debian-based node in a Lima VM (on a Mac: vz; on Linux: QEMU + KVM).
+
+The guest is one of platforms.LINUX_GUESTS (Lima's own templates): Debian
+13 by default, Ubuntu 24.04 LTS with `--guest ubuntu-24.04`. Every guest
+gets the same .deb, so what differs is what the distro ships: Debian's
+docker.io vs Ubuntu's, python3 3.13 vs 3.12, and the apt sources (both
+cloud images have the sections the .deb's Depends need).
 
   <root>/lima/                  LIMA_HOME for every VM node of the run
   <root>/<name>/share/          the VM's only mount (same path inside),
@@ -22,8 +28,9 @@ import subprocess
 import tarfile
 
 from .. import PROJECT_DIR, safety
+from ..platforms import DEFAULT_LINUX_GUEST, LINUX_GUESTS
 from ..proc import CommandFailed, run
-from .base import Node
+from .base import Node, wp_port_from_status
 
 AS_USER_SH = """#!/bin/bash
 # Run a command as the install's user with a fresh login (group
@@ -50,13 +57,23 @@ def tracked_files(project_dir=PROJECT_DIR):
     return [p for p in out.split("\0") if p]
 
 
-class DebianVMNode(Node):
-    platform = "debian"
+def guest_template(guest):
+    """The Lima template locator for a guest name, or ValueError.
+    `template:<name>` is the form Lima 2 takes (`template://` warns)."""
+    if guest not in LINUX_GUESTS:
+        raise ValueError(f"unknown Linux guest {guest!r}; know {', '.join(LINUX_GUESTS)}")
+    return f"template:{guest}"
+
+
+class LinuxVMNode(Node):
+    platform = "linux"
     kind = "linux-vm"
 
     def __init__(self, name, log, results_dir, *, root, limactl, deb_source,
-                 cpus=2, memory_gib=4, disk_gib=20):
+                 guest=DEFAULT_LINUX_GUEST, cpus=2, memory_gib=4, disk_gib=20):
         super().__init__(name, log, results_dir)
+        self.guest = guest
+        self.template = guest_template(guest)
         self.root = root
         self.dir = os.path.join(root, name)
         self.share = os.path.join(self.dir, "share")
@@ -72,7 +89,11 @@ class DebianVMNode(Node):
 
     @property
     def wp_port(self):
-        return 8080
+        """The port the launcher published WordPress on, from the node's
+        status.json once the first start has written it (8080, or 18080
+        when something on the guest held 8080, 9050 or 9077, as a system
+        tor did on Ubuntu); 8080 until then."""
+        return wp_port_from_status(self.read_file(".onionpress/status.json")) or 8080
 
     def lima_env(self):
         env = {
@@ -181,7 +202,7 @@ cp build/onionpress.deb {target}
         create = [self.limactl, "create", "--tty=false", f"--name={self.vm}",
                   f"--cpus={self.cpus}", f"--memory={self.memory_gib}", f"--disk={self.disk_gib}",
                   "--containerd=none", f"--mount-only={self.share}:w",
-                  f"--set={IGNORE_ALL_PORT_FORWARDS}", "template://debian-13"]
+                  f"--set={IGNORE_ALL_PORT_FORWARDS}", self.template]
         run(create, env=self.lima_env(), timeout=1200, log=self.log, check=True)
         run([self.limactl, "start", "--tty=false", self.vm], env=self.lima_env(),
             timeout=1800, log=self.log, check=True)
@@ -267,7 +288,8 @@ apt-get install -y -q {deb}
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def facts(self):
-        facts = {"kind": self.kind, "install": "deb (" + self.deb_source[0] + ")"}
+        facts = {"kind": self.kind, "guest": self.guest,
+                 "install": "deb (" + self.deb_source[0] + ")"}
         r = self.vm_run(["sh", "-c", '. /etc/os-release; echo "$PRETTY_NAME"; uname -m'])
         if r.ok:
             lines = r.out.strip().splitlines()
@@ -280,6 +302,11 @@ apt-get install -y -q {deb}
         r = self.vm_run(["dpkg-query", "-W", "-f", "${Version}", "onionpress"])
         if r.ok:
             facts["app_version"] = r.out.strip()
+        # Where WordPress answered: 8080, or the launcher's offset when the
+        # guest had something on 8080, 9050 or 9077; "assumed" when the
+        # launcher never wrote its status.json.
+        port = wp_port_from_status(self.read_file(".onionpress/status.json"))
+        facts["wp_port"] = f"{port} (status.json)" if port else "8080 (assumed)"
         return facts
 
 

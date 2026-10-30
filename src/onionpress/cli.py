@@ -22,11 +22,16 @@ from .config import (
     ensure_config, ensure_secrets, read_value, detect_port_offset,
     validate_address_prefix, DEFAULTS,
 )
+from .ports import port_environ
 from .docker import Docker
 from .containers import ContainerManager
 from .launcher_ops import BACKUP_PASSWORD_ENV
 from .analytics_sharing import SHARING_CONFIG_KEY
 from .hub_backup import RECOVERY_KEY_ENV
+from . import confirm as _confirm
+# Domain functions of onionheaven's (uninstall imports them from there),
+# kept under their old names here for the commands and for callers.
+from .onionheaven import _RETRYABLE, _file_log_func, _hub_context, release_onionheaven
 
 
 # `onionpress get` (issue #70) runs curl inside this container, where Tor's
@@ -217,83 +222,6 @@ def _start_step_manager(paths) -> ContainerManager:
     port_config = PortConfig.from_offset(int(offset) if offset.isdigit() else 0)
     return ContainerManager(Docker(paths), paths, port_config,
                             log_func=_launcher_log_func())
-
-
-def _file_log_func(log_file: str | None) -> Callable[[str], None]:
-    """A log function that writes to the log file only (the terminal gets
-    a summary instead)."""
-    def log(msg: str) -> None:
-        if not log_file:
-            return
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        try:
-            with open(log_file, "a") as f:
-                f.write(f"[{ts}] {msg}\n")
-        except OSError:
-            pass
-    return log
-
-
-def _hub_context(data_dir: str | None = None,
-                 log_func: Callable[[str], None] | None = None):
-    """onionheaven.HubContext for this install, with the configured hub
-    and a docker environment key_manager.extract_keys (plain `docker`,
-    this process's environment) can use: the launchers export
-    DOCKER_HOST, a direct run gets the socket resolve_paths finds."""
-    from . import onionheaven
-    paths = resolve_paths(data_dir=data_dir)
-    log = log_func or _file_log_func(paths.log_file)
-    ctx = onionheaven.HubContext(paths, log)
-    onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
-        ctx.read_config_value("ONIONHEAVEN_ADDRESS", ""), log)
-    os.environ.setdefault("DOCKER_HOST", f"unix://{paths.docker_socket}")
-    if paths.bin_dir and os.path.isdir(paths.bin_dir):
-        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-        if paths.bin_dir not in path_dirs:
-            os.environ["PATH"] = os.pathsep.join([paths.bin_dir] + path_dirs)
-    return ctx
-
-
-# Remaining items the user can do something about: start OnionPress (the
-# key could not be read) or try again later (the hub did not answer).
-_RETRYABLE = ("key-unreadable", "unanswered", "busy")
-
-
-def release_onionheaven(reason: str, keep_address: str | None = None,
-                        data_dir: str | None = None,
-                        log_func: Callable[[str], None] | None = None,
-                        out=None) -> list:
-    """Before this install forgets an onion service key (reset, key
-    import, restore, uninstall): ask every OnionHeaven hub that may hold
-    one of its keys to delete its copy (onionheaven.release_registration:
-    a signed /unregister, the hub the record names), and tell the user on
-    *out* (stdout) what happened. Nothing is printed when no hub holds
-    anything. Returns what may remain on a hub ([] = nothing).
-    """
-    from . import onionheaven
-    out = out or sys.stdout
-    ctx = _hub_context(data_dir, log_func)
-    pairs = [p for p in onionheaven.registrations_left(ctx) if p[0] != keep_address]
-    if not pairs:
-        return []
-    print("Asking the OnionHeaven hub to delete its copy of this site's "
-          "onion service key (this can take a few minutes over Tor)...", file=out)
-    remaining = onionheaven.release_registration(ctx, reason, keep_address=keep_address)
-    left = {(i["content_address"], i["onionheaven_address"]) for i in remaining}
-    for addr, hub in pairs:
-        if (addr, hub) not in left:
-            print(f"  Done: the hub {hub} no longer holds the key of {addr}.", file=out)
-    if remaining:
-        print("", file=out)
-        print("WARNING: " + onionheaven.describe_remaining(remaining).replace(
-            "\n", "\nWARNING: "), file=out)
-        if any(i["why"] in _RETRYABLE for i in remaining):
-            print("To have it deleted, make sure OnionPress is running and "
-                  "try again before the key is gone.", file=out)
-        print("OnionPress keeps a note of it in "
-              f"{os.path.join(ctx.app_support, onionheaven.REGISTRATION_RECORD)}.",
-              file=out)
-    return remaining
 
 
 class _LogRecorder:
@@ -587,10 +515,7 @@ class OnionPressCLI:
         # Build env for Docker
         secrets = ensure_secrets(self.paths.secrets_file)
         extra_env = secrets.as_env()
-        extra_env["ONIONPRESS_WP_PORT"] = str(self.port_config.wp_port)
-        extra_env["ONIONPRESS_SOCKS_PORT"] = str(self.port_config.socks_port)
-        extra_env["ONIONPRESS_PROXY_PORT"] = str(self.port_config.proxy_port)
-        extra_env["ONIONPRESS_PORT_OFFSET"] = str(self.port_config.offset)
+        extra_env.update(port_environ(self.port_config))
         extra_env["TZ"] = detect_timezone()
         extra_env["ONIONPRESS_VERSION"] = __version__
 
@@ -748,7 +673,7 @@ class OnionPressCLI:
         from .backup import (create_backup, backup_filename, verify_wp_admin,
                              get_admin_username, unchecked_notes, served_onion_address)
         if not username:
-            username = get_admin_username(data_dir=self.paths.data_dir)
+            username = get_admin_username(data_dir=self.paths.data_dir, log=self.log)
         ok, err = verify_wp_admin(username, password)
         if not ok:
             return _confirm.answer_error(err, json_output)
@@ -1767,7 +1692,7 @@ def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
     log = _settings_page_log(data_dir)
     try:
         metadata = create_backup(
-            served_onion_address() or "unknown", get_admin_username(data_dir=data_dir),
+            served_onion_address() or "unknown", get_admin_username(data_dir=data_dir, log=log),
             password, output_path, __version__, log,
             include_hub_data=False, include_host_secrets=False,
             include_onion_key=False)
@@ -1856,453 +1781,962 @@ def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
     return _confirm.answer_ok(json_output, text="Staged; start OnionPress to restore.", **facts)
 
 
-def main(argv: list[str] = None) -> int:
-    """CLI entry point."""
-    parser = argparse.ArgumentParser(
-        prog="onionpress",
-        description="OnionPress — WordPress over Tor",
-    )
-    parser.add_argument("--version", action="version", version=f"OnionPress {__version__}")
-    parser.add_argument("--data-dir", help="Override data directory (default: ~/.onionpress/)")
-
-    sub = parser.add_subparsers(dest="command", help="Command to run")
+def cmd_prepare_restore_check(backup_file: str, password: str,
+                              json_output: bool = False) -> int:
+    """`onionpress prepare-restore <zip> --check`: the welcome screen's
+    Restore from backup opens the backup here, before it starts, rather
+    than in the menubar's process (issue #475): the password checked and
+    the metadata read (backup.peek_backup_metadata), nothing written. The
+    answer is the backup's onion address and whether its key is left out
+    (a Settings page backup, which cannot set up a new install)."""
     from . import confirm as _confirm
+    from .backup import peek_backup_metadata
+    try:
+        meta = peek_backup_metadata(backup_file, password)
+    except Exception as e:
+        return _confirm.answer_error(f"Could not open the backup: {e}", json_output)
+    address = meta.get("onion_address")
+    return _confirm.answer_ok(
+        json_output, text="The backup opens.",
+        onion_address=address if isinstance(address, str) else "",
+        excludes_onion_key=meta.get("excludes_onion_key") is True)
 
-    sub.add_parser("start", help="Start OnionPress")
-    sub.add_parser("stop", help="Stop OnionPress")
-    sub.add_parser("restart", help="Restart OnionPress")
-    sub.add_parser("status", help="Show container status (JSON)")
-    p_version = sub.add_parser("version", help="Print the OnionPress version (About)")
-    p_version.add_argument("--json", action="store_true", help="As JSON (version, platform)")
-    p_address = sub.add_parser(
-        "address",
+
+# ---------------------------------------------------------------------------
+# The subcommands (issue #483): _COMMANDS at the end is the table, one row
+# per subcommand: its name, the function that adds its parser (and its
+# nested ones) and the handler main() dispatches to. The table's order is
+# the parsers' order, so the help's. A new subcommand is its builder, its
+# handler and one row (and a row in tests/test_cli_dispatch.py).
+#
+# Handlers that need no OnionPressCLI never construct it: its setup creates
+# config and secrets and probes ports.
+
+class _Run:
+    """What a handler gets: the parsed arguments, the data directory, the
+    hub recovery key main() took out of the environment, and the parsers
+    (for a grouping command's help)."""
+
+    def __init__(self, args, parser, sub, hub_recovery_key: str):
+        self.args = args
+        self.data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
+        self.hub_recovery_key = hub_recovery_key
+        self._parser = parser
+        self._sub = sub
+
+    def help(self, command: str | None = None) -> int:
+        """Print *command*'s help (default: onionpress's own); exit 1."""
+        (self._sub.choices[command] if command else self._parser).print_help()
+        return 1
+
+
+def _plain(help: str):
+    """The builder of a subcommand with no arguments of its own."""
+    return lambda sub, name: sub.add_parser(name, help=help)
+
+
+def _cli(run: _Run) -> "OnionPressCLI":
+    """OnionPressCLI, for the commands that need its setup. The
+    provisioning steps, scrub and verify-admin-password construct it
+    without using it: they always have, and its setup (config and secrets
+    creation) runs before them."""
+    return OnionPressCLI(data_dir=run.args.data_dir)
+
+
+def _app_setup(run: _Run):
+    """The app's functions as subcommands (issue #382, onionpress.app_commands):
+    the paths and a Docker wrapper, no OnionPressCLI setup (config and
+    secrets creation, port probing)."""
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    log = _file_log_func(paths.log_file)
+    return paths, log, Docker(paths, log_func=log), detect_os().value
+
+
+# ---- the app's functions (onionpress.app_commands) ----
+
+def _add_version(sub, name):
+    p = sub.add_parser(name, help="Print the OnionPress version (About)")
+    p.add_argument("--json", action="store_true", help="As JSON (version, platform)")
+
+
+def _run_version(run):
+    from . import app_commands
+    return app_commands.version_command(detect_os().value, json_output=run.args.json,
+                                        out=sys.stdout)
+
+
+def _add_address(sub, name):
+    p = sub.add_parser(
+        name,
         help="Print the onion address (--url: the site's shareable URL with its "
              "/<onionname>/ path; --copy: put that URL on the clipboard)")
-    p_address.add_argument("--url", action="store_true",
-                           help="The shareable URL, as the menu's Copy Onion Address")
-    p_address.add_argument("--copy", action="store_true",
-                           help="Copy the URL to the clipboard (pbcopy, wl-copy, xclip or xsel)")
-    p_logs = sub.add_parser(
-        "logs",
+    p.add_argument("--url", action="store_true",
+                   help="The shareable URL, as the menu's Copy Onion Address")
+    p.add_argument("--copy", action="store_true",
+                   help="Copy the URL to the clipboard (pbcopy, wl-copy, xclip or xsel)")
+
+
+def _run_address(run):
+    from . import app_commands
+    paths, _log, docker, os_name = _app_setup(run)
+    return app_commands.address_command(paths, docker, os_name, url=run.args.url,
+                                        copy=run.args.copy, out=sys.stdout)
+
+
+def _add_logs(sub, name):
+    p = sub.add_parser(
+        name,
         help="Follow the container logs; with --app, --launcher or --web print "
              "the end of that OnionPress log instead (-n N lines, -f to follow)")
-    which = p_logs.add_mutually_exclusive_group()
+    which = p.add_mutually_exclusive_group()
     which.add_argument("--app", dest="which", action="store_const", const="app",
                        help="The app's log (the Mac daemon's loops; on Linux onionpress.log)")
     which.add_argument("--launcher", dest="which", action="store_const", const="launcher",
                        help="The launcher's onionpress.log (every start's steps and errors)")
     which.add_argument("--web", dest="which", action="store_const", const="web",
                        help="The web usage log: the site's visits, the app's own probes left out")
-    p_logs.add_argument("-n", "--lines", type=int, default=200, metavar="N",
-                        help="How many lines from the end (default 200; 0: all)")
-    p_logs.add_argument("-f", "--follow", action="store_true",
-                        help="Keep printing as the log grows")
-    p_reach = sub.add_parser(
-        "check-reachability",
+    p.add_argument("-n", "--lines", type=int, default=200, metavar="N",
+                   help="How many lines from the end (default 200; 0: all)")
+    p.add_argument("-f", "--follow", action="store_true",
+                   help="Keep printing as the log grows")
+
+
+def _run_logs(run):
+    args = run.args
+    if not args.which:
+        return _cli(run).cmd_logs()
+    from . import app_commands
+    paths, _log, docker, os_name = _app_setup(run)
+    return app_commands.logs_command(paths, docker, os_name, args.which,
+                                     lines=args.lines, follow=args.follow, out=sys.stdout)
+
+
+def _add_check_reachability(sub, name):
+    p = sub.add_parser(
+        name,
         help="Test the site through the independent onionheaven Tor client, as the "
              "Settings page's Test Reachability does (exit 0 reachable, 1 not, 2 no address)")
-    p_reach.add_argument("--json", action="store_true",
-                         help="The result as JSON (reachable, http_code, address, tested_at)")
-    p_open = sub.add_parser(
-        "open",
+    p.add_argument("--json", action="store_true",
+                   help="The result as JSON (reachable, http_code, address, tested_at)")
+
+
+def _run_check_reachability(run):
+    from . import app_commands
+    paths, _log, docker, _os_name = _app_setup(run)
+    return app_commands.check_reachability_command(paths, docker, json_output=run.args.json,
+                                                   out=sys.stdout)
+
+
+def _add_check_docker(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Say whether this machine's Docker Engine and Docker Compose are new enough "
+             "for OnionPress (exit 0 yes, 1 too old or no `docker compose`, 2 docker did "
+             "not answer)")
+    p.add_argument("--json", action="store_true",
+                   help="The result as JSON (ok, engine, compose, problems, min_engine, min_compose)")
+
+
+def _run_check_docker(run):
+    from . import docker_versions
+    _paths, _log, docker, _os_name = _app_setup(run)
+    return docker_versions.check_command(docker, json_output=run.args.json, out=sys.stdout)
+
+
+def _add_open(sub, name):
+    p = sub.add_parser(
+        name,
         help="Open the site in a browser, logged in as the owner: site (local), "
              "admin (wp-admin), settings (the OnionPress Settings page) or onion "
              "(the .onion address, in Tor Browser where it is installed)")
-    p_open.add_argument("what", choices=("site", "admin", "settings", "onion"))
-    p_onionname = sub.add_parser(
-        "onionname",
+    p.add_argument("what", choices=("site", "admin", "settings", "onion"))
+
+
+def _run_open(run):
+    from . import app_commands
+    paths, _log, docker, _os_name = _app_setup(run)
+    return app_commands.open_command(run.args.what, paths, docker, out=sys.stdout)
+
+
+def _add_onionname(sub, name):
+    p = sub.add_parser(
+        name,
         help="The site's onionname (its OnionHome name): show | set NAME [--json]")
-    onionname_sub = p_onionname.add_subparsers(dest="onionname_command")
-    p_on_show = onionname_sub.add_parser("show", help="The recorded name, address and "
-                                                      "whether it is registered")
-    p_on_show.add_argument("--json", action="store_true", help="As JSON")
-    p_on_set = onionname_sub.add_parser(
+    onionname_sub = p.add_subparsers(dest="onionname_command")
+    p_show = onionname_sub.add_parser("show", help="The recorded name, address and "
+                                                   "whether it is registered")
+    p_show.add_argument("--json", action="store_true", help="As JSON")
+    p_set = onionname_sub.add_parser(
         "set", help="Pick (another) onionname: checked, registered with OnionHome "
                     "while the site is running, recorded in the config; a taken "
                     "name is refused with suggestions (exit 2)")
-    p_on_set.add_argument("name", metavar="NAME")
-    p_on_set.add_argument("--json", action="store_true", help="As JSON")
+    p_set.add_argument("name", metavar="NAME")
+    p_set.add_argument("--json", action="store_true", help="As JSON")
 
-    p_get = sub.add_parser(
-        "get",
+
+def _run_onionname(run):
+    from . import app_commands
+    args = run.args
+    paths, log, docker, os_name = _app_setup(run)
+    if not args.onionname_command:
+        return run.help("onionname")
+    if args.onionname_command == "show":
+        return app_commands.onionname_show(paths, json_output=args.json, out=sys.stdout)
+    # The registrar signs with the served key (key_manager.extract_keys:
+    # plain `docker`), so the docker environment _hub_context sets up.
+    _hub_context(args.data_dir, log)
+    return app_commands.onionname_set(args.name, paths, docker, os_name, log,
+                                      json_output=args.json, out=sys.stdout)
+
+
+# ---- OnionPressCLI's commands ----
+
+def _add_get(sub, name):
+    p = sub.add_parser(
+        name,
         help="Fetch a URL over Tor (curl inside the tor container) and print the body",
     )
-    p_get.add_argument(
+    p.add_argument(
         "url",
         help="http(s) URL, or a bare host such as abc...xyz.onion (http:// assumed)")
-    p_get.add_argument(
+    p.add_argument(
         "-i", "--headers", action="store_true",
         help="Include the response headers in the output (curl --include)")
-    p_get.add_argument(
+    p.add_argument(
         "--max-time", type=int, default=GET_DEFAULT_MAX_TIME, metavar="SECONDS",
         help=f"Give up after this many seconds (default {GET_DEFAULT_MAX_TIME})")
 
-    # The password is read by read_backup_password (environment, stdin or a
-    # prompt). The positional is the old interface, kept so existing scripts
-    # still work; it puts the password where other users can see it.
-    p_backup = sub.add_parser(
-        "backup", help="Create a backup",
+
+def _run_get(run):
+    args = run.args
+    return _cli(run).cmd_get(args.url, headers=args.headers, max_time=args.max_time)
+
+
+# The password is read by read_backup_password (environment, stdin or a
+# prompt). The positional is the old interface, kept so existing scripts
+# still work; it puts the password where other users can see it.
+def _add_backup(sub, name):
+    p = sub.add_parser(
+        name, help="Create a backup",
         epilog=f"The WP admin password (also used to encrypt the zip) is read "
                f"from ${BACKUP_PASSWORD_ENV}, else stdin, else a prompt.")
-    p_backup.add_argument(
+    p.add_argument(
         "password", nargs="?",
         help="Deprecated: visible to other local users; leave it out")
-    p_backup.add_argument("output", nargs="?", help="Output path (default: ~/OnionPress/backups/)")
-    p_backup.add_argument(
+    p.add_argument("output", nargs="?", help="Output path (default: ~/OnionPress/backups/)")
+    p.add_argument(
         "-o", "--output", dest="output_opt", metavar="OUTPUT",
         help="Output path, for use without the positional password")
-    p_backup.add_argument("--user", help="WP admin username (default: auto-resolve)")
-    _confirm.add_arguments(p_backup)
+    p.add_argument("--user", help="WP admin username (default: auto-resolve)")
+    _confirm.add_arguments(p)
 
-    p_restore = sub.add_parser(
-        "restore", help="Restore from backup",
+
+def _run_backup(run):
+    args = run.args
+    # Before OnionPressCLI: its Docker wrapper snapshots os.environ for every
+    # docker child, and read_backup_password takes the password out of it.
+    password = read_backup_password(args.password)
+    if not password:
+        return _confirm.answer_error("a password is required", args.json)
+    return _cli(run).cmd_backup(password, args.output_opt or args.output, args.user,
+                                check=args.check, json_output=args.json)
+
+
+def _add_restore(sub, name):
+    p = sub.add_parser(
+        name, help="Restore from backup",
         epilog=f"The backup password is read from ${BACKUP_PASSWORD_ENV}, "
                f"else stdin, else a prompt.")
-    p_restore.add_argument(
+    p.add_argument(
         "password", nargs="?",
         help="Deprecated: visible to other local users; leave it out")
-    p_restore.add_argument("backup_file", help="Path to backup .zip file")
-    _confirm.add_arguments(p_restore)
+    p.add_argument("backup_file", help="Path to backup .zip file")
+    _confirm.add_arguments(p)
 
-    p_reset = sub.add_parser("reset", help="Wipe all data and start fresh")
-    p_reset.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
-    _confirm.add_arguments(p_reset)
 
-    p_update = sub.add_parser(
-        "update",
+def _run_restore(run):
+    args = run.args
+    # Before OnionPressCLI, as backup's.
+    password = read_backup_password(args.password)
+    if not password:
+        if args.check:
+            # The UI asks for the password next, worded with the login
+            # the file's name carries (for the prompt only).
+            from .backup import backup_filename_username
+            return _confirm.answer_ask(
+                "password", args.json,
+                backup_user=backup_filename_username(args.backup_file))
+        return _confirm.answer_error("a password is required", args.json)
+    cli = _cli(run)
+    # A hub's recovery key, when one was given (cmd_restore asks at a
+    # terminal otherwise).
+    confirmed = _confirm.given(args)
+    if args.check:
+        return cli.cmd_restore_check(password, args.backup_file, run.hub_recovery_key,
+                                     confirmed, args.json)
+    return cli.cmd_restore(password, args.backup_file, run.hub_recovery_key,
+                           confirmed=confirmed, json_output=args.json)
+
+
+def _add_reset(sub, name):
+    p = sub.add_parser(name, help="Wipe all data and start fresh")
+    p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    _confirm.add_arguments(p)
+
+
+def _run_reset(run):
+    args = run.args
+    return _cli(run).cmd_reset(yes=args.yes, check=args.check, json_output=args.json,
+                               confirmed=_confirm.given(args))
+
+
+def _add_update(sub, name):
+    p = sub.add_parser(
+        name,
         help="(macOS) Check GitHub for a new release and install it, replacing "
              "the app bundle (--check to only check, --yes to skip the prompt)")
-    p_update.add_argument("--check", action="store_true", help="Only check; install nothing")
-    p_update.add_argument("--yes", "-y", action="store_true",
-                          help="Install without prompting (scripts, the menubar)")
-    p_update.add_argument("--json", action="store_true",
-                          help="Answer with one JSON object on the last line")
-    p_upimg = sub.add_parser(
-        "update-images",
+    p.add_argument("--check", action="store_true", help="Only check; install nothing")
+    p.add_argument("--yes", "-y", action="store_true",
+                   help="Install without prompting (scripts, the menubar)")
+    p.add_argument("--json", action="store_true",
+                   help="Answer with one JSON object on the last line")
+
+
+def _run_update(run):
+    # On Linux `update` is the launcher's own (the .deb's checked install):
+    # onionpress's help, exit 1, after OnionPressCLI's setup as before.
+    if detect_os() != OS.MACOS:
+        _cli(run)
+        return run.help()
+    # Replaces the bundle this process runs from: no OnionPressCLI setup,
+    # nothing but the updater.
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    return cmd_update(paths, _make_log_func(paths.log_file), check=args.check,
+                      yes=args.yes, json_output=args.json)
+
+
+def _add_update_images(sub, name):
+    p = sub.add_parser(
+        name,
         help="Pull the stack's pinned container images (the opt-in refresh)")
-    p_upimg.add_argument("--json", action="store_true",
-                         help="Answer with one JSON object on the last line")
-    p_uninst = sub.add_parser(
-        "uninstall",
+    p.add_argument("--json", action="store_true",
+                   help="Answer with one JSON object on the last line")
+
+
+def _add_uninstall(sub, name):
+    p = sub.add_parser(
+        name,
         help="(macOS) Remove OnionPress: the onion address and key, the site, "
              "the container VM and ~/.onionpress (asks first)")
-    _confirm.add_arguments(p_uninst)
+    _confirm.add_arguments(p)
 
-    p_ohu = sub.add_parser(
-        "onionheaven-unregister",
+
+def _run_uninstall(run):
+    # About to remove the data directory: no OnionPressCLI setup (it
+    # would create config and secrets there).
+    from . import handle_action as _ha
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    log = _make_log_func(paths.log_file)
+    os_name = detect_os().value
+    if os_name != "macos":
+        return _confirm.answer_error(
+            "onionpress uninstall is the Linux launcher's own command", args.json)
+    return cmd_uninstall(paths, Docker(paths, log_func=log), log,
+                         _ha.default_launcher(paths, os_name), check=args.check,
+                         json_output=args.json, confirmed=_confirm.given(args))
+
+
+# ---- OnionHeaven ----
+
+def _add_onionheaven_unregister(sub, name):
+    p = sub.add_parser(
+        name,
         help="Ask every OnionHeaven hub that may hold one of this install's "
              "onion service keys to delete its copy (before a reset, key "
              "import, restore or uninstall; the tor container must be "
              "running). Exit 0 when no hub holds anything any more")
-    p_ohu.add_argument("--reason", default="unregister",
-                       help="Why, for the record and the log (reset, ...)")
-    p_ohu.add_argument("--keep-address", default="",
-                       help="An address whose key stays (a restore of it): "
-                            "its registrations are left alone")
-    sub.add_parser(
-        "onionheaven-registrations",
-        help="List what the registration record says OnionHeaven hubs may "
-             "hold of this install's keys (no network)")
+    p.add_argument("--reason", default="unregister",
+                   help="Why, for the record and the log (reset, ...)")
+    p.add_argument("--keep-address", default="",
+                   help="An address whose key stays (a restore of it): "
+                        "its registrations are left alone")
 
-    p_cfu = sub.add_parser(
-        "check-for-update",
+
+def _run_onionheaven_unregister(run):
+    # Run by both launchers before a reset, key import, restore or
+    # uninstall: no OnionPressCLI setup (config/secrets creation, port
+    # probing) on a path that is about to remove them.
+    from .key_manager import is_valid_onion_address
+    args = run.args
+    keep = (args.keep_address or "").strip()
+    if keep and not is_valid_onion_address(keep):
+        print("ERROR: --keep-address is not an onion address", file=sys.stderr)
+        return 2
+    remaining = release_onionheaven(args.reason, keep_address=keep or None,
+                                    data_dir=args.data_dir)
+    # 0: no hub holds anything; 1: a hub may, and starting OnionPress
+    # or trying again could still take it back (the launchers ask
+    # before going on); 3: a hub may, but nothing here can sign for it
+    # any more (reported, recorded).
+    if any(i["why"] in _RETRYABLE for i in remaining):
+        return 1
+    return 3 if remaining else 0
+
+
+def _run_onionheaven_registrations(run):
+    from . import onionheaven
+    ctx = _hub_context(run.args.data_dir)
+    for addr, hub in onionheaven.registrations_left(ctx):
+        print(f"{addr} {hub}")
+    return 0
+
+
+def _add_check_for_update(sub, name):
+    p = sub.add_parser(
+        name,
         help="Check GitHub for a newer release (always exits 0)",
     )
-    p_cfu.add_argument("--json", action="store_true",
-                       help="Emit canonical JSON report on stdout")
-    p_cfu.add_argument("--current", help="Override detected current version")
+    p.add_argument("--json", action="store_true",
+                   help="Emit canonical JSON report on stdout")
+    p.add_argument("--current", help="Override detected current version")
 
-    sub.add_parser(
-        "smoke-test-wayback",
-        help="Publish a throwaway post and verify it got archived to the Wayback Machine",
-    )
 
-    sub.add_parser("generate-vanity",
-                   help="Generate a vanity .onion via mkp224o in the tor container")
+# ---- WordPress provisioning (the launchers' post-start steps) ----
 
-    sub.add_parser("admin-password",
-                   help="Print the recovery admin password (if any)")
-
-    p_ppi = sub.add_parser(
-        "provision-post-install",
+def _add_provision_post_install(sub, name):
+    p = sub.add_parser(
+        name,
         help="Run the WordPress post-install steps (multisite + theme + mu-plugins)",
     )
-    p_ppi.add_argument(
+    p.add_argument(
         "--themes-dir", required=True,
         help="Source directory containing the onionpress theme dir")
-    p_ppi.add_argument(
+    p.add_argument(
         "--plugins-dir", required=True,
         help="Source directory containing mu-plugins, sunrise.php, icons")
 
-    # Individual post-start provisioning steps. These are the helpers
-    # start_containers used to inline as bash function calls; the bash
-    # launchers now delegate each one through here.
-    sub.add_parser(
-        "verify-admin-password",
-        help="Validate a WP admin password (reads from stdin). Exit 0 = match.",
-    )
-    sub.add_parser("configure-ia-plugin",
-                   help="Configure the IA Wayback Machine Link Fixer in every site "
-                        "(before it is activated)")
-    sub.add_parser("configure-cache-enabler",
-                   help="Prepare Cache Enabler's activation (policy mu-plugin, FS_METHOD)")
-    sub.add_parser("apply-cache-policy",
-                   help="Check Cache Enabler's settings against OnionPress's cache "
-                        "policy; clear its stored pages (after activation)")
-    sub.add_parser("deactivate-wp-statistics",
-                   help="Remove WP-Statistics if present (clearnet leak)")
-    sub.add_parser("ensure-archive-s3-keys",
-                   help="Fetch shared archive.org S3 keys for Wayback archiving")
 
-    p_scrub = sub.add_parser(
-        "scrub",
+def _run_provision_post_install(run):
+    _cli(run)
+    from . import multisite
+    return multisite.provision_post_install(
+        themes_dir=run.args.themes_dir,
+        plugins_dir=run.args.plugins_dir,
+        log_func=print,
+    )
+
+
+def _run_verify_admin_password(run):
+    _cli(run)
+    from .backup import verify_wp_admin_password_any
+    pw = sys.stdin.read().rstrip("\n")
+    if not pw:
+        return 1
+    ok, _ = verify_wp_admin_password_any(pw)
+    return 0 if ok else 1
+
+
+def _multisite_step(step: str):
+    """The handler of a provisioning step: multisite.<step>, exit 0 when
+    it succeeds."""
+    def handle(run):
+        _cli(run)
+        from . import multisite
+        return 0 if getattr(multisite, step)(log_func=print) else 1
+    return handle
+
+
+def _add_scrub(sub, name):
+    p = sub.add_parser(
+        name,
         help="Full lifecycle test: backup → uninstall → install → restore → verify",
     )
-    p_scrub.add_argument(
+    p.add_argument(
         "password", nargs="?",
-        help="WordPress admin password (prompts if omitted)")
-    p_scrub.add_argument(
+        help="Deprecated (visible to other users): WordPress admin password; "
+             "set $ONIONPRESS_BACKUP_PASSWORD or be prompted instead")
+    p.add_argument(
         "--clean", action="store_true",
         help="Delete the backup zip after a successful scrub")
 
-    p_iba = sub.add_parser(
-        "import-backup-artifacts",
+
+def _run_scrub(run):
+    _cli(run)
+    from . import scrub as _scrub
+    # As backup's password: the environment (removed at once, so no child
+    # inherits it), the old positional with a warning, else scrub prompts.
+    password = os.environ.pop(BACKUP_PASSWORD_ENV, "") or None
+    if run.args.password:
+        print("WARNING: a password on the command line is visible to other "
+              "users of this computer. Leave it out to be prompted, or set "
+              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
+        password = run.args.password
+    return _scrub.run_scrub(
+        password=password,
+        clean=run.args.clean,
+    )
+
+
+# ---- backup and restore helpers for the launchers ----
+
+def _add_import_backup_artifacts(sub, name):
+    p = sub.add_parser(
+        name,
         help="Import a backup's container-side artifacts into the running "
              "containers (install-from-backup; no password needed)")
-    p_iba.add_argument(
+    p.add_argument(
         "--staging", required=True,
         help="Path to the already-extracted backup staging directory")
 
-    sub.add_parser(
-        "regenerate-derivatives",
-        help="Rebuild the resized image copies a restored backup left out "
-             "(no-op unless a restore left the pending marker; resumable)")
-    sub.add_parser(
-        "regenerate-derivatives-pending",
-        help="Exit 0 when a restore left resized images to rebuild (the host "
-             "marker in the data dir, or the one a backup carries in the "
-             "container's uploads/), 1 when not; both launchers' start gates "
-             "the detached regenerate-derivatives on it")
-    p_prune = sub.add_parser(
-        "prune-image-derivatives",
+
+def _run_regenerate_derivatives_pending(run):
+    # The launchers' regenerate_derivatives_pending() (Phase 4, #120):
+    # the two markers regenerate-derivatives itself acts on, asked the
+    # same way (derivatives.regeneration_pending). No OnionPressCLI
+    # setup; exit 0 = a rebuild is owed.
+    from . import derivatives
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths).docker_bin)
+    return 0 if pending else 1
+
+
+def _add_prune_image_derivatives(sub, name):
+    p = sub.add_parser(
+        name,
         help="Delete regenerable -WxH/-scaled image copies from a staged "
              "uploads dir (backup helper); prints '<files> <bytes>'")
-    p_prune.add_argument(
+    p.add_argument(
         "--uploads-dir", required=True,
         help="Path to the staged wp-content/uploads directory")
-    p_scrub = sub.add_parser(
-        "scrub-staging",
+
+
+def _add_scrub_staging(sub, name):
+    p = sub.add_parser(
+        name,
         help="Remove symbolic links, hard links to outside files and "
              "special files from a staged backup tree (backup helper)")
-    p_scrub.add_argument(
+    p.add_argument(
         "--dir", required=True,
         help="Staged tree copied out of a container (e.g. wp-content)")
-    p_stage = sub.add_parser(
-        "stage-wp-content",
+
+
+def _add_stage_wp_content(sub, name):
+    p = sub.add_parser(
+        name,
         help="Copy wp-content out of the WordPress container, read as "
              "www-data, as plain files and folders (backup helper)")
-    p_stage.add_argument("--dest", required=True, help="Folder to fill")
-    p_stage_hub = sub.add_parser(
-        "stage-hub-data",
+    p.add_argument("--dest", required=True, help="Folder to fill")
+
+
+def _add_stage_hub_data(sub, name):
+    p = sub.add_parser(
+        name,
         help="Copy a hub's OnionHeaven registry and keys out of the "
              "onionheaven container (backup helper; exit 3: not a hub)")
-    p_stage_hub.add_argument("--dest", required=True, help="Folder to fill")
-    p_sp_check = sub.add_parser(
-        "settings-page-restore-check",
+    p.add_argument("--dest", required=True, help="Folder to fill")
+
+
+def _add_settings_page_restore_check(sub, name):
+    p = sub.add_parser(
+        name,
         help="Exit 3 and say why if an extracted backup must not be restored "
              "through the WordPress Settings page (restore helper)")
-    p_sp_check.add_argument(
+    p.add_argument(
         "--staging", required=True,
         help="Directory the backup was extracted into")
-    p_wp_conf = sub.add_parser(
-        "wordpress-safe-config",
+
+
+def _add_wordpress_safe_config(sub, name):
+    p = sub.add_parser(
+        name,
         help="Write a config file cut to what a backup handed to WordPress "
              "may carry (backup helper); prints the secrets left out, by name")
-    p_wp_conf.add_argument("--config", required=True, help="Config file to read")
-    p_wp_conf.add_argument("--dest", required=True, help="File to write (new)")
-    p_restore_hub = sub.add_parser(
-        "restore-hub-data",
+    p.add_argument("--config", required=True, help="Config file to read")
+    p.add_argument("--dest", required=True, help="File to write (new)")
+
+
+def _add_restore_hub_data(sub, name):
+    p = sub.add_parser(
+        name,
         help="Put a backup's OnionHeaven registry and keys onto the hub "
              "data volume (restore helper)")
-    p_restore_hub.add_argument("--src", required=True,
-                               help="The backup's onionheaven/ folder")
-    p_stage_hub_backup = sub.add_parser(
-        "stage-hub-backup",
+    p.add_argument("--src", required=True,
+                   help="The backup's onionheaven/ folder")
+
+
+def _add_stage_hub_backup(sub, name):
+    p = sub.add_parser(
+        name,
         help="Put a hub's registry and keys into a staged backup, sealed to "
              "its recovery key if one is set up; print the metadata fields "
              "(backup helper; exit 3: not a hub, 4: no answer)")
-    p_stage_hub_backup.add_argument("--staging", required=True,
-                                    help="The staged backup folder")
-    p_sp_backup = sub.add_parser(
-        "settings-page-backup-check",
+    p.add_argument("--staging", required=True,
+                   help="The staged backup folder")
+
+
+def _add_settings_page_backup_check(sub, name):
+    p = sub.add_parser(
+        name,
         help="Exit 3 and say why if this node must not be backed up through "
              "the WordPress Settings page (an OnionHeaven hub or OnionHome, "
              "or one that could not be checked)")
-    p_sp_backup.add_argument("--address", default="",
-                             help="This node's onion address")
-    p_sp_restore_node = sub.add_parser(
-        "settings-page-restore-node-check",
+    p.add_argument("--address", default="",
+                   help="This node's onion address")
+
+
+def _add_settings_page_restore_node_check(sub, name):
+    p = sub.add_parser(
+        name,
         help="Exit 3 and say why if nothing may be restored on this node "
              "through the WordPress Settings page (an OnionHeaven hub or "
              "OnionHome, or one that could not be checked)")
-    p_sp_restore_node.add_argument("--address", default="",
-                                   help="This node's onion address")
+    p.add_argument("--address", default="",
+                   help="This node's onion address")
 
-    # An OnionHeaven hub's backup recovery key. Its private half is printed
-    # once by create and otherwise read from $ONIONPRESS_HUB_RECOVERY_KEY,
-    # stdin or a prompt, never from argv.
-    p_hrk = sub.add_parser(
-        "hub-recovery-key",
+
+# An OnionHeaven hub's backup recovery key. Its private half is printed
+# once by create and otherwise read from $ONIONPRESS_HUB_RECOVERY_KEY,
+# stdin or a prompt, never from argv.
+def _add_hub_recovery_key(sub, name):
+    p = sub.add_parser(
+        name,
         help="An OnionHeaven hub's backup recovery key: the hub's registry and "
              "registrants' keys in its backups are sealed to it",
         epilog="The private half is read from $ONIONPRESS_HUB_RECOVERY_KEY, "
                "else stdin, else a prompt; never give it as an argument.")
-    hrk = p_hrk.add_subparsers(dest="hrk_command")
-    p_hrk_create = hrk.add_parser(
+    hrk = p.add_subparsers(dest="hrk_command")
+    p_create = hrk.add_parser(
         "create", help="Make the key; keep the public half here and print the "
                        "private half once, to keep off this machine")
-    p_hrk_create.add_argument("--force", action="store_true",
-                              help="Replace a key already set up (backups sealed "
-                                   "to it still need its private half)")
+    p_create.add_argument("--force", action="store_true",
+                          help="Replace a key already set up (backups sealed "
+                               "to it still need its private half)")
     hrk.add_parser("show", help="Say whether a key is set up, and its id")
     hrk.add_parser("check", help="Check that a private half you kept is the key "
                                  "set up here")
-    p_hrk_restore = hrk.add_parser(
+    p_restore = hrk.add_parser(
         "restore", help="Restore only the hub's sealed registry and registrants' "
                         "keys from a backup (OnionPress must be running; the "
                         "backup password, then the key)")
-    p_hrk_restore.add_argument("backup_file", help="Path to the backup .zip file")
-    p_put = sub.add_parser(
-        "put-wp-tree",
+    p_restore.add_argument("backup_file", help="Path to the backup .zip file")
+
+
+def _run_hub_recovery_key(run):
+    # Needs only the data directory (restore: docker too): no
+    # OnionPressCLI setup.
+    args, data_dir = run.args, run.data_dir
+    if args.hrk_command == "create":
+        return OnionPressCLI.cmd_hub_recovery_key_create(data_dir, force=args.force)
+    if args.hrk_command == "show":
+        return OnionPressCLI.cmd_hub_recovery_key_show(data_dir)
+    if args.hrk_command == "check":
+        return OnionPressCLI.cmd_hub_recovery_key_check(data_dir, run.hub_recovery_key)
+    if args.hrk_command == "restore":
+        password = read_backup_password()
+        if not password:
+            print("ERROR: a password is required.", file=sys.stderr)
+            return 1
+        return OnionPressCLI.cmd_hub_recovery_key_restore(
+            args.backup_file, password, run.hub_recovery_key)
+    return run.help("hub-recovery-key")
+
+
+def _add_put_wp_tree(sub, name):
+    p = sub.add_parser(
+        name,
         help="Copy a host folder into the WordPress container, written as "
              "www-data (restore and plugin-install helper)")
-    p_put.add_argument("--src", required=True, help="Host folder")
-    p_put.add_argument("--dest", required=True,
-                       help="Folder in the container (replaced whole unless --merge)")
-    p_put.add_argument("--merge", action="store_true",
-                       help="Unpack over what is at --dest instead of replacing it")
+    p.add_argument("--src", required=True, help="Host folder")
+    p.add_argument("--dest", required=True,
+                   help="Folder in the container (replaced whole unless --merge)")
+    p.add_argument("--merge", action="store_true",
+                   help="Unpack over what is at --dest instead of replacing it")
 
-    p_open_login = sub.add_parser(
-        "open-login",
+
+def _add_open_login(sub, name):
+    p = sub.add_parser(
+        name,
         help="Open a localhost or .onion URL of this site in the default "
              "browser, logged in as the admin (one-time token, never in argv)")
-    p_open_login.add_argument("url", help="e.g. http://localhost:8080/wp-admin/")
+    p.add_argument("url", help="e.g. http://localhost:8080/wp-admin/")
 
-    sub.add_parser(
-        "safe-config",
-        help="Print the allowlisted (non-secret) config keys as JSON — "
-             "what the WordPress container may see")
-    p_wp_logs = sub.add_parser(
-        "wordpress-logs",
+
+def _run_open_login(run):
+    # Needs only docker and a browser: skip OnionPressCLI's setup.
+    from .launcher_ops import open_login
+    try:
+        open_login(run.args.url)
+    except RuntimeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+# ---- what the WordPress container may see (the Linux launcher's status) ----
+
+def _run_safe_config(run):
+    # Read-only, and run by the Linux launcher every 30 s: skip
+    # OnionPressCLI's setup (config/secrets creation, port probing).
+    from .config import read_config, redact_config
+    config = read_config(os.path.join(run.data_dir, "config"))
+    print(json.dumps(redact_config(config), indent=2))
+    return 0
+
+
+def _add_wordpress_logs(sub, name):
+    p = sub.add_parser(
+        name,
         help="Print the end of a log, scrubbed for the WordPress container "
              "(the status page's recent-logs.txt)")
-    p_wp_logs.add_argument("--log-file", required=True, help="Log to read")
-    sub.add_parser(
-        "wordpress-status",
-        help="Read status JSON on stdin and print the fields the WordPress "
-             "container may see")
-    sub.add_parser(
-        "retire-old-onionheaven-containers",
-        help="Before the first `compose up`: remove every onionpress-tor, "
-             "onionheaven and onionheaven-(poll|takeover)-N that does not "
-             "mount onionpress-onionheaven-data (started by an older "
-             "OnionPress; the hub data move must not race them); always "
-             "exits 0")
-    sub.add_parser(
-        "migrate-tor-network",
-        help="Before the first `compose up`: recreate an onionpress-network "
-             "whose bridge is not onionpress-tor0 (made by an older "
-             "OnionPress; the Tor side's rules name the bridge), removing "
-             "OnionPress's own containers on it and disconnecting anything "
-             "else; always exits 0")
-    sub.add_parser(
-        "migrate-key-volume",
-        help="Before anything starts Tor: copy the onion service key out of "
-             "onionpress-arti-state (its name until 2026-09-25) into "
-             "onionpress-onion-keys once, verified, in the pinned tor image "
-             "with no network; exit 1 (the start must stop) when Docker does "
-             "not answer, the copy fails or the image is not here")
-    p_db_import = sub.add_parser(
-        "db-import",
+    p.add_argument("--log-file", required=True, help="Log to read")
+
+
+def _run_wordpress_logs(run):
+    # Run by the Linux launcher on every status write; read-only like
+    # safe-config, so it skips OnionPressCLI's setup too.
+    from . import redact
+    try:
+        sys.stdout.write(redact.wordpress_log_excerpt(run.args.log_file, run.data_dir))
+    except OSError as e:
+        print(f"ERROR: {e.strerror or e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_wordpress_status(run):
+    # As wordpress-logs.
+    from . import redact
+    try:
+        status = json.load(sys.stdin)
+    except ValueError as e:
+        print(f"ERROR: status is not JSON: {e}", file=sys.stderr)
+        return 1
+    if not isinstance(status, dict):
+        print("ERROR: status is not a JSON object", file=sys.stderr)
+        return 1
+    print(json.dumps(redact.status_for_wordpress(status), indent=2))
+    return 0
+
+
+# ---- the launchers' start steps (Phase 4, #120) ----
+
+def _run_start_step(run):
+    # The launchers' retire_old_onionheaven_containers() and
+    # migrate_tor_network(): ContainerManager's own steps (start_core runs
+    # them too), logged in the launcher's format; no OnionPressCLI setup.
+    # Exit 0 whatever is found: neither step may stop a start.
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    manager = _start_step_manager(paths)
+    if run.args.command == "migrate-tor-network":
+        manager.migrate_tor_network()
+    else:
+        manager.retire_old_onionheaven_containers()
+    return 0
+
+
+def _run_migrate_key_volume(run):
+    # The launchers' migrate_key_volume(): ContainerManager's, logged in
+    # the launcher's format; no OnionPressCLI setup (it runs before the
+    # stack is up). Unlike the two steps above, its status matters: 1
+    # stops the start, since starting tor would create an empty
+    # onionpress-onion-keys that the next start took for the migrated key.
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    return 0 if _start_step_manager(paths).migrate_key_volume() else 1
+
+
+def _add_db_import(sub, name):
+    p = sub.add_parser(
+        name,
         help="Import a restored database dump into the running onionpress-db "
              "as the wordpress user (the Linux launcher's db_import; the "
              "password is the first line of stdin, never an argument): the "
              "client runs --sandbox --binary-mode --local-infile=0 with the "
              "dump on its stdin after the password line, and a client too old "
              "for --sandbox is refused; exit 1 on any failure")
-    p_db_import.add_argument(
+    p.add_argument(
         "--sql-file", required=True, help="The dump to import (wordpress.sql)")
-    p_is_hub = sub.add_parser(
-        "is-onionheaven-hub",
+
+
+def _run_db_import(run):
+    # The Linux launcher's db_import() (Phase 4, #120): backup.db_import,
+    # what restore_container_artifacts runs for the Mac's and the CLI's
+    # restores. The password is stdin's first line (the launcher pipes
+    # it in; argv is every user's to read); the dump follows it into the
+    # sandboxed client's stdin. No OnionPressCLI setup. Every refusal
+    # (an old client, a failed import) is one ERROR line and exit 1,
+    # which restore_backup turns into its "Database import failed".
+    from .backup import db_import
+    password = sys.stdin.readline().rstrip("\n") if sys.stdin is not None else ""
+    if not password:
+        print("ERROR: no database password on stdin", file=sys.stderr)
+        return 1
+    try:
+        db_import(run.args.sql_file, password)
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _add_is_onionheaven_hub(sub, name):
+    p = sub.add_parser(
+        name,
         help="Exit 0 when the onion address given is the OnionHeaven hub's "
              "(onionheaven.is_onionheaven_instance, the Mac daemon's rule), "
              "1 otherwise; the Linux launcher's write_status asks it, so "
              "status.json's onionheaven.server_active is decided by the "
              "node's address, never by the onionheaven container, which "
              "every node runs (issue #345)")
-    p_is_hub.add_argument("address", nargs="?", default="",
-                          help="The node's served onion address")
-    sub.add_parser(
-        "using-local-images",
-        help="Exit 0 when the stack points at images built on this machine "
-             "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "
-             "or ~/.onionpress/config, not on ghcr.io), 1 when at published "
-             "ones; both launchers gate every image pull on it")
-    p_egress = sub.add_parser(
-        "wordpress-egress",
+    p.add_argument("address", nargs="?", default="",
+                   help="The node's served onion address")
+
+
+def _run_is_onionheaven_hub(run):
+    # The Linux launcher's is_onionheaven_hub() (issue #345): the Mac
+    # daemon's rule, by address. No OnionPressCLI setup (every status
+    # tick, beside a live stack).
+    from .onionheaven import is_onionheaven_instance
+    return 0 if is_onionheaven_instance(run.args.address) else 1
+
+
+def _run_using_local_images(run):
+    # The launchers' using_local_images(): the one copy of the rule
+    # (containers.using_local_images; the menubar and update-images
+    # call it in-process). Before the stack is up, so no OnionPressCLI
+    # setup (config/secrets creation, port probing).
+    from .containers import using_local_images
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    return 0 if using_local_images(paths.config_file) else 1
+
+
+def _add_wordpress_egress(sub, name):
+    p = sub.add_parser(
+        name,
         help="Shut WordPress's network (onionpress-wp0) off from everything "
              "but replies to connections made from outside, the Tor side's "
              "(onionpress-tor0) off from the host and the LAN, and "
              "WordPress's published port off from every container, wherever "
              "this platform's Docker keeps its bridges (issue #144); prints "
              "one status line")
-    p_egress.add_argument(
+    p.add_argument(
         "--check", action="store_true",
         help="Only say whether the rules are in place")
-    p_egress.add_argument(
+    p.add_argument(
         "--wp-port", type=int, default=None,
         help="WordPress's published port (default: $ONIONPRESS_WP_PORT, "
              "which both launchers export; without either the published-"
              "port rule is left as it is)")
-    p_egress.add_argument(
+    p.add_argument(
         "--bin-dir", default=None,
         help="Where the app's limactl is (macOS; default: the app bundle's)")
-    sub.add_parser(
-        "apply-settings-updates",
-        help="Merge the settings page's config-updates.json (on stdin) into "
-             "the config — allowlisted keys with valid values only; prints "
-             "'changed|unchanged|rejected KEY' lines, never values")
 
-    # Backup helpers for the bash launchers. The password comes on stdin,
-    # never in argv.
-    p_pack = sub.add_parser(
-        "pack-backup",
+
+def _run_wordpress_egress(run):
+    # The launchers' block_wordpress_egress() (Phase 4, #120): run
+    # before they start the containers, so no OnionPressCLI setup
+    # (config/secrets creation, port probing). Their bash body is
+    # `… 2>&1 | tee -a "$LOG_FILE"` and returns 0 whatever happens
+    # (the Mac puts a non-zero status into its START SUMMARY), so the
+    # verdict is logged here in their `[ts] msg` format; --check (not
+    # a launcher's call) prints the bare status line. Never a
+    # traceback: whatever goes wrong is the WARNING's words.
+    import dataclasses
+    from . import wordpress_egress
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    if args.bin_dir:
+        paths = dataclasses.replace(paths, bin_dir=args.bin_dir)
+    wp_port = args.wp_port
+    if wp_port is None and os.environ.get("ONIONPRESS_WP_PORT", "").isdigit():
+        wp_port = int(os.environ["ONIONPRESS_WP_PORT"])
+    try:
+        result = wordpress_egress.ensure(
+            paths, Docker(paths), action="check" if args.check else "apply",
+            wp_port=wp_port)
+    except Exception as e:  # a start must never stop here
+        result = wordpress_egress.Result(False, "", f"error: {e}")
+    if args.check:
+        print(result.line())
+    else:
+        _log_wordpress_egress_verdict(result, _launcher_log_func(), paths.log_file)
+    return 0 if result.ok else 1
+
+
+def _run_apply_settings_updates(run):
+    # The payload was written inside WordPress, so it is untrusted
+    # (config.SETTINGS_PAGE_KEYS). Same fast path as safe-config: only
+    # the config file is touched.
+    from .config import apply_settings_updates
+    try:
+        updates = json.loads(sys.stdin.read())
+    except ValueError:
+        print("ERROR: config-updates.json is not valid JSON", file=sys.stderr)
+        return 1
+    applied = apply_settings_updates(os.path.join(run.data_dir, "config"), updates)
+    changed = {key for key, _old, _new in applied.changes}
+    for key in applied.accepted:
+        print(f"{'changed' if key in changed else 'unchanged'} {key}")
+    for key in applied.rejected:
+        print(f"rejected {key}")
+    for key in applied.held:
+        print(f"held {key}")
+    return 0
+
+
+# Backup helpers for the bash launchers. The password comes on stdin,
+# never in argv.
+def _add_pack_backup(sub, name):
+    p = sub.add_parser(
+        name,
         help="Zip and encrypt a staged backup directory (backup helper; "
              "reads the password from stdin)")
-    p_pack.add_argument(
+    p.add_argument(
         "--staging", required=True,
         help="Staged backup tree (metadata.json, tor-keys/, database/, ...)")
-    p_pack.add_argument(
+    p.add_argument(
         "--output", required=True, help="Backup file to write")
-    p_extract = sub.add_parser(
-        "extract-backup",
+
+
+def _add_extract_backup(sub, name):
+    p = sub.add_parser(
+        name,
         help="Decrypt and extract a backup, either format, into a directory "
              "(restore helper; reads the password from stdin)")
-    p_extract.add_argument(
+    p.add_argument(
         "--archive", required=True, help="Backup file to read")
-    p_extract.add_argument(
+    p.add_argument(
         "--dest", required=True, help="Directory to extract into")
 
-    p_baddr = sub.add_parser(
-        "backup-address",
+
+def _run_pack_or_extract_backup(run):
+    args = run.args
+    cli = _cli(run)
+    pw = sys.stdin.read().rstrip("\n")
+    if not pw:
+        print("ERROR: no password on stdin", file=sys.stderr)
+        return 1
+    if args.command == "pack-backup":
+        return cli.cmd_pack_backup(args.staging, args.output, pw)
+    return cli.cmd_extract_backup(args.archive, args.dest, pw)
+
+
+def _add_backup_address(sub, name):
+    p = sub.add_parser(
+        name,
         help="Validate an extracted backup and print the onion address its "
              "key belongs to (restore helper; exit 1 if invalid)")
-    p_baddr.add_argument(
+    p.add_argument(
         "--staging", required=True,
         help="Directory the backup was extracted into")
 
-    p_config = sub.add_parser(
-        "config",
+
+# ---- settings ----
+
+def _add_config(sub, name):
+    p = sub.add_parser(
+        name,
         help="Read and change settings in ~/.onionpress/config "
              "(get KEY | set KEY VALUE | unset KEY | list [--json])",
         description="Settings: every key `config list` shows, with the check "
@@ -2311,114 +2745,404 @@ def main(argv: list[str] = None) -> int:
                     "REGISTRATIONS are hand-edit only. A secret "
                     "(CLOUDFLARE_TUNNEL_TOKEN) is set with VALUE `-` and the "
                     "value on stdin, never on the command line.")
-    config_sub = p_config.add_subparsers(dest="config_command")
-    p_cget = config_sub.add_parser("get", help="Print one setting's value")
-    p_cget.add_argument("key", metavar="KEY")
-    p_cset = config_sub.add_parser(
+    config_sub = p.add_subparsers(dest="config_command")
+    p_get = config_sub.add_parser("get", help="Print one setting's value")
+    p_get.add_argument("key", metavar="KEY")
+    p_set = config_sub.add_parser(
         "set", help="Change one setting (VALUE `-` reads the value from stdin)")
-    p_cset.add_argument("key", metavar="KEY")
-    p_cset.add_argument("value", metavar="VALUE")
+    p_set.add_argument("key", metavar="KEY")
+    p_set.add_argument("value", metavar="VALUE")
     # ADDRESS_PREFIX the live address does not start with asks
     # "prefix-change" (onionpress.confirm).
-    _confirm.add_arguments(p_cset)
-    p_cunset = config_sub.add_parser(
+    _confirm.add_arguments(p_set)
+    p_unset = config_sub.add_parser(
         "unset", help="Remove one setting's line, so its default applies")
-    p_cunset.add_argument("key", metavar="KEY")
-    p_cunset.add_argument("--json", action="store_true",
-                          help="Answer with one JSON object on the last line")
-    p_clist = config_sub.add_parser(
+    p_unset.add_argument("key", metavar="KEY")
+    p_unset.add_argument("--json", action="store_true",
+                         help="Answer with one JSON object on the last line")
+    p_list = config_sub.add_parser(
         "list", help="Print every setting (a secret only as <set>/<empty>)",
         epilog="\n".join(f"  {k}: {v}" for k, v in sorted(_config_key_help().items())),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p_clist.add_argument("--json", action="store_true",
-                         help="As JSON: {\"settings\": {...}, \"hand_edit_only\": [...]}")
+    p_list.add_argument("--json", action="store_true",
+                        help="As JSON: {\"settings\": {...}, \"hand_edit_only\": [...]}")
 
-    p_oh = sub.add_parser(
-        "onionheaven",
+
+def _run_config(run):
+    # Only the config file, its change marker and the login item /
+    # user units: no OnionPressCLI setup (no Docker, no port probing).
+    from . import config as _config
+    args = run.args
+    if not args.config_command:
+        return run.help("config")
+    paths = resolve_paths(data_dir=args.data_dir)
+    return _config.run_config_command(
+        args, run.data_dir, _file_log_func(paths.log_file),
+        os_name=detect_os().value, app_bundle=paths.app_bundle)
+
+
+def _add_onionheaven(sub, name):
+    p = sub.add_parser(
+        name,
         help="Keep the site reachable through OnionHeaven: enable | disable | "
              "status [--json] | overview [--json]")
-    p_oh.add_argument("onionheaven_command", nargs="?", default="status",
-                      metavar="{enable,disable,status,overview}")
-    p_oh.add_argument("--json", action="store_true",
-                      help="status as JSON (enabled, choice, hub, registered, may_hold_key); "
-                           "overview as JSON (client, hub, known_hosts)")
+    p.add_argument("onionheaven_command", nargs="?", default="status",
+                   metavar="{enable,disable,status,overview}")
+    p.add_argument("--json", action="store_true",
+                   help="status as JSON (enabled, choice, hub, registered, may_hold_key); "
+                        "overview as JSON (client, hub, known_hosts)")
 
-    p_rconf = sub.add_parser(
-        "restore-config",
+
+def _run_onionheaven(run):
+    # As config: the config file and the registration record, no network.
+    from . import onionheaven
+    return onionheaven.run_onionheaven_command(
+        run.args.onionheaven_command, _hub_context(run.args.data_dir),
+        json_output=run.args.json)
+
+
+def _add_restore_config(sub, name):
+    p = sub.add_parser(
+        name,
         help="Merge an extracted backup's user preferences into a config "
              "file (restore helper; an allowlist, never a copy)")
-    p_rconf.add_argument(
+    p.add_argument(
         "--staging", required=True,
         help="Directory the backup was extracted into")
-    p_rconf.add_argument("--config", required=True, help="Config file to update")
-    p_rconf.add_argument(
+    p.add_argument("--config", required=True, help="Config file to update")
+    p.add_argument(
         "--address", default="",
         help="The restored onion address (ADDRESS_PREFIX must match it)")
 
-    # The WordPress Settings page's requests (issue #366): one handler for
-    # both platforms, run by onionpress-watcher.timer on Linux and by the
-    # menubar's status loop on a Mac.
-    p_ha = sub.add_parser(
-        "handle-action",
+
+# ---- the WordPress Settings page's requests and the Mac daemon ----
+
+# The WordPress Settings page's requests (issue #366): one handler for
+# both platforms, run by onionpress-watcher.timer on Linux and by the
+# menubar's status loop on a Mac.
+def _add_handle_action(sub, name):
+    p = sub.add_parser(
+        name,
         help="Handle the WordPress Settings page's request (requested-action "
              "in the shared volume), if there is one")
-    p_ha.add_argument(
+    p.add_argument(
         "--launcher", default="",
         help="The launcher script the actions run through (default: this "
              "install's)")
-    p_ha.add_argument(
+    p.add_argument(
         "--cancel", action="store_true",
         help="The question a previous run asked was answered Cancel")
-    _confirm.add_arguments(p_ha, check=False)
-    sub.add_parser(
-        "apply-config",
-        help="Apply the Settings page's config-updates.json (the allowlisted "
-             "keys), then remove it")
-    sub.add_parser(
-        "upload-analytics",
-        help="Upload the diagnostic logs to OnionHome now (Share Now; needs "
-             f"{SHARING_CONFIG_KEY}=yes and a running OnionPress): the daemon "
-             "takes the request within a cycle")
-    p_daemon = sub.add_parser(
-        "daemon",
+    _confirm.add_arguments(p, check=False)
+
+
+def _run_handle_action(run):
+    # Run every 10 s (Linux) or every status tick (Mac): no
+    # OnionPressCLI setup (config/secrets creation, port probing).
+    from . import handle_action as _ha
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    log = _make_log_func(paths.log_file)
+    os_name = detect_os().value
+    host = _ha.Host(
+        launcher=(getattr(args, "launcher", "") or _ha.default_launcher(paths, os_name)),
+        paths=paths, docker=Docker(paths, log_func=log), log=log, os_name=os_name,
+        version=__version__)
+    if args.command == "apply-config":
+        return 1 if _ha.apply_config(host, out=sys.stdout) is None else 0
+    result = _ha.handle(host, confirmed=_confirm.given(args), cancel=args.cancel)
+    if args.json:
+        print(_confirm.dumps(result))
+    return 0
+
+
+def _run_upload_analytics(run):
+    # Share Now from the command line (#351): both launchers'
+    # `upload-analytics` is this. It reads the config and leaves a
+    # marker, so no OnionPressCLI setup (config/secrets creation, port
+    # probing).
+    from . import analytics_sharing
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    return analytics_sharing.request_upload(paths, detect_os().value, out=sys.stdout)
+
+
+def _add_daemon(sub, name):
+    p = sub.add_parser(
+        name,
         help="The Mac's long-running loops (status, probe, heartbeat, the "
              "Settings page's requests, log captures, the extension proxy), "
              "as a launchd agent: daemon start | stop | status | offline, or "
              "serve (the foreground process launchd runs)")
-    p_daemon.add_argument("daemon_command", nargs="?", default="serve",
-                          choices=("serve", "start", "stop", "status", "offline"))
-    p_daemon.add_argument("--json", action="store_true", help="Answer in JSON")
-    p_daemon.add_argument("--no-offline", action="store_true",
-                          help="stop: without telling the hub /offline (an update: "
-                               "the daemon comes right back)")
-    p_daemon.add_argument("--launcher", default="",
-                          help="The launcher script the agent runs (default: this install's)")
-    p_spb = sub.add_parser(
-        "settings-page-backup",
+    p.add_argument("daemon_command", nargs="?", default="serve",
+                   choices=("serve", "start", "stop", "status", "offline"))
+    p.add_argument("--json", action="store_true", help="Answer in JSON")
+    p.add_argument("--no-offline", action="store_true",
+                   help="stop: without telling the hub /offline (an update: "
+                        "the daemon comes right back)")
+    p.add_argument("--launcher", default="",
+                   help="The launcher script the agent runs (default: this install's)")
+
+
+def _run_daemon(run):
+    # The loops (onionpress.daemon, issue #367): no OnionPressCLI setup,
+    # the daemon resolves its own ports and docker environment.
+    from . import daemon as _daemon
+    from . import handle_action as _ha
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    os_name = detect_os().value
+    launcher = args.launcher or _ha.default_launcher(paths, os_name)
+    return _daemon.run_daemon_command(
+        args.daemon_command, paths, _file_log_func(paths.log_file),
+        launcher_script=launcher, json_output=args.json, version=__version__,
+        no_offline=args.no_offline)
+
+
+# The page's own backup and restore, run by handle-action through the
+# launcher (on Linux the launcher's bash does these itself), and the
+# welcome screen's staging of a backup to install from.
+def _add_settings_page_backup(sub, name):
+    p = sub.add_parser(
+        name,
         help="The Settings page's backup: for WordPress, so without the hub "
              "data, the host's secrets or (on a Mac) the onion service key; "
              "the password from $ONIONPRESS_BACKUP_PASSWORD or stdin")
-    p_spb.add_argument("output", help="Where to write the zip")
-    p_spb.add_argument("--json", action="store_true",
-                       help="Answer with one JSON object on the last line")
-    p_prep = sub.add_parser(
-        "prepare-restore",
+    p.add_argument("output", help="Where to write the zip")
+    p.add_argument("--json", action="store_true",
+                   help="Answer with one JSON object on the last line")
+
+
+def _add_prepare_restore(sub, name):
+    p = sub.add_parser(
+        name,
         help="Stage a backup for a first start that restores it (the welcome "
              "screen's Restore from backup): extract, seed the key, apply the "
              "config overrides and write the .install-from-backup marker; the "
              "password from $ONIONPRESS_BACKUP_PASSWORD or stdin")
-    p_prep.add_argument("backup_file", help="The backup zip")
-    p_prep.add_argument("--json", action="store_true",
-                        help="Answer with one JSON object on the last line")
-    p_spr = sub.add_parser(
-        "settings-page-restore",
+    p.add_argument("backup_file", help="The backup zip")
+    p.add_argument("--check", action="store_true",
+                   help="Only open the backup and answer its onion address and "
+                        "whether its key is left out; change nothing")
+    p.add_argument("--json", action="store_true",
+                   help="Answer with one JSON object on the last line")
+
+
+def _add_settings_page_restore(sub, name):
+    p = sub.add_parser(
+        name,
         help="The Settings page's restore: in place, never on a hub or "
              "OnionHome, never a hub's keys; a backup of another address "
              "needs --confirmed address-change; the password from "
              "$ONIONPRESS_BACKUP_PASSWORD or stdin")
-    p_spr.add_argument("backup_file", help="The uploaded backup zip")
-    _confirm.add_arguments(p_spr, check=False)
+    p.add_argument("backup_file", help="The uploaded backup zip")
+    _confirm.add_arguments(p, check=False)
 
+
+def _run_settings_page_command(run):
+    args, data_dir = run.args, run.data_dir
+    password = read_backup_password()
+    if args.command == "prepare-restore" and args.check:
+        if not password:
+            return _confirm.answer_ask("password", args.json)
+        return cmd_prepare_restore_check(args.backup_file, password, args.json)
+    if not password:
+        return _confirm.answer_error("a password is required", args.json)
+    if args.command == "prepare-restore":
+        return cmd_prepare_restore(args.backup_file, password, data_dir, args.json)
+    if args.command == "settings-page-backup":
+        return cmd_settings_page_backup(args.output, password, data_dir, args.json)
+    return cmd_settings_page_restore(
+        args.backup_file, password, data_dir, args.json, _confirm.given(args))
+
+
+# Restore and backup helpers run by the launchers mid-restore or
+# mid-backup (put-wp-tree: plugin installs too) are OnionPressCLI's static
+# methods: no OnionPressCLI setup (config/secrets creation, port probing).
+# Individual post-start provisioning steps are the helpers start_containers
+# used to inline as bash function calls; the bash launchers now delegate
+# each one through here.
+_COMMANDS = [
+    # (name, adds its parser: build(sub, name), its handler: run(_Run) -> exit code)
+    ("start", _plain("Start OnionPress"), lambda run: _cli(run).cmd_start()),
+    ("stop", _plain("Stop OnionPress"), lambda run: _cli(run).cmd_stop()),
+    ("restart", _plain("Restart OnionPress"), lambda run: _cli(run).cmd_restart()),
+    ("status", _plain("Show container status (JSON)"), lambda run: _cli(run).cmd_status()),
+    ("version", _add_version, _run_version),
+    ("address", _add_address, _run_address),
+    ("logs", _add_logs, _run_logs),
+    ("check-reachability", _add_check_reachability, _run_check_reachability),
+    ("check-docker", _add_check_docker, _run_check_docker),
+    ("open", _add_open, _run_open),
+    ("onionname", _add_onionname, _run_onionname),
+    ("get", _add_get, _run_get),
+    ("backup", _add_backup, _run_backup),
+    ("restore", _add_restore, _run_restore),
+    ("reset", _add_reset, _run_reset),
+    ("update", _add_update, _run_update),
+    ("update-images", _add_update_images,
+     lambda run: _cli(run).cmd_update_images(json_output=run.args.json)),
+    ("uninstall", _add_uninstall, _run_uninstall),
+    ("onionheaven-unregister", _add_onionheaven_unregister, _run_onionheaven_unregister),
+    ("onionheaven-registrations",
+     _plain("List what the registration record says OnionHeaven hubs may "
+            "hold of this install's keys (no network)"),
+     _run_onionheaven_registrations),
+    ("check-for-update", _add_check_for_update,
+     lambda run: _cli(run).cmd_check_for_update(json_output=run.args.json,
+                                                current=run.args.current)),
+    ("smoke-test-wayback",
+     _plain("Publish a throwaway post and verify it got archived to the Wayback Machine"),
+     lambda run: _cli(run).cmd_smoke_test_wayback()),
+    ("generate-vanity", _plain("Generate a vanity .onion via mkp224o in the tor container"),
+     lambda run: _cli(run).cmd_generate_vanity()),
+    ("admin-password", _plain("Print the recovery admin password (if any)"),
+     lambda run: _cli(run).cmd_admin_password()),
+    ("provision-post-install", _add_provision_post_install, _run_provision_post_install),
+    ("verify-admin-password",
+     _plain("Validate a WP admin password (reads from stdin). Exit 0 = match."),
+     _run_verify_admin_password),
+    ("configure-ia-plugin",
+     _plain("Configure the IA Wayback Machine Link Fixer in every site "
+            "(before it is activated)"),
+     _multisite_step("configure_ia_plugin")),
+    ("configure-cache-enabler",
+     _plain("Prepare Cache Enabler's activation (policy mu-plugin, FS_METHOD)"),
+     _multisite_step("configure_cache_enabler")),
+    ("apply-cache-policy",
+     _plain("Check Cache Enabler's settings against OnionPress's cache "
+            "policy; clear its stored pages (after activation)"),
+     _multisite_step("apply_cache_policy")),
+    ("deactivate-wp-statistics", _plain("Remove WP-Statistics if present (clearnet leak)"),
+     _multisite_step("deactivate_wp_statistics")),
+    ("ensure-archive-s3-keys",
+     _plain("Fetch shared archive.org S3 keys for Wayback archiving"),
+     _multisite_step("ensure_archive_s3_keys")),
+    ("scrub", _add_scrub, _run_scrub),
+    ("import-backup-artifacts", _add_import_backup_artifacts,
+     lambda run: _cli(run).cmd_import_backup_artifacts(run.args.staging)),
+    ("regenerate-derivatives",
+     _plain("Rebuild the resized image copies a restored backup left out "
+            "(no-op unless a restore left the pending marker; resumable)"),
+     lambda run: _cli(run).cmd_regenerate_derivatives()),
+    ("regenerate-derivatives-pending",
+     _plain("Exit 0 when a restore left resized images to rebuild (the host "
+            "marker in the data dir, or the one a backup carries in the "
+            "container's uploads/), 1 when not; both launchers' start gates "
+            "the detached regenerate-derivatives on it"),
+     _run_regenerate_derivatives_pending),
+    ("prune-image-derivatives", _add_prune_image_derivatives,
+     lambda run: _cli(run).cmd_prune_image_derivatives(run.args.uploads_dir)),
+    ("scrub-staging", _add_scrub_staging,
+     lambda run: OnionPressCLI.cmd_scrub_staging(run.args.dir)),
+    ("stage-wp-content", _add_stage_wp_content,
+     lambda run: OnionPressCLI.cmd_stage_wp_content(run.args.dest)),
+    ("stage-hub-data", _add_stage_hub_data,
+     lambda run: OnionPressCLI.cmd_stage_hub_data(run.args.dest)),
+    ("settings-page-restore-check", _add_settings_page_restore_check,
+     lambda run: OnionPressCLI.cmd_settings_page_restore_check(run.args.staging)),
+    ("wordpress-safe-config", _add_wordpress_safe_config,
+     lambda run: OnionPressCLI.cmd_wordpress_safe_config(run.args.config, run.args.dest)),
+    ("restore-hub-data", _add_restore_hub_data,
+     lambda run: OnionPressCLI.cmd_restore_hub_data(run.args.src)),
+    ("stage-hub-backup", _add_stage_hub_backup,
+     lambda run: OnionPressCLI.cmd_stage_hub_backup(run.args.staging, run.data_dir)),
+    ("settings-page-backup-check", _add_settings_page_backup_check,
+     lambda run: OnionPressCLI.cmd_settings_page_backup_check(run.args.address,
+                                                              run.data_dir)),
+    ("settings-page-restore-node-check", _add_settings_page_restore_node_check,
+     lambda run: OnionPressCLI.cmd_settings_page_restore_node_check(run.args.address,
+                                                                    run.data_dir)),
+    ("hub-recovery-key", _add_hub_recovery_key, _run_hub_recovery_key),
+    ("put-wp-tree", _add_put_wp_tree,
+     lambda run: OnionPressCLI.cmd_put_wp_tree(run.args.src, run.args.dest,
+                                               run.args.merge)),
+    ("open-login", _add_open_login, _run_open_login),
+    ("safe-config",
+     _plain("Print the allowlisted (non-secret) config keys as JSON — "
+            "what the WordPress container may see"),
+     _run_safe_config),
+    ("wordpress-logs", _add_wordpress_logs, _run_wordpress_logs),
+    ("wordpress-status",
+     _plain("Read status JSON on stdin and print the fields the WordPress "
+            "container may see"),
+     _run_wordpress_status),
+    ("retire-old-onionheaven-containers",
+     _plain("Before the first `compose up`: remove every onionpress-tor, "
+            "onionheaven and onionheaven-(poll|takeover)-N that does not "
+            "mount onionpress-onionheaven-data (started by an older "
+            "OnionPress; the hub data move must not race them); always "
+            "exits 0"),
+     _run_start_step),
+    ("migrate-tor-network",
+     _plain("Before the first `compose up`: recreate an onionpress-network "
+            "whose bridge is not onionpress-tor0 (made by an older "
+            "OnionPress; the Tor side's rules name the bridge), removing "
+            "OnionPress's own containers on it and disconnecting anything "
+            "else; always exits 0"),
+     _run_start_step),
+    ("migrate-key-volume",
+     _plain("Before anything starts Tor: copy the onion service key out of "
+            "onionpress-arti-state (its name until 2026-09-25) into "
+            "onionpress-onion-keys once, verified, in the pinned tor image "
+            "with no network; exit 1 (the start must stop) when Docker does "
+            "not answer, the copy fails or the image is not here"),
+     _run_migrate_key_volume),
+    ("db-import", _add_db_import, _run_db_import),
+    ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),
+    ("using-local-images",
+     _plain("Exit 0 when the stack points at images built on this machine "
+            "(ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE, environment "
+            "or ~/.onionpress/config, not on ghcr.io), 1 when at published "
+            "ones; both launchers gate every image pull on it"),
+     _run_using_local_images),
+    ("wordpress-egress", _add_wordpress_egress, _run_wordpress_egress),
+    ("apply-settings-updates",
+     _plain("Merge the settings page's config-updates.json (on stdin) into "
+            "the config — allowlisted keys with valid values only; prints "
+            "'changed|unchanged|rejected KEY' lines, never values"),
+     _run_apply_settings_updates),
+    ("pack-backup", _add_pack_backup, _run_pack_or_extract_backup),
+    ("extract-backup", _add_extract_backup, _run_pack_or_extract_backup),
+    ("backup-address", _add_backup_address,
+     lambda run: OnionPressCLI.cmd_backup_address(run.args.staging)),
+    ("config", _add_config, _run_config),
+    ("onionheaven", _add_onionheaven, _run_onionheaven),
+    ("restore-config", _add_restore_config,
+     lambda run: OnionPressCLI.cmd_restore_config(run.args.staging, run.args.config,
+                                                  run.args.address)),
+    ("handle-action", _add_handle_action, _run_handle_action),
+    ("apply-config",
+     _plain("Apply the Settings page's config-updates.json (the allowlisted "
+            "keys), then remove it"),
+     _run_handle_action),
+    ("upload-analytics",
+     _plain("Upload the diagnostic logs to OnionHome now (Share Now; needs "
+            f"{SHARING_CONFIG_KEY}=yes and a running OnionPress): the daemon "
+            "takes the request within a cycle"),
+     _run_upload_analytics),
+    ("daemon", _add_daemon, _run_daemon),
+    ("settings-page-backup", _add_settings_page_backup, _run_settings_page_command),
+    ("prepare-restore", _add_prepare_restore, _run_settings_page_command),
+    ("settings-page-restore", _add_settings_page_restore, _run_settings_page_command),
+]
+
+
+def build_parser():
+    """onionpress's argument parser, from _COMMANDS: (parser, subparsers)."""
+    parser = argparse.ArgumentParser(
+        prog="onionpress",
+        description="OnionPress — WordPress over Tor",
+    )
+    parser.add_argument("--version", action="version", version=f"OnionPress {__version__}")
+    parser.add_argument("--data-dir", help="Override data directory (default: ~/.onionpress/)")
+    sub = parser.add_subparsers(dest="command", help="Command to run")
+    for name, build, _handler in _COMMANDS:
+        build(sub, name)
+    return parser, sub
+
+
+def main(argv: list[str] = None) -> int:
+    """CLI entry point."""
+    parser, sub = build_parser()
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -2427,485 +3151,9 @@ def main(argv: list[str] = None) -> int:
     # A hub's backup recovery key leaves the environment at once, whatever
     # the command: OnionPressCLI's Docker wrapper hands os.environ to every
     # docker child. Used by restore and hub-recovery-key only.
-    from .hub_backup import RECOVERY_KEY_ENV
     hub_recovery_key = os.environ.pop(RECOVERY_KEY_ENV, "")
-    data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
-
-    if args.command == "version":
-        from . import app_commands
-        return app_commands.version_command(detect_os().value, json_output=args.json,
-                                            out=sys.stdout)
-
-    if (args.command in ("address", "check-reachability", "open", "onionname")
-            or (args.command == "logs" and args.which)):
-        # The app's functions as subcommands (issue #382, onionpress.app_commands):
-        # the paths and a Docker wrapper, no OnionPressCLI setup (config and
-        # secrets creation, port probing).
-        from . import app_commands
-        paths = resolve_paths(data_dir=args.data_dir)
-        log = _file_log_func(paths.log_file)
-        docker = Docker(paths, log_func=log)
-        os_name = detect_os().value
-        if args.command == "address":
-            return app_commands.address_command(paths, docker, os_name, url=args.url,
-                                                copy=args.copy, out=sys.stdout)
-        if args.command == "check-reachability":
-            return app_commands.check_reachability_command(paths, docker, json_output=args.json,
-                                                           out=sys.stdout)
-        if args.command == "logs":
-            return app_commands.logs_command(paths, docker, os_name, args.which,
-                                             lines=args.lines, follow=args.follow,
-                                             out=sys.stdout)
-        if args.command == "open":
-            return app_commands.open_command(args.what, paths, docker, out=sys.stdout)
-        if not args.onionname_command:
-            p_onionname.print_help()
-            return 1
-        if args.onionname_command == "show":
-            return app_commands.onionname_show(paths, json_output=args.json, out=sys.stdout)
-        # The registrar signs with the served key (key_manager.extract_keys:
-        # plain `docker`), so the docker environment _hub_context sets up.
-        _hub_context(args.data_dir, log)
-        return app_commands.onionname_set(args.name, paths, docker, os_name, log,
-                                          json_output=args.json, out=sys.stdout)
-
-    if args.command == "config":
-        # Only the config file, its change marker and the login item /
-        # user units: no OnionPressCLI setup (no Docker, no port probing).
-        from . import config as _config
-        if not args.config_command:
-            p_config.print_help()
-            return 1
-        paths = resolve_paths(data_dir=args.data_dir)
-        return _config.run_config_command(
-            args, data_dir, _file_log_func(paths.log_file),
-            os_name=detect_os().value, app_bundle=paths.app_bundle)
-
-    if args.command == "onionheaven":
-        # The same: the config file and the registration record, no network.
-        from . import onionheaven
-        return onionheaven.run_onionheaven_command(
-            args.onionheaven_command, _hub_context(args.data_dir),
-            json_output=args.json)
-
-    if args.command == "upload-analytics":
-        # Share Now from the command line (#351): both launchers'
-        # `upload-analytics` is this. It reads the config and leaves a
-        # marker, so no OnionPressCLI setup (config/secrets creation, port
-        # probing).
-        from . import analytics_sharing
-        paths = resolve_paths(data_dir=args.data_dir)
-        return analytics_sharing.request_upload(paths, detect_os().value, out=sys.stdout)
-
-    if args.command == "daemon":
-        # The loops (onionpress.daemon, issue #367): no OnionPressCLI setup,
-        # the daemon resolves its own ports and docker environment.
-        from . import daemon as _daemon
-        from . import handle_action as _ha
-        paths = resolve_paths(data_dir=args.data_dir)
-        os_name = detect_os().value
-        launcher = args.launcher or _ha.default_launcher(paths, os_name)
-        return _daemon.run_daemon_command(
-            args.daemon_command, paths, _file_log_func(paths.log_file),
-            launcher_script=launcher, json_output=args.json, version=__version__,
-            no_offline=args.no_offline)
-
-    if args.command in ("handle-action", "apply-config"):
-        # Run every 10 s (Linux) or every status tick (Mac): no
-        # OnionPressCLI setup (config/secrets creation, port probing).
-        from . import handle_action as _ha
-        paths = resolve_paths(data_dir=args.data_dir)
-        log = _make_log_func(paths.log_file)
-        os_name = detect_os().value
-        host = _ha.Host(
-            launcher=(getattr(args, "launcher", "") or _ha.default_launcher(paths, os_name)),
-            paths=paths, docker=Docker(paths, log_func=log), log=log, os_name=os_name,
-            version=__version__)
-        if args.command == "apply-config":
-            return 1 if _ha.apply_config(host, out=sys.stdout) is None else 0
-        result = _ha.handle(host, confirmed=_confirm.given(args), cancel=args.cancel)
-        if args.json:
-            print(_confirm.dumps(result))
-        return 0
-
-    if args.command == "update" and detect_os() == OS.MACOS:
-        # Replaces the bundle this process runs from: no OnionPressCLI
-        # setup, nothing but the updater.
-        paths = resolve_paths(data_dir=args.data_dir)
-        return cmd_update(paths, _make_log_func(paths.log_file), check=args.check,
-                          yes=args.yes, json_output=args.json)
-
-    if args.command == "uninstall":
-        # About to remove the data directory: no OnionPressCLI setup (it
-        # would create config and secrets there).
-        from . import handle_action as _ha
-        paths = resolve_paths(data_dir=args.data_dir)
-        log = _make_log_func(paths.log_file)
-        os_name = detect_os().value
-        if os_name != "macos":
-            return _confirm.answer_error(
-                "onionpress uninstall is the Linux launcher's own command", args.json)
-        return cmd_uninstall(paths, Docker(paths, log_func=log), log,
-                             _ha.default_launcher(paths, os_name), check=args.check,
-                             json_output=args.json, confirmed=_confirm.given(args))
-
-    if args.command in ("settings-page-backup", "settings-page-restore", "prepare-restore"):
-        # The page's own backup and restore, run by handle-action through
-        # the launcher (on Linux the launcher's bash does these itself),
-        # and the welcome screen's staging of a backup to install from.
-        password = read_backup_password()
-        if not password:
-            return _confirm.answer_error("a password is required", args.json)
-        if args.command == "prepare-restore":
-            return cmd_prepare_restore(args.backup_file, password, data_dir, args.json)
-        if args.command == "settings-page-backup":
-            return cmd_settings_page_backup(args.output, password, data_dir, args.json)
-        return cmd_settings_page_restore(
-            args.backup_file, password, data_dir, args.json, _confirm.given(args))
-
-    if args.command == "hub-recovery-key":
-        # Needs only the data directory (restore: docker too): no
-        # OnionPressCLI setup.
-        if args.hrk_command == "create":
-            return OnionPressCLI.cmd_hub_recovery_key_create(data_dir, force=args.force)
-        if args.hrk_command == "show":
-            return OnionPressCLI.cmd_hub_recovery_key_show(data_dir)
-        if args.hrk_command == "check":
-            return OnionPressCLI.cmd_hub_recovery_key_check(data_dir, hub_recovery_key)
-        if args.hrk_command == "restore":
-            password = read_backup_password()
-            if not password:
-                print("ERROR: a password is required.", file=sys.stderr)
-                return 1
-            return OnionPressCLI.cmd_hub_recovery_key_restore(
-                args.backup_file, password, hub_recovery_key)
-        p_hrk.print_help()
-        return 1
-
-    # Restore helpers, run by the launchers mid-restore: no OnionPressCLI
-    # setup (config/secrets creation, port probing).
-    if args.command == "backup-address":
-        return OnionPressCLI.cmd_backup_address(args.staging)
-    if args.command == "restore-config":
-        return OnionPressCLI.cmd_restore_config(
-            args.staging, args.config, args.address)
-    # Backup helper, run by the Linux launcher mid-backup: same.
-    if args.command == "scrub-staging":
-        return OnionPressCLI.cmd_scrub_staging(args.dir)
-    if args.command == "stage-wp-content":
-        return OnionPressCLI.cmd_stage_wp_content(args.dest)
-    if args.command == "stage-hub-data":
-        return OnionPressCLI.cmd_stage_hub_data(args.dest)
-    if args.command == "settings-page-restore-check":
-        return OnionPressCLI.cmd_settings_page_restore_check(args.staging)
-    if args.command == "wordpress-safe-config":
-        return OnionPressCLI.cmd_wordpress_safe_config(args.config, args.dest)
-    if args.command == "restore-hub-data":
-        return OnionPressCLI.cmd_restore_hub_data(args.src)
-    if args.command == "stage-hub-backup":
-        return OnionPressCLI.cmd_stage_hub_backup(args.staging, data_dir)
-    if args.command == "settings-page-backup-check":
-        return OnionPressCLI.cmd_settings_page_backup_check(args.address, data_dir)
-    if args.command == "settings-page-restore-node-check":
-        return OnionPressCLI.cmd_settings_page_restore_node_check(args.address, data_dir)
-    # Restore and plugin-install helper for the bash launchers: same.
-    if args.command == "put-wp-tree":
-        return OnionPressCLI.cmd_put_wp_tree(args.src, args.dest, args.merge)
-
-    if args.command == "safe-config":
-        # Read-only, and run by the Linux launcher every 30 s: skip
-        # OnionPressCLI's setup (config/secrets creation, port probing).
-        from .config import read_config, redact_config
-        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
-        config = read_config(os.path.join(data_dir, "config"))
-        print(json.dumps(redact_config(config), indent=2))
-        return 0
-
-    if args.command in ("wordpress-logs", "wordpress-status"):
-        # Run by the Linux launcher on every status write; read-only like
-        # safe-config, so it skips OnionPressCLI's setup too.
-        from . import redact
-        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
-        if args.command == "wordpress-logs":
-            try:
-                sys.stdout.write(redact.wordpress_log_excerpt(args.log_file, data_dir))
-            except OSError as e:
-                print(f"ERROR: {e.strerror or e}", file=sys.stderr)
-                return 1
-            return 0
-        try:
-            status = json.load(sys.stdin)
-        except ValueError as e:
-            print(f"ERROR: status is not JSON: {e}", file=sys.stderr)
-            return 1
-        if not isinstance(status, dict):
-            print("ERROR: status is not a JSON object", file=sys.stderr)
-            return 1
-        print(json.dumps(redact.status_for_wordpress(status), indent=2))
-        return 0
-
-    if args.command == "apply-settings-updates":
-        # The payload was written inside WordPress, so it is untrusted
-        # (config.SETTINGS_PAGE_KEYS). Same fast path as safe-config: only
-        # the config file is touched.
-        from .config import apply_settings_updates
-        data_dir = args.data_dir or os.path.join(os.path.expanduser("~"), ".onionpress")
-        try:
-            updates = json.loads(sys.stdin.read())
-        except ValueError:
-            print("ERROR: config-updates.json is not valid JSON", file=sys.stderr)
-            return 1
-        applied = apply_settings_updates(os.path.join(data_dir, "config"), updates)
-        changed = {key for key, _old, _new in applied.changes}
-        for key in applied.accepted:
-            print(f"{'changed' if key in changed else 'unchanged'} {key}")
-        for key in applied.rejected:
-            print(f"rejected {key}")
-        for key in applied.held:
-            print(f"held {key}")
-        return 0
-
-    if args.command in ("retire-old-onionheaven-containers", "migrate-tor-network"):
-        # The launchers' retire_old_onionheaven_containers() and
-        # migrate_tor_network() (Phase 4, #120): ContainerManager's own
-        # steps (start_core runs them too), logged in the launcher's
-        # format; no OnionPressCLI setup. Exit 0 whatever is found: neither
-        # step may stop a start.
-        paths = resolve_paths(data_dir=args.data_dir)
-        manager = _start_step_manager(paths)
-        if args.command == "migrate-tor-network":
-            manager.migrate_tor_network()
-        else:
-            manager.retire_old_onionheaven_containers()
-        return 0
-
-    if args.command == "migrate-key-volume":
-        # The launchers' migrate_key_volume() (Phase 4, #120):
-        # ContainerManager's, logged in the launcher's format; no
-        # OnionPressCLI setup (it runs before the stack is up). Unlike the
-        # two steps above, its status matters: 1 stops the start, since
-        # starting tor would create an empty onionpress-onion-keys that the
-        # next start took for the migrated key.
-        paths = resolve_paths(data_dir=args.data_dir)
-        return 0 if _start_step_manager(paths).migrate_key_volume() else 1
-
-    if args.command == "db-import":
-        # The Linux launcher's db_import() (Phase 4, #120): backup.db_import,
-        # what restore_container_artifacts runs for the Mac's and the CLI's
-        # restores. The password is stdin's first line (the launcher pipes
-        # it in; argv is every user's to read); the dump follows it into the
-        # sandboxed client's stdin. No OnionPressCLI setup. Every refusal
-        # (an old client, a failed import) is one ERROR line and exit 1,
-        # which restore_backup turns into its "Database import failed".
-        from .backup import db_import
-        password = sys.stdin.readline().rstrip("\n") if sys.stdin is not None else ""
-        if not password:
-            print("ERROR: no database password on stdin", file=sys.stderr)
-            return 1
-        try:
-            db_import(args.sql_file, password)
-        except Exception as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-        return 0
-
-    if args.command == "regenerate-derivatives-pending":
-        # The launchers' regenerate_derivatives_pending() (Phase 4, #120):
-        # the two markers regenerate-derivatives itself acts on, asked the
-        # same way (derivatives.regeneration_pending). No OnionPressCLI
-        # setup; exit 0 = a rebuild is owed.
-        from . import derivatives
-        paths = resolve_paths(data_dir=args.data_dir)
-        pending = derivatives.regeneration_pending(paths.data_dir, Docker(paths).docker_bin)
-        return 0 if pending else 1
-
-    if args.command == "is-onionheaven-hub":
-        # The Linux launcher's is_onionheaven_hub() (issue #345): the Mac
-        # daemon's rule, by address. No OnionPressCLI setup (every status
-        # tick, beside a live stack).
-        from .onionheaven import is_onionheaven_instance
-        return 0 if is_onionheaven_instance(args.address) else 1
-
-    if args.command == "using-local-images":
-        # The launchers' using_local_images(): the one copy of the rule
-        # (containers.using_local_images; the menubar and update-images
-        # call it in-process). Before the stack is up, so no OnionPressCLI
-        # setup (config/secrets creation, port probing).
-        from .containers import using_local_images
-        paths = resolve_paths(data_dir=args.data_dir)
-        return 0 if using_local_images(paths.config_file) else 1
-
-    if args.command == "wordpress-egress":
-        # The launchers' block_wordpress_egress() (Phase 4, #120): run
-        # before they start the containers, so no OnionPressCLI setup
-        # (config/secrets creation, port probing). Their bash body is
-        # `… 2>&1 | tee -a "$LOG_FILE"` and returns 0 whatever happens
-        # (the Mac puts a non-zero status into its START SUMMARY), so the
-        # verdict is logged here in their `[ts] msg` format; --check (not
-        # a launcher's call) prints the bare status line. Never a
-        # traceback: whatever goes wrong is the WARNING's words.
-        import dataclasses
-        from . import wordpress_egress
-        paths = resolve_paths(data_dir=args.data_dir)
-        if args.bin_dir:
-            paths = dataclasses.replace(paths, bin_dir=args.bin_dir)
-        wp_port = args.wp_port
-        if wp_port is None and os.environ.get("ONIONPRESS_WP_PORT", "").isdigit():
-            wp_port = int(os.environ["ONIONPRESS_WP_PORT"])
-        try:
-            result = wordpress_egress.ensure(
-                paths, Docker(paths), action="check" if args.check else "apply",
-                wp_port=wp_port)
-        except Exception as e:  # a start must never stop here
-            result = wordpress_egress.Result(False, "", f"error: {e}")
-        if args.check:
-            print(result.line())
-        else:
-            _log_wordpress_egress_verdict(result, _launcher_log_func(), paths.log_file)
-        return 0 if result.ok else 1
-
-    if args.command == "onionheaven-unregister":
-        # Run by both launchers before a reset, key import, restore or
-        # uninstall: no OnionPressCLI setup (config/secrets creation, port
-        # probing) on a path that is about to remove them.
-        from .key_manager import is_valid_onion_address
-        keep = (args.keep_address or "").strip()
-        if keep and not is_valid_onion_address(keep):
-            print("ERROR: --keep-address is not an onion address", file=sys.stderr)
-            return 2
-        remaining = release_onionheaven(args.reason, keep_address=keep or None,
-                                        data_dir=args.data_dir)
-        # 0: no hub holds anything; 1: a hub may, and starting OnionPress
-        # or trying again could still take it back (the launchers ask
-        # before going on); 3: a hub may, but nothing here can sign for it
-        # any more (reported, recorded).
-        if any(i["why"] in _RETRYABLE for i in remaining):
-            return 1
-        return 3 if remaining else 0
-
-    if args.command == "onionheaven-registrations":
-        from . import onionheaven
-        ctx = _hub_context(args.data_dir)
-        for addr, hub in onionheaven.registrations_left(ctx):
-            print(f"{addr} {hub}")
-        return 0
-
-    if args.command == "open-login":
-        # Needs only docker and a browser: skip OnionPressCLI's setup.
-        from .launcher_ops import open_login
-        try:
-            open_login(args.url)
-        except RuntimeError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-        return 0
-
-    # Before OnionPressCLI: its Docker wrapper snapshots os.environ for every
-    # docker child, and read_backup_password takes the password out of it.
-    password = None
-    if args.command in ("backup", "restore"):
-        password = read_backup_password(args.password)
-        if not password:
-            if args.command == "restore" and args.check:
-                # The UI asks for the password next, worded with the login
-                # the file's name carries (for the prompt only).
-                from .backup import backup_filename_username
-                return _confirm.answer_ask(
-                    "password", args.json,
-                    backup_user=backup_filename_username(args.backup_file))
-            return _confirm.answer_error("a password is required", args.json)
-
-    cli = OnionPressCLI(data_dir=args.data_dir)
-
-    commands = {
-        "start": cli.cmd_start,
-        "stop": cli.cmd_stop,
-        "restart": cli.cmd_restart,
-        "status": cli.cmd_status,
-        "logs": cli.cmd_logs,
-    }
-
-    if args.command in commands:
-        return commands[args.command]()
-    elif args.command == "get":
-        return cli.cmd_get(args.url, headers=args.headers, max_time=args.max_time)
-    elif args.command == "backup":
-        return cli.cmd_backup(password, args.output_opt or args.output, args.user,
-                              check=args.check, json_output=args.json)
-    elif args.command == "restore":
-        # A hub's recovery key, when one was given (cmd_restore asks at a
-        # terminal otherwise).
-        confirmed = _confirm.given(args)
-        if args.check:
-            return cli.cmd_restore_check(password, args.backup_file, hub_recovery_key,
-                                         confirmed, args.json)
-        return cli.cmd_restore(password, args.backup_file, hub_recovery_key,
-                               confirmed=confirmed, json_output=args.json)
-    elif args.command == "import-backup-artifacts":
-        return cli.cmd_import_backup_artifacts(args.staging)
-    elif args.command == "regenerate-derivatives":
-        return cli.cmd_regenerate_derivatives()
-    elif args.command == "prune-image-derivatives":
-        return cli.cmd_prune_image_derivatives(args.uploads_dir)
-    elif args.command in ("pack-backup", "extract-backup"):
-        pw = sys.stdin.read().rstrip("\n")
-        if not pw:
-            print("ERROR: no password on stdin", file=sys.stderr)
-            return 1
-        if args.command == "pack-backup":
-            return cli.cmd_pack_backup(args.staging, args.output, pw)
-        return cli.cmd_extract_backup(args.archive, args.dest, pw)
-    elif args.command == "reset":
-        return cli.cmd_reset(yes=args.yes, check=args.check, json_output=args.json,
-                             confirmed=_confirm.given(args))
-    elif args.command == "update-images":
-        return cli.cmd_update_images(json_output=args.json)
-    elif args.command == "smoke-test-wayback":
-        return cli.cmd_smoke_test_wayback()
-    elif args.command == "check-for-update":
-        return cli.cmd_check_for_update(json_output=args.json, current=args.current)
-    elif args.command == "generate-vanity":
-        return cli.cmd_generate_vanity()
-    elif args.command == "admin-password":
-        return cli.cmd_admin_password()
-    elif args.command == "provision-post-install":
-        from . import multisite
-        return multisite.provision_post_install(
-            themes_dir=args.themes_dir,
-            plugins_dir=args.plugins_dir,
-            log_func=print,
-        )
-    elif args.command == "configure-ia-plugin":
-        from . import multisite
-        return 0 if multisite.configure_ia_plugin(log_func=print) else 1
-    elif args.command == "configure-cache-enabler":
-        from . import multisite
-        return 0 if multisite.configure_cache_enabler(log_func=print) else 1
-    elif args.command == "apply-cache-policy":
-        from . import multisite
-        return 0 if multisite.apply_cache_policy(log_func=print) else 1
-    elif args.command == "deactivate-wp-statistics":
-        from . import multisite
-        return 0 if multisite.deactivate_wp_statistics(log_func=print) else 1
-    elif args.command == "ensure-archive-s3-keys":
-        from . import multisite
-        return 0 if multisite.ensure_archive_s3_keys(log_func=print) else 1
-    elif args.command == "scrub":
-        from . import scrub as _scrub
-        return _scrub.run_scrub(
-            password=args.password,
-            clean=args.clean,
-        )
-    elif args.command == "verify-admin-password":
-        from .backup import verify_wp_admin_password_any
-        pw = sys.stdin.read().rstrip("\n")
-        if not pw:
-            return 1
-        ok, _ = verify_wp_admin_password_any(pw)
-        return 0 if ok else 1
-    else:
-        parser.print_help()
-        return 1
+    handlers = {name: handler for name, _build, handler in _COMMANDS}
+    return handlers[args.command](_Run(args, parser, sub, hub_recovery_key))
 
 
 if __name__ == "__main__":

@@ -34,6 +34,9 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import config as op_config  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
+
 COMPOSE = "app/Resources/docker/docker-compose.yml"
 PAGE = "app/Resources/plugins/onionpress-settings.php"
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
@@ -41,9 +44,9 @@ LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 # Keys the host itself acts on: (file, the expression that reads the key).
 HOST_READERS = {
     # The launcher's, since #428 (issue #36): the menubar reads it nowhere.
-    "UPDATE_ON_LAUNCH": ("app/MacOS/onionpress", 'grep "^UPDATE_ON_LAUNCH=" "$DATA_DIR/config"'),
+    "UPDATE_ON_LAUNCH": ("app/MacOS/onionpress", "$(config_value UPDATE_ON_LAUNCH)"),
     "LAUNCH_ON_LOGIN": ("src/menubar.py", 'read_config_value("LAUNCH_ON_LOGIN"'),
-    "START_ON_BOOT": ("linux/onionpress", 'grep "^START_ON_BOOT="'),
+    "START_ON_BOOT": ("linux/onionpress", "$(config_value START_ON_BOOT)"),
     "PREVENT_SLEEP": ("src/onionpress/power.py", '_read_config("PREVENT_SLEEP"'),
     "VM_MEMORY": ("src/onionpress/colima.py", '"VM_MEMORY"'),
     "REGISTER_WITH_ONIONHEAVEN": ("src/onionpress/onionheaven.py",
@@ -167,7 +170,7 @@ class TestEveryComposeCallerExportsTheKeys(unittest.TestCase):
             text = _read(rel)
             for key in CONTAINER_READERS:
                 with self.subTest(launcher=rel, key=key):
-                    self.assertIn(f'grep "^{key}="', text)
+                    self.assertIn(f"$(config_value {key})", text)
                     self.assertTrue(re.search(rf"^export .*\b{key}\b", text, re.M),
                                     f"{rel} does not export {key}")
 
@@ -215,7 +218,7 @@ class TestMacLauncherExportBlock(unittest.TestCase):
                 with open(os.path.join(tmp, "config"), "w") as f:
                     f.write(config_text)
             # Under the launcher's own `set -e`: a refused value must not end it.
-            script = ("set -e\n" + self._block()
+            script = ("set -e\n" + config_value_function() + self._block()
                       + 'printf "%s %s\\n" "$ONIONHEAVEN_MAX_SERVICES" "$ONIONHEAVEN_PROPAGATION_DELAY"\n')
             r = subprocess.run(["bash", "-c", script], env={"DATA_DIR": tmp, "PATH": os.environ["PATH"]},
                                capture_output=True, text=True, timeout=30)

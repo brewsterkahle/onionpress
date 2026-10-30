@@ -1281,7 +1281,9 @@ function onionpress_bluesky_render_content( $item ) {
     }
 
     $html    = implode( "\n", $parts );
-    $preview = trim( html_entity_decode( wp_strip_all_tags( $text ), ENT_QUOTES, 'UTF-8' ) );
+    // The preview becomes post_title and post_excerpt: plain text, never
+    // entity-decoded after the tags are stripped (#472).
+    $preview = onionpress_social_plain_text( $text );
     return array( $html, $preview );
 }
 

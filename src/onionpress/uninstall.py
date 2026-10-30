@@ -31,8 +31,7 @@ def hubs_holding_key(data_dir, log):
     """[(address, hub)] an OnionHeaven hub may hold a key of; [] on the hub
     itself."""
     from . import onionheaven
-    from .cli import _hub_context
-    ctx = _hub_context(data_dir, log)
+    ctx = onionheaven._hub_context(data_dir, log)
     pairs = onionheaven.registrations_left(ctx)
     served = ""
     try:
@@ -62,7 +61,7 @@ def check(paths, docker, log, confirmed):
 def run(paths, docker, log, launcher, out=None):
     """Uninstall. Returns what may remain on a hub (release_onionheaven's
     list: [] when nothing)."""
-    from .cli import release_onionheaven
+    from .onionheaven import release_onionheaven
     # The daemon first: its heartbeat carries the key, so it must not put
     # the key back on a hub after the /unregister below. Its launchd agent
     # is removed with the login item.

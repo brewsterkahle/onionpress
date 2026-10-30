@@ -11,10 +11,11 @@ run and a CI Linux run of the same build) into one matrix.
 """
 
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 
-from .platforms import PLATFORM_LABELS, PLATFORMS
+from .platforms import PLATFORM_LABELS, PLATFORMS, canonical_platform
 
 OUTCOME_CELLS = {"passed": "pass", "failed": "FAIL", "error": "ERROR", "skipped": "skip"}
 NOT_APPLICABLE = "—"
@@ -23,7 +24,7 @@ NOT_APPLICABLE = "—"
 @dataclass
 class Outcome:
     test: str               # "test_t0_stack.py::test_first_start" (no platform)
-    platform: str           # "macos" | "debian"
+    platform: str           # "macos" | "linux"
     outcome: str            # passed | failed | error | skipped
     reason: str = ""        # failure summary or skip reason
     seconds: float = 0.0
@@ -92,9 +93,19 @@ class RunReport:
 
     @classmethod
     def from_json(cls, text):
+        """A results.json, including one written when the Linux platform
+        was still called "debian" (merging old and new runs works)."""
         data = json.loads(text)
         data.pop("verdict", None)
         outcomes = [Outcome(**o) for o in data.pop("outcomes", [])]
+        for o in outcomes:
+            o.platform = canonical_platform(o.platform)
+        for key in ("tested", "not_tested"):
+            data[key] = {canonical_platform(p): v for p, v in data.get(key, {}).items()}
+        data["applies"] = {t: [canonical_platform(p) for p in plats]
+                           for t, plats in data.get("applies", {}).items()}
+        data["roles"] = {re.sub(r"\[(\w+)\]$", lambda m: f"[{canonical_platform(m.group(1))}]", r): n
+                         for r, n in data.get("roles", {}).items()}
         report = cls(**data)
         report.outcomes = outcomes
         return report

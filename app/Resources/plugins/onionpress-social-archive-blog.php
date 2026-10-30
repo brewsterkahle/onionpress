@@ -1030,23 +1030,23 @@ function onionpress_blog_update_post( $existing_id, $post ) {
 }
 
 /**
- * Render the source post's title.rendered as plain text — strip HTML
- * since WP titles can contain entities, but no block-level markup.
+ * Render the source post's title.rendered as plain text (#472): the
+ * other site's HTML, tags stripped, and never entity-decoded after
+ * that (it used to be, which turned `&lt;script&gt;` back into markup
+ * in a title the_title() prints without kses).
  */
 function onionpress_blog_render_title( $post ) {
-    $raw = (string) ( $post['title']['rendered'] ?? '' );
-    if ( $raw === '' ) return '';
-    return trim( html_entity_decode( wp_strip_all_tags( $raw ), ENT_QUOTES, 'UTF-8' ) );
+    return onionpress_social_plain_text( $post['title']['rendered'] ?? '' );
 }
 
 /**
- * Render the source post's excerpt.rendered, or fall back to a
- * 35-word preview of the body.
+ * Render the source post's excerpt.rendered as plain text (#472), or
+ * fall back to a 35-word preview of the body.
  */
 function onionpress_blog_render_excerpt( $post, $preview_text ) {
-    $raw = (string) ( $post['excerpt']['rendered'] ?? '' );
-    if ( $raw !== '' ) {
-        return trim( html_entity_decode( wp_strip_all_tags( $raw ), ENT_QUOTES, 'UTF-8' ) );
+    $excerpt = onionpress_social_plain_text( $post['excerpt']['rendered'] ?? '' );
+    if ( $excerpt !== '' ) {
+        return $excerpt;
     }
     return wp_trim_words( $preview_text, 35, '…' );
 }
@@ -1064,7 +1064,9 @@ function onionpress_blog_render_excerpt( $post, $preview_text ) {
  */
 function onionpress_blog_render_content( $post ) {
     $html = wp_kses_post( (string) ( $post['content']['rendered'] ?? '' ) );
-    $preview = trim( html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' ) );
+    // The preview becomes post_title and post_excerpt: plain text, never
+    // entity-decoded after the tags are stripped (#472).
+    $preview = onionpress_social_plain_text( $html );
     return array( $html, $preview );
 }
 

@@ -230,7 +230,8 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             self.assertTrue(setup_logic.provision_existing_wordpress(
                 site_title="t", onionname="alice", password=pw,
-                log_func=self.logs.append, data_dir=self.tmpdir))
+                log_func=self.logs.append, data_dir=self.tmpdir,
+                adopt_existing=True))
         rec.assert_not_in_argv(self, pw)
         self.assertEqual([i for _, i in rec.eval_calls()], [f"alice\n{pw}"])
         self.assertIn("Password updated", self.logs)
@@ -244,7 +245,8 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
         with mock.patch.object(setup_logic.subprocess, "run", rec):
             setup_logic.provision_existing_wordpress(
                 site_title="t", onionname="alice", password="hunter22",
-                log_func=self.logs.append, data_dir=self.tmpdir)
+                log_func=self.logs.append, data_dir=self.tmpdir,
+                adopt_existing=True)
         self.assertEqual([i for _, i in rec.eval_calls()],
                          ["alice\nhunter22", "admin\nhunter22"])
         self.assertIn("Password updated (via admin fallback)", self.logs)
@@ -268,7 +270,7 @@ class TestSetupLogicPasswordOnStdin(unittest.TestCase):
         self.assertIn('self.log(f"wp core install error: {type(e).__name__}")', body)
 
 
-# ─── archive.org: multisite + onion_proxy ────────────────────────────────
+# ─── archive.org and the proxy's /setup ────────────────────────────────
 
 
 LOGIN_WITH_KEYS = json.dumps(
@@ -279,22 +281,31 @@ LOGIN_WITH_COOKIES = json.dumps(
 S3_PAGE = json.dumps({"key": {"s3accesskey": "AK", "s3secretkey": "S3-SECRET"}})
 
 
-def _handler(logs, docker_bin="/x/docker"):
+def _handler(logs, docker_bin="/x/docker", data_dir=None):
     h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
     h.server = types.SimpleNamespace(docker_bin=docker_bin, docker_env={"A": "1"},
-                                     log_func=logs.append)
+                                     log_func=logs.append, onion_address=None,
+                                     launcher_script="/x/onionpress",
+                                     data_dir=data_dir)
     return h
 
 
-class TestOnionProxyArchiveLogin(unittest.TestCase):
+class TestArchiveLogin(unittest.TestCase):
+    """multisite.fetch_archive_s3_keys, the one archive.org login (setup's
+    background fetch and the per-launch reconcile)."""
+
+    def _fetch(self, email, password, logs):
+        return multisite.fetch_archive_s3_keys(
+            email, password, docker_bin="/x/docker", env={"A": "1"},
+            log_func=logs.append)
 
     def test_login_and_cookie_go_on_stdin(self):
         def reply(argv, stdin):
             return 0, (S3_PAGE if "@-" in argv and "-H" in argv else LOGIN_WITH_COOKIES)
         rec = _Recorder(reply)
         logs = []
-        with mock.patch.object(onion_proxy.subprocess, "run", rec):
-            keys = _handler(logs)._fetch_archive_s3_keys("me@example.org", "IA-P@ss&word")
+        with mock.patch.object(multisite.subprocess, "run", rec):
+            keys = self._fetch("me@example.org", "IA-P@ss&word", logs)
         self.assertEqual(keys, {"access": "AK", "secret": "S3-SECRET"})
         self.assertEqual(len(rec.calls), 2, rec.calls)
         (login, login_in, kw1), (page, page_in, kw2) = rec.calls
@@ -313,16 +324,17 @@ class TestOnionProxyArchiveLogin(unittest.TestCase):
         def boom(argv, **kwargs):
             raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 45)
         logs = []
-        with mock.patch.object(onion_proxy.subprocess, "run", boom):
-            self.assertIsNone(_handler(logs)._fetch_archive_s3_keys("e", "p"))
+        with mock.patch.object(multisite.subprocess, "run", boom):
+            self.assertIsNone(self._fetch("e", "p", logs))
         self.assertEqual(logs, ["WARNING: archive.org login timed out"])
 
     def test_setup_logs_in_through_the_onion_like_the_reconcile(self):
         """Issue #322: setup went to clearnet archive.org while the
-        per-launch reconcile went to its onion. Both are one function now."""
+        per-launch reconcile went to its onion. Both are one function now,
+        and the proxy's /setup has no login of its own (issue #481)."""
         rec = _Recorder(lambda argv, stdin: (0, LOGIN_WITH_KEYS))
-        with mock.patch.object(onion_proxy.subprocess, "run", rec):
-            keys = _handler([])._fetch_archive_s3_keys("me@example.org", "pw")
+        with mock.patch.object(multisite.subprocess, "run", rec):
+            keys = self._fetch("me@example.org", "pw", [])
         self.assertEqual(keys, {"access": "AK", "secret": "S3-SECRET"})
         [(login, _, _)] = rec.calls
         self.assertEqual(login[-1], multisite._ARCHIVE_ONION + "/services/xauthn/?op=login")
@@ -332,18 +344,29 @@ class TestOnionProxyArchiveLogin(unittest.TestCase):
 
 
 class TestOnionProxySetupPost(unittest.TestCase):
-    """The proxy's /setup form: multisite-install, then the password and the
-    archive.org keys on stdin."""
+    """The proxy's /setup form goes through setup_logic.install_fresh_wordpress
+    (issue #481): core install, then the password on stdin."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="setup-proxy-argv-test-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        # The background archive.org fetch would outlive the mock; the
+        # plugin setup would start a launcher.
+        for p in (mock.patch("threading.Thread"),
+                  mock.patch.object(setup_logic, "start_bundled_plugin_setup",
+                                    return_value=True)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def _post(self, password, reply=lambda argv, stdin: (0, ""), run=None):
         from urllib.parse import urlencode
         body = urlencode({"blog_title": "My Blog", "user_name": "alice",
-                          "admin_password": password,
-                          "admin_email": "alice@example.org"}).encode()
+                          "admin_password": password}).encode()
         logs, sent = [], []
-        h = _handler(logs)
+        h = _handler(logs, data_dir=self.tmpdir)
         # Not installed yet: the form is refused on an installed site.
-        h._wp_installed = lambda: False
+        installed = iter([False, True])
+        h._wp_installed = lambda: next(installed)
         h.headers = {"Content-Length": str(len(body))}
         h.rfile = io.BytesIO(body)
         h.wfile = io.BytesIO()
@@ -351,30 +374,29 @@ class TestOnionProxySetupPost(unittest.TestCase):
         h.send_header = lambda *a: None
         h.end_headers = lambda: None
         h.send_error = lambda *a: sent.append(a)
-        h._fetch_archive_s3_keys = lambda e, p: {"access": "AK", "secret": "S3-SECRET"}
         rec = _Recorder(reply)
         with mock.patch.object(onion_proxy.subprocess, "run", run or rec):
             h._handle_setup_post()
         return rec, logs, sent, h.wfile.getvalue().decode()
 
-    def test_password_and_s3_secret_are_stdin_only(self):
+    def test_password_is_stdin_only(self):
         pw = TRICKY_PASSWORDS[1]
         rec, logs, sent, page = self._post(pw)
         self.assertEqual(sent, [200], page)
         rec.assert_not_in_argv(self, pw)
-        rec.assert_not_in_argv(self, "S3-SECRET")
-        [install] = [a for a, _, _ in rec.calls if "multisite-install" in a]
-        self.assertIn("--admin_user=alice", install)
+        [install] = [a for a, _, _ in rec.calls if "--admin_user=alice" in a]
+        self.assertIn("core", install)
         self.assertFalse([a for a in install if "admin_password" in a])
         [(argv, stdin)] = rec.eval_calls()
         self.assertEqual(argv[:9], ["/x/docker"] + WP_AS_WWW_DATA)
         self.assertEqual(stdin, f"alice\n{pw}")
-        options = {a[a.index("update") + 1]: i for a, i, _ in rec.calls
-                   if "option" in a and "update" in a}
-        self.assertEqual(options, {"onionpress_archive_s3_access": "AK",
-                                   "onionpress_archive_s3_secret": "S3-SECRET"})
+        # The proxy's docker environment reaches every docker call.
+        for argv, _, kwargs in rec.calls:
+            if argv[0] == "/x/docker":
+                self.assertEqual(kwargs.get("env"), {"A": "1"}, argv)
         for msg in logs:
             self.assertNotIn(pw, msg)
+        self.assertTrue(os.path.exists(os.path.join(self.tmpdir, ".setup_complete")))
 
     def test_failed_password_set_is_not_reported_as_success(self):
         def reply(argv, stdin):
@@ -384,10 +406,11 @@ class TestOnionProxySetupPost(unittest.TestCase):
         self.assertIn("admin password could not be set", page)
         self.assertTrue(any("ERROR: setting the admin password failed" in m
                             for m in logs), logs)
+        self.assertFalse(os.path.exists(os.path.join(self.tmpdir, ".setup_complete")))
 
     def test_install_timeout_is_reported_without_argv(self):
         def run(argv, **kwargs):
-            if "multisite-install" in argv:
+            if "site" in argv and "create" in argv:
                 raise subprocess.TimeoutExpired(argv + ["SENTINEL-ARGV"], 30)
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         _, logs, sent, page = self._post("hunter22", run=run)

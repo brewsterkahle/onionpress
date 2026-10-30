@@ -13,7 +13,7 @@ import re
 import subprocess
 from typing import Callable, Optional
 
-from onionpress import key_manager, wp_files
+from onionpress import key_manager, onion_hostname, wp_files
 
 try:
     from onionpress import onionnames_client as _onc
@@ -217,6 +217,7 @@ def install_welcome_post(
     *,
     blog_url: str,
     docker_bin: str = "docker",
+    docker_env: dict | None = None,
     log_func: Callable[[str], None] | None = None,
 ) -> bool:
     """Replace WordPress's stock "Hello world!" post on a freshly created
@@ -233,12 +234,8 @@ def install_welcome_post(
             log_func(msg)
 
     def wp(*args, timeout: int = 30) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args(*args),
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=docker_env,
+                               timeout=timeout)
 
     url_arg = f"--url={blog_url}"
     r = wp("post", "get", "1", "--field=post_title", url_arg)
@@ -304,18 +301,14 @@ def _run_wp(docker_bin, args, *, input=None, env=None, timeout=60):
     stderr names the wp command, not the argv: a TimeoutExpired's message
     quotes the whole command line, and callers log what they catch.
     """
-    argv = [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None)
     try:
-        return subprocess.run(
-            argv, input=input, env=env,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=env,
+                               input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
         name = " ".join(a for a in list(args)[:2] if a.isalpha())
         return subprocess.CompletedProcess(
-            argv, 124, "", f"wp {name} timed out after {timeout}s")
+            [docker_bin] + wp_files.wp_cli_args(*args, stdin=input is not None),
+            124, "", f"wp {name} timed out after {timeout}s")
 
 
 def set_wp_user_password(login, password, *, docker_bin="docker", env=None,
@@ -335,6 +328,7 @@ def provision_primary_subsite(
     site_title: str,
     onion_addr: str = "localhost",
     docker_bin: str = "docker",
+    docker_env: dict | None = None,
     log_func: Callable[[str], None] | None = None,
 ) -> bool:
     """Create the primary subsite at /<onionname>/ and configure it.
@@ -362,13 +356,8 @@ def provision_primary_subsite(
 
     def wp(*args, timeout: int = 30,
            stdin: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [docker_bin] + wp_files.wp_cli_args(*args, stdin=stdin is not None),
-            input=stdin,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-        )
+        return wp_files.wp_cli(*args, docker_bin=docker_bin, env=docker_env,
+                               input=stdin, timeout=timeout)
 
     onion_addr = _site_address(onion_addr, log)
 
@@ -443,6 +432,7 @@ def provision_primary_subsite(
     install_welcome_post(
         blog_url=f"http://localhost/{onionname}/",
         docker_bin=docker_bin,
+        docker_env=docker_env,
         log_func=log_func,
     )
 
@@ -496,6 +486,80 @@ def mark_setup_complete(data_dir: str, log: Callable[[str], None] | None = None)
     return True
 
 
+# Who installed this WordPress (issue #464). Until WordPress is installed,
+# its own installer (wp-admin/install.php) takes the first visitor's choice
+# of admin account, and a setup that found WordPress installed used to
+# adopt it: rename and re-password the existing admin, keeping whatever
+# else that visitor added. Every OnionPress install writes this marker
+# beside .setup_complete, holding user 1's registration time as WordPress
+# records it; a setup that finds WordPress installed provisions it only
+# when the marker matches the live install (or the operator says
+# --adopt-existing). The bash setups (`onionpress setup` in both
+# launchers) write the same file the same way; a test keeps them equal.
+INSTALLED_BY_ONIONPRESS_MARKER = ".wordpress-installed-by-onionpress"
+INSTALLED_BY_UNKNOWN = "unknown"
+# user_registered as WordPress stores it; the launchers' bash check is the
+# same shape (note_wordpress_installed_by_onionpress).
+_USER_REGISTERED_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$")
+FOREIGN_INSTALL_MSG = (
+    "ERROR: this WordPress was not installed by OnionPress (no "
+    f"{INSTALLED_BY_ONIONPRESS_MARKER} marker for it): someone may have "
+    "reached WordPress's own installer before setup ran. Check its users "
+    "and plugins, or reset and set up again. To keep it anyway, run "
+    "`onionpress provision --adopt-existing`."
+)
+
+
+def _wp_user_1_registered(docker_bin: str, docker_env: dict | None = None) -> str:
+    """User 1's `user_registered` as WordPress stores it ('' when it
+    cannot be read)."""
+    r = _run_wp(docker_bin, ("user", "get", "1", "--field=user_registered"),
+                env=docker_env, timeout=30)
+    if r.returncode != 0:
+        return ""
+    value = (r.stdout or "").split("\n", 1)[0].strip()
+    return value if _USER_REGISTERED_RE.fullmatch(value) else ""
+
+
+def mark_wordpress_installed_by_onionpress(
+    data_dir: str, docker_bin: str = "docker",
+    log: Callable[[str], None] | None = None,
+    docker_env: dict | None = None,
+) -> bool:
+    """Record that OnionPress installed the WordPress now in the container.
+    False, logged, when the marker cannot be written."""
+    stamp = _wp_user_1_registered(docker_bin, docker_env) or INSTALLED_BY_UNKNOWN
+    path = os.path.join(data_dir, INSTALLED_BY_ONIONPRESS_MARKER)
+    try:
+        os.makedirs(data_dir, mode=0o700, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(stamp + "\n")
+    except OSError as e:
+        if log:
+            log(f"WARNING: could not write {path}: {e}")
+        return False
+    return True
+
+
+def wordpress_installed_by_onionpress(data_dir: str, docker_bin: str = "docker") -> bool:
+    """True when the marker says OnionPress installed the WordPress in the
+    container: its stamp is user 1's registration time (or 'unknown', a
+    stamp the install could not read), never a stale marker of an earlier
+    install."""
+    path = os.path.join(data_dir, INSTALLED_BY_ONIONPRESS_MARKER)
+    try:
+        with open(path, encoding="utf-8") as f:
+            stamp = f.read(256).strip()
+    except OSError:
+        return False
+    if stamp == INSTALLED_BY_UNKNOWN:
+        return True
+    if not _USER_REGISTERED_RE.fullmatch(stamp):
+        return False
+    live = _wp_user_1_registered(docker_bin)
+    return bool(live) and live == stamp
+
+
 def install_fresh_wordpress(
     *,
     site_title: str,
@@ -504,6 +568,7 @@ def install_fresh_wordpress(
     language: str = "en_US",
     onion_addr: str = "localhost",
     docker_bin: str = "docker",
+    docker_env: dict | None = None,
     launcher_bin: str | None = None,
     log_func: Callable[[str], None] | None = None,
     data_dir: str | None = None,
@@ -513,7 +578,12 @@ def install_fresh_wordpress(
     The cross-platform replacement for the old "bash auto-bootstraps with a
     random password, wizard then renames the user" dance on Linux: now the
     GTK SetupDialog, Mac SetupWindow, and `onionpress setup` SSH path all
-    funnel through this single function with the user-typed creds.
+    funnel through this single function with the user-typed creds, as
+    does the browser extension proxy's /setup form (onion_proxy).
+
+    *docker_env* is the environment docker runs with (None: this
+    process's); the launcher hop and the background archive.org key
+    fetch use this process's environment.
 
     Steps:
       1. wp core install (admin_user=onionname), then set the password on
@@ -540,7 +610,7 @@ def install_fresh_wordpress(
             log_func(msg)
 
     def wp(*args, timeout: int = 60) -> subprocess.CompletedProcess:
-        return _run_wp(docker_bin, args, timeout=timeout)
+        return _run_wp(docker_bin, args, env=docker_env, timeout=timeout)
 
     if _refuse_invalid_onionname(onionname, log):
         return False
@@ -570,13 +640,21 @@ def install_fresh_wordpress(
     # reaches wp-admin without a password), but the result is False so the
     # caller reports it.
     password_set = True
-    r = set_wp_user_password(onionname, password, docker_bin=docker_bin)
+    r = set_wp_user_password(onionname, password, docker_bin=docker_bin,
+                             env=docker_env)
     if r.returncode != 0:
         password_set = False
         log(f"ERROR: setting the admin password failed: "
             f"{r.stderr.strip()[:200]}")
     else:
         log("Admin password set")
+
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    # OnionPress installed this one (issue #464): what a later setup
+    # that finds WordPress installed checks before adopting it.
+    mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log,
+                                           docker_env=docker_env)
 
     # 2. Per-user subsite URL on the user's profile — matches Mac UX where
     # the "Website" link on profile.php points somewhere useful.
@@ -627,6 +705,7 @@ def install_fresh_wordpress(
         site_title=site_title,
         onion_addr=onion_addr,
         docker_bin=docker_bin,
+        docker_env=docker_env,
         log_func=log_func,
     )
 
@@ -645,8 +724,7 @@ def install_fresh_wordpress(
 
     if data_dir is None:
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
-    _write_config(data_dir, "ONIONNAME", onionname)
-    log(f"Onionname saved to config: {onionname}")
+    _write_config(data_dir, "ONIONNAME", onionname, log)
     if password_set:
         mark_setup_complete(data_dir, log)
 
@@ -687,6 +765,7 @@ def provision_existing_wordpress(
     docker_bin: str = "docker",
     log_func: Callable[[str], None] | None = None,
     data_dir: str | None = None,
+    adopt_existing: bool = False,
 ) -> bool:
     """Apply setup choices to an already-installed WordPress and provision
     the primary subsite.
@@ -720,6 +799,17 @@ def provision_existing_wordpress(
 
     if _refuse_invalid_onionname(onionname, log):
         return False
+
+    if data_dir is None:
+        data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
+    # Only a WordPress OnionPress installed is adopted (issue #464): one
+    # installed through wp-admin/install.php is whoever got there first's.
+    if not adopt_existing and not wordpress_installed_by_onionpress(data_dir, docker_bin):
+        log(FOREIGN_INSTALL_MSG)
+        return False
+    if adopt_existing:
+        log("Adopting the installed WordPress as the operator asked (--adopt-existing)")
+        mark_wordpress_installed_by_onionpress(data_dir, docker_bin, log)
 
     log(f"Provisioning WordPress: title={site_title!r} onionname={onionname!r}")
 
@@ -778,20 +868,22 @@ def provision_existing_wordpress(
     # 7. Persist onionname to config so wp-cli calls and tray can reuse it
     if data_dir is None:
         data_dir = os.path.join(os.path.expanduser("~"), ".onionpress")
-    _write_config(data_dir, "ONIONNAME", onionname)
-    log(f"Onionname saved to config: {onionname}")
+    _write_config(data_dir, "ONIONNAME", onionname, log)
     mark_setup_complete(data_dir, log)
 
     return True
 
 
-def provision_interactive(data_dir: str | None = None) -> bool:
+def provision_interactive(data_dir: str | None = None, *,
+                          adopt_existing: bool = False) -> bool:
     """Interactive terminal setup for headless / SSH installs.
 
     Called by `onionpress provision` on systems where WordPress has already
     been auto-installed by the container (systemd path).  Prompts for site
     title, username, and password, then delegates to
-    provision_existing_wordpress().
+    provision_existing_wordpress(), which adopts an installed WordPress
+    only when OnionPress installed it or *adopt_existing* says to
+    (`onionpress provision --adopt-existing`, issue #464).
     """
     import getpass
 
@@ -841,6 +933,7 @@ def provision_interactive(data_dir: str | None = None) -> bool:
             password=pw,
             data_dir=data_dir,
             log_func=log_fn,
+            adopt_existing=adopt_existing,
         )
     else:
         # Fresh install path — same as the GTK SetupDialog and Mac
@@ -875,44 +968,26 @@ def provision_interactive(data_dir: str | None = None) -> bool:
 def _wp_is_installed() -> bool:
     """Cheap wp-cli probe for the SSH/CLI setup path."""
     try:
-        r = subprocess.run(
-            ["docker"] + wp_files.wp_cli_args("core", "is-installed"),
-            capture_output=True, text=True, timeout=15,
-        )
-        return r.returncode == 0
+        return wp_files.wp_cli("core", "is-installed",
+                               timeout=15).returncode == 0
     except Exception:
         return False
 
 
 def _read_onion_address() -> str:
     try:
-        r = subprocess.run(
-            ["docker", "exec", "onionpress-tor",
-             "cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-            capture_output=True, text=True, timeout=10,
-        )
-        addr = r.stdout.strip()
-        return addr if key_manager.is_valid_onion_address(addr) else ""
+        return onion_hostname.read_served_address_with("docker")
     except Exception:
         return ""
 
 
-def _write_config(data_dir: str, key: str, value: str) -> None:
-    config_path = os.path.join(data_dir, "config")
+def _write_config(data_dir: str, key: str, value: str,
+                  log: Callable[[str], None]) -> None:
+    """Record KEY=VALUE through config's checked writer (issue #474):
+    the key's check, a 0600 file if it is new, the log line and the
+    change marker, as `onionpress config set` does them."""
+    from onionpress import config as op_config
     try:
-        lines = []
-        found = False
-        if os.path.exists(config_path):
-            with open(config_path) as f:
-                for line in f:
-                    if line.startswith(f"{key}="):
-                        lines.append(f"{key}={value}\n")
-                        found = True
-                    else:
-                        lines.append(line)
-        if not found:
-            lines.append(f"{key}={value}\n")
-        with open(config_path, "w") as f:
-            f.writelines(lines)
-    except OSError:
-        pass
+        op_config.set_checked_value(data_dir, key, value, log)
+    except OSError as e:
+        log(f"WARNING: could not write {key} to the config: {e}")

@@ -45,6 +45,8 @@ file       src/onionpress/key_manager.py            scripts/key_manager.py      
 file       linux/onionpress-heartbeat.py            scripts/onionpress-heartbeat.py    0644
 file       app/Resources/scripts/install_plugin.sh  scripts/install_plugin.sh          0755
 file       app/Resources/scripts/activate_plugin.sh scripts/activate_plugin.sh         0755
+file       linux/docker-rootless/dockerd-rootless.sh           docker-rootless/dockerd-rootless.sh           0755
+file       linux/docker-rootless/dockerd-rootless-setuptool.sh docker-rootless/dockerd-rootless-setuptool.sh 0755
 file       linux/onionpress.service                 onionpress.service                 0644
 file       linux/onionpress-heartbeat.service       onionpress-heartbeat.service       0644
 file       linux/onionpress-watcher.service         onionpress-watcher.service         0644

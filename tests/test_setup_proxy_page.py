@@ -13,8 +13,10 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -28,16 +30,37 @@ for fake in ("AppKit", "Foundation", "objc"):
     if fake not in sys.modules:
         sys.modules[fake] = types.ModuleType(fake)
 
-from onionpress import onion_proxy  # noqa: E402
+from onionpress import onion_proxy, setup_logic  # noqa: E402
 
 XSS = '"><script>alert(1)</script>'
+
+
+class _SetupTest(unittest.TestCase):
+    """A POST that gets through runs setup_logic.install_fresh_wordpress:
+    its data dir is a temp dir, and nothing it starts outlives the test."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="setup-proxy-page-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        for p in (mock.patch("threading.Thread"),
+                  mock.patch.object(setup_logic, "start_bundled_plugin_setup",
+                                    return_value=True)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _handler(self, body=b""):
+        h, logs, sent = _handler(body)
+        h.server.data_dir = self.tmpdir
+        return h, logs, sent
 
 
 def _handler(body=b""):
     logs, sent = [], []
     h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
     h.server = types.SimpleNamespace(docker_bin="/x/docker", docker_env={},
-                                     log_func=logs.append)
+                                     log_func=logs.append, onion_address=None,
+                                     launcher_script="/x/onionpress",
+                                     data_dir=None)
     h.headers = {"Content-Length": str(len(body))}
     h.rfile = io.BytesIO(body)
     h.wfile = io.BytesIO()
@@ -45,7 +68,6 @@ def _handler(body=b""):
     h.send_header = lambda *a: None
     h.end_headers = lambda: None
     h.send_error = lambda *a: sent.append(a)
-    h._fetch_archive_s3_keys = lambda e, p: None
     return h, logs, sent
 
 
@@ -53,17 +75,17 @@ def _run(stderr="", install_rc=0, installed=False):
     def run(argv, **kwargs):
         if "is-installed" in argv:
             return subprocess.CompletedProcess(argv, 0 if installed else 1, "", "")
-        if "multisite-install" in argv:
+        if "--admin_user=alice" in argv:
             return subprocess.CompletedProcess(argv, install_rc, "", stderr)
         return subprocess.CompletedProcess(argv, 0, "", "")
     return run
 
 
-class TestSetupFailurePage(unittest.TestCase):
+class TestSetupFailurePage(_SetupTest):
 
     def _post(self, fields, run):
         body = urlencode(fields).encode()
-        h, logs, sent = _handler(body)
+        h, logs, sent = self._handler(body)
         with mock.patch.object(onion_proxy.subprocess, "run", run):
             h._handle_setup_post()
         return sent, h.wfile.getvalue().decode()
@@ -71,8 +93,7 @@ class TestSetupFailurePage(unittest.TestCase):
     def test_wp_cli_stderr_is_escaped(self):
         stderr = f"Error: The '{XSS}' email address is invalid & <b>bold</b>."
         sent, page = self._post(
-            {"blog_title": "T", "user_name": "alice", "admin_password": "pw",
-             "admin_email": "alice@example.org"},
+            {"blog_title": "T", "user_name": "alice", "admin_password": "pw"},
             _run(stderr=stderr, install_rc=1))
         self.assertEqual(sent, [500])
         self.assertIn("<h1>Setup Failed</h1>", page)
@@ -83,26 +104,50 @@ class TestSetupFailurePage(unittest.TestCase):
 
     def test_validation_errors_are_text(self):
         sent, page = self._post(
-            {"blog_title": "-T", "user_name": XSS, "admin_password": "pw",
-             "admin_email": "x"},
+            {"blog_title": "-T", "user_name": XSS, "admin_password": "pw"},
             _run())
         self.assertEqual(sent, [400])
         self.assertNotIn("<script>", page)
-        self.assertIn("Username may only contain", page)
+        self.assertIn("Username: Letters, digits", page)
+
+    def test_user_name_is_held_to_the_onionname_rule(self):
+        # The user name is the onionname (issue #481), so it is also the
+        # site's /<name>/ path.
+        for name in ("abcd", "12345", "-alice", "alice-", "a" * 41):
+            with self.subTest(name=name):
+                sent, page = self._post(
+                    {"blog_title": "T", "user_name": name, "admin_password": "pw"},
+                    _run())
+                self.assertEqual(sent, [400], page)
+                self.assertIn("Username: ", page)
+
+    def test_no_launcher_is_refused_before_anything_installs(self):
+        body = urlencode({"blog_title": "T", "user_name": "alice",
+                          "admin_password": "pw"}).encode()
+        h, logs, sent = self._handler(body)
+        h.server.launcher_script = None
+        calls = []
+
+        def record(argv, **kwargs):
+            calls.append(list(argv))
+            return _run()(argv, **kwargs)
+        with mock.patch.object(onion_proxy.subprocess, "run", record):
+            h._handle_setup_post()
+        self.assertEqual(sent[0][0], 503)
+        self.assertEqual([c for c in calls if "is-installed" not in c], [])
 
 
-class TestSetupPostOnlyOnFirstRun(unittest.TestCase):
+class TestSetupPostOnlyOnFirstRun(_SetupTest):
     """POST /setup on an installed site would reach the password step (wp-cli
     exits 0 when there is nothing to install) and set the password of the
     user the form names. Any local user, or any web page through the
     browser, can reach 127.0.0.1."""
 
-    FIELDS = {"blog_title": "T", "user_name": "alice", "admin_password": "attacker-pw",
-              "admin_email": "alice@example.org"}
+    FIELDS = {"blog_title": "T", "user_name": "alice", "admin_password": "attacker-pw"}
 
     def _post(self, run, origin=None, port=9077):
         body = urlencode(self.FIELDS).encode()
-        h, logs, sent = _handler(body)
+        h, logs, sent = self._handler(body)
         h.server.server_port = port
         if origin is not None:
             h.headers["Origin"] = origin
@@ -142,7 +187,7 @@ class TestSetupPostOnlyOnFirstRun(unittest.TestCase):
             with self.subTest(origin=origin):
                 sent, calls, _ = self._post(_run(), origin=origin)
                 self.assertEqual(sent, [200])
-                self.assertTrue(any("multisite-install" in c for c in calls))
+                self.assertTrue(any("--admin_user=alice" in c for c in calls))
 
 
 class TestSetupFormPages(unittest.TestCase):

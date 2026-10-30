@@ -12,7 +12,9 @@ the site's onion private key to it through a Tor exit. Covered here:
     heartbeat: a malformed value falls back to the default hub, and the
     request builders refuse one that got through anyway;
   - the site's own content and healthcheck addresses, wherever they are
-    read (Tor's hostname files, the launchers' caches);
+    read (Tor's hostname files, the launchers' caches), and a census that
+    keeps the app's reads of the site's hostname file in onion_hostname
+    (issue #478);
   - hosts that only route a request (auto-login scope, the local onion
     proxy and its WordPress-side forwarder, /__op_proxy.php): parsed
     first, then checked;
@@ -51,7 +53,8 @@ for fake in ("AppKit", "Foundation", "objc"):
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import (  # noqa: E402
-    auto_login, key_manager, onion_auth, onion_proxy, onionheaven, setup_logic,
+    auto_login, key_manager, native_messaging_host, onion_auth, onion_hostname,
+    onion_proxy, onionheaven, setup_logic,
 )
 
 PHP = shutil.which("php")
@@ -171,11 +174,12 @@ class TestConfiguredHubAddress(unittest.TestCase):
                     onionheaven.ONIONHEAVEN_ADDRESS = \
                         onionheaven.configured_hub_address(value)
                     app = _FakeApp(tmp)
+                    client = onionheaven.OnionHeavenClient
                     with mock.patch.object(onionheaven, "_check_wordpress_healthy",
                                            return_value=True), \
-                            mock.patch.object(onionheaven, "_send_heartbeat"), \
+                            mock.patch.object(client, "send_heartbeat"), \
                             mock.patch.object(onionheaven.time, "sleep"), \
-                            mock.patch.object(onionheaven, "_heartbeat_loop"):
+                            mock.patch.object(client, "heartbeat_loop"):
                         onionheaven.register_with_onionheaven(app)
                     hits = [m for m in app.logs if "WARNING" in m and HUB in m]
                     self.assertEqual(bool(hits), warned, app.logs)
@@ -185,9 +189,41 @@ class TestConfiguredHubAddress(unittest.TestCase):
         # The hub address is read by the daemon (onionpress.daemon, #367),
         # at start and when `config set ONIONHEAVEN_ADDRESS` leaves the marker.
         src = _read("src/onionpress/daemon.py")
-        self.assertEqual(src.count("onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address("), 2)
+        self.assertEqual(src.count("onionheaven.use_configured_hub("), 2)
         self.assertNotIn("onionheaven.ONIONHEAVEN_ADDRESS = oh_addr", src)
         self.assertNotIn("onionheaven.ONIONHEAVEN_ADDRESS =", _read("src/menubar.py"))
+
+    def test_only_use_configured_hub_assigns_the_hub(self):
+        """Issue #476: no module assigns ONIONHEAVEN_ADDRESS from outside;
+        inside onionheaven only use_configured_hub does, through
+        configured_hub_address."""
+        pkg = os.path.join(PROJECT_DIR, "src", "onionpress")
+        rels = ["src/menubar.py"] + [f"src/onionpress/{n}" for n in sorted(os.listdir(pkg))
+                                     if n.endswith(".py")]
+        writers = []
+        for rel in rels:
+            tree = ast.parse(_read(rel))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    for sub in ast.walk(node):
+                        if isinstance(sub, ast.Global) and "ONIONHEAVEN_ADDRESS" in sub.names:
+                            writers.append((rel, node.name))
+                if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for t in targets:
+                        if isinstance(t, ast.Attribute) and t.attr == "ONIONHEAVEN_ADDRESS":
+                            writers.append((rel, "attribute"))
+        self.assertEqual(writers, [("src/onionpress/onionheaven.py", "use_configured_hub")])
+
+    def test_use_configured_hub_sets_and_returns_it(self):
+        self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS",
+                        onionheaven.ONIONHEAVEN_ADDRESS)
+        self.addCleanup(setattr, onionheaven, "REJECTED_HUB_ADDRESS", "")
+        self.assertEqual(onionheaven.use_configured_hub(OTHER_HUB), OTHER_HUB)
+        self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, OTHER_HUB)
+        self.assertEqual(onionheaven.use_configured_hub(LOOSE[0]), HUB)
+        self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, HUB)
+        self.assertEqual(onionheaven.REJECTED_HUB_ADDRESS, LOOSE[0])
 
 
 class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
@@ -404,10 +440,10 @@ class TestAutoLoginScope(unittest.TestCase):
 def _proxy_handler(path, command="GET"):
     sent, fetched = [], []
     h = onion_proxy.OnionProxyHandler.__new__(onion_proxy.OnionProxyHandler)
-    h.server = types.SimpleNamespace(cache=None, log_func=None)
+    h.server = types.SimpleNamespace(cache=None, log_func=None, server_port=9077)
     h.path = path
     h.command = command
-    h.headers = {}
+    h.headers = {"Host": "127.0.0.1:9077"}
     h.rfile = io.BytesIO()
     h.wfile = io.BytesIO()
     h.send_response = lambda *a: sent.append(("response",) + a)
@@ -447,6 +483,28 @@ class TestOnionProxyRouting(unittest.TestCase):
         h, sent, fetched = _proxy_handler(f"/proxy/{SITE}/a/b?c=1")
         h._handle_request()
         self.assertEqual(fetched, [("tor", f"http://{SITE}/a/b?c=1")])
+
+    def test_proxy_format_needs_this_proxys_host(self):
+        # Issue #465: a request for another Host (a name a page's DNS
+        # points at 127.0.0.1) is refused before the path is looked at.
+        for host in (None, "rebind.attacker.example:9077", "127.0.0.1:19077", "127.0.0.1"):
+            with self.subTest(host=host):
+                h, sent, fetched = _proxy_handler(f"/proxy/{SITE}/x")
+                h.headers = {} if host is None else {"Host": host}
+                h._handle_request()
+                self.assertEqual(fetched, [])
+                self.assertEqual(sent[0][:2], ("error", 403))
+        for host in ("localhost:9077", "[::1]:9077"):
+            with self.subTest(host=host):
+                h, sent, fetched = _proxy_handler(f"/proxy/{SITE}/x")
+                h.headers = {"Host": host}
+                h._handle_request()
+                self.assertEqual(fetched, [("tor", f"http://{SITE}/x")])
+        # An absolute-form request's Host is its target.
+        h, sent, fetched = _proxy_handler(f"http://{SITE}/x")
+        h.headers = {"Host": SITE}
+        h._handle_request()
+        self.assertEqual(fetched, [("tor", f"http://{SITE}/x")])
 
     def test_an_onion_name_never_goes_out_clearnet(self):
         # A trailing dot or upper case used to read as a clearnet name.
@@ -570,6 +628,144 @@ class TestSetupSiteAddress(unittest.TestCase):
             rec = _Recorder(content)
             with mock.patch.object(setup_logic.subprocess, "run", rec):
                 self.assertEqual(setup_logic._read_onion_address(), want)
+
+
+# ─── The served hostname (issue #478) ───────────────────────────────────
+
+
+class _HostnameDocker:
+    """A Docker whose tor container's hostname file holds *content*."""
+
+    def __init__(self, content, rc=0):
+        self.content, self.rc, self.calls = content, rc, []
+
+    def exec(self, container, command, timeout=30, quiet=False, **kw):
+        self.calls.append([container, *command])
+        from onionpress.docker import DockerResult
+        return DockerResult(self.rc, self.content if self.rc == 0 else "", "")
+
+
+class TestServedHostnameReader(unittest.TestCase):
+    """onion_hostname is the app's one reader of the site's hostname file:
+    one whole v3 address or ""."""
+
+    def test_served_address(self):
+        self.assertEqual(onion_hostname.served_address(SITE + "\n"), SITE)
+        self.assertEqual(onion_hostname.served_address(None), "")
+        for value in LOOSE:
+            with self.subTest(value=value):
+                self.assertEqual(onion_hostname.served_address(value + "\n"), "")
+
+    def test_through_a_docker(self):
+        docker = _HostnameDocker(SITE + "\n")
+        self.assertEqual(onion_hostname.read_served_address(docker), SITE)
+        self.assertEqual(docker.calls, [["onionpress-tor", "cat", onion_hostname.HOSTNAME_FILE]])
+        self.assertEqual(onion_hostname.read_served_address(_HostnameDocker(SITE, rc=1)), "")
+        for value in LOOSE:
+            with self.subTest(value=value):
+                self.assertEqual(onion_hostname.read_served_address(_HostnameDocker(value)), "")
+                # Unchecked only for the caller that reports a damaged file.
+                self.assertEqual(onion_hostname.read_hostname_text(_HostnameDocker(value)),
+                                 value.strip())
+
+    def test_through_a_docker_binary(self):
+        rec = _Recorder(SITE + "\n")
+        with mock.patch.object(onion_hostname.subprocess, "run", rec):
+            self.assertEqual(onion_hostname.read_served_address_with("/x/docker"), SITE)
+        self.assertEqual(rec.calls, [["/x/docker", "exec", "onionpress-tor", "cat",
+                                      "/var/lib/tor/hidden_service/wordpress/hostname"]])
+        for value in LOOSE:
+            with self.subTest(value=value), \
+                    mock.patch.object(onion_hostname.subprocess, "run", _Recorder(value)):
+                self.assertEqual(onion_hostname.read_served_address_with(), "")
+        failed = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, SITE, "")  # noqa: E731
+        with mock.patch.object(onion_hostname.subprocess, "run", failed):
+            self.assertEqual(onion_hostname.read_served_address_with(), "")
+
+    def test_the_rule_is_key_managers(self):
+        self.assertIs(onion_hostname.is_valid_onion_address, key_manager.is_valid_onion_address)
+
+
+class TestNativeMessagingHostAddress(unittest.TestCase):
+    """The browser extension gets the served address only when it is one
+    whole v3 address. The host runs outside the package, with a copy of
+    the rule."""
+
+    def test_same_rule_and_path(self):
+        self.assertEqual(native_messaging_host.ONION_ADDRESS_RE.pattern,
+                         key_manager.ONION_ADDRESS_RE.pattern)
+        self.assertEqual(native_messaging_host.HOSTNAME_FILE, onion_hostname.HOSTNAME_FILE)
+
+    def test_get_onion_address(self):
+        for content, want in [(SITE + "\n", SITE)] + [(v, None) for v in LOOSE]:
+            with self.subTest(content=content), \
+                    mock.patch.object(native_messaging_host.subprocess, "run",
+                                      _Recorder(content)):
+                self.assertEqual(native_messaging_host.get_onion_address(), want)
+
+
+# Where the site's hostname file may be named in src/: the reader, the
+# standalone native messaging host (its own copy, checked above), the key
+# recovery that derives a public key from it, and wp_files' constant.
+HOSTNAME_NAMES = {"TOR_HOSTNAME_FILE", "CTOR_HOSTNAME_PATH"}
+ALLOWED_HOSTNAME_READS = {
+    ("src/onionpress/onion_hostname.py", "<module>"),
+    ("src/onionpress/native_messaging_host.py", "<module>"),
+    ("src/onionpress/key_manager.py", "<module>"),
+    ("src/onionpress/key_manager.py", "extract_keys"),
+    ("src/onionpress/wp_files.py", "<module>"),
+}
+
+
+class _HostnameReads(ast.NodeVisitor):
+    def __init__(self):
+        self.stack, self.found = [], []
+
+    def _func(self, node):
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_FunctionDef = visit_AsyncFunctionDef = _func
+
+    def _hit(self, node):
+        self.found.append((self.stack[-1] if self.stack else "<module>", node.lineno))
+
+    def visit_Constant(self, node):
+        if isinstance(node.value, str) and "hidden_service/wordpress/hostname" in node.value:
+            self._hit(node)
+
+    def visit_Name(self, node):
+        if node.id in HOSTNAME_NAMES:
+            self._hit(node)
+
+    def visit_Attribute(self, node):
+        if node.attr in HOSTNAME_NAMES:
+            self._hit(node)
+        self.generic_visit(node)
+
+
+class TestOneHostnameReader(unittest.TestCase):
+    """A census: no new raw read of the hostname file in src/. Read it with
+    onion_hostname.read_served_address / read_served_address_with."""
+
+    def test_scan(self):
+        bad, seen = [], set()
+        for dirpath, dirnames, filenames in os.walk(os.path.join(PROJECT_DIR, "src")):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), PROJECT_DIR)
+                v = _HostnameReads()
+                v.visit(ast.parse(_read(rel), rel))
+                for func, line in v.found:
+                    if (rel, func) in ALLOWED_HOSTNAME_READS:
+                        seen.add((rel, func))
+                    else:
+                        bad.append(f"{rel}:{line} in {func}()")
+        self.assertEqual(bad, [], "read the served address through onion_hostname")
+        self.assertEqual(seen, ALLOWED_HOSTNAME_READS)
 
 
 # ─── Tor container ──────────────────────────────────────────────────────

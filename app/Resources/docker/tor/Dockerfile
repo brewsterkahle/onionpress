@@ -43,7 +43,7 @@
 # ARGs used in FROM lines must be declared before the first FROM (global
 # scope) and re-declared inside any stage that needs them.
 
-ARG TOR_IMAGE=containers.torproject.org/tpo/onion-services/onimages/tor:trixie@sha256:d29e07a65489fa9e3c8c57b88d53fc540fb99ccc8afc2fd9a1850191cd7869d0
+ARG TOR_IMAGE=containers.torproject.org/tpo/onion-services/onimages/tor:trixie@sha256:b4700bfb270b2fa4319c746bec030a72e40d947209589b67ee4f744f81382f5d
 ARG DOCKER_CLI_IMAGE=docker:29.8.1-cli@sha256:018edbc908e08fcc9dbf029c812c34251e9b4719e6f71ca0e5eae2a987d014ca
 
 # Stage 1: Build mkp224o for vanity .onion address generation. Lives in this

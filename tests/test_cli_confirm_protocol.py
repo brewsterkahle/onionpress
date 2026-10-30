@@ -433,7 +433,7 @@ class TestUninstallRun(unittest.TestCase):
             return mock.Mock(returncode=0)
         with mock.patch.object(uninstall.subprocess, "run", side_effect=run), \
                 mock.patch.object(uninstall, "hubs_holding_key", return_value=[(ADDR, HUB)]), \
-                mock.patch("onionpress.cli.release_onionheaven", return_value=["left"]) as release, \
+                mock.patch("onionpress.onionheaven.release_onionheaven", return_value=["left"]) as release, \
                 mock.patch.object(uninstall.login_item, "remove", return_value=True) as remove, \
                 mock.patch.object(uninstall.op_daemon, "stop_agent", return_value=True) as stop_daemon, \
                 mock.patch.object(uninstall.op_daemon, "remove_agent") as remove_agent, \

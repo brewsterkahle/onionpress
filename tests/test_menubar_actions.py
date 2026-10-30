@@ -18,6 +18,10 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import confirm  # noqa: E402
 
+# The UI processes' import closure is computed once, in test_mac_daemon.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_mac_daemon import ui_import_closure  # noqa: E402
+
 MENUBAR = os.path.join(PROJECT_ROOT, "src", "menubar.py")
 
 # What the menubar may still use these modules for: reading the address
@@ -34,6 +38,7 @@ ACTIONS = (
     '["backup", "--check", "--json", "--user", username]',
     '["backup", "--json", "-o", output_path, "--user", username]',
     '["restore", zip_path, "--check", "--json"]',
+    '["prepare-restore", zip_path, "--check", "--json"]',
     'launcher_ops.run_launcher_restore(',
     '["update", "--check", "--json"]',
     '["update", "--yes", "--json"]',
@@ -75,6 +80,27 @@ class TestImports(unittest.TestCase):
                 self.assertNotIn(name, imported)
         for alias in ("backup_manager", "hub_backup", "updater"):
             self.assertNotRegex(self.src, rf"\b{alias}\.")
+
+    def test_action_modules_are_not_imported_transitively(self):
+        """Issue #475: neither by the menubar, nor the windows it opens,
+        nor anything those import, at the top or lazily (a subprocess
+        imports them headless; test_mac_daemon.ui_import_closure). The
+        welcome screen's restore opens the backup through `onionpress
+        prepare-restore --check`, never backup.peek_backup_metadata."""
+        loaded = ui_import_closure()
+        for name in NEVER_IMPORTED:
+            with self.subTest(name=name):
+                self.assertNotIn(f"onionpress.{name}", loaded)
+
+    def test_the_welcome_restore_opens_the_backup_through_the_launcher(self):
+        body = _method(self.src, "_check_welcome_backup")
+        self.assertIn('["prepare-restore", zip_path, "--check", "--json"]', body)
+        self.assertIn("launcher_ops.BACKUP_PASSWORD_ENV: password", body)
+        with open(os.path.join(os.path.dirname(MENUBAR), "onionpress", "setup_window.py"),
+                  encoding="utf-8") as f:
+            setup_window = f.read()
+        self.assertNotIn("peek_backup_metadata", setup_window)
+        self.assertIn("sw.set_on_check_backup(self._check_welcome_backup)", self.src)
 
     def test_the_remaining_uses_only_read(self):
         for module, allowed in ALLOWED.items():

@@ -1222,58 +1222,64 @@ class TestRepublishTrigger(unittest.TestCase):
         self.assertEqual(REPUBLISH_RECOVERY_STREAK, 5)
 
 
-class TestHealthMonitorRepublish(unittest.TestCase):
-    """The Linux service's entry point: HealthMonitor.should_request_republish."""
+class TestRecoveryWindowRepublish(unittest.TestCase):
+    """Both platforms' entry point (issue #480): reachability.RecoveryWindow
+    feeds each cycle's outcome to its RepublishTrigger."""
 
-    def test_monitor_owns_a_trigger_and_feeds_it_the_health_result(self):
-        monitor = HealthMonitor()
-        self.assertIsInstance(monitor.republish, RepublishTrigger)
+    @staticmethod
+    def _window():
+        from onionpress.reachability import RecoveryWindow
+        return RecoveryWindow(mock.Mock(), lambda m: None, lambda k, d: d)
+
+    def test_window_owns_a_trigger_and_feeds_it_the_health_result(self):
+        window = self._window()
+        self.assertIsInstance(window.trigger, RepublishTrigger)
         hr = HealthResult(
             wp_healthy=True, tor_bootstrapped=True, bootstrap_pct=100,
             onion_address="op2abc.onion", tor_internally_ready=True,
             tor_externally_reachable=False, external_http_code="000:rc=28",
         )
         base = 1_000_000.0
-        with mock.patch("onionpress.health.time.time", return_value=base):
-            self.assertFalse(monitor.should_request_republish(hr))
-        with mock.patch("onionpress.health.time.time", return_value=base + 599):
-            self.assertFalse(monitor.should_request_republish(hr))
-        with mock.patch("onionpress.health.time.time", return_value=base + 600):
-            self.assertTrue(monitor.should_request_republish(hr))
-        with mock.patch("onionpress.health.time.time", return_value=base + 601):
-            self.assertFalse(monitor.should_request_republish(hr))
+        with mock.patch("onionpress.reachability.time.time", return_value=base):
+            self.assertFalse(window.decide_result(hr))
+        with mock.patch("onionpress.reachability.time.time", return_value=base + 599):
+            self.assertFalse(window.decide_result(hr))
+        with mock.patch("onionpress.reachability.time.time", return_value=base + 600):
+            self.assertTrue(window.decide_result(hr))
+        with mock.patch("onionpress.reachability.time.time", return_value=base + 601):
+            self.assertFalse(window.decide_result(hr))
 
-    def test_monitor_passes_the_wedge_class_to_the_trigger(self):
-        monitor = HealthMonitor()
+    def test_window_passes_the_wedge_class_to_the_trigger(self):
+        window = self._window()
         hr = HealthResult(tor_internally_ready=True, tor_externally_reachable=False,
                           external_http_code="000:rc=97", wedge_class="desc-missing")
-        with mock.patch("onionpress.health.time.time", return_value=0.0):
-            monitor.should_request_republish(hr)
-        self.assertEqual(monitor.republish.last_class, "desc-missing")
-        self.assertEqual(monitor.republish.required_window(),
+        with mock.patch("onionpress.reachability.time.time", return_value=0.0):
+            window.decide_result(hr)
+        self.assertEqual(window.trigger.last_class, "desc-missing")
+        self.assertEqual(window.trigger.required_window(),
                          REPUBLISH_AFTER_UNREACHABLE_FAST_SECONDS)
-        with mock.patch("onionpress.health.time.time", return_value=300.0):
-            self.assertTrue(monitor.should_request_republish(hr))
+        with mock.patch("onionpress.reachability.time.time", return_value=300.0):
+            self.assertTrue(window.decide_result(hr))
 
     def test_a_healthy_result_resets(self):
-        monitor = HealthMonitor()
+        window = self._window()
         bad = HealthResult(tor_internally_ready=True,
                            tor_externally_reachable=False,
                            external_http_code="000:rc=97")
         good = HealthResult(wp_healthy=True, tor_internally_ready=True,
                             tor_externally_reachable=True,
                             external_http_code="301")
-        with mock.patch("onionpress.health.time.time", return_value=0.0):
-            monitor.should_request_republish(bad)
-        with mock.patch("onionpress.health.time.time", return_value=300.0):
-            self.assertFalse(monitor.should_request_republish(good))
+        with mock.patch("onionpress.reachability.time.time", return_value=0.0):
+            window.decide_result(bad)
+        with mock.patch("onionpress.reachability.time.time", return_value=300.0):
+            self.assertFalse(window.decide_result(good))
         # Rate-based window: a pass is a sample, not a reset; the window
         # only ends after REPUBLISH_RECOVERY_STREAK passes in a row.
-        self.assertEqual(monitor.republish.failing_since, 0.0)
+        self.assertEqual(window.trigger.failing_since, 0.0)
         for t in range(330, 330 + 30 * REPUBLISH_RECOVERY_STREAK, 30):
-            with mock.patch("onionpress.health.time.time", return_value=float(t)):
-                monitor.should_request_republish(good)
-        self.assertIsNone(monitor.republish.failing_since)
+            with mock.patch("onionpress.reachability.time.time", return_value=float(t)):
+                window.decide_result(good)
+        self.assertIsNone(window.trigger.failing_since)
 
 
 class TestClassifyWedge(unittest.TestCase):
@@ -1422,7 +1428,7 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         # The Mac's wake handler is the daemon's (onionpress.daemon, #367).
         body = self._body("src/onionpress/daemon.py", "    def handle_wake(self):",
                           "    # -- the hub's messages")
-        self.assertIn("self._republish_trigger.reset()", body)
+        self.assertIn("self._recovery.note_wake()", body)
         menubar = open(os.path.join(self.ROOT, "src/menubar.py"), encoding="utf-8").read()
         self.assertNotIn("def handle_wake(", menubar)
 
@@ -1430,7 +1436,19 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         body = self._body("src/onionpress/reachability.py",
                           "    def note_wake(self) -> None:",
                           "    def _slept_since_last_cycle(self)")
-        self.assertIn("self.monitor.republish.reset()", body)
+        self.assertIn("self.recovery.note_wake()", body)
+
+    def test_the_shared_wake_reset_resets_the_window(self):
+        from onionpress.reachability import RecoveryWindow
+        body = self._body("src/onionpress/reachability.py",
+                          "    def note_wake(self) -> None:\n        \"\"\"Back from suspend. Issue #266",
+                          "    def note_offline(self)")
+        self.assertIn("self.trigger.reset()", body)
+        window = RecoveryWindow(mock.Mock(), lambda m: None, lambda k, d: d)
+        window.decide(True, False, "000:rc=28")
+        self.assertIsNotNone(window.trigger.failing_since)
+        window.note_wake()
+        self.assertIsNone(window.trigger.failing_since)
 
     def test_linux_heartbeat_wake_handler_calls_note_wake(self):
         body = self._body("linux/onionpress-heartbeat.py",
