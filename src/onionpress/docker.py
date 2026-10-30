@@ -222,6 +222,29 @@ class Docker:
                     pass
         return services
 
+    def run_to(self, args: list, *, log_file: str | None = None,
+               extra_env: dict | None = None) -> int:
+        """Run `docker ARGS` to the end without capturing it, for the long
+        ones whose output a launcher shows as it comes (a first `compose
+        pull` takes minutes): appended to *log_file*, or, without one,
+        streamed line by line to stdout. The exit status; 127 when docker
+        could not be run. No timeout, as the launchers had none."""
+        cmd = [self._docker_bin] + [str(a) for a in args]
+        env = {**self._env, **extra_env} if extra_env else self._env
+        try:
+            if log_file:
+                with open(log_file, "a", encoding="utf-8") as log:
+                    return subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL,
+                                          stdout=log, stderr=subprocess.STDOUT).returncode
+            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace")
+            for line in proc.stdout:
+                print(line.rstrip("\n"), flush=True)
+            return proc.wait()
+        except OSError:
+            return 127
+
     def _subprocess(
         self,
         cmd: list,

@@ -404,3 +404,28 @@ Trace deltas, on purpose: the Mac bad-prefix line, and Linux's
 `bin python3 …key_manager.py ensure-formats` became `fn ensure_key_formats`.
 Two fixtures (`plugins-off`, `update-on-launch`) were re-recorded against
 the bash first: the scenario's config had not applied (fe3636fc).
+
+### The core services (#448)
+
+`start.start_core(manager, mac=…, wp_port=…, errors=…)`, fast path
+`start-core` (`--docker-dir`, `--bin-dir`, `--wp-port`, `--errors-file`;
+exit 0 installed, 3 not, 1 stop), bash `start_core_services` + a `case`
+on its status in `start_containers`. It pulls `--policy missing` (gated on
+`using_local_images`; Linux with the Cloudflare file under a token), then
+`ContainerManager.start_core(launcher=…, egress=…)`: the launcher's words,
+compose output to the log (Mac) or streamed to stdout (Linux, through the
+new `Docker.run_to`, so the docker-argv census did not grow), the egress
+step `start.egress_step` (the launcher's verdict, `wordpress-egress` in
+START_ERRORS on the Mac), retire, the network move, `compose up` × 3;
+then the host-side `curl` wait for the port (60 s, the Mac's WARNING) and
+`wp core is-installed` × 15. Settled: `update_images` (UPDATE_ON_LAUNCH)
+stays bash, before the delegation, because its per-image pin lists are
+`refresh-image-digests.sh` consumers and the Mac's `restart` calls it too.
+Linux's WordPress address (#464) reaches compose as before, in the
+environment: `ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" op_py
+… start-core` (no Python code names the variable;
+`test_linux_bind_scope`). Gone: the Mac's `block_wordpress_egress`, both
+launchers' `retire_old_onionheaven_containers` and `migrate_tor_network`
+(Linux keeps `block_wordpress_egress` for its status loop). The ordering
+tests live in `tests/test_start_core.py`. Traces unchanged (the harness
+now has empty compose files in its docker folder, as an install has).

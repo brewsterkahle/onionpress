@@ -128,6 +128,11 @@ def run(test, platform, scenario):
                else os.path.join(os.path.dirname(launcher.script), "scripts"))
     shutil.copytree(os.path.join(PROJECT_ROOT, "app", "Resources", "scripts"), scripts)
     launcher.add_stubs(RUNNER_STUBS)
+    # The compose files, present as in a real install (the Python side
+    # adds the Cloudflare one only when it is there); the fake docker never
+    # reads them.
+    for name in ("docker-compose.yml", "docker-compose.cloudflare.yml"):
+        open(os.path.join(launcher.docker_dir, name), "w").close()
 
     os.makedirs(launcher.data_dir, mode=0o700)
     with open(os.path.join(launcher.data_dir, "config"), "w", encoding="utf-8") as f:

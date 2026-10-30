@@ -378,6 +378,21 @@ ROWS = [
     Row("seed-onion-key", ["seed-onion-key"], "start.KeySeed",
         mock.call(ANY, mac=False, bin_dir=ANY), rc=1,
         returns=mock.Mock(**{"run.return_value": False})),
+    # #442.6: the launchers' start_core_services() is start.start_core; exit
+    # 0 / 3 say whether WordPress is installed, 1 stops the start.
+    Row("start-core", ["start-core", "--docker-dir", "/d", "--bin-dir", "/b",
+                       "--wp-port", "18080", "--errors-file", "/e"],
+        "start.start_core", mock.call(ANY, mac=True, wp_port=18080, errors=ANY, log=ANY),
+        rc=0, os_name="macos", returns=(True, True),
+        check=lambda t, m: (t.assertEqual(m.call_args.args[0].paths.docker_dir, "/d"),
+                            t.assertEqual(m.call_args.args[0].paths.bin_dir, "/b"),
+                            t.assertEqual(m.call_args.kwargs["errors"].path, "/e"))),
+    Row("start-core", ["start-core"], "start.start_core",
+        mock.call(ANY, mac=False, wp_port=8080, errors=None, log=ANY), rc=3,
+        returns=(True, False)),
+    Row("start-core", ["start-core"], "start.start_core",
+        mock.call(ANY, mac=False, wp_port=8080, errors=None, log=ANY), rc=1,
+        returns=(False, False)),
     # #442.4: the launchers' apply_pending_key_import() is ContainerManager's;
     # 1 stops the start (an old keystore survived, the marker stays).
     Row("apply-pending-key-import", ["apply-pending-key-import"],

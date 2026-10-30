@@ -172,9 +172,11 @@ class TestUnderBash(unittest.TestCase):
 
     def test_start_containers_composes_with_it(self):
         body = _bash_function(_read(LAUNCHER), "start_containers")
-        self.assertIn(
-            'ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \\\n'
-            '            docker compose up -d wordpress db onionheaven autoheal', body)
+        # The core `compose up` is start-core's (#442.6), handed the
+        # address in its environment (tests/test_start_core.py).
+        fn = _bash_function(_read(LAUNCHER), "start_core_services")
+        self.assertIn('ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \\\n'
+                      '        op_py --data-dir "$DATA_DIR" start-core', fn)
         # Once the verdict is in: installed sites end as every setup does,
         # the rest stay on loopback with the heartbeat client held.
         self.assertRegex(body, r'if \$wp_installed; then\n[^\n]*\n\s*after_wordpress_installed\n')

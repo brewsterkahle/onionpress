@@ -473,14 +473,11 @@ class TestLaunchPullsNothingItHas(unittest.TestCase):
     """
 
     def test_start_time_compose_pull_is_missing_only(self):
-        for path in LAUNCHERS:
-            text = _read(path)
-            with self.subTest(path=path):
-                # Linux adds the Cloudflare override file with a tunnel token.
-                self.assertRegex(
-                    text,
-                    r'docker compose (?:"\$\{CF_COMPOSE\[@\]\}" )?'
-                    r'pull --policy missing')
+        """Both launchers' start pulls through start.start_core (#442.6);
+        Linux adds the Cloudflare override file with a tunnel token."""
+        text = _read("src/onionpress/start.py")
+        self.assertIn('run_compose_to(["pull", "--policy", "missing"]', text)
+        self.assertEqual(text.count('"pull"'), 1, "the start's one pull")
 
     def test_mac_launcher_has_no_unconditional_compose_pull(self):
         """The Mac launcher's only `docker compose pull` is the start-time

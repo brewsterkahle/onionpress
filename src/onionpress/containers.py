@@ -582,18 +582,41 @@ class ContainerManager:
             self._log(f"Image pull warning: {result.stderr.rstrip()}")
         return result
 
-    def start_core(self, retries: int = 3) -> bool:
-        """Start core services (WordPress, DB, OnionHeaven). Not Tor yet.
+    def run_compose_to(self, args: list, *, out: str, include_cloudflare: bool = False) -> int:
+        """`docker compose ARGS` with the stack's environment, its output
+        where the launchers sent it: *out* "log" appends it to the log
+        file (the Mac's `>> "$LOG_FILE" 2>&1`), "stdout" streams it
+        (Linux's `| tee -a "$LOG_FILE"`: the journal sees a first pull's
+        progress as it happens). The exit status (Docker.run_to)."""
+        files = []
+        for f in self._compose_files(include_cloudflare) or []:
+            files += ["-f", f]
+        return self.docker.run_to(["compose", *files, *args],
+                                  log_file=self.paths.log_file if out == "log" else None,
+                                  extra_env=self._build_env())
 
-        Returns True on success. Retries on failure.
+    def start_core(self, retries: int = 3, *, launcher: str | None = None,
+                   egress: Callable[[], object] | None = None) -> bool:
+        """Start core services (WordPress, DB, OnionHeaven, autoheal). Not
+        Tor yet. Before anything starts: the egress rules (issue #144),
+        retiring an older OnionPress's containers, the Tor network's move.
+
+        Returns True on success. Retries on failure (5 s apart).
+
+        *launcher* ("mac" or "linux") is a launcher's start
+        (onionpress start-core, #442.6): its words, compose's output where
+        that launcher put it, and *egress* in place of this manager's (the
+        launcher's verdict lines and START SUMMARY name). WordPress's
+        published address on Linux comes in the environment, as the
+        launcher's `compose up` always had it (issue #464).
         """
-        self._log("Starting core services...")
-        compose_files = self._compose_files()
+        if launcher is None:
+            self._log("Starting core services...")
 
         # WordPress and MariaDB reach nothing outside Docker (issue #144):
         # the rules go on the Docker host before their network has a
         # container on it. Best effort, as in the launchers; ensure() logs.
-        self._egress()
+        (egress or self._egress)()
 
         # Nothing from before the OnionHeaven data volume may run beside the
         # containers about to start (the data move must not race them).
@@ -608,22 +631,36 @@ class ContainerManager:
         except Exception as e:
             self._log(f"Could not check onionpress-network's bridge: {e}")
 
+        up = ["up", "-d"] + CORE_SERVICES
+        shown = "docker compose " + " ".join(up)
         env = self._build_env()
         for attempt in range(1, retries + 1):
-            result = self.docker.compose(
-                ["up", "-d"] + CORE_SERVICES,
-                compose_files=compose_files,
-                timeout=120,
-                extra_env=env,
-            )
-            if result.ok:
-                self._log("Core services started")
+            if launcher is None:
+                result = self.docker.compose(up, compose_files=self._compose_files(),
+                                             timeout=120, extra_env=env)
+                ok, why = result.ok, result.stderr.rstrip()
+            else:
+                ok = self.run_compose_to(up, out="log" if launcher == "mac" else "stdout") == 0
+            if ok:
+                self._log("Core services started" if launcher is None
+                          else "WordPress, DB, and Tor client containers starting")
                 return True
-            self._log(f"Start attempt {attempt}/{retries} failed: {result.stderr.rstrip()}")
+            if launcher is None:
+                self._log(f"Start attempt {attempt}/{retries} failed: {why}")
+            elif launcher == "mac":
+                self._log(f"WARNING: '{shown}' failed (attempt {attempt}/{retries}). "
+                          f"Check {self.paths.log_file} for details.")
+            else:
+                self._log(f"WARNING: docker compose up failed (attempt {attempt}/{retries})")
             if attempt < retries:
                 time.sleep(5)
 
-        self._log("ERROR: Failed to start core services after retries")
+        if launcher is None:
+            self._log("ERROR: Failed to start core services after retries")
+        elif launcher == "mac":
+            self._log(f"ERROR: '{shown}' failed after {retries} attempts.")
+        else:
+            self._log(f"ERROR: docker compose up failed after {retries} attempts")
         return False
 
     def start_tor(self) -> bool:

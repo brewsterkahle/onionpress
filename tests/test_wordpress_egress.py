@@ -1065,37 +1065,31 @@ class TestTorNetworkMove(unittest.TestCase):
 class TestLaunchers(unittest.TestCase):
 
     def test_both_shut_the_network_before_the_first_compose_up(self):
+        """Both launchers' start runs start.start_core (#442.6), whose
+        egress step comes before any `compose up` (tests/test_start_core.py)."""
         for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
                 body = _function_body(_read(path), "start_containers")
-                code = "\n".join(l for l in body.splitlines()
-                                 if not l.lstrip().startswith("#"))
-                self.assertIn("\n    block_wordpress_egress\n", code)
-                self.assertLess(code.index("block_wordpress_egress"),
-                                code.index("docker compose up"))
+                self.assertIn("start_core_services || rc=$?", body)
+                self.assertNotIn("up -d wordpress db", body)
 
     def test_the_helpers_call_the_shared_cli_and_never_stop_the_start(self):
-        """Phase 4 (#120) slice 7: the bash body is the delegation, tee'd
-        into the log (the CLI logs the verdict in the launchers' format),
-        and returns 0 whatever the CLI's status; the Mac hands it an errors
-        file and reads the step's name back for its START SUMMARY (the
-        contract in onionpress.start, #442.2)."""
-        for path, runner in ((MAC_LAUNCHER, "bundled_python -m onionpress.cli"),
-                             (LINUX_LAUNCHER, "op_py")):
-            with self.subTest(launcher=os.path.relpath(path, ROOT)):
-                body = _function_body(_read(path), "block_wordpress_egress")
-                self.assertIn(f'{runner} --data-dir "$DATA_DIR" wordpress-egress', body)
-                self.assertIn('2>&1 | tee -a "$LOG_FILE"', body)
-                self.assertTrue(body.rstrip().endswith("return 0"),
-                                "both launchers run under set -e")
-                self.assertNotIn("\n    log ", body, "the verdict lines are the CLI's")
-                self.assertNotIn("WARNING", body)
-        mac = _function_body(_read(MAC_LAUNCHER), "block_wordpress_egress")
+        """Linux's block_wordpress_egress (its status loop re-applies the
+        rules) is the delegation, tee'd into the log, returning 0 whatever
+        the CLI's status. The Mac's start runs the same step inside
+        start-core (#442.6) and keeps no bash function."""
+        body = _function_body(_read(LINUX_LAUNCHER), "block_wordpress_egress")
+        self.assertIn('op_py --data-dir "$DATA_DIR" wordpress-egress', body)
+        self.assertIn('2>&1 | tee -a "$LOG_FILE"', body)
+        self.assertTrue(body.rstrip().endswith("return 0"), "the launcher runs under set -e")
+        self.assertNotIn("\n    log ", body, "the verdict lines are the CLI's")
+        self.assertNotIn("WARNING", body)
+        self.assertNotIn("\nblock_wordpress_egress() {", _read(MAC_LAUNCHER))
+        # The Mac's start hands start-core its errors file for the START SUMMARY.
+        mac = _function_body(_read(MAC_LAUNCHER), "start_core_services")
         self.assertIn("errors=$(start_errors_file)", mac)
         self.assertIn('${errors:+--errors-file "$errors"}', mac)
         self.assertIn('note_start_errors "$errors"', mac)
-        self.assertNotIn("START_ERRORS", _function_body(_read(LINUX_LAUNCHER),
-                                                        "block_wordpress_egress"))
 
     def _run_cli(self, argv, result, os_name, docker=None):
         """cli.main(argv) with ensure answering *result*: (rc, stdout)."""
@@ -1175,20 +1169,22 @@ class TestLaunchers(unittest.TestCase):
                     self.assertEqual(f.read(), want)
 
     def test_mac_passes_its_own_limactl(self):
-        body = _function_body(_read(MAC_LAUNCHER), "block_wordpress_egress")
+        body = _function_body(_read(MAC_LAUNCHER), "start_core_services")
         self.assertIn('--bin-dir "$BIN_DIR"', body)
 
     def test_both_pass_this_users_port(self):
         """The published-port rule needs the port, offset included; both
         launchers export ONIONPRESS_WP_PORT before anything runs."""
-        for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            with self.subTest(launcher=os.path.relpath(path, ROOT)):
+        for path, fn in ((MAC_LAUNCHER, "start_core_services"),
+                         (LINUX_LAUNCHER, "block_wordpress_egress"),
+                         (LINUX_LAUNCHER, "start_core_services")):
+            with self.subTest(launcher=os.path.relpath(path, ROOT), fn=fn):
                 text = _read(path)
-                body = _function_body(text, "block_wordpress_egress")
+                body = _function_body(text, fn)
                 self.assertIn('--wp-port "$ONIONPRESS_WP_PORT"', body)
                 self.assertRegex(text, r"(?m)^export ONIONPRESS_WP_PORT=\$\(\(8080 \+ ONIONPRESS_PORT_OFFSET\)\)$")
                 self.assertLess(text.index("export ONIONPRESS_WP_PORT="),
-                                text.index("\nblock_wordpress_egress() {"))
+                                text.index(f"\n{fn}() {{"))
 
     def test_the_cli_reads_the_port(self):
         from onionpress import cli
@@ -1206,32 +1202,20 @@ class TestLaunchers(unittest.TestCase):
     # -- onionpress-network onto its fixed bridge --
 
     def test_both_move_the_tor_network_before_the_first_compose_up(self):
+        """start.start_core runs ContainerManager.start_core: retire, then
+        the move, then `compose up` (tests/test_start_core.py)."""
         for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
                 body = _function_body(_read(path), "start_containers")
-                code = "\n".join(l for l in body.splitlines()
-                                 if not l.lstrip().startswith("#"))
-                self.assertIn("\n    migrate_tor_network\n", code)
-                self.assertLess(code.index("\n    retire_old_onionheaven_containers\n"),
-                                code.index("\n    migrate_tor_network\n"))
-                self.assertLess(code.index("\n    migrate_tor_network\n"),
-                                code.index("docker compose up"))
+                self.assertIn("start_core_services || rc=$?", body)
 
     def test_the_launchers_delegate_the_move(self):
-        """Phase 4 (#120): one implementation,
-        ContainerManager.migrate_tor_network (TestTorNetworkMove), run
-        through the CLI with its log lines teed into the launcher's log; the
-        pipe's status is tee's, so under `set -e` the step never stops a
-        start, as the bash body's `return 0` did."""
-        for path, runner in ((MAC_LAUNCHER, "bundled_python -m onionpress.cli"),
-                             (LINUX_LAUNCHER, "op_py")):
+        """One implementation, ContainerManager.migrate_tor_network
+        (TestTorNetworkMove), which start_core runs (#442.6); no launcher
+        keeps a bash step."""
+        for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
-                body = _function_body(_read(path), "migrate_tor_network")
-                code = [l.strip() for l in body.splitlines()
-                        if l.strip() and not l.strip().startswith("#")]
-                self.assertEqual(code, [
-                    "migrate_tor_network() {",
-                    f'{runner} --data-dir "$DATA_DIR" migrate-tor-network 2>&1 | tee -a "$LOG_FILE"'])
+                self.assertNotIn("\nmigrate_tor_network() {", _read(path))
 
     # -- Rootless Docker's port driver --
 
@@ -1334,7 +1318,7 @@ class TestLaunchers(unittest.TestCase):
 
 
 class TestLauncherDelegationEndToEnd(unittest.TestCase):
-    """Each launcher's block_wordpress_egress, cut out and run under bash
+    """Linux's block_wordpress_egress, cut out and run under bash
     with the launchers' runners on this interpreter and a `docker` stub on
     PATH (Phase 4, #120): the CLI's verdict line reaches the terminal and
     the log file, the function returns 0 either way, and the Mac's START
@@ -1394,10 +1378,11 @@ exit 0
     def _cases(self):
         if sys.platform == "darwin":
             self.skipTest("the CLI's Linux path (docker info) is what the stub answers")
-        for launcher in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            if launcher is LINUX_LAUNCHER and not self._python_uses_the_stub_docker():
-                continue  # the bundle's docker would be run, not the stub
-            yield launcher
+        # The Mac's start runs the step inside start-core (#442.6): only
+        # Linux keeps the bash function (its status loop re-applies).
+        if not self._python_uses_the_stub_docker():
+            self.skipTest("the bundle's docker would be run, not the stub")
+        yield LINUX_LAUNCHER
 
     def test_in_place(self):
         for launcher in self._cases():
@@ -1413,9 +1398,7 @@ exit 0
         for launcher in self._cases():
             with self.subTest(launcher=os.path.relpath(launcher, ROOT)):
                 out, last, log = self._run(launcher, info_rc=1)
-                mac = launcher is MAC_LAUNCHER
-                self.assertEqual(last, "rc=0 errors=[ wordpress-egress]" if mac
-                                 else "rc=0 errors=[]")
+                self.assertEqual(last, "rc=0 errors=[]")
                 self.assertEqual(len(out), 1, out)
                 self.assertIn("] WARNING: WordPress network egress block not in place: "
                               "error: Docker did not answer `docker info`.", out[0])

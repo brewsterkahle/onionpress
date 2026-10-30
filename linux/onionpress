@@ -1524,41 +1524,6 @@ stop_onionheaven_farm() {
     fi
 }
 
-# Containers an OnionPress from before the OnionHeaven data had a volume of
-# its own started still read and write the hub's registry and keys where
-# they used to be, onionheaven/ on onionpress-persistent-data. The move
-# (onionheaven-data-migrate.py, in the onionheaven and onionpress-tor
-# entrypoints) must not race them, and nothing may go on using that copy
-# after it. So before compose starts anything, every OnionHeaven worker and
-# Tor-side container that does not mount onionpress-onionheaven-data is
-# removed, all at once: compose recreates onionpress-tor and onionheaven,
-# and the heartbeat starts new workers. The step is
-# ContainerManager.retire_old_onionheaven_containers (start_core's too),
-# run through the CLI (Phase 4, #120); its log lines come back on stdout in
-# this script's log format, so the tee carries them to the log and the
-# terminal, and the pipe's status is tee's: the step never stops a start.
-retire_old_onionheaven_containers() {
-    op_py --data-dir "$DATA_DIR" retire-old-onionheaven-containers 2>&1 | tee -a "$LOG_FILE"
-}
-
-# onionpress-network's bridge has a fixed name, onionpress-tor0
-# (docker-compose.yml), so the Tor side's rules (onionpress/
-# wordpress_egress.py) can name it before it exists. Docker cannot rename a
-# bridge: an onionpress-network made before has Docker's br-<id>, which the
-# rules miss, so it is removed here and `compose up` makes it anew. Compose
-# 2.40 would try that itself and fail the whole start while a takeover
-# worker (no compose service) is still on it. Every container on it is
-# OnionPress's and is removed (compose recreates its services, the
-# heartbeat its workers), onionheaven first since it starts workers;
-# anything else is only disconnected. Once per install. The step is
-# ContainerManager.migrate_tor_network (start_core's too), run through the
-# CLI (Phase 4, #120); its log lines come back on stdout in this script's
-# log format, so the tee carries them to the log and the terminal, and the
-# pipe's status is tee's: the step never stops a start.
-migrate_tor_network() {
-    op_py --data-dir "$DATA_DIR" migrate-tor-network 2>&1 | tee -a "$LOG_FILE"
-}
-
 # Clean stress-test entries and refresh takeover workers with current code.
 # reset_onionheaven() drives Docker through the farm controller, which only
 # the onionheaven container can reach — onionpress-tor's /reset-onionheaven
@@ -1640,6 +1605,26 @@ stop_onionheaven_activation_watcher() {
 }
 
 # ─── Container management ────────────────────────────────────────────
+# The middle of the start (start.start_core over ContainerManager.start_core,
+# #442.6): the images compose is about to start, pulled when missing only
+# (never for a locally built stack; UPDATE_ON_LAUNCH's refresh is
+# update_images, before this); WordPress's network shut before anything
+# starts on it (issue #144; a block not in place is a WARNING and a START
+# SUMMARY name on the Mac); an older OnionPress's containers retired and the
+# Tor network moved; `compose up` of the core services, 3 attempts 5 s
+# apart; WordPress's port for up to 60 s and `wp core is-installed` 15
+# times 2 s apart. Exit 0: up, WordPress installed; 3: up, not installed;
+# anything else: the core did not start, and neither does OnionPress.
+start_core_services() {
+    # WordPress's port: 127.0.0.1 until a start has seen WordPress
+    # installed (issue #464; moved once this start knows). Compose reads
+    # it from the environment, as it always did.
+    ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \
+        op_py --data-dir "$DATA_DIR" start-core --docker-dir "$DOCKER_DIR" \
+        --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
+}
+
 
 # Whether Docker has volume $1: 0 yes, 1 no, 2 Docker could not say (the
 # daemon is not up yet, e.g. the Colima VM is still booting). Callers must
@@ -1867,84 +1852,18 @@ start_containers() {
     # Update images if enabled
     update_images
 
-    # Pull pre-built images, but only ones we don't already have locally.
-    # --policy missing avoids a 5-min network hang on every start when images
-    # are already cached. update_images (gated by UPDATE_ON_LAUNCH=yes) is the
-    # path for refreshing images to latest.
-    #
-    # Tee docker's output so per-image "Pulling"/"Pulled" lines reach stdout
-    # → systemd journal → install.sh's live tail. Without the tee, the user
-    # sees 2-3 minutes of silence on first run while a few hundred MB land.
-    # `set -o pipefail` is not enabled in this script, so we rely on
-    # PIPESTATUS to get the docker exit code through the pipe.
-    if using_local_images; then
-        log "Skipping image pull: running locally built images"
-    else
-        log "Pulling pre-built images (missing only)..."
-        docker compose "${CF_COMPOSE[@]}" pull --policy missing 2>&1 | tee -a "$LOG_FILE"
-        if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-            log "WARNING: Failed to pull images (will use cached)"
-        fi
-    fi
-
-    # WordPress's network is shut before anything starts on it.
-    block_wordpress_egress
-
-    # Nothing from before the OnionHeaven data volume may run beside the
-    # containers about to start (the data move must not race them).
-    retire_old_onionheaven_containers
-
-    # The Tor side's network on its fixed bridge, for its rules (once).
-    migrate_tor_network
-
-    # Start WordPress, DB, OnionHeaven and autoheal first. autoheal (which
-    # brings autoheal-proxy) restarts a container whose healthcheck has
-    # failed for its full retry window; without it an unhealthy container
-    # stays unhealthy until the next start. The Mac launcher starts the
-    # same set (test_autoheal_started.py).
-    local max_attempts=3
-    local attempt=1
-    while [ $attempt -le $max_attempts ]; do
-        # tee for the same reason as docker compose pull above — keeps the
-        # journal tail visible while compose creates networks/volumes/containers.
-        # WordPress's port: 127.0.0.1 until a start has seen WordPress
-        # installed (issue #464; moved below once this start knows).
-        ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \
-            docker compose up -d wordpress db onionheaven autoheal 2>&1 | tee -a "$LOG_FILE"
-        if [ "${PIPESTATUS[0]}" -eq 0 ]; then
-            break
-        fi
-        log "WARNING: docker compose up failed (attempt $attempt/$max_attempts)"
-        if [ $attempt -eq $max_attempts ]; then
-            log "ERROR: docker compose up failed after $max_attempts attempts"
-            return 1
-        fi
-        attempt=$((attempt + 1))
-        sleep 5
-    done
-    log "WordPress, DB, and Tor client containers starting"
-
-    # Wait for WordPress HTTP
-    local wp_wait=0
-    while [ $wp_wait -lt 60 ]; do
-        if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
-            break
-        fi
-        sleep 2
-        wp_wait=$((wp_wait + 2))
-    done
-
-    # Check if WordPress is set up (retry up to 30s — DB can be slow on cold start)
-    local wp_installed=false
-    local wp_check=0
-    while [ $wp_check -lt 15 ]; do
-        if wp_is_installed; then
-            wp_installed=true
-            break
-        fi
-        sleep 2
-        wp_check=$((wp_check + 1))
-    done
+    # The core services (start_core_services): images pulled when missing,
+    # WordPress's network shut, an older OnionPress's containers retired,
+    # `compose up` of WordPress, the database, OnionHeaven and autoheal,
+    # then whether WordPress is installed. A core that will not start stops
+    # the start.
+    local wp_installed=false rc=0
+    start_core_services || rc=$?
+    case "$rc" in
+        0) wp_installed=true ;;
+        3) ;;
+        *) return 1 ;;
+    esac
 
     # WordPress install is no longer driven by the launcher — both the
     # GTK tray's SetupDialog and `onionpress setup` (SSH/TUI) call

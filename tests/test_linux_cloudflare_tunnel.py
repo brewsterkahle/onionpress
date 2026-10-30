@@ -63,8 +63,9 @@ class TestLauncherWiring(unittest.TestCase):
         body = _function(self.text, "start_containers")
         self.assertLess(body.index("up -d tor onionheaven"),
                         body.index('start_cloudflare_tunnel "$wp_installed"'))
-        self.assertIn('docker compose "${CF_COMPOSE[@]}" pull --policy missing',
-                      body)
+        # The start's pull takes the Cloudflare file with a token
+        # (start.start_core, #442.6; tests/test_start_core.py).
+        self.assertIn("start_core_services || rc=$?", body)
 
     def test_stop_and_uninstall_take_cloudflared_down(self):
         """Always with the override file: a token removed since the last

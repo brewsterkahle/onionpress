@@ -423,3 +423,82 @@ class KeySeed:
                      "generate a random address")
         self.log(f"Onion address: {_onion_address_line(key_dir)}")
         return True
+
+
+# ---- the core services (#442.6) ----
+
+def egress_step(paths, docker, *, wp_port: int | None, log, errors: StartErrors | None) -> None:
+    """The launchers' block_wordpress_egress: wordpress_egress.ensure
+    (issue #144) before the first `compose up`, its verdict in the
+    launcher's words; a block not in place is a WARNING and, on the Mac,
+    `wordpress-egress` in the START SUMMARY. Never stops the start."""
+    from . import cli, wordpress_egress
+    try:
+        result = wordpress_egress.ensure(paths, docker, action="apply", wp_port=wp_port)
+    except Exception as e:  # a start must never stop here
+        result = wordpress_egress.Result(False, "", f"error: {e}")
+    cli._log_wordpress_egress_verdict(result, log, paths.log_file)
+    if not result.ok and errors is not None:
+        errors.add("wordpress-egress")
+
+
+def wordpress_answers(port: int) -> bool:
+    """Whether WordPress answers on this host's published port (the
+    launchers' `curl -s --max-time 3 http://localhost:PORT`)."""
+    try:
+        return subprocess.run(["curl", "-s", "--max-time", "3", f"http://localhost:{port}"],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def start_core(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
+               log=None) -> tuple[bool, bool]:
+    """The middle of the launchers' start: the images compose is about to
+    start, pulled when missing only (never for a locally built stack;
+    UPDATE_ON_LAUNCH's refresh is the launcher's update_images, before
+    this), then ContainerManager.start_core (egress, retire, network move,
+    `compose up` of the core services, 3 attempts 5 s apart), WordPress's
+    port for up to 60 s and `wp core is-installed` 15 times 2 s apart (a
+    cold MariaDB reads as "not installed" until it answers).
+    (started, WordPress installed); not started stops the start."""
+    import time
+    from .config import read_value
+    from .containers import using_local_images
+    from .wp_files import wp_cli_args
+    log = log or manager._log
+    paths = manager.paths
+
+    if using_local_images(paths.config_file):
+        log("Skipping image pull: running locally built images")
+    else:
+        log("Pulling pre-built images (missing only)...")
+        # Linux pulls cloudflared too when the tunnel is on (CF_COMPOSE);
+        # the Mac's start never did.
+        tunnel = not mac and bool(read_value(paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", ""))
+        if manager.run_compose_to(["pull", "--policy", "missing"],
+                                  out="log" if mac else "stdout",
+                                  include_cloudflare=tunnel) != 0:
+            log("WARNING: Failed to pull images (using cached)" if mac
+                else "WARNING: Failed to pull images (will use cached)")
+
+    egress = lambda: egress_step(paths, manager.docker, wp_port=wp_port, log=log,
+                                 errors=errors)
+    if not manager.start_core(launcher="mac" if mac else "linux", egress=egress):
+        return False, False
+
+    for _ in range(30):
+        if wordpress_answers(wp_port):
+            break
+        time.sleep(2)
+    else:
+        if mac:
+            log(f"WARNING: WordPress did not answer on :{wp_port} within 60s — continuing; "
+                "the install check below may misreport a slow database as a fresh site")
+
+    for _ in range(15):
+        if manager.docker.run(wp_cli_args("core", "is-installed"), timeout=30, quiet=True).ok:
+            return True, True
+        time.sleep(2)
+    return True, False
