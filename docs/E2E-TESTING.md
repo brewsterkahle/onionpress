@@ -170,12 +170,18 @@ e2e/                       top-level, so `unittest discover tests` never finds i
 The report opens with what was tested on, before any result:
 
 ```
-OnionPress e2e — build 2.5.6 (onionpress.dmg sha256 …, onionpress.deb sha256 …)
-Host: macOS 27.0 arm64 · Tor: public network
-Tested:     macOS 27.0 arm64 (mac, Colima 0.9)  ·  Linux: Debian 13 arm64 (linux-vm, deb: docker.io)
-Not tested: Linux amd64 · Ubuntu 24.04 guest · install-sh flavour (rootless Docker CE)
-Roles: node=mac-1  peer=linux-vm-1  hub=linux-vm-1  home=linux-vm-2
+Build:      deb: built in the VM from the checkout (v2.4.84-652-g09630837)
+Host:       Ubuntu 24.04 x86_64 · Tor: public network · Tiers: t0
+Tested:     Linux — app_version 2.6.0, arch x86_64, docker Docker 26.1.5+dfsg1 (rootless),
+            guest debian-13, install deb (source), kind linux-vm, os Debian GNU/Linux 13 (trixie)
+Not tested: macOS — mac: not a Mac host (macOS cannot run in a VM on other hardware)
+Roles:      node[linux]=linux-1
 ```
+
+(the "Tested:" line of the 2026-10-30 T0 run from the Ubuntu host, §10).
+The platform is the OS family; which distro, guest and install flavour
+actually ran are node facts on that line, so "Linux" never reads as more
+than the one guest listed.
 
 Then one matrix, a row per test and a column per platform tested:
 `pass`, `fail`, `skip (reason)`, or `—` (does not apply: a Linux-only test
@@ -582,6 +588,20 @@ below.
 
 - 2026-10-25: macOS 27.0 arm64 (mac), Debian 13 arm64 (linux-vm from a
   Mac). T0.
-- Ubuntu 24.04 x86_64 host (Lima 2.2.1 + QEMU 8.2 + KVM): set up on
-  2026-10-29; the first T0 run on it (Debian 13 amd64, then
-  `--guest ubuntu-24.04`) is still to be recorded here.
+- 2026-10-30: Ubuntu 24.04 x86_64 host (Lima 2.2.1 + QEMU 8.2 + KVM,
+  `--scratch-root /dev/shm/ope2e`), Debian 13 amd64 guest (linux-vm, .deb
+  built in the VM from the checkout at 09630837, rootless Docker 26.1.5).
+  T0: 9/9 pass in 6 min (VM create + build + install 2 min 14 s).
+- 2026-10-30: same host, Ubuntu 24.04.5 amd64 guest (`--guest ubuntu-24.04`,
+  linux-vm, same .deb, system Docker 29.1.3). T0: **FAIL**, 1 pass, 2 fail,
+  6 skipped after the failed step, in 3 min (2 min with the image cached).
+  Both failures are the package's on Ubuntu, not the harness's:
+  `test_package_finished_its_own_setup` (the postinst fell back to the
+  docker group and asked for a log-out: Ubuntu's `docker.io` 29.1.3 ships
+  no `dockerd-rootless-setuptool.sh`, so the rootless attempt is skipped
+  without a word) and `test_first_start` (`docker compose` missing: the
+  `Depends` alternative `docker-compose-plugin | docker-compose` resolves
+  to Compose v1 1.29.2 on Ubuntu, where only Docker's own repo has the
+  plugin; Debian 13's `docker-compose` is v2). The fix belongs to
+  `build/build-linux.sh`; until it lands, Ubuntu 24.04 is a guest the
+  suite can run, not one the .deb passes on.

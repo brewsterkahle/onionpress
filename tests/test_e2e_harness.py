@@ -132,7 +132,7 @@ class HostProbeTest(unittest.TestCase):
         self.assertEqual(platforms.DEFAULT_LINUX_GUEST, "debian-13")
         self.assertIn("ubuntu-24.04", platforms.LINUX_GUESTS)
         for guest in platforms.LINUX_GUESTS:
-            self.assertEqual(guest_template(guest), f"template://{guest}")
+            self.assertEqual(guest_template(guest), f"template:{guest}")
         with self.assertRaises(ValueError):
             guest_template("arch")
         self.assertEqual(LinuxVMNode.platform, "linux")

@@ -216,8 +216,12 @@ class Node:
         """Logs, config, container logs and inspect output into dest."""
         os.makedirs(dest, exist_ok=True)
         try:
+            # docker-rootless-setup.log: what the .deb's postinst saw when it
+            # tried rootless Docker (Linux only); without it a docker-group
+            # fallback cannot be explained from the report.
             self.fetch_files([".onionpress/config", ".onionpress/logs", ".onionpress/onionpress.log",
-                              ".onionpress/launcher.log", ".onionpress/onionheaven-registration.json"],
+                              ".onionpress/launcher.log", ".onionpress/onionheaven-registration.json",
+                              ".onionpress/docker-rootless-setup.log"],
                              os.path.join(dest, "data-dir"))
         except Exception as e:  # noqa: BLE001 - evidence is best effort
             self.log.write(f"evidence: data dir copy failed: {e}")

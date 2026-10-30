@@ -58,10 +58,11 @@ def tracked_files(project_dir=PROJECT_DIR):
 
 
 def guest_template(guest):
-    """The Lima template for a guest name, or ValueError."""
+    """The Lima template locator for a guest name, or ValueError.
+    `template:<name>` is the form Lima 2 takes (`template://` warns)."""
     if guest not in LINUX_GUESTS:
         raise ValueError(f"unknown Linux guest {guest!r}; know {', '.join(LINUX_GUESTS)}")
-    return f"template://{guest}"
+    return f"template:{guest}"
 
 
 class LinuxVMNode(Node):
