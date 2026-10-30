@@ -109,8 +109,6 @@ class _DataDirPath(str):
     pass
 
 
-HRK_PATH = os.path.join("tor-keys", "healthcheck")
-
 # `ha_host` checks handle-action's Host: built without OnionPressCLI, from
 # the launcher given or default_launcher's answer.
 def ha_host(launcher):
@@ -240,6 +238,10 @@ ROWS = [
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
     Row("prepare-restore", ["prepare-restore", "/b.zip"], "cli.cmd_prepare_restore",
         mock.call("/b.zip", "pw", D(""), False), stdin="pw\n"),
+    # Issue #475: the welcome screen opens the backup through this.
+    Row("prepare-restore", ["prepare-restore", "/b.zip", "--check", "--json"],
+        "cli.cmd_prepare_restore_check", mock.call("/b.zip", "pw", True),
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- config and OnionHeaven: the config file only (issue #365) ----
     Row("config get", ["config", "get", "VM_CPU"], "config.run_config_command",
@@ -294,8 +296,6 @@ ROWS = [
     # ---- the launchers' backup and restore helpers ----
     Row("backup-address", ["backup-address", "--staging", "/st"],
         "CLI.cmd_backup_address", mock.call("/st")),
-    Row("healthcheck-key-address", ["healthcheck-key-address", "--dir", HRK_PATH],
-        "CLI.cmd_healthcheck_key_address", mock.call(HRK_PATH)),
     Row("restore-config", ["restore-config", "--staging", "/st", "--config", "/c", "--address", ONION],
         "CLI.cmd_restore_config", mock.call("/st", "/c", ONION)),
     Row("scrub-staging", ["scrub-staging", "--dir", "/st/wp-content"],
@@ -328,7 +328,8 @@ ROWS = [
         mock.call({"a": 1}), rc=0, returns={"a": 1}, stdin='{"a": 1}'),
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
-        returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"])),
+        returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"],
+                         held={"CLOUDFLARE_TUNNEL_TOKEN": "t"})),
     # Share Now from the command line (#351): analytics_sharing.request_upload
     # with this run's paths and the platform; no OnionPressCLI (it reads the
     # config and leaves a marker). Its status is main's.
@@ -566,7 +567,8 @@ class TestDispatch(unittest.TestCase):
         out, _ = self.run_row(next(r for r in ROWS if r.key == ("wordpress-status",)))
         self.assertEqual(json.loads(out), {"a": 1})
         out, _ = self.run_row(next(r for r in ROWS if r.key == ("apply-settings-updates",)))
-        self.assertEqual(out.splitlines(), ["changed VM_CPU", "rejected X"])
+        self.assertEqual(out.splitlines(),
+                         ["changed VM_CPU", "rejected X", "held CLOUDFLARE_TUNNEL_TOKEN"])
         out, _ = self.run_row(next(r for r in ROWS if r.key == ("onionheaven-registrations",)))
         self.assertEqual(out, f"{ONION} hub.onion\n")
 
@@ -610,6 +612,11 @@ class TestDispatch(unittest.TestCase):
                 rc, out, _ = self._main(argv)
                 self.assertEqual(rc, confirm.EXIT_FAILED)
                 self.assertIn("password", json.loads(out.strip().splitlines()[-1])["error"])
+
+    def test_prepare_restore_check_without_a_password_asks_for_one(self):
+        rc, out, _ = self._main(["prepare-restore", "/b.zip", "--check", "--json"])
+        self.assertEqual(rc, confirm.EXIT_ASK)
+        self.assertEqual(json.loads(out.strip().splitlines()[-1]), {"ask": "password"})
 
     def test_hub_recovery_key_restore_needs_a_password_and_no_subcommand_is_help(self):
         rc, _, err = self._main(["hub-recovery-key", "restore", "/b.zip"])

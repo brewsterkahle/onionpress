@@ -397,7 +397,7 @@ class TestPackBackupLeavesLinksOut(_Base):
         self.assertEqual(_non_plain(dest), [])
 
     def test_zip_is_never_told_to_store_links(self):
-        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "backup.py")) as f:
+        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "backup_archive.py")) as f:
             src = f.read()
         pack = src[src.index("\ndef pack_backup("):src.index("\n_WRONG_PASSWORD_MSG")]
         self.assertNotIn("'-y'", pack)
@@ -499,7 +499,8 @@ esac
     def test_no_host_tar_extracts_the_container_stream(self):
         with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "backup.py")) as f:
             src = f.read()
-        body = src[src.index("\ndef create_backup("):src.index("\n# Already-compressed")]
+        start = src.index("\ndef create_backup(")
+        body = src[start:src.index("\ndef ", start + 1)]
         self.assertNotRegex(body, r"\[\s*'tar',\s*'-x")
         self.assertIn("stage_wp_content(", body)
         stage = src[src.index("\ndef stage_wp_content("):src.index("\ndef put_wp_content(")]

@@ -4,8 +4,9 @@ address.
 
 discover_services() read each service's id from its hostname file and put
 it into DEL_ONION on the control port (sleep, forced republish). Those
-files are not only Tor's: Linux's restore installed a backup's healthcheck
-hostname there (test_backup_healthcheck_key_restore), and a CR/LF in it
+files are not only Tor's: Linux's restore through 2.5.x installed a
+backup's healthcheck hostname there (it takes none now:
+test_healthcheck_key_never_backed_up), and a CR/LF in it
 added a control-port command. Now a hostname file that is not one whole
 address (or is a link) is replaced by the address the public key derives
 to, written in one step.

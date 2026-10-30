@@ -35,7 +35,15 @@ class TestCoverageConfig(unittest.TestCase):
                                   "src/onionpress/app_commands.py": "94",
                                   "src/onionpress/handle_action.py": "95",
                                   "src/onionpress/confirm.py": "98",
-                                  "src/onionpress/config.py": "85"})
+                                  "src/onionpress/config.py": "85",
+                                  "src/onionpress/backup_archive.py": "92",
+                                  "src/onionpress/db_import.py": "93",
+                                  "src/onionpress/hub_backup.py": "85",
+                                  "src/onionpress/ports.py": "86",
+                                  "src/onionpress/secrets_file.py": "96",
+                                  "src/onionpress/onion_hostname.py": "98",
+                                  "src/onionpress/reachability.py": "87",
+                                  "src/onionpress/image_overrides.py": "95"})
         for path in floors:
             self.assertTrue(os.path.exists(os.path.join(PROJECT_ROOT, path)), path)
         # macOS /bin/bash is 3.2: no associative arrays.

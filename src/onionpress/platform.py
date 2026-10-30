@@ -216,3 +216,23 @@ def find_app_bundle() -> str | None:
         return standard
 
     return None
+
+
+def docker_env(docker_socket: str, docker_config_dir: str) -> dict:
+    """This process's environment pointed at OnionPress's docker daemon:
+    DOCKER_HOST (*docker_socket*) and DOCKER_CONFIG. docker.Docker's
+    environment adds Colima's settings to it."""
+    env = os.environ.copy()
+    env["DOCKER_HOST"] = f"unix://{docker_socket}"
+    env["DOCKER_CONFIG"] = docker_config_dir
+    return env
+
+
+def find_docker_bin(bin_dir: str) -> str:
+    """The docker binary: the bundled one in *bin_dir* when it is there
+    and executable, else "docker" from PATH (Linux, a dev checkout)."""
+    if bin_dir:
+        bundled = os.path.join(bin_dir, "docker")
+        if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+            return bundled
+    return "docker"

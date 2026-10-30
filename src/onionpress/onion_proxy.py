@@ -22,8 +22,19 @@ another site's page made (_from_a_web_page): /status named the onion
 address this Mac serves with Access-Control-Allow-Origin: *, which tied
 the person's clearnet browsing to their onion site, and /proxy/ let a
 page send the person's Tor to any onion URL.
+
+A request's Host must name this proxy too (own_hosts, issue #465): a
+clear-web page whose name's DNS is pointed at 127.0.0.1 (DNS rebinding)
+reaches this port with its own name as Host, and its fetches carry what
+the proxy's own page's carry. Only an absolute-form request (GET
+http://x.onion/ HTTP/1.1, the extension's proxy setting) names its target
+there. And a /proxy/ page is sandboxed (PROXIED_PAGE_CSP): a visited onion
+site's script was otherwise same-origin with /status and /setup. The links
+the proxy rewrites into such a page carry PROXY_PAGE_TOKEN, which is how
+the page's own requests are told from another site's.
 """
 
+import hmac
 import os
 import re
 import secrets
@@ -40,6 +51,10 @@ from socketserver import ThreadingMixIn
 from html import escape as html_escape
 from urllib.parse import urlparse, parse_qs
 
+# The ports this process found in its environment at import: the defaults
+# for a server built without its own (ThreadingHTTPServer's *ports*) and
+# for check_php_proxy. The Mac daemon passes its server the live ports
+# and keeps these in step (Daemon._apply_ports).
 PROXY_PORT = int(os.environ.get("ONIONPRESS_PROXY_PORT", 9077))
 PHP_PROXY_PORT = int(os.environ.get("ONIONPRESS_WP_PORT", 8080))
 PHP_PROXY_PATH = "/__op_proxy.php"
@@ -52,6 +67,20 @@ PHP_PROXY_TOKEN = secrets.token_urlsafe(32)
 PHP_PROXY_TOKEN_PLACEHOLDER = "__ONIONPRESS_PROXY_TOKEN__"
 # How onion-forward.php's body starts when Tor could not fetch the URL.
 PHP_PROXY_FETCH_FAILED = b"Tor fetch failed"
+# /proxy/ serves any onion site's page at this proxy's own origin, so every
+# response under it carries a CSP sandbox without allow-same-origin: the
+# browser gives the page an opaque origin, and its script is no longer
+# same-origin with /status (the onion address) or /setup. The site's
+# scripts, forms, links, popups and downloads keep working.
+PROXIED_PAGE_CSP = ("sandbox allow-forms allow-scripts allow-popups "
+                    "allow-modals allow-downloads")
+# A sandboxed page's own requests (its images, scripts, links, forms and
+# fetches) all arrive as Sec-Fetch-Site: cross-site with Origin null or
+# none, exactly what another site's page sends, so _from_a_web_page cannot
+# tell them apart. The links the proxy rewrites into a proxied page carry
+# this token instead (/proxy/<token>/<host>/...): a page the proxy served
+# knows it, a page from elsewhere does not. New for each run of the app.
+PROXY_PAGE_TOKEN = secrets.token_urlsafe(16)
 WAYBACK_PREFIX = "https://web.archive.org/web/"
 
 # Shown for a page load whose onion service did not answer (_send_onion_unreachable).
@@ -161,8 +190,8 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
         <tr>
           <th><label for="user_name">Username</label></th>
           <td>
-            <input type="text" name="user_name" id="user_name" value="admin" autocomplete="username" />
-            <p class="description">Usernames cannot be changed later.</p>
+            <input type="text" name="user_name" id="user_name" value="{{SUGGESTED_USERNAME}}" autocomplete="username" />
+            <p class="description">Also your site's address (/username/). Usernames cannot be changed later.</p>
           </td>
         </tr>
         <tr>
@@ -175,9 +204,6 @@ SETUP_PAGE_HTML = '''<!DOCTYPE html>
             <div class="strength-indicator"><div class="strength-bar strength-strong" id="strength-bar"></div></div>
             <p class="description">Save this password somewhere safe.</p>
           </td>
-        </tr>
-        <tr style="display:none;">
-          <td><input type="hidden" name="admin_email" id="admin_email" value="admin@onionpress.local" /></td>
         </tr>
         <tr>
           <th>Site Type</th>
@@ -395,10 +421,13 @@ def install_php_proxy(docker_bin, docker_env, php_script_path, log_func=None):
         return False
 
 
-def check_php_proxy(log_func=None):
-    """Verify the PHP proxy is responding."""
+def check_php_proxy(log_func=None, wp_port=None):
+    """Verify the PHP proxy is responding on WordPress's published port
+    (*wp_port*, default PHP_PROXY_PORT)."""
+    if wp_port is None:
+        wp_port = PHP_PROXY_PORT
     try:
-        conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=5)
+        conn = http.client.HTTPConnection("127.0.0.1", wp_port, timeout=5)
         conn.request("GET", PHP_PROXY_PATH,
                      headers={"X-OnionPress-Action": "status",
                               "X-OnionPress-Token": PHP_PROXY_TOKEN})
@@ -426,6 +455,18 @@ def _script_json(value):
     would end the script element."""
     return (json.dumps(value).replace('<', '\\u003c').replace('>', '\\u003e')
             .replace('&', '\\u0026'))
+
+
+def own_hosts(port):
+    """The Host values that name this proxy: its loopback names with its
+    port (a bare name only when the port is 80, which it never is). A
+    request for any other Host was made for a name whose DNS a page
+    pointed at 127.0.0.1, and is refused."""
+    names = ("127.0.0.1", "localhost", "[::1]")
+    own = {f"{name}:{port}" for name in names}
+    if port == 80:
+        own.update(names)
+    return own
 
 
 def _onion_host(host):
@@ -475,6 +516,34 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
             return origin
         return None
 
+    def _own_origins(self):
+        port = getattr(self.server, 'server_port', None)
+        return tuple(sorted("http://" + host for host in own_hosts(port)))
+
+    def _host_is_own(self):
+        """True when the request's Host names this proxy (own_hosts). A
+        page at a name its DNS rebinds to 127.0.0.1 reaches this port with
+        that name as Host, and its same-origin fetches carry no Origin and
+        Sec-Fetch-Site: same-origin, what _from_a_web_page takes for the
+        proxy's own page."""
+        host = self.headers.get('Host')
+        if host is None:
+            return False
+        port = getattr(self.server, 'server_port', None)
+        return host.strip().lower() in own_hosts(port)
+
+    def _refuse_host(self):
+        # Nothing of the request goes into the body or the log.
+        self.send_error(403, "Not this proxy's host")
+
+    def end_headers(self):
+        # Every response under /proxy/ (a page, a subresource, a cached
+        # copy, the unreachable page, an error) is a document at this
+        # proxy's origin when a browser renders it: sandbox it.
+        if getattr(self, 'path', '').startswith('/proxy/'):
+            self.send_header('Content-Security-Policy', PROXIED_PAGE_CSP)
+        super().end_headers()
+
     def _from_a_web_page(self):
         """True for a request a browser made on behalf of another site's
         page. Browsers add Origin to cross-origin fetches and Sec-Fetch-Site
@@ -486,8 +555,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         so same-site counts as another site's page."""
         if self._get_cors_origin():
             return False
-        port = getattr(self.server, 'server_port', None)
-        own = (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+        own = self._own_origins()
         origin = self.headers.get('Origin')
         if origin is not None:
             return origin not in own
@@ -504,6 +572,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         """Handle CORS preflight requests (browser extensions only)."""
+        if not self._host_is_own():
+            self._refuse_host()
+            return
         self.send_response(204)
         cors_origin = self._get_cors_origin()
         if cors_origin:
@@ -521,6 +592,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.send_error(403, "This proxy carries .onion sites only (http://)")
 
     def _handle_request(self, head_only=False):
+        # An absolute-form request names its target in Host; every other
+        # request must name this proxy there, whatever it asks for.
+        if not self.path.startswith('http://') and not self._host_is_own():
+            self._refuse_host()
+            return
+
         # Status endpoint
         if self.path == '/status':
             if self._from_a_web_page():
@@ -548,10 +625,17 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 target_path += '?' + parsed.query
             target_port = parsed.port
         elif self.path.startswith('/proxy/'):
-            if self._from_a_web_page():
+            rest = self.path[len('/proxy/'):]
+            token, slash, tail = rest.partition('/')
+            if slash and hmac.compare_digest(token.encode('latin-1'),
+                                             PROXY_PAGE_TOKEN.encode('ascii')):
+                # A link the proxy rewrote into a page it served
+                # (_rewrite_onion_links): the sandboxed page's own request.
+                rest = tail
+            elif self._from_a_web_page():
                 self._refuse_web_page()
                 return
-            parts = self.path[len('/proxy/'):].split('/', 1)
+            parts = rest.split('/', 1)
             target_host = parts[0].lower()
             target_path = '/' + parts[1] if len(parts) > 1 else '/'
             target_port = None
@@ -680,8 +764,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
 
         method = "HEAD" if head_only else ("POST" if post_data else "GET")
 
+        wp_port = self.server.wp_port
         try:
-            conn = http.client.HTTPConnection("127.0.0.1", PHP_PROXY_PORT, timeout=60)
+            conn = http.client.HTTPConnection("127.0.0.1", wp_port, timeout=60)
             conn.request(method, PHP_PROXY_PATH, body=post_data, headers=headers)
             resp = conn.getresponse()
             body = resp.read()
@@ -691,7 +776,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         except OSError as e:
             # Log once on first failure, then every 5 minutes while down.
             # OSError covers ConnectionRefusedError, timeout, etc. — all signs
-            # that the Lima SSH port forward for localhost:PHP_PROXY_PORT has dropped.
+            # that the Lima SSH port forward for localhost:wp_port has dropped.
             srv = self.server
             now = time.time()
             if srv._wp_unreachable_since is None:
@@ -700,14 +785,14 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 if srv.log_func:
                     srv.log_func(
                         "WARNING: WordPress unreachable on localhost:%d — "
-                        "Lima port forward may be down (%s)", PHP_PROXY_PORT, e)
+                        "Lima port forward may be down (%s)", wp_port, e)
             elif now - srv._wp_unreachable_last_log >= 300:
                 srv._wp_unreachable_last_log = now
                 elapsed = int(now - srv._wp_unreachable_since)
                 if srv.log_func:
                     srv.log_func(
                         "WARNING: WordPress still unreachable on localhost:%d — "
-                        "%ds elapsed (%s)", PHP_PROXY_PORT, elapsed, e)
+                        "%ds elapsed (%s)", wp_port, elapsed, e)
             raise
 
         # Recovery: log once when WordPress comes back after a failure.
@@ -716,7 +801,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
                 elapsed = int(time.time() - self.server._wp_unreachable_since)
                 self.server.log_func(
                     "WordPress reachable again on localhost:%d after %ds down",
-                    PHP_PROXY_PORT, elapsed)
+                    wp_port, elapsed)
             self.server._wp_unreachable_since = None
             self.server._wp_unreachable_last_log = None
 
@@ -738,7 +823,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         except Exception:
             return body_bytes
 
-        proxy_prefix = f"/proxy/{onion_host}"
+        # The rewritten links carry the token: a sandboxed page's requests
+        # cannot otherwise be told from another site's (PROXY_PAGE_TOKEN).
+        proxy_prefix = f"/proxy/{PROXY_PAGE_TOKEN}/{onion_host}"
 
         ONION_URL_RE = re.compile(
             r'(https?://)((?:[a-z0-9-]+\.)*[a-z0-9]{16,56}\.onion)((?:/[^\s"\'<>]*)?)',
@@ -748,7 +835,7 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         def replace_abs_onion(match):
             host = match.group(2)
             path = match.group(3) or ''
-            return f"/proxy/{host}{path}"
+            return f"/proxy/{PROXY_PAGE_TOKEN}/{host}{path}"
 
         text = ONION_URL_RE.sub(replace_abs_onion, text)
 
@@ -771,11 +858,9 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         # Check if WordPress is already installed
         try:
             from onionpress import wp_files
-            result = subprocess.run(
-                [self.server.docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
-                env=self.server.docker_env,
-                capture_output=True, timeout=10
-            )
+            result = wp_files.wp_cli("core", "is-installed",
+                                     docker_bin=self.server.docker_bin,
+                                     env=self.server.docker_env, timeout=10)
             if result.returncode == 0:
                 body = b'<html><head><meta http-equiv="refresh" content="0;url=/status"></head><body>WordPress is already configured.</body></html>'
                 self.send_response(302)
@@ -795,6 +880,11 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         import html as html_mod
         html = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}',
                                        html_mod.escape(generated_password))
+        # The user name is the onionname: setup_logic suggests one, as the
+        # setup window does ("admin", the form's old default, without one).
+        from onionpress import setup_logic
+        html = html.replace('{{SUGGESTED_USERNAME}}',
+                            html_mod.escape(setup_logic.suggest_onionname() or 'admin'))
         html = html.replace('{{ERROR_BANNER}}', '')
         body = html.encode('utf-8')
         self.send_response(200)
@@ -818,11 +908,12 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         admin_password = html_mod.escape(params.get('admin_password', [''])[0])
 
         page = SETUP_PAGE_HTML.replace('{{GENERATED_PASSWORD}}', admin_password)
+        page = page.replace('{{SUGGESTED_USERNAME}}', '')
         page = page.replace('{{ERROR_BANNER}}', banner)
 
         # Also preserve other field values via JavaScript
         blog_title = params.get('blog_title', ['My OnionPress Site'])[0]
-        user_name = params.get('user_name', ['admin'])[0]
+        user_name = params.get('user_name', [''])[0]
         theme = params.get('theme_choice', ['blog'])[0]
 
         # Inject script to restore form values
@@ -844,35 +935,49 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _setup_post_same_origin(self):
-        """False for a POST a browser sent from any page but this proxy's
-        own: browsers send Origin with every cross-origin POST, so any web
-        page could otherwise submit the setup form to 127.0.0.1. A client
-        that sends no Origin is not a browser."""
+        """False for a POST a browser sent from any page but the setup page
+        this proxy served: browsers send Origin with every POST, so any web
+        page could otherwise submit the setup form to 127.0.0.1, and a
+        proxied onion page (/proxy/, sandboxed: Origin null, every request
+        cross-site) is not the setup page either. A client that sends no
+        Origin is not a browser."""
         origin = self.headers.get('Origin')
         if origin is None:
             return True
-        port = getattr(self.server, 'server_port', None)
-        return origin in (f"http://127.0.0.1:{port}", f"http://localhost:{port}")
+        if origin not in self._own_origins():
+            return False
+        site = self.headers.get('Sec-Fetch-Site')
+        return site is None or site == 'same-origin'
 
     def _wp_installed(self):
         """True if WordPress is installed, None if that can't be told."""
         from onionpress import wp_files
         try:
-            result = subprocess.run(
-                [self.server.docker_bin] + wp_files.wp_cli_args("core", "is-installed"),
-                env=self.server.docker_env, capture_output=True, timeout=10)
+            result = wp_files.wp_cli("core", "is-installed",
+                                     docker_bin=self.server.docker_bin,
+                                     env=self.server.docker_env, timeout=10)
         except (subprocess.SubprocessError, OSError):
             return None
         return result.returncode == 0
 
+    def _send_setup_result(self, status, body):
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle_setup_post(self):
-        """Process the WordPress setup form submission."""
+        """Process the WordPress setup form submission.
+
+        The install itself is setup_logic.install_fresh_wordpress, the one
+        install path every setup front end shares; this handles the form,
+        refuses what must not reach it, and reports the result."""
         if not self._setup_post_same_origin():
             self.send_error(403, "Cross-origin setup request refused")
             return
-        # First run only. On an installed site `wp core multisite-install`
-        # changes nothing and exits 0, and the password step below would
-        # then set the password of whichever existing user the form names.
+        # First run only. On an installed site the password step would set
+        # the password of whichever existing user the form names.
         installed = self._wp_installed()
         if installed is not False:
             if self.server.log_func:
@@ -897,253 +1002,89 @@ class OnionProxyHandler(BaseHTTPRequestHandler):
         title = params.get('blog_title', ['My OnionPress Site'])[0]
         username = params.get('user_name', [''])[0]
         password = params.get('admin_password', [''])[0]
-        email = params.get('admin_email', ['admin@example.com'])[0]
         # theme_choice captured for future use
         # theme = params.get('theme_choice', ['standard'])[0]
 
+        import html as html_mod
         if not username or not password:
-            body = b'<html><body><h1>Error</h1><p>Username and password are required.</p><p><a href="/setup">Go back</a></p></body></html>'
-            self.send_response(400)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_setup_result(400, b'<html><body><h1>Error</h1><p>Username and password are required.</p><p><a href="/setup">Go back</a></p></body></html>')
             return
 
-        # Validate setup inputs — reject values that could be misinterpreted
-        # as CLI flags or contain control characters.
+        # Validate setup inputs. The user name is the onionname (the admin
+        # login and the site's /<name>/ path), held to setup_logic's rule;
+        # the rest must carry no control characters.
         import re
+        from onionpress import setup_logic
         _ctrl_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
         errors = []
-        if not re.fullmatch(r'[a-zA-Z0-9_.\-]+', username):
-            errors.append("Username may only contain letters, numbers, underscores, dots, and hyphens.")
+        name_ok, reason = setup_logic.validate_onionname(username)
+        if not name_ok:
+            errors.append("Username: " + setup_logic.onionname_error_message(reason) + ".")
         if _ctrl_re.search(password):
             errors.append("Password must not contain control characters.")
-        if not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
-            errors.append("Please enter a valid email address.")
         if _ctrl_re.search(title) or title.startswith('-'):
             errors.append("Site title must not start with a dash or contain control characters.")
-        if len(title) > 200 or len(username) > 60 or len(email) > 254:
+        if len(title) > 200:
             errors.append("One or more fields are too long.")
         if errors:
-            import html as html_mod
             msg = '<br>'.join(html_mod.escape(e) for e in errors)
-            body = f'<html><body><h1>Error</h1><p>{msg}</p><p><a href="/setup">Go back</a></p></body></html>'.encode()
-            self.send_response(400)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_setup_result(400, f'<html><body><h1>Error</h1><p>{msg}</p><p><a href="/setup">Go back</a></p></body></html>'.encode())
             return
 
-        # Use the shared archive.org credentials for Wayback Machine
-        # archiving; multisite.py holds the one copy, so rotating them is
-        # a single edit.
-        from onionpress import multisite as _multisite
-        archive_s3_keys = self._fetch_archive_s3_keys(
-            _multisite._ARCHIVE_LOGIN_EMAIL, _multisite._ARCHIVE_LOGIN_PASS
-        )
-        if archive_s3_keys is None and self.server.log_func:
-            self.server.log_func("Warning: could not fetch archive.org S3 keys — Wayback archiving may not work")
+        launcher = getattr(self.server, 'launcher_script', None)
+        if not launcher:
+            # Without the launcher the install would skip the multisite
+            # conversion, mu-plugins and theme (provision-post-install).
+            if self.server.log_func:
+                self.server.log_func("Setup form refused: no launcher to provision the site")
+            self.send_error(503, "OnionPress launcher not available")
+            return
 
-        # Run wp core multisite-install (subdirectory mode)
+        # Every step's message goes to the OnionPress log; the errors are
+        # kept for the failure page.
+        errors_logged = []
+
+        def log(msg):
+            if self.server.log_func:
+                self.server.log_func(msg)
+            if msg.startswith("ERROR"):
+                errors_logged.append(msg)
+
         try:
-            from onionpress import wp_files
-            docker = self.server.docker_bin
-            denv = self.server.docker_env
-
-            # sunrise.php is installed by provision-post-install before WordPress
-            # exists. It queries wp_site on load, which fails during a fresh install
-            # because multisite tables don't exist yet. Move it aside for the install
-            # (as www-data, whose folder wp-content is).
-            subprocess.run(
-                [docker] + wp_files.exec_args("bash", "-c",
-                    "[ -f wp-content/sunrise.php ] && "
-                    "mv wp-content/sunrise.php wp-content/sunrise.php.bak || true"),
-                env=denv, capture_output=True, timeout=10
+            ok = setup_logic.install_fresh_wordpress(
+                site_title=title,
+                onionname=username,
+                password=password,
+                onion_addr=self.server.onion_address or "localhost",
+                docker_bin=self.server.docker_bin,
+                docker_env=self.server.docker_env,
+                launcher_bin=launcher,
+                log_func=log,
+                data_dir=self.server.data_dir,
             )
-
-            # No --admin_password: argv is visible to every local user (ps)
-            # and a subprocess error quotes it. wp-cli generates a password
-            # (printed on the stdout we drop) and the user's goes in on
-            # stdin once the install is done.
-            cmd = [docker] + wp_files.wp_cli_args(
-                "core", "multisite-install",
-                "--url=http://localhost",
-                f"--title={title}",
-                f"--admin_user={username}",
-                f"--admin_email={email}",
-                "--skip-email",
-            )
-            result = subprocess.run(
-                cmd, env=denv,
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30
-            )
-
-            subprocess.run(
-                [docker] + wp_files.exec_args("bash", "-c",
-                    "[ -f wp-content/sunrise.php.bak ] && "
-                    "mv wp-content/sunrise.php.bak wp-content/sunrise.php || true"),
-                env=denv, capture_output=True, timeout=10
-            )
-
-            if result.returncode == 0:
-                if self.server.log_func:
-                    self.server.log_func("WordPress multisite installed via setup page")
-
-                from onionpress.setup_logic import set_wp_user_password
-                pw_result = set_wp_user_password(
-                    username, password, docker_bin=docker, env=denv)
-                password_set = pw_result.returncode == 0
-                if self.server.log_func:
-                    self.server.log_func(
-                        "Admin password set" if password_set else
-                        "ERROR: setting the admin password failed: "
-                        + pw_result.stderr.strip()[:200])
-
-                # Set multisite constants in wp-config.php
-                multisite_constants = [
-                    ("MULTISITE", "true"),
-                    ("SUBDOMAIN_INSTALL", "false"),
-                    ("DOMAIN_CURRENT_SITE", "'localhost'"),
-                    ("PATH_CURRENT_SITE", "'/'"),
-                    ("SITE_ID_CURRENT_SITE", "1"),
-                    ("BLOG_ID_CURRENT_SITE", "1"),
-                    ("SUNRISE", "true"),
-                ]
-                for const_name, const_value in multisite_constants:
-                    subprocess.run(
-                        [docker] + wp_files.wp_cli_args(
-                            "config", "set", const_name, const_value,
-                            "--raw", "--type=constant"),
-                        env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
-                    )
-
-                # Write .htaccess with multisite rewrite rules
-                htaccess_content = (
-                    "# Privacy: prevent onion address leaking in Referer headers\n"
-                    "<IfModule mod_headers.c>\n"
-                    'Header set Referrer-Policy "no-referrer"\n'
-                    "</IfModule>\n"
-                    "\n"
-                    "# My Creations is a publishing folder: serve its files, never run them\n"
-                    "RewriteEngine On\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/creations/ [NC]\n"
-                    "RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "# ...and never its hidden files and folders (.git/, .DS_Store, .thumbs/)\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\\. [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "\n"
-                    "# Blog importer snapshots (drafts, private posts, author emails) went to\n"
-                    "# blog-archives/ through 2.5.2. They live in the hidden .blog-archives/ now;\n"
-                    "# until the importer has moved the old folder there, refuse it as well.\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/creations/blog-archives(/|$) [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "\n"
-                    "# Uploads are media: serve them, never run them\n"
-                    "RewriteCond %{REQUEST_URI} /wp-content/uploads/ [NC]\n"
-                    "RewriteCond %{REQUEST_URI} \\.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]\n"
-                    "RewriteRule ^ - [F]\n"
-                    "\n"
-                    "# BEGIN WordPress Multisite\n"
-                    "RewriteEngine On\n"
-                    "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"
-                    "RewriteBase /\n"
-                    "RewriteRule ^index\\.php$ - [L]\n"
-                    "\n"
-                    "# add a trailing slash to /wp-admin\n"
-                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?wp-admin$ $1wp-admin/ [R=301,L]\n"
-                    "\n"
-                    "RewriteCond %{REQUEST_FILENAME} -f [OR]\n"
-                    "RewriteCond %{REQUEST_FILENAME} -d\n"
-                    "RewriteRule ^ - [L]\n"
-                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?(wp-(content|admin|includes).*) $2 [L]\n"
-                    "RewriteRule ^([_0-9a-zA-Z.-]+/)?(.*\\.php)$ $2 [L]\n"
-                    "RewriteRule . index.php [L]\n"
-                    "# END WordPress Multisite\n"
-                )
-                # As www-data (wp_files), whose folder the web root is.
-                wp_files.put_file("/var/www/html/.htaccess", htaccess_content,
-                                  "644", docker_bin=docker, env=denv, timeout=10)
-
-                if self.server.log_func:
-                    self.server.log_func("Multisite constants and .htaccess configured")
-
-                # Save archive.org S3 keys if credentials were validated earlier.
-                # `wp option update <key>` reads the value from stdin, so the
-                # secret key stays out of argv.
-                if archive_s3_keys:
-                    for key, val in [('onionpress_archive_s3_access', archive_s3_keys['access']),
-                                     ('onionpress_archive_s3_secret', archive_s3_keys['secret'])]:
-                        subprocess.run(
-                            [docker] + wp_files.wp_cli_args(
-                                "option", "update", key, stdin=True),
-                            input=val,
-                            env=denv, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10
-                        )
-                    if self.server.log_func:
-                        self.server.log_func("Archive.org S3 keys saved for Wayback archiving")
-
-                if password_set:
-                    body = SETUP_SUCCESS_HTML.encode('utf-8')
-                    self.send_response(200)
-                else:
-                    body = (b'<html><body><h1>Setup Incomplete</h1>'
-                            b'<p>WordPress was installed, but your admin password '
-                            b'could not be set. See the OnionPress log.</p>'
-                            b'</body></html>')
-                    self.send_response(500)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            else:
-                if self.server.log_func:
-                    self.server.log_func(f"wp core multisite-install failed: {result.stderr}")
-                # wp-cli's stderr quotes the submitted title, user name and
-                # email back: escape it, or the form is a script injection.
-                import html as html_mod
-                error_msg = html_mod.escape(result.stderr.strip() or "Unknown error")
-                body = f'<html><body><h1>Setup Failed</h1><p>{error_msg}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
-                self.send_response(500)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
         except Exception as e:
             # A subprocess error's message quotes its whole argv; name the
             # error instead.
-            import html as html_mod
             detail = (type(e).__name__ if isinstance(e, subprocess.SubprocessError)
                       else str(e))
-            if self.server.log_func:
-                self.server.log_func(f"Setup error: {detail}")
-            body = f'<html><body><h1>Setup Error</h1><p>{html_mod.escape(detail)}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8')
-            self.send_response(500)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            log(f"Setup error: {detail}")
+            self._send_setup_result(500, f'<html><body><h1>Setup Error</h1><p>{html_mod.escape(detail)}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8'))
+            return
 
-    def _fetch_archive_s3_keys(self, email, password):
-        """Log in to archive.org and return its S3 keys as a dict with
-        'access' and 'secret', or None on failure.
-
-        The same login as the per-launch reconcile
-        (multisite.fetch_archive_s3_keys): archive.org's onion, from the
-        onionheaven container's Tor, form and cookie on curl's stdin. Setup
-        used to log in to clearnet archive.org through a Tor exit, which
-        archive.org turns most exits away from (issue #322).
-        """
-        from onionpress import multisite as _multisite
-        return _multisite.fetch_archive_s3_keys(
-            email, password,
-            docker_bin=self.server.docker_bin,
-            env=self.server.docker_env,
-            log_func=self.server.log_func,
-        )
+        if ok:
+            log("WordPress installed via setup page")
+            self._send_setup_result(200, SETUP_SUCCESS_HTML.encode('utf-8'))
+        elif self._wp_installed():
+            # Installed, but the admin password was not set.
+            self._send_setup_result(500, b'<html><body><h1>Setup Incomplete</h1>'
+                                    b'<p>WordPress was installed, but your admin password '
+                                    b'could not be set. See the OnionPress log.</p>'
+                                    b'</body></html>')
+        else:
+            # wp-cli's stderr quotes the submitted title and user name back:
+            # escape it, or the form is a script injection.
+            error_msg = html_mod.escape("\n".join(errors_logged) or "Unknown error")
+            self._send_setup_result(500, f'<html><body><h1>Setup Failed</h1><p>{error_msg}</p><p><a href="/setup">Try again</a></p></body></html>'.encode('utf-8'))
 
     def _handle_status(self):
         """Return proxy status as JSON."""
@@ -1182,7 +1123,12 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, ports=None, **kwargs):
+        # *ports*: a callable returning this install's PortConfig, read at
+        # each request, so a port resync reaches a running server. None:
+        # the ports of this process's environment (PROXY_PORT,
+        # PHP_PROXY_PORT).
+        self._ports = ports
         self.onion_address = None
         self.healthcheck_address = None
         self.tor_ready = False
@@ -1196,6 +1142,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self._wp_unreachable_since = None   # time.time() of first failure, or None
         self._wp_unreachable_last_log = None  # time.time() of last warning log
         super().__init__(*args, **kwargs)
+
+    @property
+    def wp_port(self):
+        """WordPress's published port, which /__op_proxy.php is fetched on."""
+        if self._ports is None:
+            return PHP_PROXY_PORT
+        return self._ports().wp_port
 
 
 def stop_proxy(server):

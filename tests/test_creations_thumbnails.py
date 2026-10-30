@@ -116,5 +116,107 @@ class TestThumbnailScan(unittest.TestCase):
         self.assertIn("const THUMBS_PREFIX = '.thumbs/';", _read(PLUGIN))
 
 
+class TestThumbnailsFollowNoLink(unittest.TestCase):
+    """WordPress can plant links in My Creations (it is mounted rw into the
+    container); the host's walk follows none of them (#460)."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="onionpress-thumbs-link-")
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.dir = os.path.join(self.root, "My Creations")
+        self.outside = os.path.join(self.root, "Work")
+        os.makedirs(self.dir)
+        os.makedirs(os.path.join(self.outside, "deep"))
+        for rel in ("a.png", "deep/b.png"):
+            with open(os.path.join(self.outside, rel), "w") as f:
+                f.write("host file")
+
+    def _outside_files(self):
+        return sorted(os.path.relpath(os.path.join(r, f), self.outside)
+                      for r, _d, fs in os.walk(self.outside) for f in fs)
+
+    def _png(self):
+        path = os.path.join(self.root, "rendered.png")
+        with open(path, "wb") as f:
+            f.write(b"\x89PNG thumb")
+        return path
+
+    def test_linked_thumbs_folder_stops_the_pass(self):
+        os.symlink(self.outside, os.path.join(self.dir, ".thumbs"))
+        with open(os.path.join(self.dir, "x.jpg"), "w") as f:
+            f.write("x")
+        self.assertFalse(thumbnails.thumbs_dir_ok(self.dir))
+        self.assertEqual(thumbnails.scan(self.dir), ([], [], False))
+        orphans = [os.path.join(self.dir, ".thumbs", "a.png"),
+                   os.path.join(self.dir, ".thumbs", "deep", "b.png")]
+        self.assertEqual(thumbnails.prune(self.dir, orphans), 0)
+        self.assertFalse(thumbnails.install(self.dir, "x.jpg", self._png()))
+        self.assertEqual(self._outside_files(), ["a.png", "deep/b.png"])
+
+    def test_thumbs_file_is_not_a_folder(self):
+        with open(os.path.join(self.dir, ".thumbs"), "w") as f:
+            f.write("")
+        self.assertFalse(thumbnails.thumbs_dir_ok(self.dir))
+
+    def test_linked_source_is_no_source(self):
+        os.symlink(os.path.join(self.outside, "a.png"), os.path.join(self.dir, "x.png"))
+        os.symlink(self.outside, os.path.join(self.dir, "sub"))
+        stale, _orphans, complete = thumbnails.scan(self.dir)
+        self.assertTrue(complete)
+        self.assertEqual(stale, [])
+        self.assertFalse(thumbnails.source_ok(self.dir, os.path.join(self.dir, "x.png")))
+        self.assertFalse(thumbnails.source_ok(
+            self.dir, os.path.join(self.dir, "sub", "a.png")))
+
+    def test_thumbnail_of_a_link_is_pruned_not_followed(self):
+        os.symlink(os.path.join(self.outside, "a.png"), os.path.join(self.dir, "x.png"))
+        os.makedirs(os.path.join(self.dir, ".thumbs"))
+        # A thumbnail that is itself a link: removed as a link only.
+        os.symlink(os.path.join(self.outside, "a.png"),
+                   os.path.join(self.dir, ".thumbs", "x.png.png"))
+        _stale, orphans, _complete = thumbnails.scan(self.dir)
+        self.assertEqual(thumbnails.prune(self.dir, orphans), 1)
+        self.assertEqual(self._outside_files(), ["a.png", "deep/b.png"])
+
+    def test_linked_thumbs_subfolder_is_neither_walked_nor_written(self):
+        os.makedirs(os.path.join(self.dir, ".thumbs"))
+        os.symlink(self.outside, os.path.join(self.dir, ".thumbs", "sub"))
+        os.makedirs(os.path.join(self.dir, "sub"))
+        with open(os.path.join(self.dir, "sub", "foo.jpg"), "w") as f:
+            f.write("x")
+        stale, orphans, complete = thumbnails.scan(self.dir)
+        self.assertTrue(complete)
+        self.assertEqual(orphans, [])  # the link's target is not listed
+        self.assertEqual([rel for _s, rel, _m in stale], ["sub/foo.jpg"])
+        # Orphans naming paths through the link remove nothing.
+        self.assertEqual(thumbnails.prune(self.dir, [
+            os.path.join(self.dir, ".thumbs", "sub", "a.png")]), 0)
+        self.assertFalse(thumbnails.install(self.dir, "sub/foo.jpg", self._png()))
+        self.assertEqual(self._outside_files(), ["a.png", "deep/b.png"])
+
+    def test_install_writes_inside_and_replaces_a_link(self):
+        self.assertTrue(thumbnails.install(self.dir, "s/t/x.jpg", self._png()))
+        out = os.path.join(self.dir, ".thumbs", "s", "t", "x.jpg.png")
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), b"\x89PNG thumb")
+        os.remove(out)
+        os.symlink(os.path.join(self.outside, "a.png"), out)
+        self.assertTrue(thumbnails.install(self.dir, "s/t/x.jpg", self._png()))
+        self.assertFalse(os.path.islink(out))
+        with open(os.path.join(self.outside, "a.png")) as f:
+            self.assertEqual(f.read(), "host file")
+
+    def test_daemon_renders_into_a_private_folder(self):
+        src = _read("src/onionpress/daemon.py")
+        gen = src[src.index("    def start_thumbnail_generator(self):"):]
+        gen = gen[:gen.index("threading.Thread(target=generator")]
+        self.assertIn("thumbnails.thumbs_dir_ok(creations_dir)", gen)
+        self.assertIn("thumbnails.source_ok(creations_dir, src)", gen)
+        self.assertIn("tempfile.TemporaryDirectory(", gen)
+        self.assertIn("thumbnails.install(creations_dir, rel, ql_output)", gen)
+        self.assertNotIn("makedirs", gen)
+        self.assertNotIn("os.rename", gen)
+
+
 if __name__ == "__main__":
     unittest.main()

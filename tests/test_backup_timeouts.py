@@ -159,7 +159,10 @@ class TestSources(unittest.TestCase):
     """The places that had fixed limits."""
 
     def setUp(self):
-        self.backup = _read(os.path.join(PROJECT_ROOT, "src/onionpress/backup.py"))
+        # backup.py, and the modules split out of it (#484).
+        self.backup = "\n".join(
+            _read(os.path.join(PROJECT_ROOT, f"src/onionpress/{name}.py"))
+            for name in ("backup", "backup_archive", "db_import"))
 
     def _function(self, name):
         start = self.backup.index(f"\ndef {name}(")

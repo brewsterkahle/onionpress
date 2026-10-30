@@ -45,10 +45,26 @@ Endpoints:
   POST /api/name/register-local, /release-local — Docker-bridge sources only
   GET  /status       — Public status summary (no auth); accepting_registrations
                        says whether this node is a hub
-  GET  /status/<addr> — Per-address detail (looks up by content or healthcheck address)
+  GET  /status/<addr> — Coarse: whether the content address is registered
+                       and its status word (no auth)
+  POST /status/<addr> — Per-address detail, signed by the address's own key
+                       (endpoint "status")
 """
 
 MAX_REQUEST_BODY = 1_048_576  # 1 MB — reject larger POST bodies to prevent memory exhaustion
+MAX_LOG_UPLOAD_BODY = 10_485_760  # 10 MB, /logs/upload only
+
+# Bounds on what an unauthenticated client can hold (#461). Every node keeps
+# one keep-alive connection to its hub, so the connection cap sits well
+# above the node count; bodies are read under a deadline, never just an
+# idle timeout, and only a few large ones at a time. The deadline is
+# generous: onion circuits stall for minutes, so a body gets at least the
+# handler's idle timeout (300 s) and a slow circuit's rate; memory is
+# bounded by the two caps, not by it.
+MAX_CONNECTIONS = 1024
+MAX_LARGE_BODIES = 4  # concurrent bodies above MAX_REQUEST_BODY
+BODY_DEADLINE_FLOOR = 300  # seconds, plus one per BODY_MIN_RATE bytes
+BODY_MIN_RATE = 4096
 
 import base64
 import hashlib
@@ -56,9 +72,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -66,7 +84,7 @@ from urllib.parse import parse_qs, urlparse
 from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
-    note_signed_request, ONIONHOME_ADDRESS,
+    note_signed_request, short_text, ONIONHOME_ADDRESS,
     takeover_function, release_function,
     is_registration_hub, registrations_opted_in, write_key_file,
     KEYS_DIR, PROPAGATION_DELAY, ONIONHEAVEN_DATA_DIR, OWN_HOSTNAME_PATH,
@@ -148,6 +166,70 @@ def analytics_room(content_address, healthcheck_address, analytics_dir=None):
         total = 0
     if total >= ANALYTICS_MAX_INSTANCES:
         return 507, f"analytics storage is full ({total} sites); no new site is taken"
+    return None, None
+
+
+# A manifest offers a day's log files; more names than this in one is
+# nothing a client sends, and each is written to the pair's audit file.
+MAX_MANIFEST_FILES = 1000
+
+
+def _v3(value):
+    """True if value is one v3 onion address (a str; JSON carries anything)."""
+    return isinstance(value, str) and ONION_RE.fullmatch(value) is not None
+
+
+def analytics_disk_full():
+    """True when the filesystem holding ANALYTICS_DIR is past
+    ANALYTICS_DISK_THRESHOLD. ANALYTICS_DIR is a bind mount of the host's
+    folder (on a Mac, the Mac's disk); "/" is the container's own disk,
+    which the analytics never fill (issue #468). A usage that cannot be
+    read counts as not full, as before."""
+    try:
+        usage = shutil.disk_usage(ANALYTICS_DIR)
+    except OSError:
+        return False
+    return usage.used / usage.total > ANALYTICS_DISK_THRESHOLD
+
+
+def analytics_pair_bytes(site_dir):
+    """The bytes a pair's folder holds: its regular files, links not
+    followed; 0 for a folder that is not there."""
+    total = 0
+    try:
+        with os.scandir(site_dir) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0
+    return total
+
+
+def analytics_pair_room(site_dir, incoming, replacing=None):
+    """(status, error) refusing a write of `incoming` bytes into a pair's
+    folder that would put it past ANALYTICS_PER_INSTANCE_QUOTA, or
+    (None, None); `replacing` names a regular file there the write
+    replaces, whose size is freed first. Checked before every write
+    (issue #468): the quota used to be held only by the daily cleanup,
+    so a pair could put a day's uploads past it, and files a client
+    sent with an empty healthcheck address landed beside the pairs
+    where the cleanup never looked."""
+    held = analytics_pair_bytes(site_dir)
+    if replacing:
+        try:
+            st = os.lstat(os.path.join(site_dir, replacing))
+            if stat.S_ISREG(st.st_mode):
+                held -= st.st_size
+        except OSError:
+            pass
+    if held + incoming > ANALYTICS_PER_INSTANCE_QUOTA:
+        return 507, (f"this site's analytics are at their quota "
+                     f"({ANALYTICS_PER_INSTANCE_QUOTA // 1048576} MB); nothing more is "
+                     f"stored until older files expire")
     return None, None
 
 
@@ -537,22 +619,48 @@ def derive_onion_address(public_key_32):
 _RESET_LOCK = threading.Lock()
 
 
-def _verify_signature(handler, data, endpoint):
+NOT_REGISTERED_ERROR = "Entry not found"
+
+
+def _registry_has(conn, content_address, healthcheck_address):
+    """True if the registry holds a row for the address (the pair, when a
+    healthcheck address is given), registered or unregistered."""
+    if healthcheck_address:
+        row = conn.execute(
+            "SELECT 1 FROM registry WHERE content_address = ? AND healthcheck_address = ?",
+            (content_address, healthcheck_address)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM registry WHERE content_address = ? LIMIT 1",
+            (content_address,)).fetchone()
+    return row is not None
+
+
+def _verify_signature(handler, data, endpoint, registered_only=False):
     """Verify the ed25519 signature on a request.
 
-    Returns (ok, error_message). Verification is unconditional: the
-    signature IS the ownership proof, and the source address carries no
-    information — Tor delivers every onion-service request from
-    127.0.0.1, so a loopback "local request" bypass (removed in the fix
-    for #126) let anyone over Tor /offline or /unregister any address.
-    Every legitimate caller (Mac menubar app, Linux heartbeat daemon,
-    stress-test workers) signs; nothing inside the container posts to
-    these endpoints.
+    Returns (ok, status, error_message): status is the HTTP status to
+    answer a refusal with (403, or 404 for an address the registry has
+    never seen when registered_only is set) and None when ok.
+    Verification is unconditional: the signature IS the ownership
+    proof, and the source address carries no information — Tor delivers
+    every onion-service request from 127.0.0.1, so a loopback "local
+    request" bypass (removed in the fix for #126) let anyone over Tor
+    /offline or /unregister any address. Every legitimate caller (Mac
+    menubar app, Linux heartbeat daemon, stress-test workers) signs;
+    nothing inside the container posts to these endpoints.
 
     libsodium checks the signature (onion_auth.verify, PyNaCl). Without
     PyNaCl this raises VerificationUnavailable and do_POST answers 503:
     an unchecked /offline or /unregister would let anyone release or
     remove another site's address.
+
+    registered_only (issue #467): the request is for an address the
+    registry holds a row for, and one it does not is answered 404
+    before a replay mark or an address log line is written for it.
+    Any key signs for its own address, so /offline, /unregister and
+    the signed status query from a fresh key must leave nothing behind
+    on the hub; only /online, which registration_room bounds, may.
     """
     content_address = data.get("content_address", "")
     healthcheck_address = data.get("healthcheck_address", "")
@@ -564,7 +672,7 @@ def _verify_signature(handler, data, endpoint):
         timestamp, signature
     )
     if not ok:
-        return ok, err
+        return False, 403, err
     # Verified, and not seen before (issue #400): a captured /offline
     # replayed within the timestamp tolerance forced a takeover of a live
     # site. The mark moves only on a verified signature, so this comes
@@ -573,16 +681,26 @@ def _verify_signature(handler, data, endpoint):
         conn = db_connect()
         try:
             db_ensure_schema(conn)
+            if registered_only and not _registry_has(conn, content_address,
+                                                      healthcheck_address):
+                return False, 404, NOT_REGISTERED_ERROR
             fresh, why = note_signed_request(conn, content_address, timestamp, signature)
         finally:
             conn.close()
     except Exception as e:
         log(f"REJECT-REPLAY-CHECK /{endpoint}: {content_address}: {e}")
-        return False, "Could not check the request against replay"
+        return False, 403, "Could not check the request against replay"
     if not fresh:
         log(f"REJECT-REPLAY /{endpoint}: {content_address}: {why}")
-        return False, why
-    return True, ""
+        return False, 403, why
+    return True, None, ""
+
+
+# Endpoint label of the signed per-address status query (POST
+# /status/<address>, issue #469): the full answer goes only to the
+# address's own key. src/onionpress/onionheaven.py signs with the same
+# literal; a test checks.
+STATUS_ENDPOINT = "status"
 
 
 # Endpoint label of the signature that backs an is_onionheaven claim on
@@ -630,6 +748,36 @@ def _note_verification_unavailable(error):
 # Request handler
 # ---------------------------------------------------------------------------
 
+_large_bodies = threading.BoundedSemaphore(MAX_LARGE_BODIES)
+
+
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with at most MAX_CONNECTIONS connections; one
+    more is closed at once rather than given a thread (#461)."""
+
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 class OnionHeavenHandler(BaseHTTPRequestHandler):
     # HTTP/1.1 with keep-alive so clients can hold a persistent socket
     # to the hub and send /offline within milliseconds during system
@@ -670,27 +818,85 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         """
         if _accepts_registrations():
             return False
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-        except ValueError:
-            length = -1
-        if 0 <= length <= MAX_REQUEST_BODY:
-            self.rfile.read(length)
-        else:
-            self.close_connection = True
+        if self._read_body() is None:
+            return True  # answered already
         self._send_json(403, {"error": NOT_A_HUB_ERROR})
         return True
 
-    def _read_json(self, max_size=None):
-        if max_size is None:
-            max_size = MAX_REQUEST_BODY
-        length = int(self.headers.get("Content-Length", 0))
-        if length == 0:
+    def _body_length(self, max_size):
+        """The request's body length, or None with the answer sent.
+
+        Content-Length must be plain digits (a ``-1`` once read to EOF,
+        #461); chunked bodies are refused. Missing means no body. Nothing
+        is read on a refusal and the connection is closed.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            self._send_json(411, {"error": "Content-Length required"})
             return None
+        values = self.headers.get_all("Content-Length") or []
+        if not values:
+            return 0
+        if len(values) != 1 or not re.fullmatch(r"[0-9]{1,12}", values[0].strip()):
+            self.close_connection = True
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return None
+        length = int(values[0])
         if length > max_size:
+            self.close_connection = True
             self._send_json(413, {"error": "Request body too large"})
-            return False  # distinguishes from None (no body) — caller must check
-        body = self.rfile.read(length)
+            return None
+        return length
+
+    def _read_body(self):
+        """The body do_POST admitted, read once under a deadline; None, with
+        the answer sent, when it does not arrive in time."""
+        if self._body is not None:
+            return self._body
+        length = self._body_len
+        deadline = time.monotonic() + BODY_DEADLINE_FLOOR + length / BODY_MIN_RATE
+        large = length > MAX_REQUEST_BODY
+        if large and not _large_bodies.acquire(blocking=False):
+            self.close_connection = True
+            self._send_json(503, {"error": "Busy, try again later"})
+            return None
+        chunks = []
+        try:
+            left = length
+            while left > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                self.connection.settimeout(remaining)
+                chunk = self.rfile.read1(min(left, 65536))
+                if not chunk:
+                    raise ConnectionError("body cut short")
+                chunks.append(chunk)
+                left -= len(chunk)
+        except (TimeoutError, OSError):
+            self.close_connection = True
+            try:
+                self._send_json(408, {"error": "Request body not received in time"})
+            except OSError:
+                pass
+            return None
+        finally:
+            if large:
+                _large_bodies.release()
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
+        self._body = b"".join(chunks)
+        return self._body
+
+    def _read_json(self, max_size=None):
+        # The length was checked against this path's limit in do_POST.
+        body = self._read_body()
+        if body is None:
+            return False  # answered already — caller must check
+        if not body:
+            return None
         try:
             return json.loads(body)
         except (json.JSONDecodeError, ValueError):
@@ -756,34 +962,25 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 takeover_containers = 0
             conn.close()
 
-            # Per-worker details and aggregate queue stats
+            # Aggregate queue stats. Counts only: the per-worker list
+            # (container names, each one's queue) went out to anyone
+            # until issue #469, and nothing consumed it.
             total_queued = 0
             total_in_flight = 0
             total_active = 0
             total_failed = 0
-            workers = []
             for tc in tc_rows:
-                worker_info = {
-                    "name": tc["container_name"],
-                    "bootstrapped": bool(tc["bootstrapped"]),
-                    "assigned_count": tc["assigned_count"],
-                }
                 if tc["bootstrapped"]:
                     try:
                         from onionheaven_common import get_queue_status
                         qs = get_queue_status(tc["container_name"])
                         if qs:
-                            worker_info["queued"] = qs.get("queued", 0)
-                            worker_info["in_flight"] = qs.get("in_flight", 0)
-                            worker_info["active"] = qs.get("active", 0)
-                            worker_info["failed"] = qs.get("failed", 0)
                             total_queued += qs.get("queued", 0)
                             total_in_flight += qs.get("in_flight", 0)
                             total_active += qs.get("active", 0)
                             total_failed += qs.get("failed", 0)
                     except Exception:
                         pass
-                workers.append(worker_info)
 
             self._send_json(200, {
                 "version": SERVER_VERSION,
@@ -800,41 +997,101 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 "takeover_in_flight": total_in_flight,
                 "takeover_active": total_active,
                 "takeover_failed": total_failed,
-                "takeover_workers": workers,
             })
         except Exception as e:
             self._send_json(500, {"error": str(e)})
 
     # -- GET /status/<address> ------------------------------------------------
+    #
+    # Issue #469: the per-address detail (the healthcheck address, the
+    # version, every online/offline/takeover time, the audit, the address
+    # log with its "/offline received" lines) went to anyone over Tor.
+    # Polled, that was a minute-resolution record of when each publisher's
+    # computer slept and woke, and it tied every content address to its
+    # healthcheck onion both ways. The plain GET now says only whether a
+    # content address is registered here and its status word; the detail
+    # answers a POST /status/<address> signed by the address's own key
+    # (STATUS_ENDPOINT, replay-marked like /offline). A healthcheck
+    # address is looked up by neither: it names nothing on its own.
+
+    # The registry's status words, most alive first: the coarse answer
+    # for an address with several rows is the first of these any live
+    # row has.
+    COARSE_STATUS_ORDER = ("online", "taken-over", "unregistered")
 
     def _handle_status_detail(self, address):
+        """The coarse, unauthenticated answer."""
         if not ONION_RE.fullmatch(address):
             self._send_json(400, {"error": "Invalid .onion address format"})
             return
-
         try:
             conn = db_connect()
-            db_ensure_schema(conn)
+            try:
+                db_ensure_schema(conn)
+                rows = conn.execute(
+                    "SELECT status, unregistered_at FROM registry WHERE content_address = ?",
+                    (address,)).fetchall()
+            finally:
+                conn.close()
+            if not rows:
+                self._send_json(404, {"error": "No entries found for this address"})
+                return
+            live = [r["status"] for r in rows if r["unregistered_at"] is None]
+            word = "unregistered"
+            for candidate in self.COARSE_STATUS_ORDER:
+                if candidate in live:
+                    word = candidate
+                    break
+            self._send_json(200, {
+                "address": address,
+                "registered": bool(live),
+                "status": word,
+            })
+        except Exception as e:
+            self._send_json(500, {"error": str(e)})
 
-            # Try content_address first, then healthcheck_address
+    # -- POST /status/<address> (signed) ---------------------------------------
+
+    def _handle_status_signed(self, address):
+        """The full per-address answer, for the address's own key: the
+        body is signed like /offline's, with STATUS_ENDPOINT, and its
+        content_address is the address in the path."""
+        if not ONION_RE.fullmatch(address):
+            self._send_json(400, {"error": "Invalid .onion address format"})
+            return
+        if self._refuse_unless_hub():
+            return
+        data = self._read_json()
+        if data is False:
+            return  # answered already
+        if not data:
+            self._send_json(400, {"error": "Invalid JSON"})
+            return
+        if data.get("content_address", "") != address:
+            self._send_json(400, {"error": "content_address must be the address in the path"})
+            return
+        healthcheck_address = data.get("healthcheck_address", "")
+        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
+            self._send_json(400, {"error": "Invalid healthcheck_address format"})
+            return
+        ok, status, err = _verify_signature(self, data, STATUS_ENDPOINT, registered_only=True)
+        if not ok:
+            self._send_json(status, {"error": err})
+            return
+        try:
+            self._send_json(200, self._status_detail(address))
+        except Exception as e:
+            self._send_json(500, {"error": str(e)})
+
+    def _status_detail(self, address):
+        """Every row of a content address, with the address log."""
+        conn = db_connect()
+        try:
+            db_ensure_schema(conn)
             rows = conn.execute(
                 "SELECT * FROM registry WHERE content_address = ? ORDER BY registered_at",
                 (address,)
             ).fetchall()
-            lookup_type = "content_address"
-
-            if not rows:
-                rows = conn.execute(
-                    "SELECT * FROM registry WHERE healthcheck_address = ? ORDER BY registered_at",
-                    (address,)
-                ).fetchall()
-                lookup_type = "healthcheck_address"
-
-            if not rows:
-                conn.close()
-                self._send_json(404, {"error": "No entries found for this address (checked both content_address and healthcheck_address)"})
-                return
-
             now = datetime.now(timezone.utc)
             entries = []
             for row in rows:
@@ -878,21 +1135,18 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 entry["propagation_delay_seconds"] = PROPAGATION_DELAY
 
                 entries.append(entry)
+        finally:
             conn.close()
 
-            from onionheaven_common import get_addr_logs
-            recent_logs = get_addr_logs(address)
-
-            self._send_json(200, {
-                "lookup_type": lookup_type,
-                "address": address,
-                "entries": entries,
-                "count": len(entries),
-                "recent_logs": recent_logs,
-                "server_time": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            })
-        except Exception as e:
-            self._send_json(500, {"error": str(e)})
+        from onionheaven_common import get_addr_logs
+        return {
+            "lookup_type": "content_address",
+            "address": address,
+            "entries": entries,
+            "count": len(entries),
+            "recent_logs": get_addr_logs(address),
+            "server_time": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
 
     @staticmethod
     def _seconds_since(ts_str, now):
@@ -934,8 +1188,19 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             "/api/name/release-local": self._handle_name_release_local,
         }
         handler = handlers.get(path)
+        if handler is None and path.startswith("/status/"):
+            # The signed per-address status query (issue #469).
+            address = path[len("/status/"):]
+            handler = lambda: self._handle_status_signed(address)  # noqa: E731
         if handler is None:
+            self.close_connection = True  # the body is never read
             self._send_json(404, {"error": "Not found"})
+            return
+        # Every POST's length is checked here, before any handler (#461).
+        self._body = None
+        self._body_len = self._body_length(
+            MAX_LOG_UPLOAD_BODY if path == "/logs/upload" else MAX_REQUEST_BODY)
+        if self._body_len is None:
             return
         try:
             handler()
@@ -948,6 +1213,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.log_message("ERROR in %s: %s", path, e)
             self._send_json(500, {"error": str(e)})
+        finally:
+            if self._body_len and self._body is None:
+                # A handler that answered without reading the body: the
+                # unread bytes must not be taken for the next request.
+                self.close_connection = True
 
     # -- Name registry -----------------------------------------------------
     #
@@ -1231,10 +1501,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
-        # Verify ed25519 signature
-        ok, err = _verify_signature(self, data, "unregister")
+        # Verify ed25519 signature; an address with no row is 404 before
+        # anything is written for it (issue #467).
+        ok, status, err = _verify_signature(self, data, "unregister", registered_only=True)
         if not ok:
-            self._send_json(403, {"error": err})
+            self._send_json(status, {"error": err})
             return
 
         conn = db_connect()
@@ -1320,9 +1591,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         # Verify ed25519 signature — accept both "online" and "register" actions
         # for backwards compatibility with older clients
         endpoint = self.path.split("?")[0].lstrip("/")
-        ok, err = _verify_signature(self, data, endpoint)
+        ok, status, err = _verify_signature(self, data, endpoint)
         if not ok:
-            self._send_json(403, {"error": err})
+            self._send_json(status, {"error": err})
             return
 
         # Room under the caps (issue #391), once the signature is good and
@@ -1431,7 +1702,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         # Accept optional fields
         wordpress_healthy = data.get("wordpress_healthy")
-        version = data.get("version", "unknown")
+        # A short printable string (issue #467): it is stored per row and
+        # echoed in the signed status answer, and the body is 1 MB.
+        version = short_text(data.get("version"), default="unknown") or "unknown"
         is_oh = 1 if _signed_peer_claim(data) else 0
 
         created = False
@@ -1548,10 +1821,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid healthcheck_address format"})
             return
 
-        # Verify ed25519 signature
-        ok, err = _verify_signature(self, data, "offline")
+        # Verify ed25519 signature; an address with no row is 404 before
+        # a replay mark or an address log line is written for it (#467).
+        ok, status, err = _verify_signature(self, data, "offline", registered_only=True)
         if not ok:
-            self._send_json(403, {"error": err})
+            self._send_json(status, {"error": err})
             return
 
         # Telemetry: log every authenticated /offline. Paired with the
@@ -1560,7 +1834,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         # from the same address ⇒ the client lost the suspend window
         # before its /offline POST could complete).
         from onionheaven_common import addr_log
-        version = data.get("version", "")
+        version = short_text(data.get("version"))
         addr_log(content_address, f"/offline received from {content_address} (version={version})")
 
         conn = db_connect()
@@ -1641,10 +1915,12 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         content_address = data.get("content_address", "")
         healthcheck_address = data.get("healthcheck_address", "")
-        if not content_address or not ONION_RE.fullmatch(content_address):
+        if not _v3(content_address):
             self._send_json(400, {"error": "Invalid content_address"})
             return
-        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
+        # Required (issue #468): with "" the pair's folder was the
+        # content address's own, where the per-instance quota never looked.
+        if not _v3(healthcheck_address):
             self._send_json(400, {"error": "Invalid healthcheck_address"})
             return
 
@@ -1659,19 +1935,18 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
 
         files = data.get("files", [])
+        if not isinstance(files, list) or len(files) > MAX_MANIFEST_FILES:
+            self._send_json(400, {"error": "Invalid files"})
+            return
         if not files:
             self._send_json(200, {"wanted": []})
             return
 
         # Check disk usage
-        try:
-            usage = shutil.disk_usage("/")
-            if usage.used / usage.total > ANALYTICS_DISK_THRESHOLD:
-                self.log_message("Analytics: disk >85%% full, rejecting manifest")
-                self._send_json(200, {"wanted": []})
-                return
-        except OSError:
-            pass
+        if analytics_disk_full():
+            self.log_message("Analytics: disk >85%% full, rejecting manifest")
+            self._send_json(200, {"wanted": []})
+            return
 
         # Room under the caps (issue #391) before a new pair's directory.
         status, err = analytics_room(content_address, healthcheck_address)
@@ -1680,17 +1955,25 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(status, {"error": err})
             return
 
-        # Persist instance metadata with dated filename
-        site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
-        os.makedirs(site_dir, exist_ok=True)
+        # Instance metadata (free text cut short, #467) with dated
+        # filename, within the pair's quota (#468).
+        version = short_text(data.get("version"))
         meta = {
             "content_address": content_address,
             "healthcheck_address": healthcheck_address,
-            "version": data.get("version", ""),
-            "tor_impl": data.get("tor_impl", ""),
-            "os_version": data.get("os_version", ""),
-            "timestamp": data.get("timestamp", ""),
+            "version": version,
+            "tor_impl": short_text(data.get("tor_impl")),
+            "os_version": short_text(data.get("os_version")),
+            "timestamp": short_text(data.get("timestamp")),
         }
+        meta_text = json.dumps(meta, indent=2)
+        site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
+        status, err = analytics_pair_room(site_dir, len(meta_text))
+        if status:
+            self.log_message("Analytics: refusing %s: %s", content_address[:12], err)
+            self._send_json(status, {"error": err})
+            return
+        os.makedirs(site_dir, exist_ok=True)
         try:
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             seq = 1
@@ -1701,7 +1984,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                     break
                 seq += 1
             with open(meta_path, "w") as f:
-                json.dump(meta, f, indent=2)
+                f.write(meta_text)
         except OSError:
             pass
 
@@ -1714,13 +1997,16 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         wanted = []
         rejected = []  # names dropped (unsafe) — recorded in the audit trail
         superseded = []  # .log offered when .log.gz already stored
+        offered = []  # every name, as the audit trail and the log may hold it
         for f in files:
-            name = f.get("name", "")
-            if not ANALYTICS_LOG_NAME_RE.fullmatch(name):
-                rejected.append(name or "<empty>")
+            name = f.get("name", "") if isinstance(f, dict) else ""
+            shown = short_text(name, 200) or "<empty>"
+            offered.append(shown)
+            if not isinstance(name, str) or not ANALYTICS_LOG_NAME_RE.fullmatch(name):
+                rejected.append(shown)
                 self.log_message(
                     "Analytics: rejected %s from %s (unsafe name)",
-                    name or "<empty>", content_address,
+                    shown, content_address,
                 )
                 continue
             local_path = os.path.join(site_dir, name)
@@ -1728,6 +2014,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 superseded.append(name)
                 continue
             remote_size = f.get("size", 0)
+            if isinstance(remote_size, bool) or not isinstance(remote_size, int):
+                remote_size = 0
             if not os.path.exists(local_path):
                 wanted.append(name)
                 continue
@@ -1741,11 +2029,11 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         _append_audit(site_dir, {
             "event": "manifest",
-            "offered": [f.get("name", "") for f in files],
+            "offered": offered,
             "wanted": wanted,
             "rejected": rejected,
             "superseded": superseded,
-            "version": data.get("version", ""),
+            "version": version,
         })
 
         self._send_json(200, {"wanted": wanted})
@@ -1757,7 +2045,7 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             self._send_json(403, {"error": "Not an OnionHome instance"})
             return
 
-        data = self._read_json(max_size=10_485_760)  # 10 MB for log uploads
+        data = self._read_json(max_size=MAX_LOG_UPLOAD_BODY)
         if data is False:
             return  # 413 already sent
         if not data:
@@ -1768,13 +2056,13 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         healthcheck_address = data.get("healthcheck_address", "")
         file_name = data.get("file_name", "")
 
-        if not content_address or not ONION_RE.fullmatch(content_address):
+        if not _v3(content_address):
             self._send_json(400, {"error": "Invalid content_address"})
             return
-        if healthcheck_address and not ONION_RE.fullmatch(healthcheck_address):
+        if not _v3(healthcheck_address):  # required, as on /logs/manifest (#468)
             self._send_json(400, {"error": "Invalid healthcheck_address"})
             return
-        if not ANALYTICS_LOG_NAME_RE.fullmatch(file_name):
+        if not isinstance(file_name, str) or not ANALYTICS_LOG_NAME_RE.fullmatch(file_name):
             self._send_json(400, {"error": "Invalid file_name"})
             return
 
@@ -1796,27 +2084,27 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             return
 
         # Check / manage disk space
-        try:
-            usage = shutil.disk_usage("/")
-            if usage.used / usage.total > ANALYTICS_DISK_THRESHOLD:
-                self._analytics_cleanup()
-                # Re-check after cleanup
-                usage = shutil.disk_usage("/")
-                if usage.used / usage.total > ANALYTICS_DISK_THRESHOLD:
-                    self._send_json(507, {"error": "Disk full"})
-                    return
-        except OSError:
-            pass
+        if analytics_disk_full():
+            self._analytics_cleanup()
+            if analytics_disk_full():  # re-check after cleanup
+                self._send_json(507, {"error": "Disk full"})
+                return
 
-        # Room under the caps (issue #391) before a new pair's directory.
+        # Room under the caps (issue #391) before a new pair's directory,
+        # and under the pair's quota (#468) before the write.
         status, err = analytics_room(content_address, healthcheck_address)
+        if status:
+            self.log_message("Analytics: refusing %s: %s", content_address[:12], err)
+            self._send_json(status, {"error": err})
+            return
+        site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
+        status, err = analytics_pair_room(site_dir, len(file_bytes), replacing=file_name)
         if status:
             self.log_message("Analytics: refusing %s: %s", content_address[:12], err)
             self._send_json(status, {"error": err})
             return
 
         # Write the file
-        site_dir = os.path.join(ANALYTICS_DIR, content_address, healthcheck_address)
         os.makedirs(site_dir, exist_ok=True)
         dest = os.path.join(site_dir, file_name)
         try:
@@ -1883,6 +2171,9 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
 
         # Phase 2: per-instance quota. Group remaining files by site
         # directory and trim oldest-first within each until under quota.
+        # Files directly under a content address's folder (what an upload
+        # with an empty healthcheck address left there before #468) are
+        # held to the quota as a group of their own.
         try:
             content_dirs = os.listdir(ANALYTICS_DIR)
         except OSError:
@@ -1893,42 +2184,22 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
                 hc_dirs = os.listdir(content_path)
             except OSError:
                 continue
+            strays = []
             for hc in hc_dirs:
                 site_dir = os.path.join(content_path, hc)
                 if not os.path.isdir(site_dir):
+                    strays.append(site_dir)
                     continue
-                entries = []
-                total = 0
                 try:
-                    for name in os.listdir(site_dir):
-                        p = os.path.join(site_dir, name)
-                        try:
-                            st = os.stat(p)
-                        except OSError:
-                            continue
-                        entries.append((st.st_mtime, st.st_size, p))
-                        total += st.st_size
+                    paths = [os.path.join(site_dir, name) for name in os.listdir(site_dir)]
                 except OSError:
                     continue
-                if total <= ANALYTICS_PER_INSTANCE_QUOTA:
-                    continue
-                entries.sort()  # oldest first
-                for _mtime, size, path in entries:
-                    if total <= ANALYTICS_PER_INSTANCE_QUOTA:
-                        break
-                    try:
-                        os.remove(path)
-                        total -= size
-                    except OSError:
-                        continue
+                OnionHeavenHandler._trim_to_quota(paths)
+            OnionHeavenHandler._trim_to_quota(strays)
 
         # Phase 3: disk-full fallback. Only kicks in if the above two
         # phases didn't free enough space.
-        try:
-            usage = shutil.disk_usage("/")
-        except OSError:
-            return
-        if usage.used / usage.total <= ANALYTICS_DISK_THRESHOLD:
+        if not analytics_disk_full():
             return
         all_files = []
         for root, _dirs, files in os.walk(ANALYTICS_DIR):
@@ -1941,10 +2212,34 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
         all_files.sort()  # oldest first
         for _mtime, path in all_files:
             try:
-                usage = shutil.disk_usage("/")
-                if usage.used / usage.total <= ANALYTICS_DISK_THRESHOLD:
+                if not analytics_disk_full():
                     break
                 os.remove(path)
+            except OSError:
+                continue
+
+    @staticmethod
+    def _trim_to_quota(paths):
+        """Remove the oldest of `paths` until they hold no more than
+        ANALYTICS_PER_INSTANCE_QUOTA bytes together."""
+        entries = []
+        total = 0
+        for p in paths:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, p))
+            total += st.st_size
+        if total <= ANALYTICS_PER_INSTANCE_QUOTA:
+            return
+        entries.sort()  # oldest first
+        for _mtime, size, path in entries:
+            if total <= ANALYTICS_PER_INSTANCE_QUOTA:
+                break
+            try:
+                os.remove(path)
+                total -= size
             except OSError:
                 continue
 
@@ -2032,7 +2327,7 @@ def main():
     # 30s waiting on Tor. Single-threaded serving would stall every other
     # endpoint (heartbeats, status) during that window. Existing handlers
     # are safe under concurrency (SQLite WAL, per-request connections).
-    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
+    server = BoundedThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), OnionHeavenHandler)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] web-server: listening on {LISTEN_HOST}:{LISTEN_PORT}", flush=True)
     try:

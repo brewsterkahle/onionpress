@@ -933,7 +933,7 @@ function onionpress_bluesky_create_reply_comment( $item, $parent_post_id ) {
         $comment_parent = onionpress_bluesky_find_comment_by_source_id( 'bluesky:' . $reply_to_uri );
     }
     $gmt = gmdate( 'Y-m-d H:i:s', $ts );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -976,7 +976,7 @@ function onionpress_bluesky_convert_post_to_comment( $post_id, $parent_post_id )
     if ( $author === '' ) $author = (string) get_option( ONIONPRESS_BLUESKY_HANDLE_OPT, 'me' );
     $author_url = (string) get_post_meta( $post_id, '_source_url', true );
     $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -1281,7 +1281,9 @@ function onionpress_bluesky_render_content( $item ) {
     }
 
     $html    = implode( "\n", $parts );
-    $preview = trim( html_entity_decode( wp_strip_all_tags( $text ), ENT_QUOTES, 'UTF-8' ) );
+    // The preview becomes post_title and post_excerpt: plain text, never
+    // entity-decoded after the tags are stripped (#472).
+    $preview = onionpress_social_plain_text( $text );
     return array( $html, $preview );
 }
 

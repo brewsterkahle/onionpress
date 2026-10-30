@@ -43,10 +43,26 @@ DOCUMENTS_DIR="$HOME/OnionPress"
 # copy src/onionpress/ there. Setting PYTHONPATH lets us run `python3 -m
 # onionpress.cli` without a system-wide pip install.
 ONIONPRESS_PYTHONPATH="${ONIONPRESS_PYTHONPATH:-$INSTALL_DIR/lib}"
+# Every python3 this script runs is isolated (-I: no current directory
+# or script directory on sys.path, no PYTHON* environment, no user site):
+# `python3 -m` and `python3 -I -c` put the current directory first on
+# sys.path, and WordPress can write one directory the owner may run
+# `onionpress` from, My Creations (issue #470). -P and PYTHONSAFEPATH
+# need Python 3.11, which the .deb does not require, so the package's
+# path reaches the interpreter as an argument instead of PYTHONPATH (-E
+# ignores it), -B keeps PYTHONDONTWRITEBYTECODE's effect, and PYTHONPATH
+# stays in the environment for the Python the CLI itself starts.
 op_py() {
-    # Run a subcommand of the shared Python CLI.
-    PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -m onionpress.cli "$@"
+    # Run a subcommand of the shared Python CLI. Self-contained (tests
+    # extract this function alone); OP_PY below is the same command line
+    # for run_detached, which cannot run a function.
+    PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -I -B -c 'import sys, runpy
+sys.path[:0] = sys.argv.pop(1).split(":")
+runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' "$ONIONPRESS_PYTHONPATH" "$@"
 }
+OP_PY=(python3 -I -B -c 'import sys, runpy
+sys.path[:0] = sys.argv.pop(1).split(":")
+runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' "$ONIONPRESS_PYTHONPATH")
 
 # True only for a well-formed v3 onion address: 56 lowercase base32
 # characters, then ".onion", and nothing else (no newline, no "/"). The
@@ -231,7 +247,7 @@ detect_port_offset() {
             offset=0
             break
         fi
-        if python3 -c '
+        if python3 -I -c '
 import socket, sys
 for p in sys.argv[1:]:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -258,7 +274,7 @@ if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
     # to target the wrong port.
     _status_json="$DATA_DIR/status.json"
     if [ -f "$_status_json" ] && command -v python3 >/dev/null 2>&1; then
-        _running_wp_port=$(python3 -c "
+        _running_wp_port=$(python3 -I -c "
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -292,7 +308,7 @@ if [ -z "$ONIONPRESS_PORT_OFFSET" ]; then
             if [ -n "$_prev" ]; then
                 _desired=$((8080 + _prev))
                 for _i in $(seq 1 30); do  # up to 15s, 0.5s each
-                    if python3 -c '
+                    if python3 -I -c '
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
@@ -406,7 +422,7 @@ is_onionheaven_hub() {
 # built one. Never a floating tag such as `alpine`, which a registry or a
 # mirror could swap for an image that reads the key. Each run overrides the
 # entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:7035842f4aab419948febd7f64c287f937e0a2cb2bbd5ec1a32d42269081d7e7}"
+KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc}"
 
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing
@@ -528,6 +544,117 @@ command_exists() {
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
     wp_cli core is-installed >/dev/null 2>&1
+}
+
+# ─── WordPress's installer is nobody's but the owner's (issue #464) ───
+#
+# Until WordPress is installed, wp-admin/install.php takes the first
+# visitor's choice of admin account. The .deb starts the units at once and
+# a headless install may wait days for `onionpress setup`, so until then:
+#
+# - WordPress's published port binds 127.0.0.1, whatever ONIONPRESS_BIND_HOST
+#   says. Whether WordPress is installed is only known once the container
+#   answers, so the start binds by the last start's verdict (the
+#   .wordpress-installed marker, written when `wp core is-installed` said
+#   yes, removed when it said no) and moves the port once the verdict is
+#   in (bind_wordpress_port_for_install_state: a recreate of the one
+#   container, once per install, right after setup).
+# - The heartbeat client, which would register the address with the
+#   OnionHeaven hub, is held (a runtime mask of its user unit) until then.
+# - The image denies install.php and setup-config.php to every source but
+#   the owner's (loopback and the network's gateway), so Tor visitors never
+#   see them (onionpress-install-page.conf in the WordPress image).
+# A setup that finds WordPress installed adopts it only when OnionPress
+# installed it (setup_logic's .wordpress-installed-by-onionpress marker).
+WP_INSTALLED_MARKER=".wordpress-installed"
+WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"
+HEARTBEAT_UNIT=onionpress-heartbeat.service
+
+# The bind host for this start's `compose up`: the configured one once a
+# start has seen WordPress installed, else 127.0.0.1.
+wordpress_bind_host_for_start() {
+    if [ -f "$DATA_DIR/$WP_INSTALLED_MARKER" ]; then
+        echo "$ONIONPRESS_BIND_HOST"
+    else
+        echo 127.0.0.1
+    fi
+}
+
+# The host part of onionpress-wordpress's published port as Docker maps
+# it now ('' when the container is not up).
+wordpress_port_bind_host() {
+    docker port onionpress-wordpress 80/tcp 2>/dev/null | head -1 | cut -d: -f1 | tr -d '[:space:]'
+}
+
+# Record the verdict and move WordPress's published port to the bind host
+# it calls for, when it is somewhere else. $1: true when WordPress is
+# installed.
+bind_wordpress_port_for_install_state() {
+    local installed="$1" wanted current
+    if [ "$installed" = true ]; then
+        touch "$DATA_DIR/$WP_INSTALLED_MARKER"
+        wanted="$ONIONPRESS_BIND_HOST"
+    else
+        rm -f "${DATA_DIR:?}/${WP_INSTALLED_MARKER:?}"
+        wanted=127.0.0.1
+    fi
+    current=$(wordpress_port_bind_host)
+    [ -n "$current" ] || return 0
+    [ "$current" != "$wanted" ] || return 0
+    if [ "$installed" = true ]; then
+        log "WordPress is installed: moving its port $ONIONPRESS_WP_PORT from $current to $wanted (ONIONPRESS_BIND_HOST)"
+    else
+        log "WordPress is not installed: keeping its port $ONIONPRESS_WP_PORT on 127.0.0.1 (was $current) until setup runs"
+    fi
+    ONIONPRESS_BIND_HOST="$wanted" docker compose up -d wordpress >> "$LOG_FILE" 2>&1 \
+        || log "WARNING: could not move WordPress's port to $wanted (see $LOG_FILE)"
+}
+
+# Whether the heartbeat client's user unit is held (masked at runtime).
+heartbeat_client_held() {
+    case "$(systemctl --user is-enabled "$HEARTBEAT_UNIT" 2>/dev/null)" in
+        masked*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Hold the heartbeat client while WordPress is not installed: nothing
+# registers an address whose site does not exist yet with the hub. The
+# runtime mask fails the start job systemd queues after this unit's
+# READY and does not survive a reboot (the next start decides again).
+hold_heartbeat_client_until_installed() {
+    if ! heartbeat_client_held; then
+        systemctl --user mask --runtime "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || return 0
+        log "Heartbeat client held until WordPress is installed (no hub registration before setup)"
+    fi
+    if systemctl --user is-active "$HEARTBEAT_UNIT" >/dev/null 2>&1; then
+        systemctl --user stop "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || true
+    fi
+}
+
+release_heartbeat_client_hold() {
+    heartbeat_client_held || return 0
+    systemctl --user unmask --runtime "$HEARTBEAT_UNIT" >>"$LOG_FILE" 2>&1 || true
+    log "WordPress is installed: heartbeat client released"
+    start_heartbeat_client
+}
+
+# What every setup path ends with once WordPress is installed: the port
+# where the config says, the heartbeat client running.
+after_wordpress_installed() {
+    bind_wordpress_port_for_install_state true
+    release_heartbeat_client_hold
+}
+
+# OnionPress installed the WordPress now in the container (issue #464):
+# the marker setup_logic.wordpress_installed_by_onionpress reads, user 1's
+# registration time as WordPress records it (setup_logic writes the same
+# file from install_fresh_wordpress; a test keeps the two equal).
+note_wordpress_installed_by_onionpress() {
+    local stamp
+    stamp=$(wp_cli user get 1 --field=user_registered 2>/dev/null | head -1 | tr -d '\r')
+    [[ "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || stamp=unknown
+    printf '%s\n' "$stamp" > "$DATA_DIR/$WP_INSTALLED_BY_ONIONPRESS_MARKER"
 }
 
 # Verify a WP admin password without making a backup. Used by scrub/
@@ -713,11 +840,11 @@ HOW TO GET THE KEY FROM mkp224o OUTPUT:
   Each address has its own directory containing hs_ed25519_secret_key.
   Encode that file to base32:
 
-    python3 -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
+    python3 -I -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())"
 
 EXAMPLE:
 
-  KEY=\$(python3 -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
+  KEY=\$(python3 -I -c "import base64; print(base64.b32encode(open('\$HOME/.onionpress/shared/vanity-keys/<address>.onion/hs_ed25519_secret_key','rb').read()).decode())")
   onionpress import-key "\$KEY"
 
 WHAT THIS COMMAND DOES:
@@ -1147,10 +1274,10 @@ update_images() {
     # only when the tunnel is on: compose never starts it otherwise, and it
     # is ~60 MB.
     local images=(
-        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:7035842f4aab419948febd7f64c287f937e0a2cb2bbd5ec1a32d42269081d7e7}"
-        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:5b26f8a3ef70fa02322666af143750bfafd7b98acfd6e89386ae3aeac0df054c}"
-        "mariadb:13.0.2@sha256:f1bba652ba57bea3099ca2fe1af692af537c27d96e0bcde39dce29e2ba1ec4f3"
-        "willfarrell/autoheal:latest@sha256:fe88c69806c71ac82fd3a483596011742f5ef319f84744cc3128e5b92b10af77"
+        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc}"
+        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:ef35899bf2dbed58f7a64ece2d3008e5e428b7a9ac5f4ddfcb363d8e8bce57a0}"
+        "mariadb:13.0.2@sha256:4844586367ef1b639ae699953e00a6a18f460f700e52df00401e1101a6ef2450"
+        "willfarrell/autoheal:latest@sha256:df19e62e64c515d914a67d7ad4e45351e31cb44482de60c58c8bfa1181bd0b03"
         "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
     )
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
@@ -1219,17 +1346,17 @@ fetch_archive_s3_keys() {
     }
 
     local success
-    success=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('success',''))" 2>/dev/null)
+    success=$(echo "$response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('success',''))" 2>/dev/null)
     if [ "$success" != "True" ]; then
         local reason
-        reason=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('reason','unknown'))" 2>/dev/null)
+        reason=$(echo "$response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('reason','unknown'))" 2>/dev/null)
         log "Archive.org login failed: $reason"
         return 1
     fi
 
     # Try S3 keys from login response
-    ia_s3_access=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('s3',{}).get('access',''))" 2>/dev/null)
-    ia_s3_secret=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('s3',{}).get('secret',''))" 2>/dev/null)
+    ia_s3_access=$(echo "$response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('s3',{}).get('access',''))" 2>/dev/null)
+    ia_s3_secret=$(echo "$response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('s3',{}).get('secret',''))" 2>/dev/null)
 
     if [ -n "$ia_s3_access" ] && [ -n "$ia_s3_secret" ]; then
         return 0
@@ -1237,8 +1364,8 @@ fetch_archive_s3_keys() {
 
     # Fallback: fetch S3 keys separately using cookies
     local sig user
-    sig=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-sig',''))" 2>/dev/null)
-    user=$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-user',''))" 2>/dev/null)
+    sig=$(echo "$response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-sig',''))" 2>/dev/null)
+    user=$(echo "$response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('values',{}).get('cookies',{}).get('logged-in-user',''))" 2>/dev/null)
 
     if [ -n "$sig" ] && [ -n "$user" ]; then
         # The session cookie is a credential too: curl reads that header
@@ -1250,8 +1377,8 @@ fetch_archive_s3_keys() {
             -H "User-Agent: OnionPress (+https://github.com/brewsterkahle/onionpress)" \
             -H @- \
             "$onion/account/s3.php?output_json=1" 2>/dev/null)
-        ia_s3_access=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3accesskey',''))" 2>/dev/null)
-        ia_s3_secret=$(echo "$s3_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3secretkey',''))" 2>/dev/null)
+        ia_s3_access=$(echo "$s3_response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3accesskey',''))" 2>/dev/null)
+        ia_s3_secret=$(echo "$s3_response" | python3 -I -c "import sys,json; print(json.load(sys.stdin).get('key',{}).get('s3secretkey',''))" 2>/dev/null)
         if [ -n "$ia_s3_access" ] && [ -n "$ia_s3_secret" ]; then
             return 0
         fi
@@ -1441,6 +1568,7 @@ setup_wordpress_interactive() {
 
     if $_wp_install_ok; then
         log "WordPress installed successfully via WP-CLI"
+        note_wordpress_installed_by_onionpress
     else
         log "ERROR: WP-CLI core install failed"
         echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
@@ -1968,37 +2096,6 @@ start_containers() {
             log "WARNING: No C Tor key file (hs_ed25519_secret_key) -- C Tor will generate a random address"
         fi
 
-        # Restore healthcheck keys if present (saved by backup)
-        local hc_keys="$DATA_DIR/shared/healthcheck-keys"
-        if [ -d "$hc_keys" ] && [ -f "$hc_keys/hs_ed25519_secret_key" ]; then
-            docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
-            # As for the address key above.
-            if docker run --rm \
-                --network none \
-                --cap-drop ALL \
-                --cap-add CHOWN \
-                --cap-add DAC_OVERRIDE \
-                --cap-add FOWNER \
-                --security-opt no-new-privileges:true \
-                -v onionpress-tor-state:/dest \
-                --mount type=bind,source="$hc_keys",target=/src,readonly \
-                --entrypoint sh \
-                "$KEY_HELPER_IMAGE" -c '
-                    set -e
-                    mkdir -p /dest/hidden_service/healthcheck
-                    cp /src/hs_ed25519_secret_key /dest/hidden_service/healthcheck/
-                    cp /src/hs_ed25519_public_key /dest/hidden_service/healthcheck/ 2>/dev/null || true
-                    cp /src/hostname /dest/hidden_service/healthcheck/ 2>/dev/null || true
-                    chown -R debian-tor:debian-tor /dest/hidden_service/healthcheck
-                    chmod 700 /dest/hidden_service/healthcheck
-                    chmod 600 /dest/hidden_service/healthcheck/hs_ed25519_secret_key
-                ' >> "$LOG_FILE" 2>&1; then
-                log "Healthcheck key installed to tor-state volume"
-            else
-                log "WARNING: Failed to copy healthcheck key to tor-state volume"
-            fi
-        fi
-
         log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
     elif $FIRST_RUN; then
         log "No imported key found -- using random onion address"
@@ -2047,7 +2144,10 @@ start_containers() {
     while [ $attempt -le $max_attempts ]; do
         # tee for the same reason as docker compose pull above — keeps the
         # journal tail visible while compose creates networks/volumes/containers.
-        docker compose up -d wordpress db onionheaven autoheal 2>&1 | tee -a "$LOG_FILE"
+        # WordPress's port: 127.0.0.1 until a start has seen WordPress
+        # installed (issue #464; moved below once this start knows).
+        ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \
+            docker compose up -d wordpress db onionheaven autoheal 2>&1 | tee -a "$LOG_FILE"
         if [ "${PIPESTATUS[0]}" -eq 0 ]; then
             break
         fi
@@ -2091,8 +2191,11 @@ start_containers() {
     # discussion in commit 25c285fa / fbfcc4b2 era.
     if $wp_installed; then
         log "WordPress is installed -- starting Tor"
+        after_wordpress_installed
     else
         log "WordPress not installed -- run 'onionpress setup' or open the OnionPress tray's Setup dialog to configure"
+        bind_wordpress_port_for_install_state false
+        hold_heartbeat_client_until_installed
     fi
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     warn_if_socks_port_exposed
@@ -2135,7 +2238,7 @@ start_containers() {
     # provision-post-install so the image-fallback mu-plugin is in place.
     if $wp_installed && regenerate_derivatives_pending; then
         log "Image derivatives: rebuild pending — starting in the background"
-        run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -m onionpress.cli regenerate-derivatives
+        run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" "${OP_PY[@]}" regenerate-derivatives
     fi
 }
 
@@ -2214,6 +2317,10 @@ stop_heartbeat_client() {
 # Start it again (it then loads the key Tor serves now) where its unit is
 # enabled.
 start_heartbeat_client() {
+    if heartbeat_client_held; then
+        log "Heartbeat client stays held: WordPress is not installed yet"
+        return 0
+    fi
     if systemctl --user is-enabled onionpress-heartbeat.service >/dev/null 2>&1; then
         systemctl --user start onionpress-heartbeat 2>>"$LOG_FILE" \
             || log "WARNING: Failed to start heartbeat client"
@@ -2606,25 +2713,9 @@ create_backup() {
         log "WARNING: No Tor keys found — backup will not include keys"
     fi
 
-    # Healthcheck onion service keys (separate address, random per install).
-    # Not in a backup handed to WordPress (--without-host-secrets): a start
-    # makes new ones, and the heartbeat gives the hub the new address.
-    if [ "$with_host_secrets" = "no" ]; then
-        log "Backup: healthcheck keys left out of this backup, which is handed to WordPress (a restore makes new ones)"
-    else
-        mkdir -p "$staging/tor-keys/healthcheck"
-        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hs_ed25519_secret_key > "$staging/tor-keys/healthcheck/hs_ed25519_secret_key" 2>/dev/null || true
-        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hs_ed25519_public_key > "$staging/tor-keys/healthcheck/hs_ed25519_public_key" 2>/dev/null || true
-        key_volume_cat onionpress-tor-state hidden_service/healthcheck/hostname > "$staging/tor-keys/healthcheck/hostname" 2>/dev/null || true
-        # Clean up empty files
-        find "$staging/tor-keys/healthcheck" -empty -delete 2>/dev/null
-        if [ -d "$staging/tor-keys/healthcheck" ] && [ -n "$(ls -A "$staging/tor-keys/healthcheck" 2>/dev/null)" ]; then
-            log "Backup: healthcheck keys saved"
-        else
-            rmdir "$staging/tor-keys/healthcheck" 2>/dev/null || true
-            log "Backup: no healthcheck keys found (will be regenerated)"
-        fi
-    fi
+    # The healthcheck onion service's key is never backed up, as on the
+    # Mac: a start makes a new one and the heartbeat gives the hub its
+    # address (one restore path, one secret fewer in every backup).
 
     # 2. Dump WordPress database
     log "Backup: exporting database..."
@@ -2728,7 +2819,7 @@ create_backup() {
     { [ -d "$staging/onionheaven" ] || [ -f "$staging/onionheaven.sealed" ]; } && has_onionheaven="true"
 
     log "Backup: writing metadata..."
-    python3 -c "
+    python3 -I -c "
 import json, sys
 metadata = {
     'onion_address': sys.argv[1],
@@ -2938,32 +3029,13 @@ restore_backup() {
         log "WARNING: No Tor keys in backup — skipping key restore"
     fi
 
-    # Restore healthcheck keys if present in backup. The next start puts
-    # them in the tor container, where tor-watchdog.py takes the service id
-    # from the hostname for DEL_ONION on the control port (a CR/LF there
-    # would add a command) and the heartbeat sends the hub that address.
-    # Never from the Settings page (the upload is WordPress's to make; a
-    # start makes new keys). Otherwise only a key whose files agree and
-    # whose hostname names its address (healthcheck-key-address), and only
-    # those files, the hostname written from the checked address.
-    local hc_backup="$staging/tor-keys/healthcheck"
-    if [ -d "$hc_backup" ] && [ -f "$hc_backup/hs_ed25519_secret_key" ]; then
-        local hc_addr=""
-        if [ "$from_settings_page" = "true" ]; then
-            log "Restore: the backup's healthcheck keys left out (the Settings page's restore; a start makes new ones)"
-        elif hc_addr=$(op_py healthcheck-key-address --dir "$hc_backup" 2>>"$LOG_FILE") \
-                && is_onion_address "$hc_addr"; then
-            local hc_dest="$DATA_DIR/shared/healthcheck-keys"
-            rm -rf "$hc_dest"
-            mkdir -p "$hc_dest"
-            cp "$hc_backup/hs_ed25519_secret_key" "$hc_dest/"
-            [ -f "$hc_backup/hs_ed25519_public_key" ] && cp "$hc_backup/hs_ed25519_public_key" "$hc_dest/"
-            echo "$hc_addr" > "$hc_dest/hostname"
-            log "Restore: healthcheck keys restored"
-        else
-            log "WARNING: the backup's healthcheck keys do not check out; left out (a start makes new ones)"
-        fi
+    # A healthcheck key in the backup (Linux backups through 2.5.x) is not
+    # restored: a start makes a new one, as on the Mac. A key an older
+    # restore staged for the next start goes too.
+    if [ -d "$staging/tor-keys/healthcheck" ]; then
+        log "Restore: the backup's healthcheck key left out (a start makes a new one)"
     fi
+    rm -rf "$DATA_DIR/shared/healthcheck-keys"
 
     # 2. Restore database
     local sql_file="$staging/database/wordpress.sql"
@@ -3059,7 +3131,7 @@ write_status() {
 
     # Get container states
     local containers_json
-    containers_json=$(docker compose ps --format json 2>/dev/null | python3 -c "
+    containers_json=$(docker compose ps --format json 2>/dev/null | python3 -I -c "
 import sys, json
 containers = {}
 for line in sys.stdin:
@@ -3100,9 +3172,9 @@ print(json.dumps(containers))
     # Determine overall state
     local state="unknown"
     local tor_state
-    tor_state=$(echo "$containers_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-tor','stopped'))" 2>/dev/null || echo "stopped")
+    tor_state=$(echo "$containers_json" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-tor','stopped'))" 2>/dev/null || echo "stopped")
     local wp_state
-    wp_state=$(echo "$containers_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-wordpress','stopped'))" 2>/dev/null || echo "stopped")
+    wp_state=$(echo "$containers_json" | python3 -I -c "import sys,json; d=json.load(sys.stdin); print(d.get('onionpress-wordpress','stopped'))" 2>/dev/null || echo "stopped")
 
     if [ "$tor_state" = "running" ] && [ "$wp_state" = "running" ] && [ "$bootstrap_pct" = "100" ]; then
         # Verify onion service is actually reachable via Tor network
@@ -3113,7 +3185,7 @@ print(json.dumps(containers))
             # the static /.onionpress-health first (no PHP) and the front
             # page only for an image that answers it 404.
             local reach_verdict reach_code=""
-            reach_verdict=$(python3 -c '
+            reach_verdict=$(python3 -I -c '
 import json, sys, time
 try:
     with open(sys.argv[1]) as f:
@@ -3196,6 +3268,9 @@ except Exception:
     if [ -n "$started_at" ] && [ "$started_at" != "0001-01-01T00:00:00Z" ]; then
         local started_epoch
         started_epoch=$(date -d "$started_at" +%s 2>/dev/null || echo 0)
+        # Derived from docker's answer: only a plain number goes into
+        # bash arithmetic (issue #466).
+        [[ "$started_epoch" =~ ^[0123456789]{1,12}$ ]] || started_epoch=0
         local now_epoch
         now_epoch=$(date +%s)
         if [ "$started_epoch" -gt 0 ] 2>/dev/null; then
@@ -3208,7 +3283,7 @@ except Exception:
     # used to read was the v3 JSON queue, which the v4 plugin deleted, so
     # the count was always 0.
     local wayback_queue=0
-    wayback_queue=$(wp_cli eval 'echo json_encode(onionpress_wayback_queue_totals());' 2>/dev/null | python3 -c "
+    wayback_queue=$(wp_cli eval 'echo json_encode(onionpress_wayback_queue_totals());' 2>/dev/null | python3 -I -c "
 import sys, json
 try:
     data = json.load(sys.stdin)
@@ -3232,7 +3307,7 @@ except Exception:
 
     # Read client registration state
     if [ -f "$DATA_DIR/onionheaven-registration.json" ]; then
-        oh_client_registered=$(python3 -c "
+        oh_client_registered=$(python3 -I -c "
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -3338,7 +3413,7 @@ except: print('false')
 
     # Build status.json
     local status_json
-    status_json=$(python3 -c "
+    status_json=$(python3 -I -c "
 import json, sys
 try:
     _ov = json.loads(sys.argv[26])
@@ -3453,6 +3528,11 @@ apply_config_updates() {
     rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
     [ -z "$changed" ] || log "Settings page changed: ${changed% }"
     [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
+    # A tunnel token is never set from the page (#463): its owner would
+    # see this host's IP. Removing it is applied above.
+    if printf '%s\n' "$result" | grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'; then
+        log "WARNING: Settings page asked to set CLOUDFLARE_TUNNEL_TOKEN; not set. On this computer run: onionpress config set CLOUDFLARE_TUNNEL_TOKEN -"
+    fi
 
     # Clear the updates file
     wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
@@ -4312,6 +4392,9 @@ main() {
                 op_py provision-post-install \
                     --themes-dir "$THEMES_DIR" \
                     --plugins-dir "$PLUGINS_DIR" >> "$LOG_FILE" 2>&1 || true
+                # WordPress's port where the config says, the heartbeat
+                # client released (issue #464).
+                after_wordpress_installed
                 # Then Cache Enabler and the Link Fixer, which need the
                 # mu-plugins provision-post-install has just installed.
                 setup_bundled_plugins
@@ -4333,13 +4416,18 @@ main() {
             # the container auto-installs WP with a random admin password).
             # Unlike `setup`, this works when WP is already installed.
             #
-            # Usage: onionpress provision
+            # Usage: onionpress provision [--adopt-existing]
             #   → interactive terminal prompts
-            PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -c "
+            # An installed WordPress is adopted only when OnionPress
+            # installed it (the .wordpress-installed-by-onionpress marker),
+            # else refused: whoever reached wp-admin/install.php first
+            # chose its admin (issue #464). --adopt-existing keeps it anyway.
+            PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -I -B -c "
 import sys
+sys.path[:0] = sys.argv.pop(1).split(':')
 from onionpress.setup_logic import provision_interactive
-sys.exit(0 if provision_interactive() else 1)
-"
+sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.argv[1:]) else 1)
+" "$ONIONPRESS_PYTHONPATH" "${@:2}"
             ;;
 
         provision-post-install)
@@ -4361,6 +4449,12 @@ sys.exit(0 if provision_interactive() else 1)
             op_py provision-post-install \
                 --themes-dir "$THEMES_DIR" \
                 --plugins-dir "$PLUGINS_DIR"
+            # Every setup ends here (setup_logic.install_fresh_wordpress
+            # runs this subcommand): WordPress's port goes where the config
+            # says and the heartbeat client is released (issue #464).
+            if wp_is_installed; then
+                after_wordpress_installed
+            fi
             ;;
 
         setup-bundled-plugins)
@@ -4955,7 +5049,7 @@ sys.exit(0 if provision_interactive() else 1)
 
             result=$(reset_onionheaven_in_container) \
                 || { echo "ERROR: OnionHeaven reset failed — see $LOG_FILE"; exit 1; }
-            echo "$result" | python3 -m json.tool 2>/dev/null || echo "$result"
+            echo "$result" | python3 -I -m json.tool 2>/dev/null || echo "$result"
             log "OnionHeaven reset complete"
             ;;
 

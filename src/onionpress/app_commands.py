@@ -24,7 +24,7 @@ import sys
 
 from . import __version__
 from . import config as _config
-from . import key_manager, launcher_ops, wp_files
+from . import key_manager, launcher_ops, onion_hostname
 from .log_rotation import current_log_path
 
 TOR_CONTAINER = "onionpress-tor"
@@ -72,12 +72,10 @@ def served_address(docker, data_dir=""):
     """The onion address the tor container serves, else the daemon's
     cached one, else '' (never anything but a whole v3 address)."""
     try:
-        r = docker.run(["exec", TOR_CONTAINER, "cat", wp_files.TOR_HOSTNAME_FILE],
-                       timeout=10, quiet=True)
-        addr = r.output.strip() if r.ok else ""
+        addr = onion_hostname.read_served_address(docker)
     except Exception:
         addr = ""
-    if key_manager.is_valid_onion_address(addr):
+    if addr:
         return addr
     if data_dir:
         try:

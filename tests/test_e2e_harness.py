@@ -132,7 +132,7 @@ class SafetyTest(unittest.TestCase):
             safety.check_daemon_agent(args_only, 0, root)
 
     def test_daemon_label_is_the_products(self):
-        with open(os.path.join(PROJECT_DIR, "src", "onionpress", "daemon.py"), encoding="utf-8") as f:
+        with open(os.path.join(PROJECT_DIR, "src", "onionpress", "daemon_client.py"), encoding="utf-8") as f:
             m = re.search(r'^AGENT_LABEL = "([^"]+)"', f.read(), re.M)
         self.assertEqual(m.group(1), safety.DAEMON_AGENT_LABEL)
 

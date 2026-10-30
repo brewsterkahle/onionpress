@@ -204,7 +204,9 @@ class TestAllowlist(unittest.TestCase):
         applied = op_config.apply_settings_updates(self.config, HOSTILE)
         config = op_config.read_config(self.config)
         self.assertEqual(config["UPDATE_ON_LAUNCH"], "no")
-        self.assertEqual(config["CLOUDFLARE_TUNNEL_TOKEN"], TOKEN)
+        # Never set from the page unattended (#463): held for the host.
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)
+        self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": TOKEN})
         self.assertEqual(config["ONIONHEAVEN_ADDRESS"],
                          "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
         self.assertEqual(config["ADDRESS_PREFIX"], "op2")
@@ -214,8 +216,24 @@ class TestAllowlist(unittest.TestCase):
         self.assertNotIn("evil", self._config())
         self.assertEqual(set(applied.rejected), set(HOSTILE) - {
             "UPDATE_ON_LAUNCH", "CLOUDFLARE_TUNNEL_TOKEN"})
-        self.assertEqual([k for k, _, _ in applied.changes],
-                         ["UPDATE_ON_LAUNCH", "CLOUDFLARE_TUNNEL_TOKEN"])
+        self.assertEqual([k for k, _, _ in applied.changes], ["UPDATE_ON_LAUNCH"])
+
+    def test_a_tunnel_token_is_removed_but_never_set(self):
+        """#463: a token puts the site on the clear web through a tunnel
+        whose owner sees the host's IP; only removal is unattended."""
+        applied = op_config.apply_settings_updates(
+            self.config, {"CLOUDFLARE_TUNNEL_TOKEN": TOKEN})
+        self.assertEqual((applied.accepted, applied.changes), ({}, []))
+        self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": TOKEN})
+        op_config.write_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN", TOKEN)
+        replaced = TOKEN.replace("e", "f")
+        applied = op_config.apply_settings_updates(
+            self.config, {"CLOUDFLARE_TUNNEL_TOKEN": replaced})
+        self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": replaced})
+        self.assertEqual(op_config.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), TOKEN)
+        applied = op_config.apply_settings_updates(self.config, {"CLOUDFLARE_TUNNEL_TOKEN": ""})
+        self.assertEqual(applied.held, {})
+        self.assertEqual(op_config.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
 
     def test_comments_and_other_keys_survive(self):
         op_config.apply_settings_updates(self.config, {"UPDATE_ON_LAUNCH": "no"})
@@ -395,19 +413,20 @@ class TestMacApplyConfig(unittest.TestCase):
     def test_hostile_payload(self):
         payload = dict(HOSTILE, LAUNCH_ON_LOGIN="no")
         self.assertEqual(sorted(self._apply(json.dumps(payload))),
-                         ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"])
+                         ["LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"])
         config = op_config.read_config(self.config)
-        self.assertEqual(config["CLOUDFLARE_TUNNEL_TOKEN"], TOKEN)
+        # Held for the person at the Mac (#463; test_handle_action.TestTunnelToken).
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)
         self.assertEqual(config["LAUNCH_ON_LOGIN"], "no")
         self.assertNotIn("ONIONPRESS_TOR_IMAGE", config)
         self.assertNotIn("PREVENT_SLEEP", config)
         log = "\n".join(self.lines)
         self.assertNotIn(TOKEN, log)
         self.assertNotIn("evil", log)
-        self.assertIn("CLOUDFLARE_TUNNEL_TOKEN: set", log)
+        self.assertIn("CLOUDFLARE_TUNNEL_TOKEN waits for the person at this Mac", log)
         self.assertIn("ONIONPRESS_TOR_IMAGE", log)
         self.assertIn("ONIONHEAVEN_ADDRESS", log)
-        accepted = ["CLOUDFLARE_TUNNEL_TOKEN", "LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"]
+        accepted = ["LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"]
         self.assertEqual(self.effects, [accepted])
         # What the running menubar owes (caffeinate, the tunnel flag,
         # status.json) waits in the marker it takes on its next tick.
@@ -522,7 +541,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
         config = op_config.read_config(os.path.join(self.data, "config"))
         self.assertEqual(config["UPDATE_ON_LAUNCH"], "no")
         self.assertEqual(config["START_ON_BOOT"], "yes")
-        self.assertEqual(config["CLOUDFLARE_TUNNEL_TOKEN"], TOKEN)
+        self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)  # refused on Linux (#463)
         self.assertEqual(config["ONIONHEAVEN_ADDRESS"],
                          "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion")
         for key in ("ONIONPRESS_TOR_IMAGE", "ONIONPRESS_WORDPRESS_IMAGE",
@@ -536,7 +555,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
         log = self._read_out(self.log_file)
         self.assertNotIn(TOKEN, log)
         self.assertNotIn("evil", log)
-        self.assertIn("CLOUDFLARE_TUNNEL_TOKEN", log)
+        self.assertIn("onionpress config set CLOUDFLARE_TUNNEL_TOKEN -", log)
         self.assertRegex(log, r"ignored.*ONIONPRESS_TOR_IMAGE")
         self.assertRegex(log, r"ignored.*ONIONHEAVEN_ADDRESS")
         self.assertIn("systemctl --user enable onionpress.service onionpress-heartbeat.service", self._read_out("calls"))

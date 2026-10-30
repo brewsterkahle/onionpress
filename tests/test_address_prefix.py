@@ -151,7 +151,7 @@ class TestEmptyPrefix(unittest.TestCase):
             return None  # "nothing generated" — keeps the test off the key path
 
         with tempfile.TemporaryDirectory() as tmp:
-            cli = OnionPressCLI(data_dir=tmp)
+            cli = OnionPressCLI(data_dir=tmp, app_bundle="")
             with open(cli.paths.config_file, "w") as f:
                 f.write("ADDRESS_PREFIX=\n")
             with mock.patch("onionpress.launcher_ops.tor_image_has_mkp224o", return_value=True), \

@@ -68,7 +68,7 @@ class LoopTestCase(unittest.TestCase):
         )
         # Fire on the first wedge sample, so the wiring is what is tested
         # (the trigger's own policy has its tests in test_onionpress_health).
-        self.loop.monitor.republish = RepublishTrigger(
+        self.loop.recovery.trigger = RepublishTrigger(
             failing_for=0, fast_for=0, cooldown=0)
         self.results = []
         self.loop.checker.full_check = mock.Mock(
@@ -126,15 +126,15 @@ class TestWindowResets(LoopTestCase):
     def setUp(self):
         super().setUp()
         # A real window this time: nothing fires within one cycle.
-        self.loop.monitor.republish = RepublishTrigger()
+        self.loop.recovery.trigger = RepublishTrigger()
 
     def test_wake_resets_window_and_rechecks_wordpress(self):
         self.results = [_wedged()]
         self.loop.run_once()
-        self.assertIsNotNone(self.loop.monitor.republish.failing_since)
+        self.assertIsNotNone(self.loop.recovery.trigger.failing_since)
         self.assertTrue(self.loop.monitor.state.wordpress_confirmed)
         self.loop.note_wake()
-        self.assertIsNone(self.loop.monitor.republish.failing_since)
+        self.assertIsNone(self.loop.recovery.trigger.failing_since)
         self.assertFalse(self.loop.monitor.state.wordpress_confirmed)
 
     def test_no_probe_while_asleep(self):
@@ -149,14 +149,14 @@ class TestWindowResets(LoopTestCase):
             return _wedged()
         self.loop.checker.full_check = mock.Mock(side_effect=probe)
         self.assertIsNone(self.loop.run_once())
-        self.assertIsNone(self.loop.monitor.republish.failing_since)
+        self.assertIsNone(self.loop.recovery.trigger.failing_since)
 
     def test_offline_resets_window(self):
         self.results = [_wedged()]
         self.loop.run_once()
         self.online = False
         self.assertIsNone(self.loop.run_once())
-        self.assertIsNone(self.loop.monitor.republish.failing_since)
+        self.assertIsNone(self.loop.recovery.trigger.failing_since)
         self.assertIsNone(self.status()["reachable"])
 
     def test_clock_gap_counts_as_wake(self):
@@ -166,13 +166,13 @@ class TestWindowResets(LoopTestCase):
         with mock.patch.object(reachability.time, "time", return_value=1000.0), \
              mock.patch.object(reachability.time, "monotonic", return_value=50.0):
             self.loop.run_once()
-        self.assertIsNotNone(self.loop.monitor.republish.failing_since)
+        self.assertIsNotNone(self.loop.recovery.trigger.failing_since)
         with mock.patch.object(reachability.time, "time", return_value=2830.0), \
              mock.patch.object(reachability.time, "monotonic", return_value=80.0):
             self.loop.run_once()
         self.assertTrue(any("suspend detected" in m for m in self.logs))
         # The window was reset before this cycle's sample: one sample, not two.
-        self.assertEqual(len(self.loop.monitor.republish.samples), 1)
+        self.assertEqual(len(self.loop.recovery.trigger.samples), 1)
 
     def test_no_clock_gap_keeps_window(self):
         self.results = [_wedged(), _wedged()]
@@ -182,7 +182,31 @@ class TestWindowResets(LoopTestCase):
         with mock.patch.object(reachability.time, "time", return_value=1030.0), \
              mock.patch.object(reachability.time, "monotonic", return_value=80.0):
             self.loop.run_once()
-        self.assertEqual(len(self.loop.monitor.republish.samples), 2)
+        self.assertEqual(len(self.loop.recovery.trigger.samples), 2)
+
+
+class TestOneRecoveryDriver(unittest.TestCase):
+    """Issue #480: the #266 decision (trigger, request, wake and offline
+    resets) is reachability.RecoveryWindow's on both platforms; neither
+    driver builds or feeds a RepublishTrigger itself."""
+
+    def test_the_linux_loop_runs_a_recovery_window(self):
+        loop = reachability.ReachabilityLoop(
+            mock.Mock(), lambda m: None, read_config_value=lambda k, d: d,
+            status_path=os.path.join(tempfile.mkdtemp(), "r.json"))
+        self.assertIsInstance(loop.recovery, reachability.RecoveryWindow)
+        self.assertEqual(loop.recovery.container, "onionpress-tor")
+
+    def test_neither_driver_touches_the_trigger(self):
+        loop_src = _read("src/onionpress/reachability.py")
+        loop_src = loop_src[loop_src.index("class ReachabilityLoop:"):]
+        for name, src in (("daemon.py", _read("src/onionpress/daemon.py")),
+                          ("ReachabilityLoop", loop_src)):
+            with self.subTest(driver=name):
+                self.assertNotIn("RepublishTrigger(", src)
+                self.assertNotIn(".observe(", src)
+                self.assertNotIn("request_watchdog_republish", src)
+                self.assertNotIn('"REPUBLISH_ON_UNREACHABLE",', src)
 
 
 class TestHeartbeatRunsTheLoop(unittest.TestCase):

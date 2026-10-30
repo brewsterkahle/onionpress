@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import wp_files
-from .platform import OnionPressPaths, detect_timezone
+from .platform import (OnionPressPaths, detect_timezone, docker_env,
+                       find_docker_bin)
 
 
 @dataclass
@@ -75,18 +76,12 @@ class Docker:
     @staticmethod
     def _find_docker(paths: OnionPressPaths) -> str:
         """Resolve the docker binary path."""
-        if paths.bin_dir:
-            bundled = os.path.join(paths.bin_dir, "docker")
-            if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
-                return bundled
-        return "docker"  # fall back to PATH
+        return find_docker_bin(paths.bin_dir)
 
     @staticmethod
     def _build_env(paths: OnionPressPaths, extra_env: dict | None = None) -> dict:
         """Build the environment dict for docker subprocesses."""
-        env = os.environ.copy()
-        env["DOCKER_HOST"] = f"unix://{paths.docker_socket}"
-        env["DOCKER_CONFIG"] = paths.docker_config_dir
+        env = docker_env(paths.docker_socket, paths.docker_config_dir)
         env["COLIMA_HOME"] = paths.colima_home
         env["LIMA_HOME"] = os.path.join(paths.colima_home, "_lima")
         env["LIMA_INSTANCE"] = "onionpress"
@@ -163,11 +158,16 @@ class Docker:
         check: bool = False,
         quiet: bool = False,
         input: str | None = None,
+        offline: bool = False,
+        nice: bool = False,
     ) -> DockerResult:
         """Run wp-cli in the WordPress container as www-data
         (wp_files.wp_cli_args), never as root. *input* goes to wp-cli's
-        stdin (`docker exec -i`)."""
-        return self.run(wp_files.wp_cli_args(*args, stdin=input is not None),
+        stdin (`docker exec -i`); *offline* and *nice* as in wp_cli_args.
+        wp_files.wp_cli is the same command for a caller holding only a
+        docker binary and environment."""
+        return self.run(wp_files.wp_cli_args(*args, stdin=input is not None,
+                                             offline=offline, nice=nice),
                         timeout=timeout, check=check, input=input, quiet=quiet)
 
     def compose(

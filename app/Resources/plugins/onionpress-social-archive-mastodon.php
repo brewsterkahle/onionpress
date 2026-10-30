@@ -969,7 +969,7 @@ function onionpress_mastodon_create_self_reply_comment( $status, $parent_post_id
     }
 
     $gmt = gmdate( 'Y-m-d H:i:s', $ts );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -1079,7 +1079,7 @@ function onionpress_mastodon_convert_post_to_comment( $post_id, $parent_post_id 
     $author_url = (string) get_post_meta( $post_id, '_source_url', true );
 
     $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -1377,7 +1377,9 @@ function onionpress_mastodon_render_content( $status ) {
     }
     // The Mastodon `content` field wraps paragraphs in <p>; that's fine
     // for direct insertion as post_content (theme + wpautop won't re-wrap).
-    $preview = trim( html_entity_decode( wp_strip_all_tags( $html ), ENT_QUOTES, 'UTF-8' ) );
+    // The preview becomes post_title and post_excerpt: plain text, never
+    // entity-decoded after the tags are stripped (#472).
+    $preview = onionpress_social_plain_text( $html );
     return array( $html, $preview );
 }
 

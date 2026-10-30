@@ -21,6 +21,265 @@ if ( ! defined( 'ABSPATH' ) ) {
 const ONIONPRESS_SOCIAL_ADMIN_SLUG = 'onionpress-social-archive';
 
 /**
+ * wp_insert_comment() for every importer comment (#462). Unlike
+ * wp_new_comment() it runs no comment filter (wp_filter_comment), and
+ * WordPress does not kses comment_text on output, so the author, its URL
+ * and the content are cleaned here, before they are stored. The author
+ * may be anyone's display name (Bluesky/Mastodon thread ancestors).
+ */
+function onionpress_social_insert_comment( $args ) {
+    $args['comment_author']     = sanitize_text_field( (string) ( $args['comment_author'] ?? '' ) );
+    $args['comment_author_url'] = esc_url_raw( (string) ( $args['comment_author_url'] ?? '' ) );
+    $args['comment_content']    = wp_kses_post( (string) ( $args['comment_content'] ?? '' ) );
+    return wp_insert_comment( $args );
+}
+
+/**
+ * Plain text for a post title or excerpt taken from a foreign source
+ * (#472): a Reddit thread title (raw_json=1, so `<` and `>` come as
+ * they are), a WP REST title.rendered, a preview cut from a body.
+ *
+ * Nothing stored as a title or an excerpt may carry markup: the_title()
+ * and the_excerpt() run no kses, and the save-time `title_save_pre`
+ * kses that used to strip it only runs for a user without
+ * unfiltered_html, which the owner's own "Sync now" and ZIP upload are
+ * not. Tags are stripped and the result goes through
+ * sanitize_text_field() (a stray `<` becomes `&lt;`); entities are
+ * never decoded afterwards, since that would turn `&lt;script&gt;`
+ * back into markup. What remains renders as text wherever a title or
+ * excerpt is printed.
+ */
+function onionpress_social_plain_text( $text ) {
+    return sanitize_text_field( wp_strip_all_tags( (string) $text ) );
+}
+
+// ──────────────────────── uploaded archives (#473) ────────────────────────
+//
+// The Twitter and Reddit importers take a ZIP from any site administrator
+// and unpack it under the container's /tmp. An archive lists each member's
+// size, but nothing makes the data match it, and deflate expands up to
+// ~1000x; so, before anything is written, the archive may list at most
+// ONIONPRESS_SOCIAL_ZIP_MAX_MEMBERS members, none over
+// ONIONPRESS_SOCIAL_ZIP_MAX_MEMBER_BYTES, adding up to at most the larger
+// of ONIONPRESS_SOCIAL_ZIP_MIN_UNPACK_BUDGET and
+// ONIONPRESS_SOCIAL_ZIP_MAX_EXPANSION times the archive's own size (a real
+// export is mostly already-compressed media, ~1-5x), and what is wanted
+// must fit the disk with ONIONPRESS_SOCIAL_ZIP_FREE_RESERVE to spare. Only
+// the members an importer reads are extracted, by name, each held to its
+// listed size as it is written. The model is backup.check_archive_size.
+const ONIONPRESS_SOCIAL_ZIP_MAX_MEMBERS       = 100000;
+const ONIONPRESS_SOCIAL_ZIP_MAX_MEMBER_BYTES  = 2147483648; // 2 GiB
+const ONIONPRESS_SOCIAL_ZIP_MIN_UNPACK_BUDGET = 1073741824; // 1 GiB
+const ONIONPRESS_SOCIAL_ZIP_MAX_EXPANSION     = 20;
+const ONIONPRESS_SOCIAL_ZIP_FREE_RESERVE      = 536870912;  // 512 MiB
+
+function onionpress_social_zip_limits() {
+    return array(
+        'max_members'       => ONIONPRESS_SOCIAL_ZIP_MAX_MEMBERS,
+        'max_member_bytes'  => ONIONPRESS_SOCIAL_ZIP_MAX_MEMBER_BYTES,
+        'min_unpack_budget' => ONIONPRESS_SOCIAL_ZIP_MIN_UNPACK_BUDGET,
+        'max_expansion'     => ONIONPRESS_SOCIAL_ZIP_MAX_EXPANSION,
+        'free_reserve'      => ONIONPRESS_SOCIAL_ZIP_FREE_RESERVE,
+    );
+}
+
+/**
+ * Why a member name cannot be extracted under a folder of ours, or ''
+ * when it can: forward-slash components only, none empty, "." or "..",
+ * no leading slash, no backslash, no NUL or control character.
+ */
+function onionpress_social_zip_name_problem( $name ) {
+    if ( $name === '' ) {
+        return 'an empty name';
+    }
+    if ( preg_match( '/[\x00-\x1f\x7f]/', $name ) ) {
+        return 'a control character in a name';
+    }
+    if ( strpos( $name, '\\' ) !== false ) {
+        return 'a backslash in a name';
+    }
+    if ( $name[0] === '/' ) {
+        return 'an absolute path';
+    }
+    if ( preg_match( '/^[A-Za-z]:/', $name ) ) {
+        return 'a drive letter in a name';
+    }
+    $parts = explode( '/', rtrim( $name, '/' ) );
+    foreach ( $parts as $part ) {
+        if ( $part === '' ) {
+            return 'an empty path component';
+        }
+        if ( $part === '.' || $part === '..' ) {
+            return 'a "' . $part . '" path component';
+        }
+    }
+    return '';
+}
+
+/**
+ * Bytes as "1.2 GB" or "340.0 MB", for a message.
+ */
+function onionpress_social_zip_size_text( $n ) {
+    if ( $n >= 1073741824 ) {
+        return sprintf( '%.1f GB', $n / 1073741824 );
+    }
+    return sprintf( '%.1f MB', $n / 1048576 );
+}
+
+/**
+ * Check an opened archive before anything is extracted. Every member
+ * is held to the limits and the name rules, symlinks and special files
+ * are refused, and the members matching $pattern (the ones the caller
+ * reads) must fit the free space under $target_dir. Returns the wanted
+ * members as array( name => listed size ), or a WP_Error.
+ */
+function onionpress_social_zip_check( $zip, $archive_bytes, $pattern, $limits, $target_dir ) {
+    $count = (int) $zip->numFiles;
+    if ( $count > $limits['max_members'] ) {
+        return new WP_Error( 'zip_refused', sprintf(
+            'The archive holds more than %s files.', number_format_i18n( $limits['max_members'] ) ) );
+    }
+    $total  = 0;
+    $wanted = array();
+    for ( $i = 0; $i < $count; $i++ ) {
+        $stat = $zip->statIndex( $i );
+        if ( ! is_array( $stat ) ) {
+            return new WP_Error( 'zip_refused', 'The archive could not be read.' );
+        }
+        $name = (string) $stat['name'];
+        $why  = onionpress_social_zip_name_problem( $name );
+        if ( $why !== '' ) {
+            return new WP_Error( 'zip_refused', 'The archive contains ' . $why . '.' );
+        }
+        $opsys = 0;
+        $attr  = 0;
+        if ( $zip->getExternalAttributesIndex( $i, $opsys, $attr ) && $opsys === ZipArchive::OPSYS_UNIX ) {
+            $type = ( $attr >> 16 ) & 0170000;
+            if ( $type === 0120000 ) {
+                return new WP_Error( 'zip_refused', 'The archive contains a symbolic link.' );
+            }
+            if ( $type !== 0 && $type !== 0100000 && $type !== 0040000 ) {
+                return new WP_Error( 'zip_refused', 'The archive contains a special file.' );
+            }
+        }
+        if ( substr( $name, -1 ) === '/' ) {
+            continue; // a folder entry: nothing to write
+        }
+        $size = (int) $stat['size'];
+        if ( $size < 0 || $size > $limits['max_member_bytes'] ) {
+            return new WP_Error( 'zip_refused', sprintf(
+                'A file in the archive is larger than %s.',
+                onionpress_social_zip_size_text( $limits['max_member_bytes'] ) ) );
+        }
+        $total += $size;
+        if ( preg_match( $pattern, $name ) ) {
+            if ( isset( $wanted[ $name ] ) ) {
+                return new WP_Error( 'zip_refused', 'The archive lists a file twice.' );
+            }
+            $wanted[ $name ] = $size;
+        }
+    }
+    $budget = max( (int) $limits['min_unpack_budget'], (int) $limits['max_expansion'] * (int) $archive_bytes );
+    if ( $total > $budget ) {
+        return new WP_Error( 'zip_refused', sprintf(
+            'The archive would unpack to %s, more than an upload of %s can hold.',
+            onionpress_social_zip_size_text( $total ),
+            onionpress_social_zip_size_text( $archive_bytes ) ) );
+    }
+    $free = @disk_free_space( $target_dir );
+    if ( is_float( $free ) || is_int( $free ) ) {
+        $needed = array_sum( $wanted ) + (int) $limits['free_reserve'];
+        if ( $needed > $free ) {
+            return new WP_Error( 'zip_refused', sprintf(
+                'Not enough free space to unpack the archive (%s needed).',
+                onionpress_social_zip_size_text( $needed ) ) );
+        }
+    }
+    return $wanted;
+}
+
+/**
+ * Extract the members of the ZIP at $zip_path whose names match
+ * $pattern into $target_dir (a private folder the caller made for this
+ * upload), after onionpress_social_zip_check(). Each member is written
+ * by us, never by extractTo, and held to its listed size: a member that
+ * inflates past it fails the whole extraction and what was written is
+ * removed. Returns true or a WP_Error.
+ */
+function onionpress_social_zip_extract( $zip_path, $target_dir, $pattern, $limits = null ) {
+    if ( $limits === null ) {
+        $limits = onionpress_social_zip_limits();
+    }
+    $archive_bytes = @filesize( $zip_path );
+    if ( $archive_bytes === false ) {
+        return new WP_Error( 'zip_refused', 'The upload could not be read.' );
+    }
+    $zip = new ZipArchive();
+    if ( $zip->open( $zip_path ) !== true ) {
+        return new WP_Error( 'zip_refused', 'The file is not a ZIP archive.' );
+    }
+    $wanted = onionpress_social_zip_check( $zip, $archive_bytes, $pattern, $limits, $target_dir );
+    if ( is_wp_error( $wanted ) ) {
+        $zip->close();
+        return $wanted;
+    }
+
+    $written = array();
+    $fail = function ( $message ) use ( $zip, &$written ) {
+        $zip->close();
+        foreach ( $written as $path ) {
+            @unlink( $path );
+        }
+        return new WP_Error( 'zip_refused', $message );
+    };
+
+    foreach ( $wanted as $name => $size ) {
+        $path = $target_dir . '/' . $name;
+        $dir  = dirname( $path );
+        if ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) {
+            return $fail( 'Could not create a folder for the extracted files.' );
+        }
+        $in = $zip->getStream( $name );
+        if ( ! $in ) {
+            return $fail( sprintf( 'A file in the archive could not be read (%s).', $name ) );
+        }
+        $out = @fopen( $path, 'xb' );
+        if ( ! $out ) {
+            fclose( $in );
+            return $fail( 'Could not write an extracted file.' );
+        }
+        $written[] = $path;
+        $got = 0;
+        while ( ! feof( $in ) ) {
+            $chunk = fread( $in, 1048576 );
+            if ( $chunk === false ) {
+                fclose( $in );
+                fclose( $out );
+                return $fail( sprintf( 'A file in the archive could not be read (%s).', $name ) );
+            }
+            if ( $chunk === '' ) {
+                break;
+            }
+            $got += strlen( $chunk );
+            if ( $got > $size ) {
+                fclose( $in );
+                fclose( $out );
+                return $fail( 'A file in the archive unpacks to more data than it lists.' );
+            }
+            if ( fwrite( $out, $chunk ) !== strlen( $chunk ) ) {
+                fclose( $in );
+                fclose( $out );
+                return $fail( 'Could not write an extracted file.' );
+            }
+        }
+        fclose( $in );
+        fclose( $out );
+    }
+    $zip->close();
+    return true;
+}
+
+/**
  * Canonical list of supported sources. Each entry carries:
  *   - label:    human-facing platform name (e.g. "Twitter / X")
  *   - cat_name: display name for the WP category

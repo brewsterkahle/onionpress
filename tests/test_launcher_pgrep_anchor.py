@@ -255,16 +255,18 @@ class TestLauncherChecksOnlyItsOwnBundle(unittest.TestCase):
                          "needs the system pgrep")
     def test_with_the_real_pgrep(self):
         """A process whose argv[0] is the bundle's executable path (as the
-        MenubarApp's is) is found by the system pgrep; the installed
-        bundle's is not."""
+        MenubarApp's is) is found by the system pgrep; another bundle's is
+        not. That other bundle is one nothing runs: /Applications'
+        OnionPress may well be running on the Mac under test."""
+        other = os.path.join(self.tmp, "Elsewhere", "OnionPress.app")
         decoy = subprocess.Popen([self._exe(self.TEST), "20"], executable="/bin/sleep")
         try:
             time.sleep(0.3)
             self.assertEqual(self._run(self.TEST, [], real_pgrep=True), "")
             self.assertTrue(self._reopen_touched())
             os.unlink(os.path.join(self.data_dir, ".reopen"))
-            self.assertEqual(self._run(self.LIVE, [], real_pgrep=True),
-                             f"launched: {self._exe(self.LIVE)}\n")
+            self.assertEqual(self._run(other, [], real_pgrep=True),
+                             f"launched: {self._exe(other)}\n")
             self.assertFalse(self._reopen_touched())
         finally:
             decoy.kill()

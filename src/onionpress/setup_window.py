@@ -166,6 +166,8 @@ class SetupProgressWindow(AppKit.NSObject):
         self._pass_field = None
         self.language = "en_US"
         self._on_setup_callback = None  # Called when user clicks "Set Up"
+        # Called with (zip_path, password) to read a backup's facts, or None
+        self._on_check_backup = None
         self._showing_welcome = True
         return self
 
@@ -821,10 +823,14 @@ class SetupProgressWindow(AppKit.NSObject):
         password = pass_field.stringValue() or ""
 
         # 3. Validate the password up front — no half-restore on a bad password.
+        # The menubar's callback asks the launcher (`onionpress
+        # prepare-restore --check`): the backup is opened there, never in
+        # this process (issue #475). None or an error is a failure.
         try:
-            from onionpress import backup as _backup
-            meta = _backup.peek_backup_metadata(zip_path, password)
+            meta = self._on_check_backup(zip_path, password) if self._on_check_backup else None
         except Exception:
+            meta = None
+        if not meta:
             warn = AppKit.NSAlert.alloc().init()
             warn.setMessageText_("Couldn't open that backup")
             warn.setInformativeText_(
@@ -885,6 +891,12 @@ class SetupProgressWindow(AppKit.NSObject):
     def set_on_setup(self, callback):
         """Set callback for when user clicks Set Up. Called in a background thread."""
         self._on_setup_callback = callback
+
+    def set_on_check_backup(self, callback):
+        """Set the callback that reads a backup's facts for Restore from
+        backup: (zip_path, password) -> a dict with onion_address and
+        excludes_onion_key, or None when the backup cannot be opened."""
+        self._on_check_backup = callback
 
     def show(self):
         def _show():

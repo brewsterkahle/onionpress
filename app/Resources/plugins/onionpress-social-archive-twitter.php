@@ -234,10 +234,15 @@ function onionpress_twitter_handle_upload() {
     if ( ! wp_mkdir_p( $workdir ) ) {
         return array( 'level' => 'error', 'message' => 'Could not create temp dir for extraction.' );
     }
+    @chmod( $workdir, 0700 );
 
-    if ( ! onionpress_twitter_extract_safely( $upload_tmp, $workdir ) ) {
+    $extracted = onionpress_twitter_extract_safely( $upload_tmp, $workdir );
+    if ( is_wp_error( $extracted ) ) {
         onionpress_rrmdir( $workdir );
-        return array( 'level' => 'error', 'message' => 'ZIP extraction failed or the file is not a valid Twitter archive.' );
+        return array(
+            'level'   => 'error',
+            'message' => 'ZIP refused: ' . esc_html( $extracted->get_error_message() ) . ' Upload the archive as Twitter delivered it.',
+        );
     }
 
     // Twitter puts everything under data/; archive may or may not have a
@@ -317,44 +322,24 @@ function onionpress_twitter_handle_upload() {
 }
 
 /**
- * Unzip ``$zip_path`` into ``$target_dir``, rejecting entries whose paths
- * would escape the target (zip-slip defense). Also skips symlinks and
- * files whose extensions fall outside the allow-list — a Twitter archive
- * only legitimately contains js/html/json/txt/jpg/png/gif/mp4/mov/m4v.
+ * The members of a Twitter archive the importer reads, at the root or
+ * under one per-download folder: data/tweets.js (or its parts),
+ * data/account.js, and the tweet media files (`<tweet id>-<hash>.<ext>`
+ * in data/tweets_media or data/tweet_media, image and video types
+ * only). Nothing else in the archive is extracted (#473).
+ */
+const ONIONPRESS_TWITTER_ZIP_MEMBERS = '#^(?:[^/]+/)?data/(?:tweets(?:-part\d+)?\.js|account\.js|tweets?_media/\d+-[A-Za-z0-9_.-]+\.(?i:jpg|jpeg|png|gif|mp4|mov|m4v|webp))$#D';
+
+/**
+ * Unpack the members the importer reads from ``$zip_path`` into
+ * ``$target_dir`` through onionpress_social_zip_extract(): the archive
+ * is held to the shared limits (members, per-member and total size,
+ * expansion, free space), names that would escape the target, symlinks
+ * and special files refuse it whole, and nothing is written before the
+ * checks pass (#473). Returns true or a WP_Error saying why.
  */
 function onionpress_twitter_extract_safely( $zip_path, $target_dir ) {
-    $zip = new ZipArchive();
-    if ( $zip->open( $zip_path ) !== true ) {
-        return false;
-    }
-    $target_real = realpath( $target_dir );
-    if ( ! $target_real ) {
-        $zip->close();
-        return false;
-    }
-    $allow_ext = array( 'js', 'html', 'json', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov', 'm4v', 'webp' );
-    for ( $i = 0; $i < $zip->numFiles; $i++ ) {
-        $stat = $zip->statIndex( $i );
-        $name = $stat['name'];
-        if ( $name === '' || substr( $name, -1 ) === '/' ) {
-            continue; // directories — extractTo handles on-demand
-        }
-        // Reject anything that tries to traverse
-        if ( strpos( $name, '..' ) !== false ) {
-            continue;
-        }
-        // Extension allow-list
-        $ext = strtolower( pathinfo( $name, PATHINFO_EXTENSION ) );
-        if ( ! in_array( $ext, $allow_ext, true ) ) {
-            continue;
-        }
-        // Extract one entry at a time; extractTo resolves the target
-        // and would catch traversal there too, but the explicit checks
-        // above keep the attack surface small.
-        $zip->extractTo( $target_dir, array( $name ) );
-    }
-    $zip->close();
-    return true;
+    return onionpress_social_zip_extract( $zip_path, $target_dir, ONIONPRESS_TWITTER_ZIP_MEMBERS );
 }
 
 /**
@@ -509,7 +494,7 @@ function onionpress_twitter_create_self_reply_comment( $tweet, $parent_post_id, 
     }
 
     $gmt = gmdate( 'Y-m-d H:i:s', $ts );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -551,7 +536,7 @@ function onionpress_twitter_convert_post_to_comment( $post_id, $parent_post_id )
     if ( $author === '' ) $author = 'me';
     $author_url = (string) get_post_meta( $post_id, '_source_url', true );
     $gmt = $post->post_date_gmt ?: gmdate( 'Y-m-d H:i:s' );
-    $comment_id = wp_insert_comment( array(
+    $comment_id = onionpress_social_insert_comment( array(
         'comment_post_ID'    => $parent_post_id,
         'comment_author'     => $author,
         'comment_author_url' => $author_url,
@@ -693,7 +678,7 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
     // Title is a short preview of the plain-text content. Leaving it
     // empty causes WP to auto-generate "No title" strings that don't
     // render well in archive lists. 10 words is enough for recognition.
-    $preview_text = wp_strip_all_tags( $content );
+    $preview_text = onionpress_social_plain_text( $content );
     $title        = wp_trim_words( $preview_text, 10, '…' );
     if ( $title === '' ) {
         $title = gmdate( 'Y-m-d', $ts ) . ' tweet';
@@ -760,11 +745,18 @@ function onionpress_twitter_import_tweet( $tweet, $opts ) {
 /**
  * Render a tweet's content: expand t.co links, make @mentions clickable,
  * strip trailing media t.co links (they'll be re-added as attachments),
- * and wrap in safe HTML. Output is safe for direct insertion as
- * post_content (no <script> etc.).
+ * and wrap in safe HTML. The text is escaped first, so the only markup
+ * is what this function adds.
  */
 function onionpress_twitter_render_content( $tweet ) {
-    $text = $tweet['full_text'] ?? $tweet['text'] ?? '';
+    // The archive's text is plain text with &lt; &gt; &amp; encoded: decode
+    // and escape it before anything adds markup (#462). t.co links and
+    // @handles contain nothing esc_html changes, so the substitutions
+    // below still find them.
+    $text = esc_html( html_entity_decode(
+        (string) ( $tweet['full_text'] ?? $tweet['text'] ?? '' ),
+        ENT_QUOTES | ENT_HTML5, 'UTF-8'
+    ) );
 
     // Strip media short-URLs from tail — the attached media will be
     // re-rendered as <img>/<video> in sideload_media.

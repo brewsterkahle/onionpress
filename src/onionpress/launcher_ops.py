@@ -26,6 +26,8 @@ import sys
 from typing import Optional
 
 from . import auto_login, key_manager
+from .config import validate_address_prefix
+from .ports import get_running_wp_port  # noqa: F401  (moved there, #482)
 
 
 # Pinned to digest. The literal below is propagated from build/image-pins.env
@@ -36,7 +38,7 @@ from . import auto_login, key_manager
 # same image the rest of a locally built stack uses.
 DEFAULT_TOR_IMAGE = os.environ.get(
     "ONIONPRESS_TOR_IMAGE",
-    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:7035842f4aab419948febd7f64c287f937e0a2cb2bbd5ec1a32d42269081d7e7",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc",
 )
 
 # How the menubar, the tray, scrub and the launchers hand a backup password
@@ -265,10 +267,6 @@ def generate_vanity_in_container(
     # returning an old address as if freshly minted.
     if not prefix:
         raise ValueError("prefix must not be empty")
-    # Imported here, not at module scope: config imports this module for
-    # get_running_wp_port(), so a top-level import would be circular.
-    from .config import validate_address_prefix
-
     prefix_ok, prefix_error, _ = validate_address_prefix(prefix)
     if not prefix_ok:
         raise ValueError(prefix_error.splitlines()[0])
@@ -468,50 +466,6 @@ def describe_republish_request(status: str) -> str:
                 "or is hung; it waits for the watchdog's restart by the tor "
                 "container's supervisor")
     return "republish request to tor-watchdog FAILED (docker exec)"
-
-
-def get_running_wp_port(container: str = "onionpress-wordpress") -> Optional[int]:
-    """Read the host port our own WordPress container actually published.
-
-    `detect_port_offset()` binds candidate ports to find one that's free —
-    correct for allocation at first launch, wrong as a runtime lookup: once
-    a stack is up, its ports are bound (by the stack itself), so the bind
-    test always fails and reports "in use", concluding nothing about which
-    port was actually chosen. Reading `docker port` instead asks the one
-    source that's authoritative once a stack exists — the mapping Docker
-    already made — for both the "still on our own port" case and the "came
-    up on a different offset than last time" case (stop/start races where
-    the old offset's forwards are still bound when the new ones come up).
-
-    Returns None if the container isn't running or isn't ours to read
-    (multi-user machines: this only ever inspects a container name, never
-    another user's — Docker containers are per-user via the docker socket
-    each user's Colima VM exposes, so there is no cross-user leakage here).
-    """
-    try:
-        result = subprocess.run(
-            ["docker", "port", container, "80"],
-            capture_output=True, text=True, timeout=10,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    # Expected output: "0.0.0.0:8080" or "127.0.0.1:8080" (one line per
-    # bound address; take the first).
-    first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-    if ":" not in first_line:
-        return None
-    port_str = first_line.rsplit(":", 1)[-1]
-    if not port_str.isdigit():
-        return None
-    port = int(port_str)
-    # Offsets are 8080 + k*10000, so nothing we allocate is ever below
-    # 8080 — a lower published port belongs to something else entirely
-    # (e.g. a hand-edited port mapping).
-    if port < 8080:
-        return None
-    return port
 
 
 def get_admin_password(data_dir: str) -> Optional[str]:

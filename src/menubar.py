@@ -43,16 +43,18 @@ sys.path.insert(0, script_dir)
 from onionpress import install_native_messaging
 from onionpress import onionheaven
 from onionpress import key_manager
+from onionpress import onion_hostname
 from onionpress import login_item
-from onionpress import daemon as op_daemon
+from onionpress import daemon_client as op_daemon
 try:
     from onionpress import setup_window
 except ImportError:
     setup_window = None
 from onionpress.platform import resolve_paths
 from onionpress import config as op_config
+from onionpress.ports import PortAttributes, port_environ
 from onionpress import confirm as op_confirm
-from onionpress import containers
+from onionpress import image_overrides
 from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
     parse_version,
@@ -73,7 +75,7 @@ from onionpress import splash_tips
 
 
 
-class OnionPressApp(rumps.App):
+class OnionPressApp(PortAttributes, rumps.App):
     # The daemon (onionpress.daemon, `onionpress daemon` under launchd) runs
     # every loop; this process shows its state file and sends commands
     # through the launcher. How often the state is read and the menu
@@ -223,7 +225,7 @@ class OnionPressApp(rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.5.6"
+        self.version = "2.6.0"
 
         # The environment of this process's children: the launcher (which
         # sets its own), auto_login's token mint and the first-run setup's
@@ -407,14 +409,10 @@ class OnionPressApp(rumps.App):
     # ── The view of the daemon's state ───────────────────────────────
 
     def _apply_ports(self, pc):
-        self.port_offset = pc.offset
-        self.wp_port = pc.wp_port
-        self.socks_port = pc.socks_port
-        self.proxy_port = pc.proxy_port
-        os.environ["ONIONPRESS_PORT_OFFSET"] = str(pc.offset)
-        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
-        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
-        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
+        """The daemon's ports as this process's: self.ports (port_offset,
+        wp_port… read it) and the environment the launcher inherits."""
+        self.ports = pc
+        os.environ.update(port_environ(pc))
 
     @property
     def display_state(self):
@@ -986,6 +984,7 @@ class OnionPressApp(rumps.App):
             self.dismiss_launch_splash()
             sw = setup_window.get_setup_window()
             sw.set_on_setup(lambda: self._first_run_after_welcome())
+            sw.set_on_check_backup(self._check_welcome_backup)
             setup_window.show_welcome_screen()
             return  # Don't call start_service — the callback will
 
@@ -1397,6 +1396,22 @@ class OnionPressApp(rumps.App):
 
         threading.Thread(target=start, daemon=True).start()
 
+    def _check_welcome_backup(self, zip_path, password):
+        """The welcome screen's Restore from backup, before it starts:
+        `onionpress prepare-restore <zip> --check` opens the backup (the
+        password in the environment, never on argv) and answers its facts
+        (onion_address, excludes_onion_key), changing nothing. None when it
+        could not: a wrong password or not an OnionPress backup."""
+        rc, ans, out, err = self._run_launcher_json(
+            ["prepare-restore", zip_path, "--check", "--json"],
+            env={launcher_ops.BACKUP_PASSWORD_ENV: password}, timeout=300)
+        if rc != 0 or not ans or not ans.get("ok"):
+            failure = (ans or {}).get("error") or self._launcher_failure(
+                out, err, "could not read it")
+            self.log(f"Restore from backup: could not open the backup: {failure}")
+            return None
+        return ans
+
     def _first_run_after_welcome(self):
         """Called after the user clicks Set Up (new site) or Restore from backup.
         Runs on a background thread (from setup_window callback)."""
@@ -1466,15 +1481,9 @@ class OnionPressApp(rumps.App):
     def _read_onion_address(self):
         """Return the local wordpress .onion address, or None if not yet written."""
         try:
-            docker_bin = os.path.join(self.bin_dir, "docker")
-            result = subprocess.run(
-                [docker_bin, "exec", "onionpress-tor", "cat",
-                 "/var/lib/tor/hidden_service/wordpress/hostname"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10,
-            )
-            addr = result.stdout.strip()
-            if key_manager.is_valid_onion_address(addr):
+            addr = onion_hostname.read_served_address_with(
+                os.path.join(self.bin_dir, "docker"))
+            if addr:
                 return addr
         except Exception as e:
             self.log(f"onionname: can't read onion address: {e}")
@@ -1685,13 +1694,9 @@ class OnionPressApp(rumps.App):
         try:
             from onionpress.setup_logic import install_fresh_wordpress
             docker_bin = os.path.join(self.bin_dir, "docker")
-            addr_result = subprocess.run(
-                [docker_bin, "exec", "onionpress-tor", "cat",
-                 "/var/lib/tor/hidden_service/wordpress/hostname"],
-                capture_output=True, text=True, encoding='utf-8',
-                errors='replace', timeout=10
-            )
-            onion_addr = addr_result.stdout.strip() or "localhost"
+            # One whole v3 address or "localhost": it becomes the site URL.
+            onion_addr = (onion_hostname.read_served_address_with(docker_bin)
+                          or "localhost")
 
             def _log(msg):
                 self.log(msg)
@@ -1967,11 +1972,8 @@ class OnionPressApp(rumps.App):
         unless *confirmed* already names it (the welcome screen's prefix:
         the person just chose it).
         """
-        if not os.path.exists(self.config_file):
-            config_template = os.path.join(self.resources_dir, "config-template.txt")
-            if os.path.exists(config_template):
-                import shutil
-                shutil.copy2(config_template, self.config_file)
+        # A missing config is made by the launcher (from the template,
+        # 0600) before it runs the subcommand: nothing is copied here.
         argv = [self.launcher_script, "config", "set", key]
         stdin = None
         if key in op_config.SECRET_CONFIG_KEYS and value:
@@ -2018,12 +2020,16 @@ class OnionPressApp(rumps.App):
         """Show GUI settings dialog."""
         from onionpress.settings_ui import show_settings_dialog
 
-        # Create default config if it doesn't exist
+        # A missing config is made by the launcher (from the template,
+        # 0600) before any subcommand runs; `config list` changes nothing
+        # else (issue #474: the menubar writes no config itself).
         if not os.path.exists(self.config_file):
-            config_template = os.path.join(self.parent_resources_dir, "config-template.txt")
-            if os.path.exists(config_template):
-                import shutil
-                shutil.copy2(config_template, self.config_file)
+            try:
+                subprocess.run([self.launcher_script, "config", "list"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=60)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(f"config list failed to run: {e}")
 
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
 
@@ -2048,11 +2054,16 @@ class OnionPressApp(rumps.App):
         (write_config_value)."""
         from onionpress.onionheaven_ui import show_onionheaven_dialog
 
+        # A missing config is made by the launcher (from the template,
+        # 0600) before any subcommand runs; `config list` changes nothing
+        # else (issue #474: the menubar writes no config itself).
         if not os.path.exists(self.config_file):
-            config_template = os.path.join(self.parent_resources_dir, "config-template.txt")
-            if os.path.exists(config_template):
-                import shutil
-                shutil.copy2(config_template, self.config_file)
+            try:
+                subprocess.run([self.launcher_script, "config", "list"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=60)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(f"config list failed to run: {e}")
 
         icon_path = os.path.join(self.resources_dir, "app-icon.png")
         show_onionheaven_dialog(
@@ -2765,7 +2776,7 @@ class OnionPressApp(rumps.App):
         # locally built images — update_docker_images() has already said so,
         # and "all container images are up to date" would be a lie.
         if (not app_update_available and not images_updated
-                and not containers.using_local_images(self._paths.config_file)):
+                and not image_overrides.using_local_images(self._paths.config_file)):
             version = self.version
             self.show_native_alert(
                 "No Updates Available",
@@ -3093,6 +3104,22 @@ License: AGPL v3 or later"""
                 buttons=["Cancel", "Reset"], default_button=0, cancel_button=0,
                 style="critical")
             return choice == 1
+        if what == "clearnet-tunnel":
+            # Only the Settings page asks this (handle_action, #463): code in
+            # WordPress could have written the token.
+            choice = self.show_native_alert(
+                title=("Replace the Cloudflare Tunnel token?" if facts.get("replace")
+                       else "Put this site on the regular internet?"),
+                message=("The OnionPress Settings page in WordPress asked to "
+                         f"{'replace' if facts.get('replace') else 'set'} the Cloudflare "
+                         "Tunnel token.\n\n"
+                         "A tunnel puts this site on the regular internet. Whoever owns the "
+                         "tunnel in Cloudflare sees this Mac's IP address, which the onion "
+                         "service otherwise hides, and decides what the tunnel reaches.\n\n"
+                         "Set it only if you pasted this token yourself."),
+                buttons=["Cancel", "Set Token"], default_button=0, cancel_button=0,
+                style="critical")
+            return choice == 1
         if what == "prefix-change":
             choice = self.show_native_alert(
                 title="Change the Address Prefix?",
@@ -3117,11 +3144,17 @@ License: AGPL v3 or later"""
     def _ask_settings_page_question(self, result):
         """The question `onionpress handle-action` stopped at, asked of the
         person at this Mac; True only for an explicit Replace/Restore.
-        Today one question: "address-change" (handle_action.py), for a key
-        import or a restore of another address from the page."""
+        Two questions (handle_action.py): "address-change", for a key
+        import or a restore of another address from the page, and
+        "clearnet-tunnel", for a Cloudflare Tunnel token (#463)."""
         what = result.get("confirm")
         current = result.get("current") or ""
         new_address = result.get("new") or ""
+        if what == "clearnet-tunnel":
+            confirmed = self._ask_cli_question("clearnet-tunnel", result)
+            self.log("Settings page: Cloudflare Tunnel token "
+                     f"{'confirmed' if confirmed else 'not confirmed'} at this Mac")
+            return confirmed
         if what != "address-change":
             self.log(f"Settings page: unknown question '{what}' (cancelled)")
             return False

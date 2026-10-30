@@ -20,11 +20,12 @@ settings-page-backup, settings-page-restore, update. The Linux launcher
 keeps its bash bodies behind those subcommands and the Mac launcher
 delegates them to onionpress.cli; this module is what both share.
 
-A question in flight (a Mac key import or restore of another address) is
-kept in $DATA_DIR/pending-action/ (0700, no container mounts it): the
-request, and the key or the uploaded zip and its password, which the page
-has already handed over and which the confirmed run needs again. The next
-`handle-action --confirmed address-change` resumes it; `--cancel`, or no
+A question in flight (a Mac key import or restore of another address, or
+a Cloudflare Tunnel token the page asked to set: "clearnet-tunnel", #463)
+is kept in $DATA_DIR/pending-action/ (0700, no container mounts it): the
+request, and the key, the token, or the uploaded zip and its password,
+which the page has already handed over and which the confirmed run needs
+again. The next `handle-action --confirmed <question>` resumes it; `--cancel`, or no
 answer within PENDING_MAX_AGE, writes the page a "not confirmed" result
 and drops it. While one is pending no other request is handled.
 
@@ -55,8 +56,7 @@ import subprocess
 import tempfile
 import time
 
-from . import confirm, redact, wp_files
-from .key_manager import is_valid_onion_address
+from . import confirm, onion_hostname, redact, wp_files
 from .launcher_ops import BACKUP_PASSWORD_ENV
 
 SHARED = wp_files.SHARED_DIR
@@ -114,6 +114,8 @@ IMPORT_REFUSED_LINUX_MSG = (
     "Not imported: a key import replaces this site's onion address, which the "
     "Settings page never does on Linux. On the computer running OnionPress, "
     "run: onionpress import-key")
+TUNNEL_TOKEN_KEY = "CLOUDFLARE_TUNNEL_TOKEN"
+SET_TUNNEL_TOKEN = "set-tunnel-token"  # the pending action of "clearnet-tunnel"
 IMPORT_NOT_CONFIRMED_MSG = (
     "Not replaced: the person at the Mac running OnionPress has to click "
     "Replace in the dialog OnionPress shows there.")
@@ -217,10 +219,7 @@ class Host:
 
     def served_address(self):
         """The onion address the tor container serves, or ''."""
-        r = self.docker.run(["exec", "onionpress-tor", "cat", wp_files.TOR_HOSTNAME_FILE],
-                            timeout=10, quiet=True)
-        addr = r.output.strip() if r.ok else ""
-        return addr if is_valid_onion_address(addr) else ""
+        return onion_hostname.read_served_address(self.docker)
 
     def containers(self):
         """[(name, status)] of the onionpress containers."""
@@ -284,7 +283,7 @@ def _write_private(path, data):
 
 
 def _pending_save(host, action, question, facts, *, key=None, zip_path=None,
-                  password=None):
+                  password=None, token=None):
     """Keep the question and what the confirmed run needs again."""
     _pending_clear(host)
     d = _pending_dir(host)
@@ -294,6 +293,8 @@ def _pending_save(host, action, question, facts, *, key=None, zip_path=None,
         _write_private(os.path.join(d, "key"), key + "\n")
     if password is not None:
         _write_private(os.path.join(d, "password"), password)
+    if token is not None:
+        _write_private(os.path.join(d, "token"), token + "\n")
     if zip_path is not None:
         shutil.move(zip_path, os.path.join(d, "restore-upload.zip"))
     doc = {"action": action, "confirm": question,
@@ -370,6 +371,11 @@ def handle(host, confirmed=frozenset(), cancel=False):
     # keys come back so the menubar applies what it owes at once.
     applied = apply_config(host) if host.os_name == "macos" else []
     extra = {"config": applied} if applied else {}
+    pending = _pending_load(host)
+    if pending:
+        # apply_config held a tunnel token for the person at this Mac (#463).
+        return {"handled": None, "confirm": pending["confirm"],
+                "action": pending.get("action"), **pending.get("facts", {}), **extra}
 
     action = host.read_shared(REQUEST_FILE).strip()
     if not action:
@@ -429,6 +435,10 @@ def _resume(host, pending, confirmed):
     host.request_id = checked_request_id(pending.get("request_id"))
     host.log(f"Settings page: {action} confirmed at this Mac")
     try:
+        if action == SET_TUNNEL_TOKEN:
+            token = _pending_read(host, "token").strip()
+            _pending_clear(host)
+            return {"handled": action, **_set_tunnel_token(host, token)}
         if action == "import-key-file":
             key = _pending_read(host, "key").strip()
             _pending_clear(host)
@@ -878,6 +888,8 @@ def apply_config(host, out=None):
         host.log("Settings page: config-updates.json is not valid JSON (left for the next run)")
         return None
     applied = op_config.apply_settings_updates(host.paths.config_file, updates)
+    if applied.held:
+        _hold_tunnel_token(host, applied.held.get(TUNNEL_TOKEN_KEY, ""))
     if applied.rejected:
         host.log("Settings page: ignored (not a setting it may change, or an "
                  f"invalid value): {', '.join(applied.rejected)}")
@@ -899,3 +911,42 @@ def apply_config(host, out=None):
                 app_bundle=host.paths.app_bundle):
             host.log(line)
     return list(applied.accepted)
+
+
+def _hold_tunnel_token(host, token):
+    """The page asked to set or replace the Cloudflare Tunnel token (#463):
+    never applied unattended. A tunnel's owner sees this host's IP address
+    and chooses what it reaches, and anything in WordPress can write the
+    page's requests. On a Mac it waits for the person at the Mac
+    ("clearnet-tunnel"); elsewhere it is refused."""
+    if not token:
+        return
+    if host.os_name != "macos":
+        host.log(f"Settings page: {TUNNEL_TOKEN_KEY} not set: the page cannot set it here. "
+                 f"On this computer run: onionpress config set {TUNNEL_TOKEN_KEY} -")
+        return
+    if _pending_load(host):
+        host.log(f"Settings page: {TUNNEL_TOKEN_KEY} not set: another question is waiting")
+        return
+    from . import config as op_config
+    replace = bool(op_config.read_value(host.paths.config_file, TUNNEL_TOKEN_KEY))
+    _pending_save(host, SET_TUNNEL_TOKEN, "clearnet-tunnel", {"replace": replace},
+                  token=token)
+    host.log(f"Settings page: {TUNNEL_TOKEN_KEY} waits for the person at this Mac")
+
+
+def _set_tunnel_token(host, token):
+    """The confirmed run of "clearnet-tunnel": write the held token."""
+    from . import config as op_config
+    if not op_config.SETTINGS_PAGE_KEYS[TUNNEL_TOKEN_KEY](token) or not token:
+        host.log(f"Settings page: {TUNNEL_TOKEN_KEY} not set: the held token is gone or invalid")
+        return {}
+    old = op_config.read_value(host.paths.config_file, TUNNEL_TOKEN_KEY)
+    op_config.set_config_value(host.paths.config_file, TUNNEL_TOKEN_KEY, token)
+    host.log(f"  {op_config.describe_change(TUNNEL_TOKEN_KEY, old, token)}")
+    op_config.note_config_changed(host.paths.data_dir, [TUNNEL_TOKEN_KEY])
+    for line in op_config.apply_side_effects(
+            [TUNNEL_TOKEN_KEY], host.paths.config_file, host.os_name, host.log,
+            app_bundle=host.paths.app_bundle):
+        host.log(line)
+    return {"config": [TUNNEL_TOKEN_KEY]}

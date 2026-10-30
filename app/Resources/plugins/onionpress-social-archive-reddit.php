@@ -260,10 +260,15 @@ function onionpress_reddit_handle_upload() {
     if ( ! wp_mkdir_p( $workdir ) ) {
         return array( 'level' => 'error', 'message' => 'Could not create temp dir for extraction.' );
     }
+    @chmod( $workdir, 0700 );
 
-    if ( ! onionpress_reddit_extract_safely( $upload_tmp, $workdir ) ) {
+    $extracted = onionpress_reddit_extract_safely( $upload_tmp, $workdir );
+    if ( is_wp_error( $extracted ) ) {
         onionpress_reddit_rrmdir( $workdir );
-        return array( 'level' => 'error', 'message' => 'ZIP extraction failed or the file is not a valid Reddit data export.' );
+        return array(
+            'level'   => 'error',
+            'message' => 'ZIP refused: ' . esc_html( $extracted->get_error_message() ) . ' Upload the CSV export as Reddit delivered it.',
+        );
     }
 
     $posts_csv    = onionpress_reddit_find_csv( $workdir, 'posts.csv' );
@@ -317,33 +322,22 @@ function onionpress_reddit_handle_upload() {
 }
 
 /**
- * Extract a Reddit CSV ZIP into $target_dir, rejecting traversal and
- * limiting extensions to what a legitimate Reddit data export contains
- * (CSV plus the optional metadata.json).
+ * The members of a Reddit data export the importer reads: posts.csv and
+ * comments.csv, at the root or under one per-request folder. Nothing
+ * else in the archive is extracted (#473).
+ */
+const ONIONPRESS_REDDIT_ZIP_MEMBERS = '#^(?:[^/]+/)?(?:posts|comments)\.csv$#D';
+
+/**
+ * Unpack the two CSVs from a Reddit data export at ``$zip_path`` into
+ * ``$target_dir`` through onionpress_social_zip_extract(): the archive
+ * is held to the shared limits (members, per-member and total size,
+ * expansion, free space), names that would escape the target, symlinks
+ * and special files refuse it whole, and nothing is written before the
+ * checks pass (#473). Returns true or a WP_Error saying why.
  */
 function onionpress_reddit_extract_safely( $zip_path, $target_dir ) {
-    $zip = new ZipArchive();
-    if ( $zip->open( $zip_path ) !== true ) {
-        return false;
-    }
-    $allow_ext = array( 'csv', 'json', 'txt' );
-    for ( $i = 0; $i < $zip->numFiles; $i++ ) {
-        $stat = $zip->statIndex( $i );
-        $name = $stat['name'];
-        if ( $name === '' || substr( $name, -1 ) === '/' ) {
-            continue;
-        }
-        if ( strpos( $name, '..' ) !== false ) {
-            continue;
-        }
-        $ext = strtolower( pathinfo( $name, PATHINFO_EXTENSION ) );
-        if ( ! in_array( $ext, $allow_ext, true ) ) {
-            continue;
-        }
-        $zip->extractTo( $target_dir, array( $name ) );
-    }
-    $zip->close();
-    return true;
+    return onionpress_social_zip_extract( $zip_path, $target_dir, ONIONPRESS_REDDIT_ZIP_MEMBERS );
 }
 
 /**
@@ -414,7 +408,9 @@ function onionpress_reddit_import_submission( $row ) {
     }
     $post_date_gmt = gmdate( 'Y-m-d H:i:s', $ts );
 
-    $title     = (string) ( $row['title'] ?? '' );
+    // A thread title is another Reddit user's text (#472): plain text
+    // before it becomes post_title.
+    $title     = onionpress_social_plain_text( $row['title'] ?? '' );
     $body_md   = (string) ( $row['body']  ?? '' );
     $link_url  = (string) ( $row['url']   ?? '' );
     $subreddit = (string) ( $row['subreddit'] ?? '' );
@@ -441,7 +437,7 @@ function onionpress_reddit_import_submission( $row ) {
     }
 
     if ( $title === '' ) {
-        $title = wp_trim_words( wp_strip_all_tags( $content ), 10, '…' );
+        $title = wp_trim_words( onionpress_social_plain_text( $content ), 10, '…' );
     }
     if ( $title === '' ) {
         $title = gmdate( 'Y-m-d', $ts ) . ' Reddit post';
@@ -507,7 +503,7 @@ function onionpress_reddit_import_comment( $row ) {
         $title = 'Re: ' . $slug_human;
         $reply_label = $slug_human;
     } else {
-        $title = wp_trim_words( $body_md, 10, '…' );
+        $title = wp_trim_words( onionpress_social_plain_text( $body_md ), 10, '…' );
         $reply_label = $link_url;
     }
     if ( $title === '' ) {
@@ -547,7 +543,10 @@ function onionpress_reddit_import_comment( $row ) {
  * post with the subreddit name and assigns it to the Reddit category.
  */
 function onionpress_reddit_insert_post( $title, $content, $post_date_gmt, $meta, $subreddit ) {
-    $excerpt = wp_trim_words( wp_strip_all_tags( $content ), 35, '…' );
+    // Every Reddit title and excerpt is plain text at ingest (#472),
+    // whatever path built it.
+    $title   = onionpress_social_plain_text( $title );
+    $excerpt = wp_trim_words( onionpress_social_plain_text( $content ), 35, '…' );
     $post_id = wp_insert_post( array(
         'post_type'     => 'post',
         'post_status'   => 'publish',
@@ -1081,7 +1080,15 @@ function onionpress_reddit_api_comment_to_row( $data ) {
 
 function onionpress_reddit_get_title_cache() {
     $c = get_option( ONIONPRESS_REDDIT_TITLE_CACHE_OPT, array() );
-    return is_array( $c ) ? $c : array();
+    if ( ! is_array( $c ) ) {
+        return array();
+    }
+    // Plain text on the way out too (#472): a cache written before the
+    // titles were cleaned at fetch time still holds raw ones.
+    foreach ( $c as $id => $title ) {
+        $c[ $id ] = onionpress_social_plain_text( $title );
+    }
+    return $c;
 }
 
 function onionpress_reddit_save_title_cache( $cache ) {
@@ -1183,7 +1190,7 @@ function onionpress_reddit_resolve_titles_batch( $deadline ) {
         if ( ! array_key_exists( $link_id, $cache ) ) {
             continue;
         }
-        $title = (string) $cache[ $link_id ];
+        $title = onionpress_social_plain_text( $cache[ $link_id ] );
         foreach ( $pids as $pid ) {
             if ( $title !== '' ) {
                 $post = get_post( $pid );
@@ -1230,7 +1237,9 @@ function onionpress_reddit_fetch_thread_titles( $link_ids ) {
     foreach ( $kids as $child ) {
         $id = (string) ( $child['data']['name'] ?? '' );
         if ( $id === '' ) continue;
-        $out[ $id ] = (string) ( $child['data']['title'] ?? '' );
+        // raw_json=1 leaves `<` and `>` unescaped; the title is cached
+        // and stored as a post title, so plain text here (#472).
+        $out[ $id ] = onionpress_social_plain_text( $child['data']['title'] ?? '' );
     }
     return $out;
 }

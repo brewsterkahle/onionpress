@@ -4,7 +4,8 @@
 # check/confirm, Settings-page and config code). Run after `coverage run`
 # (`make coverage`, CI). Each floor sits a point or two under what the
 # run that set it measured (2026-10-23; the CLI's raised 2026-10-25 with
-# tests/test_cli_commands.py and tests/test_cli_edges.py); raise one when
+# tests/test_cli_commands.py and tests/test_cli_edges.py; the modules split
+# out by #474-#484 added 2026-10-29); raise one when
 # the tests catch up, never lower one to pass. Runs under macOS /bin/bash 3.2 (no associative arrays).
 set -e
 set -o pipefail  # coverage's exit code, not tail's
@@ -19,6 +20,14 @@ src/onionpress/app_commands.py 94
 src/onionpress/handle_action.py 95
 src/onionpress/confirm.py 98
 src/onionpress/config.py 85
+src/onionpress/backup_archive.py 92
+src/onionpress/db_import.py 93
+src/onionpress/hub_backup.py 85
+src/onionpress/ports.py 86
+src/onionpress/secrets_file.py 96
+src/onionpress/onion_hostname.py 98
+src/onionpress/reachability.py 87
+src/onionpress/image_overrides.py 95
 "
 
 # `python` is the interpreter that ran the tests (uv run / CI's venv).

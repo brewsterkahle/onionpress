@@ -38,12 +38,15 @@ another address: onionpress.handle_action's pending-action/) is not
 answered here: it goes into the state file and the menubar asks the person
 at the Mac, then runs `handle-action --confirmed … | --cancel` itself.
 
-Everything that talks to the hub is onionpress.onionheaven's, unchanged:
-this object is the `app` those functions take (the attributes they read
-are set in __init__), so the Mac and the CLI's HubContext share one
-implementation and one lock (_hub_lock). The dual probe is
-onionpress.health's, the republish request onionpress.launcher_ops's,
-shared with Linux's onionpress.reachability.
+Everything that talks to the hub is onionpress.onionheaven's: the daemon
+holds one OnionHeavenClient (hub_client, issue #479), which owns the
+session's registration state and reads this object as its host, so the
+Mac and the CLI's HubContext share one implementation and one lock
+(_hub_lock). The dual probe is
+onionpress.health's; the #266 recovery step on its outcome (the
+RepublishTrigger, the request to the watchdog, the wake and offline
+resets) is onionpress.reachability's RecoveryWindow, the one Linux's
+ReachabilityLoop runs too.
 """
 
 import json
@@ -52,6 +55,7 @@ import plistlib
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -60,6 +64,7 @@ from . import config as op_config
 from . import confirm as op_confirm
 from . import key_manager
 from . import launcher_ops
+from . import onion_hostname
 from . import onion_proxy
 from . import onionheaven
 from . import redact
@@ -68,32 +73,52 @@ from . import wp_files
 from .docker import Docker
 from .health import (
     HealthChecker,
-    RepublishTrigger,
     WEDGE_LOAD_WARN,
     WEDGE_LOAD_ALARM,
     WEDGE_FAILING_STREAK_ALARM,
     decode_curl_reason,
 )
 from .log_rotation import RotatingLog
+from .ports import PortAttributes, port_environ
 from .power import CaffeineManager
+from .reachability import RecoveryWindow
 from .reachability_stats import ReachabilityStats
 from .system_metrics import host_metrics, container_metrics
 
-STATE_FILENAME = "daemon-state.json"
-PID_FILENAME = "daemon.pid"
-AGENT_LABEL = "org.onionpress.daemon"
-ONIONNAME_RETRY_MARKER = ".onionname-retry"
-OFFLINE_ACK_MARKER = ".daemon-offline-ack"
-UPLOAD_TRIGGER_MARKER = ".upload-analytics"
+# The view's side (the state file's reader, the pid, the launchd agent)
+# is onionpress.daemon_client's, which imports none of the loops' modules
+# (issue #475); re-exported here, where the CLI, the uninstaller and the
+# tests have always found it.
+from .daemon_client import (  # noqa: F401
+    AGENT_LABEL,
+    OFFLINE_ACK_MARKER,
+    ONIONNAME_RETRY_MARKER,
+    PID_FILENAME,
+    QUITTING_MARKER,
+    STALE_AFTER_SECONDS,
+    STALLED_AFTER_SECONDS,
+    STATE_FILENAME,
+    _gui_domain,
+    _launchctl,
+    agent_loaded_pid,
+    agent_plist,
+    agent_plist_path,
+    agent_status,
+    daemon_pid,
+    display_state_of,
+    install_agent,
+    pid_alive,
+    pid_path,
+    read_state,
+    remove_agent,
+    request_offline,
+    start_agent,
+    state_is_fresh,
+    state_path,
+    stop_agent,
+)
 
-# A state file older than this is a daemon that is gone or stuck: the
-# menubar shows "Reconnecting" (never "Stopped") until a fresh one lands.
-# The status tick is at most 30 s apart, and a slow tick (docker exec
-# stalls under memory pressure) is reported by the daemon itself through
-# last_check_complete.
-STALE_AFTER_SECONDS = 90
-# check_status has not finished a pass in this long: "stalled".
-STALLED_AFTER_SECONDS = 180
+UPLOAD_TRIGGER_MARKER = ".upload-analytics"
 
 PLACEHOLDER_ADDRESSES = ("Starting...", "Not running", "Generating address...")
 
@@ -103,16 +128,8 @@ def _utc_now():
 
 
 # ---------------------------------------------------------------------------
-# The state file (read by the menubar; the only coupling between the two)
+# The state file (written here; read by the menubar through daemon_client)
 # ---------------------------------------------------------------------------
-
-def state_path(data_dir):
-    return os.path.join(data_dir, STATE_FILENAME)
-
-
-def pid_path(data_dir):
-    return os.path.join(data_dir, PID_FILENAME)
-
 
 def write_json_atomic(path, doc):
     """Write *doc* to *path* through a temp file and a rename, so a reader
@@ -125,86 +142,6 @@ def write_json_atomic(path, doc):
     os.replace(tmp, path)
 
 
-def read_state(data_dir):
-    """The daemon's last state, or None (no file, unreadable, not JSON)."""
-    try:
-        with open(state_path(data_dir), encoding="utf-8") as f:
-            doc = json.load(f)
-    except (OSError, ValueError):
-        return None
-    return doc if isinstance(doc, dict) else None
-
-
-def pid_alive(pid):
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
-
-
-def daemon_pid(data_dir):
-    """The pid in daemon.pid when that process is alive, else None."""
-    try:
-        with open(pid_path(data_dir), encoding="utf-8") as f:
-            pid = int(f.read().strip())
-    except (OSError, ValueError):
-        return None
-    return pid if pid_alive(pid) else None
-
-
-def state_is_fresh(state, now=None, max_age=STALE_AFTER_SECONDS):
-    """A state the menubar may show: written recently by a live process."""
-    if not state:
-        return False
-    now = time.time() if now is None else now
-    try:
-        age = now - float(state.get("updated_at") or 0)
-    except (TypeError, ValueError):
-        return False
-    if age > max_age:
-        return False
-    return pid_alive(state.get("pid"))
-
-
-def display_state_of(state, now=None):
-    """One of 'stopped', 'available', 'offline', 'stalled', 'stuck',
-    'starting', from a state document (the menubar's icon and title, and
-    the daemon's own poll interval). 'reconnecting' is the menubar's own
-    verdict for no fresh state at all, never this function's."""
-    now = time.time() if now is None else now
-    if not state or not state.get("is_running"):
-        return "stopped"
-    # A pass has not completed in 3+ minutes (a docker exec hung under
-    # memory pressure): a stale "ready" is not to be trusted.
-    try:
-        if now - float(state.get("last_check_complete") or now) > STALLED_AFTER_SECONDS:
-            return "stalled"
-    except (TypeError, ValueError):
-        pass
-    if state.get("is_ready"):
-        return "available"
-    if not state.get("has_internet", True):
-        return "offline"
-    yellow_since = state.get("yellow_since")
-    try:
-        if yellow_since and now - float(yellow_since) > 300:
-            return "stuck"
-    except (TypeError, ValueError):
-        pass
-    return "starting"
-
-
 def poll_interval(display_state):
     """Seconds between status passes (the menubar's old adaptive schedule):
     30 s when the site is up, 10 s offline, 5 s while starting or stuck."""
@@ -213,236 +150,6 @@ def poll_interval(display_state):
     if display_state == "offline":
         return 10
     return 5
-
-
-# ---------------------------------------------------------------------------
-# The launchd agent
-# ---------------------------------------------------------------------------
-
-def agent_plist_path():
-    return os.path.expanduser(f"~/Library/LaunchAgents/{AGENT_LABEL}.plist")
-
-
-def agent_plist(launcher_script, logs_dir, port_offset_env=None):
-    """The LaunchAgent: `<launcher> daemon`, kept alive across crashes
-    (SuccessfulExit false: a clean exit 0, which `daemon stop`'s TERM and
-    a `quit` produce, stays down; a crash or a kill -9 is restarted after
-    ThrottleInterval), started at login (RunAtLoad: the login item opens
-    the menubar, which would start it anyway), per user (gui domain;
-    each user's own ~/.onionpress and port offset). AbandonProcessGroup:
-    an `onionpress update` the daemon's own tick started stops the daemon
-    before the bundle swap and must outlive it; so must a Settings-page
-    restore in flight when the daemon is restarted."""
-    plist = {
-        "Label": AGENT_LABEL,
-        "ProgramArguments": [launcher_script, "daemon"],
-        "RunAtLoad": True,
-        "KeepAlive": {"SuccessfulExit": False},
-        "ThrottleInterval": 10,
-        "ProcessType": "Background",
-        "AbandonProcessGroup": True,
-        "LimitLoadToSessionType": "Aqua",
-        "StandardOutPath": os.path.join(logs_dir, "daemon-stdout.log"),
-        "StandardErrorPath": os.path.join(logs_dir, "daemon-stderr.log"),
-        # launchd sets HOME itself; spelled out so the agent of a test
-        # install (HOME under /tmp) never reaches the user's ~/.onionpress.
-        "EnvironmentVariables": {"ONIONPRESS_DAEMON_LAUNCHD": "1",
-                                 "HOME": os.path.expanduser("~")},
-    }
-    if port_offset_env is not None:
-        plist["EnvironmentVariables"]["ONIONPRESS_PORT_OFFSET"] = str(port_offset_env)
-    return plist
-
-
-def _gui_domain():
-    return f"gui/{os.getuid()}"
-
-
-def _launchctl(args, timeout=20):
-    try:
-        return subprocess.run(["launchctl", *args], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
-    except (OSError, subprocess.SubprocessError) as e:
-        return subprocess.CompletedProcess(["launchctl", *args], 1, "", str(e))
-
-
-def agent_loaded_pid():
-    """(loaded, pid) from `launchctl print gui/<uid>/<label>`: pid None
-    when loaded but not running (between KeepAlive restarts)."""
-    r = _launchctl(["print", f"{_gui_domain()}/{AGENT_LABEL}"])
-    if r.returncode != 0:
-        return False, None
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("pid = "):
-            try:
-                return True, int(line.split("=", 1)[1].strip())
-            except ValueError:
-                return True, None
-    return True, None
-
-
-def install_agent(launcher_script, data_dir, log, path="", port_offset=None):
-    """Write the plist (rewritten when its program or logs changed: an
-    update moves nothing, since the bundle path stays, but a bundle run
-    from somewhere else must point the agent at itself). Returns the
-    path, or '' when there is no launcher to run."""
-    path = path or agent_plist_path()
-    if not launcher_script or not os.path.isfile(launcher_script):
-        log(f"daemon: LaunchAgent not installed: no launcher at {launcher_script or 'none'}")
-        return ""
-    logs_dir = os.path.join(data_dir, "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    wanted = agent_plist(launcher_script, logs_dir, port_offset)
-    try:
-        with open(path, "rb") as f:
-            if plistlib.load(f) == wanted:
-                return path
-    except (OSError, ValueError):
-        pass
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "wb") as f:
-        plistlib.dump(wanted, f)
-    os.replace(tmp, path)
-    log(f"daemon: LaunchAgent written ({path})")
-    return path
-
-
-def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
-    """Install the plist, bootstrap it (or kickstart a loaded one that is
-    not running). True when the agent is running afterwards."""
-    path = install_agent(launcher_script, data_dir, log, path, port_offset)
-    if not path:
-        return False
-    loaded, pid = agent_loaded_pid()
-    if loaded and pid:
-        return True
-    if loaded:
-        r = _launchctl(["kickstart", f"{_gui_domain()}/{AGENT_LABEL}"])
-    else:
-        r = _launchctl(["bootstrap", _gui_domain(), path])
-        if r.returncode != 0 and "already" in (r.stderr or "").lower():
-            r = _launchctl(["kickstart", f"{_gui_domain()}/{AGENT_LABEL}"])
-    if r.returncode != 0:
-        log(f"daemon: launchctl failed (rc {r.returncode}): {(r.stderr or r.stdout).strip()}")
-        return False
-    for _ in range(20):
-        loaded, pid = agent_loaded_pid()
-        if pid:
-            log(f"daemon: started under launchd (pid {pid})")
-            return True
-        time.sleep(0.25)
-    log("daemon: launchd accepted the agent but it is not running yet")
-    return loaded
-
-
-QUITTING_MARKER = ".daemon-quitting"
-
-
-def stop_agent(data_dir, log, path="", wait=30, offline=True):
-    """Boot the agent out (TERM: the daemon stops the proxy, the captures
-    and caffeinate and exits 0) and wait for the process to be gone. With
-    *offline* (a `quit`: the site is going down with the daemon) the
-    daemon tells the hub /offline first; `update` passes False, since it
-    comes right back. True when no daemon is left running. The plist
-    stays: `start` bootstraps it again."""
-    path = path or agent_plist_path()
-    pid = daemon_pid(data_dir)
-    marker = os.path.join(data_dir, QUITTING_MARKER)
-    try:
-        if offline and pid:
-            with open(marker, "w") as f:
-                f.write(str(pid))
-        elif os.path.exists(marker):
-            os.remove(marker)
-    except OSError:
-        pass
-    loaded, agent_pid = agent_loaded_pid()
-    if loaded:
-        r = _launchctl(["bootout", f"{_gui_domain()}/{AGENT_LABEL}"])
-        if r.returncode != 0:
-            log(f"daemon: launchctl bootout failed (rc {r.returncode}): "
-                f"{(r.stderr or r.stdout).strip()}")
-    elif pid:
-        # Running outside launchd (a terminal's `onionpress daemon`).
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
-    deadline = time.monotonic() + wait
-    for p in (pid, agent_pid):
-        while p and pid_alive(p) and time.monotonic() < deadline:
-            time.sleep(0.25)
-    left = [p for p in (pid, agent_pid) if p and pid_alive(p)]
-    if left:
-        log(f"daemon: still running after {wait}s (pid {left[0]})")
-        return False
-    log("daemon: stopped")
-    return True
-
-
-def remove_agent(log, path=""):
-    """Boot the agent out and delete its plist (uninstall)."""
-    path = path or agent_plist_path()
-    loaded, _pid = agent_loaded_pid()
-    if loaded:
-        _launchctl(["bootout", f"{_gui_domain()}/{AGENT_LABEL}"])
-    if os.path.exists(path):
-        os.remove(path)
-        log("daemon: LaunchAgent removed")
-
-
-def agent_status(data_dir):
-    """What `onionpress daemon status` prints."""
-    loaded, pid = agent_loaded_pid()
-    state = read_state(data_dir)
-    now = time.time()
-    doc = {
-        "loaded": loaded,
-        "pid": pid or daemon_pid(data_dir),
-        "plist": agent_plist_path(),
-        "plist_installed": os.path.exists(agent_plist_path()),
-        "state_file": state_path(data_dir),
-        "state_fresh": state_is_fresh(state, now),
-    }
-    if state:
-        doc["state_age_s"] = int(now - float(state.get("updated_at") or now))
-        doc["display_state"] = display_state_of(state, now)
-        doc["onion_address"] = state.get("onion_address") or ""
-        doc["ports"] = state.get("ports") or {}
-    return doc
-
-
-def request_offline(data_dir, log, wait=10):
-    """`onionpress daemon offline` (the launcher's `stop`): USR1 to the
-    daemon, which tells the hub /offline while the tor container is still
-    up, then wait for its acknowledgement. True when acknowledged; False
-    when no daemon runs or it did not answer in time (the stop goes on)."""
-    pid = daemon_pid(data_dir)
-    if not pid:
-        return False
-    ack = os.path.join(data_dir, OFFLINE_ACK_MARKER)
-    try:
-        os.remove(ack)
-    except OSError:
-        pass
-    try:
-        os.kill(pid, signal.SIGUSR1)
-    except OSError as e:
-        log(f"daemon: could not signal pid {pid}: {e}")
-        return False
-    deadline = time.monotonic() + wait
-    while time.monotonic() < deadline:
-        if os.path.exists(ack):
-            try:
-                os.remove(ack)
-            except OSError:
-                pass
-            return True
-        time.sleep(0.2)
-    log(f"daemon: no /offline acknowledgement from pid {pid} in {wait}s")
-    return False
 
 
 def run_daemon_command(sub, paths, log, *, launcher_script="", json_output=False,
@@ -491,7 +198,7 @@ def run_daemon_command(sub, paths, log, *, launcher_script="", json_output=False
 # The daemon
 # ---------------------------------------------------------------------------
 
-class Daemon:
+class Daemon(PortAttributes):
     """The loops. One instance per process; `run()` blocks until TERM."""
 
     is_onionheaven = False
@@ -553,12 +260,10 @@ class Daemon:
 
         # Ports: resolved in run() (the running stack's, else the first
         # free offset). Until then the environment's or the default.
-        pc = op_config.PortConfig.from_offset(
+        # self.ports is the one holder; port_offset, wp_port, socks_port and
+        # proxy_port read it (PortAttributes).
+        self.ports = op_config.PortConfig.from_offset(
             int(os.environ.get("ONIONPRESS_PORT_OFFSET", "0") or 0))
-        self.port_offset = pc.offset
-        self.wp_port = pc.wp_port
-        self.socks_port = pc.socks_port
-        self.proxy_port = pc.proxy_port
         self.runtime_ready = False
         self.port_conflict = []
 
@@ -588,24 +293,13 @@ class Daemon:
         self._last_check_complete_ts = time.time()
         self._was_ready = False
         self._tor_internally_ready = False
-        self._onionheaven_reclaim_succeeded = False
-        self._onionheaven_reclaim_in_flight = False
-        self._onionheaven_reclaim_last_attempt = 0
         self._wordpress_confirmed = False
         self._onionheaven_overview = None   # onionheaven.overview(), from check_status
         self._onionheaven_checked = False
-        self._onionheaven_registration_succeeded = False
-        self._onionheaven_heartbeat_succeeded = False
         self._pending_manual_upload = False
-        self._onionheaven_registration_in_flight = False
-        self._onionheaven_opt_out_in_flight = False
-        self._onionheaven_opt_out_last_attempt = 0
-        self._onionheaven_opt_out_gave_up = False
         self._onionname_retry_in_flight = False
         self._onionname_retry_giveup = False
         self._onionname_collision = None
-        self._heartbeat_generation = 0
-        self._heartbeat_loop_running = False
         self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
         self._quitting = False
         self._stopping = False
@@ -620,7 +314,11 @@ class Daemon:
         self._last_status_payload = None
 
         self._reachability_stats = ReachabilityStats()
-        self._republish_trigger = RepublishTrigger()
+        # The #266 recovery step (onionpress.reachability, shared with
+        # Linux). Late-bound, so a replaced log or config reader is seen.
+        self._recovery = RecoveryWindow(
+            self._docker, lambda m: self.log(m),
+            read_config_value=lambda k, d: self.read_config_value(k, d))
         self._last_probe_code = ""
         self._last_probe_why = ""
         self._last_probe_ms = 0
@@ -628,8 +326,17 @@ class Daemon:
         self._last_snapshot_ts = time.time()
         self._snapshot_interval_seconds = 12 * 3600
 
-        onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
+        onionheaven.use_configured_hub(
             self.read_config_value("ONIONHEAVEN_ADDRESS", ""), self.log)
+        # The OnionHeaven client: registration, heartbeat, /offline, the
+        # opt-out and the record's upkeep. Its hooks are late-bound, so a
+        # replaced health checker or docker is seen.
+        self.hub_client = onionheaven.OnionHeavenClient(
+            self,
+            sleeping=lambda: self._sleeping,
+            wordpress_healthy=lambda: self._health_checker.check_wordpress_local(),
+            docker=lambda: self._docker,
+            drives_own_snapshot=True)
 
     # -- small helpers -----------------------------------------------------
 
@@ -869,10 +576,10 @@ class Daemon:
         except OSError:
             pass
         try:
-            if (self._onionheaven_registration_succeeded and not self.is_onionheaven
+            if (self.hub_client.registration_succeeded and not self.is_onionheaven
                     and self._take_marker(QUITTING_MARKER)):
                 try:
-                    onionheaven.notify_onionheaven_offline(self)
+                    self.hub_client.notify_offline()
                 except Exception:
                     pass
         except Exception:
@@ -889,9 +596,9 @@ class Daemon:
         tell the hub /offline now, as the menubar's Stop did before
         stopping the containers, and acknowledge."""
         try:
-            if self._onionheaven_registration_succeeded and not self.is_onionheaven:
+            if self.hub_client.registration_succeeded and not self.is_onionheaven:
                 try:
-                    ok = bool(onionheaven.notify_onionheaven_offline(self))
+                    ok = bool(self.hub_client.notify_offline())
                     self.log(f"daemon: /offline before stop {'landed' if ok else 'MISSED'}")
                 except Exception as e:
                     self.log(f"daemon: /offline before stop failed: {e}")
@@ -980,16 +687,13 @@ class Daemon:
                  f"SOCKS {self.socks_port}, proxy {self.proxy_port})")
 
     def _apply_ports(self, pc):
-        self.port_offset = pc.offset
-        self.wp_port = pc.wp_port
-        self.socks_port = pc.socks_port
-        self.proxy_port = pc.proxy_port
-        os.environ["ONIONPRESS_PORT_OFFSET"] = str(pc.offset)
-        os.environ["ONIONPRESS_WP_PORT"] = str(self.wp_port)
-        os.environ["ONIONPRESS_SOCKS_PORT"] = str(self.socks_port)
-        os.environ["ONIONPRESS_PROXY_PORT"] = str(self.proxy_port)
-        onion_proxy.PROXY_PORT = self.proxy_port
-        onion_proxy.PHP_PROXY_PORT = self.wp_port
+        """Make *pc* this daemon's ports: self.ports (which the proxy
+        server reads at each request), the environment the launcher and
+        other children inherit, and onion_proxy's defaults."""
+        self.ports = pc
+        os.environ.update(port_environ(pc))
+        onion_proxy.PROXY_PORT = pc.proxy_port
+        onion_proxy.PHP_PROXY_PORT = pc.wp_port
 
     def _resync_ports(self):
         """After the stack came up: the port Docker actually published,
@@ -1085,10 +789,7 @@ class Daemon:
                 self.log(f"Image downloaded: {name}")
 
     def _read_served_address(self):
-        r = self._docker.run(["exec", "onionpress-tor", "cat", wp_files.TOR_HOSTNAME_FILE],
-                             timeout=10, quiet=True)
-        addr = r.output.strip() if r.ok else ""
-        return addr if key_manager.is_valid_onion_address(addr) else ""
+        return onion_hostname.read_served_address(self._docker)
 
     def check_status(self):
         """One pass: containers, address, internet, WordPress, the dual
@@ -1109,7 +810,7 @@ class Daemon:
                     "WEDGE WARNING: onion service unreachable for 10+ min. "
                     "Automatic recovery: see the `probe verdict=` and "
                     "`descriptor republish` lines (REPUBLISH_ON_UNREACHABLE="
-                    f"{'yes' if self._republish_on_unreachable_enabled() else 'no'}).")
+                    f"{'yes' if self._recovery.republish_enabled() else 'no'}).")
                 self._wedge_warning_fired = True
 
             if not self.runtime_ready:
@@ -1194,7 +895,7 @@ class Daemon:
                         self.log("Going offline — no internet connection")
                     self.is_ready = False
                     self._last_reachability = (None, None)
-                    self._republish_trigger.reset()
+                    self._recovery.note_offline()
                     if self._yellow_since is None:
                         self._yellow_since = time.time()
                 else:
@@ -1237,7 +938,7 @@ class Daemon:
                     self.onion_address = "Not running"
                 self.is_ready = False
                 self._last_reachability = (None, None)
-                self._republish_trigger.reset()
+                self._recovery.note_offline()
                 self._wp_installed = None
                 self._was_ready = False
                 self._last_bootstrap_pct = 0
@@ -1247,12 +948,7 @@ class Daemon:
                 self._wedge_warning_fired = False
                 self.healthcheck_address = None
                 self._onionheaven_checked = False
-                self._onionheaven_registration_succeeded = False
-                self._onionheaven_heartbeat_succeeded = False
-                self._onionheaven_registration_in_flight = False
-                self._onionheaven_reclaim_succeeded = False
-                self._onionheaven_reclaim_in_flight = False
-                self._onionheaven_reclaim_last_attempt = 0
+                self.hub_client.reset_session()
                 self._tor_internally_ready = False
                 if self.web_log_process is not None:
                     self.stop_web_log_capture()
@@ -1287,7 +983,8 @@ class Daemon:
     _port_conflict_logged = False
 
     def _full_health_pass(self):
-        """Internet is there: WordPress, then the dual probe and the trigger."""
+        """Internet is there: WordPress, then the dual probe and the #266
+        recovery step (RecoveryWindow, shared with Linux)."""
         current_status = (self.is_running, self.onion_address)
         should_log = (current_status != self.last_status_logged) or not self.is_ready
         if not self._wordpress_confirmed:
@@ -1298,10 +995,8 @@ class Daemon:
             wordpress_ready = True
         tor_reachable = self.check_tor_reachability(log_result=should_log)
         self._reachability_stats.record_probe(tor_reachable, self._last_probe_code, self._last_probe_ms)
-        if self._republish_trigger.observe(time.time(), self._tor_internally_ready,
-                                           tor_reachable, self._last_probe_code,
-                                           self._last_probe_why):
-            self._request_descriptor_republish()
+        self._recovery.step(self._tor_internally_ready, tor_reachable,
+                            self._last_probe_code, self._last_probe_why)
 
         previous_ready = self.is_ready
         ready_now = wordpress_ready and tor_reachable
@@ -1316,9 +1011,7 @@ class Daemon:
                 self._reachability_stats.reset_session(_now)
             self.is_ready = True
             self._was_ready = True
-            self._onionheaven_reclaim_succeeded = False
-            self._onionheaven_reclaim_in_flight = False
-            self._onionheaven_reclaim_last_attempt = 0
+            self.hub_client.reset_reclaim()
             self._bootstrap_stall_count = 0
             self._yellow_since = None
             self._consecutive_fail_count = 0
@@ -1356,7 +1049,7 @@ class Daemon:
                     _trip_ts = time.time()
                     self._yellow_since = _trip_ts
                     self._bootstrap_stall_count = 0
-                    self._onionheaven_heartbeat_succeeded = False
+                    self.hub_client.heartbeat_succeeded = False
                     self.startup_time = _trip_ts
                     self._reachability_stats.enter_yellow(_trip_ts)
                     self.log(f"reachability: purple → yellow (http={self._last_probe_code}, "
@@ -1393,21 +1086,9 @@ class Daemon:
                 self.caffeine.start()
 
         tor_bootstrapped = self._last_bootstrap_pct >= 100 or self.is_ready
-        if (tor_bootstrapped and self._address_known()
-                and not self.is_onionheaven
-                and not self._onionheaven_registration_succeeded
-                and not self._onionheaven_registration_in_flight):
-            # On by default: "yes" or unset registers; "no" never does
-            # (the opt-out below asks the hub to forget an earlier
-            # registration). Re-read every cycle.
-            if onionheaven.get_registration_choice(self) == "yes":
-                self._onionheaven_registration_in_flight = True
-                onionheaven.start_registration_thread(self)
-
-        if (tor_bootstrapped and not self.is_onionheaven
-                and key_manager.is_valid_onion_address(self.onion_address)):
-            onionheaven.maybe_unregister_after_opt_out(self)
-            onionheaven.maintain_registration(self)
+        # The heartbeat on "yes" (or unset), the opt-out's /unregister on
+        # "no", and the record's upkeep: the client's, re-read every cycle.
+        self.hub_client.tick(tor_bootstrapped, self._address_known())
 
         if tor_bootstrapped and self._address_known() and not self._analytics_sharing_started:
             self._analytics_sharing_started = True
@@ -1441,7 +1122,7 @@ class Daemon:
 
     def check_wp_installed(self):
         try:
-            r = self._docker.run(wp_files.wp_cli_args("core", "is-installed"), timeout=10, quiet=True)
+            r = self._docker.wp("core", "is-installed", timeout=10, quiet=True)
             return r.ok
         except Exception:
             return None
@@ -1551,21 +1232,6 @@ class Daemon:
     def _signal_watchdog(self, container, sig):
         return launcher_ops.signal_watchdog(self._docker, container, sig)
 
-    def _republish_on_unreachable_enabled(self):
-        value = self.read_config_value("REPUBLISH_ON_UNREACHABLE", "yes")
-        return str(value).strip().lower() not in ("no", "0", "false", "off")
-
-    def _request_descriptor_republish(self):
-        """The RepublishTrigger fired: ask onionpress-tor's watchdog for
-        DEL+ADD (issue #266), or only log it with REPUBLISH_ON_UNREACHABLE=no."""
-        reason = self._republish_trigger.describe(time.time())
-        if not self._republish_on_unreachable_enabled():
-            self.log(f"reachability: {reason} — would request descriptor republish "
-                     "(REPUBLISH_ON_UNREACHABLE=no, log-only)")
-            return
-        status = launcher_ops.request_watchdog_republish(self._docker, "onionpress-tor", reason)
-        self.log(f"reachability: {reason} — {launcher_ops.describe_republish_request(status)}")
-
     def _maybe_emit_snapshot(self, force=False, fast=False):
         now = time.time()
         if not force and now - self._last_snapshot_ts < self._snapshot_interval_seconds:
@@ -1592,18 +1258,18 @@ class Daemon:
         self.log("System going to sleep")
         self._maybe_emit_snapshot(force=True, fast=True)
         self._sleeping = True
-        self._onionheaven_heartbeat_succeeded = False
+        self.hub_client.heartbeat_succeeded = False
         if not self.is_onionheaven:
             for container in ("onionpress-tor", "onionheaven"):
                 if self._signal_watchdog(container, "USR1"):
                     self.log(f"Sent USR1 (sleep) to {container} watchdog")
                 else:
                     self.log(f"Failed to send USR1 to {container} watchdog")
-            if self.is_ready and self._onionheaven_registration_succeeded:
+            if self.is_ready and self.hub_client.registration_succeeded:
                 t0 = time.monotonic()
                 ok = False
                 try:
-                    ok = bool(onionheaven.notify_onionheaven_offline(self, max_time=5))
+                    ok = bool(self.hub_client.notify_offline(max_time=5))
                 except Exception:
                     ok = False
                 self._record_suspend_offline(ok, int((time.monotonic() - t0) * 1000))
@@ -1618,16 +1284,12 @@ class Daemon:
         self.log("System wake detected — marking Tor as reconnecting")
         self._maybe_emit_snapshot(force=True)
         self._reachability_stats.reset_session(time.time())
-        self._republish_trigger.reset()
+        self._recovery.note_wake()
         self._sleeping = False
         self.startup_time = time.time()
         self.caffeine.start()
         self._onionheaven_checked = False
-        self._onionheaven_registration_succeeded = False
-        self._onionheaven_heartbeat_succeeded = False
-        self._onionheaven_registration_in_flight = False
-        self._heartbeat_loop_running = False
-        self._heartbeat_generation += 1
+        self.hub_client.wake()
         self._wordpress_confirmed = False
         if self.is_ready:
             self.is_ready = False
@@ -1678,7 +1340,7 @@ class Daemon:
             self.log("Analytics upload queued — will run when online")
             return
         try:
-            result = analytics_sharing._do_upload_cycle(self, include_active=True) or {}
+            result = analytics_sharing.upload_cycle(self, include_active=True) or {}
             status = result.get("status", "unknown")
             if status == "ok":
                 w, u = result.get("wanted", 0), result.get("uploaded", 0)
@@ -1743,7 +1405,7 @@ class Daemon:
             if "CLOUDFLARE_TUNNEL_TOKEN" in keys:
                 self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
             if "ONIONHEAVEN_ADDRESS" in keys:
-                onionheaven.ONIONHEAVEN_ADDRESS = onionheaven.configured_hub_address(
+                onionheaven.use_configured_hub(
                     self.read_config_value("ONIONHEAVEN_ADDRESS", ""), self.log)
             if self.is_running:
                 self.write_status_to_volume()
@@ -1962,7 +1624,8 @@ class Daemon:
         def run_proxy():
             try:
                 server = onion_proxy.ThreadingHTTPServer(("127.0.0.1", self.proxy_port),
-                                                         onion_proxy.OnionProxyHandler)
+                                                         onion_proxy.OnionProxyHandler,
+                                                         ports=lambda: self.ports)
                 server.docker_bin = docker_bin
                 server.docker_env = docker_env
                 server.onion_address = self.onion_address
@@ -2191,11 +1854,20 @@ class Daemon:
 
         def generator():
             failed = {}
+            warned_unsafe = False
             if self._stop.wait(10):
                 return
             while not self._stop.is_set():
                 try:
                     if os.path.isdir(creations_dir):
+                        if not thumbnails.thumbs_dir_ok(creations_dir):
+                            if not warned_unsafe:
+                                self.log("My Creations/.thumbs is not a real folder "
+                                         "(a link?); no thumbnails until it is removed")
+                            warned_unsafe = True
+                            self._stop.wait(60)
+                            continue
+                        warned_unsafe = False
                         stale, orphans, _complete = thumbnails.scan(creations_dir)
                         removed = thumbnails.prune(creations_dir, orphans)
                         if removed:
@@ -2203,22 +1875,25 @@ class Daemon:
                         for src, rel, mtime in stale:
                             if failed.get(src) == mtime:
                                 continue
-                            thumb = thumbnails.thumb_path(creations_dir, rel)
-                            os.makedirs(os.path.dirname(thumb), exist_ok=True)
-                            try:
-                                subprocess.run(["qlmanage", "-t", "-s", "400", "-o",
-                                                os.path.dirname(thumb), src],
-                                               capture_output=True, timeout=30)
-                            except subprocess.TimeoutExpired:
-                                failed[src] = mtime
+                            # Rendered into a private folder, then copied in
+                            # through no-follow fds (onionpress.thumbnails, #460).
+                            if not thumbnails.source_ok(creations_dir, src):
                                 continue
-                            ql_output = os.path.join(os.path.dirname(thumb), os.path.basename(src) + ".png")
-                            if os.path.exists(ql_output) and ql_output != thumb:
-                                os.rename(ql_output, thumb)
-                            elif not os.path.exists(thumb):
-                                failed[src] = mtime
-                            else:
-                                failed.pop(src, None)
+                            with tempfile.TemporaryDirectory(prefix="onionpress-thumb-") as tmp:
+                                try:
+                                    subprocess.run(["qlmanage", "-t", "-s", "400", "-o",
+                                                    tmp, src],
+                                                   capture_output=True, timeout=30)
+                                except subprocess.TimeoutExpired:
+                                    failed[src] = mtime
+                                    continue
+                                ql_output = os.path.join(tmp, os.path.basename(src) + ".png")
+                                if (os.path.isfile(ql_output)
+                                        and not os.path.islink(ql_output)
+                                        and thumbnails.install(creations_dir, rel, ql_output)):
+                                    failed.pop(src, None)
+                                else:
+                                    failed[src] = mtime
                 except Exception as e:
                     self.log(f"Thumbnail generation error: {e}")
                 self._stop.wait(60)

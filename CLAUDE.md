@@ -229,6 +229,10 @@
   `CLOUDFLARE_TUNNEL_TOKEN` (write-only field). Log changes via
   `describe_change`/`loggable_value`. Every page key reaches a reader
   (`tests/test_settings_page_keys_are_read.py`).
+- **The page never sets `CLOUDFLARE_TUNNEL_TOKEN` unattended** (#463; its
+  tunnel's owner sees the host's IP): `PAGE_HELD_KEYS` values are held,
+  asked on a Mac ("clearnet-tunnel"), refused on Linux; removal is
+  applied. `TestTunnelToken` in `tests/test_handle_action.py`.
 - **Page requests are handled only by `onionpress handle-action`**
   (`handle_action.py`, both platforms): fixed verbs (`ACTIONS`), each run
   through the launcher; `update` only checks on both platforms; on a Mac an
@@ -333,6 +337,11 @@
   (no `allow-scripts`) and `nosniff`, on both paths.
   `tests/test_creations_sandboxed_serving.py`.
 - Thumbnails are never removed when part of a folder could not be read.
+- **Host code that walks the Creations mount follows no link** (#460):
+  `.thumbs` must be a real folder, linked sources are skipped, removals and
+  writes go through `O_NOFOLLOW` folder fds (`thumbnails.prune`/`install`),
+  qlmanage renders into a private temp folder.
+  `tests/test_creations_thumbnails.py`.
 
 ## Follow Requests Stay Off the Container Network
 - **Never call `wp_remote_*`/`fetch_feed` directly for a follow**: use
@@ -342,6 +351,50 @@
 ## Imported Bodies Are Filtered at Ingest (issue #403)
 - Every foreign HTML field goes through `wp_kses_post()` where it is read.
   `tests/test_importers_kses_at_ingest.py` (census).
+- **Every importer comment goes through `onionpress_social_insert_comment`**
+  (#462; `wp_insert_comment` runs no comment filter): author, URL and
+  content are cleaned before storing. Tweet text is escaped first.
+  Same test.
+- **Every foreign title and excerpt is `onionpress_social_plain_text()`**
+  (#472, `onionpress-social-archive.php`:
+  `sanitize_text_field( wp_strip_all_tags( … ) )`, never
+  `html_entity_decode` afterwards, which turned `&lt;script&gt;` back
+  into markup): the_title() and the_excerpt() run no kses, and the
+  save-time `title_save_pre` kses that stripped a Reddit thread's
+  `<img onerror>` title under wp-cron is off for the owner's own Sync
+  now or ZIP upload (unfiltered_html). Reddit thread titles are cleaned
+  when fetched (raw_json=1), when the cache is read and when applied;
+  CSV/API titles and every `onionpress_reddit_insert_post`; the blog
+  importer's `title.rendered` / `excerpt.rendered`; the previews cut
+  from bodies (Twitter, Bluesky, Mastodon, blog). The census holds every
+  `post_title` / `post_excerpt` to the helper (an attachment's
+  `sanitize_title` aside); a new importer's titles go through it.
+
+## Importer ZIP Uploads Are Held to Limits (issue #473)
+- The Twitter and Reddit importers take a ZIP from any site administrator
+  and used `extractTo` on every member with an allowed extension: no cap
+  on count, size, total or ratio. Both now unpack through
+  `onionpress_social_zip_extract( $zip_path, $target_dir, $pattern )`
+  (`onionpress-social-archive.php`), modelled on
+  `backup.check_archive_size`: before a byte is written the archive may
+  list at most `ONIONPRESS_SOCIAL_ZIP_MAX_MEMBERS` (100,000) members,
+  none over `ONIONPRESS_SOCIAL_ZIP_MAX_MEMBER_BYTES` (2 GiB), adding up
+  to at most the larger of `ONIONPRESS_SOCIAL_ZIP_MIN_UNPACK_BUDGET`
+  (1 GiB) and `ONIONPRESS_SOCIAL_ZIP_MAX_EXPANSION` (20) times the
+  upload's own size, the wanted members must fit the disk with
+  `ONIONPRESS_SOCIAL_ZIP_FREE_RESERVE` (512 MiB) to spare, and a
+  symlink, special file, absolute, `..`, backslash or control-character
+  name or a wanted name listed twice refuses the archive whole. Only the
+  members an importer reads are extracted, by name pattern
+  (`ONIONPRESS_TWITTER_ZIP_MEMBERS`: `data/tweets*.js`, `data/account.js`,
+  the tweet media files; `ONIONPRESS_REDDIT_ZIP_MEMBERS`: `posts.csv`,
+  `comments.csv`; each at the root or one folder down), each written by
+  the plugin from `getStream` and held to its listed size (a member that
+  inflates past it fails the extraction and what was written is removed).
+  The workdir is 0700; a refusal is shown with its reason. Nothing in
+  the plugins may call `extractTo` again. `tests/test_social_zip_limits.py`
+  (the limits, the patterns, and archives built with zipfile run under
+  php where installed).
 
 ## The Blogroll Refreshes in wp-cron, Never in a Page View (issue #314)
 - The serve path only reads cached items and schedules
@@ -379,6 +432,10 @@
 - Port 8083 (web-server.py) is mapped onto the onion address only when
   `hub_api_exposed()` (hub or OnionHome). socat listeners are
   `-T 30 … max-children=64`. `tests/test_tor_node_surface.py`.
+- **do_POST checks every body's length before a handler runs** (digits
+  only, the path's limit, no chunked); bodies are read under a deadline,
+  at most `MAX_CONNECTIONS` connections (#461). Handlers read only via
+  `_read_json` and check `is False`. `tests/test_hub_request_limits.py`.
 
 ## Containers Drop Every Capability
 - **Every compose service, takeover worker and one-shot `docker run` has
@@ -399,6 +456,113 @@
 - `$DATA_DIR` is 0700 on every start; every creation of `config` is 0600;
   every `os.makedirs` of the data dir passes `mode=0o700`.
   `tests/test_data_dir_permissions.py`.
+- **The .deb postinst and install.sh make it as the user, never as root**
+  (issue #471): the same `plain_path` / `data_dir_setup` /
+  `first_install_files` in both (test-held identical), run through
+  `runuser -u "$REAL_USER" --` (postinst) or `run_as_user` (install.sh);
+  `install -d -m 700`, secrets and config under `umask 077` + `set -C`
+  (0600 from the first byte, a link at the name fails the write), a link
+  or a non-folder/non-file at `~/.onionpress`, `secrets` or `config`
+  refused with a message (the launcher makes what is missing), existing
+  files never rewritten; the root `chown -R` fixup is gone. Still root's:
+  the bootstrap's `docker-rootless-setup.log` write + chown.
+  `tests/test_deb_postinst_data_dir.py`.
+
+## Container Output Never Reaches Bash Arithmetic (issue #466)
+- Inside `$(( ))`, `(( ))`, `[[ a -gt b ]]`, `let` and `declare -i` bash
+  evaluates a variable's VALUE as an expression, and `a[$(cmd)]` in it
+  runs cmd (bash 3.2 and 5). The Mac launcher's `detect_container_runtime`
+  put the tor container's MemTotal (`docker exec … awk`) straight into
+  `$(( ))`: root in that container chose what the next `onionpress start`
+  ran as the Mac user. Every number read out of a container, or derived
+  from docker's answer, is now held to `[[ "$x" =~ ^[0123456789]{1,N}$ ]]
+  || x=0` before arithmetic sees it (`_vm_mem_kb`, `_vm_cpus`; Linux's
+  `started_epoch`). `[ a -gt b ]` (the test builtin) does not evaluate
+  expressions, but write the guard anyway: the census in
+  `tests/test_launcher_container_arithmetic.py` follows a value assigned
+  from `docker`/`wp_cli`/`wp_exec` output (transitively) into any
+  arithmetic context in the three launcher scripts and fails on one
+  without that guard line between assignment and use; it also runs the
+  guarded blocks under bash with `a[$(>file)]` as the container's answer.
+
+## The Launchers' Python Ignores the Current Directory (issue #470)
+- `python3 -m x` and `python3 -c` put the cwd first on sys.path (`-m`
+  ahead of PYTHONPATH), and WordPress has My Creations read-write: a
+  planted `socket.py` or `onionpress/__init__.py` there ran as the host
+  user when the owner ran `onionpress …` from that folder. Linux: every
+  `python3` in `linux/onionpress` runs `-I` (no cwd or script dir on
+  sys.path, no PYTHON* environment, no user site; `-P`/PYTHONSAFEPATH
+  need 3.11, which the .deb's `python3` does not promise). `op_py` is
+  `python3 -I -B -c '<boot>' "$ONIONPRESS_PYTHONPATH" "$@"`: the boot
+  puts the argument on sys.path and `runpy.run_module("onionpress.cli")`;
+  `-B` keeps `PYTHONDONTWRITEBYTECODE`'s effect; PYTHONPATH stays in the
+  environment for the Python the CLI starts itself (derivatives'
+  `sys.executable -m onionpress.cli`, still un-isolated: open). `op_py`
+  is self-contained (the harnesses extract it alone); `OP_PY` is the same
+  argv for `run_detached`. A script run by path (`"$SCRIPTS_DIR/key_manager.py"`)
+  gets its own root-owned dir on sys.path, not the cwd, and stays as is
+  (the key-replacement test holds the two launchers' bodies equal).
+  Mac: `bundled_python` sets `PYTHONSAFEPATH=1` (never `-I`: it would
+  ignore PYTHONHOME) and its one `-c` says `-P` too. No `cd /`: nothing
+  in either launcher depends on the cwd, and relative backup paths would
+  break. `tests/test_launcher_python_isolated.py` (census; op_py and the
+  snippets run from a folder of planted modules).
+
+## WordPress's Installer Is the Owner's Alone (issue #464)
+- Until WordPress is installed, `wp-admin/install.php` takes the first
+  visitor's choice of admin (user 1, super admin after the multisite
+  conversion); the .deb starts the units at once, Linux binds WordPress's
+  port to every interface by default, Tor serves the site as soon as the
+  key exists, and a setup that found WordPress installed adopted it.
+- **Only a WordPress OnionPress installed is adopted.** Every install
+  writes `~/.onionpress/.wordpress-installed-by-onionpress`
+  (`setup_logic.INSTALLED_BY_ONIONPRESS_MARKER`: user 1's `user_registered`
+  as WordPress records it, else `unknown`): `install_fresh_wordpress`
+  (after the password is set) and both launchers' bash `setup`
+  (`note_wordpress_installed_by_onionpress`, test-held identical, right
+  after `wp core multisite-install`). `provision_existing_wordpress`
+  refuses an installed WordPress whose marker is missing or does not
+  match the live install (`FOREIGN_INSTALL_MSG`, False; the Linux tray's
+  legacy branch gets the same answer) unless `adopt_existing`:
+  `onionpress provision --adopt-existing`. A restored site's stamp
+  differs from the marker: `provision` is not for restored sites.
+  `tests/test_setup_adopts_only_its_own_install.py`.
+- **Linux binds WordPress's port to 127.0.0.1 until WordPress is
+  installed.** `start_containers` composes with
+  `ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)"` (the config
+  value only once a start has seen WordPress installed:
+  `$DATA_DIR/.wordpress-installed`, a cache verified every start), then,
+  with `wp core is-installed`'s answer, `bind_wordpress_port_for_install_state`
+  records the verdict and recreates the wordpress container when its
+  mapping (`docker port`) is not the one the state calls for: once per
+  install, right after setup. Not installed: `hold_heartbeat_client_until_installed`
+  masks the heartbeat user unit at runtime (`systemctl --user mask
+  --runtime`, gone at reboot; `start_heartbeat_client` respects it), so
+  nothing registers the address with the hub before the site exists.
+  Every setup path ends in `after_wordpress_installed` (port moved,
+  hold released): the `provision-post-install` subcommand that
+  `install_fresh_wordpress` runs (the tray, `provision`), the `setup`
+  case, `start_containers` for an installed site. Only the wordpress
+  service's port reads `ONIONPRESS_BIND_HOST` (test-held), so the
+  per-command override reaches nothing else. The .deb postinst's
+  upgrade `try-restart onionpress-heartbeat` fails while the unit is
+  held (it prints the commands and never fails the install).
+  `tests/test_linux_wordpress_port_until_installed.py` (the functions
+  under bash against stub docker/systemctl).
+- **The image denies `install.php` and `setup-config.php` to every
+  source but the owner's**: `onionpress-install-page.conf` (`<Files ~>`,
+  `Require ip 127.0.0.0/8 ::1` or `%{REMOTE_ADDR} == osenv('ONIONPRESS_WP_GATEWAY')`,
+  the container's default gateway, where the published port's requests
+  arrive from on both platforms: auto-login's "local" rule). Tor visitors
+  arrive from the tor container, cloudflared's from its own address. The
+  entrypoint's `gateway_from_route` (the plugin's /proc/net/route parse,
+  every field checked before the arithmetic) exports the variable before
+  Apache starts; none means loopback only. Verified against Apache 2.4.58
+  (`TestUnderApache` runs where apache2 is installed). The rule stays
+  after setup. **Needs a WordPress image publish**; until then an old
+  image still serves the installer to Tor, which the Linux bind and the
+  adopt refusal do not cover. No `DISALLOW_FILE_MODS` (it would break the
+  owner's plugin installs). `tests/test_wordpress_installer_local_only.py`.
 
 ## Colima VM Sandboxing
 - The VM has exactly two mounts: `~/.onionpress/shared:w` and
@@ -439,6 +603,50 @@
   `analytics_room`, `MAX_NAMES_PER_ADDRESS`); existing pairs always have
   room. The numbers are still the issue's decision.
   `tests/test_hub_registration_caps.py`.
+
+## The Hub Bounds What a Free Key Leaves and Tells (issues #467, #468, #469)
+- #467: `/offline`, `/unregister` and the signed status query answer 404
+  for an address the registry has no row for, before a replay mark or an
+  address log line is written (`_verify_signature(..., registered_only=True)`:
+  after `verify_payload`, before `note_signed_request`; only `/online`,
+  bounded by `registration_room`, may leave anything). Every free-text
+  body field goes through `onionheaven_common.short_text` (64 printable
+  characters: the registry's `version`, the address log lines, the
+  analytics metadata and audit). `_addr_logs` is an LRU of
+  `_ADDR_LOGS_MAX_ADDRESSES` (8192, above `MAX_REGISTRANTS`), and
+  `note_signed_request` deletes marks older than the tolerance on every
+  insert (`SIGNED_REQUEST_MARK_TTL`, an index on `last_timestamp`).
+  `UnknownAddressTest` and the pruning test in
+  `tests/test_hub_signature_verification.py`, `BoundedGrowthTest` in
+  `tests/test_hub_registration_caps.py`, the stored version in
+  `tests/test_hub_stored_keys.py`.
+- #468: `/logs/manifest` and `/logs/upload` take a v3 `healthcheck_address`
+  only (with "" the files landed in `<content>/` itself, outside the
+  per-instance quota; the body has to be read to see it), and
+  `analytics_pair_room` holds the pair's folder, sidecars included, to
+  `ANALYTICS_PER_INSTANCE_QUOTA` before every write (507). `analytics_disk_full`
+  is the one reader of `shutil.disk_usage`, on `ANALYTICS_DIR` (a bind
+  mount of the host's folder; "/" was the container's disk). The cleanup
+  trims stray files under `<content>/` as a group of their own;
+  `MAX_MANIFEST_FILES` bounds a manifest. No replay marks on `/logs/*`:
+  the client re-sends the same signed upload when an ACK is lost (same
+  second, so the same signature), and a replay re-stores identical bytes
+  within the quota. `AnalyticsQuotaTest` in `tests/test_hub_registration_caps.py`.
+- #469 (decided conservatively, 2026-10-29): `GET /status/<address>`
+  answers `{address, registered, status}` for a content address only (a
+  healthcheck address is 404: it names nothing on its own); the detail
+  (healthcheck address, version, every time, audit, `recent_logs`) answers
+  `POST /status/<address>` signed by the address's own key under
+  `STATUS_ENDPOINT` ("status"), replay-marked like `/offline`, 404 when
+  never registered; the aggregate `/status` keeps its counts and lost
+  `takeover_workers` (names, per-worker queues; nothing read it).
+  Consumers: the Mac daemon's `onionheaven._heartbeat_landed` (did a
+  timed-out `/online` land?) is the one reader of the detail and signs
+  its query (`onionheaven.STATUS_ENDPOINT`, test-tied); the launchers'
+  hub-address check and the heartbeats read only the aggregate; linux/,
+  the plugins and tests/stress read neither form. A hub without this
+  release still answers the old GET. `tests/test_hub_status_privacy.py`
+  (server, client and a consumer census).
 
 ## Registry Names Reach Docker Only as Workers'
 - Registry data is attacker-writable: a name reaches docker only through
@@ -548,9 +756,12 @@
 - Zip-bomb limits (`check_archive_size`); format 2's inner zip is extracted
   by zipfile only; format 1's `unzip -P` under `ulimit -f` and a disk
   watchdog. `tests/test_backup_extract_limits.py`.
-- Restored keys (site and Linux healthcheck) are checked before use; the
-  hostname is written from the key. `tests/test_backup_healthcheck_key_restore.py`,
-  `tests/test_tor_watchdog_service_ids.py`.
+- A restored site key is checked before use; the hostname is written from
+  the key. `tests/test_tor_watchdog_service_ids.py`.
+- **The healthcheck key is in no backup on either platform**: a start makes
+  a new one and the heartbeat tells the hub; a restore takes none and
+  removes a key an older restore staged.
+  `tests/test_healthcheck_key_never_backed_up.py`.
 - **A restored dump runs only SQL**: `backup.db_import` streams it on stdin
   to a client run `--sandbox --binary-mode --local-infile=0` (refuse a
   client without `--sandbox`); the DB password re-set uses the host
@@ -641,6 +852,26 @@
   `_from_a_web_page` refuses foreign `Origin`/`Sec-Fetch-Site`/`Referer`;
   no clearnet fetch, no `CONNECT`. `tests/test_browser_extension.py`,
   `tests/test_strict_onion_addresses.py`.
+- **And only a request whose `Host` names it** (issue #465, `own_hosts`:
+  `127.0.0.1`/`localhost`/`[::1]` with its port; a bare name only on port
+  80): a page at a name its DNS points at 127.0.0.1 (rebinding) sends
+  `Sec-Fetch-Site: same-origin` and no `Origin`, what the setup page's
+  fetch sends. Checked first on every handler, OPTIONS and POST included;
+  only an absolute-form request (`GET http://x.onion/`) names its target
+  in `Host`. 403 without echoing the request.
+- **A `/proxy/` page is sandboxed off the proxy's origin**: every response
+  under `/proxy/` carries `PROXIED_PAGE_CSP` (`sandbox allow-forms
+  allow-scripts allow-popups allow-modals allow-downloads`, never
+  `allow-same-origin`, added in `end_headers`), so a visited onion site's
+  script is no longer same-origin with `/status` or `/setup`. Its own
+  requests then arrive as `cross-site` with `Origin: null` or none, what
+  another site's page sends, so `_rewrite_onion_links` writes
+  `/proxy/<PROXY_PAGE_TOKEN>/<host>/...` (a per-run secret only a page the
+  proxy served knows) and a tokened request skips `_from_a_web_page`; the
+  plain `/proxy/<host>/` form (tools, the address bar) keeps the check.
+  `_setup_post_same_origin` also needs `Sec-Fetch-Site: same-origin` when
+  it is sent. Absolute-form responses get no CSP: that page is the
+  onion's own origin.
 - Fallback pages only link the Wayback Machine, never redirect. Not
   live-tested on a Mac; the native host likely does not start from a
   py2app build.

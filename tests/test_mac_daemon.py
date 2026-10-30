@@ -26,6 +26,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import daemon as op_daemon  # noqa: E402
+from onionpress import daemon_client as op_daemon_client  # noqa: E402
 from onionpress import config as op_config  # noqa: E402
 from onionpress.docker import DockerResult  # noqa: E402
 from onionpress.platform import resolve_paths  # noqa: E402
@@ -44,6 +45,100 @@ def _methods(src):
     cls = [n for n in tree.body if isinstance(n, ast.ClassDef)][0]
     return {n.name: ast.get_source_segment(src, n)
             for n in cls.body if isinstance(n, ast.FunctionDef)}
+
+
+# The UI processes' code: the menubar and the windows it opens.
+UI_SOURCES = {"menubar": "src/menubar.py",
+              "onionpress.setup_window": "src/onionpress/setup_window.py",
+              "onionpress.settings_ui": "src/onionpress/settings_ui.py"}
+
+# Run in a fresh interpreter: AppKit, rumps and objc are stand-ins (any
+# attribute is a class or a pass-through decorator), so the UI modules
+# import headless, without PyObjC and without touching the window server;
+# prints the onionpress modules the imports loaded.
+_UI_IMPORT_PROBE = r"""
+import importlib, json, sys, types
+
+class _Meta(type):
+    def __getattr__(cls, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub
+
+class _Stub(metaclass=_Meta):
+    def __init__(self, *a, **k):
+        pass
+    def __call__(self, *a, **k):
+        return _Stub()
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub()
+
+def _decorator(*a, **k):
+    if len(a) == 1 and callable(a[0]) and not k:
+        return a[0]
+    return lambda f: f
+
+class _Mod(types.ModuleType):
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _Stub if name[:1].isupper() else _decorator
+
+for name in ("rumps", "AppKit", "objc", "Foundation", "Quartz",
+             "PyObjCTools", "PyObjCTools.AppHelper"):
+    sys.modules[name] = _Mod(name)
+sys.path.insert(0, sys.argv[1])
+for target in sys.argv[2:]:
+    importlib.import_module(target)
+print(json.dumps(sorted(m for m in sys.modules
+                        if m == "onionpress" or m.startswith("onionpress."))))
+"""
+
+
+def _named_onionpress_modules(rel):
+    """Every onionpress module *rel* names in an import statement, at the
+    top or inside a function (a lazy import still runs in that process)."""
+    names = set()
+    for node in ast.walk(ast.parse(_read(rel))):
+        if isinstance(node, ast.Import):
+            names.update(a.name for a in node.names if a.name.startswith("onionpress."))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative: inside the onionpress package
+                base = "onionpress" + (f".{node.module}" if node.module else "")
+            elif node.module and (node.module == "onionpress"
+                                  or node.module.startswith("onionpress.")):
+                base = node.module
+            else:
+                continue
+            names.add(base)
+            if base == "onionpress":
+                names.update(f"onionpress.{a.name}" for a in node.names)
+    names.discard("onionpress")
+    return names
+
+
+_UI_CLOSURE = []
+
+
+def ui_import_closure():
+    """The onionpress modules a UI process loads: the closure of importing
+    menubar, setup_window and settings_ui, and every onionpress module they
+    import lazily, in a subprocess (issue #475). Cached: one run per suite."""
+    if not _UI_CLOSURE:
+        targets = set(UI_SOURCES)
+        for rel in UI_SOURCES.values():
+            targets |= _named_onionpress_modules(rel)
+        env = dict(os.environ, DOCKER_HOST="unix:///var/empty/no-docker-for-tests.sock")
+        r = subprocess.run([sys.executable, "-c", _UI_IMPORT_PROBE,
+                            os.path.join(PROJECT_ROOT, "src"), *sorted(targets)],
+                           capture_output=True, text=True, timeout=120, env=env,
+                           cwd=PROJECT_ROOT)
+        if r.returncode != 0:
+            raise AssertionError(f"importing the UI modules failed:\n{r.stderr}")
+        _UI_CLOSURE.append(frozenset(json.loads(r.stdout.strip().splitlines()[-1])))
+    return _UI_CLOSURE[0]
 
 
 class FakeDocker:
@@ -281,17 +376,40 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(s["display_state"], "starting")
         self.assertIsNotNone(s["yellow_since"])
         self.assertEqual(s["probe"]["code"], "000:rc=28")
-        self.assertEqual(self.d._republish_trigger.failing_since, self.d._republish_trigger.failing_since)
+        self.assertIsNotNone(self.d._recovery.trigger.failing_since)
+
+    def test_the_daemon_runs_the_shared_recovery_step(self):
+        """Issue #480: one #266 driver. The daemon's trigger is a
+        reachability.RecoveryWindow's, and a due request reaches the
+        watchdog through it (or only the log with
+        REPUBLISH_ON_UNREACHABLE=no)."""
+        from onionpress.health import RepublishTrigger
+        from onionpress.reachability import RecoveryWindow
+        self.assertIsInstance(self.d._recovery, RecoveryWindow)
+        self.d._recovery.trigger = RepublishTrigger(failing_for=0, fast_for=0, cooldown=0)
+        self.tick()
+        self.health.external = (False, "000:rc=28")
+        with mock.patch("onionpress.launcher_ops.request_watchdog_republish",
+                        return_value="requested") as req:
+            self.tick()
+        req.assert_called_once()
+        self.assertEqual(req.call_args.args[1], "onionpress-tor")
+        with open(os.path.join(self.dir, "config"), "a") as f:
+            f.write("REPUBLISH_ON_UNREACHABLE=no\n")
+        with mock.patch("onionpress.launcher_ops.request_watchdog_republish") as req:
+            self.tick()
+        req.assert_not_called()
+        self.assertIn("log-only", "".join(self._log_text()))
 
     def test_no_internet_is_offline_and_resets_the_window(self):
         self.tick()
         self.health.internet = False
-        self.d._republish_trigger.reset = mock.Mock()
+        self.d._recovery.trigger.reset = mock.Mock()
         self.tick()
         s = self.state()
         self.assertFalse(s["has_internet"])
         self.assertEqual(s["display_state"], "offline")
-        self.d._republish_trigger.reset.assert_called()
+        self.d._recovery.trigger.reset.assert_called()
 
     def test_the_config_marker_is_taken_by_the_daemon(self):
         op_config.note_config_changed(self.dir, ["PREVENT_SLEEP"])
@@ -328,6 +446,33 @@ class TestStatusPass(_DaemonCase):
         self.assertFalse(self.d.checking)
 
 
+class TestPorts(_DaemonCase):
+    """Issue #476: the daemon's ports are one PortConfig (self.ports);
+    _apply_ports replaces it, exports it to the environment the launcher
+    inherits and keeps onion_proxy's defaults in step."""
+
+    def test_apply_ports_moves_all_of_them_together(self):
+        from onionpress import onion_proxy
+        for name in ("PROXY_PORT", "PHP_PROXY_PORT"):
+            self.addCleanup(setattr, onion_proxy, name, getattr(onion_proxy, name))
+        pc = op_config.PortConfig.from_offset(10000)
+        with mock.patch.dict(os.environ):
+            self.d._apply_ports(pc)
+            self.assertEqual(os.environ["ONIONPRESS_PORT_OFFSET"], "10000")
+            self.assertEqual(os.environ["ONIONPRESS_WP_PORT"], "18080")
+            self.assertEqual(os.environ["ONIONPRESS_SOCKS_PORT"], "19050")
+            self.assertEqual(os.environ["ONIONPRESS_PROXY_PORT"], "19077")
+        self.assertIs(self.d.ports, pc)
+        self.assertEqual((self.d.port_offset, self.d.wp_port, self.d.socks_port,
+                          self.d.proxy_port), (10000, 18080, 19050, 19077))
+        self.assertEqual((onion_proxy.PROXY_PORT, onion_proxy.PHP_PROXY_PORT),
+                         (19077, 18080))
+
+    def test_the_port_attributes_are_views(self):
+        with self.assertRaises(AttributeError):
+            self.d.wp_port = 1
+
+
 class TestHubLoopsGate(_DaemonCase):
     """The heartbeat starts only on "yes" (unset = yes), once Tor is
     bootstrapped and the address is known; the opt-out and the upkeep run
@@ -342,29 +487,41 @@ class TestHubLoopsGate(_DaemonCase):
     def _run(self, choice):
         with open(os.path.join(self.dir, "config"), "w") as f:
             f.write(f"REGISTER_WITH_ONIONHEAVEN={choice}\n" if choice is not None else "")
-        with mock.patch("onionpress.onionheaven.start_registration_thread") as start, \
-                mock.patch("onionpress.onionheaven.maybe_unregister_after_opt_out") as optout, \
-                mock.patch("onionpress.onionheaven.maintain_registration") as maintain, \
+        client = self.d.hub_client
+        with mock.patch.object(client, "start_registration_thread") as start, \
+                mock.patch.object(client, "maybe_unregister_after_opt_out") as optout, \
+                mock.patch.object(client, "maintain_registration") as maintain, \
                 mock.patch("onionpress.analytics_sharing.start_analytics_sharing") as analytics:
             self.d._hub_loops()
         return start, optout, maintain, analytics
 
+    def test_the_daemon_holds_one_client_of_itself(self):
+        from onionpress import onionheaven
+        client = self.d.hub_client
+        self.assertIsInstance(client, onionheaven.OnionHeavenClient)
+        self.assertIs(client.app, self.d)
+        self.assertIs(onionheaven.client_of(self.d), client)
+        self.assertTrue(client.drives_own_snapshot)
+        self.d._sleeping = True
+        self.assertTrue(client._sleeping())
+
     def test_yes_and_unset_start_the_heartbeat(self):
         for choice in ("yes", None):
             with self.subTest(choice=choice):
-                self.d._onionheaven_registration_in_flight = False
+                self.d.hub_client.registration_in_flight = False
                 start, optout, maintain, analytics = self._run(choice)
-                start.assert_called_once_with(self.d)
-                optout.assert_called_once_with(self.d)
-                maintain.assert_called_once_with(self.d)
+                start.assert_called_once_with()
+                optout.assert_called_once_with()
+                maintain.assert_called_once_with()
+                self.assertTrue(self.d.hub_client.registration_in_flight)
 
     def test_no_and_a_typo_never_start_it(self):
         for choice in ("no", "nope"):
             with self.subTest(choice=choice):
-                self.d._onionheaven_registration_in_flight = False
+                self.d.hub_client.registration_in_flight = False
                 start, optout, maintain, analytics = self._run(choice)
                 start.assert_not_called()
-                optout.assert_called_once_with(self.d)
+                optout.assert_called_once_with()
 
     def test_not_before_bootstrap(self):
         self.d._last_bootstrap_pct = 50
@@ -384,8 +541,8 @@ class TestSleepWake(_DaemonCase):
     def test_sleep_signals_the_watchdogs_and_pauses(self):
         self.tick()
         with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True) as sig, \
-                mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
-            self.d._onionheaven_registration_succeeded = True
+                mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
+            self.d.hub_client.registration_succeeded = True
             self.d.handle_sleep()
         self.assertTrue(self.d._sleeping)
         self.assertEqual([c.args[1:] for c in sig.call_args_list],
@@ -396,12 +553,14 @@ class TestSleepWake(_DaemonCase):
 
     def test_wake_resets_the_window_and_supersedes_the_heartbeat(self):
         self.tick()
-        self.d._republish_trigger.reset = mock.Mock()
-        gen = self.d._heartbeat_generation
+        self.d._recovery.trigger.reset = mock.Mock()
+        gen = self.d.hub_client.heartbeat_generation
+        self.d.hub_client.registration_succeeded = True
         with mock.patch("onionpress.launcher_ops.signal_watchdog", return_value=True) as sig:
             self.d.handle_wake()
-        self.d._republish_trigger.reset.assert_called_once()
-        self.assertEqual(self.d._heartbeat_generation, gen + 1)
+        self.d._recovery.trigger.reset.assert_called_once()
+        self.assertEqual(self.d.hub_client.heartbeat_generation, gen + 1)
+        self.assertFalse(self.d.hub_client.registration_succeeded)
         self.assertFalse(self.d._sleeping)
         self.assertFalse(self.d.is_ready)
         self.assertEqual([c.args[1:] for c in sig.call_args_list],
@@ -409,23 +568,23 @@ class TestSleepWake(_DaemonCase):
 
     def test_usr1_sends_offline_and_acknowledges(self):
         self.tick()
-        with mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
-            self.d._onionheaven_registration_succeeded = True
+        with mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
+            self.d.hub_client.registration_succeeded = True
             self.d._offline_now()
         off.assert_called_once()
         self.assertTrue(os.path.exists(os.path.join(self.dir, op_daemon.OFFLINE_ACK_MARKER)))
 
     def test_shutdown_sends_offline_only_for_a_quit(self):
         self.tick()
-        self.d._onionheaven_registration_succeeded = True
+        self.d.hub_client.registration_succeeded = True
         self.d.stop_onion_proxy = lambda: None
-        with mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
+        with mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
             self.d._shutdown()
         off.assert_not_called()                        # launchd restart / update: coming back
         with open(os.path.join(self.dir, op_daemon.QUITTING_MARKER), "w") as f:
             f.write("1")
         self.d._quitting = False
-        with mock.patch("onionpress.onionheaven.notify_onionheaven_offline", return_value=True) as off:
+        with mock.patch.object(self.d.hub_client, "notify_offline", return_value=True) as off:
             self.d._shutdown()
         off.assert_called_once()                       # `daemon stop` for a quit
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
@@ -533,18 +692,18 @@ class TestLaunchdAgent(unittest.TestCase):
         def launchctl(args, timeout=20):
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, "", "")
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: next(states)), \
-                mock.patch.object(op_daemon, "_gui_domain", lambda: "gui/501"):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: next(states)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
         self.assertEqual(calls, [["bootstrap", "gui/501", self.plist]])
         # Loaded but not running: kickstart
         calls.clear()
         states = iter([(True, None), (True, 7)])
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: next(states)), \
-                mock.patch.object(op_daemon, "_gui_domain", lambda: "gui/501"):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: next(states)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.start_agent(self.launcher, self.dir, self.lines.append, self.plist)
         self.assertTrue(ok)
         self.assertEqual(calls, [["kickstart", "gui/501/org.onionpress.daemon"]])
@@ -557,9 +716,9 @@ class TestLaunchdAgent(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "", "")
         with open(op_daemon.pid_path(self.dir), "w") as f:
             f.write(str(2 ** 22 - 1))      # not alive: nothing to wait for
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (True, None)), \
-                mock.patch.object(op_daemon, "_gui_domain", lambda: "gui/501"):
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (True, None)), \
+                mock.patch.object(op_daemon_client, "_gui_domain", lambda: "gui/501"):
             ok = op_daemon.stop_agent(self.dir, self.lines.append, self.plist, offline=True)
         self.assertTrue(ok)
         self.assertEqual(calls, [["bootout", "gui/501/org.onionpress.daemon"]])
@@ -567,26 +726,26 @@ class TestLaunchdAgent(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
         with open(op_daemon.pid_path(self.dir), "w") as f:
             f.write(str(os.getpid()))
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (False, None)), \
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)), \
                 mock.patch.object(op_daemon.os, "kill") as kill:
             op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=True)
         self.assertTrue(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
         kill.assert_any_call(os.getpid(), op_daemon.signal.SIGTERM)
-        with mock.patch.object(op_daemon, "_launchctl", launchctl), \
-                mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (False, None)), \
+        with mock.patch.object(op_daemon_client, "_launchctl", launchctl), \
+                mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)), \
                 mock.patch.object(op_daemon.os, "kill"):
             op_daemon.stop_agent(self.dir, self.lines.append, self.plist, wait=0.1, offline=False)
         self.assertFalse(os.path.exists(os.path.join(self.dir, op_daemon.QUITTING_MARKER)))
 
     def test_status_and_the_cli(self):
-        with mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (False, None)):
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (False, None)):
             doc = op_daemon.agent_status(self.dir)
         self.assertFalse(doc["loaded"])
         self.assertFalse(doc["state_fresh"])
         out = io.StringIO()
         paths = resolve_paths(data_dir=self.dir, app_bundle="")
-        with mock.patch.object(op_daemon, "agent_loaded_pid", lambda: (True, 77)):
+        with mock.patch.object(op_daemon_client, "agent_loaded_pid", lambda: (True, 77)):
             rc = op_daemon.run_daemon_command("status", paths, self.lines.append,
                                               json_output=True, out=out)
         self.assertEqual(rc, 0)
@@ -701,6 +860,40 @@ class TestMenubarIsAView(unittest.TestCase):
                      "start_thumbnail_generator", "start_status_checker"):
             with self.subTest(name=name):
                 self.assertNotIn(name, self.src)
+
+    def test_loop_modules_are_not_imported_transitively(self):
+        """Issue #475: what the UI modules import, and what those import.
+        The menubar reads the state through daemon_client, never
+        onionpress.daemon (which loads every loop)."""
+        loaded = ui_import_closure()
+        self.assertIn("onionpress.daemon_client", loaded)
+        self.assertNotIn("onionpress.daemon", loaded)
+        for name in self.LOOP_MODULES:
+            with self.subTest(module=name):
+                self.assertNotIn(f"onionpress.{name}", loaded)
+
+    def test_docker_is_not_imported_transitively(self):
+        """Issue #475: the menubar asks image_overrides, not containers
+        (which imports docker), whether the images are local builds."""
+        self.assertNotIn("onionpress.docker", ui_import_closure())
+        self.assertNotIn("onionpress.containers", ui_import_closure())
+        tree = ast.parse(_read("src/onionpress/image_overrides.py"))
+        self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
+
+    def test_daemon_client_imports_the_standard_library_only(self):
+        tree = ast.parse(_read("src/onionpress/daemon_client.py"))
+        self.assertFalse([n for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)])
+        imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+        self.assertEqual(imported, {"json", "os", "plistlib", "signal", "subprocess", "time"})
+
+    def test_daemon_reexports_the_client(self):
+        from onionpress import daemon_client
+        for name in ("read_state", "state_is_fresh", "display_state_of", "daemon_pid",
+                     "agent_loaded_pid", "start_agent", "stop_agent", "remove_agent",
+                     "agent_status", "request_offline", "ONIONNAME_RETRY_MARKER",
+                     "STALE_AFTER_SECONDS", "QUITTING_MARKER", "PID_FILENAME"):
+            with self.subTest(name=name):
+                self.assertIs(getattr(op_daemon, name), getattr(daemon_client, name))
 
     def test_no_timer_but_the_splash_tips(self):
         timers = [m.start() for m in re.finditer(r"rumps\.Timer\(|NSTimer\.", self.src)]

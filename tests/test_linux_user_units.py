@@ -76,8 +76,9 @@ class TestWatcherBackgroundWork(unittest.TestCase):
 
     def test_derivative_rebuild_is_detached_through_it(self):
         body = _bash_function(self.launcher, "start_containers")
+        # The isolated form of op_py (issue #470; tests/test_launcher_python_isolated.py).
         self.assertRegex(body, r"\n\s*run_detached env PYTHONPATH=\"\$ONIONPRESS_PYTHONPATH\" "
-                               r"python3 -m onionpress\.cli regenerate-derivatives\n")
+                               r"\"\$\{OP_PY\[@\]\}\" regenerate-derivatives\n")
         self.assertNotRegex(body, r"\(\s*op_py regenerate-derivatives")
 
     def _run(self, in_watcher):

@@ -1,7 +1,9 @@
 """Health checks and restart decisions for OnionPress.
 
-Extracts the health monitoring logic from menubar.py into a testable module.
-The MenubarApp (or CLI) creates a HealthMonitor and calls check() periodically.
+HealthChecker runs the checks and the dual probe; RepublishTrigger is the
+#266 republish policy, driven on both platforms through
+onionpress.reachability.RecoveryWindow; HealthMonitor tracks Linux's
+display state across cycles (onionpress.reachability.ReachabilityLoop).
 """
 
 import json
@@ -15,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
 
-from . import key_manager
+from . import onion_hostname
 from .docker import Docker
 
 
@@ -351,13 +353,8 @@ class HealthChecker:
         address: the address goes into the probe URLs and into control-port
         commands (classify_wedge), and on Linux into status.json.
         """
-        result = self.docker.exec(
-            "onionpress-tor",
-            ["cat", "/var/lib/tor/hidden_service/wordpress/hostname"],
-            timeout=10,
-        )
-        addr = result.output.strip() if result.ok else ""
-        if addr and not key_manager.is_valid_onion_address(addr):
+        addr = onion_hostname.read_hostname_text(self.docker, quiet=False)
+        if addr and not onion_hostname.served_address(addr):
             self._log("WARNING: the hostname file does not hold a valid onion address")
             return ""
         if expected_address and addr and addr != expected_address:
@@ -971,8 +968,8 @@ class HealthChecker:
                 hostname file (warns on mismatch).
             wordpress_confirmed: If True, skip the local WordPress
                 probe — WP responds reliably once it has come up
-                inside Docker (Mac menubar's `_wordpress_confirmed`
-                optimization). Caller should track this via
+                inside Docker (as the Mac daemon's
+                `_wordpress_confirmed`). Caller should track this via
                 `HealthMonitor.state.wordpress_confirmed` and reset
                 it on system wake.
 
@@ -1076,8 +1073,9 @@ class RepublishTrigger:
 
     Pure policy, no I/O: feed it one external-probe outcome per health
     cycle via observe() and it returns True on the cycle where a request
-    should be sent. Shared by the Mac menubar and the Linux service so
-    both platforms fire on the same evidence.
+    should be sent. Owned by onionpress.reachability.RecoveryWindow, which
+    the Mac daemon and the Linux heartbeat both run, so both platforms
+    fire on the same evidence.
 
     A cycle is a *wedge sample* only when all of these hold:
       - Tor is internally ready (bootstrapped, hostname present, WordPress
@@ -1245,7 +1243,6 @@ class HealthMonitor:
     def __init__(self, log_func: Callable[[str], None] | None = None):
         self.state = HealthState()
         self.log_func = log_func
-        self.republish = RepublishTrigger()
 
     def _log(self, msg: str) -> None:
         if self.log_func:
@@ -1339,23 +1336,6 @@ class HealthMonitor:
             return True
 
         return False
-
-    def should_request_republish(self, result: HealthResult) -> bool:
-        """Feed this cycle's dual-probe outcome to the republish trigger.
-
-        Returns True on the cycle where the caller should ask the tor
-        container's watchdog for a forced DEL_ONION/ADD_ONION republish
-        (see launcher_ops.request_watchdog_republish). Mirrors what the
-        Mac menubar does inline in check_status() with the same
-        RepublishTrigger.
-        """
-        return self.republish.observe(
-            time.time(),
-            result.tor_internally_ready,
-            result.tor_externally_reachable,
-            result.external_http_code,
-            result.wedge_class,
-        )
 
     def should_reclaim(self) -> bool:
         """Decide whether to send OnionHeaven /online reclaim.

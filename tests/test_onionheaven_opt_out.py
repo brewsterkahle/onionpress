@@ -48,6 +48,8 @@ for fake in ("AppKit", "Foundation", "objc"):
 
 from onionpress import key_manager, onion_auth, onionheaven  # noqa: E402
 
+Client = onionheaven.OnionHeavenClient
+
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
 OTHER_HUB = "hub" + "b" * 53 + ".onion"
 HC = "vipwsi6bjeychxvdo3xjvojr2yvw7ggwagekemekmeccscryuhehp2id.onion"
@@ -165,11 +167,11 @@ class TestMacHeartbeatLoopFollowsTheChoice(_MacCase):
     def _run_loop(self, app, flip_after, new_choice):
         beats = []
 
-        def fake_send(a, wp_healthy=True):
-            beats.append(a.read_config_value("REGISTER_WITH_ONIONHEAVEN"))
-            a._onionheaven_registration_succeeded = True
+        def fake_send(client, wp_healthy=True):
+            beats.append(client.app.read_config_value("REGISTER_WITH_ONIONHEAVEN"))
+            client.registration_succeeded = True
             if len(beats) == flip_after:
-                a.set_choice(new_choice)
+                client.app.set_choice(new_choice)
             return True
 
         sleeps = []
@@ -179,10 +181,10 @@ class TestMacHeartbeatLoopFollowsTheChoice(_MacCase):
             if len(sleeps) > 20:
                 raise AssertionError("heartbeat loop did not stop")
 
-        with mock.patch.object(onionheaven, "_send_heartbeat", fake_send), \
+        with mock.patch.object(Client, "send_heartbeat", fake_send), \
                 mock.patch.object(onionheaven.time, "sleep", guarded_sleep), \
-                mock.patch.object(onionheaven, "unregister_from_onionheaven") as unreg:
-            onionheaven._heartbeat_loop(app)
+                mock.patch.object(Client, "unregister") as unreg:
+            onionheaven.client_of(app).heartbeat_loop()
         return beats, unreg
 
     def test_loop_ends_at_the_first_beat_after_turning_off(self):
@@ -191,9 +193,10 @@ class TestMacHeartbeatLoopFollowsTheChoice(_MacCase):
                 app = _App(self.tmpdir, "yes")
                 beats, unreg = self._run_loop(app, flip_after=2, new_choice=new_choice)
                 self.assertEqual(beats, ["yes", "yes"])
-                self.assertFalse(app._heartbeat_loop_running)
-                self.assertFalse(app._onionheaven_registration_succeeded)
-                self.assertFalse(app._onionheaven_heartbeat_succeeded)
+                client = onionheaven.client_of(app)
+                self.assertFalse(client.heartbeat_loop_running)
+                self.assertFalse(client.registration_succeeded)
+                self.assertFalse(client.heartbeat_succeeded)
                 self.assertTrue(any("heartbeats stopped" in l for l in app.logs), app.logs)
                 # The loop never unregisters itself: an explicit no goes
                 # through maybe_unregister_after_opt_out, unset never does.
@@ -207,30 +210,31 @@ class TestMacHeartbeatLoopFollowsTheChoice(_MacCase):
                 self.assertEqual(beats, [])
 
     def test_a_superseded_loop_leaves_the_new_loops_guard(self):
-        app = _App(self.tmpdir, "no")
-        app._heartbeat_generation = 3
-        app._heartbeat_loop_running = True
-        onionheaven._end_heartbeat_loop(app, 2, "no")
-        self.assertTrue(app._heartbeat_loop_running)
-        onionheaven._end_heartbeat_loop(app, 3, "no")
-        self.assertFalse(app._heartbeat_loop_running)
+        client = onionheaven.client_of(_App(self.tmpdir, "no"))
+        client.heartbeat_generation = 3
+        client.heartbeat_loop_running = True
+        client._end_heartbeat_loop(2, "no")
+        self.assertTrue(client.heartbeat_loop_running)
+        client._end_heartbeat_loop(3, "no")
+        self.assertFalse(client.heartbeat_loop_running)
 
     def test_registration_retries_stop_when_turned_off(self):
         app = _App(self.tmpdir, "yes")
         sends = []
 
-        def failing_send(a, wp_healthy=True):
+        def failing_send(client, wp_healthy=True):
             sends.append(1)
-            a.set_choice("no")
+            client.app.set_choice("no")
             return False
 
-        with mock.patch.object(onionheaven, "_send_heartbeat", failing_send), \
-                mock.patch.object(onionheaven, "_heartbeat_loop") as loop:
-            app._onionheaven_registration_in_flight = True
-            onionheaven.register_with_onionheaven(app)
+        client = onionheaven.client_of(app)
+        with mock.patch.object(Client, "send_heartbeat", failing_send), \
+                mock.patch.object(Client, "heartbeat_loop") as loop:
+            client.registration_in_flight = True
+            client.register()
         self.assertEqual(sends, [1])
         loop.assert_not_called()
-        self.assertFalse(app._onionheaven_registration_in_flight)
+        self.assertFalse(client.registration_in_flight)
 
 
 class TestMacNothingGoesToTheHubUnlessYes(_MacCase):
@@ -291,7 +295,8 @@ class TestMacOptOutUnregisters(_MacCase):
     def test_explicit_no_sends_one_signed_unregister_for_the_whole_address(self):
         self.registered(hub=OTHER_HUB)
         app = _App(self.tmpdir, "no")
-        app._onionheaven_registration_succeeded = True
+        client = onionheaven.client_of(app)
+        client.registration_succeeded = True
         thread, rec = self._opt_out(app, '{"unregistered": true}')
         self.assertIsNotNone(thread)
         # To the hub this install registered with, not the configured one.
@@ -310,8 +315,8 @@ class TestMacOptOutUnregisters(_MacCase):
         status = self.saved_record()
         self.assertFalse(status["registered"])
         self.assertEqual(status["onionheaven_address"], OTHER_HUB)
-        self.assertFalse(app._onionheaven_registration_succeeded)
-        self.assertFalse(app._onionheaven_opt_out_in_flight)
+        self.assertFalse(client.registration_succeeded)
+        self.assertFalse(client.opt_out_in_flight)
         # Done: the record is cleared, so nothing more is sent.
         thread, rec = self._opt_out(app, '{"unregistered": true}', now=10 ** 10)
         self.assertIsNone(thread)
@@ -356,7 +361,7 @@ class TestMacOptOutUnregisters(_MacCase):
         _, rec = self._opt_out(app, "", now=1000.0)
         self.assertEqual(len(rec.calls), 4)  # four attempts, then give up for now
         self.assertTrue(self.saved_record()["registered"])
-        self.assertFalse(getattr(app, "_onionheaven_opt_out_gave_up", False))
+        self.assertFalse(onionheaven.client_of(app).opt_out_gave_up)
         thread, rec = self._opt_out(app, "", now=1000.0 + 60)
         self.assertIsNone(thread)
         thread, rec = self._opt_out(
@@ -379,20 +384,21 @@ class TestMacOptOutUnregisters(_MacCase):
         with mock.patch.object(onionheaven.subprocess, "run", rec):
             self.assertIsNone(onionheaven.unregister_from_onionheaven(
                 app, while_choice="no"))
-            app._onionheaven_opt_out_last_attempt = 5
-            onionheaven._unregister_after_opt_out(app)
+            client = onionheaven.client_of(app)
+            client.opt_out_last_attempt = 5
+            client._unregister_after_opt_out()
         self.assertEqual(rec.calls, [])
         self.assertTrue(self.saved_record()["registered"])
         # A later "no" acts at once, and this session has not given up.
-        self.assertEqual(app._onionheaven_opt_out_last_attempt, 0)
-        self.assertFalse(getattr(app, "_onionheaven_opt_out_gave_up", False))
+        self.assertEqual(client.opt_out_last_attempt, 0)
+        self.assertFalse(client.opt_out_gave_up)
 
     def test_a_record_for_another_key_is_given_up_for_the_session(self):
         self.registered(address=ELSEWHERE)
         app = _App(self.tmpdir, "no")
         _, rec = self._opt_out(app, '{"unregistered": true}')
         self.assertEqual(rec.calls, [])
-        self.assertTrue(app._onionheaven_opt_out_gave_up)
+        self.assertTrue(onionheaven.client_of(app).opt_out_gave_up)
         thread, _ = self._opt_out(app, '{"unregistered": true}', now=10 ** 10)
         self.assertIsNone(thread)
 
@@ -422,7 +428,7 @@ class TestMacOptOutUnregisters(_MacCase):
     def test_turning_it_back_on_registers_again(self):
         self.registered(hub=HUB)
         app = _App(self.tmpdir, "no")
-        app._onionheaven_registration_succeeded = True
+        onionheaven.client_of(app).registration_succeeded = True
         self._opt_out(app, '{"unregistered": true}')
         self.assertFalse(self.saved_record()["registered"])
         app.set_choice("yes")
@@ -443,16 +449,23 @@ class TestMacOptOutUnregisters(_MacCase):
         self.assertNotIn("healthcheck_address", payload)
 
     def test_menubar_wiring(self):
-        # The status pass is the daemon's (onionpress.daemon, issue #367).
+        # The status pass is the daemon's (onionpress.daemon, issue #367),
+        # through its client's tick (issue #479).
         src = _read("src/onionpress/daemon.py")
-        self.assertIn("onionheaven.maybe_unregister_after_opt_out(self)", src)
-        self.assertNotIn("onionheaven.maybe_unregister_after_opt_out(", _read("src/menubar.py"))
+        self.assertIn("self.hub_client.tick(tor_bootstrapped, self._address_known())", src)
+        self.assertNotIn("maybe_unregister_after_opt_out(", _read("src/menubar.py"))
+        oh = _read("src/onionpress/onionheaven.py")
+        tick = oh[oh.index("    def tick("):]
+        tick = tick[:tick.index("\n    def ", 1)]
+        self.assertIn("self.maybe_unregister_after_opt_out()", tick)
         # The only place a heartbeat thread starts, and only on yes.
-        self.assertEqual(src.count("onionheaven.start_registration_thread(self)"), 1)
-        i = src.index("onionheaven.start_registration_thread(self)")
-        self.assertIn('if onionheaven.get_registration_choice(self) == "yes":',
-                      src[i - 200:i])
+        self.assertNotIn("start_registration_thread", src)
+        self.assertEqual(oh.count("self.start_registration_thread()"), 1)
+        i = tick.index("self.start_registration_thread()")
+        self.assertIn('if get_registration_choice(self.app) == "yes":',
+                      tick[i - 200:i])
         self.assertNotIn("start_online_notification_thread", src)
+        self.assertNotIn("notify_online", src)
 
 
 # ─── Linux heartbeat daemon ────────────────────────────────────────────
