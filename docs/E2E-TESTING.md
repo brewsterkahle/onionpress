@@ -593,15 +593,21 @@ below.
   built in the VM from the checkout at 09630837, rootless Docker 26.1.5).
   T0: 9/9 pass in 6 min (VM create + build + install 2 min 14 s).
 - 2026-10-30: same host, Ubuntu 24.04.5 amd64 guest (`--guest ubuntu-24.04`,
-  linux-vm, same .deb, system Docker 29.1.3). T0: **FAIL**, 1 pass, 2 fail,
-  6 skipped after the failed step, in 3 min (2 min with the image cached).
-  Both failures are the package's on Ubuntu, not the harness's:
-  `test_package_finished_its_own_setup` (the postinst fell back to the
-  docker group and asked for a log-out: Ubuntu's `docker.io` 29.1.3 ships
-  no `dockerd-rootless-setuptool.sh`, so the rootless attempt is skipped
-  without a word) and `test_first_start` (`docker compose` missing: the
-  `Depends` alternative `docker-compose-plugin | docker-compose` resolves
-  to Compose v1 1.29.2 on Ubuntu, where only Docker's own repo has the
-  plugin; Debian 13's `docker-compose` is v2). The fix belongs to
-  `build/build-linux.sh`; until it lands, Ubuntu 24.04 is a guest the
-  suite can run, not one the .deb passes on.
+  linux-vm). With the .deb of that morning: **FAIL**, 1 pass, 2 fail, 6
+  skipped, in 3 min, every failure the package's on Ubuntu (PR #495 fixed
+  them the same day): `Depends` let apt pick Compose v1 (Ubuntu's
+  `docker-compose` is the Python 1.29.2; its v2 is `docker-compose-v2`),
+  so `docker compose` was missing; Ubuntu's `docker.io` 29.1.3 ships no
+  `dockerd-rootless-setuptool.sh`, so the postinst fell back to the docker
+  group without a word; Ubuntu's RootlessKit 1.1.1 refuses the
+  `--detach-netns` Docker's wrapper passes; and `Recommends:
+  torbrowser-launcher` brought the system `tor` on to 127.0.0.1:9050
+  (Ubuntu installs Recommends by default, the Debian cloud image does
+  not), which made the launcher move every port up by 10000, so the site
+  answered on 18080 while the harness waited on 8080. With PR #495's .deb
+  (`--deb`): **9/9 pass in 4 min 46 s**, rootless Docker 29.1.3; Debian 13
+  with the same package 9/9 in 6 min 49 s. Since then a Linux node's
+  local-site probe reads the port from the launcher's `status.json`
+  (`wp_port`, 8080 + 10000 per bump) instead of assuming 8080, and the
+  report's node facts carry it, so a guest with its own tor on 9050 is
+  tested on 18080 rather than failed.

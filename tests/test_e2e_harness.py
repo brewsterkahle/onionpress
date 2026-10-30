@@ -14,7 +14,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "e2e"))
 
 from harness import platforms, safety  # noqa: E402
-from harness.nodes.base import parse_curl_include  # noqa: E402
+from harness.nodes.base import parse_curl_include, wp_port_from_status  # noqa: E402
 from harness.nodes.linux_vm import LinuxVMNode, guest_template  # noqa: E402
 from harness.nodes.mac import pick_port_offset  # noqa: E402
 from harness.report import NOT_APPLICABLE, Outcome, RunReport, merge  # noqa: E402
@@ -334,6 +334,26 @@ class NodeHelpersTest(unittest.TestCase):
     def test_port_offset_skips_busy_ports(self):
         busy = {8080 + 31000}
         self.assertEqual(pick_port_offset(is_free=lambda p: p not in busy), 32000)
+
+    def test_the_launchers_published_port_is_read_from_its_status(self):
+        # An Ubuntu guest with a system tor on 9050 made the launcher take
+        # offset 10000 (2026-10-30); the harness must probe where it
+        # published, not 8080.
+        self.assertEqual(wp_port_from_status('{"wp_port": 18080, "server_active": true}'), 18080)
+        self.assertEqual(wp_port_from_status('{"wp_port": "8080"}'), 8080)
+        for text in ("", "not json", "{}", '{"wp_port": 8081}', '{"wp_port": 80}',
+                     '{"wp_port": 78080}', '{"wp_port": null}', "[]"):
+            with self.subTest(text):
+                self.assertIsNone(wp_port_from_status(text))
+
+    def test_a_linux_node_probes_the_port_its_status_names_or_8080(self):
+        with tempfile.TemporaryDirectory() as root:
+            node = LinuxVMNode("linux-1", None, root, root=root, limactl="/bin/false",
+                               deb_source=("deb", "/x.deb"))
+            node.read_file = lambda rel: ""
+            self.assertEqual(node.wp_port, 8080, "no status yet: the default")
+            node.read_file = lambda rel: '{"wp_port": 18080}' if rel == ".onionpress/status.json" else ""
+            self.assertEqual(node.wp_port, 18080)
 
 
 if __name__ == "__main__":

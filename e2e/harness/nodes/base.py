@@ -68,6 +68,21 @@ def parse_curl_include(text):
     return HttpResponse(status, headers, rest, raw)
 
 
+def wp_port_from_status(text):
+    """The WordPress port a node's launcher published, from its
+    `~/.onionpress/status.json`, or None. The launcher moves every port
+    up by 10000 while 8080, 9050 or 9077 is taken (a system tor on 9050
+    did that on an Ubuntu guest), so the port is 8080 + k * 10000; any
+    other value is not the launcher's and is ignored."""
+    try:
+        port = int(json.loads(text).get("wp_port", 0))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if port < 8080 or port > 65535 or (port - 8080) % 10000:
+        return None
+    return port
+
+
 class Node:
     platform = ""       # "macos" | "linux"
     kind = ""           # "mac" | "linux-vm" | ...

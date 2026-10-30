@@ -30,7 +30,7 @@ import tarfile
 from .. import PROJECT_DIR, safety
 from ..platforms import DEFAULT_LINUX_GUEST, LINUX_GUESTS
 from ..proc import CommandFailed, run
-from .base import Node
+from .base import Node, wp_port_from_status
 
 AS_USER_SH = """#!/bin/bash
 # Run a command as the install's user with a fresh login (group
@@ -89,7 +89,11 @@ class LinuxVMNode(Node):
 
     @property
     def wp_port(self):
-        return 8080
+        """The port the launcher published WordPress on, from the node's
+        status.json once the first start has written it (8080, or 18080
+        when something on the guest held 8080, 9050 or 9077, as a system
+        tor did on Ubuntu); 8080 until then."""
+        return wp_port_from_status(self.read_file(".onionpress/status.json")) or 8080
 
     def lima_env(self):
         env = {
@@ -298,6 +302,11 @@ apt-get install -y -q {deb}
         r = self.vm_run(["dpkg-query", "-W", "-f", "${Version}", "onionpress"])
         if r.ok:
             facts["app_version"] = r.out.strip()
+        # Where WordPress answered: 8080, or the launcher's offset when the
+        # guest had something on 8080, 9050 or 9077; "assumed" when the
+        # launcher never wrote its status.json.
+        port = wp_port_from_status(self.read_file(".onionpress/status.json"))
+        facts["wp_port"] = f"{port} (status.json)" if port else "8080 (assumed)"
         return facts
 
 
