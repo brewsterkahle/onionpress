@@ -956,14 +956,12 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # etc.) USED to be here but have been ported to
     # src/onionpress/multisite.py — see TestMultisiteModuleExports below
     # for the equivalent assertion at the Python level. What stays bash:
-    # the WordPress.org plugin steps (install_plugin.sh + activate_plugin.sh
-    # helpers around the Python configure-*/apply-cache-policy steps;
-    # tests/test_bundled_plugins.py also holds the two copies equal) and
-    # detect_port_offset (needs to run before the Python lib path is set up).
+    # the delegations to the WordPress.org plugin steps
+    # (onionpress.bundled_plugins, #442.3; tests/test_bundled_plugins.py
+    # holds their shape) and detect_port_offset (needs to run before the
+    # Python lib path is set up).
     REQUIRED_ON_BOTH = {
-        "install_ia_plugin",
-        "install_cache_enabler",
-        "install_wp_org_plugin",
+        "install_bundled_plugins",
         "setup_bundled_plugins",
         "detect_port_offset",
     }

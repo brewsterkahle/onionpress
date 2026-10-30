@@ -336,3 +336,21 @@ Linux status loop and `--check` read it). Linux gets no START SUMMARY:
 its launcher passes no file, and the WARNING/ERROR lines are the record.
 `tests/test_start_errors_contract.py` runs the Mac's reader and summary
 under /bin/bash.
+
+### The bundled plugins (#445)
+
+`onionpress.bundled_plugins`: `install_bundled_plugins` (the Link Fixer,
+then Cache Enabler, each unless `INSTALL_*=no`: `install_plugin.sh
+--pinned-version`, the installed header's `Version:` read as www-data, the
+download into a temp folder, `put-wp-tree`) and `setup_bundled_plugins`
+(`wp core is-installed`, then per wanted and present plugin
+`configure-*` → `activate_plugin.sh … --network|--each-site` →
+`apply-cache-policy`), with the bash's log words. The two scripts stay
+(they hold the pins and the activation scopes); the onionpress steps run
+through `start.run_cli_step` (a subprocess of this interpreter, isolated
+as `op_py` / `bundled_python` are, output appended to the log), the
+scripts in docker's environment. Fast paths `install-bundled-plugins` and
+`setup-bundled-plugins` (`--scripts-dir`), always exit 0; the bash
+functions are `… 2>&1 | tee -a "$LOG_FILE"; return 0`, and the six helpers
+(`plugin_wanted` … `install_cache_enabler`) are gone. Delta: put-wp-tree's
+stdout now goes to the log, not the terminal. Traces unchanged.

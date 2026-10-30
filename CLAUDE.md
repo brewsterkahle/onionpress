@@ -848,10 +848,11 @@
   `tests/test_plugin_pins.py`. App and WordPress image ship together.
 
 ## Cache Enabler and the Link Fixer Are Active
-- Both launchers install pinned releases, configure (refusing without
-  their policy mu-plugin) and activate: Cache Enabler `--network`, Link
-  Fixer `--each-site`. `INSTALL_IA_PLUGIN` / `INSTALL_CACHE_ENABLER=no`
-  skip one.
+- `onionpress.bundled_plugins` (both launchers delegate:
+  `install-bundled-plugins`, `setup-bundled-plugins`) installs pinned
+  releases, configures (refusing without their policy mu-plugin) and
+  activates: Cache Enabler `--network`, Link Fixer `--each-site`.
+  `INSTALL_IA_PLUGIN` / `INSTALL_CACHE_ENABLER=no` skip one.
 - Cache policy: store only anonymous pages for Host == the onion address;
   serve-time exclusions are forced on every site; stray hosts' settings
   files are removed. Link Fixer policy: never names an onion/local/private

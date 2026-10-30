@@ -2547,6 +2547,51 @@ def _run_migrate_key_volume(run):
     return 0 if _start_step_manager(paths).migrate_key_volume() else 1
 
 
+def _add_bundled_plugins(sub, name):
+    what = ("Put the pinned Internet Archive Link Fixer and Cache Enabler "
+            "releases in the WordPress container (downloaded over Tor, checked "
+            "against their pins; each unless INSTALL_*=no)"
+            if name == "install-bundled-plugins" else
+            "Configure and activate Cache Enabler (network-wide, then its cache "
+            "policy) and the Link Fixer (site by site), once WordPress is "
+            "installed")
+    p = sub.add_parser(name, help=what + "; best effort, always exits 0")
+    p.add_argument("--scripts-dir", default=None,
+                   help="Where install_plugin.sh and activate_plugin.sh are "
+                        "(default: the app bundle's)")
+
+
+def _plugin_host(paths, scripts_dir):
+    from . import start
+    from .bundled_plugins import PluginHost
+    if not scripts_dir:
+        scripts_dir = (os.path.join(os.path.dirname(paths.docker_dir), "scripts")
+                       if paths.docker_dir else "")
+    return PluginHost(
+        docker=Docker(paths), config_file=paths.config_file, scripts_dir=scripts_dir,
+        log_file=paths.log_file, log=_launcher_log_func(),
+        run_step=lambda argv: start.run_cli_step(argv, data_dir=paths.data_dir,
+                                                 log_file=paths.log_file))
+
+
+def _run_bundled_plugins(run):
+    # The launchers' install_bundled_plugins() / setup_bundled_plugins()
+    # (#442.3): onionpress.bundled_plugins, logged in the launcher's format
+    # (`… 2>&1 | tee -a "$LOG_FILE"`); no OnionPressCLI setup. Best
+    # effort: whatever goes wrong is a logged line, never a stopped start.
+    from . import bundled_plugins
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    host = _plugin_host(paths, run.args.scripts_dir)
+    try:
+        if run.args.command == "install-bundled-plugins":
+            bundled_plugins.install_bundled_plugins(host)
+        else:
+            bundled_plugins.setup_bundled_plugins(host)
+    except Exception as e:
+        host.log(f"WARNING: {run.args.command} failed: {e}")
+    return 0
+
+
 def _add_db_import(sub, name):
     p = sub.add_parser(
         name,
@@ -3101,6 +3146,8 @@ _COMMANDS = [
             "with no network; exit 1 (the start must stop) when Docker does "
             "not answer, the copy fails or the image is not here"),
      _run_migrate_key_volume),
+    ("install-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
+    ("setup-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("db-import", _add_db_import, _run_db_import),
     ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),
     ("using-local-images",

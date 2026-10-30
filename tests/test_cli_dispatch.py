@@ -34,7 +34,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
-    analytics_sharing, app_commands, backup, cli, config, confirm, containers, daemon,
+    analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
     derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
     redact, scrub, wordpress_egress,
 )
@@ -398,6 +398,17 @@ ROWS = [
         "onionheaven.is_onionheaven_instance", mock.call(ONION), rc=0, returns=True),
     Row("is-onionheaven-hub", ["is-onionheaven-hub"],
         "onionheaven.is_onionheaven_instance", mock.call(""), rc=1, returns=False),
+    # #442.3: the launchers' install_bundled_plugins() / setup_bundled_plugins()
+    # are onionpress.bundled_plugins, never OnionPressCLI; best effort, so 0
+    # whatever happens (a raised error is a logged WARNING).
+    Row("install-bundled-plugins", ["install-bundled-plugins", "--scripts-dir", "/s"],
+        "bundled_plugins.install_bundled_plugins", mock.call(ANY), rc=0, returns=None,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].scripts_dir, "/s")),
+    Row("setup-bundled-plugins", ["setup-bundled-plugins", "--scripts-dir", "/s"],
+        "bundled_plugins.setup_bundled_plugins", mock.call(ANY), rc=0, returns=None),
+    Row("setup-bundled-plugins", ["setup-bundled-plugins"],
+        "bundled_plugins.setup_bundled_plugins", mock.call(ANY), rc=0,
+        returns=mock.Mock(side_effect=RuntimeError("x"))),
     # Phase 4 (#120): the launchers' using_local_images() is this.
     Row("using-local-images", ["using-local-images"], "containers.using_local_images",
         mock.call(D("config")), rc=0, returns=True),
@@ -451,7 +462,7 @@ MODULES = {
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
-    "docker_versions": docker_versions,
+    "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
 }
 
 
