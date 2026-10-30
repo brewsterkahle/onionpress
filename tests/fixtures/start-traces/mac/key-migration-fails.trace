@@ -3,11 +3,11 @@ fn wait_for_docker_or_recover_vm 180 start
 fn ensure_vm_fsck_repair
 docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
-docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
 log Migrating the onion service key volume: onionpress-arti-state -> onionpress-onion-keys
 docker volume create onionpress-onion-keys
 log onionpress-onion-keys
-docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-arti-state:/old:ro -v onionpress-onion-keys:/new --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc -c 
+docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-arti-state:/old:ro -v onionpress-onion-keys:/new --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c 
             set -eu
             dir="$1" dest="$2"
             for name in state keystore hss; do

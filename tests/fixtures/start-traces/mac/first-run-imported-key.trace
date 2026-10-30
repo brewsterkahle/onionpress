@@ -7,9 +7,9 @@ docker volume ls --format {{.Name}}
 log First run detected - generating custom onion address...
 log Using address prefix: 'op2'
 log Using pre-imported key: op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion
-docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
 docker volume create onionpress-onion-keys
-docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/dest --mount type=bind,source=$TMP/home/.onionpress/shared/vanity-keys/op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion,target=/src,readonly --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc -c mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*
+docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/dest --mount type=bind,source=$TMP/home/.onionpress/shared/vanity-keys/op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion,target=/src,readonly --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*
 log Address key installed to the onionpress-onion-keys volume
 log Onion address: op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion
 log Pulling pre-built images (missing only)...
