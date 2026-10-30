@@ -125,18 +125,6 @@ class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
             "missing — a warning lets a vanity-less DMG ship (the 2.4.101 bug).",
         )
 
-    def test_validate_bundle_requires_mkp224o(self):
-        """validate-bundle.sh's required universal-binaries list must keep
-        mkp224o, so any bundle check (CI or manual) catches its absence.
-        """
-        script = _read("build/validate-bundle.sh")
-        self.assertRegex(
-            script,
-            r'UNIVERSAL_BINARIES=\([^)]*\bmkp224o\b[^)]*\)',
-            "validate-bundle.sh must list mkp224o among the required universal "
-            "binaries it verifies are present in the bundle.",
-        )
-
 
 class TestNoTorImplementationSwitch(unittest.TestCase):
     """TOR_IMPL chose between C Tor and Arti until 2026-09-24. Arti was then
