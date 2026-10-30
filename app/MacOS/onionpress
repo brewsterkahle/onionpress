@@ -2784,7 +2784,9 @@ main() {
             if [ -f "$PIDFILE" ]; then
                 # If PID file is older than system boot, it's from a previous
                 # boot session — definitely stale (PID may have been recycled)
-                boot_sec=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*sec = \([0-9]*\).*/\1/')
+                # "{ sec = 1790986968, usec = 370567 } ...": the first field (a
+                # greedy `.*sec = ` matched usec, so this never fired).
+                boot_sec=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
                 pid_mtime=$(stat -f %m "$PIDFILE" 2>/dev/null || echo 0)
                 if [ -n "$boot_sec" ] && [ "$pid_mtime" -lt "$boot_sec" ] 2>/dev/null; then
                     log "Removing stale PID file from previous boot"

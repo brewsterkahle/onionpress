@@ -17,6 +17,7 @@ Runs under macOS's /bin/bash 3.2, what the app runs it with."""
 import os
 import signal
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -101,7 +102,12 @@ class TestStart(_Case):
         os.makedirs(self.l.data_dir, exist_ok=True)
         with open(self.l.pidfile, "w") as f:
             f.write(str(os.getpid()))
-        os.utime(self.l.pidfile, (1, 1))
+        # A minute before this boot: well above any usec, which a greedy
+        # parse of kern.boottime once read as the boot time.
+        boot = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                              capture_output=True, text=True, check=True).stdout
+        boot_sec = int(re.match(r"\{ sec = (\d+),", boot).group(1))
+        os.utime(self.l.pidfile, (boot_sec - 60, boot_sec - 60))
         r = self.l.run("start")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Removing stale PID file from previous boot", r.stdout)
