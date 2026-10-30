@@ -308,6 +308,10 @@
   (`setup_logic.mark_setup_complete`). `tests/test_setup_complete_marker.py`.
 - Quit takes the site down unless `QUIT_KEEPS_SITE_RUNNING=yes`. Update and
   uninstall stop the daemon first.
+- **The daemon's start never stops Colima**: with no daemon alive a running
+  VM is a crash restart's or a terminal start's live site; its port is read
+  (`resolve_port_offset`). `TestResolvePorts` in
+  `tests/test_mac_daemon_paths.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`

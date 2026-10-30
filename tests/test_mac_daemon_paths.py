@@ -439,8 +439,8 @@ class TestResolvePorts(_PathsCase):
     def setUp(self):
         super().setUp()
         self.d.bin_dir = "/b"
-        self.stale = mock.Mock()
-        p = mock.patch.object(op_config, "stop_stale_colima", self.stale)
+        self.runs = []
+        p = mock.patch("subprocess.run", side_effect=lambda argv, **kw: self.runs.append(argv))
         p.start()
         self.addCleanup(p.stop)
         self.sleeps = []
@@ -459,9 +459,6 @@ class TestResolvePorts(_PathsCase):
 
     def test_the_resolved_offset_is_published_everywhere(self):
         self.resolve(op_config.PortConfig.from_offset(10000))
-        self.stale.assert_called_once_with(
-            "/b/colima", self.d.colima_home, op_daemon.pid_path(self.dir),
-            log_func=self.d.log)
         self.assertEqual(self.d.port_offset, 10000)
         self.assertEqual(self.d.wp_port, 18080)
         self.assertEqual(os.environ["ONIONPRESS_PORT_OFFSET"], "10000")
@@ -480,11 +477,12 @@ class TestResolvePorts(_PathsCase):
         self.assertEqual(self.d.port_offset, 20000)
         self.assertTrue(self.saw("port detection failed (no socket)"))
 
-    def test_a_failing_stale_check_does_not_stop_the_start(self):
-        self.stale.side_effect = OSError("colima gone")
+    def test_a_running_colima_is_never_stopped(self):
+        # With this daemon's own pid file just written and no other daemon
+        # alive, a running VM is a crash restart's or a terminal start's
+        # live site: its port is read, nothing is run against it.
         self.resolve(op_config.PortConfig.from_offset(0))
-        self.assertTrue(self.saw("stale Colima check failed: colima gone"))
-        self.assertEqual(self.d.port_offset, 0)
+        self.assertEqual(self.runs, [])
 
     def test_waits_for_the_previous_instance_s_port(self):
         with open(self.sentinel, "w") as f:

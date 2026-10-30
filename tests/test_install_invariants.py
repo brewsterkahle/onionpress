@@ -1670,20 +1670,16 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
         self.assertIn('env["DOCKER_CONFIG"] = self.paths.docker_config_dir',
                       ast.get_source_segment(wrapper, run))
 
-        # The daemon builds every colima env from os.environ (its stop and
-        # delete would remove a "colima" context too), so it must set it
-        # first (onionpress.daemon: _setup_environment before
-        # _resolve_ports_at_start's stop_stale_colima).
+        # The daemon builds every colima and docker env from os.environ (a
+        # stop or delete would remove a "colima" context too), so it must
+        # set it first (onionpress.daemon: _setup_environment before
+        # _resolve_ports_at_start's docker query).
         daemon = _read("src/onionpress/daemon.py")
-        self.assertLess(
-            daemon.index('os.environ["DOCKER_CONFIG"] = docker_config_dir'),
-            daemon.index("stop_stale_colima("))
         run = daemon[daemon.index("    def run(self):"):daemon.index("    def _main_loop_once(")]
         self.assertLess(run.index("self._setup_environment()"),
                         run.index("self._resolve_ports_at_start()"))
         # The menubar runs nothing of colima itself any more.
         menubar = _read("src/menubar.py")
-        self.assertNotIn("stop_stale_colima(", menubar)
         self.assertNotIn("[colima_bin,", menubar)
 
 

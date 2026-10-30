@@ -4,7 +4,6 @@ Handles starting, stopping, and configuring the Colima VM that runs
 Docker containers on macOS. Linux bypasses this entirely (native Docker).
 """
 
-import logging
 import os
 import subprocess
 from typing import Callable
@@ -286,61 +285,3 @@ def detect_container_runtime(paths: OnionPressPaths, log_func=None) -> str:
         "No container runtime available. "
         "Install Docker or ensure Colima is bundled in the app."
     )
-
-
-def stop_stale_colima(colima_bin: str, colima_home: str, pid_file: str,
-                      log_func=None) -> None:
-    """Stop an orphaned Colima VM left over from a crash or force-quit.
-
-    If our Colima VM is running but the MenubarApp PID file is stale (or
-    missing), the VM is orphaned and holding ports.  Stop it so the next
-    launch gets port 8080 instead of needlessly offsetting.
-
-    log_func receives the progress lines; the MenubarApp passes its own
-    logger. Without one they go to the "onionpress" logging logger, which
-    has no handler in the app, so they only ever reached stderr.
-    """
-    _logger = logging.getLogger("onionpress")
-
-    def warn(msg: str) -> None:
-        if log_func:
-            log_func(msg)
-        else:
-            _logger.warning(msg)
-
-    # If a live MenubarApp already owns these ports, leave them alone
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)  # raises if not alive
-            return  # another instance is running — not stale
-        except (ProcessLookupError, ValueError, OSError):
-            pass  # stale PID file — fall through
-
-    # Check if the onionpress Colima VM is running
-    env = os.environ.copy()
-    env["COLIMA_HOME"] = colima_home
-    env["LIMA_HOME"] = os.path.join(colima_home, "_lima")
-    env["LIMA_INSTANCE"] = "onionpress"
-
-    try:
-        result = subprocess.run(
-            [colima_bin, "list", "--json"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10, env=env,
-        )
-        if result.returncode != 0 or "Running" not in result.stdout:
-            return  # VM not running — nothing to clean up
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return
-
-    warn("Found orphaned Colima VM from a previous crash — stopping it (up to 60s)")
-    try:
-        subprocess.run(
-            [colima_bin, "stop"],
-            capture_output=True, timeout=60, env=env,
-        )
-        warn("Orphaned Colima VM stopped successfully")
-    except (subprocess.TimeoutExpired, OSError) as e:
-        warn(f"Failed to stop orphaned Colima VM: {e}")

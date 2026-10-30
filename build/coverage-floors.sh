@@ -35,7 +35,7 @@ src/onionpress/launcher_ops.py 84
 src/onionpress/scrub.py 90
 src/onionpress/key_manager.py 87
 src/onionpress/updater.py 81
-src/onionpress/colima.py 78
+src/onionpress/colima.py 93
 "
 
 # `python` is the interpreter that ran the tests (uv run / CI's venv).
