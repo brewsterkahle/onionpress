@@ -111,6 +111,7 @@ if LIB_DIR not in sys.path:
 
 import key_manager
 import onion_auth
+from onionpress import hub_record
 
 # Defaults
 DEFAULT_HUB = "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"
@@ -972,23 +973,15 @@ def send_offline(hub_addr, content_addr, hc_addr, priv_key, pub_key):
 # "registered" this daemon keeps "left_on_hubs" (registrations not taken
 # back yet) and honours "released" (an address whose key is being given up:
 # no /online for it until "until").
-_STATE_CARRIED = ("left_on_hubs", "released")
+_STATE_CARRIED = hub_record.CARRIED
 
 
 def _save_state(data):
     """Write the record whole. left_on_hubs and released are carried over
     from the file unless *data* sets them (None drops one)."""
     with _record_lock():
-        data = dict(data)
-        missing = [k for k in _STATE_CARRIED if k not in data]
-        if missing:
-            previous = _load_state()
-            for key in missing:
-                if key in previous:
-                    data[key] = previous[key]
-        for key in _STATE_CARRIED:
-            if data.get(key) is None:
-                data.pop(key, None)
+        data = hub_record.carry_over(
+            data, _load_state() if hub_record.missing_carried(data) else {})
         tmp = f"{STATE_PATH}.{os.getpid()}.tmp"
         try:
             with open(tmp, "w") as f:
@@ -1024,34 +1017,10 @@ def _state_registration(state):
     return (addr, hub) if key_manager.is_valid_onion_address(hub) else None
 
 
-def _left_on_hubs(state):
-    entries = state.get("left_on_hubs")
-    if not isinstance(entries, list):
-        return []
-    return [e for e in entries
-            if isinstance(e, dict)
-            and key_manager.is_valid_onion_address(e.get("content_address"))
-            and key_manager.is_valid_onion_address(e.get("onionheaven_address"))]
-
-
-def _entry_pair(entry):
-    return entry["content_address"], entry["onionheaven_address"]
-
-
-def _note_left_on_hub(state, addr, hub, reason):
-    entries = _left_on_hubs(state)
-    if not any(_entry_pair(e) == (addr, hub) for e in entries):
-        entries.append({"content_address": addr, "onionheaven_address": hub,
-                        "since": datetime.now(timezone.utc).isoformat(),
-                        "reason": reason})
-    state["left_on_hubs"] = entries
-
-
-def _forget_left_on_hub(state, addr, hub):
-    entries = _left_on_hubs(state)
-    kept = [e for e in entries if _entry_pair(e) != (addr, hub)]
-    state["left_on_hubs"] = kept
-    return len(kept) != len(entries)
+_left_on_hubs = hub_record.left_on_hubs
+_entry_pair = hub_record.pair
+_note_left_on_hub = hub_record.note_left_on_hub
+_forget_left_on_hub = hub_record.forget_left_on_hub
 
 
 @_under_record_lock
@@ -1103,12 +1072,7 @@ def _record_unregistered(hub_addr, content_addr):
 def _address_on_hold(content_addr, now=None):
     """True while the record's "released" hold covers *content_addr*: the
     launcher had its hubs delete that key, which is about to go."""
-    released = _load_state().get("released")
-    if not isinstance(released, dict) or released.get("content_address") != content_addr:
-        return False
-    until = released.get("until")
-    now = time.time() if now is None else now
-    return isinstance(until, (int, float)) and now < until
+    return hub_record.address_on_hold(_load_state(), content_addr, now)
 
 
 def _read_version():
