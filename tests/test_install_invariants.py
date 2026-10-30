@@ -603,7 +603,7 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         for path, py_cmd in (
             ("linux/onionpress", r'op_py\s+provision-post-install'),
             ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+             r'bundled_python\s+-m\s+onionpress\.cli\s+--data-dir\s+"\$DATA_DIR"\s+provision-post-install'),
         ):
             script = _read(path)
             m = re.search(
@@ -637,7 +637,7 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         for path, py_cmd in (
             ("linux/onionpress", r'op_py\s+provision-post-install'),
             ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+             r'bundled_python\s+-m\s+onionpress\.cli\s+--data-dir\s+"\$DATA_DIR"\s+provision-post-install'),
         ):
             script = _read(path)
             m = re.search(
@@ -2697,7 +2697,7 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
     or the command exists on one platform only."""
 
     def test_both_launchers_forward_get(self):
-        self.assertIn('bundled_python -m onionpress.cli get "${@:2}"',
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" get "${@:2}"',
                       _read("app/MacOS/onionpress"))
         self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
 

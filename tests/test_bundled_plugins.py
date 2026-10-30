@@ -212,7 +212,7 @@ class TestLaunchers(unittest.TestCase):
             with self.subTest(rel):
                 ia = start.index("\n    install_ia_plugin\n")
                 ce = start.index("\n    install_cache_enabler\n")
-                provision = start.index("onionpress.cli provision-post-install" if "MacOS" in rel
+                provision = start.index('onionpress.cli --data-dir "$DATA_DIR" provision-post-install' if "MacOS" in rel
                                         else "op_py provision-post-install")
                 setup = start.index("\n    setup_bundled_plugins\n")
                 self.assertLess(max(ia, ce), provision)

@@ -194,6 +194,11 @@
 - `make coverage` enforces floors (`build/coverage-floors.sh`); raise a
   floor when tests catch up, never lower one to pass.
   `tests/test_coverage_gate.py`.
+- **The launchers' `main` is run, not just read**: `tests/launcher_harness.py`
+  runs a copy of each launcher with docker, the CLI and named helpers
+  stubbed. A launcher verb's options, exit status and the CLI argv it
+  produces go in `tests/test_launcher_dispatch_{mac,linux}.py`; the tray
+  runs only verbs the Linux `main` has (same file).
 - **A new `onionpress` subcommand needs a row in `tests/test_cli_dispatch.py`**
   (the census fails otherwise; grouping commands go in `PARENTS`), and its
   handler a case in `tests/test_cli_commands.py` / `test_cli_edges.py`.

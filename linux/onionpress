@@ -1994,7 +1994,7 @@ start_containers() {
     # build), but only once there is a key to install, after this step.
     # Strategy: if mkp224o is already in the local image, generate vanity
     # now; otherwise log and continue, the user gets a random address
-    # this run and can run `onionpress handle-action regenerate-vanity`
+    # this run and can run `onionpress generate-vanity`
     # later once the next-published tor image bundles mkp224o.
     if $FIRST_RUN && [ -n "$ADDRESS_PREFIX" ] \
        && [ ${#ADDRESS_PREFIX} -ge 2 ] && [ ${#ADDRESS_PREFIX} -le 6 ] \
@@ -2278,7 +2278,16 @@ stop_containers() {
     # different port number across restarts. Best-effort.
     echo "${ONIONPRESS_PORT_OFFSET:-0}" > "$DATA_DIR/.previous-port-offset" 2>/dev/null || true
     cd "$DOCKER_DIR"
-    docker compose "${COMPOSE_WITH_CF[@]}" down 2>&1 | tee -a "$LOG_FILE"
+    # The status is compose's, not tee's or log's: `stop` reports a failed
+    # stop (tests/test_launcher_dispatch_linux.py).
+    local down_out down_rc=0
+    down_out=$(docker compose "${COMPOSE_WITH_CF[@]}" down 2>&1) || down_rc=$?
+    [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
+    if [ "$down_rc" -ne 0 ]; then
+        log "ERROR: stopping the containers failed (compose down exited $down_rc)"
+        write_status 2>/dev/null || true
+        return "$down_rc"
+    fi
     log "Containers stopped"
     # Write a final stopped status.json so any surviving tray process
     # (the tray runs as its own user process, not under our service)
@@ -4208,7 +4217,7 @@ update_finish() {
     log "Restarting OnionPress..."
     echo "  Restarting OnionPress..."
     stop_heartbeat_client
-    stop_containers
+    stop_containers || log "WARNING: update: the stop failed; starting the containers anyway"
     start_containers
     wait_for_services
     write_status
@@ -4216,6 +4225,13 @@ update_finish() {
 
     log "Update complete: $new_version"
     echo "  Update complete! Now running OnionPress $new_version."
+}
+
+usage() {
+    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+    echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
+    echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME;"
+    echo "  onionheaven enable|disable|status|overview [--json]; config get|set|unset|list"
 }
 
 main() {
@@ -4283,7 +4299,7 @@ main() {
             setup_db_passwords
             # Stop heartbeat client first (sends /offline before containers go down)
             stop_heartbeat_client
-            stop_containers
+            stop_containers || log "WARNING: restart: the stop failed; starting the containers anyway"
             start_containers
             wait_for_services
             # The `start` process's tailers ended with the old containers
@@ -4368,7 +4384,7 @@ main() {
                     log "Setup --from-backup: flagging key reimport..."
                     touch "$DATA_DIR/.import-key-pending"
                 fi
-                stop_containers
+                stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
                 start_containers
                 wait_for_services
                 start_heartbeat_client
@@ -4544,6 +4560,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                         shift
                         if [ $# -gt 0 ]; then shift; fi
                         ;;
+                    --output=*) backup_path="${1#--output=}"; shift ;;
                     --check) backup_check=yes; shift ;;
                     --json) backup_json=yes; backup_check_flags+=(--json); shift ;;
                     --user)
@@ -4551,9 +4568,16 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                         shift
                         if [ $# -gt 0 ]; then shift; fi
                         ;;
+                    --user=*) backup_check_flags+=(--user "${1#--user=}"); shift ;;
+                    # An unknown flag must not become the legacy password.
+                    -?*) echo "ERROR: backup: unknown option $1" >&2; exit 2 ;;
                     *) backup_pos+=("$1"); shift ;;
                 esac
             done
+            if [ "${#backup_pos[@]}" -gt 2 ]; then
+                echo "ERROR: backup: too many arguments" >&2
+                exit 2
+            fi
             if [ -n "${backup_pos[1]:-}" ]; then
                 backup_path="${backup_pos[1]}"
             fi
@@ -4605,9 +4629,20 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
                     --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
                     --json) restore_flags+=("$restore_arg") ;;
                     --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
+                    --confirmed=?*) restore_flags+=("$restore_arg") ;;
+                    # An unknown flag must not become the legacy password.
+                    -?*) echo "ERROR: restore: unknown option $restore_arg" >&2; exit 2 ;;
                     *) restore_pos+=("$restore_arg") ;;
                 esac
             done
+            if [ "$restore_what" = yes ]; then
+                echo "ERROR: restore: --confirmed needs a value" >&2
+                exit 2
+            fi
+            if [ "${#restore_pos[@]}" -gt 2 ]; then
+                echo "ERROR: restore: too many arguments" >&2
+                exit 2
+            fi
             restore_path="${restore_pos[0]:-}"
             if [ -n "${restore_pos[1]:-}" ]; then
                 restore_legacy_pass="${restore_pos[0]}"
@@ -4628,7 +4663,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             fi
             if [ "$restore_check" = yes ]; then
                 # Changes nothing: the CLI's answer is the whole result.
-                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path" "${restore_flags[@]}"
+                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"
                 exit $?
             fi
             # install-from-backup: the shared Python CLI tears the install down
@@ -4642,7 +4677,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # copy (a backup of another address replaces the key), and
             # started again after, with the restored one.
             stop_heartbeat_client
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py restore "$restore_path" "${restore_flags[@]}"; then
+            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
                 start_heartbeat_client
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
@@ -5053,10 +5088,13 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             log "OnionHeaven reset complete"
             ;;
 
+        help|-h|--help)
+            usage
+            ;;
+
         *)
-            echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
-            echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
-            echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME; onionheaven alerts [--dismiss]"
+            echo "onionpress: unknown command: $1" >&2
+            usage >&2
             exit 1
             ;;
     esac

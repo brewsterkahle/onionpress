@@ -2295,7 +2295,7 @@ HTEOF
         bundled_python -m onionpress.cli "$_step" >> "$LOG_FILE" 2>&1 \
             || { log "WARNING: $_step failed (rc=$?) — continuing; see $LOG_FILE"; START_ERRORS="$START_ERRORS $_step"; }
     done
-    bundled_python -m onionpress.cli provision-post-install \
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" provision-post-install \
         --themes-dir "$RESOURCES_DIR/themes" \
         --plugins-dir "$RESOURCES_DIR/plugins" >> "$LOG_FILE" 2>&1 \
         || { log "WARNING: provision-post-install failed (rc=$?) — themes/plugins may be missing; see $LOG_FILE"; START_ERRORS="$START_ERRORS provision-post-install"; }
@@ -2383,8 +2383,16 @@ stop_containers() {
     # Stop farm containers first (they depend on the onionheaven container's DB)
     stop_onionheaven_farm
     cd "$DOCKER_DIR"
-    # Stop all containers (including onionheaven; cloudflared via override file if token set)
-    docker compose $CF_COMPOSE down 2>&1 | tee -a "$LOG_FILE"
+    # Stop all containers (including onionheaven; cloudflared via override file if token set).
+    # The status is compose's, not tee's or log's: `stop` and `quit` report
+    # a failed stop (tests/test_launcher_dispatch_mac.py).
+    local down_out down_rc=0
+    down_out=$(docker compose $CF_COMPOSE down 2>&1) || down_rc=$?
+    [ -z "$down_out" ] || printf '%s\n' "$down_out" | tee -a "$LOG_FILE"
+    if [ "$down_rc" -ne 0 ]; then
+        log "ERROR: stopping the containers failed (compose down exited $down_rc)"
+        return "$down_rc"
+    fi
     log "Containers stopped"
 }
 
@@ -2876,9 +2884,16 @@ main() {
             # captures, and exits 0 so launchd leaves it down.
             # (`--no-offline`, from the menubar's update relaunch: the site
             # is coming right back, so the hub is not told /offline.)
+            # Both flags are read wherever they stand; anything else is
+            # ignored with a warning (a teardown never stops on a flag).
             QUIT_DAEMON_ARGS=""
-            for _arg in "$@"; do
-                [ "$_arg" = "--no-offline" ] && QUIT_DAEMON_ARGS="--no-offline"
+            QUIT_LEAVE_MENUBAR=no
+            for _arg in "${@:2}"; do
+                case "$_arg" in
+                    --no-offline) QUIT_DAEMON_ARGS="--no-offline" ;;
+                    --leave-menubar) QUIT_LEAVE_MENUBAR=yes ;;
+                    *) echo "onionpress quit: ignoring unknown option $_arg" >&2 ;;
+                esac
             done
             log "quit: stopping the OnionPress daemon"
             if ! bundled_python -m onionpress.cli --data-dir "$DATA_DIR" daemon stop $QUIT_DAEMON_ARGS >> "$LOG_FILE" 2>&1; then
@@ -2893,14 +2908,14 @@ main() {
             # that case. `-u $(whoami)` restricts to this user's
             # processes per the multi-user rule in CLAUDE.md.
             MENUBAR_PID=""
-            if [ "${2:-}" = "--leave-menubar" ]; then
+            if [ "$QUIT_LEAVE_MENUBAR" = yes ]; then
                 log "quit: run from the menubar (it quits itself)"
             elif [ -f "$DATA_DIR/menubar.pid" ]; then
                 # The MenubarApp's own pid file (src/menubar.py writes it;
                 # $PIDFILE is the start lock, never the app's pid).
                 MENUBAR_PID=$(cat "$DATA_DIR/menubar.pid" 2>/dev/null | tr -d '[:space:]')
             fi
-            if [ "${2:-}" != "--leave-menubar" ] && { [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; }; then
+            if [ "$QUIT_LEAVE_MENUBAR" != yes ] && { [ -z "$MENUBAR_PID" ] || ! kill -0 "$MENUBAR_PID" 2>/dev/null; }; then
                 # Match THIS bundle's py2app-frozen MenubarApp binary path,
                 # anchored so only a command line that IS that executable
                 # matches — not a shell, grep or tail that merely names the
@@ -3003,7 +3018,7 @@ main() {
             # containers refresh, splitting the cluster across image
             # versions (e.g. missing `has` command in queue-manager).
             update_images
-            stop_containers
+            stop_containers || log "WARNING: restart: the stop failed; starting the containers anyway"
             start_containers
             wait_for_services
             ;;
@@ -3048,6 +3063,7 @@ main() {
                 log "Tor containers started"
             else
                 log "ERROR: Failed to start tor container (rc=$_tor_rc) — see $LOG_FILE"
+                exit "$_tor_rc"
             fi
             ;;
 
@@ -3109,7 +3125,7 @@ main() {
             # cmd_get, which runs curl inside the tor container (a SOCKS
             # connection from the host does not work through Colima's port
             # forwarding). "${@:2}" forwards the URL and flags verbatim.
-            bundled_python -m onionpress.cli get "${@:2}"
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" get "${@:2}"
             ;;
 
         provision-post-install)
@@ -3119,7 +3135,7 @@ main() {
             # etc.) still exist below and are still called by start_
             # containers — only this subcommand entry point goes through
             # Python for now.
-            bundled_python -m onionpress.cli provision-post-install \
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" provision-post-install \
                 --themes-dir "$RESOURCES_DIR/themes" \
                 --plugins-dir "$RESOURCES_DIR/plugins"
             ;;
@@ -3182,7 +3198,7 @@ main() {
                     log "Setup --from-backup: flagging key reimport..."
                     touch "$DATA_DIR/.import-key-pending"
                 fi
-                stop_containers
+                stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
                 start_containers
                 wait_for_services
             else
@@ -3208,7 +3224,7 @@ main() {
             # ONIONPRESS_BACKUP_PASSWORD, stdin or a no-echo prompt; the old
             # `backup <password> [output_path]` still works, with a warning.
             shift  # drop "backup"
-            bundled_python -m onionpress.cli backup "$@"
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" backup "$@"
             ;;
 
         restore)
@@ -3232,9 +3248,20 @@ main() {
                     --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
                     --json) restore_flags+=("$restore_arg") ;;
                     --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
+                    --confirmed=?*) restore_flags+=("$restore_arg") ;;
+                    # An unknown flag must not become the legacy password.
+                    -?*) echo "ERROR: restore: unknown option $restore_arg" >&2; exit 2 ;;
                     *) restore_pos+=("$restore_arg") ;;
                 esac
             done
+            if [ "$restore_what" = yes ]; then
+                echo "ERROR: restore: --confirmed needs a value" >&2
+                exit 2
+            fi
+            if [ "${#restore_pos[@]}" -gt 2 ]; then
+                echo "ERROR: restore: too many arguments" >&2
+                exit 2
+            fi
             restore_path="${restore_pos[0]:-}"
             if [ -n "${restore_pos[1]:-}" ]; then
                 restore_legacy_pass="${restore_pos[0]}"
@@ -3255,7 +3282,7 @@ main() {
             fi
             if [ "$restore_check" = yes ]; then
                 # Changes nothing: the CLI's answer is the whole result.
-                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path" "${restore_flags[@]}"
+                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"
                 exit $?
             fi
             # install-from-backup: the Python CLI tears the install down and
@@ -3264,7 +3291,7 @@ main() {
             # (no .import-key-pending, no manual multisite/Tor dance).
             # The exit status is the caller's only sign of a refused or
             # failed restore (the tray and the menubar check it).
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli restore "$restore_path" "${restore_flags[@]}"; then
+            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
                 echo "ERROR: Restore failed — see $LOG_FILE" >&2
                 exit 1
             fi
@@ -3299,7 +3326,9 @@ main() {
         scrub)
             # Scrub: full lifecycle test — backup, reset, restore, verify.
             # Proves backup/restore integrity and that reset truly cleans up.
-            # Usage: onionpress scrub [wp-admin-password]
+            # Usage: onionpress scrub. The WordPress admin password comes
+            # from read_backup_password (ONIONPRESS_BACKUP_PASSWORD, stdin or
+            # a prompt); `scrub <password>` still works, with a warning.
             echo ""
             echo "OnionPress Scrub"
             echo "================"
@@ -3315,17 +3344,15 @@ main() {
             echo ""
             echo "── Step 1/4: Backup ──"
             setup_db_passwords
-            local scrub_pass="${2:-}"
+            read_backup_password "${2:-}"
+            local scrub_pass="$BACKUP_PASS"
             if [ -z "$scrub_pass" ]; then
-                read -r -s -p "WordPress admin password (for backup): " scrub_pass
-                echo ""
-            fi
-            if [ -z "$scrub_pass" ]; then
-                echo "ERROR: Password is required for backup."
+                echo "ERROR: Password is required for backup." >&2
                 exit 1
             fi
-            local scrub_backup="/tmp/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
-            ONIONPRESS_BACKUP_PASSWORD="$scrub_pass" bundled_python -m onionpress.cli backup --output "$scrub_backup"
+            # In the user's own data dir, not the shared /tmp.
+            local scrub_backup="$DATA_DIR/onionpress-scrub-$(date +%Y%m%d-%H%M%S).zip"
+            ONIONPRESS_BACKUP_PASSWORD="$scrub_pass" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" backup --output "$scrub_backup"
 
             # Capture the live identity + a log mark BEFORE teardown so Step 4 can
             # prove install-from-backup preserved the address and did not
@@ -3372,7 +3399,7 @@ main() {
             # cli restore tears down (already reset above) and rebuilds the
             # install directly from the backup — seeded key + imported DB/
             # content, no in-place overwrite or key-volume swap churn.
-            ONIONPRESS_BACKUP_PASSWORD="$scrub_pass" bundled_python -m onionpress.cli restore "$scrub_backup"
+            ONIONPRESS_BACKUP_PASSWORD="$scrub_pass" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "$scrub_backup"
             echo "  Restore and restart complete."
 
             # ── Step 4: Verify ──────────────────────────────────────────
@@ -3567,8 +3594,8 @@ User commands:
                 unset KEY | list [--json]  (a secret: set KEY - with the
                 value on stdin; run 'config list --help' for the keys)
   onionheaven   Keep the site reachable through OnionHeaven:
-                onionheaven enable | disable | status [--json];
-                onionheaven alerts [--dismiss] (the hub's messages)
+                onionheaven enable | disable | status [--json] |
+                overview [--json]
   hub-recovery-key
                 An OnionHeaven hub's backup recovery key
                 (create, show, check, restore)
