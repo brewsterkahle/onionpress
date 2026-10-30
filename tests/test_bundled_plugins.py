@@ -41,6 +41,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import multisite, setup_logic, wp_files  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
 
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 ACTIVATE = os.path.join(PROJECT_ROOT, "app/Resources/scripts/activate_plugin.sh")
@@ -312,7 +314,7 @@ class TestLaunchers(unittest.TestCase):
         if config is not None:
             with open(os.path.join(data, "config"), "w") as f:
                 f.write(config)
-        script = (_bash_function(_read(LAUNCHERS[1]), "plugin_wanted")
+        script = (config_value_function() + _bash_function(_read(LAUNCHERS[1]), "plugin_wanted")
                   + 'plugin_wanted INSTALL_IA_PLUGIN && echo yes || echo no\n')
         r = subprocess.run(["bash", "-c", "set -e\n" + script], capture_output=True,
                            text=True, env={"DATA_DIR": data, "PATH": "/usr/bin:/bin"},
@@ -325,7 +327,9 @@ class TestLaunchers(unittest.TestCase):
         self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=\n"), "yes")
         self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=yes\n"), "yes")
         self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=no\n"), "no")
-        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=yes\nINSTALL_IA_PLUGIN=no\n"), "no")
+        # A duplicated key: the first line, config.read_value's rule (#404).
+        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=no\nINSTALL_IA_PLUGIN=yes\n"), "no")
+        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=yes\nINSTALL_IA_PLUGIN=no\n"), "yes")
 
 
 class TestSetupStartsThePluginSetup(unittest.TestCase):

@@ -21,8 +21,12 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -223,7 +227,7 @@ class TestBindHostResolution(unittest.TestCase):
                 "set -e\n"
                 f"DATA_DIR={data_dir!r}\n"
                 f"LOG_FILE={os.path.join(data_dir, 'onionpress.log')!r}\n"
-                + block + '\nprintf "%s" "$ONIONPRESS_BIND_HOST"\n'
+                + config_value_function() + block + '\nprintf "%s" "$ONIONPRESS_BIND_HOST"\n'
             )
             env = {} if env_value is None else {"ONIONPRESS_BIND_HOST": env_value}
             result = _run_bash(script, env=env)

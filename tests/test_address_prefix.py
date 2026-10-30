@@ -40,6 +40,9 @@ from onionpress.config import (  # noqa: E402
     validate_address_prefix,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -376,6 +379,7 @@ class TestKeyImportKeepsPrefixLength(unittest.TestCase):
             script = (
                 "log() { :; }\n"
                 f"DATA_DIR={tmp!r}\n"
+                + config_value_function() +
                 f"address={self.ADDRESS!r}\n"
                 "import_block() {\n" + block + "\n}\nimport_block\n"
             )

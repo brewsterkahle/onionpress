@@ -97,10 +97,12 @@ class TestPostinstText(unittest.TestCase):
                         self.postinst.index("/opt/onionpress/docker-rootless"),
                         "the distro's copy comes first")
 
-    def test_root_logs_only_at_a_plain_name(self):
-        self.assertIn('plain_path "$_rootless_log" -f || _rootless_log=/dev/null', self.postinst)
-        self.assertIn('[ "$_rootless_log" = /dev/null ] || chown', self.postinst,
-                      "never chown /dev/null to the user")
+    def test_the_reasons_reach_the_log_through_the_users_shell(self):
+        # Issue #490's as_user_logging_to opens the log as the user; the
+        # notes about a skipped or failed attempt go the same way.
+        self.assertIn('as_user_logging_to "$_rootless_log" ">>" echo "$*"', self.postinst)
+        self.assertIn('as_user_logging_to "$_rootless_log" ">" true', self.postinst,
+                      "the log starts when an attempt starts, before the first note")
 
     def test_the_users_manager_is_never_only_reexeced(self):
         self.assertNotIn("daemon-reexec", self.postinst,
@@ -220,7 +222,7 @@ exit 127
 '''
 
     TOOLS = ("bash", "sh", "env", "grep", "awk", "cut", "cat", "mkdir",
-             "tr", "head", "date", "chmod", "touch", "printf")
+             "tr", "head", "date", "chmod", "touch", "printf", "echo", "true")
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="op-postinst-first-")
@@ -369,8 +371,7 @@ exit 127
         self.assertIn("Docker mode: rootless (no logout required).", r.stdout,
                       "a bad log name costs the log, not the setup")
         with open(target) as f:
-            self.assertEqual(f.read(), "", "root wrote nothing through the link")
-        self.assertFalse([c for c in calls if c.startswith("chown") and "/dev/null" in c], calls)
+            self.assertEqual(f.read(), "", "nothing was written through the link")
 
     def test_the_first_install_needs_no_session_bus(self):
         self._docker_io_layout()

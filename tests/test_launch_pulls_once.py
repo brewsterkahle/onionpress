@@ -44,7 +44,7 @@ class TestOnePullPass(unittest.TestCase):
         self.assertIn("docker compose pull --policy missing", body)
         fn = code[code.index("update_images() {"):]
         fn = fn[:fn.index("\n}\n")]
-        self.assertIn('grep "^UPDATE_ON_LAUNCH=" "$DATA_DIR/config"', fn)
+        self.assertIn("$(config_value UPDATE_ON_LAUNCH)", fn)
         self.assertIn('if [ "$update_enabled" != "yes" ]; then', fn)
 
 

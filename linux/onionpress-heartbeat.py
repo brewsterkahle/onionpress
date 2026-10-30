@@ -58,6 +58,8 @@ install.sh and the .deb).
 """
 
 import base64
+import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -121,6 +123,18 @@ DATA_DIR = os.path.expanduser("~/.onionpress")
 CONFIG_PATH = os.path.join(DATA_DIR, "config")
 STATE_PATH = os.path.join(DATA_DIR, "onionheaven-registration.json")
 
+# The Mac client's _hub_lock (onionpress.onionheaven, issue #404): every
+# /online, every /unregister and every change to the registration record
+# holds an flock on this file, and /online re-reads the choice inside it,
+# so this daemon and a launcher's onionheaven-unregister (reset, key
+# import, restore, uninstall) never interleave: an /online landing after
+# an /unregister would put the key back on the hub while the record says
+# it is gone. Next to the record; the name is onionheaven.HUB_LOCK_FILE
+# (test-held).
+HUB_LOCK_FILE = "onionheaven-hub.lock"
+HEARTBEAT_LOCK_TIMEOUT = 10
+RELEASE_LOCK_TIMEOUT = 300
+
 # Logging
 
 
@@ -171,6 +185,87 @@ _bad_hub_value_logged = None
 # default hub stands in for it), or "": register() warns again with it
 # right before the key goes out.
 _rejected_hub_value = ""
+
+
+class HubBusy(Exception):
+    """Another OnionPress process held the hub lock longer than we wait."""
+
+
+_HUB_LOCK = threading.RLock()
+_hub_flock = {"depth": 0, "fd": None}  # guarded by _HUB_LOCK
+
+
+def _acquire_hub_flock(timeout):
+    """An exclusive flock on HUB_LOCK_FILE: its fd, None when the file
+    cannot be used (going on without it, as before it existed), or HubBusy
+    after *timeout* seconds."""
+    path = os.path.join(os.path.dirname(STATE_PATH), HUB_LOCK_FILE)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        log.warning("OnionHeaven: cannot open the hub lock (%s); going on without it", e)
+        return None
+    deadline = time.monotonic() + timeout
+    waiter = threading.Event()  # not time.sleep: tests stub it out
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                raise HubBusy()
+            waiter.wait(0.2)
+        except OSError as e:
+            os.close(fd)
+            log.warning("OnionHeaven: cannot lock the hub lock (%s); going on without it", e)
+            return None
+
+
+@contextlib.contextmanager
+def _hub_lock(timeout=RELEASE_LOCK_TIMEOUT):
+    """_HUB_LOCK plus the cross-process flock, taken by the outermost
+    holder only (re-entrant). Raises HubBusy after *timeout* seconds."""
+    with _HUB_LOCK:
+        outer = _hub_flock["depth"] == 0
+        if outer:
+            _hub_flock["fd"] = _acquire_hub_flock(timeout)
+        _hub_flock["depth"] += 1
+        try:
+            yield
+        finally:
+            _hub_flock["depth"] -= 1
+            if outer:
+                fd, _hub_flock["fd"] = _hub_flock["fd"], None
+                if fd is not None:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(fd)
+
+
+@contextlib.contextmanager
+def _record_lock():
+    """The hub lock around a read-modify-write of the record. A process
+    that keeps it past RELEASE_LOCK_TIMEOUT is waited out no longer: the
+    write goes ahead without it, as every write did before the lock."""
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_hub_lock(RELEASE_LOCK_TIMEOUT))
+        except HubBusy:
+            log.warning("OnionHeaven: another OnionPress process kept the hub lock; "
+                        "changing the registration record without it")
+        yield
+
+
+def _under_record_lock(fn):
+    """fn's read-modify-write of the record runs under _record_lock."""
+    def locked(*args, **kwargs):
+        with _record_lock():
+            return fn(*args, **kwargs)
+    locked.__name__ = fn.__name__
+    locked.__doc__ = fn.__doc__
+    return locked
 
 
 def _hub_fallback_warning():
@@ -676,26 +771,31 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
 
     backoff_delays = [10, 30, 30]
     for attempt in range(4):
-        # Every attempt carries the key: stop the moment the user turns
-        # OnionHeaven off, not after the retries.
-        if _registration_choice(read_config()) != "yes":
-            log.info("Registration stopped: REGISTER_WITH_ONIONHEAVEN is no longer yes")
-            return False
-        if _address_on_hold(content_addr):
-            log.info("Registration skipped: the key of %s is being given up "
-                     "and its hubs were asked to delete it", content_addr)
-            return False
-        log.info("Registration attempt %d/4 with %s...", attempt + 1, hub_addr)
-        ok, resp = sign_and_post("online", hub_addr, content_addr, hc_addr, priv_key, pub_key, extra)
-
-        if ok and resp:
-            if resp.get("registered"):
-                log.info("Registration successful: %s", resp)
-                _record_registered(hub_addr, content_addr)
-                return True
-            error = resp.get("error", "unknown")
-            log.error("Registration rejected: %s", error)
-            return False
+        try:
+            with _hub_lock(HEARTBEAT_LOCK_TIMEOUT):
+                # Every attempt carries the key: stop the moment the user
+                # turns OnionHeaven off, not after the retries.
+                if _registration_choice(read_config()) != "yes":
+                    log.info("Registration stopped: REGISTER_WITH_ONIONHEAVEN is no longer yes")
+                    return False
+                if _address_on_hold(content_addr):
+                    log.info("Registration skipped: the key of %s is being given up "
+                             "and its hubs were asked to delete it", content_addr)
+                    return False
+                log.info("Registration attempt %d/4 with %s...", attempt + 1, hub_addr)
+                ok, resp = sign_and_post("online", hub_addr, content_addr, hc_addr,
+                                         priv_key, pub_key, extra)
+                if ok and resp:
+                    if resp.get("registered"):
+                        log.info("Registration successful: %s", resp)
+                        _record_registered(hub_addr, content_addr)
+                        return True
+                    error = resp.get("error", "unknown")
+                    log.error("Registration rejected: %s", error)
+                    return False
+        except HubBusy:
+            log.info("Registration attempt %d/4 not sent: another OnionPress "
+                     "process is asking a hub to delete a key", attempt + 1)
 
         if attempt < 3:
             delay = backoff_delays[attempt]
@@ -706,16 +806,17 @@ def register(hub_addr, content_addr, hc_addr, priv_key, pub_key):
     # The record says whether the hub may hold the key (the opt-out's
     # /unregister keys off it), so a failed attempt must not clear one an
     # earlier session wrote.
-    previous = _load_state()
-    if previous.get("registered"):
-        previous["last_attempt"] = datetime.now(timezone.utc).isoformat()
-        _save_state(previous)
-    else:
-        _save_state({
-            "registered": False,
-            "last_attempt": datetime.now(timezone.utc).isoformat(),
-            "onionheaven_address": hub_addr,
-        })
+    with _record_lock():
+        previous = _load_state()
+        if previous.get("registered"):
+            previous["last_attempt"] = datetime.now(timezone.utc).isoformat()
+            _save_state(previous)
+        else:
+            _save_state({
+                "registered": False,
+                "last_attempt": datetime.now(timezone.utc).isoformat(),
+                "onionheaven_address": hub_addr,
+            })
     return False
 
 
@@ -748,28 +849,34 @@ def unregister(hub_addr, content_addr, hc_addr, priv_key, pub_key, while_choice=
     """
     backoff_delays = [5, 15, 30]
     for attempt in range(4):
-        if while_choice is not None:
-            choice = _registration_choice(read_config())
-            if choice != while_choice:
-                log.info("Unregister dropped: REGISTER_WITH_ONIONHEAVEN is now %s",
-                         choice or "unrecognized")
-                return None
-        log.info("Unregister attempt %d/4 from %s...", attempt + 1, hub_addr)
-        ok, resp = sign_and_post("unregister", hub_addr, content_addr, "", priv_key, pub_key)
-
-        if ok and resp:
-            error = resp.get("error")
-            if resp.get("unregistered") or error == UNREGISTER_NOT_FOUND:
-                if resp.get("unregistered"):
-                    log.info("Unregistered successfully from %s", hub_addr)
-                else:
-                    log.info("Hub %s holds no entry for %s; nothing to unregister",
-                             hub_addr, content_addr)
-                _record_unregistered(hub_addr, content_addr)
-                return True
-            log.error("Unregister rejected: %s", error or "unknown")
-            if error:
-                return False
+        try:
+            with _hub_lock(RELEASE_LOCK_TIMEOUT):
+                if while_choice is not None:
+                    choice = _registration_choice(read_config())
+                    if choice != while_choice:
+                        log.info("Unregister dropped: REGISTER_WITH_ONIONHEAVEN is now %s",
+                                 choice or "unrecognized")
+                        return None
+                log.info("Unregister attempt %d/4 from %s...", attempt + 1, hub_addr)
+                ok, resp = sign_and_post("unregister", hub_addr, content_addr, "",
+                                         priv_key, pub_key)
+                if ok and resp:
+                    error = resp.get("error")
+                    if resp.get("unregistered") or error == UNREGISTER_NOT_FOUND:
+                        if resp.get("unregistered"):
+                            log.info("Unregistered successfully from %s", hub_addr)
+                        else:
+                            log.info("Hub %s holds no entry for %s; nothing to unregister",
+                                     hub_addr, content_addr)
+                        _record_unregistered(hub_addr, content_addr)
+                        return True
+                    log.error("Unregister rejected: %s", error or "unknown")
+                    if error:
+                        return False
+        except HubBusy:
+            log.warning("OnionHeaven: another OnionPress process kept the hub lock; "
+                        "unregister not sent")
+            return False
 
         if attempt < 3:
             delay = backoff_delays[min(attempt, len(backoff_delays) - 1)]
@@ -811,10 +918,23 @@ def heartbeat(hub_addr, content_addr, hc_addr, priv_key, pub_key):
     if _is_onionheaven_server():
         extra["is_onionheaven"] = True
 
-    ok, resp = sign_and_post(
-        "online", hub_addr, content_addr, hc_addr, priv_key, pub_key,
-        extra=extra,
-    )
+    try:
+        with _hub_lock(HEARTBEAT_LOCK_TIMEOUT):
+            # Re-read inside the lock: an opt-out's /unregister that got
+            # the lock first is never followed by this /online.
+            if _registration_choice(read_config()) != "yes":
+                log.info("Heartbeat dropped: REGISTER_WITH_ONIONHEAVEN is no longer yes")
+                return False
+            if _address_on_hold(content_addr):
+                return False
+            ok, resp = sign_and_post(
+                "online", hub_addr, content_addr, hc_addr, priv_key, pub_key,
+                extra=extra,
+            )
+    except HubBusy:
+        log.info("Heartbeat not sent now: another OnionPress process is asking "
+                 "a hub to delete a key")
+        return False
 
     if ok and resp and resp.get("online"):
         log.info("Heartbeat OK (wp_healthy=%s)", wp_healthy)
@@ -858,27 +978,28 @@ _STATE_CARRIED = ("left_on_hubs", "released")
 def _save_state(data):
     """Write the record whole. left_on_hubs and released are carried over
     from the file unless *data* sets them (None drops one)."""
-    data = dict(data)
-    missing = [k for k in _STATE_CARRIED if k not in data]
-    if missing:
-        previous = _load_state()
-        for key in missing:
-            if key in previous:
-                data[key] = previous[key]
-    for key in _STATE_CARRIED:
-        if data.get(key) is None:
-            data.pop(key, None)
-    tmp = f"{STATE_PATH}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, STATE_PATH)
-    except OSError as e:
-        log.warning("Failed to save state: %s", e)
+    with _record_lock():
+        data = dict(data)
+        missing = [k for k in _STATE_CARRIED if k not in data]
+        if missing:
+            previous = _load_state()
+            for key in missing:
+                if key in previous:
+                    data[key] = previous[key]
+        for key in _STATE_CARRIED:
+            if data.get(key) is None:
+                data.pop(key, None)
+        tmp = f"{STATE_PATH}.{os.getpid()}.tmp"
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, STATE_PATH)
+        except OSError as e:
+            log.warning("Failed to save state: %s", e)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def _load_state():
@@ -933,6 +1054,7 @@ def _forget_left_on_hub(state, addr, hub):
     return len(kept) != len(entries)
 
 
+@_under_record_lock
 def _record_registered(hub_addr, content_addr):
     """A hub took an /online: the record says it holds the key. A
     registration the record named before, for another hub or address,
@@ -962,6 +1084,7 @@ def _record_registered(hub_addr, content_addr):
     _save_state(state)
 
 
+@_under_record_lock
 def _record_unregistered(hub_addr, content_addr):
     """*hub_addr* answered an /unregister for *content_addr*: drop that
     pair. The registration is cleared only when it names that pair."""
@@ -1642,6 +1765,7 @@ _left_reported = set()     # entries for a lost key, logged once per run
 HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
 
 
+@_under_record_lock
 def _reconcile_record():
     """At start, with this daemon's key loaded. A registration the record
     names for another address is a key this install no longer has (an
@@ -1671,10 +1795,11 @@ def _maybe_release_left_hubs(choice, now=None):
     heartbeat puts the key there again, so that entry is dropped.
     Returns the unregister() results, or None when nothing was sent."""
     global _left_last_attempt
-    state = _load_state()
-    current = (_content_addr, _current_hub)
-    if choice == "yes" and _forget_left_on_hub(state, *current):
-        _save_state(state)
+    with _record_lock():
+        state = _load_state()
+        current = (_content_addr, _current_hub)
+        if choice == "yes" and _forget_left_on_hub(state, *current):
+            _save_state(state)
     pairs = [_entry_pair(e) for e in _left_on_hubs(state)
              if e["content_address"] == _content_addr
              and e["onionheaven_address"] != _content_addr
@@ -1732,11 +1857,12 @@ def _release_replaced_key(served):
         if hub == _content_addr:
             continue
         if unregister(hub, _content_addr, _hc_addr, _priv_key, _pub_key) is not True:
-            state = _load_state()
-            _note_left_on_hub(state, _content_addr, hub, "key replaced")
-            if _state_registration(state) == (_content_addr, hub):
-                state["registered"] = False
-            _save_state(state)
+            with _record_lock():
+                state = _load_state()
+                _note_left_on_hub(state, _content_addr, hub, "key replaced")
+                if _state_registration(state) == (_content_addr, hub):
+                    state["registered"] = False
+                _save_state(state)
             log.warning("OnionHeaven: %s may still hold the key of %s", hub, _content_addr)
 
 
@@ -1921,11 +2047,12 @@ def main():
             # deletes its copy of the key). If it does not answer, the record
             # keeps it in left_on_hubs and _maybe_release_left_hubs asks again.
             if unregister(_current_hub, _content_addr, _hc_addr, _priv_key, _pub_key) is not True:
-                state = _load_state()
-                _note_left_on_hub(state, _content_addr, _current_hub, "hub changed")
-                if _state_registration(state) == (_content_addr, _current_hub):
-                    state["registered"] = False
-                _save_state(state)
+                with _record_lock():
+                    state = _load_state()
+                    _note_left_on_hub(state, _content_addr, _current_hub, "hub changed")
+                    if _state_registration(state) == (_content_addr, _current_hub):
+                        state["registered"] = False
+                    _save_state(state)
             _registered = False
             # Persistent socket points at the old hub — drop it so the
             # next /online opens a fresh one to the new hub.

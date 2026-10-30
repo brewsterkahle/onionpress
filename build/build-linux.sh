@@ -431,15 +431,12 @@ rootless_setuptool_dir() {
 }
 
 # Why rootless Docker was skipped or did not start: said at the terminal
-# and kept in the setup log (the e2e harness collects that file; without
-# it a docker-group install cannot be explained).
-own_rootless_log() {
-    [ "$_rootless_log" = /dev/null ] || chown "$REAL_USER:$REAL_USER" "$_rootless_log" 2>/dev/null || true
-}
+# and added to the setup log by the user's shell (as_user_logging_to
+# below; the e2e harness collects that file, and without it a
+# docker-group install cannot be explained).
 rootless_note() {
     echo "  $*"
-    echo "$*" >>"$_rootless_log" 2>/dev/null || true
-    own_rootless_log
+    as_user_logging_to "$_rootless_log" ">>" echo "$*" || true
 }
 
 # The user's manager, as the user, over its private socket
@@ -447,6 +444,27 @@ rootless_note() {
 user_systemctl() {
     runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
         systemctl --user "$@"
+}
+
+# Runs "${@:3}" as the user with its output in the log $1, which the
+# user's shell opens, not root's (issue #490): the data dir is the user's,
+# and root's `>` there would follow a link planted at the name. $2 is
+# ">" (start the log) or ">>" (add to it). A link, or anything but a
+# regular file, at the name keeps no output and is left alone.
+as_user_logging_to() {
+    local log="$1" how="$2"
+    shift 2
+    runuser -u "$REAL_USER" -- bash -c '
+        log=$1 how=$2
+        shift 2
+        umask 077
+        if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
+            echo "  $log is a link or not a regular file; its output is not kept" >&2
+            log=/dev/null
+        fi
+        if [ "$how" = ">" ]; then exec "$@" >"$log" 2>&1; fi
+        exec "$@" >>"$log" 2>&1
+    ' as_user_logging_to "$log" "$how" "$@"
 }
 
 # The user's rootless daemon answers `docker info` (within $1 seconds).
@@ -485,11 +503,9 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
         rootless_ok=1
     fi
 
-    # The setup log is root's to write, so only at a name no link can
-    # lead elsewhere (#471); a planted link means no log, never a
-    # followed one.
+    # The setup log: the user's shell opens it (as_user_logging_to, #490),
+    # root never does.
     _rootless_log="$DATA_DIR/docker-rootless-setup.log"
-    plain_path "$_rootless_log" -f || _rootless_log=/dev/null
 
     # 3. Try fresh rootless setup. Skip if there is no setup tool
     #    anywhere or if system Docker is actively serving other
@@ -498,6 +514,7 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
     #    where apt just brought docker.service up. Either way the reason
     #    is said and logged.
     if [ "$rootless_ok" = "0" ] && [ "$bootstrap_ok" = "1" ]; then
+        as_user_logging_to "$_rootless_log" ">" true || true
         if ! rootless_dir=$(rootless_setuptool_dir); then
             rootless_note "Rootless Docker was not tried: no dockerd-rootless-setuptool.sh on PATH, in $DOCKER_IO_CONTRIB or in $PACKAGED_ROOTLESS_DIR; using the system daemon."
         elif docker ps -q 2>/dev/null | grep -q .; then
@@ -514,10 +531,10 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             # to, through the drop-in Docker documents for the purpose,
             # written as the user (#471).
             if ! runuser -u "$REAL_USER" -- rootlesskit --help 2>/dev/null | grep -q -- '--detach-netns'; then
-                runuser -u "$REAL_USER" -- env HOME="$REAL_HOME" sh -c '
+                as_user_logging_to "$_rootless_log" ">>" env HOME="$REAL_HOME" sh -c '
                     d="$HOME/.config/systemd/user/docker.service.d"
                     mkdir -p "$d" && printf "[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=false\n" > "$d/onionpress-rootlesskit.conf"
-                ' >>"$_rootless_log" 2>&1 || true
+                ' || true
                 rootless_note "RootlessKit here predates --detach-netns; the rootless daemon runs without it (docker.service.d/onionpress-rootlesskit.conf)."
             fi
 
@@ -526,11 +543,12 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             # so it exits 127 after setting the daemon up. The verdict is
             # the user's rootless daemon answering. Its output is kept for
             # when that fails.
-            runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-                PATH="$rootless_dir:$PATH" \
-                dockerd-rootless-setuptool.sh install --force >>"$_rootless_log" 2>&1 || true
-            own_rootless_log
-            if user_systemctl enable --now docker.service >>"$_rootless_log" 2>&1 && \
+            as_user_logging_to "$_rootless_log" ">>" \
+                env XDG_RUNTIME_DIR="/run/user/$REAL_UID" PATH="$rootless_dir:$PATH" \
+                dockerd-rootless-setuptool.sh install --force || true
+            if as_user_logging_to "$_rootless_log" ">>" \
+                   env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+                   systemctl --user enable --now docker.service && \
                rootless_docker_answers 30; then
                 rootless_ok=1
             else

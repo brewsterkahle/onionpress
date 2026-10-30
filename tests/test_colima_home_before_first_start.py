@@ -155,7 +155,7 @@ class TestHarness(unittest.TestCase):
     """The launcher's functions under bash, with stub binaries."""
 
     FUNCTIONS = (
-        "docs_mount_args", "colima_start_with_vm_settings", "install_docker",
+        "config_value", "docs_mount_args", "colima_start_with_vm_settings", "install_docker",
         "ensure_docker_socket", "docker_socket_forwards",
         "docker_socket_forward_is_foreign", "recover_docker_socket_forward",
         "wait_for_docker", "lima_vm_running", "recover_lima_vm",
