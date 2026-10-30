@@ -94,6 +94,8 @@ class TestStart(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("start_containers", self.l.fn_calls())
 
+    @unittest.skipUnless(sys.platform == "darwin",
+                         "the launcher reads the boot time with macOS's sysctl and stat -f")
     def test_a_lock_from_before_the_boot_is_stale_even_if_its_pid_lives(self):
         # The pid may have been recycled since: the file's age decides.
         os.makedirs(self.l.data_dir, exist_ok=True)
