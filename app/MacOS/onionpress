@@ -45,6 +45,26 @@ RESOURCES_DIR="$APP_DIR/Resources"
 DOCKER_DIR="$RESOURCES_DIR/docker"
 SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
+
+# The value of KEY in ~/.onionpress/config (config_value KEY [default]),
+# by config.read_value's rule (issue #404): a line is KEY's when, stripped,
+# it starts with `KEY=`; the first such line wins; the value is everything
+# after its first `=`, blanks around it trimmed. $2 (default empty) when
+# no line names KEY. Always succeeds, so `x=$(config_value K)` is safe
+# under `set -e`. Identical in the three launcher scripts
+# (tests/test_config_one_reader.py).
+config_value() {
+    local line value
+    line=$(grep -E "^[[:space:]]*$1=" "$DATA_DIR/config" 2>/dev/null | head -1)
+    if [ -z "$line" ]; then
+        printf '%s\n' "${2-}"
+        return 0
+    fi
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    printf '%s\n' "$value"
+}
 DOCUMENTS_DIR="$HOME/OnionPress"
 OLD_DOCUMENTS_DIR="$HOME/Documents/OnionPress"
 
@@ -373,7 +393,7 @@ export ONIONPRESS_VERSION
 # Read Cloudflare Tunnel token from config (empty = disabled)
 CLOUDFLARE_TUNNEL_TOKEN=""
 if [ -f "$DATA_DIR/config" ]; then
-    _cf_token=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    _cf_token=$(config_value CLOUDFLARE_TUNNEL_TOKEN)
     if [ ! -z "$_cf_token" ]; then
         CLOUDFLARE_TUNNEL_TOKEN="$_cf_token"
     fi
@@ -386,7 +406,7 @@ export CLOUDFLARE_TUNNEL_TOKEN
 # containers. Kept in step with linux/onionpress and onionpress.containers.
 ONIONHEAVEN_ACCEPT_REGISTRATIONS=""
 if [ -f "$DATA_DIR/config" ]; then
-    ONIONHEAVEN_ACCEPT_REGISTRATIONS=$(grep "^ONIONHEAVEN_ACCEPT_REGISTRATIONS=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    ONIONHEAVEN_ACCEPT_REGISTRATIONS=$(config_value ONIONHEAVEN_ACCEPT_REGISTRATIONS)
 fi
 export ONIONHEAVEN_ACCEPT_REGISTRATIONS
 
@@ -399,9 +419,9 @@ export ONIONHEAVEN_ACCEPT_REGISTRATIONS
 ONIONHEAVEN_MAX_SERVICES="${ONIONHEAVEN_MAX_SERVICES:-50}"
 ONIONHEAVEN_PROPAGATION_DELAY="${ONIONHEAVEN_PROPAGATION_DELAY:-180}"
 if [ -f "$DATA_DIR/config" ]; then
-    _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    _val=$(config_value ONIONHEAVEN_MAX_SERVICES)
     [[ "$_val" =~ ^[0-9]+$ ]] && ONIONHEAVEN_MAX_SERVICES="$_val"
-    _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    _val=$(config_value ONIONHEAVEN_PROPAGATION_DELAY)
     [[ "$_val" =~ ^[0-9]+$ ]] && ONIONHEAVEN_PROPAGATION_DELAY="$_val"
 fi
 export ONIONHEAVEN_MAX_SERVICES ONIONHEAVEN_PROPAGATION_DELAY
@@ -413,13 +433,9 @@ export ONIONHEAVEN_MAX_SERVICES ONIONHEAVEN_PROPAGATION_DELAY
 # repoints the whole stack: compose's tor/wordpress/onionheaven services, the
 # image pulls below, the OnionHeaven takeover workers and vanity-key
 # generation. See docs/BUILDING.md.
-#
-# The `| cut` is not cosmetic — a bare `var=$(grep ...)` takes grep's exit
-# status, so a missing key would return 1 and kill the script under `set -e`.
-# -f2- rather than -f2 so a value containing '=' is not truncated.
 for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do
     if [ -z "$(eval echo \"\$$_img_var\")" ] && [ -f "$DATA_DIR/config" ]; then
-        _img_val=$(grep "^${_img_var}=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+        _img_val=$(config_value "$_img_var")
         if [ -n "$_img_val" ]; then
             eval "export ${_img_var}=\"\$_img_val\""
         fi
@@ -677,7 +693,7 @@ detect_container_runtime() {
                 # Check if configured VM memory differs from running VM
                 _cfg_mem=2
                 if [ -f "$DATA_DIR/config" ]; then
-                    _tmp_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+                    _tmp_mem=$(config_value VM_MEMORY)
                     [ -n "$_tmp_mem" ] && _cfg_mem="$_tmp_mem"
                 fi
                 # Get actual VM memory in GB (MemTotal is in kB). The value
@@ -692,7 +708,7 @@ detect_container_runtime() {
                 # Read configured CPU count
                 _cfg_cpu=2
                 if [ -f "$DATA_DIR/config" ]; then
-                    _tmp_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2)
+                    _tmp_cpu=$(config_value VM_CPU)
                     [ -n "$_tmp_cpu" ] && _cfg_cpu="$_tmp_cpu"
                 fi
                 # Get actual VM CPU count
@@ -737,9 +753,9 @@ detect_container_runtime() {
                 _restart_mem=2
                 _restart_cpu=2
                 if [ -f "$DATA_DIR/config" ]; then
-                    _cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+                    _cfg_mem=$(config_value VM_MEMORY)
                     [ -n "$_cfg_mem" ] && _restart_mem="$_cfg_mem"
-                    _cfg_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2)
+                    _cfg_cpu=$(config_value VM_CPU)
                     [ -n "$_cfg_cpu" ] && _restart_cpu="$_cfg_cpu"
                 fi
 
@@ -853,9 +869,9 @@ recover_docker_socket_forward() {
     local who="$1" cpu=2 memory=2 disk=20 value
     log "$who: Lima forwards the VM's Docker socket to $(docker_socket_forwards | tr '\n' ' ')— not $COLIMA_HOME/default/docker.sock, where OnionPress waits for it. Restarting the VM through Colima to re-point it"
     if [ -f "$DATA_DIR/config" ]; then
-        value=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2); [ -n "$value" ] && cpu="$value"
-        value=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2); [ -n "$value" ] && memory="$value"
-        value=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2); [ -n "$value" ] && disk="$value"
+        value=$(config_value VM_CPU); [ -n "$value" ] && cpu="$value"
+        value=$(config_value VM_MEMORY); [ -n "$value" ] && memory="$value"
+        value=$(config_value VM_DISK); [ -n "$value" ] && disk="$value"
     fi
     if ! "$BIN_DIR/colima" stop >> "$LOG_FILE" 2>&1; then
         log "$who: colima stop failed — forcing"
@@ -1276,7 +1292,7 @@ set_address_prefix_for() {
     # the startup check enforces so the written value stays valid.
     local current_prefix=""
     if [ -f "$DATA_DIR/config" ]; then
-        current_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+        current_prefix=$(config_value ADDRESS_PREFIX)
     fi
     local prefix_len=${#current_prefix}
     if [ "$prefix_len" -lt 2 ]; then
@@ -1298,7 +1314,7 @@ set_address_prefix_for() {
 # else; missing or empty means yes, as it always has.
 plugin_wanted() {
     local value
-    value=$(grep "^$1=" "$DATA_DIR/config" 2>/dev/null | tail -1 | cut -d= -f2)
+    value=$(config_value "$1")
     [ -z "$value" ] || [ "$value" = "yes" ]
 }
 
@@ -1485,11 +1501,11 @@ install_docker() {
     VM_MEMORY=2
     VM_CPU=2
     if [ -f "$DATA_DIR/config" ]; then
-        config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+        config_mem=$(config_value VM_MEMORY)
         if [ ! -z "$config_mem" ]; then
             VM_MEMORY="$config_mem"
         fi
-        config_cpu=$(grep "^VM_CPU=" "$DATA_DIR/config" | cut -d= -f2)
+        config_cpu=$(config_value VM_CPU)
         if [ ! -z "$config_cpu" ]; then
             VM_CPU="$config_cpu"
         fi
@@ -1501,7 +1517,7 @@ install_docker() {
     # a VM created here gets Lima's 100 GiB default.
     local VM_DISK=20 _cfg_disk
     if [ -f "$DATA_DIR/config" ]; then
-        _cfg_disk=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2)
+        _cfg_disk=$(config_value VM_DISK)
         [ -n "$_cfg_disk" ] && VM_DISK="$_cfg_disk"
     fi
     log "Creating the Colima VM with a ${VM_DISK}GB diffdisk cap"
@@ -1525,9 +1541,10 @@ update_images() {
     # Check if auto-update is enabled in config
     local update_enabled="no"
     if [ -f "$DATA_DIR/config" ]; then
-        local config_value=$(grep "^UPDATE_ON_LAUNCH=" "$DATA_DIR/config" | cut -d= -f2)
-        if [ ! -z "$config_value" ]; then
-            update_enabled="$config_value"
+        local configured
+        configured=$(config_value UPDATE_ON_LAUNCH)
+        if [ ! -z "$configured" ]; then
+            update_enabled="$configured"
         fi
     fi
 
@@ -1979,9 +1996,9 @@ start_containers() {
         # Fall back to old VANITY_PREFIX for migration from older configs
         ADDRESS_PREFIX="op2"
         if [ -f "$DATA_DIR/config" ]; then
-            CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            CUSTOM_PREFIX=$(config_value ADDRESS_PREFIX)
             if [ -z "$CUSTOM_PREFIX" ]; then
-                CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+                CUSTOM_PREFIX=$(config_value VANITY_PREFIX)
             fi
             if [ ! -z "$CUSTOM_PREFIX" ]; then
                 ADDRESS_PREFIX="$CUSTOM_PREFIX"

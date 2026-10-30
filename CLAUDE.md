@@ -259,6 +259,11 @@
   `CODE_DEFAULTS`); a UI only calls the command. `ONIONPRESS_*` and
   `ONIONHEAVEN_ACCEPT_REGISTRATIONS` are hand-edit only. Secrets only as
   `config set KEY -`. `tests/test_cli_config.py`.
+- **One rule reads the config** (#404): the first `KEY=` line wins, the
+  value is all after its first `=`, trimmed: `config.read_value` /
+  `read_config` and the launchers' `config_value` (identical in all three
+  scripts; never `grep | cut`). Writes are a temp file + rename under
+  `.config.lock`, one line per key. `tests/test_config_one_reader.py`.
 - The page's backup leaves out host secrets (`include_host_secrets=False`,
   config cut to `SAFE_CONFIG_KEYS`); no restore takes the token from a
   backup. `tests/test_backup_host_secrets_off_wordpress.py`.
@@ -720,6 +725,9 @@
 - The choice is re-read before every request carrying the key; nothing
   goes out unless registering. An explicit `no` sends one signed
   `/unregister`, retried every 15 min. `tests/test_onionheaven_opt_out.py`.
+- The Linux heartbeat holds the same hub lock as the Mac client
+  (`onionheaven-hub.lock` next to the record) around every /online,
+  /unregister and record write (#404). `tests/test_linux_heartbeat_hub_lock.py`.
 - **Every end of a hub's hold on a key takes it back** (uninstall, reset,
   key import, restore of another address, hub change) via
   `release_registration` / `onionheaven-unregister`; what could not be

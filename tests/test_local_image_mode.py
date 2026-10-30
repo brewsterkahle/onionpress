@@ -26,6 +26,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.containers import using_local_images  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
@@ -170,7 +173,7 @@ class TestConfigOverrideLoopIsInjectionSafe(unittest.TestCase):
                 script = (
                     "set -e\n"
                     f"DATA_DIR={data_dir!r}\n"
-                    + match.group(0)
+                    + config_value_function() + match.group(0)
                     + '\nprintf "%s|%s" "$ONIONPRESS_TOR_IMAGE" "$ONIONPRESS_WORDPRESS_IMAGE"\n'
                 )
                 result = subprocess.run(
@@ -267,26 +270,29 @@ class TestLaunchersDefineThePredicate(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn("ONIONPRESS_TOR_IMAGE", text)
                 self.assertIn("ONIONPRESS_WORDPRESS_IMAGE", text)
-                self.assertRegex(
-                    text, r'grep "\^\$\{_img_var\}=" "\$DATA_DIR/config"',
+                self.assertIn(
+                    '$(config_value "$_img_var")', text,
                     f"{path} must read the image overrides from "
                     "~/.onionpress/config.",
                 )
 
     def test_config_read_survives_set_e(self):
-        """`var=$(grep ...)` takes grep's exit status, so a missing key returns
-        1 and kills the whole script under `set -e`. Piping through cut makes
-        the pipeline's status cut's. This is the repo's established idiom and
-        dropping the pipe is a real outage.
-        """
+        """`var=$(grep ...)` takes grep's exit status, so a missing key
+        returns 1 and kills the whole script under `set -e`. The read goes
+        through config_value, which always succeeds (#404); the override
+        loop runs under `set -e` against a config without the keys."""
         for path in LAUNCHERS:
             with self.subTest(path=path):
-                self.assertRegex(
-                    _read(path),
-                    r'grep "\^\$\{_img_var\}=" "\$DATA_DIR/config" \| head -1 \| cut -d= -f2-',
-                    f"{path}'s image-override config read must stay piped "
-                    "through cut (see docstring).",
-                )
+                loop = TestConfigOverrideLoopIsInjectionSafe.LOOP.search(_read(path)).group(0)
+                with tempfile.TemporaryDirectory() as data_dir:
+                    with open(os.path.join(data_dir, "config"), "w") as f:
+                        f.write("OTHER=1\n")
+                    r = subprocess.run(
+                        ["bash", "-c", "set -e\n" + f"DATA_DIR={data_dir!r}\n"
+                         + config_value_function() + loop + "\necho survived\n"],
+                        capture_output=True, text=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(r.stdout.strip(), "survived", r.stderr)
 
 
 class TestEveryPullIsGuarded(unittest.TestCase):

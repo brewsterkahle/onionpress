@@ -446,7 +446,7 @@ class OptInPlumbingTest(unittest.TestCase):
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
             text = _read(rel)
             with self.subTest(launcher=rel):
-                self.assertIn('grep "^ONIONHEAVEN_ACCEPT_REGISTRATIONS="', text)
+                self.assertIn("$(config_value ONIONHEAVEN_ACCEPT_REGISTRATIONS)", text)
                 self.assertIn("export ONIONHEAVEN_ACCEPT_REGISTRATIONS", text)
 
     def test_python_compose_env_sets_it(self):

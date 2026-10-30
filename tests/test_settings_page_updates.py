@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import config as op_config  # noqa: E402
 from onionpress import wp_files  # noqa: E402
 from onionpress.redact import scrub_for_upload  # noqa: E402
+from test_config_one_reader import config_value_function  # noqa: E402
 
 PHP = "app/Resources/plugins/onionpress-settings.php"
 
@@ -521,7 +522,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
         with open(os.path.join(self.out, "config-updates.json"), "w") as f:
             f.write(payload)
         launcher = _read("linux/onionpress")
-        script = (self._function(launcher, "op_py")
+        script = (config_value_function() + self._function(launcher, "op_py")
                   + self._function(launcher, "wp_exec")
                   + self._function(launcher, "apply_config_updates")
                   + self.STUBS + call)
@@ -602,7 +603,7 @@ class TestMacLauncherKeepsTokenPadding(unittest.TestCase):
     """The Mac launcher read the token with `cut -d= -f2`, which keeps only
     the text up to the next "=": a base64 token's trailing padding was cut
     off (#323). It now reads everything after the first "=", the first
-    line only, as config.read_value does."""
+    line only, through config_value, as config.read_value does (#404)."""
 
     def test_token_read_whole(self):
         src = _read("app/MacOS/onionpress")
@@ -616,7 +617,8 @@ class TestMacLauncherKeepsTokenPadding(unittest.TestCase):
                         f.write(f"VM_CPU=2\nCLOUDFLARE_TUNNEL_TOKEN={token}\n"
                                 "CLOUDFLARE_TUNNEL_TOKEN=second\n")
                     out = subprocess.run(
-                        ["bash", "-c", m.group(0) + '\nprintf "%s" "$CLOUDFLARE_TUNNEL_TOKEN"'],
+                        ["bash", "-c", config_value_function() + m.group(0)
+                         + '\nprintf "%s" "$CLOUDFLARE_TUNNEL_TOKEN"'],
                         capture_output=True, text=True, timeout=30,
                         env={**os.environ, "DATA_DIR": tmp})
                     self.assertEqual(out.returncode, 0, out.stderr)

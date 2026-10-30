@@ -36,6 +36,26 @@ PLUGINS_DIR="$INSTALL_DIR/plugins"
 THEMES_DIR="$INSTALL_DIR/themes"
 SCRIPTS_DIR="$INSTALL_DIR/scripts"
 DATA_DIR="$HOME/.onionpress"
+
+# The value of KEY in ~/.onionpress/config (config_value KEY [default]),
+# by config.read_value's rule (issue #404): a line is KEY's when, stripped,
+# it starts with `KEY=`; the first such line wins; the value is everything
+# after its first `=`, blanks around it trimmed. $2 (default empty) when
+# no line names KEY. Always succeeds, so `x=$(config_value K)` is safe
+# under `set -e`. Identical in the three launcher scripts
+# (tests/test_config_one_reader.py).
+config_value() {
+    local line value
+    line=$(grep -E "^[[:space:]]*$1=" "$DATA_DIR/config" 2>/dev/null | head -1)
+    if [ -z "$line" ]; then
+        printf '%s\n' "${2-}"
+        return 0
+    fi
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    printf '%s\n' "$value"
+}
 DOCUMENTS_DIR="$HOME/OnionPress"
 
 # Shared Python package (also used by the tray app and, eventually, the Mac
@@ -340,10 +360,9 @@ export ONIONPRESS_PROXY_PORT=$((9077 + ONIONPRESS_PORT_OFFSET))
 # the config. Mac (Colima) doesn't run this launcher and gets 127.0.0.1
 # from the compose file. Anything but an IPv4 address would fail `docker
 # compose up` and take the site down, so it falls back to 127.0.0.1, the
-# narrower choice, with a warning. Same grep | cut idiom as below, so a
-# missing key doesn't kill the script under `set -e`.
+# narrower choice, with a warning.
 if [ -z "${ONIONPRESS_BIND_HOST:-}" ] && [ -f "$DATA_DIR/config" ]; then
-    ONIONPRESS_BIND_HOST=$(grep "^ONIONPRESS_BIND_HOST=" "$DATA_DIR/config" | head -1 | cut -d= -f2- | tr -d "[:space:]\"'")
+    ONIONPRESS_BIND_HOST=$(config_value ONIONPRESS_BIND_HOST | tr -d "[:space:]\"'")
 fi
 case "${ONIONPRESS_BIND_HOST:-}" in
     "") ONIONPRESS_BIND_HOST=0.0.0.0 ;;
@@ -383,13 +402,9 @@ export ONIONHEAVEN_PROPAGATION_DELAY="${ONIONHEAVEN_PROPAGATION_DELAY:-180}"
 # prints these two exports. Setting either here, or in ~/.onionpress/config,
 # repoints the whole stack: compose's tor/wordpress/onionheaven services, the
 # image pulls below, and vanity-key generation. See docs/BUILDING.md.
-#
-# The `| cut` is load-bearing, not cosmetic — a bare `var=$(grep ...)` takes
-# grep's exit status, so a missing key returns 1 and kills the script under
-# `set -e`. -f2- rather than -f2 so a value containing '=' is not truncated.
 for _img_var in ONIONPRESS_TOR_IMAGE ONIONPRESS_WORDPRESS_IMAGE; do
     if [ -z "$(eval echo \"\$$_img_var\")" ] && [ -f "$DATA_DIR/config" ]; then
-        _img_val=$(grep "^${_img_var}=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+        _img_val=$(config_value "$_img_var")
         if [ -n "$_img_val" ]; then
             eval "export ${_img_var}=\"\$_img_val\""
         fi
@@ -468,9 +483,9 @@ fi
 
 # Read settings from config (override defaults)
 if [ -f "$DATA_DIR/config" ]; then
-    _val=$(grep "^ONIONHEAVEN_MAX_SERVICES=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    _val=$(config_value ONIONHEAVEN_MAX_SERVICES)
     [ -n "$_val" ] && export ONIONHEAVEN_MAX_SERVICES="$_val"
-    _val=$(grep "^ONIONHEAVEN_PROPAGATION_DELAY=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+    _val=$(config_value ONIONHEAVEN_PROPAGATION_DELAY)
     [ -n "$_val" ] && export ONIONHEAVEN_PROPAGATION_DELAY="$_val"
 fi
 
@@ -487,7 +502,7 @@ COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
 read_cloudflare_token() {
     CLOUDFLARE_TUNNEL_TOKEN=""
     if [ -f "$DATA_DIR/config" ]; then
-        CLOUDFLARE_TUNNEL_TOKEN=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+        CLOUDFLARE_TUNNEL_TOKEN=$(config_value CLOUDFLARE_TUNNEL_TOKEN)
     fi
     export CLOUDFLARE_TUNNEL_TOKEN
     if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
@@ -503,7 +518,7 @@ read_cloudflare_token
 # onionpress.containers: compose hands it to tor and onionheaven.
 ONIONHEAVEN_ACCEPT_REGISTRATIONS=""
 if [ -f "$DATA_DIR/config" ]; then
-    ONIONHEAVEN_ACCEPT_REGISTRATIONS=$(grep "^ONIONHEAVEN_ACCEPT_REGISTRATIONS=" "$DATA_DIR/config" | head -1 | cut -d= -f2-)
+    ONIONHEAVEN_ACCEPT_REGISTRATIONS=$(config_value ONIONHEAVEN_ACCEPT_REGISTRATIONS)
 fi
 export ONIONHEAVEN_ACCEPT_REGISTRATIONS
 
@@ -1079,7 +1094,7 @@ set_address_prefix_for() {
     # Update ADDRESS_PREFIX in config to match imported address
     local current_prefix=""
     if [ -f "$DATA_DIR/config" ]; then
-        current_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+        current_prefix=$(config_value ADDRESS_PREFIX)
     fi
     local prefix_len=${#current_prefix}
     if [ "$prefix_len" -lt 2 ]; then
@@ -1101,7 +1116,7 @@ set_address_prefix_for() {
 # else; missing or empty means yes, as it always has.
 plugin_wanted() {
     local value
-    value=$(grep "^$1=" "$DATA_DIR/config" 2>/dev/null | tail -1 | cut -d= -f2)
+    value=$(config_value "$1")
     [ -z "$value" ] || [ "$value" = "yes" ]
 }
 
@@ -1244,9 +1259,10 @@ setup_bundled_plugins() {
 update_images() {
     local update_enabled="no"
     if [ -f "$DATA_DIR/config" ]; then
-        local config_value=$(grep "^UPDATE_ON_LAUNCH=" "$DATA_DIR/config" | cut -d= -f2)
-        if [ ! -z "$config_value" ]; then
-            update_enabled="$config_value"
+        local configured
+        configured=$(config_value UPDATE_ON_LAUNCH)
+        if [ ! -z "$configured" ]; then
+            update_enabled="$configured"
         fi
     fi
 
@@ -1974,9 +1990,9 @@ start_containers() {
     # Read address prefix from config
     ADDRESS_PREFIX="op2"
     if [ -f "$DATA_DIR/config" ]; then
-        CUSTOM_PREFIX=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+        CUSTOM_PREFIX=$(config_value ADDRESS_PREFIX)
         if [ -z "$CUSTOM_PREFIX" ]; then
-            CUSTOM_PREFIX=$(grep "^VANITY_PREFIX=" "$DATA_DIR/config" | cut -d= -f2)
+            CUSTOM_PREFIX=$(config_value VANITY_PREFIX)
         fi
         if [ ! -z "$CUSTOM_PREFIX" ]; then
             ADDRESS_PREFIX="$CUSTOM_PREFIX"
@@ -3019,7 +3035,7 @@ restore_backup() {
         local addr_base="${onion_address%.onion}"
         if [ -f "$DATA_DIR/config" ]; then
             local old_prefix
-            old_prefix=$(grep "^ADDRESS_PREFIX=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2 || echo "")
+            old_prefix=$(config_value ADDRESS_PREFIX)
             if [ -n "$old_prefix" ]; then
                 local prefix_len=${#old_prefix}
                 local new_prefix="${addr_base:0:$prefix_len}"
@@ -3328,8 +3344,8 @@ except: print('false')
 
     # Read config
     if [ -f "$DATA_DIR/config" ]; then
-        oh_config_enabled=$(grep "^REGISTER_WITH_ONIONHEAVEN=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
-        oh_client_hub=$(grep "^ONIONHEAVEN_ADDRESS=" "$DATA_DIR/config" 2>/dev/null | cut -d= -f2)
+        oh_config_enabled=$(config_value REGISTER_WITH_ONIONHEAVEN)
+        oh_client_hub=$(config_value ONIONHEAVEN_ADDRESS)
     fi
     # On by default: "yes" or unset is enabled, anything else is not.
     oh_config_enabled=${oh_config_enabled:-yes}
@@ -3553,7 +3569,7 @@ apply_config_updates() {
     # Handle START_ON_BOOT (re-applied whenever the page sends it)
     if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
         local boot_val
-        boot_val=$(grep "^START_ON_BOOT=" "$DATA_DIR/config" | cut -d= -f2)
+        boot_val=$(config_value START_ON_BOOT)
         if [ "$boot_val" = "yes" ]; then
             systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
         else
