@@ -49,6 +49,8 @@ REQUIRED_EXECUTABLES=(
     ./opt/onionpress/scripts/activate_plugin.sh
     ./usr/lib/systemd/system-sleep/onionpress
     ./opt/onionpress/onionpress-wordpress-egress
+    ./opt/onionpress/docker-rootless/dockerd-rootless.sh
+    ./opt/onionpress/docker-rootless/dockerd-rootless-setuptool.sh
 )
 REQUIRED_FILES=(
     ./opt/onionpress/VERSION
@@ -114,6 +116,14 @@ case "$DEPENDS" in
 esac
 if [ "$(printf '%s' "$DEPENDS" | wc -l)" != "0" ]; then
     fail "Depends is folded over several lines; a binary package's control file wants one line"
+fi
+# Compose v1 (the `docker-compose` 1.x package of Ubuntu and Debian 12) has
+# no `docker compose`; a bare docker-compose alternative let apt choose it
+# on Ubuntu 24.04. Every Compose alternative must be v2.
+if printf '%s' "$DEPENDS" | grep -qE '(^|[,|] *)docker-compose *([,|]|$)'; then
+    fail "Depends lets Compose v1 satisfy it (a bare docker-compose alternative); Depends is: $DEPENDS"
+else
+    ok "Depends admits no Compose v1"
 fi
 
 # ─── Members: owners, modes, names ──────────────────────────────────────

@@ -4270,6 +4270,14 @@ main() {
                 log "ERROR: Docker is not available. Install Docker first."
                 exit 1
             fi
+            # Everything below runs `docker compose` (Compose v2, a CLI
+            # plugin). Ubuntu's and Debian 12's docker-compose package is
+            # the retired v1, which has no such command: say so instead
+            # of failing at the first compose call.
+            if ! docker compose version >/dev/null 2>&1; then
+                log "ERROR: 'docker compose' is not available. Install docker-compose-v2 (Ubuntu), docker-compose 2.x (Debian 13) or Docker's docker-compose-plugin."
+                exit 1
+            fi
 
             setup_db_passwords
             start_containers
