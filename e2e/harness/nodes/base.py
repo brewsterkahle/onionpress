@@ -1,7 +1,7 @@
 """What every node can do, whatever it runs on.
 
 A subclass provides five primitives: `exec` (a command in the node's own
-context: the Mac host with the node's environment, or the Debian VM as the
+context: the Mac host with the node's environment, or the Linux VM as the
 install's user), `docker` (a docker command against the node's own
 daemon), `launcher` (the installed `onionpress` command), `read_file` and
 `fetch_files` (for evidence). Everything a platform-neutral test uses is
@@ -69,7 +69,7 @@ def parse_curl_include(text):
 
 
 class Node:
-    platform = ""       # "macos" | "debian"
+    platform = ""       # "macos" | "linux"
     kind = ""           # "mac" | "linux-vm" | ...
 
     def __init__(self, name, log, results_dir):

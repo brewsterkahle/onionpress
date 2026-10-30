@@ -5,7 +5,8 @@
 #   e2e/run.sh [--tier t0[,t1…]] [options]
 #
 # Options are the harness's (see `e2e/run.sh --help-options`):
-#   --platforms macos,debian   default: everything the host offers
+#   --platforms macos,linux    default: everything the host offers
+#   --guest debian-13|ubuntu-24.04   the Linux VM's distro (default debian-13)
 #   --mac-app PATH | --mac-dmg PATH | --deb PATH | --release TAG|latest
 #   --max-nodes N  --keep  --scratch-root DIR  --limactl PATH
 # and any pytest option (-k, -x, -v, …).
@@ -28,7 +29,12 @@ case "${1:-}" in
         shift
         exec "${PY[@]}" python "$E2E_DIR/probe.py" "$@" ;;
     --help-options)
-        exec "${PY[@]}" python -m pytest -c "$E2E_DIR/pytest.ini" --rootdir "$E2E_DIR" --help | sed -n '/onionpress e2e/,/^$/p' ;;
+        # The e2e dir as an argument, so pytest loads its conftest (the
+        # options live there); exit here, not exec (a pipeline's exec runs
+        # in a subshell and the script would go on to run the suite).
+        "${PY[@]}" python -m pytest -c "$E2E_DIR/pytest.ini" --rootdir "$E2E_DIR" --help "$E2E_DIR" \
+            | sed -n '/onionpress e2e/,/^$/p'
+        exit ;;
 esac
 
 tiers="t0"
