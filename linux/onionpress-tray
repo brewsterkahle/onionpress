@@ -1120,22 +1120,6 @@ def confirm_quit(parent=None) -> bool:
     return response == Gtk.ResponseType.OK
 
 
-def confirm_regenerate(parent=None) -> bool:
-    dlg = Gtk.MessageDialog(
-        parent=parent, flags=0,
-        message_type=Gtk.MessageType.WARNING,
-        buttons=Gtk.ButtonsType.OK_CANCEL,
-        text="Regenerate .onion address?",
-    )
-    dlg.format_secondary_text(
-        "This generates a new vanity address. Any existing links to your "
-        "current address will stop working. Your WordPress content stays "
-        "the same.")
-    response = dlg.run()
-    dlg.destroy()
-    return response == Gtk.ResponseType.OK
-
-
 # ─── 6b. First-run setup dialog ─────────────────────────────────────────
 
 class SetupDialog:
@@ -2031,17 +2015,6 @@ class OnionPressTray:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
-    def _on_regenerate(self, *_):
-        if not confirm_regenerate():
-            return
-
-        def _run():
-            try:
-                Launcher.run("handle-action", "regenerate-vanity",
-                             capture=True, timeout=1800)
-            except Exception as e:
-                log(f"regenerate error: {e}")
-        threading.Thread(target=_run, daemon=True).start()
 
     def _on_check_updates(self, *_):
         def _run():

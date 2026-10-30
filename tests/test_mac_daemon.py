@@ -984,7 +984,8 @@ class TestLauncherWiring(unittest.TestCase):
     def test_quit_stops_the_daemon_first_and_leaves_the_menubar_when_told(self):
         body = self.cases["quit"]
         self.assertLess(body.index("daemon stop"), body.index("stop_containers"))
-        self.assertIn('"${2:-}" = "--leave-menubar"', body)
+        # Either flag in any position: run in tests/test_launcher_dispatch_mac.py.
+        self.assertIn("--leave-menubar) QUIT_LEAVE_MENUBAR=yes", body)
         self.assertIn("--no-offline", body)
 
     def test_daemon_case_delegates(self):

@@ -194,6 +194,11 @@
 - `make coverage` enforces floors (`build/coverage-floors.sh`); raise a
   floor when tests catch up, never lower one to pass.
   `tests/test_coverage_gate.py`.
+- **The launchers' `main` is run, not just read**: `tests/launcher_harness.py`
+  runs a copy of each launcher with docker, the CLI and named helpers
+  stubbed. A launcher verb's options, exit status and the CLI argv it
+  produces go in `tests/test_launcher_dispatch_{mac,linux}.py`; the tray
+  runs only verbs the Linux `main` has (same file).
 - **A new `onionpress` subcommand needs a row in `tests/test_cli_dispatch.py`**
   (the census fails otherwise; grouping commands go in `PARENTS`), and its
   handler a case in `tests/test_cli_commands.py` / `test_cli_edges.py`.
@@ -303,6 +308,10 @@
   (`setup_logic.mark_setup_complete`). `tests/test_setup_complete_marker.py`.
 - Quit takes the site down unless `QUIT_KEEPS_SITE_RUNNING=yes`. Update and
   uninstall stop the daemon first.
+- **The daemon's start never stops Colima**: with no daemon alive a running
+  VM is a crash restart's or a terminal start's live site; its port is read
+  (`resolve_port_offset`). `TestResolvePorts` in
+  `tests/test_mac_daemon_paths.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`

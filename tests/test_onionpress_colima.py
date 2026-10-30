@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -200,6 +201,27 @@ class TestColimaStop(unittest.TestCase):
         c.stop()
         self.assertTrue(any("Stopping" in l for l in logs))
 
+    def test_a_failed_stop_is_a_warning(self):
+        _write_script(os.path.join(self.paths.bin_dir, "colima"),
+                      '#!/bin/bash\necho "vm busy" >&2\nexit 1\n')
+        logs = []
+        Colima(self.paths, log_func=logs.append).stop()
+        self.assertIn("Colima stop warning: vm busy", logs)
+
+    def test_a_stop_that_times_out_is_logged_not_raised(self):
+        logs = []
+        c = Colima(self.paths, log_func=logs.append)
+        with mock.patch("subprocess.run",
+                        side_effect=subprocess.TimeoutExpired(["colima", "stop"], 60)):
+            c.stop()
+        self.assertIn("Colima stop timed out", logs)
+
+    def test_a_status_that_times_out_is_not_running(self):
+        c = Colima(self.paths)
+        with mock.patch("subprocess.run",
+                        side_effect=subprocess.TimeoutExpired(["colima", "status"], 10)):
+            self.assertFalse(c.is_running())
+
 
 class TestColimaVMConfigMismatch(unittest.TestCase):
     def setUp(self):
@@ -248,6 +270,37 @@ class TestColimaVMConfigMismatch(unittest.TestCase):
         c = Colima(self.paths)
         self.assertFalse(c.check_vm_config_mismatch(mock_docker))
 
+    def _check(self, *answers, config="VM_MEMORY=2\nVM_CPU=2\n"):
+        with open(self.paths.config_file, "w") as f:
+            f.write(config)
+        docker = mock.Mock()
+        docker.exec.side_effect = list(answers)
+        self.logs = []
+        return Colima(self.paths, log_func=self.logs.append).check_vm_config_mismatch(docker)
+
+    def test_cpu_mismatch(self):
+        self.assertTrue(self._check(mock.Mock(ok=True, output="2097152"),
+                                    mock.Mock(ok=True, output="4")))
+        self.assertIn("VM CPU mismatch: config=2, running=4", self.logs)
+
+    def test_unreadable_answers_are_no_mismatch(self):
+        for answers in ([mock.Mock(ok=True, output="lots")],
+                        [mock.Mock(ok=True, output="2097152"), mock.Mock(ok=False, output="")],
+                        [mock.Mock(ok=True, output="2097152"), mock.Mock(ok=True, output="two")]):
+            with self.subTest(answers=[a.output for a in answers]):
+                self.assertFalse(self._check(*answers))
+
+    def test_restart_with_config_takes_the_stack_down_first(self):
+        order = []
+        docker = mock.Mock()
+        docker.compose.side_effect = lambda *a, **k: order.append("down")
+        c = Colima(self.paths)
+        with mock.patch.object(c, "stop", lambda: order.append("stop")), \
+                mock.patch.object(c, "start", lambda: order.append("start")):
+            c.restart_with_config(docker)
+        docker.compose.assert_called_once_with(["down"], timeout=60)
+        self.assertEqual(order, ["down", "stop", "start"])
+
 
 class TestDetectContainerRuntime(unittest.TestCase):
     @mock.patch("onionpress.colima.detect_os", return_value=mock.Mock(value="linux"))
@@ -277,6 +330,33 @@ class TestDetectContainerRuntime(unittest.TestCase):
                 detect_container_runtime(paths)
         finally:
             shutil.rmtree(os.path.dirname(paths.data_dir), ignore_errors=True)
+
+    def _on_mac(self, initialized, running):
+        from onionpress.platform import OS
+        paths = _make_paths(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, os.path.dirname(paths.data_dir), True)
+        _write_script(os.path.join(paths.bin_dir, "colima"), "#!/bin/bash\n")
+        started = []
+        with mock.patch("onionpress.colima.detect_os", return_value=OS.MACOS), \
+                mock.patch.object(Colima, "initialized", initialized), \
+                mock.patch.object(Colima, "is_running", return_value=running), \
+                mock.patch.object(Colima, "start", lambda self: started.append(True)), \
+                mock.patch("subprocess.run") as run:
+            result = detect_container_runtime(paths)
+        run.assert_not_called()  # the bundled Colima, never system docker
+        return result, started
+
+    def test_mac_running_vm_is_used_as_it_is(self):
+        self.assertEqual(self._on_mac(initialized=True, running=True),
+                         ("colima-bundled", []))
+
+    def test_mac_stopped_vm_is_started(self):
+        self.assertEqual(self._on_mac(initialized=True, running=False),
+                         ("colima-bundled", [True]))
+
+    def test_mac_first_run_starts_the_vm(self):
+        self.assertEqual(self._on_mac(initialized=False, running=False),
+                         ("colima-bundled", [True]))
 
 
 class TestRepairForeignSocketLink(unittest.TestCase):

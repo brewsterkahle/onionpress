@@ -2239,7 +2239,8 @@ def _add_scrub(sub, name):
     )
     p.add_argument(
         "password", nargs="?",
-        help="WordPress admin password (prompts if omitted)")
+        help="Deprecated (visible to other users): WordPress admin password; "
+             "set $ONIONPRESS_BACKUP_PASSWORD or be prompted instead")
     p.add_argument(
         "--clean", action="store_true",
         help="Delete the backup zip after a successful scrub")
@@ -2248,8 +2249,16 @@ def _add_scrub(sub, name):
 def _run_scrub(run):
     _cli(run)
     from . import scrub as _scrub
+    # As backup's password: the environment (removed at once, so no child
+    # inherits it), the old positional with a warning, else scrub prompts.
+    password = os.environ.pop(BACKUP_PASSWORD_ENV, "") or None
+    if run.args.password:
+        print("WARNING: a password on the command line is visible to other "
+              "users of this computer. Leave it out to be prompted, or set "
+              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
+        password = run.args.password
     return _scrub.run_scrub(
-        password=run.args.password,
+        password=password,
         clean=run.args.clean,
     )
 

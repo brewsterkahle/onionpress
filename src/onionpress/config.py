@@ -5,9 +5,9 @@ Handles:
 - The Settings page allowlist and `onionpress config` (CLI_CONFIG_KEYS)
 - Validating onion address prefixes
 
-Database secrets live in secrets_file.py, port selection in ports.py and
-stop_stale_colima in colima.py (issue #482); their names are re-exported
-here so existing `config.X` callers keep working.
+Database secrets live in secrets_file.py and port selection in ports.py
+(issue #482); their names are re-exported here so existing `config.X`
+callers keep working.
 """
 
 import os
@@ -22,15 +22,6 @@ from .ports import (  # noqa: F401  (re-exported, #482)
 from .secrets_file import (  # noqa: F401  (re-exported, #482)
     Secrets, _generate_password, ensure_secrets, load_secrets,
 )
-
-
-def __getattr__(name):
-    # colima.py imports this module, so its stop_stale_colima is
-    # re-exported lazily rather than imported at the top.
-    if name == "stop_stale_colima":
-        from .colima import stop_stale_colima
-        return stop_stale_colima
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # Default config values matching config-template.txt

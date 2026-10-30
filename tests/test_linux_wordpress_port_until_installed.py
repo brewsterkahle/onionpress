@@ -297,7 +297,8 @@ class TestEverySetupPathEndsThere(unittest.TestCase):
         self.assertRegex(case, r"op_py provision-post-install \\\n[^\n]*\n[^\n]*\n(\s*#[^\n]*\n)*"
                                r"\s*after_wordpress_installed\n")
         # --from-backup restarts the containers: start_containers decides.
-        self.assertIn("stop_containers\n                start_containers", case)
+        self.assertIn('stop_containers || log "WARNING: setup: the stop failed; starting the '
+                      'containers anyway"\n                start_containers', case)
 
     def test_the_marker_is_removed_with_its_sibling(self):
         """A removal of ~/.onionpress state must not leave only this one."""

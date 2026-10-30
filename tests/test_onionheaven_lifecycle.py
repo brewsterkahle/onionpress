@@ -885,8 +885,8 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         check = branch.index('if [ "$restore_check" = yes ]')
         real = branch[branch.index("exit $?", check):]
         self.assertNotIn("heartbeat_client", branch[:check])
-        self.assert_before(real, "stop_heartbeat_client", "op_py restore", "restore")
-        self.assert_before(real, "op_py restore", "start_heartbeat_client", "restore")
+        self.assert_before(real, "stop_heartbeat_client", 'op_py --data-dir "$DATA_DIR" restore', "restore")
+        self.assert_before(real, 'op_py --data-dir "$DATA_DIR" restore', "start_heartbeat_client", "restore")
         for rel in ("linux/onionpress", "app/MacOS/onionpress"):
             with self.subTest(rel=rel):
                 branch = _case_branch(_read(rel), "setup")
