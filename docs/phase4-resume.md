@@ -292,3 +292,47 @@ Notes carried over from slice 7 that a later slice may want: the
 traceback); and a helper in `cli.py` that asks `detect_os()` must use the
 module-level import, so the dispatch census's `os_name` and a test's
 `mock.patch.object(cli, "detect_os", …)` reach it.
+
+## Phase 4b (#442): start_containers and setup
+
+Issue https://github.com/brewsterkahle/onionpress/issues/442 moves the
+two pieces phase 4 left in bash, one sub-issue per slice (#443–#453), on
+branch `cli-first-start-setup-442`. Same rules as the slices above. The
+Colima bootstrap and the Linux install/systemd code stay bash.
+
+### The start traces (#443)
+
+`tests/test_start_traces.py` runs each launcher's `start_containers`
+(`tests/start_trace.py`: `launcher_harness.Launcher`, so the real top
+level, with `main` replaced by one `start_containers` call under `set -e`)
+against a stateful fake docker (`tests/start_trace_docker.py`: volumes,
+in-use and stuck volumes, compose failures by count, WordPress installed,
+plugins, the published port) and records, in order: every `log` line,
+docker call (compose files by base name; `[BIND=…]` on Linux's `compose
+up`), Python step and stubbed function; then the detached steps, the
+status, START_ERRORS (Mac), the markers left and the volumes.
+`bundled_python`/`op_py` are `tests/start_trace_runner.py`: the start
+steps already in Python run for real in it (OS forced to the launcher's,
+no app bundle, `time.sleep` a no-op, `wordpress_egress.ensure` answering
+"ok"), the WordPress-side ones (`provision-post-install`, `configure-*`,
+…) are recorded as `py …`. When a step moves into the Python start, the
+runner patches the same seam (`start.run_cli_step`,
+`start.run_detached_cli`, `start.generate_vanity_on_host`,
+`start.configure_site_timezones`) so the recorded line stays the same.
+Fixtures: `tests/fixtures/start-traces/<platform>/<scenario>.trace`;
+`OP_UPDATE_START_TRACES=1` rewrites them, and a slice that changes one
+says why in its commit. About 100 s for the 55 runs.
+
+### The START SUMMARY contract (#444)
+
+In `src/onionpress/start.py`'s docstring: a Python start step appends the
+names of the steps it could not do to `--errors-file` (one per line,
+`^[a-z0-9]+(-[a-z0-9]+)*$`, `StartErrors`), the Mac reads them into
+START_ERRORS with `note_start_errors` (a name of any other shape is
+dropped) and removes the file; the exit status only says stop / carry on.
+`wordpress-egress --errors-file` exits 0 for a block not in place and
+writes `wordpress-egress` (without the flag its status is as before: the
+Linux status loop and `--check` read it). Linux gets no START SUMMARY:
+its launcher passes no file, and the WARNING/ERROR lines are the record.
+`tests/test_start_errors_contract.py` runs the Mac's reader and summary
+under /bin/bash.

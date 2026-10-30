@@ -1077,8 +1077,9 @@ class TestLaunchers(unittest.TestCase):
     def test_the_helpers_call_the_shared_cli_and_never_stop_the_start(self):
         """Phase 4 (#120) slice 7: the bash body is the delegation, tee'd
         into the log (the CLI logs the verdict in the launchers' format),
-        and returns 0 whatever the CLI's status; the Mac reads that status
-        out of PIPESTATUS for its START SUMMARY."""
+        and returns 0 whatever the CLI's status; the Mac hands it an errors
+        file and reads the step's name back for its START SUMMARY (the
+        contract in onionpress.start, #442.2)."""
         for path, runner in ((MAC_LAUNCHER, "bundled_python -m onionpress.cli"),
                              (LINUX_LAUNCHER, "op_py")):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
@@ -1090,8 +1091,9 @@ class TestLaunchers(unittest.TestCase):
                 self.assertNotIn("\n    log ", body, "the verdict lines are the CLI's")
                 self.assertNotIn("WARNING", body)
         mac = _function_body(_read(MAC_LAUNCHER), "block_wordpress_egress")
-        self.assertIn('[ "${PIPESTATUS[0]}" -eq 0 ] || START_ERRORS="$START_ERRORS wordpress-egress"',
-                      mac)
+        self.assertIn("errors=$(start_errors_file)", mac)
+        self.assertIn('${errors:+--errors-file "$errors"}', mac)
+        self.assertIn('note_start_errors "$errors"', mac)
         self.assertNotIn("START_ERRORS", _function_body(_read(LINUX_LAUNCHER),
                                                         "block_wordpress_egress"))
 
@@ -1154,6 +1156,23 @@ class TestLaunchers(unittest.TestCase):
         self.assertRegex(out, "^" + self.TS + "WARNING: WordPress network egress block not in place: "
                          "error: no docker\. ")
         self.assertNotIn("Traceback", out)
+
+    def test_errors_file_names_the_step_and_exits_0(self):
+        """The START SUMMARY contract (#442.2): with --errors-file a block
+        not in place is the name `wordpress-egress` in the file and exit
+        0; in place, nothing is written."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        errors = os.path.join(tmp, "errors")
+        for ok, want in ((True, ""), (False, "wordpress-egress\n")):
+            with self.subTest(ok=ok):
+                open(errors, "w").close()
+                rc, _out, _ = self._run_cli(
+                    ["wordpress-egress", "--errors-file", errors],
+                    egress.Result(ok, "rootless", "x"), "MACOS")
+                self.assertEqual(rc, 0)
+                with open(errors, encoding="utf-8") as f:
+                    self.assertEqual(f.read(), want)
 
     def test_mac_passes_its_own_limactl(self):
         body = _function_body(_read(MAC_LAUNCHER), "block_wordpress_egress")
@@ -1355,6 +1374,8 @@ exit 0
             'ONIONPRESS_WP_PORT=8080; START_ERRORS=""\n'
             'bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
             'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
+            + "".join(_function_body(_read(MAC_LAUNCHER), fn) + "\n}\n"
+                      for fn in ("start_errors_file", "note_start_errors"))
             + _function_body(_read(launcher), "block_wordpress_egress") + "\n}\n"
             "block_wordpress_egress\n"
             'echo "rc=$? errors=[$START_ERRORS]"\n')

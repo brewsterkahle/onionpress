@@ -25,6 +25,7 @@ from .config import (
 from .ports import port_environ
 from .docker import Docker
 from .containers import ContainerManager
+from .start import StartErrors
 from .launcher_ops import BACKUP_PASSWORD_ENV
 from .analytics_sharing import SHARING_CONFIG_KEY
 from .hub_backup import RECOVERY_KEY_ENV
@@ -2631,6 +2632,16 @@ def _add_wordpress_egress(sub, name):
     p.add_argument(
         "--bin-dir", default=None,
         help="Where the app's limactl is (macOS; default: the app bundle's)")
+    _add_errors_file(p)
+
+
+def _add_errors_file(p):
+    p.add_argument(
+        "--errors-file", default=None,
+        help="Append the name of each step that failed here, one per line, "
+             "and exit 0 for them: the Mac launcher's START SUMMARY "
+             "(onionpress.start); a non-zero exit then only means the "
+             "start must stop")
 
 
 def _run_wordpress_egress(run):
@@ -2661,6 +2672,10 @@ def _run_wordpress_egress(run):
         print(result.line())
     else:
         _log_wordpress_egress_verdict(result, _launcher_log_func(), paths.log_file)
+    if args.errors_file and not args.check:
+        if not result.ok:
+            StartErrors(args.errors_file).add("wordpress-egress")
+        return 0
     return 0 if result.ok else 1
 
 

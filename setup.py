@@ -113,7 +113,8 @@ OPTIONS = {
                  'onionpress.uninstall',
                  'onionpress.wordpress_egress',
                  'onionpress.daemon_client',
-                 'onionpress.thumbnails', 'onionpress.daemon'],
+                 'onionpress.thumbnails', 'onionpress.daemon',
+                 'onionpress.start'],
     'excludes': ['tkinter', 'test', 'unittest'],
     'arch': 'universal2',  # Build for both Intel and Apple Silicon
     'strip': True,  # Strip debug symbols to reduce size

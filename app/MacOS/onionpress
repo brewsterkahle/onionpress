@@ -264,6 +264,25 @@ log() {
 # everything come up?" is a single grep rather than a read of the whole
 # log. Each guarded step appends its name to START_ERRORS.
 START_ERRORS=""
+
+# A Python start step names what it could not do in a file (the START
+# SUMMARY contract, src/onionpress/start.py): `--errors-file "$f"` on the
+# call, then `note_start_errors "$f"` reads the names, one per line, into
+# START_ERRORS and removes the file. Only names of the bash's shape count.
+start_errors_file() {
+    mktemp "${TMPDIR:-/tmp}/onionpress-start-errors.XXXXXX" 2>/dev/null || true
+}
+note_start_errors() {
+    local name
+    [ -n "$1" ] && [ -f "$1" ] || return 0
+    while IFS= read -r name || [ -n "$name" ]; do
+        if [[ "$name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+            START_ERRORS="$START_ERRORS $name"
+        fi
+    done < "$1"
+    rm -f "$1"
+}
+
 log_start_summary() {
     if [ -n "${START_ERRORS:-}" ]; then
         log "START SUMMARY: failed components:${START_ERRORS} — see the ERROR/WARNING lines above in $LOG_FILE"
@@ -2385,12 +2404,18 @@ HTEOF
 # the start summary say so. The Python side bounds `limactl shell`, which
 # hangs for good when the VM's sshd is wedged. The body is onionpress.cli's
 # (Phase 4, #120): it logs the verdict in this script's log format, tee'd
-# into the log; its status only names the step in the START SUMMARY and
-# never stops the start.
+# into the log; it never stops the start, and a block not in place is
+# named in the START SUMMARY through the errors file (note_start_errors).
 block_wordpress_egress() {
+    local errors rc
+    errors=$(start_errors_file)
     bundled_python -m onionpress.cli --data-dir "$DATA_DIR" wordpress-egress \
-        --bin-dir "$BIN_DIR" --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
-    [ "${PIPESTATUS[0]}" -eq 0 ] || START_ERRORS="$START_ERRORS wordpress-egress"
+        --bin-dir "$BIN_DIR" --wp-port "$ONIONPRESS_WP_PORT" \
+        ${errors:+--errors-file "$errors"} 2>&1 | tee -a "$LOG_FILE"
+    rc=${PIPESTATUS[0]}
+    note_start_errors "$errors"
+    # No errors file (mktemp failed): the status is all there is.
+    [ -n "$errors" ] || [ "$rc" -eq 0 ] || START_ERRORS="$START_ERRORS wordpress-egress"
     return 0
 }
 
