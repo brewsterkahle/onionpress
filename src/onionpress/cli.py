@@ -2520,6 +2520,26 @@ def _run_wordpress_status(run):
     return 0
 
 
+def _add_linux_status(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Print the Linux launcher's status.json from the probes it "
+             "gathered (named fields; see linux_status.FIELDS)")
+    p.add_argument("--field", action="append", default=[], metavar="NAME=VALUE",
+                   help="One probe result; repeatable")
+
+
+def _run_linux_status(run):
+    from . import linux_status
+    try:
+        fields = linux_status.parse_fields(run.args.field)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(linux_status.build(fields), indent=2))
+    return 0
+
+
 # ---- the launchers' start steps (Phase 4, #120) ----
 
 def _run_start_step(run):
@@ -2697,6 +2717,45 @@ def _add_pack_backup(sub, name):
         help="Staged backup tree (metadata.json, tor-keys/, database/, ...)")
     p.add_argument(
         "--output", required=True, help="Backup file to write")
+
+
+def _add_backup_metadata(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Print metadata.json for a backup the Linux launcher staged "
+             "(backup helper)")
+    p.add_argument("--onion-address", default="")
+    p.add_argument("--version", required=True)
+    p.add_argument("--has-onionheaven", action="store_true")
+    p.add_argument("--excludes-image-derivatives", action="store_true")
+    p.add_argument("--hub-fields", default="",
+                   help="JSON stage-hub-backup printed (empty for none)")
+    p.add_argument("--hub-unchecked", action="store_true")
+    p.add_argument("--without-host-secrets", action="store_true")
+    p.add_argument("--secrets-left-out", default="",
+                   help="Space-separated names of the secrets left out")
+
+
+def _run_backup_metadata(run):
+    from .backup import linux_backup_metadata
+    a = run.args
+    try:
+        hub_fields = json.loads(a.hub_fields) if a.hub_fields else None
+    except ValueError:
+        print("ERROR: --hub-fields is not JSON", file=sys.stderr)
+        return 1
+    if hub_fields is not None and not isinstance(hub_fields, dict):
+        print("ERROR: --hub-fields is not a JSON object", file=sys.stderr)
+        return 1
+    metadata = linux_backup_metadata(
+        a.onion_address, a.version,
+        has_onionheaven=a.has_onionheaven,
+        excludes_image_derivatives=a.excludes_image_derivatives,
+        hub_fields=hub_fields, hub_unchecked=a.hub_unchecked,
+        with_host_secrets=not a.without_host_secrets,
+        secrets_left_out=a.secrets_left_out.split())
+    print(json.dumps(metadata, indent=2))
+    return 0
 
 
 def _add_extract_backup(sub, name):
@@ -3065,6 +3124,7 @@ _COMMANDS = [
      _plain("Read status JSON on stdin and print the fields the WordPress "
             "container may see"),
      _run_wordpress_status),
+    ("linux-status", _add_linux_status, _run_linux_status),
     ("retire-old-onionheaven-containers",
      _plain("Before the first `compose up`: remove every onionpress-tor, "
             "onionheaven and onionheaven-(poll|takeover)-N that does not "
@@ -3102,6 +3162,7 @@ _COMMANDS = [
      _run_apply_settings_updates),
     ("pack-backup", _add_pack_backup, _run_pack_or_extract_backup),
     ("extract-backup", _add_extract_backup, _run_pack_or_extract_backup),
+    ("backup-metadata", _add_backup_metadata, _run_backup_metadata),
     ("backup-address", _add_backup_address,
      lambda run: OnionPressCLI.cmd_backup_address(run.args.staging)),
     ("config", _add_config, _run_config),

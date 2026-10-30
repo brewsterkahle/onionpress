@@ -590,6 +590,9 @@ if cmd == "stage-hub-backup":
 if cmd == "prune-image-derivatives":
     cli.log = lambda m: print(m, file=sys.stderr)
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))
+if cmd == "backup-metadata":
+    from onionpress.cli import main
+    sys.exit(main(args))
 if cmd == "pack-backup":
     sys.exit(cli.cmd_pack_backup(a[1], a[3], sys.stdin.read()))
 sys.exit(2)' "$@"

@@ -2061,3 +2061,39 @@ def backup_filename_username(path):
         return None
     user = m.group('user').strip()
     return user if _BACKUP_USERNAME_RE.fullmatch(user) else None
+
+
+def linux_backup_metadata(onion_address, version, *, has_onionheaven=False,
+                          excludes_image_derivatives=False, hub_fields=None,
+                          hub_unchecked=False, with_host_secrets=True,
+                          secrets_left_out=(), now=None):
+    """metadata.json's content for a backup the Linux launcher stages
+    (issue #406; it was an inline python3 -c in create_backup).
+
+    *hub_fields* are what stage_hub_backup printed (onionheaven_data and
+    its sealed-format and recovery-key fields). pack_backup stamps
+    backup_format afterwards.
+    """
+    metadata = {
+        'onion_address': onion_address,
+        'backup_date': (now or datetime.now(timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'onionpress_version': version,
+        'platform': 'linux',
+        'has_onionheaven': bool(has_onionheaven),
+        # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
+        'excludes_image_derivatives': bool(excludes_image_derivatives),
+    }
+    for key in ('onionheaven_data', 'onionheaven_sealed_format',
+                'onionheaven_recovery_key_id'):
+        if hub_fields and key in hub_fields:
+            metadata[key] = hub_fields[key]
+    if hub_unchecked:
+        # The onionheaven container did not say whether this is a hub: the
+        # hub data may be missing (unchecked_notes).
+        metadata['onionheaven_data_unchecked'] = True
+    if not with_host_secrets:
+        # Handed to WordPress: no host secrets, and the names of those that
+        # were set (TUNNEL_TOKEN_KEY).
+        metadata['excludes_host_secrets'] = True
+        metadata['secret_config_left_out'] = list(secrets_left_out)
+    return metadata
