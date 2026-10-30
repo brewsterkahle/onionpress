@@ -552,7 +552,12 @@ def run_scrub(
             log(f"ERROR: {e}")
             return 1
 
-        phase_uninstall(log)
+        try:
+            phase_uninstall(log)
+        except RuntimeError as e:
+            log(f"ERROR: {e}")
+            log(f"  Backup retained for recovery: {state.backup_path}")
+            return 1
 
         try:
             phase_install(state.repo_dir, log)
