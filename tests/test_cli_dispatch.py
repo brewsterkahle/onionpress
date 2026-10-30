@@ -368,31 +368,22 @@ ROWS = [
             m.return_value.migrate_tor_network.assert_called_once_with(),
             m.return_value.retire_old_onionheaven_containers.assert_not_called(),
             t.assertEqual(m.call_args.args[2].wp_port, 8080))),
-    # Phase 4 (#120): the launchers' migrate_key_volume() is ContainerManager's;
-    # unlike the two above its status matters: 1 stops the start.
-    # #442.5: the launchers' seed_onion_key() is start.KeySeed (the Mac's
-    # flow on macOS, with --bin-dir for its mkp224o); 1 stops the start.
-    Row("seed-onion-key", ["seed-onion-key", "--bin-dir", "/b"], "start.KeySeed",
-        mock.call(ANY, mac=True, bin_dir="/b"), rc=0, os_name="macos",
-        returns=mock.Mock(**{"run.return_value": True})),
-    Row("seed-onion-key", ["seed-onion-key"], "start.KeySeed",
-        mock.call(ANY, mac=False, bin_dir=ANY), rc=1,
-        returns=mock.Mock(**{"run.return_value": False})),
-    # #442.6: the launchers' start_core_services() is start.start_core; exit
-    # 0 / 3 say whether WordPress is installed, 1 stops the start.
-    Row("start-core", ["start-core", "--docker-dir", "/d", "--bin-dir", "/b",
-                       "--wp-port", "18080", "--errors-file", "/e"],
-        "start.start_core", mock.call(ANY, mac=True, wp_port=18080, errors=ANY, log=ANY),
-        rc=0, os_name="macos", returns=(True, True),
+    # #442.8: the launchers' start_containers() is start.start_containers
+    # (Linux --until-core); exit 1 stops the start, 0 / 3 say whether
+    # WordPress is installed.
+    Row("start-containers", ["start-containers", "--docker-dir", "/d", "--bin-dir", "/b",
+                             "--scripts-dir", "/s", "--themes-dir", "/t", "--plugins-dir", "/p",
+                             "--wp-port", "18080", "--errors-file", "/e"],
+        "start.start_containers",
+        mock.call(ANY, mac=True, wp_port=18080, errors=ANY, bin_dir="/b", scripts_dir="/s",
+                  themes_dir="/t", plugins_dir="/p", until_core=False, log=ANY),
+        rc=0, os_name="macos", returns=0,
         check=lambda t, m: (t.assertEqual(m.call_args.args[0].paths.docker_dir, "/d"),
-                            t.assertEqual(m.call_args.args[0].paths.bin_dir, "/b"),
                             t.assertEqual(m.call_args.kwargs["errors"].path, "/e"))),
-    Row("start-core", ["start-core"], "start.start_core",
-        mock.call(ANY, mac=False, wp_port=8080, errors=None, log=ANY), rc=3,
-        returns=(True, False)),
-    Row("start-core", ["start-core"], "start.start_core",
-        mock.call(ANY, mac=False, wp_port=8080, errors=None, log=ANY), rc=1,
-        returns=(False, False)),
+    Row("start-containers", ["start-containers", "--until-core"], "start.start_containers",
+        mock.call(ANY, mac=False, wp_port=8080, errors=None, bin_dir=ANY, scripts_dir="",
+                  themes_dir="", plugins_dir="", until_core=True, log=ANY),
+        rc=3, returns=3),
     # #442.7: the launchers' start_post_up() is start.post_up; best effort, 0.
     Row("start-post-up", ["start-post-up", "--wordpress-installed", "yes", "--docker-dir", "/d",
                           "--scripts-dir", "/s", "--themes-dir", "/t", "--plugins-dir", "/p"],
@@ -404,15 +395,8 @@ ROWS = [
         "start.post_up", mock.call(ANY, mac=True, installed=False, errors=ANY,
                                    themes_dir="/t", plugins_dir="/p", scripts_dir="", log=ANY),
         rc=0, os_name="macos", returns=mock.Mock(side_effect=RuntimeError("x"))),
-    # #442.4: the launchers' apply_pending_key_import() is ContainerManager's;
-    # 1 stops the start (an old keystore survived, the marker stays).
-    Row("apply-pending-key-import", ["apply-pending-key-import"],
-        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
-        returns=mock.Mock(**{"apply_pending_key_import.return_value": True}),
-        check=lambda t, m: m.return_value.apply_pending_key_import.assert_called_once_with()),
-    Row("apply-pending-key-import", ["apply-pending-key-import"],
-        "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=1,
-        returns=mock.Mock(**{"apply_pending_key_import.return_value": False})),
+    # Phase 4 (#120): the launchers' migrate_key_volume() is ContainerManager's;
+    # unlike the retire and move rows its status matters: 1 stops the start.
     Row("migrate-key-volume", ["migrate-key-volume"],
         "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
         returns=mock.Mock(**{"migrate_key_volume.return_value": True}),

@@ -1,8 +1,6 @@
 log Starting OnionPress containers...
 fn wait_for_docker_or_recover_vm 180 start
 fn ensure_vm_fsck_repair
-docker volume ls --format {{.Name}}
-docker volume ls --format {{.Name}}
 log Checking for Docker image updates...
 log Pulling ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN...
 docker pull ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
@@ -21,6 +19,8 @@ docker pull ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:PIN
 log ✓ ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:PIN up to date
 log ✓ Image update check complete
 docker image prune -f
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
 log Pulling pre-built images (missing only)...
 docker compose pull --policy missing
 log ✓ WordPress network egress block in place: ok (test)

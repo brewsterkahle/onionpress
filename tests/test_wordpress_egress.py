@@ -1070,7 +1070,7 @@ class TestLaunchers(unittest.TestCase):
         for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
                 body = _function_body(_read(path), "start_containers")
-                self.assertIn("start_core_services || rc=$?", body)
+                self.assertIn("start-containers", body)
                 self.assertNotIn("up -d wordpress db", body)
 
     def test_the_helpers_call_the_shared_cli_and_never_stop_the_start(self):
@@ -1085,8 +1085,9 @@ class TestLaunchers(unittest.TestCase):
         self.assertNotIn("\n    log ", body, "the verdict lines are the CLI's")
         self.assertNotIn("WARNING", body)
         self.assertNotIn("\nblock_wordpress_egress() {", _read(MAC_LAUNCHER))
-        # The Mac's start hands start-core its errors file for the START SUMMARY.
-        mac = _function_body(_read(MAC_LAUNCHER), "start_core_services")
+        # The Mac's start hands start-containers its errors file for the
+        # START SUMMARY.
+        mac = _function_body(_read(MAC_LAUNCHER), "start_containers")
         self.assertIn("errors=$(start_errors_file)", mac)
         self.assertIn('${errors:+--errors-file "$errors"}', mac)
         self.assertIn('note_start_errors "$errors"', mac)
@@ -1169,15 +1170,15 @@ class TestLaunchers(unittest.TestCase):
                     self.assertEqual(f.read(), want)
 
     def test_mac_passes_its_own_limactl(self):
-        body = _function_body(_read(MAC_LAUNCHER), "start_core_services")
+        body = _function_body(_read(MAC_LAUNCHER), "start_containers")
         self.assertIn('--bin-dir "$BIN_DIR"', body)
 
     def test_both_pass_this_users_port(self):
         """The published-port rule needs the port, offset included; both
         launchers export ONIONPRESS_WP_PORT before anything runs."""
-        for path, fn in ((MAC_LAUNCHER, "start_core_services"),
+        for path, fn in ((MAC_LAUNCHER, "start_containers"),
                          (LINUX_LAUNCHER, "block_wordpress_egress"),
-                         (LINUX_LAUNCHER, "start_core_services")):
+                         (LINUX_LAUNCHER, "start_containers")):
             with self.subTest(launcher=os.path.relpath(path, ROOT), fn=fn):
                 text = _read(path)
                 body = _function_body(text, fn)
@@ -1207,7 +1208,7 @@ class TestLaunchers(unittest.TestCase):
         for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
             with self.subTest(launcher=os.path.relpath(path, ROOT)):
                 body = _function_body(_read(path), "start_containers")
-                self.assertIn("start_core_services || rc=$?", body)
+                self.assertIn("start-containers", body)
 
     def test_the_launchers_delegate_the_move(self):
         """One implementation, ContainerManager.migrate_tor_network

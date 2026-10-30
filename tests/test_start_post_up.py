@@ -339,13 +339,14 @@ class TestLaunchers(unittest.TestCase):
             return f.read()
 
     def test_both_end_the_start_with_post_up(self):
-        for rel in ("app/MacOS/onionpress", "linux/onionpress"):
-            text = self._read(rel)
-            i = text.index("\nstart_containers() {")
-            body = text[i:text.index("\n}\n", i)]
-            with self.subTest(rel):
-                self.assertIn('start_post_up "$wp_installed"', body)
-                self.assertLess(body.index("start_core_services"), body.index("start_post_up"))
+        """The Mac's start-containers runs it; Linux's start runs
+        start-post-up itself after its install-state steps (#442.8)."""
+        text = self._read("linux/onionpress")
+        i = text.index("\nstart_containers() {")
+        body = text[i:text.index("\n}\n", i)]
+        self.assertLess(body.index("start-containers --until-core"),
+                        body.index('start_post_up "$wp_installed"'))
+        self.assertIn("post_up(manager", self._read("src/onionpress/start.py"))
 
     def test_linux_keeps_its_host_steps_around_it(self):
         text = self._read("linux/onionpress")

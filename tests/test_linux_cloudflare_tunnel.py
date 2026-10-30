@@ -65,7 +65,7 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertIn('start_post_up "$wp_installed"', body)
         # The start's pull takes the Cloudflare file with a token
         # (start.start_core, #442.6; tests/test_start_core.py).
-        self.assertIn("start_core_services || rc=$?", body)
+        self.assertIn("start-containers --until-core", body)
 
     def test_stop_and_uninstall_take_cloudflared_down(self):
         """Always with the override file: a token removed since the last

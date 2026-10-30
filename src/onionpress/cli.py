@@ -11,6 +11,7 @@ import getpass
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from typing import Callable
@@ -525,68 +526,23 @@ class OnionPressCLI:
             self.docker, self.paths, self.port_config, log_func=self.log,
         )
 
-    def cmd_start(self) -> int:
-        """Start OnionPress containers."""
-        # Check PID lock
-        if self._check_pid_lock():
-            print("OnionPress is already running.", file=sys.stderr)
-            return 1
-        self._write_pid_lock()
-
+    def _launcher_verb(self, verb: str) -> int:
+        """Run this install's launcher with *verb* (`start`, `restart`), its
+        output on this terminal: the one start path (#442.8), with the key
+        steps (a pending import, the key volume's migration, the first
+        run's key) a start must never skip."""
+        from .handle_action import default_launcher
+        os_name = "macos" if detect_os() == OS.MACOS else "linux"
+        launcher = default_launcher(self.paths, os_name)
         try:
-            # Detect container runtime (may start Colima on macOS)
-            if detect_os() == OS.MACOS:
-                from .colima import detect_container_runtime
-                runtime = detect_container_runtime(self.paths, log_func=self.log)
-                self.log(f"Container runtime: {runtime}")
-
-            # This start has no key volume migration (the launcher's
-            # migrate_key_volume): refuse while one is due, before anything
-            # starts.
-            why = self.containers.key_volume_not_ready()
-            if why:
-                self.log(f"ERROR: not starting: {why}")
-                return 1
-
-            # Pull images if configured
-            if read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "no") == "yes":
-                self.containers.pull_images()
-
-            # Start core services
-            if not self.containers.start_core():
-                return 1
-
-            # Wait for WordPress
-            if not self.containers.wait_for_wordpress():
-                self.log("WARNING: WordPress not ready, continuing anyway")
-
-            # Start Tor if WordPress is installed
-            if self.containers.wp_is_installed():
-                # A restore may have left image sizes to rebuild (#257);
-                # runs detached, resumable, no-op without the marker.
-                from . import derivatives
-                derivatives.spawn_regeneration(
-                    self.paths.data_dir, self.log, self.paths.log_file)
-                self.containers.start_tor()
-
-                # Wait for Tor
-                if self.containers.wait_for_tor():
-                    addr = self.containers.get_onion_address()
-                    if addr:
-                        self.log(f"Onion address: {addr}")
-                        print(f"  Onion address: {addr}")
-            else:
-                self.log("WordPress not installed — skipping Tor startup")
-                print("  WordPress not installed. Run: onionpress setup")
-
-            wp_url = f"http://localhost:{self.port_config.wp_port}"
-            self.log(f"OnionPress is running! Local: {wp_url}")
-            print(f"  Local access: {wp_url}")
-            return 0
-
-        except Exception as e:
-            self.log(f"ERROR: {e}")
+            return subprocess.run([launcher, verb], stdin=subprocess.DEVNULL).returncode
+        except OSError as e:
+            self.log(f"ERROR: cannot run the launcher {launcher}: {e}")
             return 1
+
+    def cmd_start(self) -> int:
+        """Start OnionPress: the launcher's `start`."""
+        return self._launcher_verb("start")
 
     def cmd_stop(self) -> int:
         """Stop OnionPress containers."""
@@ -596,9 +552,8 @@ class OnionPressCLI:
         return 0
 
     def cmd_restart(self) -> int:
-        """Restart OnionPress containers."""
-        self.containers.stop()
-        return self.cmd_start()
+        """Restart OnionPress: the launcher's `restart`."""
+        return self._launcher_verb("restart")
 
     def cmd_status(self) -> int:
         """Print container status as JSON."""
@@ -1630,24 +1585,6 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
 
     # -- PID lock --
 
-    def _check_pid_lock(self) -> bool:
-        """Check if another instance is running."""
-        if not os.path.exists(self.paths.pid_file):
-            return False
-        try:
-            with open(self.paths.pid_file) as f:
-                pid = int(f.read().strip())
-            os.kill(pid, 0)  # Check if process exists
-            return True
-        except (ValueError, OSError):
-            # Stale PID file
-            os.remove(self.paths.pid_file)
-            return False
-
-    def _write_pid_lock(self) -> None:
-        with open(self.paths.pid_file, "w") as f:
-            f.write(str(os.getpid()))
-
     def _remove_pid_lock(self) -> None:
         try:
             os.remove(self.paths.pid_file)
@@ -2577,47 +2514,6 @@ def _run_bundled_plugins(run):
     return 0
 
 
-def _add_seed_onion_key(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Before anything starts Tor: on a first run (Docker says there is "
-             "no onionpress-onion-keys) install the imported key, or generate "
-             "one (macOS: the bundled mkp224o; Linux: generate-vanity), into "
-             "the key volume from the pinned tor image; Linux also re-syncs an "
-             "imported key. Exit 1 (the start must stop) when Docker does not "
-             "answer or the key cannot be installed (the volume made for it is "
-             "removed)")
-    p.add_argument("--bin-dir", default=None,
-                   help="Where the app's mkp224o is (macOS; default: the app bundle's)")
-
-
-def _run_seed_onion_key(run):
-    # The launchers' first-run block of start_containers (#442.5): the key
-    # seed in start.KeySeed, logged in the launcher's format; no
-    # OnionPressCLI setup (it runs before the stack is up).
-    from . import start
-    paths = resolve_paths(data_dir=run.args.data_dir)
-    seed = start.KeySeed(_start_step_manager(paths), mac=detect_os() == OS.MACOS,
-                         bin_dir=run.args.bin_dir or paths.bin_dir)
-    return 0 if seed.run() else 1
-
-
-def _add_start_core(sub, name):
-    p = sub.add_parser(
-        name,
-        help="The middle of a launcher's start: pull missing images, the "
-             "egress rules, retire old containers, move the Tor network, "
-             "`compose up` the core services (3 attempts), wait for "
-             "WordPress; exit 0 when it is installed, 3 when not, 1 when the "
-             "core services did not start (the start must stop)")
-    p.add_argument("--docker-dir", default=None, help="The compose files' folder")
-    p.add_argument("--bin-dir", default=None,
-                   help="Where the app's limactl is (macOS; default: the app bundle's)")
-    p.add_argument("--wp-port", type=int, default=None,
-                   help="WordPress's published port (default: $ONIONPRESS_WP_PORT)")
-    _add_errors_file(p)
-
-
 def _start_paths(args):
     """The data dir's paths, with the launcher's docker and bin folders."""
     import dataclasses
@@ -2630,25 +2526,46 @@ def _start_paths(args):
     return dataclasses.replace(paths, **changes) if changes else paths
 
 
-def _run_start_core(run):
-    # The launchers' core block of start_containers (#442.6): start.start_core
-    # over ContainerManager.start_core, in the launcher's words. 0 / 3 say
-    # whether WordPress is installed; 1 stops the start.
+def _add_start_containers(sub, name):
+    p = sub.add_parser(
+        name,
+        help="A launcher's start once Docker answers (onionpress.start): a "
+             "pending key import, the key volume's migration, the first run's "
+             "key, the core services, then Tor, the plugins and provisioning. "
+             "Exit 1 when the start must stop, else 0 (WordPress installed) or "
+             "3 (not yet)")
+    p.add_argument("--docker-dir", default=None, help="The compose files' folder")
+    p.add_argument("--bin-dir", default=None,
+                   help="Where the app's mkp224o and limactl are (macOS)")
+    p.add_argument("--scripts-dir", default=None,
+                   help="Where install_plugin.sh and activate_plugin.sh are")
+    p.add_argument("--themes-dir", default="", help="The bundled themes")
+    p.add_argument("--plugins-dir", default="", help="The bundled mu-plugins")
+    p.add_argument("--wp-port", type=int, default=None,
+                   help="WordPress's published port (default: $ONIONPRESS_WP_PORT)")
+    p.add_argument("--until-core", action="store_true",
+                   help="Stop after the core services (Linux: its install-state "
+                        "steps follow in the launcher, then start-post-up)")
+    _add_errors_file(p)
+
+
+def _run_start_containers(run):
+    # The launchers' start_containers after the Docker wait (#442.8):
+    # start.start_containers, logged in the launcher's format.
     from . import start
     args = run.args
     paths = _start_paths(args)
     wp_port = args.wp_port
     if wp_port is None:
-        offset = os.environ.get("ONIONPRESS_WP_PORT", "")
-        wp_port = int(offset) if offset.isdigit() else 8080
+        port = os.environ.get("ONIONPRESS_WP_PORT", "")
+        wp_port = int(port) if port.isdigit() else 8080
     manager = _start_step_manager(paths)
-    ok, installed = start.start_core(
+    return start.start_containers(
         manager, mac=detect_os() == OS.MACOS, wp_port=wp_port,
         errors=StartErrors(args.errors_file) if args.errors_file else None,
-        log=manager.log_func)
-    if not ok:
-        return 1
-    return 0 if installed else 3
+        bin_dir=args.bin_dir or paths.bin_dir, scripts_dir=args.scripts_dir or "",
+        themes_dir=args.themes_dir, plugins_dir=args.plugins_dir,
+        until_core=args.until_core, log=manager.log_func)
 
 
 def _add_start_post_up(sub, name):
@@ -2686,15 +2603,6 @@ def _run_start_post_up(run):
         if errors is not None:
             errors.add("start-post-up")
     return 0
-
-
-def _run_apply_pending_key_import(run):
-    # The launchers' apply_pending_key_import() (#442.4): ContainerManager's,
-    # logged in the launcher's format; no OnionPressCLI setup (it runs
-    # before the stack is up). 1 stops the start: an old keystore survived,
-    # or Docker could not say, and the marker stays for the next start.
-    paths = resolve_paths(data_dir=run.args.data_dir)
-    return 0 if _start_step_manager(paths).apply_pending_key_import() else 1
 
 
 def _add_db_import(sub, name):
@@ -3244,14 +3152,7 @@ _COMMANDS = [
             "OnionPress's own containers on it and disconnecting anything "
             "else; always exits 0"),
      _run_start_step),
-    ("apply-pending-key-import",
-     _plain("Finish a key import Docker was not up for (.import-key-pending): "
-            "remove the old key and C Tor volumes, confirmed absent, then the "
-            "marker; exit 1 (the start must stop, the marker stays) when one "
-            "survives or Docker does not answer"),
-     _run_apply_pending_key_import),
-    ("seed-onion-key", _add_seed_onion_key, _run_seed_onion_key),
-    ("start-core", _add_start_core, _run_start_core),
+    ("start-containers", _add_start_containers, _run_start_containers),
     ("start-post-up", _add_start_post_up, _run_start_post_up),
     ("migrate-key-volume",
      _plain("Before anything starts Tor: copy the onion service key out of "

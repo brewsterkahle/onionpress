@@ -721,7 +721,7 @@ class TestWiring(unittest.TestCase):
         that lack the hub data volume; the controller has none on purpose."""
         # Both launchers' start runs ContainerManager's step (start_core, #442.6).
         for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
-            self.assertIn("start-core", _read(launcher))
+            self.assertIn("start-containers", _read(launcher))
         from onionpress import containers
         self.assertIsNone(containers._HUB_CONTAINER_RE.fullmatch("onionheaven-farm"))
         self.assertIsNotNone(containers._HUB_CONTAINER_RE.fullmatch("onionheaven"))

@@ -168,33 +168,16 @@ class TestApplyPendingKeyImport(unittest.TestCase):
         self.assertEqual(docker.calls, [])
 
 
-class TestSubcommand(unittest.TestCase):
-    def test_exit_status_is_the_managers(self):
-        for ok, rc in ((True, 0), (False, 1)):
-            with self.subTest(ok=ok), \
-                 mock.patch.object(cli, "ContainerManager") as manager, \
-                 mock.patch.object(cli, "Docker"), \
-                 mock.patch.object(cli, "OnionPressCLI") as heavy:
-                manager.return_value.apply_pending_key_import.return_value = ok
-                self.assertEqual(cli.main(["apply-pending-key-import"]), rc)
-                heavy.assert_not_called()
-
-
 class TestLaunchers(unittest.TestCase):
-    def test_both_delegate_and_stop_the_start(self):
-        for rel, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
-                            ("linux/onionpress", "op_py")):
+    def test_no_launcher_keeps_a_copy(self):
+        """Both launchers' start runs it inside start-containers (#442.8)."""
+        for rel in ("app/MacOS/onionpress", "linux/onionpress"):
             with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
                 text = f.read()
             with self.subTest(rel):
-                start = text.index("\napply_pending_key_import() {")
-                self.assertEqual(
-                    text[start:text.index("\n}\n", start) + 3],
-                    "\napply_pending_key_import() {\n"
-                    f'    {runner} --data-dir "$DATA_DIR" apply-pending-key-import 2>&1 '
-                    '| tee -a "$LOG_FILE"\n'
-                    '    return "${PIPESTATUS[0]}"\n}\n')
                 self.assertNotIn('rm -f "$DATA_DIR/.import-key-pending"', text)
+                self.assertNotIn("\napply_pending_key_import() {", text)
+                self.assertIn("start-containers", text)
 
 
 if __name__ == "__main__":

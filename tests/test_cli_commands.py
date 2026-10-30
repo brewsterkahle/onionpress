@@ -657,71 +657,28 @@ class TestLifecycleCommands(Sandbox):
         self.spawn = self.stack.enter_context(
             mock.patch("onionpress.derivatives.spawn_regeneration"))
 
-    def test_start_refuses_while_another_start_holds_the_lock(self):
-        self.write("onionpress.pid", str(os.getpid()))
-        self.assertEqual(self.cli.cmd_start(), 1)
-        self.assertIn("already running", self.err.getvalue())
+    def test_start_is_the_launchers(self):
+        """One start path (#442.8): `onionpress start` runs this install's
+        launcher, whose start never skips the key steps (a pending import,
+        the key volume's migration, the first run's key)."""
+        for verb, method in (("start", self.cli.cmd_start), ("restart", self.cli.cmd_restart)):
+            with self.subTest(verb), \
+                 mock.patch("onionpress.handle_action.default_launcher",
+                            return_value="/opt/onionpress/onionpress") as where, \
+                 mock.patch("onionpress.cli.subprocess.run",
+                            return_value=mock.Mock(returncode=7)) as run:
+                self.assertEqual(method(), 7)
+                self.assertEqual(run.call_args.args[0], ["/opt/onionpress/onionpress", verb])
+                self.assertEqual(where.call_args.args[1], "linux")
         self.cli.containers.start_core.assert_not_called()
-
-    def test_start_with_wordpress_installed(self):
-        self.write("config", "UPDATE_ON_LAUNCH=yes\n")
-        self.assertEqual(self.cli.cmd_start(), 0)
-        c = self.cli.containers
-        c.pull_images.assert_called_once()
-        c.start_core.assert_called_once()
-        c.start_tor.assert_called_once()
-        self.spawn.assert_called_once_with(self.dir, self.cli.log, self.cli.paths.log_file)
-        self.assertIn(f"  Onion address: {ADDR}\n", self.out.getvalue())
-        self.assertIn("  Local access: http://localhost:8080\n", self.out.getvalue())
-        with open(self.cli.paths.pid_file) as f:
-            self.assertEqual(f.read(), str(os.getpid()))
-
-    def test_start_pulls_nothing_unless_asked(self):
-        self.assertEqual(self.cli.cmd_start(), 0)
-        self.cli.containers.pull_images.assert_not_called()
-
-    def test_start_without_wordpress_installed_skips_tor(self):
-        self.cli.containers.wp_is_installed.return_value = False
-        self.assertEqual(self.cli.cmd_start(), 0)
         self.cli.containers.start_tor.assert_not_called()
-        self.spawn.assert_not_called()
-        self.assertIn("Run: onionpress setup", self.out.getvalue())
-        self.assertTrue(any("skipping Tor startup" in m for m in self.cli.logged))
+        self.cli.containers.stop.assert_not_called()
 
-    def test_start_while_a_key_volume_migration_is_due(self):
-        self.cli.containers.key_volume_not_ready.return_value = "the old volume is there"
-        self.assertEqual(self.cli.cmd_start(), 1)
-        self.cli.containers.start_core.assert_not_called()
-        self.assertTrue(any("not starting: the old volume is there" in m
-                            for m in self.cli.logged))
-
-    def test_start_core_failure_is_1(self):
-        self.cli.containers.start_core.return_value = False
-        self.assertEqual(self.cli.cmd_start(), 1)
-        self.cli.containers.start_tor.assert_not_called()
-
-    def test_wordpress_not_ready_is_a_warning_only(self):
-        self.cli.containers.wait_for_wordpress.return_value = False
-        self.assertEqual(self.cli.cmd_start(), 0)
-        self.assertTrue(any("WARNING: WordPress not ready" in m for m in self.cli.logged))
-
-    def test_tor_not_bootstrapping_prints_no_address(self):
-        self.cli.containers.wait_for_tor.return_value = False
-        self.assertEqual(self.cli.cmd_start(), 0)
-        self.assertNotIn("Onion address", self.out.getvalue())
-
-    def test_an_exception_is_logged_and_1(self):
-        self.cli.containers.start_core.side_effect = RuntimeError("compose exploded")
-        self.assertEqual(self.cli.cmd_start(), 1)
-        self.assertIn("ERROR: compose exploded", self.cli.logged)
-
-    def test_a_mac_start_detects_the_runtime_first(self):
-        self.detect_os.return_value = OS.MACOS
-        with mock.patch("onionpress.colima.detect_container_runtime",
-                        return_value="colima-bundled") as runtime:
-            self.assertEqual(self.cli.cmd_start(), 0)
-        runtime.assert_called_once_with(self.cli.paths, log_func=self.cli.log)
-        self.assertIn("Container runtime: colima-bundled", self.cli.logged)
+    def test_a_launcher_that_will_not_run_is_1(self):
+        with mock.patch("onionpress.handle_action.default_launcher", return_value="/nonexistent"), \
+             mock.patch("onionpress.cli.subprocess.run", side_effect=OSError("gone")):
+            self.assertEqual(self.cli.cmd_start(), 1)
+        self.assertIn("ERROR: cannot run the launcher /nonexistent: gone", self.cli.logged)
 
     def test_stop_releases_the_lock(self):
         self.write("onionpress.pid", str(os.getpid()))
@@ -729,14 +686,6 @@ class TestLifecycleCommands(Sandbox):
         self.cli.containers.stop.assert_called_once()
         self.assertFalse(os.path.exists(self.cli.paths.pid_file))
         self.assertIn("OnionPress stopped", self.cli.logged)
-
-    def test_restart_stops_then_starts(self):
-        order = []
-        self.cli.containers.stop.side_effect = lambda: order.append("stop")
-        with mock.patch.object(self.cli, "cmd_start",
-                               side_effect=lambda: order.append("start") or 7):
-            self.assertEqual(self.cli.cmd_restart(), 7)
-        self.assertEqual(order, ["stop", "start"])
 
     def test_status_is_json(self):
         self.cli.containers.get_status.return_value = ContainerStatus(

@@ -732,3 +732,39 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
                          log_file=paths.log_file)
         configure_site_timezones(docker, log, paths.log_file)
         cloudflare_tunnel(manager, mac=True, installed=installed, log=log)
+
+
+# ---- the whole start (#442.8) ----
+
+STOP, INSTALLED, NOT_INSTALLED = 1, 0, 3
+
+
+def start_containers(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
+                     bin_dir: str = "", scripts_dir: str = "", themes_dir: str = "",
+                     plugins_dir: str = "", until_core: bool = False, log=None) -> int:
+    """Both launchers' start once Docker answers, in their order: a key
+    import Docker was not up for, the key volume's migration from its old
+    name, the first run's key (all three before anything that could start
+    Tor, and each stopping the start when it cannot be done), the core
+    services, then everything after them (post_up). STOP, or whether
+    WordPress is installed (INSTALLED / NOT_INSTALLED). *until_core* ends
+    after the core services: Linux runs its install-state steps (which
+    name WordPress's published address, issue #464) in the launcher and
+    then `start-post-up`."""
+    log = log or manager._log
+    if not manager.apply_pending_key_import():
+        return STOP
+    # Upgraded installs: the key volume comes over from its old name
+    # before the first-run check looks for the new one.
+    if not manager.migrate_key_volume():
+        log("ERROR: cannot start without the onion service key volume")
+        return STOP
+    if not KeySeed(manager, mac=mac, bin_dir=bin_dir, log=log).run():
+        return STOP
+    ok, installed = start_core(manager, mac=mac, wp_port=wp_port, errors=errors, log=log)
+    if not ok:
+        return STOP
+    if not until_core:
+        post_up(manager, mac=mac, installed=installed, errors=errors, themes_dir=themes_dir,
+                plugins_dir=plugins_dir, scripts_dir=scripts_dir, log=log)
+    return INSTALLED if installed else NOT_INSTALLED

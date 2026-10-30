@@ -350,6 +350,22 @@
   (`resolve_port_offset`). `TestResolvePorts` in
   `tests/test_mac_daemon_paths.py`.
 
+## The Start Is onionpress.start (issue #442)
+- **Each launcher's `start_containers` is the Docker wait (Mac: VM
+  recovery, fsck drop-in), `update_images`, then `onionpress
+  start-containers`** (`start.start_containers`): pending key import →
+  key volume migration → first-run key → core services → post-up, each key
+  step stopping the start. Linux runs `--until-core`, its install-state
+  steps (#464) and `start-post-up`. `onionpress start`/`restart` run the
+  launcher. `tests/test_start_sequence.py`.
+- **A change to the start is checked against the recorded traces**
+  (`tests/test_start_traces.py`, fixtures under
+  `tests/fixtures/start-traces/`); a fixture changes only on purpose
+  (`OP_UPDATE_START_TRACES=1`), said in the commit.
+- Best-effort steps name their failures in the Mac START SUMMARY through
+  `--errors-file` (`start.StartErrors`, read by `note_start_errors`).
+  `tests/test_start_errors_contract.py`.
+
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
   live in `src/onionpress/app_commands.py`, shared by both platforms, never

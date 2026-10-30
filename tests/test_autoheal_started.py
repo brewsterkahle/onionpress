@@ -40,7 +40,7 @@ class TestAutohealStarted(unittest.TestCase):
             src = _read(rel)
             ups = re.findall(r"(?m)^\s*(?:if\s+)?(docker compose up -d wordpress db [^\n>|']*)", src)
             self.assertEqual(ups, [], f"{rel}: a core `compose up` of its own")
-            self.assertIn("start-core", src)
+            self.assertIn("start-containers", src)
 
     def test_python_container_manager_starts_autoheal(self):
         from onionpress import containers

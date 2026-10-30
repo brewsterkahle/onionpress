@@ -902,7 +902,7 @@ class TestLaunchers(unittest.TestCase):
         for launcher in LAUNCHERS:
             with self.subTest(launcher=launcher):
                 body = _bash_function(hd._read(launcher), "start_containers")
-                self.assertIn("start_core_services || rc=$?", body)
+                self.assertIn("start-containers", body)
                 self.assertNotIn("up -d wordpress db", body)
 
     def test_the_farm_stops_all_at_once(self):

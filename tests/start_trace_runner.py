@@ -38,7 +38,7 @@ REAL = {
     "regenerate-derivatives-pending", "wordpress-egress",
     "apply-pending-key-import", "start-containers", "setup-bundled-plugins",
     "install-bundled-plugins", "start-post-up",
-    "start-core", "start-post-up", "seed-onion-key",
+    "start-post-up",
 }
 # Only ever started in the background by a start.
 DETACHED = {"ensure-archive-s3-keys", "regenerate-derivatives"}

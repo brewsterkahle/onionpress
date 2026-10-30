@@ -1483,24 +1483,6 @@ wait_for_docker_or_recover_vm() {
     recover_lima_vm "$who" || return 1
     wait_for_docker "$limit"
 }
-# The end of the start, once the core is up (start.post_up, #442.7): the
-# .htaccess repair, Tor (`tor` in the START SUMMARY when it will not
-# start), the pinned plugins, an install-from-backup's import, the
-# provisioning steps (each named in the START SUMMARY when it fails), the
-# plugins' setup, the image rebuild and the archive.org login (detached,
-# outliving this script), the site timezones, the Cloudflare tunnel. Best
-# effort: it never stops the start. $1: whether WordPress is installed.
-start_post_up() {
-    local errors
-    errors=$(start_errors_file)
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" start-post-up \
-        --wordpress-installed "$([ "$1" = true ] && echo yes || echo no)" \
-        --docker-dir "$DOCKER_DIR" --scripts-dir "$SCRIPTS_DIR" \
-        --themes-dir "$RESOURCES_DIR/themes" --plugins-dir "$RESOURCES_DIR/plugins" \
-        ${errors:+--errors-file "$errors"} 2>&1 | tee -a "$LOG_FILE"
-    note_start_errors "$errors"
-    return 0
-}
 
 
 # Run a command inside the VM through `limactl shell`, bounded to $1
@@ -1529,26 +1511,6 @@ vm_shell_bounded() {
     wait "$pid" || rc=$?
     cat "$out"
     rm -f "$out"
-    return "$rc"
-}
-# The middle of the start (start.start_core over ContainerManager.start_core,
-# #442.6): the images compose is about to start, pulled when missing only
-# (never for a locally built stack; UPDATE_ON_LAUNCH's refresh is
-# update_images, before this); WordPress's network shut before anything
-# starts on it (issue #144; a block not in place is a WARNING and a START
-# SUMMARY name on the Mac); an older OnionPress's containers retired and the
-# Tor network moved; `compose up` of the core services, 3 attempts 5 s
-# apart; WordPress's port for up to 60 s and `wp core is-installed` 15
-# times 2 s apart. Exit 0: up, WordPress installed; 3: up, not installed;
-# anything else: the core did not start, and neither does OnionPress.
-start_core_services() {
-    local errors rc
-    errors=$(start_errors_file)
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" start-core \
-        --docker-dir "$DOCKER_DIR" --bin-dir "$BIN_DIR" --wp-port "$ONIONPRESS_WP_PORT" \
-        ${errors:+--errors-file "$errors"} 2>&1 | tee -a "$LOG_FILE"
-    rc=${PIPESTATUS[0]}
-    note_start_errors "$errors"
     return "$rc"
 }
 
@@ -1622,19 +1584,6 @@ EOF
     esac
     return 0
 }
-# The first run's onion service key (start.KeySeed, #442.5): only when
-# Docker confirms there is no onionpress-onion-keys volume (an unanswered
-# question stops the start), the imported key in shared/vanity-keys/, or a
-# generated one, is installed in it from the pinned tor image, with no
-# network; a seed that fails removes the volume it made and stops the
-# start, or Tor would mint a random address. Linux also re-syncs an
-# imported key at every start. Lines tee'd into the log; the status stops
-# the start.
-seed_onion_key() {
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" seed-onion-key \
-        --bin-dir "$BIN_DIR" 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
-}
 
 
 # After recover_lima_vm has rebooted a wedged VM, keep the journal of the
@@ -1667,17 +1616,6 @@ save_previous_boot_journal() {
     log "$who: previous boot: fsck-root=$fsck emergency=$emergency sysinit=$sysinit ssh=$ssh — journal saved to $path"
     return 0
 }
-# Finish a key import that Docker was not running for (.import-key-pending,
-# written by import_key and a restore of another address): remove the old
-# key, migration-era and C Tor keystore volumes, force-removing what holds
-# one, each confirmed absent by Docker, then the marker. The body is
-# onionpress.cli's (ContainerManager.apply_pending_key_import, #442.4),
-# its lines tee'd into the log; its status stops the start, and the marker
-# stays, whenever an old keystore survives or Docker could not say.
-apply_pending_key_import() {
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" apply-pending-key-import 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
-}
 
 
 # One-time migration of the onion service key volume from its historical
@@ -1701,10 +1639,10 @@ start_containers() {
 
     cd "$DOCKER_DIR"
 
-    # Docker has to answer before anything below asks whether a volume
-    # exists. Those checks used to read "Docker is not up yet" as "no such
-    # volume", and a missing key volume is the first-run signal: upgrading
-    # to 2.5.0 on 2026-09-30 while the Colima VM was still booting took the
+    # Docker has to answer before anything asks whether a volume exists.
+    # Those checks used to read "Docker is not up yet" as "no such volume",
+    # and a missing key volume is the first-run signal: upgrading to 2.5.0
+    # on 2026-09-30 while the Colima VM was still booting took the
     # first-run path instead of migrating the key volume.
     #
     # If Docker never answers but Lima still reports the VM Running, the VM
@@ -1722,46 +1660,31 @@ start_containers() {
     # exists for; see ensure_vm_fsck_repair). Best effort, never blocks.
     ensure_vm_fsck_repair
 
-    # A key import Docker was not up for: the old keystores go first, each
-    # confirmed absent, or the start stops with the import still pending.
-    if ! apply_pending_key_import; then
-        return 1
-    fi
-
-    # Upgraded installs: bring the key volume over from its old name before
-    # the first-run check below looks for the new one.
-    if ! migrate_key_volume; then
-        log "ERROR: cannot start without the onion service key volume"
-        return 1
-    fi
-
-    # The onion service key, before anything starts Tor: on a first run
-    # (Docker's confirmed "no" key volume) the imported or a generated key
-    # goes into the key volume, and a key that does not get there stops the
-    # start (seed_onion_key).
-    if ! seed_onion_key; then
-        return 1
-    fi
-
-    # Update images if enabled in config
+    # UPDATE_ON_LAUNCH's refresh of the pinned images (opt-in; restart runs
+    # it too). The start's own pull, below, fetches only what is missing.
     update_images
 
-    # The core services (start_core_services): images pulled when missing,
-    # WordPress's network shut, an older OnionPress's containers retired,
-    # `compose up` of WordPress, the database, OnionHeaven and autoheal,
-    # then whether WordPress is installed. A core that will not start stops
-    # the start.
-    local wp_installed=false rc=0
-    start_core_services || rc=$?
+    # The rest of the start is onionpress.start's (#442.8): a pending key
+    # import, the key volume's migration and the first run's key (each
+    # before anything that could start Tor, each stopping the start when it
+    # cannot be done), the core services (egress rules first), then Tor,
+    # the plugins, provisioning, a backup's import, the image rebuild, the
+    # site timezones and the Cloudflare tunnel. What fails without stopping
+    # the start is named in the START SUMMARY through the errors file.
+    local errors rc
+    errors=$(start_errors_file)
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" start-containers \
+        --docker-dir "$DOCKER_DIR" --bin-dir "$BIN_DIR" --scripts-dir "$SCRIPTS_DIR" \
+        --themes-dir "$RESOURCES_DIR/themes" --plugins-dir "$RESOURCES_DIR/plugins" \
+        --wp-port "$ONIONPRESS_WP_PORT" \
+        ${errors:+--errors-file "$errors"} 2>&1 | tee -a "$LOG_FILE"
+    rc=${PIPESTATUS[0]}
+    note_start_errors "$errors"
+    # 0: WordPress installed, 3: not yet (the setup window does it).
     case "$rc" in
-        0) wp_installed=true ;;
-        3) ;;
+        0|3) return 0 ;;
         *) return 1 ;;
     esac
-
-    # Tor, the plugins, provisioning, the backup import, the image rebuild,
-    # the timezones and the Cloudflare tunnel (start_post_up): best effort.
-    start_post_up "$wp_installed"
 }
 
 # Function to stop containers

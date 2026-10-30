@@ -42,8 +42,7 @@ class TestOnePullPass(unittest.TestCase):
         body = code[start:code.index("\n}\n", start)]
         self.assertEqual(len(re.findall(r"(?m)^\s+update_images$", body)), 1)
         # The missing-only pull is start-core's (start.start_core, #442.6).
-        self.assertIn("start_core_services || rc=$?", body)
-        self.assertLess(body.index("update_images"), body.index("start_core_services"))
+        self.assertLess(body.index("update_images"), body.index("start-containers"))
         fn = code[code.index("update_images() {"):]
         fn = fn[:fn.index("\n}\n")]
         self.assertIn("$(config_value UPDATE_ON_LAUNCH)", fn)

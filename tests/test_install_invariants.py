@@ -635,10 +635,11 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         Step ordering is enforced inside multisite.provision_post_install
         — see tests/test_multisite.py.
         """
-        # Both launchers' start runs it inside start-post-up (#442.7).
+        # The start runs it inside start-post-up (#442.7): Linux calls that
+        # itself, the Mac's start-containers runs it (#442.8).
         for path, py_cmd in (
             ("linux/onionpress", r'start_post_up "\$wp_installed"'),
-            ("app/MacOS/onionpress", r'start_post_up "\$wp_installed"'),
+            ("app/MacOS/onionpress", r'onionpress\.cli --data-dir "\$DATA_DIR" start-containers'),
         ):
             script = _read(path)
             m = re.search(
@@ -1428,14 +1429,12 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # look for the new volume (the function's own early-return
                 # check sits above start_containers and does not count).
                 sc = text.index("\nstart_containers() {")
-                call = text.index("if ! migrate_key_volume; then", sc)
-                # The first-run check is seed_onion_key's (start.KeySeed, #442.5).
-                check = text.index("if ! seed_onion_key; then", sc)
-                self.assertLess(
-                    call, check,
-                    "migrate_key_volume must be called before the first-run "
-                    "check that looks for the new volume.",
-                )
+                # The start's migration and first-run check are
+                # start.start_containers' since #442.8, in that order
+                # (tests/test_start_sequence.py): the launcher keeps neither.
+                body = text[sc:text.index("\n}\n", sc)]
+                self.assertIn("start-containers", body)
+                self.assertNotIn("docker_volume_state onionpress-onion-keys", body)
                 for old_name_check in ('grep -qx "onionpress-arti-state"',
                                        "docker_volume_state onionpress-arti-state"):
                     self.assertNotIn(
@@ -1470,9 +1469,8 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # VM recovery, see TestStartRecoversWedgedLimaVM); Linux has
                 # no VM and waits directly.
                 wait = body.index("if ! wait_for_docker")
-                for later in ("apply_pending_key_import",
-                              "if ! migrate_key_volume; then",
-                              "if ! seed_onion_key; then"):
+                # The key steps are start-containers' (#442.8).
+                for later in ("start-containers",):
                     self.assertLess(
                         wait, body.index(later),
                         f"start_containers must wait for Docker before "
@@ -1989,13 +1987,15 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
 
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
-                 "apply_pending_key_import",
+                 "config_value", "update_images",
                  "using_local_images", "ensure_key_helper_image",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
     # Without a limactl on PATH they report the VM as not Running, so the
     # Docker-down cases below still stop without any recovery attempt.
-    OPTIONAL_FUNCTIONS = ("lima_vm_running", "recover_lima_vm",
+    OPTIONAL_FUNCTIONS = ("start_errors_file", "note_start_errors",
+                          "wordpress_bind_host_for_start",
+                          "lima_vm_running", "recover_lima_vm",
                           "wait_for_docker_or_recover_vm",
                           # start_containers then looks after the guest's
                           # root fs; without a limactl that is a no-op too.
@@ -2070,7 +2070,7 @@ exit 0
                        "STUB_IMAGE": image,
                        "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src"),
                        "SHIM": os.path.join(PROJECT_ROOT, "tests", "cli_on_stub_docker.py"),
-                       "HOME": tmp,
+                       "HOME": tmp, "ONIONPRESS_WP_PORT": "8080",
                        "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"}
             run_env.update(env or {})
             out = subprocess.run(["bash", "-c", script], env=run_env,

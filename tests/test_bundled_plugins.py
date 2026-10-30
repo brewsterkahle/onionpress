@@ -208,7 +208,7 @@ class TestLaunchers(unittest.TestCase):
         for rel in LAUNCHERS:
             start = _bash_function(_read(rel), "start_containers")
             with self.subTest(rel):
-                self.assertIn('start_post_up "$wp_installed"', start)
+                self.assertIn("start-containers", start)
                 self.assertNotIn("configure-ia-plugin", start)
                 self.assertNotIn("configure_cache_enabler", start)
 

@@ -212,60 +212,8 @@ class TestCLIArgParsing(unittest.TestCase):
         MockCLI.assert_called_once_with(data_dir="/tmp/test")
 
 
-class TestPIDLock(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    @mock.patch("onionpress.cli.detect_port_offset")
-    @mock.patch("onionpress.cli.ensure_secrets")
-    @mock.patch("onionpress.cli.Docker")
-    def test_pid_lock_lifecycle(self, MockDocker, mock_secrets, mock_ports):
-        from onionpress.config import PortConfig, Secrets
-        mock_ports.return_value = PortConfig(0, 8080, 9050, 9077)
-        mock_secrets.return_value = Secrets("p1", "p2", "p3")
-        MockDocker.return_value = mock.Mock()
-
-        cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
-
-        # No lock initially
-        self.assertFalse(cli._check_pid_lock())
-
-        # Write lock
-        cli._write_pid_lock()
-        pid_file = os.path.join(self.tmpdir, "onionpress.pid")
-        self.assertTrue(os.path.exists(pid_file))
-        with open(pid_file) as f:
-            self.assertEqual(int(f.read().strip()), os.getpid())
-
-        # Lock detected (our own PID is running)
-        self.assertTrue(cli._check_pid_lock())
-
-        # Remove lock
-        cli._remove_pid_lock()
-        self.assertFalse(os.path.exists(pid_file))
-
-    @mock.patch("onionpress.cli.detect_port_offset")
-    @mock.patch("onionpress.cli.ensure_secrets")
-    @mock.patch("onionpress.cli.Docker")
-    def test_stale_pid_lock(self, MockDocker, mock_secrets, mock_ports):
-        from onionpress.config import PortConfig, Secrets
-        mock_ports.return_value = PortConfig(0, 8080, 9050, 9077)
-        mock_secrets.return_value = Secrets("p1", "p2", "p3")
-        MockDocker.return_value = mock.Mock()
-
-        cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
-        pid_file = os.path.join(self.tmpdir, "onionpress.pid")
-
-        # Write a stale PID (very unlikely to be a real process)
-        with open(pid_file, "w") as f:
-            f.write("999999999")
-
-        # Should detect as stale and clean up
-        self.assertFalse(cli._check_pid_lock())
-        self.assertFalse(os.path.exists(pid_file))
+# The start's PID lock is the launcher's (`onionpress start` runs it since
+# #442.8); cmd_stop still removes it: test_cli_commands, test_stop_releases_the_lock.
 
 
 class TestNormalizeGetUrl(unittest.TestCase):
@@ -505,9 +453,13 @@ class TestCmdStartWaitsForTheKeyVolume(unittest.TestCase):
         cli.log = mock.Mock()
         cli.containers = mock.Mock()
         cli.containers.key_volume_not_ready.return_value = "the key is still in onionpress-arti-state"
-        with mock.patch("onionpress.cli.detect_os", return_value=None):
+        # `onionpress start` is the launcher's start (#442.8), which runs the
+        # migration first: nothing of the stack is touched from here.
+        with mock.patch("onionpress.cli.subprocess.run",
+                        return_value=mock.Mock(returncode=1)) as run:
             rc = cli.cmd_start()
         self.assertEqual(rc, 1)
+        self.assertEqual(run.call_args.args[0][1:], ["start"])
         cli.containers.pull_images.assert_not_called()
         cli.containers.start_core.assert_not_called()
         cli.containers.start_tor.assert_not_called()

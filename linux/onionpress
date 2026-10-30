@@ -1606,27 +1606,6 @@ start_post_up() {
 }
 
 
-# ─── Container management ────────────────────────────────────────────
-# The middle of the start (start.start_core over ContainerManager.start_core,
-# #442.6): the images compose is about to start, pulled when missing only
-# (never for a locally built stack; UPDATE_ON_LAUNCH's refresh is
-# update_images, before this); WordPress's network shut before anything
-# starts on it (issue #144; a block not in place is a WARNING and a START
-# SUMMARY name on the Mac); an older OnionPress's containers retired and the
-# Tor network moved; `compose up` of the core services, 3 attempts 5 s
-# apart; WordPress's port for up to 60 s and `wp core is-installed` 15
-# times 2 s apart. Exit 0: up, WordPress installed; 3: up, not installed;
-# anything else: the core did not start, and neither does OnionPress.
-start_core_services() {
-    # WordPress's port: 127.0.0.1 until a start has seen WordPress
-    # installed (issue #464; moved once this start knows). Compose reads
-    # it from the environment, as it always did.
-    ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \
-        op_py --data-dir "$DATA_DIR" start-core --docker-dir "$DOCKER_DIR" \
-        --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
-}
-
 
 # Whether Docker has volume $1: 0 yes, 1 no, 2 Docker could not say (the
 # daemon is not up yet, e.g. the Colima VM is still booting). Callers must
@@ -1637,18 +1616,6 @@ docker_volume_state() {
     local names
     names=$(docker volume ls --format '{{.Name}}' 2>>"$LOG_FILE") || return 2
     printf '%s\n' "$names" | grep -qx -- "$1"
-}
-# The first run's onion service key (start.KeySeed, #442.5): only when
-# Docker confirms there is no onionpress-onion-keys volume (an unanswered
-# question stops the start), the imported key in shared/vanity-keys/, or a
-# generated one, is installed in it from the pinned tor image, with no
-# network; a seed that fails removes the volume it made and stops the
-# start, or Tor would mint a random address. Linux also re-syncs an
-# imported key at every start. Lines tee'd into the log; the status stops
-# the start.
-seed_onion_key() {
-    op_py --data-dir "$DATA_DIR" seed-onion-key 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
 }
 
 
@@ -1670,17 +1637,6 @@ wait_for_docker() {
         log "Docker daemon ready after ${waited}s"
     fi
     return 0
-}
-# Finish a key import that Docker was not running for (.import-key-pending,
-# written by import_key and a restore of another address): remove the old
-# key, migration-era and C Tor keystore volumes, force-removing what holds
-# one, each confirmed absent by Docker, then the marker. The body is
-# onionpress.cli's (ContainerManager.apply_pending_key_import, #442.4),
-# its lines tee'd into the log; its status stops the start, and the marker
-# stays, whenever an old keystore survives or Docker could not say.
-apply_pending_key_import() {
-    op_py --data-dir "$DATA_DIR" apply-pending-key-import 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
 }
 
 
@@ -1778,37 +1734,21 @@ start_containers() {
         return 1
     fi
 
-    # A key import Docker was not up for: the old keystores go first, each
-    # confirmed absent, or the start stops with the import still pending.
-    if ! apply_pending_key_import; then
-        return 1
-    fi
-
-    # Upgraded installs: bring the key volume over from its old name before
-    # the first-run check below looks for the new one.
-    if ! migrate_key_volume; then
-        log "ERROR: cannot start without the onion service key volume"
-        return 1
-    fi
-
-    # The onion service key, before anything starts Tor: on a first run
-    # (Docker's confirmed "no" key volume) the imported or a generated key
-    # goes into the key volume, and a key that does not get there stops the
-    # start (seed_onion_key).
-    if ! seed_onion_key; then
-        return 1
-    fi
-
-    # Update images if enabled
+    # UPDATE_ON_LAUNCH's refresh of the pinned images (opt-in). The
+    # start's own pull fetches only what is missing.
     update_images
 
-    # The core services (start_core_services): images pulled when missing,
-    # WordPress's network shut, an older OnionPress's containers retired,
-    # `compose up` of WordPress, the database, OnionHeaven and autoheal,
-    # then whether WordPress is installed. A core that will not start stops
-    # the start.
-    local wp_installed=false rc=0
-    start_core_services || rc=$?
+    # onionpress.start (#442.8), up to the core services: a pending key
+    # import, the key volume's migration and the first run's key (each
+    # before anything that could start Tor, each stopping the start when it
+    # cannot be done), then the core services, egress rules first.
+    # WordPress's port: 127.0.0.1 until a start has seen WordPress
+    # installed (issue #464; compose reads it from the environment).
+    local wp_installed=false rc
+    ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \
+        op_py --data-dir "$DATA_DIR" start-containers --until-core \
+        --docker-dir "$DOCKER_DIR" --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
+    rc=${PIPESTATUS[0]}
     case "$rc" in
         0) wp_installed=true ;;
         3) ;;

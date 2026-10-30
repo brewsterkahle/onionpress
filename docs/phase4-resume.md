@@ -465,3 +465,27 @@ launchers' `regenerate_derivatives_pending` and `install_bundled_plugins`,
 Linux's `start_cloudflare_tunnel`, `warn_if_socks_port_exposed`,
 `run_detached` and `OP_PY`. Their behavioural tests moved to
 `tests/test_start_post_up.py`.
+
+### One delegation, one start path (#450)
+
+`start.start_containers` (fast path `start-containers`: exit 1 stop, 0
+installed, 3 not) runs `apply_pending_key_import` → `migrate_key_volume`
+→ `KeySeed` → `start_core` → `post_up`. The Mac's `start_containers` is
+the Docker wait, `ensure_vm_fsck_repair`, `update_images` and that one
+call (errors file → START_ERRORS); Linux's is the wait, `update_images`,
+`start-containers --until-core` (with `ONIONPRESS_BIND_HOST` in its
+environment), its install-state steps and LAN note, `start-post-up`, and
+the activation watcher. Settled:
+- Linux cannot be one call: the install-state steps name
+  `ONIONPRESS_BIND_HOST` (no Python may, `test_linux_bind_scope`) and
+  must run between the core and Tor (the heartbeat hold before Tor).
+- `update_images` runs before the key steps now (it only pulls): the
+  `update-on-launch` traces moved its lines up.
+- `OnionPressCLI.cmd_start` / `cmd_restart` run the launcher's `start` /
+  `restart` (`handle_action.default_launcher`); the thinner Python start
+  (no migration, seed or provisioning) and its PID-lock helpers are gone.
+- The intermediate subcommands (`apply-pending-key-import`,
+  `seed-onion-key`, `start-core`) and their bash functions are gone; the
+  Python functions keep their unit tests (`test_pending_key_import`,
+  `test_first_run_key_seed`, `test_start_core`), the order is
+  `tests/test_start_sequence.py`.

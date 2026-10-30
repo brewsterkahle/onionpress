@@ -212,31 +212,16 @@ class TestEgressStep(Base):
 
 class TestLaunchers(unittest.TestCase):
 
-    def _start(self, path):
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-        i = text.index("\nstart_containers() {")
-        return text, text[i:text.index("\n}\n", i)]
-
-    def test_both_run_the_core_after_the_key_steps(self):
-        for path in (MAC_LAUNCHER, LINUX_LAUNCHER):
-            with self.subTest(path=os.path.relpath(path, ROOT)):
-                text, body = self._start(path)
-                self.assertLess(body.index("if ! seed_onion_key; then"),
-                                body.index("start_core_services || rc=$?"))
-                self.assertIn('*) return 1 ;;', body)
-                fn = text[text.index("\nstart_core_services() {"):]
-                fn = fn[:fn.index("\n}\n")]
-                self.assertIn('start-core --docker-dir "$DOCKER_DIR"', fn.replace("\\\n        ", ""))
-                self.assertIn('--wp-port "$ONIONPRESS_WP_PORT"', fn)
-
     def test_linux_binds_by_the_last_verdict(self):
         """Issue #464: compose reads WordPress's address from the
-        environment the launcher hands the start."""
-        text, _ = self._start(LINUX_LAUNCHER)
-        fn = text[text.index("\nstart_core_services() {"):]
+        environment the launcher hands the start (start-containers, #442.8;
+        tests/test_start_sequence.py holds the rest of the shape)."""
+        with open(LINUX_LAUNCHER, encoding="utf-8") as f:
+            text = f.read()
+        i = text.index("\nstart_containers() {")
         self.assertIn('ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \\\n'
-                      '        op_py --data-dir "$DATA_DIR" start-core', fn)
+                      '        op_py --data-dir "$DATA_DIR" start-containers --until-core',
+                      text[i:text.index("\n}\n", i)])
 
 
 if __name__ == "__main__":
