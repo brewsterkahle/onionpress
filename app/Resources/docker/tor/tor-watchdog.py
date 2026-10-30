@@ -43,6 +43,9 @@ import sys
 import time
 import traceback
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import onion_auth  # noqa: E402  (the one address derivation)
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -227,19 +230,13 @@ def _read_ed25519_key(secret_key_path):
 def _derive_onion_address(public_key_path):
     """Derive .onion address from hs_ed25519_public_key file.
 
-    v3 onion address = base32(pubkey + checksum + version)
-    checksum = SHA3-256(".onion checksum" + pubkey + version)[:2]
+    The address derivation is onion_auth's.
     """
-    import hashlib
     with open(public_key_path, "rb") as f:
         data = f.read()
     if len(data) != 64:
         raise ValueError(f"Public key wrong size: {len(data)} (expected 64)")
-    pubkey = data[32:]  # 32-byte header + 32-byte key
-    version = b'\x03'
-    checksum = hashlib.sha3_256(b".onion checksum" + pubkey + version).digest()[:2]
-    addr_bytes = pubkey + checksum + version
-    return base64.b32encode(addr_bytes).decode("ascii").lower() + ".onion"
+    return onion_auth.derive_onion_address(data[32:])  # 32-byte header + key
 
 
 def _read_hostname(path):

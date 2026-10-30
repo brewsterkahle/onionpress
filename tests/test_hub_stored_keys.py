@@ -351,11 +351,17 @@ class OnlineStoresKeysTest(unittest.TestCase):
         good = _pem(self.expanded, self.public)
         self.assertEqual(self._online(good)[0], 200)
         other_expanded, other_public, _ = _keypair()
-        for doctored in (_pem(other_expanded, self.public),
-                         _pem(other_expanded, self.public, inner_public=other_public)):
+        # The PEM is read once, as the takeover reads it (the private
+        # section): a wrong scalar under the right public key does not
+        # belong; a private section carrying another public key derives to
+        # another address.
+        for doctored, said in (
+                (_pem(other_expanded, self.public), "does not belong"),
+                (_pem(other_expanded, self.public, inner_public=other_public),
+                 "does not derive")):
             status, body = self._online(doctored)
             self.assertEqual(status, 400)
-            self.assertIn("does not belong", body["error"])
+            self.assertIn(said, body["error"])
             self.assertEqual(self._stored(), good)
 
     def test_a_doctored_first_key_is_not_stored(self):
