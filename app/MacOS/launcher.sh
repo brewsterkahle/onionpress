@@ -34,6 +34,26 @@ APP_DIR="$(dirname "$SCRIPT_DIR")"
 RESOURCES_DIR="$APP_DIR/Resources"
 MENUBAR_APP="$RESOURCES_DIR/MenubarApp"
 DATA_DIR="$HOME/.onionpress"
+
+# The value of KEY in ~/.onionpress/config (config_value KEY [default]),
+# by config.read_value's rule (issue #404): a line is KEY's when, stripped,
+# it starts with `KEY=`; the first such line wins; the value is everything
+# after its first `=`, blanks around it trimmed. $2 (default empty) when
+# no line names KEY. Always succeeds, so `x=$(config_value K)` is safe
+# under `set -e`. Identical in the three launcher scripts
+# (tests/test_config_one_reader.py).
+config_value() {
+    local line value
+    line=$(grep -E "^[[:space:]]*$1=" "$DATA_DIR/config" 2>/dev/null | head -1)
+    if [ -z "$line" ]; then
+        printf '%s\n' "${2-}"
+        return 0
+    fi
+    value=${line#*=}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    printf '%s\n' "$value"
+}
 DOCUMENTS_DIR="$HOME/OnionPress"
 OLD_DOCUMENTS_DIR="$HOME/Documents/OnionPress"
 
@@ -261,7 +281,7 @@ initialize_colima() {
         # Read VM memory from config (default: 1 GB)
         VM_MEMORY=1
         if [ -f "$DATA_DIR/config" ]; then
-            config_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+            config_mem=$(config_value VM_MEMORY)
             if [ ! -z "$config_mem" ]; then
                 VM_MEMORY="$config_mem"
             fi
@@ -287,7 +307,7 @@ initialize_colima() {
         # BEFORE first launch (cap is baked in at VM creation).
         VM_DISK=20
         if [ -f "$DATA_DIR/config" ]; then
-            config_disk=$(grep "^VM_DISK=" "$DATA_DIR/config" | cut -d= -f2)
+            config_disk=$(config_value VM_DISK)
             if [ ! -z "$config_disk" ]; then
                 VM_DISK="$config_disk"
             fi
@@ -355,7 +375,7 @@ initialize_colima() {
         # Read VM memory from config (default: 1 GB)
         local vm_mem=1
         if [ -f "$DATA_DIR/config" ]; then
-            local cfg_mem=$(grep "^VM_MEMORY=" "$DATA_DIR/config" | cut -d= -f2)
+            local cfg_mem=$(config_value VM_MEMORY)
             if [ ! -z "$cfg_mem" ]; then
                 vm_mem="$cfg_mem"
             fi

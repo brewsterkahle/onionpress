@@ -318,6 +318,29 @@ def regenerate_if_pending(data_dir: str, log_func: Optional[Callable[[str], None
         lock.close()
 
 
+# The child's boot (issue #491). `python -m` and `-c` put the current
+# directory first on sys.path, and the caller's may be a folder WordPress
+# writes (My Creations). -I would drop it but also PYTHONHOME, which the
+# Mac's bundled Python needs; -P / PYTHONSAFEPATH need 3.11, past the
+# .deb's floor. So the boot drops the entry itself, before importing
+# anything that is not built in, and puts this package's root in front.
+_CLI_BOOT = """import sys
+if not getattr(sys.flags, "safe_path", False) and sys.path and sys.path[0] in ("", "."):
+    del sys.path[0]
+sys.path[:0] = [sys.argv.pop(1)]
+import runpy
+runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)
+"""
+
+
+def isolated_cli_argv(*args: str) -> list:
+    """argv that runs `onionpress.cli *args` in this interpreter without
+    the current directory on sys.path. Every Python-to-Python spawn in
+    src/ goes through it (tests/test_python_spawns_isolated.py)."""
+    package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return [sys.executable, "-c", _CLI_BOOT, package_root, *args]
+
+
 def spawn_regeneration(data_dir: str, log_func: Optional[Callable[[str], None]] = None,
                        log_file: Optional[str] = None) -> Optional[int]:
     """Start `onionpress.cli regenerate-derivatives` detached in the
@@ -331,11 +354,11 @@ def spawn_regeneration(data_dir: str, log_func: Optional[Callable[[str], None]] 
     try:
         if log_file:
             out = open(log_file, "a")
+        data_dir = os.path.abspath(data_dir)
         proc = subprocess.Popen(
-            [sys.executable, "-m", "onionpress.cli", "--data-dir", data_dir,
-             "regenerate-derivatives"],
+            isolated_cli_argv("--data-dir", data_dir, "regenerate-derivatives"),
             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-            start_new_session=True,
+            start_new_session=True, cwd=data_dir,
         )
     except OSError as e:
         log(f"Image derivatives: could not start background regeneration: {e} "

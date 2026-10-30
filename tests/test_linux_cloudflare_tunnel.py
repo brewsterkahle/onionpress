@@ -15,8 +15,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LAUNCHER = os.path.join(PROJECT_ROOT, "linux", "onionpress")
@@ -44,7 +48,7 @@ class TestLauncherWiring(unittest.TestCase):
 
     def test_token_is_read_from_the_config(self):
         body = _function(self.text, "read_cloudflare_token")
-        self.assertIn('cut -d= -f2-', body)
+        self.assertIn("$(config_value CLOUDFLARE_TUNNEL_TOKEN)", body)
         self.assertNotRegex(self.text, r'(?m)^CLOUDFLARE_TUNNEL_TOKEN=""\s*$',
                             "the token must not be blanked at top level")
         self.assertRegex(self.text, r"(?m)^read_cloudflare_token$")
@@ -96,6 +100,7 @@ class TestTunnelBehaviour(unittest.TestCase):
             '    if [ "$1 $2" = "container inspect" ]; then [ "$CF_EXISTS" = yes ]; fi',
             '}',
             compose_line,
+            config_value_function(),
             _function(text, "read_cloudflare_token"),
             _function(text, "start_cloudflare_tunnel"),
         ])
