@@ -9,15 +9,19 @@ onionpress-onion-keys volume; C Tor's own key files are what Tor runs on.
 
 import base64
 import re
-import struct
 import subprocess
+
+try:
+    from onionpress import onion_auth, onion_keys
+except ImportError:  # loaded flat from a scripts/ directory (linux/install-tree.sh)
+    import onion_auth
+    import onion_keys
 
 # The delivered PEM, in the onionpress-onion-keys volume as the container sees
 # it. Renamed on 2026-09-25 from /var/lib/arti/state/keystore/hss/... (volume
 # onionpress-arti-state); the launchers migrate old volumes on first start.
 DELIVERED_KEY_DIR = "/var/lib/onionpress-keys/wordpress"
 DELIVERED_KEY_PATH = DELIVERED_KEY_DIR + "/ks_hs_id.ed25519_expanded_private"
-ARTI_KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
 CONTAINER = "onionpress-tor"
 
 # C Tor onion service key files — where the running identity lives. The PEM
@@ -30,149 +34,16 @@ CTOR_HOSTNAME_PATH = "/var/lib/tor/hidden_service/wordpress/hostname"
 CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
 CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
 
-OPENSSH_MAGIC = b"openssh-key-v1\x00"
-
-
-def _pack_string(data):
-    """Pack bytes as uint32 big-endian length + data."""
-    return struct.pack(">I", len(data)) + data
-
-
-def _unpack_string(buf, offset):
-    """Unpack a uint32-length-prefixed string from buf at offset. Returns (data, new_offset)."""
-    if offset + 4 > len(buf):
-        raise ValueError("Truncated length field")
-    length = struct.unpack(">I", buf[offset:offset + 4])[0]
-    offset += 4
-    if offset + length > len(buf):
-        raise ValueError(f"Truncated data: need {length} bytes at offset {offset}, have {len(buf) - offset}")
-    return buf[offset:offset + length], offset + length
-
-
 def parse_openssh_key(data):
-    """
-    Parse an OpenSSH private key file (PEM format, unencrypted).
-    Returns (private_key_64bytes, public_key_32bytes).
-    """
-    # Strip PEM headers and decode base64
-    text = data.decode("utf-8", errors="replace")
-    lines = text.strip().splitlines()
-    b64_lines = []
-    in_body = False
-    for line in lines:
-        if line.startswith("-----BEGIN"):
-            in_body = True
-            continue
-        if line.startswith("-----END"):
-            break
-        if in_body:
-            b64_lines.append(line.strip())
-    if not b64_lines:
-        raise ValueError("No PEM body found in key file")
-
-    raw = base64.b64decode("".join(b64_lines))
-
-    # Parse binary format
-    if not raw.startswith(OPENSSH_MAGIC):
-        raise ValueError("Missing openssh-key-v1 magic")
-    offset = len(OPENSSH_MAGIC)
-
-    cipher, offset = _unpack_string(raw, offset)
-    kdf, offset = _unpack_string(raw, offset)
-    kdf_options, offset = _unpack_string(raw, offset)
-
-    if cipher != b"none" or kdf != b"none":
-        raise ValueError("Encrypted keys are not supported")
-
-    nkeys = struct.unpack(">I", raw[offset:offset + 4])[0]
-    offset += 4
-    if nkeys != 1:
-        raise ValueError(f"Expected 1 key, got {nkeys}")
-
-    # Skip public key blob (we'll get it from the private section)
-    _pub_blob, offset = _unpack_string(raw, offset)
-
-    # Parse private key blob
-    priv_blob, offset = _unpack_string(raw, offset)
-    p = 0
-
-    check1 = struct.unpack(">I", priv_blob[p:p + 4])[0]
-    p += 4
-    check2 = struct.unpack(">I", priv_blob[p:p + 4])[0]
-    p += 4
-    if check1 != check2:
-        raise ValueError("Check integers mismatch — key may be corrupt or encrypted")
-
-    key_type, p = _unpack_string(priv_blob, p)
-    if key_type != ARTI_KEY_TYPE:
-        raise ValueError(f"Unexpected key type: {key_type!r}")
-
-    public_key, p = _unpack_string(priv_blob, p)
-    if len(public_key) != 32:
-        raise ValueError(f"Public key is {len(public_key)} bytes, expected 32")
-
-    secret_blob, p = _unpack_string(priv_blob, p)
-    # Arti writes just the 64-byte expanded private key (no appended public key),
-    # unlike standard OpenSSH ed25519 which concatenates private+public.
-    if len(secret_blob) == 64:
-        private_key = secret_blob
-    elif len(secret_blob) == 96:
-        private_key = secret_blob[:64]
-        if secret_blob[64:] != public_key:
-            raise ValueError("Embedded public key in private blob does not match")
-    else:
-        raise ValueError(f"Secret blob is {len(secret_blob)} bytes, expected 64 or 96")
-
-    return private_key, public_key
+    """(private_key_64bytes, public_key_32bytes) of an unencrypted OpenSSH
+    key file (onion_keys.parse_pem; a 96-byte secret with the public key
+    appended is taken too)."""
+    return onion_keys.parse_pem(data, allow_embedded_public=True)
 
 
 def build_openssh_key(private_key, public_key):
-    """
-    Build an OpenSSH private key file (PEM format, unencrypted) for Arti.
-    private_key: 64 bytes (expanded Ed25519)
-    public_key: 32 bytes
-    Returns bytes (PEM-encoded).
-    """
-    if len(private_key) != 64:
-        raise ValueError(f"Private key must be 64 bytes, got {len(private_key)}")
-    if len(public_key) != 32:
-        raise ValueError(f"Public key must be 32 bytes, got {len(public_key)}")
-
-    # Build public key blob
-    pub_blob = _pack_string(ARTI_KEY_TYPE) + _pack_string(public_key)
-
-    # Build private key blob
-    import os
-    check = struct.pack(">I", int.from_bytes(os.urandom(4), "big"))
-    priv_blob = (
-        check + check +  # checkint1 == checkint2
-        _pack_string(ARTI_KEY_TYPE) +
-        _pack_string(public_key) +
-        _pack_string(private_key) +  # Arti uses just 64-byte expanded privkey
-        _pack_string(b"")  # empty comment
-    )
-    # Pad to 8-byte boundary with 1,2,3,4,...
-    pad_len = (8 - len(priv_blob) % 8) % 8
-    priv_blob += bytes(range(1, pad_len + 1))
-
-    # Assemble full binary
-    binary = (
-        OPENSSH_MAGIC +
-        _pack_string(b"none") +       # cipher
-        _pack_string(b"none") +       # kdf
-        _pack_string(b"") +           # kdf options
-        struct.pack(">I", 1) +        # nkeys
-        _pack_string(pub_blob) +
-        _pack_string(priv_blob)
-    )
-
-    # PEM-wrap
-    b64 = base64.b64encode(binary).decode("ascii")
-    lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
-    pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-    pem += "\n".join(lines) + "\n"
-    pem += "-----END OPENSSH PRIVATE KEY-----\n"
-    return pem.encode("utf-8")
+    """The OpenSSH PEM (bytes) of a 64-byte expanded key and its public key."""
+    return onion_keys.build_pem(private_key, public_key)
 
 
 def _docker_cat(path):
@@ -645,11 +516,7 @@ def _python_public_key(scalar):
     return encode_point(scalar_mult(s, B))
 
 
-def derive_onion_address(public_key):
-    """Derive v3 .onion address from 32-byte public key."""
-    import hashlib
-    checksum = hashlib.sha3_256(b'.onion checksum' + public_key + b'\x03').digest()[:2]
-    return base64.b32encode(public_key + checksum + b'\x03').decode().lower() + '.onion'
+derive_onion_address = onion_auth.derive_onion_address
 
 
 # A v3 onion address as derive_onion_address writes it: 56 lowercase base32

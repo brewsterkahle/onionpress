@@ -224,6 +224,7 @@ COPY healthcheck-server.sh /healthcheck-server.sh
 COPY onionheaven-redirect.sh /onionheaven-redirect.sh
 COPY onionheaven-tor-manager.sh /onionheaven-tor-manager.sh
 COPY onion_auth.py /onion_auth.py
+COPY onion_keys.py /onion_keys.py
 COPY onionheaven_common.py /onionheaven_common.py
 COPY onionheaven-heartbeat.py /onionheaven-heartbeat.py
 COPY onionheaven-farm.py /onionheaven-farm.py

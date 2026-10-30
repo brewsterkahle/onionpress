@@ -21,151 +21,33 @@ Usage:
 """
 
 import base64
-import hashlib
-import hmac
-import io
 import os
 import stat
 import struct
 import sys
 
+import onion_auth
+import onion_keys
+from onion_keys import SodiumUnavailable, keypair_error
+
 # C Tor key file headers (exactly 32 bytes each)
 CTOR_SECRET_HEADER = b"== ed25519v1-secret: type0 ==\x00\x00\x00"
 CTOR_PUBLIC_HEADER = b"== ed25519v1-public: type0 ==\x00\x00\x00"
 
-OPENSSH_MAGIC = b"openssh-key-v1\x00"
-KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
-
-
-def _pack(data):
-    """Pack bytes with a 4-byte big-endian length prefix."""
-    return struct.pack(">I", len(data)) + data
-
-
-def _unpack_string(data, offset):
-    """Unpack a length-prefixed string from data at offset."""
-    if offset + 4 > len(data):
-        raise ValueError("Truncated data")
-    length = struct.unpack(">I", data[offset:offset + 4])[0]
-    offset += 4
-    if offset + length > len(data):
-        raise ValueError("Truncated string data")
-    return data[offset:offset + length], offset + length
-
 
 def parse_arti_pem(pem_path):
-    """Parse an Arti OpenSSH PEM file and return (expanded_key, public_key).
-
-    expanded_key: 64 bytes, public_key: 32 bytes.
-    """
-    with open(pem_path, "rb") as f:
-        return parse_arti_pem_bytes(f.read())
+    """(expanded_key 64 bytes, public_key 32 bytes) of an Arti OpenSSH PEM file."""
+    return onion_keys.parse_pem_file(pem_path)
 
 
 def parse_arti_pem_bytes(pem_bytes):
-    """parse_arti_pem for a PEM in memory: (expanded_key, public_key) from
-    the private section, the key ADD_ONION gets at takeover time.
+    """parse_arti_pem for a PEM in memory: the private section's keys, the
+    key ADD_ONION gets at takeover time.
 
     web-server.py reads a registration's PEM with this same function, so the
     key it checks is the key a takeover will use.
     """
-    lines = io.StringIO(pem_bytes.decode("utf-8"), newline=None).readlines()
-
-    # Strip PEM header/footer and decode base64
-    b64_lines = []
-    in_key = False
-    for line in lines:
-        line = line.strip()
-        if line == "-----BEGIN OPENSSH PRIVATE KEY-----":
-            in_key = True
-            continue
-        if line == "-----END OPENSSH PRIVATE KEY-----":
-            break
-        if in_key:
-            b64_lines.append(line)
-
-    binary = base64.b64decode("".join(b64_lines))
-
-    # Verify magic
-    if not binary.startswith(OPENSSH_MAGIC):
-        raise ValueError("Not an OpenSSH private key")
-
-    offset = len(OPENSSH_MAGIC)
-
-    # Skip cipher, kdf, kdf options
-    _, offset = _unpack_string(binary, offset)  # cipher
-    _, offset = _unpack_string(binary, offset)  # kdf
-    _, offset = _unpack_string(binary, offset)  # kdf options
-
-    # Number of keys
-    num_keys = struct.unpack(">I", binary[offset:offset + 4])[0]
-    offset += 4
-
-    # Skip public key blob
-    _, offset = _unpack_string(binary, offset)
-
-    # Private key section
-    priv_section, _ = _unpack_string(binary, offset)
-
-    # Parse private section: check1, check2, key_type, pub, priv, comment
-    p = 0
-    check1 = struct.unpack(">I", priv_section[p:p + 4])[0]
-    p += 4
-    check2 = struct.unpack(">I", priv_section[p:p + 4])[0]
-    p += 4
-    if check1 != check2:
-        raise ValueError("Check values mismatch — corrupted or encrypted key")
-
-    key_type, p = _unpack_string(priv_section, p)
-    if key_type != KEY_TYPE:
-        raise ValueError(f"Unexpected key type: {key_type}")
-
-    public_key, p = _unpack_string(priv_section, p)
-    if len(public_key) != 32:
-        raise ValueError(f"Public key wrong size: {len(public_key)}")
-
-    expanded_key, p = _unpack_string(priv_section, p)
-    if len(expanded_key) != 64:
-        raise ValueError(f"Expanded key wrong size: {len(expanded_key)}")
-
-    return expanded_key, public_key
-
-
-class SodiumUnavailable(RuntimeError):
-    """PyNaCl (python3-nacl, libsodium) is not installed."""
-
-
-def keypair_error(expanded_key, public_key):
-    """Why expanded_key is not public_key's secret key, or None if it is.
-
-    An expanded ed25519 key is a secret scalar a (its first 32 bytes) and a
-    nonce prefix; the public key is a times the base point. The scalar is
-    what Tor signs with and derives the onion address from, so a key whose
-    scalar does not give public_key cannot serve that address. The point
-    multiplication is libsodium's (PyNaCl), never computed here. Raises
-    SodiumUnavailable without PyNaCl.
-    """
-    if len(expanded_key) != 64 or len(public_key) != 32:
-        return "the key has the wrong length"
-    scalar = expanded_key[:32]
-    if scalar[31] & 0x80:
-        # libsodium (and Tor's ref10) take the scalar mod 2^255: a set top
-        # bit would check one scalar here and hand Tor another.
-        return "the secret scalar is not below 2^255"
-    try:
-        from nacl import bindings
-    except ImportError as e:
-        raise SodiumUnavailable(str(e)) from e
-    if not getattr(bindings, "has_crypto_scalarmult_ed25519", True):
-        raise SodiumUnavailable("libsodium was built without ed25519 scalar multiplication")
-    try:
-        derived = bindings.crypto_scalarmult_ed25519_base_noclamp(scalar)
-    except (RuntimeError, TypeError, ValueError):
-        # libsodium refuses a zero scalar and one that gives the identity
-        return "the secret scalar is zero or a multiple of the group order"
-    if not hmac.compare_digest(derived, public_key):
-        return "the secret scalar does not give the public key"
-    return None
+    return onion_keys.parse_pem(pem_bytes)
 
 
 def _write_atomic(path, data, mode=0o600):
@@ -202,28 +84,8 @@ def _write_atomic(path, data, mode=0o600):
 
 
 def build_arti_pem(expanded_key, public_key):
-    """Build an Arti-format OpenSSH PEM from expanded key + public key."""
-    pub_blob = _pack(KEY_TYPE) + _pack(public_key)
-
-    check = struct.pack(">I", int.from_bytes(os.urandom(4), "big"))
-    priv_blob = (check + check +
-                 _pack(KEY_TYPE) + _pack(public_key) +
-                 _pack(expanded_key) + _pack(b""))
-
-    # Pad to 8-byte boundary
-    pad_len = (8 - len(priv_blob) % 8) % 8
-    priv_blob += bytes(range(1, pad_len + 1))
-
-    binary = (OPENSSH_MAGIC +
-              _pack(b"none") + _pack(b"none") + _pack(b"") +
-              struct.pack(">I", 1) +
-              _pack(pub_blob) + _pack(priv_blob))
-
-    b64 = base64.b64encode(binary).decode("ascii")
-    lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
-    return ("-----BEGIN OPENSSH PRIVATE KEY-----\n" +
-            "\n".join(lines) + "\n" +
-            "-----END OPENSSH PRIVATE KEY-----\n")
+    """The Arti-format OpenSSH PEM (str) of an expanded key + public key."""
+    return onion_keys.build_pem(expanded_key, public_key).decode("ascii")
 
 
 def arti_to_ctor(pem_path, output_dir):
@@ -255,9 +117,7 @@ def arti_to_ctor(pem_path, output_dir):
 
 def _onion_address(public_key):
     """v3 onion address (no .onion suffix) of a 32-byte ed25519 public key."""
-    version = b"\x03"
-    checksum = hashlib.sha3_256(b".onion checksum" + public_key + version).digest()[:2]
-    return base64.b32encode(public_key + checksum + version).decode("ascii").lower().rstrip("=")
+    return onion_auth.derive_onion_address(public_key)[:-len(".onion")]
 
 
 def _read_small(path, limit=4096):
