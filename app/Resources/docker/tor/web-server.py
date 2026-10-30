@@ -936,6 +936,8 @@ class OnionHeavenHandler(BaseHTTPRequestHandler):
             taken_over = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE status='taken-over'"
             ).fetchone()[0]
+            # The unregistered rows the hub still keeps, not every one
+            # there ever was: unregister_entry prunes them (issue #492).
             unregistered = conn.execute(
                 "SELECT COUNT(*) FROM registry WHERE unregistered_at IS NOT NULL"
             ).fetchone()[0]

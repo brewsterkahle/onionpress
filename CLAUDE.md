@@ -613,6 +613,11 @@
   `analytics_room`, `MAX_NAMES_PER_ADDRESS`); existing pairs always have
   room. The numbers are still the issue's decision.
   `tests/test_hub_registration_caps.py`.
+- **Dead rows are bounded too** (#492): `unregister_entry` keeps the
+  newest `MAX_DEAD_ROWS_PER_ADDRESS` (4, at least 1, so #467's 404 still
+  knows the address) and `MAX_DEAD_ROWS` (`MAX_REGISTRANTS` × 4) hub-wide
+  (`prune_dead_rows`); `/status`'s `unregistered` counts kept rows.
+  `DeadRowsTest` in the same file.
 
 ## The Hub Bounds What a Free Key Leaves and Tells (issues #467, #468, #469)
 - #467: `/offline`, `/unregister` and the signed status query answer 404

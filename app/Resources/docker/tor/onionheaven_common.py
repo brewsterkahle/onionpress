@@ -92,6 +92,18 @@ _addr_logs_lock = threading.Lock()
 _ADDR_LOG_MAX = 10
 _ADDR_LOGS_MAX_ADDRESSES = 8192
 
+# Unregistered registry rows the hub keeps (issue #492). Every start of a
+# node makes a new healthcheck key, so register/unregister cycles left a
+# dead row each, and #391's caps count only live rows. unregister_entry
+# keeps the newest MAX_DEAD_ROWS_PER_ADDRESS dead rows of an address (at
+# least one, so /offline and /unregister still know it, #467) and the
+# newest MAX_DEAD_ROWS hub-wide (MAX_REGISTRANTS times the per-address
+# number). The registry then holds at most
+# MAX_REGISTRANTS * MAX_ROWS_PER_ADDRESS live rows plus MAX_DEAD_ROWS.
+MAX_DEAD_ROWS_PER_ADDRESS = max(1, int(os.environ.get(
+    "ONIONHEAVEN_MAX_DEAD_ROWS_PER_ADDRESS", "4")))
+MAX_DEAD_ROWS = int(os.environ.get("ONIONHEAVEN_MAX_DEAD_ROWS", "20000"))
+
 # A free-text field of a request body (a version, an OS name) as the
 # hub stores or logs it: this many characters at most (issue #467).
 SHORT_TEXT_LIMIT = 64
@@ -386,6 +398,9 @@ def db_ensure_schema(conn):
         signatures      TEXT NOT NULL,
         updated_at      TEXT
     )""")
+    # prune_dead_rows orders unregistered rows by this column (#492).
+    conn.execute("CREATE INDEX IF NOT EXISTS registry_unregistered_at "
+                 "ON registry (unregistered_at)")
     # note_signed_request prunes expired marks by this column (#467).
     conn.execute("CREATE INDEX IF NOT EXISTS signed_requests_last_timestamp "
                  "ON signed_requests (last_timestamp)")
@@ -1632,6 +1647,7 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
         "WHERE content_address = ? AND healthcheck_address = ?",
         (now, reason, content_address, healthcheck_address)
     )
+    prune_dead_rows(conn, content_address)
     db_commit_with_retry(conn)
 
     # Delete key directory if no other active rows use this content_address
@@ -1647,6 +1663,21 @@ def unregister_entry(conn, content_address, healthcheck_address, reason="unregis
             shutil.rmtree(key_dir, ignore_errors=True)
             log(f"Deleted keys for {content_address}")
         purge_kept_keys(content_address)
+
+
+def prune_dead_rows(conn, content_address):
+    """Delete unregistered rows past MAX_DEAD_ROWS_PER_ADDRESS for the
+    address and past MAX_DEAD_ROWS hub-wide, oldest first (issue #492).
+    Live rows are never touched. The caller commits."""
+    conn.execute(
+        "DELETE FROM registry WHERE content_address = ? AND unregistered_at IS NOT NULL "
+        "AND rowid NOT IN (SELECT rowid FROM registry WHERE content_address = ? "
+        "AND unregistered_at IS NOT NULL ORDER BY unregistered_at DESC, rowid DESC LIMIT ?)",
+        (content_address, content_address, MAX_DEAD_ROWS_PER_ADDRESS))
+    conn.execute(
+        "DELETE FROM registry WHERE rowid IN (SELECT rowid FROM registry "
+        "WHERE unregistered_at IS NOT NULL ORDER BY unregistered_at DESC, rowid DESC "
+        "LIMIT -1 OFFSET ?)", (MAX_DEAD_ROWS,))
 
 
 def _key_dir(content_address):

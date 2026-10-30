@@ -30,6 +30,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOCKER_TOR_DIR = os.path.join(PROJECT_ROOT, "app", "Resources", "docker", "tor")
 sys.path.insert(0, DOCKER_TOR_DIR)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load(name, filename):
@@ -44,6 +45,7 @@ import onionheaven_common as oc  # noqa: E402
 import onionnames  # noqa: E402
 from onionpress import onion_auth  # noqa: E402
 from nacl import bindings as sodium  # noqa: E402
+import test_hub_stored_keys as stored_keys  # noqa: E402
 
 
 def _keypair():
@@ -76,7 +78,7 @@ class _Handler(ws.OnionHeavenHandler):
         self.replies.append((status_code, data))
 
 
-class OnlineCapsTest(unittest.TestCase):
+class _RegistryCase(unittest.TestCase):
 
     def setUp(self):
         self.base = tempfile.mkdtemp(prefix="op-hub-caps-")
@@ -123,6 +125,9 @@ class OnlineCapsTest(unittest.TestCase):
             "last_healthy, status, unregistered_at) VALUES (?, ?, 'x', 'x', 'online', ?)",
             (address, hc, "2026-01-01T00:00:00Z" if unregistered else None))
         self.keeper.commit()
+
+
+class OnlineCapsTest(_RegistryCase):
 
     def test_a_fifth_healthcheck_address_is_refused_before_any_write(self):
         expanded, public, address = _keypair()
@@ -190,6 +195,121 @@ class OnlineCapsTest(unittest.TestCase):
             with self.subTest(handler=fn):
                 self.assertLess(b.index("analytics_room(content_address, healthcheck_address)"),
                                 b.index("os.makedirs(site_dir, exist_ok=True)"))
+
+
+class DeadRowsTest(_RegistryCase):
+    """Issue #492: unregistered rows were never deleted, and every start of
+    a node makes a new healthcheck key, so register/unregister cycles grew
+    the registry past #391's caps (which count live rows). unregister_entry
+    now keeps MAX_DEAD_ROWS_PER_ADDRESS dead rows of an address and
+    MAX_DEAD_ROWS hub-wide; the #467 404 still holds."""
+
+    def setUp(self):
+        super().setUp()
+        for name, value in (("release_function", lambda *a, **k: None),
+                            ("purge_kept_keys", lambda *a, **k: None),
+                            ("KEYS_DIR", os.path.join(self.base, "keys")),
+                            ("db_commit_with_retry", lambda conn: conn.commit())):
+            p = mock.patch.object(oc, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        # Replay marks are test_hub_signature_verification.py's: here a cycle
+        # sends several requests a second for one address.
+        p = mock.patch.object(ws, "note_signed_request", lambda *a: (True, ""))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _online(self, expanded, public, address, hc):
+        ts = onion_auth.make_timestamp()
+        data = {"content_address": address, "healthcheck_address": hc, "timestamp": ts,
+                "signature": onion_auth.sign_payload(expanded, public, "online", address, hc, ts),
+                "arti_key_pem": base64.b64encode(stored_keys._pem(expanded, public)).decode()}
+        h = _Handler("/online", data)
+        h.do_POST()
+        return h.replies[0]
+
+    def _signed_post(self, path, endpoint, expanded, public, address, hc):
+        ts = onion_auth.make_timestamp()
+        data = {"content_address": address, "healthcheck_address": hc, "timestamp": ts,
+                "signature": onion_auth.sign_payload(expanded, public, endpoint, address, hc, ts)}
+        h = _Handler(path, data)
+        h.do_POST()
+        return h.replies[0]
+
+    def _rows(self, address=None, dead=None):
+        sql, args = "SELECT COUNT(*) FROM registry WHERE 1", []
+        if address:
+            sql += " AND content_address = ?"
+            args.append(address)
+        if dead is not None:
+            sql += " AND unregistered_at IS " + ("NOT NULL" if dead else "NULL")
+        return self.keeper.execute(sql, args).fetchone()[0]
+
+    def test_defaults(self):
+        self.assertEqual(oc.MAX_DEAD_ROWS_PER_ADDRESS, 4)
+        self.assertEqual(oc.MAX_DEAD_ROWS, ws.MAX_REGISTRANTS * oc.MAX_DEAD_ROWS_PER_ADDRESS)
+
+    def test_a_hundred_cycles_leave_a_fixed_number_of_rows(self):
+        expanded, public, address = _keypair()
+        for _ in range(100):
+            hc = _keypair()[2]
+            status, body = self._online(expanded, public, address, hc)
+            self.assertEqual(status, 200, body)
+            status, body = self._signed_post("/unregister", "unregister", expanded, public, address, hc)
+            self.assertEqual(status, 200, body)
+            self.assertLessEqual(self._rows(address), oc.MAX_DEAD_ROWS_PER_ADDRESS)
+        self.assertEqual(self._rows(address, dead=True), oc.MAX_DEAD_ROWS_PER_ADDRESS)
+        # The address is still known (#467): /unregister for it is not 404.
+        status, body = self._signed_post("/unregister", "unregister", expanded, public, address, "")
+        self.assertEqual(status, 200, body)
+        # A key the registry never saw still is.
+        e2, p2, a2 = _keypair()
+        status, _body = self._signed_post("/unregister", "unregister", e2, p2, a2, "")
+        self.assertEqual(status, 404)
+
+    def test_the_newest_dead_rows_are_kept_and_live_rows_never_go(self):
+        address = _keypair()[2]
+        live = [_keypair()[2] for _ in range(2)]
+        for hc in live:
+            self._row(address, hc)
+        dead = []
+        for i in range(10):
+            hc = _keypair()[2]
+            dead.append(hc)
+            self.keeper.execute(
+                "INSERT INTO registry (content_address, healthcheck_address, registered_at, "
+                "status, unregistered_at) VALUES (?, ?, 'x', 'unregistered', ?)",
+                (address, hc, f"2026-01-01T00:00:{i:02d}Z"))
+        self.keeper.commit()
+        conn = ws.db_connect()
+        oc.prune_dead_rows(conn, address)
+        conn.commit()
+        conn.close()
+        kept = {r[0] for r in self.keeper.execute(
+            "SELECT healthcheck_address FROM registry WHERE unregistered_at IS NOT NULL")}
+        self.assertEqual(kept, set(dead[-oc.MAX_DEAD_ROWS_PER_ADDRESS:]))
+        self.assertEqual(self._rows(address, dead=False), 2)
+
+    def test_the_hub_keeps_at_most_max_dead_rows(self):
+        p = mock.patch.object(oc, "MAX_DEAD_ROWS", 5)
+        p.start()
+        self.addCleanup(p.stop)
+        live_address = _keypair()[2]
+        self._row(live_address, _keypair()[2])
+        for i in range(12):
+            expanded, public, address = _keypair()
+            hc = _keypair()[2]
+            self.assertEqual(self._online(expanded, public, address, hc)[0], 200)
+            status, _ = self._signed_post("/unregister", "unregister", expanded, public, address, hc)
+            self.assertEqual(status, 200)
+            self.assertLessEqual(self._rows(dead=True), 5)
+        self.assertEqual(self._rows(dead=True), 5)
+        self.assertEqual(self._rows(live_address, dead=False), 1)
+
+    def test_at_least_one_dead_row_per_address(self):
+        with mock.patch.dict(os.environ, {"ONIONHEAVEN_MAX_DEAD_ROWS_PER_ADDRESS": "0"}):
+            fresh = _load("onionheaven_common_zero", "onionheaven_common.py")
+        self.assertEqual(fresh.MAX_DEAD_ROWS_PER_ADDRESS, 1)
 
 
 class AnalyticsRoomTest(unittest.TestCase):
