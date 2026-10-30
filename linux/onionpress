@@ -4244,7 +4244,7 @@ update_finish() {
 }
 
 usage() {
-    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
+    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|check-docker|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|write-status|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
     echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
     echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME;"
     echo "  onionheaven enable|disable|status|overview [--json]; config get|set|unset|list"
@@ -4270,14 +4270,19 @@ main() {
                 log "ERROR: Docker is not available. Install Docker first."
                 exit 1
             fi
-            # Everything below runs `docker compose` (Compose v2, a CLI
-            # plugin). Ubuntu's and Debian 12's docker-compose package is
-            # the retired v1, which has no such command: say so instead
-            # of failing at the first compose call.
-            if ! docker compose version >/dev/null 2>&1; then
-                log "ERROR: 'docker compose' is not available. Install docker-compose-v2 (Ubuntu), docker-compose 2.x (Debian 13) or Docker's docker-compose-plugin."
+            # Everything below needs Docker Engine and Compose at least as
+            # new as onionpress.docker_versions says (`docker compose pull
+            # --policy missing` on every start, 2.22+): refuse an older
+            # one, or a machine whose docker-compose is the retired v1
+            # with no `docker compose`, with what was found and how to
+            # upgrade, instead of failing at the first compose call.
+            if ! _docker_check=$(op_py check-docker 2>&1); then
+                while IFS= read -r _line; do
+                    log "ERROR: $_line"
+                done <<< "$_docker_check"
                 exit 1
             fi
+            log "$_docker_check"
 
             setup_db_passwords
             start_containers
@@ -4345,11 +4350,12 @@ main() {
             op_py --data-dir "$DATA_DIR" address "${@:2}"
             ;;
 
-        version|check-reachability|open|onionname)
+        version|check-reachability|check-docker|open|onionname)
             # The app's remaining functions as subcommands (issue #382):
             # the version, the Settings page's reachability test through
-            # the onionheaven Tor client, the tray's Open Local Site /
-            # Open in Tor Browser / Settings (logged in), and the
+            # the onionheaven Tor client, whether Docker and Compose are
+            # new enough (what `start` refuses on), the tray's Open Local
+            # Site / Open in Tor Browser / Settings (logged in), and the
             # onionname (show | set NAME).
             op_py --data-dir "$DATA_DIR" "$1" "${@:2}"
             ;;

@@ -1927,6 +1927,22 @@ def _run_check_reachability(run):
                                                    out=sys.stdout)
 
 
+def _add_check_docker(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Say whether this machine's Docker Engine and Docker Compose are new enough "
+             "for OnionPress (exit 0 yes, 1 too old or no `docker compose`, 2 docker did "
+             "not answer)")
+    p.add_argument("--json", action="store_true",
+                   help="The result as JSON (ok, engine, compose, problems, min_engine, min_compose)")
+
+
+def _run_check_docker(run):
+    from . import docker_versions
+    _paths, _log, docker, _os_name = _app_setup(run)
+    return docker_versions.check_command(docker, json_output=run.args.json, out=sys.stdout)
+
+
 def _add_open(sub, name):
     p = sub.add_parser(
         name,
@@ -2954,6 +2970,7 @@ _COMMANDS = [
     ("address", _add_address, _run_address),
     ("logs", _add_logs, _run_logs),
     ("check-reachability", _add_check_reachability, _run_check_reachability),
+    ("check-docker", _add_check_docker, _run_check_docker),
     ("open", _add_open, _run_open),
     ("onionname", _add_onionname, _run_onionname),
     ("get", _add_get, _run_get),

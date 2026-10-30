@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, cli, config, confirm, containers, daemon,
-    derivatives, handle_action, launcher_ops, multisite, onionheaven, redact, scrub,
-    wordpress_egress,
+    derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
+    redact, scrub, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -150,6 +150,8 @@ ROWS = [
     Row("check-reachability", ["check-reachability", "--json"],
         "app_commands.check_reachability_command",
         mock.call(ANY, ANY, json_output=True, out=ANY), rc=2, returns=2),
+    Row("check-docker", ["check-docker", "--json"], "docker_versions.check_command",
+        mock.call(ANY, json_output=True, out=ANY), rc=1, returns=1, setup_cli=False),
     Row("open", ["open", "onion"], "app_commands.open_command",
         mock.call("onion", ANY, ANY, out=ANY), rc=0, returns=0),
     Row("onionname show", ["onionname", "show", "--json"], "app_commands.onionname_show",
@@ -449,6 +451,7 @@ MODULES = {
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
+    "docker_versions": docker_versions,
 }
 
 
