@@ -474,8 +474,14 @@
   `VerificationUnavailable` (503), never says yes. Signing composes
   libsodium primitives only (no arithmetic of our own); the pure-Python
   fallback warns and must never be reached in shipped builds.
-- The only verifier is web-server.py; the three copies of `onion_auth.py`
-  stay identical. `tests/test_onion_auth.py`.
+- The only verifier is web-server.py; `src/onionpress/onion_auth.py` is the
+  source of the image's and stress image's copies (`build/sync-onion-keys.sh`).
+  `tests/test_onion_auth.py`.
+- **A v3 address is derived only by `onion_auth.derive_onion_address`; an
+  onion key's OpenSSH PEM is read, built and checked only by
+  `onion_keys`** (source in `src/onionpress/`, copied into the tor image by
+  the same script). No second parser or derivation in web-server.py,
+  key-convert.py, tor-watchdog.py or key_manager.py. `tests/test_onion_keys.py`.
 - A verified request is accepted once (`note_signed_request`, replay →
   403). `tests/test_hub_signature_verification.py`.
 

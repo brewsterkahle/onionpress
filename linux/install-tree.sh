@@ -40,6 +40,7 @@ tree       app/Resources/themes                     themes
 tree       src/onionpress                           lib/onionpress
 tree       linux/assets                             assets
 file       src/onionpress/onion_auth.py             scripts/onion_auth.py              0644
+file       src/onionpress/onion_keys.py             scripts/onion_keys.py              0644
 file       src/onionpress/key_manager.py            scripts/key_manager.py             0644
 file       linux/onionpress-heartbeat.py            scripts/onionpress-heartbeat.py    0644
 file       app/Resources/scripts/install_plugin.sh  scripts/install_plugin.sh          0755

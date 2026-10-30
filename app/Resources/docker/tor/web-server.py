@@ -64,12 +64,10 @@ BODY_DEADLINE_FLOOR = 300  # seconds, plus one per BODY_MIN_RATE bytes
 BODY_MIN_RATE = 4096
 
 import base64
-import hashlib
 import json
 import os
 import re
 import shutil
-import struct
 import sys
 import threading
 import time
@@ -77,6 +75,8 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import onion_auth
+import onion_keys
 from onion_auth import verify_payload, verify_name_payload, VerificationUnavailable
 from onionheaven_common import (
     db_connect, db_commit_with_retry, db_ensure_schema, log,
@@ -164,19 +164,6 @@ def analytics_room(content_address, healthcheck_address, analytics_dir=None):
         return 507, f"analytics storage is full ({total} sites); no new site is taken"
     return None, None
 
-
-def _load_key_convert():
-    """key-convert.py, beside this file: the parser the takeover path uses
-    (tor-manager and the queue manager run its pem-to-* commands)."""
-    import importlib.util
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "key-convert.py")
-    spec = importlib.util.spec_from_file_location("key_convert", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-key_convert = _load_key_convert()
 
 SERVER_VERSION = os.environ.get("ONIONPRESS_VERSION", "unknown")
 
@@ -323,11 +310,10 @@ def _sync_activate_marker(poll_seconds=5):
 
 
 # ---------------------------------------------------------------------------
-# OpenSSH PEM key builder (reimplemented from key_manager.py)
+# Registrants' OpenSSH PEMs (read by onion_keys, as the takeover path reads them)
 # ---------------------------------------------------------------------------
 
-OPENSSH_MAGIC = b"openssh-key-v1\x00"
-ARTI_KEY_TYPE = b"ed25519-expanded@spec.torproject.org"
+OPENSSH_MAGIC = onion_keys.OPENSSH_MAGIC
 
 
 def validate_arti_pem(pem_bytes):
@@ -380,97 +366,10 @@ def validate_arti_pem(pem_bytes):
 
 
 def extract_public_key_from_arti_pem(pem_bytes):
-    """Return the 32-byte Ed25519 public key embedded in an Arti OpenSSH PEM,
-    or None if the PEM is malformed. Caller is responsible for derivation.
-
-    The format (mirror of build_openssh_key above):
-      OPENSSH_MAGIC | str("none") | str("none") | str("") | u32(1)
-      | str(pub_blob) | str(priv_blob)
-    where pub_blob = str(ARTI_KEY_TYPE) | str(public_key_32).
-    """
-    try:
-        text = pem_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    lines = [l for l in text.strip().splitlines()
-             if not l.startswith("-----")]
-    try:
-        decoded = base64.b64decode("".join(lines))
-    except Exception:
-        return None
-    if not decoded.startswith(OPENSSH_MAGIC):
-        return None
-
-    def _read_str(buf, off):
-        if off + 4 > len(buf):
-            raise ValueError("truncated")
-        n = struct.unpack(">I", buf[off:off + 4])[0]
-        if off + 4 + n > len(buf):
-            raise ValueError("truncated")
-        return buf[off + 4:off + 4 + n], off + 4 + n
-
-    try:
-        off = len(OPENSSH_MAGIC)
-        _, off = _read_str(decoded, off)   # ciphername
-        _, off = _read_str(decoded, off)   # kdfname
-        _, off = _read_str(decoded, off)   # kdfoptions
-        off += 4                            # nkeys (always 1)
-        pub_blob, _ = _read_str(decoded, off)
-        ktype, sub = _read_str(pub_blob, 0)
-        if ktype != ARTI_KEY_TYPE:
-            return None
-        public_key, _ = _read_str(pub_blob, sub)
-        if len(public_key) != 32:
-            return None
-        return public_key
-    except (ValueError, struct.error):
-        return None
-
-
-def _pack_string(data):
-    """Pack bytes as uint32 big-endian length + data."""
-    return struct.pack(">I", len(data)) + data
-
-
-def build_openssh_key(private_key, public_key):
-    """Build an OpenSSH PEM private key for Arti from raw Ed25519 keys.
-
-    private_key: 64 bytes (expanded Ed25519)
-    public_key: 32 bytes
-    Returns bytes (PEM-encoded).
-    """
-    # Build public key blob
-    pub_blob = _pack_string(ARTI_KEY_TYPE) + _pack_string(public_key)
-
-    # Build private key blob
-    check = struct.pack(">I", int.from_bytes(os.urandom(4), "big"))
-    priv_blob = (
-        check + check +
-        _pack_string(ARTI_KEY_TYPE) +
-        _pack_string(public_key) +
-        _pack_string(private_key) +
-        _pack_string(b"")  # empty comment
-    )
-    # Pad to 8-byte boundary
-    pad_len = (8 - len(priv_blob) % 8) % 8
-    priv_blob += bytes(range(1, pad_len + 1))
-
-    binary = (
-        OPENSSH_MAGIC +
-        _pack_string(b"none") +
-        _pack_string(b"none") +
-        _pack_string(b"") +
-        struct.pack(">I", 1) +
-        _pack_string(pub_blob) +
-        _pack_string(priv_blob)
-    )
-
-    b64 = base64.b64encode(binary).decode("ascii")
-    lines = [b64[i:i + 70] for i in range(0, len(b64), 70)]
-    pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-    pem += "\n".join(lines) + "\n"
-    pem += "-----END OPENSSH PRIVATE KEY-----\n"
-    return pem.encode("utf-8")
+    """The 32-byte public key in an Arti OpenSSH PEM, or None if the PEM
+    cannot be read. The same parser the takeover path uses (onion_keys), so
+    the address checked here is the one the key serves."""
+    return onion_keys.public_key_of_pem(pem_bytes)
 
 
 _warned_no_sodium = False
@@ -484,9 +383,9 @@ def private_key_problem(pem_bytes, public_key):
     is what a takeover hands to Tor: a PEM with the right public key and a
     wrong secret scalar would overwrite a good stored key, and that site's
     next takeover would fail. So the private section is read the way the
-    takeover path reads it (key-convert.py), must carry the same public
+    takeover path reads it (onion_keys), must carry the same public
     key, and its secret scalar times the base point must be that public key
-    (libsodium through PyNaCl: key_convert.keypair_error).
+    (libsodium through PyNaCl: onion_keys.keypair_error).
 
     The request signature covers endpoint, addresses and timestamp, not the
     PEM; with this check the PEM proves itself, since only the address's
@@ -498,14 +397,14 @@ def private_key_problem(pem_bytes, public_key):
     """
     global _warned_no_sodium
     try:
-        expanded, inner_public = key_convert.parse_arti_pem_bytes(pem_bytes)
+        expanded, inner_public = onion_keys.parse_pem(pem_bytes)
     except Exception:
         return "the private section cannot be read"
     if inner_public != public_key:
         return "the private section carries a different public key"
     try:
-        return key_convert.keypair_error(expanded, public_key)
-    except key_convert.SodiumUnavailable as e:
+        return onion_keys.keypair_error(expanded, public_key)
+    except onion_keys.SodiumUnavailable as e:
         if not _warned_no_sodium:
             _warned_no_sodium = True
             log(f"WARNING: PyNaCl is not available ({e}): registrants' private "
@@ -518,26 +417,7 @@ def private_key_problem(pem_bytes, public_key):
 # Tor v3 address derivation
 # ---------------------------------------------------------------------------
 
-BASE32_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
-
-
-def base32_encode(data):
-    """RFC 4648 base32 encode (lowercase, no padding)."""
-    bits = ""
-    for byte in data:
-        bits += format(byte, "08b")
-    result = []
-    for i in range(0, len(bits) - 4, 5):
-        result.append(BASE32_ALPHABET[int(bits[i:i + 5], 2)])
-    return "".join(result)
-
-
-def derive_onion_address(public_key_32):
-    """Derive a Tor v3 .onion address from a 32-byte Ed25519 public key."""
-    checksum_input = b".onion checksum" + public_key_32 + b"\x03"
-    checksum = hashlib.sha3_256(checksum_input).digest()[:2]
-    addr_bytes = public_key_32 + checksum + b"\x03"
-    return base32_encode(addr_bytes) + ".onion"
+derive_onion_address = onion_auth.derive_onion_address
 
 
 # ---------------------------------------------------------------------------
