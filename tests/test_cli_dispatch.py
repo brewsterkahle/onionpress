@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
     derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
-    redact, scrub, wordpress_egress,
+    redact, scrub, start, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -370,6 +370,14 @@ ROWS = [
             t.assertEqual(m.call_args.args[2].wp_port, 8080))),
     # Phase 4 (#120): the launchers' migrate_key_volume() is ContainerManager's;
     # unlike the two above its status matters: 1 stops the start.
+    # #442.5: the launchers' seed_onion_key() is start.KeySeed (the Mac's
+    # flow on macOS, with --bin-dir for its mkp224o); 1 stops the start.
+    Row("seed-onion-key", ["seed-onion-key", "--bin-dir", "/b"], "start.KeySeed",
+        mock.call(ANY, mac=True, bin_dir="/b"), rc=0, os_name="macos",
+        returns=mock.Mock(**{"run.return_value": True})),
+    Row("seed-onion-key", ["seed-onion-key"], "start.KeySeed",
+        mock.call(ANY, mac=False, bin_dir=ANY), rc=1,
+        returns=mock.Mock(**{"run.return_value": False})),
     # #442.4: the launchers' apply_pending_key_import() is ContainerManager's;
     # 1 stops the start (an old keystore survived, the marker stays).
     Row("apply-pending-key-import", ["apply-pending-key-import"],
@@ -472,6 +480,7 @@ MODULES = {
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
+    "start": start,
 }
 
 

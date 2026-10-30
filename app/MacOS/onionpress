@@ -908,91 +908,6 @@ recover_docker_socket_forward() {
     return 0
 }
 
-# Ensure both key formats exist in a directory: C Tor's key files and the
-# OpenSSH PEM (ks_hs_id.ed25519_expanded_private) that the container and
-# OnionHeaven take. Derives whichever is missing from whichever is present.
-ensure_key_formats() {
-    local dir="$1"
-    bundled_python "$SCRIPTS_DIR/key_manager.py" ensure-formats "$dir" >> "$LOG_FILE" 2>&1
-}
-
-# Function to generate custom onion address with prefix
-generate_vanity_address() {
-    local prefix="${1:-op2}"
-    # Use shared directory so Docker/Colima can access it
-    local output_dir="$DATA_DIR/shared/vanity-keys"
-
-    log "Generating custom onion address with prefix '$prefix'..." >&2
-
-    # Create output directory, abort loudly if we can't
-    if ! mkdir -p "$output_dir" 2>>"$LOG_FILE"; then
-        log "ERROR: Cannot create $output_dir (permissions?). Not falling back to random." >&2
-        return 1
-    fi
-
-    # Check if mkp224o is available
-    if [ ! -f "$BIN_DIR/mkp224o" ]; then
-        log "ERROR: mkp224o not found at $BIN_DIR/mkp224o. Not falling back to random." >&2
-        return 1
-    fi
-    if [ ! -x "$BIN_DIR/mkp224o" ]; then
-        log "ERROR: $BIN_DIR/mkp224o exists but is not executable. Not falling back to random." >&2
-        return 1
-    fi
-    # Quarantine attribute on a nested helper binary (common when the DMG
-    # is downloaded from onionpress.org and Gatekeeper only approved the
-    # main app) makes mkp224o silently killed on first exec. Strip it
-    # defensively — harmless if the attr isn't there.
-    xattr -d com.apple.quarantine "$BIN_DIR/mkp224o" 2>/dev/null || true
-
-    # Clean stale output dirs from a prior crashed run so `find` below
-    # can't pick up a partial.
-    find "$output_dir" -maxdepth 1 -type d -name "*.onion" -empty -delete 2>/dev/null || true
-
-    # Generate address with prefix (single threaded for consistency).
-    # Capture exit status so we can complain loudly if mkp224o crashes.
-    if ! cd "$output_dir"; then
-        log "ERROR: Cannot cd to $output_dir" >&2
-        return 1
-    fi
-    "$BIN_DIR/mkp224o" -d . -n 1 -t 4 "$prefix" >> "$LOG_FILE" 2>&1
-    local mkp_rc=$?
-    if [ $mkp_rc -ne 0 ]; then
-        log "ERROR: mkp224o exited with status $mkp_rc (prefix='$prefix'). "\
-"This is usually one of: quarantined nested binary (codesign/notarize issue), "\
-"disk full, or platform mismatch. Not falling back to random." >&2
-        return 1
-    fi
-
-    # Find generated directory — must contain the actual key files, not
-    # just an empty stub from a prior crash.
-    local candidate
-    candidate=$(find "$output_dir" -maxdepth 1 -type d -name "${prefix}*" 2>/dev/null | head -1)
-    if [ -z "$candidate" ]; then
-        log "ERROR: mkp224o exited 0 but no ${prefix}*.onion directory was produced" >&2
-        return 1
-    fi
-    if [ ! -f "$candidate/hs_ed25519_secret_key" ] || [ ! -f "$candidate/hostname" ]; then
-        log "ERROR: $candidate exists but is missing hs_ed25519_secret_key or hostname" >&2
-        return 1
-    fi
-    VANITY_DIR="$candidate"
-
-    VANITY_ADDRESS=$(basename "$VANITY_DIR")
-    log "Generated custom address: $VANITY_ADDRESS" >&2
-
-    # Ensure both key formats exist (mkp224o generates C Tor format, derive the PEM)
-    if ! ensure_key_formats "$VANITY_DIR"; then
-        log "ERROR: ensure_key_formats failed for $VANITY_DIR" >&2
-        return 1
-    fi
-    log "Ensured both key formats for vanity key" >&2
-
-    # Return the directory path (only thing on stdout)
-    echo "$VANITY_DIR"
-    return 0
-}
-
 # Function to import a pre-generated onion service key
 import_key() {
     # import-key [<key>|-|--file <hs_ed25519_secret_key>] [--check] [--json]
@@ -1756,6 +1671,20 @@ EOF
     esac
     return 0
 }
+# The first run's onion service key (start.KeySeed, #442.5): only when
+# Docker confirms there is no onionpress-onion-keys volume (an unanswered
+# question stops the start), the imported key in shared/vanity-keys/, or a
+# generated one, is installed in it from the pinned tor image, with no
+# network; a seed that fails removes the volume it made and stops the
+# start, or Tor would mint a random address. Linux also re-syncs an
+# imported key at every start. Lines tee'd into the log; the status stops
+# the start.
+seed_onion_key() {
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" seed-onion-key \
+        --bin-dir "$BIN_DIR" 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
+}
+
 
 # After recover_lima_vm has rebooted a wedged VM, keep the journal of the
 # boot that wedged. The guest's journal is persistent, so `journalctl -b -1`
@@ -1846,7 +1775,6 @@ start_containers() {
     # is in the wedge recover_lima_vm describes; the login-time start used
     # to give up here (2026-10-02) while the menubar Restart path already
     # knew how to recover. Both now share that recovery, tried once.
-    local vol_state key_state
     if ! wait_for_docker_or_recover_vm 180 start; then
         log "ERROR: Docker daemon not ready after 180s (one Lima VM recovery attempted if it was Running); not starting"
         return 1
@@ -1871,147 +1799,12 @@ start_containers() {
         return 1
     fi
 
-    # Check if this is first run (no key volume exists). Only Docker's
-    # confirmed "no" counts: an unanswered question is not a fresh install.
-    key_state=0; docker_volume_state onionpress-onion-keys || key_state=$?
-    if [ "$key_state" -eq 2 ]; then
-        log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+    # The onion service key, before anything starts Tor: on a first run
+    # (Docker's confirmed "no" key volume) the imported or a generated key
+    # goes into the key volume, and a key that does not get there stops the
+    # start (seed_onion_key).
+    if ! seed_onion_key; then
         return 1
-    fi
-    if [ "$key_state" -eq 1 ]; then
-        log "First run detected - generating custom onion address..."
-
-        # Read address prefix from config, default to "op2"
-        # Fall back to old VANITY_PREFIX for migration from older configs
-        ADDRESS_PREFIX="op2"
-        if [ -f "$DATA_DIR/config" ]; then
-            CUSTOM_PREFIX=$(config_value ADDRESS_PREFIX)
-            if [ -z "$CUSTOM_PREFIX" ]; then
-                CUSTOM_PREFIX=$(config_value VANITY_PREFIX)
-            fi
-            if [ ! -z "$CUSTOM_PREFIX" ]; then
-                ADDRESS_PREFIX="$CUSTOM_PREFIX"
-            fi
-        fi
-
-        # Validate before announcing it — the old order logged
-        # "Using address prefix: 'elphin'" and only then the rejection, so the
-        # log's first statement about the prefix was the one that did not
-        # happen.
-        #
-        # These rules mirror config.validate_address_prefix(): base32 (a-z,
-        # 2-7), 2 to 5 characters. Keep them in step; the Python side is the
-        # source of truth and tests/test_address_prefix.py checks they agree.
-        #
-        # The fallback is deliberately silent-but-logged rather than fatal: a
-        # bad prefix must not stop the app starting. The real guard is
-        # validation at the point of entry (setup_window.py), because nobody
-        # reads this log — a user who typed "elphin" got an op2… address and
-        # the only evidence was here.
-        #
-        # The character check is [[ =~ ]], which tests the whole value. It
-        # was `echo | grep -qE`, which tests each line on its own: a config
-        # with two ADDRESS_PREFIX= lines reads as "ab<newline>cd" and passed.
-        _prefix_problem=""
-        _prefix_re='^[a-z2-7]+$'
-        if [ ${#ADDRESS_PREFIX} -gt 5 ]; then
-            _prefix_problem="too long (${#ADDRESS_PREFIX} chars, max 5)"
-        elif [ ${#ADDRESS_PREFIX} -lt 2 ]; then
-            _prefix_problem="too short (${#ADDRESS_PREFIX} chars, min 2)"
-        elif ! [[ $ADDRESS_PREFIX =~ $_prefix_re ]]; then
-            _prefix_problem="contains characters that are not base32 (only a-z and 2-7; 0, 1, 8 and 9 are not valid)"
-        fi
-
-        if [ -n "$_prefix_problem" ]; then
-            # Closest valid prefix, by the same rule the Python validator uses:
-            # lowercase, drop non-base32, truncate to 5.
-            _prefix_suggestion=$(echo "$ADDRESS_PREFIX" | tr '[:upper:]' '[:lower:]' \
-                | tr -cd 'a-z2-7' | cut -c1-5)
-            log "ERROR: ADDRESS_PREFIX '$ADDRESS_PREFIX' is $_prefix_problem."
-            if [ ${#_prefix_suggestion} -ge 2 ]; then
-                log "       Falling back to 'op2'. To use the closest valid prefix, set"
-                log "       ADDRESS_PREFIX=$_prefix_suggestion in $DATA_DIR/config before first launch."
-            else
-                log "       Falling back to 'op2'. Edit ADDRESS_PREFIX in $DATA_DIR/config."
-            fi
-            ADDRESS_PREFIX="op2"
-            unset _prefix_suggestion
-        fi
-        unset _prefix_problem _prefix_re
-
-        log "Using address prefix: '$ADDRESS_PREFIX'"
-
-        # Check for pre-existing imported key before generating a new one
-        VANITY_DIR=""
-        if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-            VANITY_DIR=$(vanity_key_dir || true)
-            if [ -n "$VANITY_DIR" ]; then
-                log "Using pre-imported key: $(basename "$VANITY_DIR")"
-            fi
-        fi
-
-        # Generate custom onion address if no imported key found
-        if [ -z "$VANITY_DIR" ]; then
-            if VANITY_DIR=$(generate_vanity_address "$ADDRESS_PREFIX"); then
-                log "Custom onion address generated successfully"
-            fi
-        fi
-
-        if [ -n "$VANITY_DIR" ]; then
-            # The seed runs from the stack's tor image, which a first run
-            # has not pulled yet.
-            if ! ensure_key_helper_image; then
-                log "ERROR: no tor image to install the address key with; not starting (the key stays in $VANITY_DIR for the next start)"
-                return 1
-            fi
-            # Create the key volume and install the PEM where the entrypoint
-            # looks for it (<name>/ks_hs_id.ed25519_expanded_private, read as root)
-            if ! docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
-                log "ERROR: Failed to create the onionpress-onion-keys volume"
-                return 1
-            fi
-            # Root reads the key out of the user's 0700 folder. virtiofs
-            # leaves that check to macOS, which allows it; DAC_OVERRIDE is
-            # for a mount that enforces it in the VM (the untested qemu/sshfs
-            # fallback), as cli.py's same seed needs on Linux. The key needs
-            # no network, and gets none.
-            if ! docker run --rm \
-                --network none \
-                --cap-drop ALL \
-                --cap-add DAC_OVERRIDE \
-                --security-opt no-new-privileges:true \
-                -v onionpress-onion-keys:/dest \
-                --mount type=bind,source="$VANITY_DIR",target=/src,readonly \
-                --entrypoint sh \
-                "$KEY_HELPER_IMAGE" -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
-                # Left behind, the volume would end the first run: the next
-                # start would never install this key, and Tor would mint a
-                # random address. Without it, the next start tries again.
-                if ! docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
-                    log "ERROR: could not remove the onionpress-onion-keys volume the key did not reach; remove it (docker volume rm onionpress-onion-keys) before the next start, or Tor will start without the key"
-                fi
-                log "ERROR: Failed to copy address key to the onionpress-onion-keys volume; not starting"
-                return 1
-            fi
-
-            log "Address key installed to the onionpress-onion-keys volume"
-            log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
-        else
-            # Vanity generation failed. Continue with a random address so
-            # the user gets a working install, but leave detailed
-            # diagnostic lines in the log (written by generate_vanity_address)
-            # so we can find out after the fact why the op2… generation
-            # didn't work. Common cause: quarantined nested mkp224o helper
-            # on a fresh Apple Silicon install from onionpress.org.
-            log "WARNING: vanity generation failed — continuing with random onion address (see ERROR lines above)"
-        fi
-    else
-        # Not first run. The vanity prefix is fixed at install (#256 phase 4b)
-        # — the old "config ADDRESS_PREFIX changed -> regenerate the onion
-        # identity on startup" path was removed: it shared the churny
-        # compose-down + delete-key-volume + regenerate flow and risked
-        # clobbering the address. Nothing to do here.
-        :
     fi
 
     # Update images if enabled in config

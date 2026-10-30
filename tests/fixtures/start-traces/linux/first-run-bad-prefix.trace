@@ -8,7 +8,7 @@ log First run with ADDRESS_PREFIX=Elph1n -- checking tor image for mkp224o...
 py generate-vanity
 log Vanity address generated; will be installed below
 log Using pre-imported key: op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
-bin python3 $TMP/opt/scripts/key_manager.py ensure-formats $TMP/home/.onionpress/shared/vanity-keys/op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
+fn ensure_key_formats $TMP/home/.onionpress/shared/vanity-keys/op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
 log Key formats synchronized
 docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
 docker volume create onionpress-onion-keys

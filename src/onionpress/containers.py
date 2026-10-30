@@ -93,6 +93,73 @@ def forget_key_volume_migration(data_dir: str) -> None:
         pass
 
 
+# The first-run key seed (ContainerManager.run_key_seed): the delivered PEM
+# where the tor entrypoint reads it, <name>/ks_hs_id.ed25519_expanded_private
+# in KEY_VOLUME, root's, 0700/0600. The launchers' start (#442.5) and the
+# restore (cli.cmd_restore) run it; the key folder is bind-mounted read-only.
+KEY_SEED_SCRIPT = ("mkdir -p /dest/wordpress && "
+                   "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
+                   "chown -R 0:0 /dest && "
+                   "chmod 700 /dest /dest/wordpress && "
+                   "chmod 600 /dest/wordpress/*")
+# Linux's start also puts C Tor's own key files in TOR_STATE_VOLUME
+# (/var/lib/tor/hidden_service/wordpress/), debian-tor's: the tor image's
+# user. The entrypoint re-derives them from the PEM anyway (issue #311);
+# kept as the Linux launcher always did it, word for word (its indentation
+# too: the start traces compare the argv).
+TOR_STATE_SEED_SCRIPT = """
+                    set -e
+                    mkdir -p /dest/hidden_service/wordpress/authorized_clients
+                    cp /src/hs_ed25519_secret_key /dest/hidden_service/wordpress/
+                    cp /src/hs_ed25519_public_key /dest/hidden_service/wordpress/ 2>/dev/null || true
+                    cp /src/hostname /dest/hidden_service/wordpress/
+                    chown -R debian-tor:debian-tor /dest/hidden_service
+                    chmod 700 /dest/hidden_service /dest/hidden_service/wordpress
+                    chmod 600 /dest/hidden_service/wordpress/hs_ed25519_secret_key
+                    chmod 644 /dest/hidden_service/wordpress/hostname
+                """
+
+
+def run_key_seed(docker, key_dir: str, image: str, *, timeout: int = 300):
+    """Copy the PEM in *key_dir* into KEY_VOLUME (KEY_SEED_SCRIPT) from
+    *image*, the pinned tor image (ensure_tor_image): no network, only
+    DAC_OVERRIDE (root reads the key out of the user's 0700 folder, which
+    Linux and a VM mount that enforces it check), no new privileges. The
+    DockerResult; the caller decides what a failure means (a first run
+    removes the volume and stops, a restore stops)."""
+    return docker.run(
+        ["run", "--rm",
+         "--network", "none",
+         "--cap-drop", "ALL",
+         "--cap-add", "DAC_OVERRIDE",
+         "--security-opt", "no-new-privileges:true",
+         "-v", f"{KEY_VOLUME}:/dest",
+         "--mount", f"type=bind,source={key_dir},target=/src,readonly",
+         "--entrypoint", "sh",
+         image, "-c", KEY_SEED_SCRIPT],
+        timeout=timeout, quiet=True)
+
+
+def run_tor_state_seed(docker, key_dir: str, image: str, *, timeout: int = 300):
+    """C Tor's key files from *key_dir* into TOR_STATE_VOLUME
+    (TOR_STATE_SEED_SCRIPT): no network; it reads the user's files and
+    writes into debian-tor's folders (DAC_OVERRIDE), chowns (CHOWN) and
+    chmods what is no longer root's (FOWNER). Linux's start only."""
+    return docker.run(
+        ["run", "--rm",
+         "--network", "none",
+         "--cap-drop", "ALL",
+         "--cap-add", "CHOWN",
+         "--cap-add", "DAC_OVERRIDE",
+         "--cap-add", "FOWNER",
+         "--security-opt", "no-new-privileges:true",
+         "-v", f"{TOR_STATE_VOLUME}:/dest",
+         "--mount", f"type=bind,source={key_dir},target=/src,readonly",
+         "--entrypoint", "sh",
+         image, "-c", TOR_STATE_SEED_SCRIPT],
+        timeout=timeout, quiet=True)
+
+
 # The copy ContainerManager.migrate_key_volume runs in the tor image
 # (`sh -c SCRIPT migrate-key-volume /old /new`): arti's files are its own
 # user's, in 0700 folders, so reading them takes DAC_OVERRIDE; the copy is
@@ -343,6 +410,12 @@ class ContainerManager:
                 f.write(text if text.endswith("\n") else text + "\n")
         except OSError:
             pass
+
+    def run_key_seed(self, key_dir: str, image: str, *, timeout: int = 300):
+        return run_key_seed(self.docker, key_dir, image, timeout=timeout)
+
+    def run_tor_state_seed(self, key_dir: str, image: str, *, timeout: int = 300):
+        return run_tor_state_seed(self.docker, key_dir, image, timeout=timeout)
 
     def apply_pending_key_import(self) -> bool:
         """Finish a key import Docker was not up for: with the

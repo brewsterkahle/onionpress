@@ -1651,6 +1651,19 @@ docker_volume_state() {
     names=$(docker volume ls --format '{{.Name}}' 2>>"$LOG_FILE") || return 2
     printf '%s\n' "$names" | grep -qx -- "$1"
 }
+# The first run's onion service key (start.KeySeed, #442.5): only when
+# Docker confirms there is no onionpress-onion-keys volume (an unanswered
+# question stops the start), the imported key in shared/vanity-keys/, or a
+# generated one, is installed in it from the pinned tor image, with no
+# network; a seed that fails removes the volume it made and stops the
+# start, or Tor would mint a random address. Linux also re-syncs an
+# imported key at every start. Lines tee'd into the log; the status stops
+# the start.
+seed_onion_key() {
+    op_py --data-dir "$DATA_DIR" seed-onion-key 2>&1 | tee -a "$LOG_FILE"
+    return "${PIPESTATUS[0]}"
+}
+
 
 # Wait up to $1 seconds for the Docker daemon to answer; returns 1 if it
 # never does. Kept identical in the macOS and Linux launchers.
@@ -1825,7 +1838,6 @@ start_containers() {
     # to 2.5.0 on 2026-09-30 while the Docker daemon (there, the Colima VM)
     # was still starting took the first-run path instead of migrating the
     # key volume.
-    local vol_state key_state
     if ! wait_for_docker 180; then
         log "ERROR: Docker daemon not ready after 180s; not starting"
         return 1
@@ -1844,147 +1856,12 @@ start_containers() {
         return 1
     fi
 
-    # Set up onion address key. Only Docker's confirmed "no" makes this a
-    # first run: an unanswered question is not a fresh install.
-    FIRST_RUN=false
-    key_state=0; docker_volume_state onionpress-onion-keys || key_state=$?
-    if [ "$key_state" -eq 2 ]; then
-        log "ERROR: Docker did not say whether onionpress-onion-keys exists; not starting"
+    # The onion service key, before anything starts Tor: on a first run
+    # (Docker's confirmed "no" key volume) the imported or a generated key
+    # goes into the key volume, and a key that does not get there stops the
+    # start (seed_onion_key).
+    if ! seed_onion_key; then
         return 1
-    fi
-    if [ "$key_state" -eq 1 ]; then
-        FIRST_RUN=true
-        log "First run detected"
-    fi
-
-    # Read address prefix from config
-    ADDRESS_PREFIX="op2"
-    if [ -f "$DATA_DIR/config" ]; then
-        CUSTOM_PREFIX=$(config_value ADDRESS_PREFIX)
-        if [ -z "$CUSTOM_PREFIX" ]; then
-            CUSTOM_PREFIX=$(config_value VANITY_PREFIX)
-        fi
-        if [ ! -z "$CUSTOM_PREFIX" ]; then
-            ADDRESS_PREFIX="$CUSTOM_PREFIX"
-        fi
-    fi
-
-    # First-run vanity generation. mkp224o lives in the tor container image
-    # (see app/Resources/docker/tor/Dockerfile) so Docker's multi-arch
-    # manifest list handles amd64/arm64 transparently — the host .deb stays
-    # Architecture: all. No `docker compose pull` here: with the registry's
-    # manifest-list image it would overwrite any locally-built image (the
-    # digest differs), which is the wrong thing during development. The
-    # key seeds below do fetch the tor image when it is missing
-    # (ensure_key_helper_image: by its pinned reference, never over a local
-    # build), but only once there is a key to install, after this step.
-    # Strategy: if mkp224o is already in the local image, generate vanity
-    # now; otherwise log and continue, the user gets a random address
-    # this run and can run `onionpress generate-vanity`
-    # later once the next-published tor image bundles mkp224o.
-    if $FIRST_RUN && [ -n "$ADDRESS_PREFIX" ] \
-       && [ ${#ADDRESS_PREFIX} -ge 2 ] && [ ${#ADDRESS_PREFIX} -le 6 ] \
-       && ! vanity_key_dir >/dev/null; then
-        log "First run with ADDRESS_PREFIX=$ADDRESS_PREFIX -- checking tor image for mkp224o..."
-        if op_py generate-vanity >> "$LOG_FILE" 2>&1; then
-            log "Vanity address generated; will be installed below"
-        else
-            log "Vanity generation skipped or failed; falling back to random address"
-        fi
-    fi
-
-    # Check for pre-existing imported key (or one we just generated)
-    VANITY_DIR=""
-    if [ -d "$DATA_DIR/shared/vanity-keys" ]; then
-        VANITY_DIR=$(vanity_key_dir || true)
-        if [ -n "$VANITY_DIR" ]; then
-            log "Using pre-imported key: $(basename "$VANITY_DIR")"
-        fi
-    fi
-
-    if [ -n "$VANITY_DIR" ]; then
-        # Ensure both key formats exist (derives whichever is missing)
-        python3 "$SCRIPTS_DIR/key_manager.py" ensure-formats "$VANITY_DIR" 2>>"$LOG_FILE" \
-            && log "Key formats synchronized" \
-            || log "WARNING: Failed to synchronize key formats"
-
-        # The seeds below run from the stack's tor image, which a first run
-        # has not pulled yet. Without it Tor cannot start either.
-        if ! ensure_key_helper_image; then
-            log "ERROR: no tor image to install the onion service key with; not starting (the key stays in $VANITY_DIR for the next start)"
-            return 1
-        fi
-
-        # Sync imported key to the key volume the entrypoint reads the PEM from
-        # (<name>/ks_hs_id.ed25519_expanded_private, read as root)
-        docker volume create onionpress-onion-keys >> "$LOG_FILE" 2>&1 || true
-        # Root reads the key out of the user's 0700 folder: DAC_OVERRIDE.
-        # The key needs no network, and gets none.
-        if docker run --rm \
-            --network none \
-            --cap-drop ALL \
-            --cap-add DAC_OVERRIDE \
-            --security-opt no-new-privileges:true \
-            -v onionpress-onion-keys:/dest \
-            --mount type=bind,source="$VANITY_DIR",target=/src,readonly \
-            --entrypoint sh \
-            "$KEY_HELPER_IMAGE" -c 'mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*' >> "$LOG_FILE" 2>&1; then
-            log "Address key installed to the onionpress-onion-keys volume"
-        elif $FIRST_RUN; then
-            # Left behind, the empty volume would end the first run: the
-            # next start would take it for an installed key. Without it, the
-            # next start tries again.
-            if ! docker volume rm onionpress-onion-keys >> "$LOG_FILE" 2>&1; then
-                log "ERROR: could not remove the onionpress-onion-keys volume the key did not reach; remove it (docker volume rm onionpress-onion-keys) before the next start"
-            fi
-            log "ERROR: Failed to copy address key to the onionpress-onion-keys volume; not starting"
-            return 1
-        else
-            # The volume holds the key from an earlier start.
-            log "WARNING: Failed to copy address key to the onionpress-onion-keys volume (keeping the one installed earlier)"
-        fi
-
-        # C Tor keys were already ensured by ensure-formats above
-
-        # Sync imported key to C Tor state volume as well
-        if [ -f "$VANITY_DIR/hs_ed25519_secret_key" ]; then
-            docker volume create onionpress-tor-state >> "$LOG_FILE" 2>&1 || true
-            # Reads the user's key files and writes into Tor's folders,
-            # debian-tor's once Tor has run (DAC_OVERRIDE), then chowns
-            # (CHOWN) and chmods what is no longer root's (FOWNER).
-            # debian-tor is the tor image's own user.
-            if docker run --rm \
-                --network none \
-                --cap-drop ALL \
-                --cap-add CHOWN \
-                --cap-add DAC_OVERRIDE \
-                --cap-add FOWNER \
-                --security-opt no-new-privileges:true \
-                -v onionpress-tor-state:/dest \
-                --mount type=bind,source="$VANITY_DIR",target=/src,readonly \
-                --entrypoint sh \
-                "$KEY_HELPER_IMAGE" -c '
-                    set -e
-                    mkdir -p /dest/hidden_service/wordpress/authorized_clients
-                    cp /src/hs_ed25519_secret_key /dest/hidden_service/wordpress/
-                    cp /src/hs_ed25519_public_key /dest/hidden_service/wordpress/ 2>/dev/null || true
-                    cp /src/hostname /dest/hidden_service/wordpress/
-                    chown -R debian-tor:debian-tor /dest/hidden_service
-                    chmod 700 /dest/hidden_service /dest/hidden_service/wordpress
-                    chmod 600 /dest/hidden_service/wordpress/hs_ed25519_secret_key
-                    chmod 644 /dest/hidden_service/wordpress/hostname
-                ' >> "$LOG_FILE" 2>&1; then
-                log "Address key installed to tor-state volume (C Tor)"
-            else
-                log "WARNING: Failed to copy address key to tor-state volume"
-            fi
-        else
-            log "WARNING: No C Tor key file (hs_ed25519_secret_key) -- C Tor will generate a random address"
-        fi
-
-        log "Onion address: $(cat "$VANITY_DIR/hostname" 2>/dev/null || basename "$VANITY_DIR")"
-    elif $FIRST_RUN; then
-        log "No imported key found -- using random onion address"
     fi
 
     # Update images if enabled

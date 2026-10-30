@@ -5,7 +5,7 @@ docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 log First run detected - generating custom onion address...
-log ERROR: ADDRESS_PREFIX 'Elph1n' is too long (6 chars, max 5).
+log ERROR: ADDRESS_PREFIX 'Elph1n' is invalid: Address prefix "Elph1n" contains invalid characters.
 log        Falling back to 'op2'. To use the closest valid prefix, set
 log        ADDRESS_PREFIX=elphn in $TMP/home/.onionpress/config before first launch.
 log Using address prefix: 'op2'

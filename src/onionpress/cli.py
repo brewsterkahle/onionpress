@@ -903,25 +903,10 @@ class OnionPressCLI:
                 # Colima mount, so the bind works on macOS as well as Linux).
                 vanity_addr_dir = os.path.join(
                     self.paths.data_dir, "shared", "vanity-keys", addr)
-                seed = self.docker.run([
-                    "run", "--rm",
-                    # The key needs no network, and gets none.
-                    "--network", "none",
-                    # Root reads the key out of the user's folder, whose
-                    # permissions Linux enforces: DAC_OVERRIDE, nothing else.
-                    "--cap-drop", "ALL",
-                    "--cap-add", "DAC_OVERRIDE",
-                    "--security-opt", "no-new-privileges:true",
-                    "-v", "onionpress-onion-keys:/dest",
-                    "--mount", f"type=bind,source={vanity_addr_dir},target=/src,readonly",
-                    "--entrypoint", "sh",
-                    image, "-c",
-                    "mkdir -p /dest/wordpress && "
-                    "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
-                    "chown -R 0:0 /dest && "
-                    "chmod 700 /dest /dest/wordpress && "
-                    "chmod 600 /dest/wordpress/*",
-                ], timeout=30)
+                # The same seed as a first-run start's (containers.KEY_SEED_SCRIPT:
+                # no network, DAC_OVERRIDE only, the pinned tor image).
+                from .containers import run_key_seed
+                seed = run_key_seed(self.docker, vanity_addr_dir, image, timeout=30)
                 if not seed.ok:
                     # Started without it, Tor would mint a new address under the
                     # restored site. Without the volume, the next start installs
@@ -2592,6 +2577,31 @@ def _run_bundled_plugins(run):
     return 0
 
 
+def _add_seed_onion_key(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Before anything starts Tor: on a first run (Docker says there is "
+             "no onionpress-onion-keys) install the imported key, or generate "
+             "one (macOS: the bundled mkp224o; Linux: generate-vanity), into "
+             "the key volume from the pinned tor image; Linux also re-syncs an "
+             "imported key. Exit 1 (the start must stop) when Docker does not "
+             "answer or the key cannot be installed (the volume made for it is "
+             "removed)")
+    p.add_argument("--bin-dir", default=None,
+                   help="Where the app's mkp224o is (macOS; default: the app bundle's)")
+
+
+def _run_seed_onion_key(run):
+    # The launchers' first-run block of start_containers (#442.5): the key
+    # seed in start.KeySeed, logged in the launcher's format; no
+    # OnionPressCLI setup (it runs before the stack is up).
+    from . import start
+    paths = resolve_paths(data_dir=run.args.data_dir)
+    seed = start.KeySeed(_start_step_manager(paths), mac=detect_os() == OS.MACOS,
+                         bin_dir=run.args.bin_dir or paths.bin_dir)
+    return 0 if seed.run() else 1
+
+
 def _run_apply_pending_key_import(run):
     # The launchers' apply_pending_key_import() (#442.4): ContainerManager's,
     # logged in the launcher's format; no OnionPressCLI setup (it runs
@@ -3154,6 +3164,7 @@ _COMMANDS = [
             "marker; exit 1 (the start must stop, the marker stays) when one "
             "survives or Docker does not answer"),
      _run_apply_pending_key_import),
+    ("seed-onion-key", _add_seed_onion_key, _run_seed_onion_key),
     ("migrate-key-volume",
      _plain("Before anything starts Tor: copy the onion service key out of "
             "onionpress-arti-state (its name until 2026-09-25) into "

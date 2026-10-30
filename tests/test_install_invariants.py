@@ -1430,7 +1430,8 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # check sits above start_containers and does not count).
                 sc = text.index("\nstart_containers() {")
                 call = text.index("if ! migrate_key_volume; then", sc)
-                check = text.index("docker_volume_state onionpress-onion-keys", sc)
+                # The first-run check is seed_onion_key's (start.KeySeed, #442.5).
+                check = text.index("if ! seed_onion_key; then", sc)
                 self.assertLess(
                     call, check,
                     "migrate_key_volume must be called before the first-run "
@@ -1472,7 +1473,7 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 wait = body.index("if ! wait_for_docker")
                 for later in ("apply_pending_key_import",
                               "if ! migrate_key_volume; then",
-                              "docker_volume_state onionpress-onion-keys"):
+                              "if ! seed_onion_key; then"):
                     self.assertLess(
                         wait, body.index(later),
                         f"start_containers must wait for Docker before "

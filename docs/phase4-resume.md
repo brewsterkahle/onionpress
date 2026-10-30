@@ -373,3 +373,34 @@ the stub on PATH, never an installed OnionPress.app's docker) with
 `DOCKER_HOST` at the no-docker socket and HOME at its scratch folder: the
 two migration end-to-end tests no longer skip on a Mac with the app.
 Traces unchanged.
+
+### The first-run key seed (#447)
+
+`start.KeySeed(manager, mac=…, bin_dir=…)`, fast path `seed-onion-key`
+(`--bin-dir` on the Mac, for mkp224o), bash `seed_onion_key` in the
+slice-5 shape. `volume_state(KEY_VOLUME)` 2 stops, 1 is a first run.
+Platform differences, as settled:
+- Generation: the Mac's `generate_vanity_address` is
+  `start.generate_vanity_on_host` (bundled mkp224o on the host, its
+  ERROR lines, the quarantine strip, stale empty folders removed, then
+  `start.ensure_key_formats` = `key_manager.ensure_key_formats`
+  in-process); Linux still runs `generate-vanity` in the tor image
+  (`run_cli_step`). The bash generator is gone.
+- Prefix: the Mac uses `config.validate_address_prefix` and logs its first
+  line (`ERROR: ADDRESS_PREFIX 'x' is invalid: …`) where the bash copy
+  said "too long (6 chars, max 5)"; the copy and its tests are gone
+  (`test_address_prefix.TestFirstRunUsesTheValidator`). Linux dropped its
+  `2 <= len <= 6` gate: generate-vanity validates.
+- Linux keeps re-syncing an imported key every start, the C Tor seed into
+  `onionpress-tor-state` and its format sync (in-process now, where the
+  bash ran `key_manager.py`); the Mac keeps neither (the entrypoint
+  re-derives C Tor's files from the PEM, #311). A failed `volume create` on
+  a Linux first run now stops the start, as the Mac's always did.
+- One seed: `containers.run_key_seed(docker, …)` (`KEY_SEED_SCRIPT`) for
+  both starts and `cmd_restore`; `run_tor_state_seed` (`TOR_STATE_SEED_SCRIPT`,
+  byte for byte the bash's) for Linux. The `docker run` census lost the
+  three bash rows and the restore's and gained these two.
+Trace deltas, on purpose: the Mac bad-prefix line, and Linux's
+`bin python3 …key_manager.py ensure-formats` became `fn ensure_key_formats`.
+Two fixtures (`plugins-off`, `update-on-launch`) were re-recorded against
+the bash first: the scenario's config had not applied (fe3636fc).

@@ -147,6 +147,11 @@ def install_seams():
             return os.path.join(data_dir, "shared", "vanity-keys",
                                 os.environ["FAKE_VANITY"])
         start.generate_vanity_on_host = generate
+    if hasattr(start, "ensure_key_formats"):
+        def formats(key_dir, *a, **k):
+            record(f"fn ensure_key_formats {key_dir}")
+            return True
+        start.ensure_key_formats = formats
     for name in ("configure_site_timezones",):
         if hasattr(start, name):
             setattr(start, name, lambda *a, _n=name, **k: record(f"fn {_n}"))

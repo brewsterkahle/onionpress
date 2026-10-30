@@ -138,8 +138,10 @@
   `.key-volume-migration-pending`. Every identity wipe drops that marker
   and keeps the old volume name in its wipe list. `cli start` /
   `ContainerManager.start_tor` refuse while a migration is due. A failed
-  first-run key seed removes its volume and stops.
-  `tests/test_install_invariants.py`.
+  first-run key seed removes its volume and stops (`start.KeySeed`, the
+  launchers' `seed-onion-key`; one seed, `containers.run_key_seed`, for
+  start and restore). `tests/test_install_invariants.py`,
+  `tests/test_first_run_key_seed.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
   multi-arch index digest, mkp224o by commit, wp-cli by sha256);
   `MKP224O_VERSION` matches `build/build-dmg-simple.sh`. Re-pin the

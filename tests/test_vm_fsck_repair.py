@@ -82,7 +82,7 @@ class TestWiring(unittest.TestCase):
         call = body.index("\n    ensure_vm_fsck_repair\n")
         self.assertLess(wait, call)
         # ...and before any volume question (those need Docker too).
-        self.assertLess(call, body.index("docker_volume_state"))
+        self.assertLess(call, body.index("apply_pending_key_import"))
 
     def test_recovery_keeps_the_wedged_boots_journal(self):
         body = _function_body(self.text, "recover_lima_vm")
