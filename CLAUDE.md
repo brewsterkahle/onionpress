@@ -473,8 +473,9 @@
   (0600 from the first byte, a link at the name fails the write), a link
   or a non-folder/non-file at `~/.onionpress`, `secrets` or `config`
   refused with a message (the launcher makes what is missing), existing
-  files never rewritten; the root `chown -R` fixup is gone. Still root's:
-  the bootstrap's `docker-rootless-setup.log` write + chown.
+  files never rewritten; the root `chown -R` fixup is gone. The Docker
+  bootstrap's `docker-rootless-setup.log` is opened by the user's shell
+  (`as_user_logging_to`, #490): root opens nothing under the data dir.
   `tests/test_deb_postinst_data_dir.py`.
 
 ## Container Output Never Reaches Bash Arithmetic (issue #466)

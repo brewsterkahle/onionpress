@@ -419,6 +419,27 @@ user_systemctl() {
         systemctl --user "$@"
 }
 
+# Runs "${@:3}" as the user with its output in the log $1, which the
+# user's shell opens, not root's (issue #490): the data dir is the user's,
+# and root's `>` there would follow a link planted at the name. $2 is
+# ">" (start the log) or ">>" (add to it). A link, or anything but a
+# regular file, at the name keeps no output and is left alone.
+as_user_logging_to() {
+    local log="$1" how="$2"
+    shift 2
+    runuser -u "$REAL_USER" -- bash -c '
+        log=$1 how=$2
+        shift 2
+        umask 077
+        if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
+            echo "  $log is a link or not a regular file; its output is not kept" >&2
+            log=/dev/null
+        fi
+        if [ "$how" = ">" ]; then exec "$@" >"$log" 2>&1; fi
+        exec "$@" >>"$log" 2>&1
+    ' as_user_logging_to "$log" "$how" "$@"
+}
+
 # The user's rootless daemon answers `docker info` (within $1 seconds).
 rootless_docker_answers() {
     local tries="${1:-1}"
@@ -481,11 +502,12 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             # the user's rootless daemon answering. Its output is kept for
             # when that fails.
             _rootless_log="$DATA_DIR/docker-rootless-setup.log"
-            runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-                PATH="$rootless_dir:$PATH" \
-                dockerd-rootless-setuptool.sh install --force >"$_rootless_log" 2>&1 || true
-            chown "$REAL_USER:$REAL_USER" "$_rootless_log" 2>/dev/null || true
-            if user_systemctl enable --now docker.service >>"$_rootless_log" 2>&1 && \
+            as_user_logging_to "$_rootless_log" ">" \
+                env XDG_RUNTIME_DIR="/run/user/$REAL_UID" PATH="$rootless_dir:$PATH" \
+                dockerd-rootless-setuptool.sh install --force || true
+            if as_user_logging_to "$_rootless_log" ">>" \
+                   env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+                   systemctl --user enable --now docker.service && \
                rootless_docker_answers 30; then
                 rootless_ok=1
             else
