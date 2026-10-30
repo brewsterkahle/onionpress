@@ -1594,7 +1594,8 @@ class TestBashBackupHelpers(unittest.TestCase):
             with self.subTest(rel):
                 self.assertNotRegex(code, r"\bzip\b[^\n]*\s-P\s")
                 self.assertNotRegex(code, r"\bunzip\b[^\n]*\s-P\s")
-                self.assertIn("extract-backup", code)
+                if rel.startswith("linux"):  # the Mac's restore and setup are the CLI's
+                    self.assertIn("extract-backup", code)
 
     def test_launchers_pass_the_password_on_stdin(self):
         for rel in self.LAUNCHERS:

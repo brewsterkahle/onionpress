@@ -295,12 +295,16 @@ class TestEverySetupPathEndsThere(unittest.TestCase):
                                r"\s*if wp_is_installed; then\n\s*after_wordpress_installed\n\s*fi$")
 
     def test_the_setup_case(self):
+        # `onionpress setup` installs through install_fresh_wordpress
+        # (#442.10), which runs this launcher's provision-post-install case:
+        # that one ends with after_wordpress_installed.
         case = _case(_read(LAUNCHER), "setup")
-        self.assertRegex(case, r"op_py provision-post-install \\\n[^\n]*\n[^\n]*\n(\s*#[^\n]*\n)*"
-                               r"\s*after_wordpress_installed\n")
+        self.assertIn('run_setup "$@" || setup_rc=$?', case)
+        provision = _case(_read(LAUNCHER), "provision-post-install")
+        self.assertIn("after_wordpress_installed", provision)
         # --from-backup restarts the containers: start_containers decides.
         self.assertIn('stop_containers || log "WARNING: setup: the stop failed; starting the '
-                      'containers anyway"\n                start_containers', case)
+                      'containers anyway"\n                    start_containers', case)
 
     def test_the_marker_is_removed_with_its_sibling(self):
         """A removal of ~/.onionpress state must not leave only this one."""

@@ -366,6 +366,14 @@
   `--errors-file` (`start.StartErrors`, read by `note_start_errors`).
   `tests/test_start_errors_contract.py`.
 
+## `onionpress setup` Is setup_logic's (issue #442)
+- The launchers' `setup)` case is `run_setup` (passwords moved into the
+  environment, never the CLI's argv) → `setup_logic.setup_from_terminal`,
+  which installs through `install_fresh_wordpress`; its exit says what the
+  launcher does next (10: restart for a backup's key). `--from-backup`
+  takes the address from the key (`stage_setup_from_backup`), never
+  metadata.json; no key, no new one. `tests/test_terminal_setup.py`.
+
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
   live in `src/onionpress/app_commands.py`, shared by both platforms, never
@@ -581,9 +589,9 @@
   writes `~/.onionpress/.wordpress-installed-by-onionpress`
   (`setup_logic.INSTALLED_BY_ONIONPRESS_MARKER`: user 1's `user_registered`
   as WordPress records it, else `unknown`): `install_fresh_wordpress`
-  (after the password is set) and both launchers' bash `setup`
-  (`note_wordpress_installed_by_onionpress`, test-held identical, right
-  after `wp core multisite-install`). `provision_existing_wordpress`
+  (after the password is set), the one install path (the setup window,
+  the Linux tray, `onionpress setup` since #442.10).
+  `provision_existing_wordpress`
   refuses an installed WordPress whose marker is missing or does not
   match the live install (`FOREIGN_INSTALL_MSG`, False; the Linux tray's
   legacy branch gets the same answer) unless `adopt_existing`:

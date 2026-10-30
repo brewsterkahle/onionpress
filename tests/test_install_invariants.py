@@ -1513,9 +1513,12 @@ class TestKeyVolumeMigration(unittest.TestCase):
                         any(re.search(r"\bif ! migrate_key_volume\b", l) for l in block),
                         f"{lines[start].strip()!r} starts tor at line {n + 1} "
                         "without migrate_key_volume before it")
-            # The start's tor is Python's since #442.7 (start.post_up, after
-            # migrate_key_volume and behind key_volume_not_ready).
-            self.assertGreaterEqual(found, 1, f)
+            # The start's and the setup's tor are Python's since #442.7 and
+            # #442.11 (start.post_up and setup_logic.setup_from_terminal,
+            # both after the migration and behind key_volume_not_ready:
+            # tests/test_start_post_up.py, tests/test_terminal_setup.py);
+            # what is left here is the launchers' own `start-tor`.
+            self.assertGreaterEqual(found, 0, f)
 
     def test_identity_wipes_drop_the_migration_marker(self):
         """A key import or restore removes both key volumes for a replaced

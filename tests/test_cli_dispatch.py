@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
     derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
-    redact, scrub, start, wordpress_egress,
+    redact, scrub, setup_logic, start, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -368,6 +368,20 @@ ROWS = [
             m.return_value.migrate_tor_network.assert_called_once_with(),
             m.return_value.retire_old_onionheaven_containers.assert_not_called(),
             t.assertEqual(m.call_args.args[2].wp_port, 8080))),
+    # #442.11: the launchers' `setup)` case runs this; setup_logic decides
+    # (tests/test_terminal_setup.py), never OnionPressCLI.
+    Row("setup", ["setup", "--user", "alice", "--title", "T", "--launcher", "/l"],
+        "setup_logic.setup_from_terminal",
+        mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
+                  user="alice", title="T", from_backup="", ia_account="", log=ANY),
+        rc=0, returns=0, setup_cli=False,
+        check=lambda t, m: t.assertEqual(
+            (m.call_args.kwargs["user"], m.call_args.kwargs["title"],
+             m.call_args.kwargs["launcher_bin"]), ("alice", "T", "/l"))),
+    Row("setup", ["setup", "--from-backup", "/b.zip"], "setup_logic.setup_from_terminal",
+        mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
+                  user="", title="", from_backup="/b.zip", ia_account="", log=ANY),
+        rc=10, returns=10, setup_cli=False),
     # #442.8: the launchers' start_containers() is start.start_containers
     # (Linux --until-core); exit 1 stops the start, 0 / 3 say whether
     # WordPress is installed.
@@ -490,7 +504,7 @@ MODULES = {
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
-    "start": start,
+    "start": start, "setup_logic": setup_logic,
 }
 
 

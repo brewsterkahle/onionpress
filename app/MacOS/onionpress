@@ -161,9 +161,6 @@ onionheaven_release() {
 wp_cli() {
     docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp "$@"
 }
-wp_cli_in() {
-    docker exec -i -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp "$@"
-}
 
 # Copy the tor hostname into the shared volume so WP code (theme,
 # mu-plugins, REST endpoints) can answer "what's my .onion?" without
@@ -557,12 +554,6 @@ command_exists() {
 # registration time as WordPress records it (setup_logic writes the same
 # file from install_fresh_wordpress; a test keeps the two equal).
 WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"
-note_wordpress_installed_by_onionpress() {
-    local stamp
-    stamp=$(wp_cli user get 1 --field=user_registered 2>/dev/null | head -1 | tr -d '\r')
-    [[ "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || stamp=unknown
-    printf '%s\n' "$stamp" > "$DATA_DIR/$WP_INSTALLED_BY_ONIONPRESS_MARKER"
-}
 
 # Check if WordPress core is installed (setup wizard completed)
 wp_is_installed() {
@@ -597,6 +588,30 @@ read_backup_password() {
             IFS= read -r BACKUP_PASS || true
         fi
     fi
+}
+
+# `onionpress setup` (setup_logic.setup_from_terminal, #442.11) with this
+# launcher's arguments, the passwords moved off the command line into the
+# environment the CLI reads (and drops) them from: `--pass`,
+# `--ia-password` and `--from-backup`'s password. Its status says what is
+# left for the launcher: 0 done, 2 already installed, 10 restart the stack
+# (a backup's setup), anything else failed.
+run_setup() {
+    local args=() setup_pass="" ia_pass="" backup_pass=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --pass) setup_pass="${2:-}"; shift; [ $# -eq 0 ] || shift ;;
+            --ia-password) ia_pass="${2:-}"; shift; [ $# -eq 0 ] || shift ;;
+            --from-backup)
+                backup_pass="${2:-}"
+                args+=(--from-backup "${3:-}")
+                shift; [ $# -eq 0 ] || shift; [ $# -eq 0 ] || shift ;;
+            *) args+=("$1"); shift ;;
+        esac
+    done
+    ONIONPRESS_SETUP_PASSWORD="$setup_pass" ONIONPRESS_IA_PASSWORD="$ia_pass" \
+        ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
+        bundled_python -m onionpress.cli --data-dir "$DATA_DIR" setup --launcher "$SCRIPT_DIR/onionpress" "${args[@]}"
 }
 
 # Function to generate and load database passwords
@@ -645,24 +660,6 @@ EOF
         log "ERROR: Secrets file not found at $secrets_file"
         exit 1
     fi
-}
-
-# Set a WordPress user's password: wp_set_user_password <login> <password>
-# Both reach a fixed `wp eval` PHP on stdin. As --admin_password or
-# --user_pass the password would sit in the process list, where ps shows
-# every user's command lines. Identical in app/MacOS/onionpress and
-# linux/onionpress, and the PHP is setup_logic.WP_SET_PASSWORD_PHP
-# (test-enforced).
-wp_set_user_password() {
-    printf '%s\n%s' "$1" "$2" | wp_cli_in eval '
-$in = explode("\n", file_get_contents("php://stdin"), 2);
-$u = get_user_by("login", trim($in[0]));
-$pw = isset($in[1]) ? trim($in[1]) : "";
-if (!$u || $pw === "") { fwrite(STDERR, "Error: no such user, or an empty password\n"); exit(1); }
-wp_set_password($pw, $u->ID);
-delete_user_meta($u->ID, "default_password_nag");
-echo "Success: password set for ", $u->user_login, "\n";
-'
 }
 
 # Function to detect container runtime
@@ -1916,177 +1913,6 @@ _validate_oh_address() {
 # CLI subcommands: setup, backup, restore, reset
 # ===========================================================================
 
-setup_wordpress_cli() {
-    local wp_user="" wp_pass="" wp_email="" wp_title="OnionPress"
-    local from_backup_pass="" from_backup_path=""
-
-    # Parse arguments
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --user)  wp_user="$2";  shift 2 ;;
-            --pass)  wp_pass="$2";  shift 2 ;;
-            --email) wp_email="$2"; shift 2 ;;
-            --title) wp_title="$2"; shift 2 ;;
-            --from-backup)
-                from_backup_pass="$2"
-                from_backup_path="$3"
-                shift 3 ;;
-            *) shift ;;
-        esac
-    done
-
-    # Set when --from-backup copied the backup's key in (the setup command
-    # then has the start install it); a backup without one leaves this
-    # install's key alone.
-    SETUP_BACKUP_KEY_RESTORED=""
-    # --from-backup mode: extract config from backup, use dummy WP credentials
-    # (restore will overwrite the database with real users afterward)
-    if [ -n "$from_backup_pass" ]; then
-        if [ -z "$from_backup_path" ] || [ ! -f "$from_backup_path" ]; then
-            echo "Usage: $0 setup --from-backup <password> <backup.zip>"
-            return 1
-        fi
-        echo "  Extracting config from backup..."
-        local staging
-        staging=$(mktemp -d -t onionpress-setup-XXXXXX)
-        trap "rm -rf '$staging'" RETURN
-        # Either backup format; format 2 needs the Python decoder (plain
-        # unzip can't read it). The password goes over stdin, not argv.
-        if ! printf '%s' "$from_backup_pass" | bundled_python -m onionpress.cli extract-backup --archive "$from_backup_path" --dest "$staging" >>"$LOG_FILE" 2>&1; then
-            echo "ERROR: Failed to extract backup (wrong password, corrupt zip or not a valid OnionPress backup)" >&2
-            return 1
-        fi
-        # metadata.json and the key files are whoever made the backup file's
-        # (a password proves nothing about that). backup-address checks
-        # them and prints the address the key belongs to, or nothing if the
-        # backup has no key; that address names a directory below, so it is
-        # never read from metadata.json. Refused before anything is copied.
-        local onion_address
-        if ! onion_address=$(bundled_python -m onionpress.cli backup-address --staging "$staging" 2>>"$LOG_FILE") \
-            || { [ -n "$onion_address" ] && ! is_onion_address "$onion_address"; }; then
-            echo "ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)" >&2
-            return 1
-        fi
-        # Restore the backup's user preferences. The backup's config is
-        # its author's: every other key keeps this install's value
-        # (backup.RESTORABLE_CONFIG), never a straight copy.
-        if bundled_python -m onionpress.cli restore-config --staging "$staging" --config "$DATA_DIR/config" \
-            --address "$onion_address" 2>>"$LOG_FILE"; then
-            log "Setup: restored settings from backup"
-            echo "  Settings restored from backup."
-        fi
-        # Restore vanity keys if present (accept either C Tor or Arti format)
-        if { [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] || [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; } && [ -f "$staging/metadata.json" ]; then
-            if [ -n "$onion_address" ]; then
-                rm -rf "$DATA_DIR/shared/vanity-keys/"
-                local addr_dir="$DATA_DIR/shared/vanity-keys/$onion_address"
-                mkdir -p "$addr_dir"
-                [ -f "$staging/tor-keys/hs_ed25519_secret_key" ] && cp "$staging/tor-keys/hs_ed25519_secret_key" "$addr_dir/"
-                [ -f "$staging/tor-keys/hs_ed25519_public_key" ] && cp "$staging/tor-keys/hs_ed25519_public_key" "$addr_dir/"
-                [ -f "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] && cp "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" "$addr_dir/"
-                echo "$onion_address" > "$addr_dir/hostname"
-                log "Setup: restored Tor keys for $onion_address from backup"
-                echo "  Tor keys restored from backup ($onion_address)."
-                SETUP_BACKUP_KEY_RESTORED=yes
-            fi
-        fi
-        if [ "$SETUP_BACKUP_KEY_RESTORED" != "yes" ]; then
-            # A backup without an onion service key (a Mac Settings page
-            # backup): this install keeps the key and address it has.
-            log "Setup: the backup holds no onion service key; this install keeps its own"
-            echo "  This backup holds no onion service key: this install keeps its own address."
-        fi
-        # Use dummy credentials — restore will overwrite the database
-        wp_user="admin"
-        wp_pass="$from_backup_pass"
-        wp_email="admin@onionpress.local"
-        echo "  Installing WordPress with temporary credentials (restore will overwrite)..."
-    fi
-
-    # If credentials not provided, prompt interactively
-    if [ -z "$wp_user" ] || [ -z "$wp_pass" ]; then
-        echo ""
-        echo "  ======================================="
-        echo "  OnionPress First-Time Setup"
-        echo "  ======================================="
-        echo ""
-        echo "  Create your WordPress admin account."
-        echo "  You'll use these credentials to log in at /wp-admin."
-        echo ""
-
-        if [ -z "$wp_user" ]; then
-            while [ -z "$wp_user" ]; do
-                printf "  Admin username: "
-                read wp_user
-                if [ -z "$wp_user" ]; then
-                    echo "  Username cannot be empty."
-                fi
-            done
-        fi
-
-        if [ -z "$wp_pass" ]; then
-            local wp_pass2=""
-            while [ -z "$wp_pass" ]; do
-                printf "  Admin password: "
-                stty -echo 2>/dev/null
-                read wp_pass
-                stty echo 2>/dev/null
-                echo ""
-                if [ -z "$wp_pass" ]; then
-                    echo "  Password cannot be empty."
-                    continue
-                fi
-                printf "  Confirm password: "
-                stty -echo 2>/dev/null
-                read wp_pass2
-                stty echo 2>/dev/null
-                echo ""
-                if [ "$wp_pass" != "$wp_pass2" ]; then
-                    echo "  Passwords do not match. Try again."
-                    wp_pass=""
-                fi
-            done
-        fi
-
-        printf "  Site title [OnionPress]: "
-        read wp_title_input
-        if [ -n "$wp_title_input" ]; then
-            wp_title="$wp_title_input"
-        fi
-    fi
-
-    if [ -z "$wp_email" ]; then
-        wp_email="${wp_user}@onionpress.local"
-    fi
-
-    echo ""
-    echo "  Installing WordPress (multisite)..."
-    log "Running WP-CLI core multisite-install for first-time setup"
-
-    # No --admin_password: ps shows every user's command lines. wp-cli
-    # generates a password, printed on the stdout dropped here, and
-    # wp_set_user_password then sets the user's on stdin.
-    if wp_cli core multisite-install \
-        --url="http://localhost" \
-        --title="$wp_title" \
-        --admin_user="$wp_user" \
-        --admin_email="$wp_email" \
-        --skip-email >/dev/null 2>>"$LOG_FILE"; then
-        log "WordPress multisite installed successfully via WP-CLI"
-        note_wordpress_installed_by_onionpress
-    else
-        log "ERROR: WP-CLI core multisite-install failed"
-        echo "  ERROR: WordPress installation failed. Check $LOG_FILE for details."
-        return 1
-    fi
-    if ! wp_set_user_password "$wp_user" "$wp_pass" >> "$LOG_FILE" 2>&1; then
-        log "ERROR: setting the WordPress admin password failed"
-        echo "  ERROR: WordPress was installed, but the admin password could not be set. Check $LOG_FILE for details."
-        return 1
-    fi
-    echo "  WordPress installed successfully!"
-}
-
 main() {
     case "${1:-start}" in
         start)
@@ -2462,70 +2288,25 @@ main() {
             ;;
 
         setup)
-            # Usage: onionpress setup [--user USER] [--pass PASS] [--email EMAIL] [--title TITLE]
+            # Usage: onionpress setup [--user USER] [--pass PASS] [--title TITLE]
             #        onionpress setup --from-backup <password> <backup.zip>
+            # The install the setup window makes (run_setup); a backup's
+            # setup restarts the stack so the start installs its key.
             setup_db_passwords
             cd "$DOCKER_DIR"
-            if wp_is_installed; then
-                echo "WordPress is already installed."
-                # A site is set up: the menubar must not show the welcome
-                # screen for it (issue #374; a node set up headlessly before
-                # this marker existed gets it from this run).
-                touch "$DATA_DIR/.setup_complete"
-                exit 0
-            fi
-            # Make sure WordPress container is running
-            if ! wp_cli --info >/dev/null 2>&1; then
-                echo "WordPress container is not running. Start OnionPress first."
-                exit 1
-            fi
             shift  # remove "setup" from args
-            local has_from_backup=""
-            for arg in "$@"; do
-                [ "$arg" = "--from-backup" ] && has_from_backup=1 && break
-            done
-            # A failed setup — for --from-backup, a backup refused before
-            # anything was restored — must not go on to flag a key reimport.
-            setup_wordpress_cli "$@" || exit 1
-            # WordPress is installed: what the menubar's first-run check
-            # asks (issue #374). Its own setup window writes the same
-            # marker (setup_logic.mark_setup_complete), the daemon again
-            # once the site is operational; without it a headless setup's
-            # first menubar launch showed the welcome screen.
-            touch "$DATA_DIR/.setup_complete"
-            if [ -n "$has_from_backup" ]; then
-                # --from-backup restored keys to vanity-keys/ — need to reinstall
-                # into the key volume so Tor uses the restored address.
-                # Use .import-key-pending flag so start_containers removes the old
-                # key volume and installs the restored key.
-                # The backup's key replaces the one Tor serves now: hubs
-                # that may hold a copy of that one are asked to delete it
-                # first (not the backup's own address, which stays).
-                # A backup without a key restored none: the install keeps
-                # its key, and nothing is released or reimported.
-                if [ "${SETUP_BACKUP_KEY_RESTORED:-}" = "yes" ]; then
-                    local restored_key_dir=""
-                    restored_key_dir=$(vanity_key_dir) || restored_key_dir=""
-                    ONIONPRESS_YES=true onionheaven_release restore \
-                        "${restored_key_dir:+$(basename "$restored_key_dir")}"
-                    log "Setup --from-backup: flagging key reimport..."
-                    touch "$DATA_DIR/.import-key-pending"
-                fi
-                stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
-                start_containers
-                wait_for_services
-            else
-                # Start Tor if not running, its key volume in place first
-                # (see start-tor).
-                if ! docker compose ps tor --format json 2>/dev/null | grep -q running; then
-                    echo "  Starting Tor..."
-                    if ! migrate_key_volume; then
-                        echo "  Tor not started: the onion service key volume is not in place (see $LOG_FILE)." >&2
-                        exit 1
-                    fi
-                    docker compose up -d tor >> "$LOG_FILE" 2>&1
-                fi
-            fi
+            local setup_rc=0
+            run_setup "$@" || setup_rc=$?
+            case "$setup_rc" in
+                0) ;;
+                2) exit 0 ;;
+                10)
+                    stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
+                    start_containers
+                    wait_for_services
+                    ;;
+                *) exit 1 ;;
+            esac
             echo ""
             echo "  Setup complete! Your site is now running."
             echo "  Admin panel: http://localhost:${ONIONPRESS_WP_PORT}/wp-admin"

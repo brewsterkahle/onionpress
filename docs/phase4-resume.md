@@ -489,3 +489,46 @@ the activation watcher. Settled:
   Python functions keep their unit tests (`test_pending_key_import`,
   `test_first_run_key_seed`, `test_start_core`), the order is
   `tests/test_start_sequence.py`.
+
+### The setup half (#451–#453)
+
+`onionpress setup` (`cli._run_setup`, no OnionPressCLI) runs
+`setup_logic.setup_from_terminal(data_dir, mac, launcher_bin, docker,
+manager, user, title, from_backup, ia_account, log)`; exit `SETUP_DONE` 0,
+`SETUP_FAILED` 1, `SETUP_ALREADY_INSTALLED` 2, `SETUP_RESTART` 10. Both
+launchers' `setup)` case: `setup_db_passwords`, `run_setup "$@"` (moves
+`--pass`, `--ia-password` and `--from-backup`'s password into
+`ONIONPRESS_SETUP_PASSWORD` / `ONIONPRESS_IA_PASSWORD` /
+`ONIONPRESS_BACKUP_PASSWORD`; the CLI pops them once read), then on 10
+`stop_containers; start_containers; wait_for_services` (Linux also
+`start_heartbeat_client`), Linux's `write_status`, the closing lines.
+- #451 `stage_setup_from_backup`: `backup.extract_backup` into a 0700
+  temp folder (always removed), `backup.staged_backup_address` (the key's
+  address; refused before anything is copied), `restore_backup_config`,
+  the key files into `vanity-keys/<address>/`. No key: this install keeps
+  its own. Not `prepare_install_from_backup`: that stages a full import
+  only the Mac's start performs.
+- #452 `ask_setup_answers` (username = an onionname, password ≥ 6 chars
+  typed twice through getpass, title defaulting to `default_site_title()`)
+  and `install_fresh_wordpress`, so the terminal installs as the setup
+  window does (single-site install, then the launcher's
+  `provision-post-install` converts to multisite and, on Linux, moves the
+  port and releases the heartbeat hold; the user's subsite; the bundled
+  plugins; the shared archive.org keys in the background). Linux's
+  `--ia-account` login is `multisite.fetch_archive_s3_keys` + `wp option
+  update` on stdin (`save_archive_login`).
+- #453 decided: both platforms now provision, set up the plugins and
+  fetch the archive.org keys at setup (install_fresh_wordpress does); both
+  check "WordPress running" with `wp --info` (Linux's hint keeps its
+  `systemctl` line); both write `.setup_complete` for an installed site.
+  `--from-backup` installs with `admin` / the backup's password, then
+  (with a key) asks the hubs to release the current one and flags the
+  import; the launcher restarts either way. Without a backup, Tor starts
+  if it is not running, behind `migrate_key_volume` and
+  `key_volume_not_ready`.
+Gone from both launchers: `setup_wordpress_cli` / `_interactive`,
+`note_wordpress_installed_by_onionpress`, `wp_set_user_password`,
+`wp_cli_in`, Linux's `fetch_archive_s3_keys`. Deltas: `--user` must be a
+valid onionname and the password 6+ characters (the GUI's rules);
+`--email` is accepted and ignored (install_fresh_wordpress uses
+admin@onionpress.local).

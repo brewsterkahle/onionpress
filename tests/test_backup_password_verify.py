@@ -96,13 +96,9 @@ class TestCreateBackupWiring(unittest.TestCase):
         body = _function(self.text, "verify_wp_admin_password")
         self.assertIn("\n    op_py verify-admin-password\n", body)
 
-    def test_archive_login_password_goes_to_curl_on_stdin(self):
-        body = _function(self.text, "fetch_archive_s3_keys")
-        self.assertIn("""printf '%s' "$ia_pass" | docker exec -i onionheaven""", body)
-        self.assertIn('--data-urlencode "password@-"', body)
-        self.assertIn('--data-urlencode "email=$ia_email"', body)
-        self.assertEqual(body.count("$ia_pass"), 1, "used only to feed curl's stdin")
-        self.assertNotIn("urllib.parse.quote", body)
+    def test_archive_login_is_the_pythons(self):
+        # multisite.fetch_archive_s3_keys (TestArchiveLoginPython) since #442.10.
+        self.assertNotIn("fetch_archive_s3_keys", self.text)
 
 
 class TestNoCodeSplicingInLaunchers(unittest.TestCase):
@@ -280,25 +276,26 @@ class TestCreateBackupHarness(_Harness):
         self.assertIn("php://stdin", php.pop())
 
 
-class TestArchiveLoginHarness(_Harness):
-
-    FUNCTIONS = ("fetch_archive_s3_keys",)
-    RUN = ('rc=0; fetch_archive_s3_keys "$IA_EMAIL" "$PW" || rc=$?; '
-           'echo "rc=$rc $ia_s3_access $ia_s3_secret"')
+class TestArchiveLoginPython(unittest.TestCase):
+    """The terminal setup's archive.org login is multisite.fetch_archive_s3_keys
+    since #442.10 (Linux's bash fetch_archive_s3_keys is gone): the form,
+    password included, is curl's stdin, intact whatever it holds."""
 
     def test_password_reaches_curl_on_stdin_intact(self):
+        import urllib.parse
+        from onionpress import multisite
+        answer = json.dumps({"success": True, "values": {"s3": {"access": "AK", "secret": "SK"}}})
         for pw in TRICKY_PASSWORDS:
-            with self.subTest(pw=pw):
-                out, made, _ = self.run_bash(
-                    self.RUN, {"PW": pw, "IA_EMAIL": "o'brien@example.org"})
-                self.assertEqual(out.stdout.strip(), "rc=0 AK SK", out.stderr)
-                # Over Tor: curl runs in the onionheaven container.
-                [call] = [c for c in made if c["argv"][:4] ==
-                          ["exec", "-i", "onionheaven", "curl"]]
-                self.assertEqual(call["stdin"], pw)
-                self.assertIn("email=o'brien@example.org", call["argv"])
-                self.assertIn("password@-", call["argv"])
-                for arg in call["argv"]:
+            with self.subTest(pw=pw), mock.patch.object(
+                    multisite.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 0, answer, "")) as run:
+                keys = multisite.fetch_archive_s3_keys("o'brien@example.org", pw)
+                self.assertEqual(keys, {"access": "AK", "secret": "SK"})
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[1:5], ["exec", "-i", "onionheaven", "curl"])
+                form = urllib.parse.parse_qs(run.call_args.kwargs["input"])
+                self.assertEqual(form, {"email": ["o'brien@example.org"], "password": [pw]})
+                for arg in argv:
                     self.assertNotIn(pw, arg)
 
 

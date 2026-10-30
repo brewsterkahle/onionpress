@@ -21,7 +21,6 @@ install (FOREIGN_INSTALL_MSG, False), unless adopt_existing is given:
 
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -90,30 +89,19 @@ class TestTheLiterals(unittest.TestCase):
             self.assertIn('WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"',
                           _read(rel), rel)
 
-    def test_the_launchers_write_it_alike(self):
-        mac = _bash_function(_read(LAUNCHERS[0]), "note_wordpress_installed_by_onionpress")
-        linux = _bash_function(_read(LAUNCHERS[1]), "note_wordpress_installed_by_onionpress")
-        self.assertEqual(mac, linux)
-        self.assertIn("wp_cli user get 1 --field=user_registered", mac)
-
-    def test_each_bash_setup_writes_it_right_after_the_install(self):
-        for rel, setup_fn in (("app/MacOS/onionpress", "setup_wordpress_cli"),
-                              ("linux/onionpress", "setup_wordpress_interactive")):
-            body = _bash_function(_read(rel), setup_fn)
-            self.assertIn("core multisite-install", body, rel)
-            self.assertRegex(
-                body,
-                r'installed successfully via WP-CLI"\n\s*note_wordpress_installed_by_onionpress\n',
-                f"{rel}: {setup_fn} does not note the install")
-
-    def test_the_bash_and_python_stamps_agree(self):
-        """The same shape on both sides: WordPress's datetime, else 'unknown'."""
+    def test_one_writer(self):
+        """Every setup installs through setup_logic.install_fresh_wordpress
+        since #442.10 (the launchers' `onionpress setup` too), whose
+        mark_wordpress_installed_by_onionpress writes the marker
+        (TestPythonSide); no launcher keeps a bash copy."""
         self.assertEqual(setup_logic.INSTALLED_BY_UNKNOWN, "unknown")
-        body = _bash_function(_read("linux/onionpress"), "note_wordpress_installed_by_onionpress")
-        self.assertIn(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$", body)
-        self.assertIn("|| stamp=unknown", body)
         self.assertEqual(setup_logic._USER_REGISTERED_RE.pattern,
                          r"^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$")
+        for rel in LAUNCHERS:
+            text = _read(rel)
+            with self.subTest(rel):
+                self.assertNotIn("note_wordpress_installed_by_onionpress", text)
+                self.assertNotIn("core multisite-install", text)
 
     def test_linux_provision_takes_adopt_existing(self):
         text = _read("linux/onionpress")
@@ -251,70 +239,6 @@ class TestPythonSide(unittest.TestCase):
                 self.assertTrue(setup_logic.provision_interactive(
                     data_dir=self.tmp, adopt_existing=adopt))
             self.assertEqual(m.call_args.kwargs["adopt_existing"], adopt)
-
-
-WP_CLI_STUB = r"""
-wp_cli() {
-    echo "wp_cli $*" >> "$CALLS"
-    printf '%s\n' "$STUB_REGISTERED"
-}
-"""
-
-
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
-class TestBashMarkerUnderBash(unittest.TestCase):
-    """note_wordpress_installed_by_onionpress from each launcher, run under
-    bash against a wp_cli stub, and read back by setup_logic."""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="onionpress-adopt-bash-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.data_dir = os.path.join(self.tmp, "data")
-        os.mkdir(self.data_dir)
-        self.calls = os.path.join(self.tmp, "calls")
-        self.marker = os.path.join(self.data_dir, ".wordpress-installed-by-onionpress")
-        self.pwned = os.path.join(self.tmp, "pwned")
-
-    def _run(self, rel, registered):
-        text = _read(rel)
-        script = (
-            "set -e\n"
-            f"DATA_DIR={shlex.quote(self.data_dir)}\n"
-            f"CALLS={shlex.quote(self.calls)}\n"
-            + WP_CLI_STUB
-            + 'WP_INSTALLED_BY_ONIONPRESS_MARKER=".wordpress-installed-by-onionpress"\n'
-            + _bash_function(text, "note_wordpress_installed_by_onionpress")
-            + "note_wordpress_installed_by_onionpress\n"
-        )
-        env = dict(os.environ, STUB_REGISTERED=registered, OP_PWNED=self.pwned)
-        r = subprocess.run(["bash", "-c", script], env=env,
-                           capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        with open(self.marker) as f:
-            return f.read()
-
-    def test_the_stamp_is_wordpress_s(self):
-        for rel in LAUNCHERS:
-            with self.subTest(launcher=rel):
-                self.assertEqual(self._run(rel, REGISTERED), REGISTERED + "\n")
-                with open(self.calls) as f:
-                    self.assertIn("wp_cli user get 1 --field=user_registered", f.read())
-                # ...and setup_logic reads it as its own.
-                with mock.patch.object(setup_logic, "_wp_user_1_registered", return_value=REGISTERED):
-                    self.assertTrue(setup_logic.wordpress_installed_by_onionpress(self.data_dir))
-                with mock.patch.object(setup_logic, "_wp_user_1_registered",
-                                       return_value="2026-10-30 00:00:00"):
-                    self.assertFalse(setup_logic.wordpress_installed_by_onionpress(self.data_dir))
-
-    def test_anything_else_is_unknown(self):
-        for rel in LAUNCHERS:
-            for answer in ("", "Error: no user", "a[$(>$OP_PWNED)]", REGISTERED + " extra",
-                           "2026-10-29T10:11:12"):
-                with self.subTest(launcher=rel, answer=answer):
-                    self.assertEqual(self._run(rel, answer), "unknown\n")
-                    self.assertFalse(os.path.exists(self.pwned))
-                    with mock.patch.object(setup_logic, "_wp_user_1_registered", return_value=REGISTERED):
-                        self.assertTrue(setup_logic.wordpress_installed_by_onionpress(self.data_dir))
 
 
 if __name__ == "__main__":

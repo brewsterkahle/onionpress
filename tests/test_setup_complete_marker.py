@@ -9,9 +9,10 @@ site was fully operational, so a node set up headlessly with
 over Tor) had a working site and a first menubar launch that asked to set
 it up. Now every setup that installs WordPress writes the marker when it
 completes: setup_logic.install_fresh_wordpress (the Mac setup window, the
-Linux paths) and the Mac launcher's `onionpress setup` (both branches, and
-once more for an installed site, so a node from before this change gets
-it from a run of `onionpress setup`). The daemon's write stays.
+Linux paths, and since #442.10 both launchers' `onionpress setup`), and
+`onionpress setup` once more for an installed site
+(setup_logic.setup_from_terminal), so a node from before this change gets
+it from a run of `onionpress setup`. The daemon's write stays.
 """
 
 import os
@@ -58,8 +59,15 @@ class TestOneMarkerName(unittest.TestCase):
     def test_daemon_writes_it_when_operational(self):
         self.assertIn('self._marker(".setup_complete")', _read("src/onionpress/daemon.py"))
 
-    def test_mac_launchers_setup_writes_it(self):
-        self.assertEqual(_setup_case().count('touch "$DATA_DIR/.setup_complete"'), 2)
+    def test_the_terminal_setup_writes_it(self):
+        """`onionpress setup` (#442.11): install_fresh_wordpress writes it,
+        setup_from_terminal once more for an installed site
+        (tests/test_terminal_setup.py); the launcher no longer does."""
+        self.assertNotIn('touch "$DATA_DIR/.setup_complete"', _setup_case())
+        flow = _read("src/onionpress/setup_logic.py")
+        flow = flow[flow.index("def setup_from_terminal("):]
+        installed = flow.index("return SETUP_ALREADY_INSTALLED")
+        self.assertIn("mark_setup_complete(data_dir, log)", flow[:installed])
 
 
 class TestInstallFreshWordpressWritesIt(unittest.TestCase):
@@ -112,9 +120,8 @@ record() { echo "$*" >> "$CALLS"; }
 setup_db_passwords() { record setup_db_passwords; }
 wp_is_installed() { record wp_is_installed; return "${STUB_INSTALLED_RC:-1}"; }
 wp_cli() { record "wp_cli $*"; return "${STUB_WP_CLI_RC:-0}"; }
-setup_wordpress_cli() {
-    record "setup_wordpress_cli $*"
-    SETUP_BACKUP_KEY_RESTORED="${STUB_KEY_RESTORED:-}"
+run_setup() {
+    record "run_setup $*"
     return "${STUB_SETUP_RC:-0}"
 }
 docker() {
@@ -166,24 +173,25 @@ class TestMacLauncherSetupWritesIt(unittest.TestCase):
         with open(self.calls) as f:
             return f.read().splitlines()
 
+    # What `onionpress setup` decides (and writes) is setup_logic's
+    # (tests/test_terminal_setup.py); the case runs it and does what its
+    # status says.
+
     def test_a_completed_setup(self):
         r = self._run("--user", "alice", "--pass", "hunter22", "--email", "a@example.org")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Setup complete!", r.stdout)
-        self.assertTrue(os.path.exists(self.marker))
-        self.assertIn("setup_wordpress_cli --user alice --pass hunter22 --email a@example.org",
+        self.assertIn("run_setup --user alice --pass hunter22 --email a@example.org",
                       self._calls())
-        self.assertFalse(os.path.exists(os.path.join(self.data_dir, ".import-key-pending")))
+        self.assertNotIn("start_containers", self._calls())
 
     def test_a_completed_setup_from_backup(self):
-        r = self._run("--from-backup", "pw", "/x/backup.zip", STUB_KEY_RESTORED="yes")
+        r = self._run("--from-backup", "pw", "/x/backup.zip", STUB_SETUP_RC=10)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Setup complete!", r.stdout)
-        self.assertTrue(os.path.exists(self.marker))
         calls = self._calls()
-        self.assertTrue(os.path.exists(os.path.join(self.data_dir, ".import-key-pending")))
         self.assertLess(calls.index("stop_containers"), calls.index("start_containers"))
-        self.assertIn("wait_for_services", calls)
+        self.assertLess(calls.index("start_containers"), calls.index("wait_for_services"))
 
     def test_a_failed_setup_writes_nothing(self):
         r = self._run("--user", "alice", STUB_SETUP_RC=1)
@@ -191,21 +199,11 @@ class TestMacLauncherSetupWritesIt(unittest.TestCase):
         self.assertFalse(os.path.exists(self.marker))
         self.assertNotIn("Setup complete!", r.stdout)
 
-    def test_no_wordpress_container_writes_nothing(self):
-        r = self._run("--user", "alice", STUB_WP_CLI_RC=1)
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("not running", r.stdout)
-        self.assertFalse(os.path.exists(self.marker))
-        self.assertNotIn("setup_wordpress_cli --user alice", self._calls())
-
-    def test_an_installed_site_is_set_up(self):
-        """A node set up before the marker existed: `onionpress setup`
-        says so and writes it."""
-        r = self._run(STUB_INSTALLED_RC=0)
+    def test_an_installed_site_is_only_said(self):
+        r = self._run(STUB_SETUP_RC=2)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("already installed", r.stdout)
-        self.assertTrue(os.path.exists(self.marker))
-        self.assertNotIn("setup_wordpress_cli", " ".join(self._calls()))
+        self.assertNotIn("Setup complete!", r.stdout)
+        self.assertNotIn("start_containers", self._calls())
 
 
 if __name__ == "__main__":

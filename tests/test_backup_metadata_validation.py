@@ -588,12 +588,11 @@ class TestBackupAddressCli(unittest.TestCase):
 
 
 class TestLauncherRestorePaths(unittest.TestCase):
-    """The bash restore_backup (Linux) and setup --from-backup (both
-    launchers) functions, run for real against crafted backup files. The
-    Mac launcher's `restore` goes through onionpress.cli restore."""
+    """The bash restore_backup (Linux) and `setup --from-backup` (both
+    launchers: setup_logic.stage_setup_from_backup since #442.9), run for
+    real against crafted backup files. The Mac launcher's `restore` goes
+    through onionpress.cli restore."""
 
-    SETUP = {"linux/onionpress": "setup_wordpress_interactive",
-             "app/MacOS/onionpress": "setup_wordpress_cli"}
     # Launchers with a bash restore_backup.
     RESTORE = ("linux/onionpress",)
 
@@ -613,11 +612,22 @@ class TestLauncherRestorePaths(unittest.TestCase):
             f.write("ONIONNAME=me\n")
         return data
 
+    def _setup_from_backup(self, path):
+        """`setup --from-backup`'s staging, as `onionpress setup` runs it:
+        (rc, what it said); its log lines go to the log file."""
+        from onionpress import setup_logic
+        said = []
+
+        def log(msg):
+            with open(os.path.join(self.tmp, "log"), "a") as f:
+                f.write(msg + "\n")
+        data = os.path.join(self.tmp, "home", ".onionpress")
+        ok, _ = setup_logic.stage_setup_from_backup(path, PW, data, log, said.append)
+        return (0 if ok else 1), "\n".join(said)
+
     def _run(self, launcher, call):
         text = _read(launcher)
-        names = ["is_onion_address", self.SETUP[launcher]]
-        if launcher in self.RESTORE:
-            names.append("restore_backup")
+        names = ["is_onion_address", "restore_backup"]
         funcs = "".join(_bash_function(text, name) for name in names)
         # Stubs. extract-backup goes straight to the Python helper (the CLI
         # entry builds OnionPressCLI, which sets up ~/.onionpress);
@@ -662,9 +672,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
 
     def _restore_functions(self, launcher):
         """The launcher's bash functions that restore from a backup."""
-        if launcher in self.RESTORE:
-            return ("restore_backup", self.SETUP[launcher])
-        return (self.SETUP[launcher],)
+        return ("restore_backup",) if launcher in self.RESTORE else ()
 
     def test_restore_backup_only_where_listed(self):
         for launcher in LAUNCHERS:
@@ -713,11 +721,10 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
 
     def test_setup_from_backup_refuses_crafted_backups(self):
         backups = list(self._crafted())
-        for launcher, func in self.SETUP.items():
-            for label, path in backups:
-                with self.subTest(launcher=launcher, case=label):
+        for label, path in backups:
+            with self.subTest(case=label):
                     data = self._fresh_data_dir()
-                    rc, _, err = self._run(launcher, f'{func} --from-backup "$PW" {path!r}')
+                    rc, err = self._setup_from_backup(path)
                     self.assertNotEqual(rc, 0)
                     # Refused by extract-backup (metadata) or the
                     # backup-address gate (keys); either way, before
@@ -749,13 +756,17 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                 if launcher == "linux/onionpress":
                     # The Settings page takes the address from the last line.
                     self.assertEqual(out.rstrip("\n").rsplit("\n", 1)[-1], ADDR)
-        for launcher, func in self.SETUP.items():
-            with self.subTest(launcher, func=func):
+        with self.subTest("setup --from-backup"):
                 data = self._fresh_data_dir()
-                self._run(launcher, f'{func} --from-backup "$PW" {path!r}')
+                self._setup_from_backup(path)
                 self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")),
                                  [ADDR])
                 self.assertEqual(read_config(os.path.join(data, "config")), want_config)
+
+    def _stage_source(self):
+        text = _read("src/onionpress/setup_logic.py")
+        i = text.index("def stage_setup_from_backup(")
+        return text[i:text.index("\ndef ", i + 10)]
 
     def test_launchers_never_copy_a_backups_config(self):
         for launcher in LAUNCHERS:
@@ -766,6 +777,9 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                     self.assertIn('restore-config --staging "$staging" '
                                   '--config "$DATA_DIR/config"',
                                   _bash_function(code, func), func)
+        stage = self._stage_source()
+        self.assertIn("backup.restore_backup_config(", stage)
+        self.assertNotIn('"config")', stage.split("config_file =", 1)[0])
 
     def test_launchers_never_read_the_address_from_metadata(self):
         for launcher in LAUNCHERS:
@@ -778,12 +792,18 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                     self.assertLess(gate, body.index("vanity-keys"), func)
                     if 'cp "$staging/config"' in body:
                         self.assertLess(gate, body.index('cp "$staging/config"'), func)
+        stage = self._stage_source()
+        self.assertNotIn('"onion_address"', stage)
+        self.assertNotIn("'onion_address'", stage)
+        self.assertLess(stage.index("backup.staged_backup_address("),
+                        stage.index('"vanity-keys"'))
 
     def test_failed_setup_and_restore_stop_the_launcher(self):
-        for launcher, func in self.SETUP.items():
+        for launcher in LAUNCHERS:
             code = _read(launcher)
             with self.subTest(launcher):
-                self.assertIn(f'{func} "$@" || exit 1', code)
+                self.assertIn('run_setup "$@" || setup_rc=$?', code)
+                self.assertIn("                *) exit 1 ;;\n            esac", code)
                 self.assertRegex(
                     code, r'if ! (?:ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" )?'
                           r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '

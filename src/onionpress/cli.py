@@ -28,6 +28,8 @@ from .docker import Docker
 from .containers import ContainerManager
 from .start import StartErrors
 from .launcher_ops import BACKUP_PASSWORD_ENV
+from .setup_logic import IA_PASSWORD_ENV as _IA_PASSWORD_ENV
+from .setup_logic import SETUP_PASSWORD_ENV as _SETUP_PASSWORD_ENV
 from .analytics_sharing import SHARING_CONFIG_KEY
 from .hub_backup import RECOVERY_KEY_ENV
 from . import confirm as _confirm
@@ -2568,6 +2570,45 @@ def _run_start_containers(run):
         until_core=args.until_core, log=manager.log_func)
 
 
+def _add_setup(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Set up WordPress from a terminal (the launchers' `setup`): the "
+             "install the setup window makes, with the answers given here or "
+             "asked; --from-backup takes a backup's settings and key. "
+             f"Passwords only in the environment (${{{_SETUP_PASSWORD_ENV}}}, "
+             f"${{{_IA_PASSWORD_ENV}}}, ${{{BACKUP_PASSWORD_ENV}}} for the "
+             "backup's). Exit 0 done, 2 already installed, 10 the launcher "
+             "must restart the stack, 1 failed")
+    p.add_argument("--user", default="", help="The admin username (an onionname)")
+    p.add_argument("--title", default="", help="The site title")
+    p.add_argument("--email", default="", help="Accepted for compatibility; unused")
+    p.add_argument("--ia-account", default="",
+                   help="An archive.org account to keep S3 keys from (Linux's setup)")
+    p.add_argument("--from-backup", default="", metavar="BACKUP_ZIP",
+                   help="Set up from this backup (its password in the environment)")
+    p.add_argument("--launcher", default=None,
+                   help="The launcher that runs provision-post-install and "
+                        "setup-bundled-plugins (default: this install's)")
+
+
+def _run_setup(run):
+    # The launchers' `setup)` case (#442.11): setup_logic.setup_from_terminal.
+    # No OnionPressCLI setup: the launcher made config and secrets already.
+    from . import setup_logic
+    from .handle_action import default_launcher
+    args = run.args
+    paths = resolve_paths(data_dir=args.data_dir)
+    mac = detect_os() == OS.MACOS
+    log = _make_log_func(paths.log_file)
+    return setup_logic.setup_from_terminal(
+        data_dir=paths.data_dir, mac=mac,
+        launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
+        docker=Docker(paths), manager=_start_step_manager(paths), user=args.user,
+        title=args.title, from_backup=args.from_backup, ia_account=args.ia_account,
+        log=log)
+
+
 def _add_start_post_up(sub, name):
     p = sub.add_parser(
         name,
@@ -3152,6 +3193,7 @@ _COMMANDS = [
             "OnionPress's own containers on it and disconnecting anything "
             "else; always exits 0"),
      _run_start_step),
+    ("setup", _add_setup, _run_setup),
     ("start-containers", _add_start_containers, _run_start_containers),
     ("start-post-up", _add_start_post_up, _run_start_post_up),
     ("migrate-key-volume",
