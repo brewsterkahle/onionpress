@@ -35,6 +35,10 @@ SCENARIOS = [
     Scenario("first-run-imported-key", docker=FRESH, files=KEY_FILES),
     Scenario("first-run-generated", docker=FRESH, env={"FAKE_VANITY": GENERATED}),
     Scenario("first-run-generation-fails", docker=FRESH),
+    Scenario("first-run-bad-prefix", docker=FRESH, config="ADDRESS_PREFIX=Elph1n\n",
+             env={"FAKE_VANITY": GENERATED}),
+    Scenario("first-run-vanity-prefix", docker=FRESH, config="ADDRESS_PREFIX=\nVANITY_PREFIX=ab\n",
+             env={"FAKE_VANITY": GENERATED}),
     Scenario("first-run-seed-fails", files=KEY_FILES, docker=dict(
         FRESH, rules=[{"match": r"^run .*onionpress-onion-keys:/dest", "rc": 1}])),
     Scenario("import-key-pending-removed", files={".import-key-pending": ""},
