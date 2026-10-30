@@ -81,6 +81,21 @@
   up rootless Docker, judging success by `docker info`, using
   `user_systemctl` (not `--machine`) and `--no-block`
   (`tests/test_deb_first_install_docker.py`).
+- The rootless setup tool is looked for on PATH, then in docker.io's
+  contrib, then in the package's own copy of Docker's two scripts
+  (`linux/docker-rootless/`, pinned by commit and sha256, Apache-2.0 in
+  `linux/copyright`; Ubuntu's docker.io ships none). A RootlessKit without
+  `--detach-netns` (Ubuntu 24.04's 1.1.1) gets the user's
+  `docker.service.d/onionpress-rootlesskit.conf` drop-in turning it off. A
+  skipped or failed attempt says why at the terminal and in
+  `~/.onionpress/docker-rootless-setup.log`. **No Compose v1 in
+  `Depends`**: every Compose alternative is v2 (`docker-compose-plugin |
+  docker-compose-v2 | docker-compose (>= 2)`), and the launcher's start
+  checks `docker compose version`. **The .deb Recommends nothing**:
+  torbrowser-launcher is a Suggests, since as a Recommends it brought the
+  system `tor` on to 9050 (Ubuntu installs Recommends by default) and the
+  site moved to 18080. `tests/test_docker_rootless_vendored.py`,
+  `tests/test_deb_first_install_docker.py`.
 - **Every Mac build input is pinned by hash**: downloads through
   `fetch_checked` against the `*_SHA256_*` constants; Python from the
   `build/*-macos.lock` files with `--require-hashes`
