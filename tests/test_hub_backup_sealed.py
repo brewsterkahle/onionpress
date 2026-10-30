@@ -68,6 +68,11 @@ def _read(rel):
 
 
 def _load_key_convert():
+    # key-convert.py imports onion_auth as a top-level module: the tor image
+    # copies it next to the script at build time (src/onionpress/onion_auth.py).
+    pkg = os.path.join(PROJECT_ROOT, "src", "onionpress")
+    if pkg not in sys.path:
+        sys.path.append(pkg)
     spec = importlib.util.spec_from_file_location(
         "key_convert_hub_backup", os.path.join(DOCKER_TOR_DIR, "key-convert.py"))
     module = importlib.util.module_from_spec(spec)
