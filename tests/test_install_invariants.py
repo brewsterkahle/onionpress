@@ -635,10 +635,10 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         Step ordering is enforced inside multisite.provision_post_install
         — see tests/test_multisite.py.
         """
+        # Both launchers' start runs it inside start-post-up (#442.7).
         for path, py_cmd in (
-            ("linux/onionpress", r'op_py\s+provision-post-install'),
-            ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+--data-dir\s+"\$DATA_DIR"\s+provision-post-install'),
+            ("linux/onionpress", r'start_post_up "\$wp_installed"'),
+            ("app/MacOS/onionpress", r'start_post_up "\$wp_installed"'),
         ):
             script = _read(path)
             m = re.search(
@@ -962,7 +962,6 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # holds their shape) and detect_port_offset (needs to run before the
     # Python lib path is set up).
     REQUIRED_ON_BOTH = {
-        "install_bundled_plugins",
         "setup_bundled_plugins",
         "detect_port_offset",
     }
@@ -1516,7 +1515,9 @@ class TestKeyVolumeMigration(unittest.TestCase):
                         any(re.search(r"\bif ! migrate_key_volume\b", l) for l in block),
                         f"{lines[start].strip()!r} starts tor at line {n + 1} "
                         "without migrate_key_volume before it")
-            self.assertGreaterEqual(found, 2, f)
+            # The start's tor is Python's since #442.7 (start.post_up, after
+            # migrate_key_volume and behind key_volume_not_ready).
+            self.assertGreaterEqual(found, 1, f)
 
     def test_identity_wipes_drop_the_migration_marker(self):
         """A key import or restore removes both key volumes for a replaced
@@ -1950,9 +1951,13 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
             previous = text[:m.start()].rstrip("\n").rsplit("\n", 1)[-1].strip()
             self.assertEqual(previous, "log_start_summary", text[m.start() - 120:m.end()])
         self.assertIn("\nlog_start_summary() {", text)
-        self.assertGreaterEqual(
-            text.count('START_ERRORS="$START_ERRORS'), 4,
-            "the guarded start steps append their name to START_ERRORS")
+        # The guarded start steps name themselves through the errors file
+        # (onionpress.start's contract, #442.2).
+        self.assertIn('START_ERRORS="$START_ERRORS $name"', text)
+        start = _read("src/onionpress/start.py")
+        for name in ("tor", "deactivate-wp-statistics", "provision-post-install",
+                     "wordpress-egress"):
+            self.assertIn(f'"{name}"', start, name)
 
     def test_wait_for_services_reports_without_failing_the_start(self):
         # Linux already returns 0 here; under set -e a return 1 ended
@@ -2469,48 +2474,16 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         end = text.index("\n}\n", start)
         return text[start:end]
 
-    def test_launchers_delegate_the_pending_check(self):
-        """Phase 4 (#120): the check is onionpress.cli's, the same
-        derivatives.regeneration_pending the sweep itself uses, so the gate
-        and the sweep cannot disagree about a marker."""
-        for f, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
-                          ("linux/onionpress", "op_py")):
-            with self.subTest(launcher=f):
-                body = self._function_body(_read(f), "regenerate_derivatives_pending")
-                code = [l.strip() for l in body.splitlines()
-                        if l.strip() and not l.strip().startswith("#")]
-                self.assertEqual(code, [
-                    "regenerate_derivatives_pending() {",
-                    f'{runner} --data-dir "$DATA_DIR" regenerate-derivatives-pending '
-                    '2>>"$LOG_FILE"'])
-
-    def _pending_under_bash(self, launcher, host_marker):
-        """The launcher's own function under bash, its runner on this
-        interpreter and src/, DOCKER_HOST at nothing (the container marker's
-        `docker exec` then fails, as it does with the stack down); returns
-        the exit code."""
-        text = _read(launcher)
-        with tempfile.TemporaryDirectory() as tmp:
-            if host_marker:
-                open(os.path.join(tmp, self.HOST_MARKER), "w").close()
-            script = ('bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
-                      'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
-                      + self._function_body(text, "regenerate_derivatives_pending") + "\n}\n"
-                      + "regenerate_derivatives_pending\n")
-            out = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=60,
-                env={"PATH": "/usr/bin:/bin", "HOME": tmp, "DATA_DIR": tmp,
-                     "LOG_FILE": os.path.join(tmp, "log"),
-                     "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-                     "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src")})
-            self.assertEqual(out.stderr, "")
-        return out.returncode
-
-    def test_the_delegation_answers_for_the_host_marker(self):
+    def test_the_start_asks_the_sweeps_own_check(self):
+        """The start's gate (start.post_up, #442.7) is
+        derivatives.regeneration_pending, the check the sweep itself runs,
+        so the gate and the sweep cannot disagree about a marker; no
+        launcher keeps a bash copy."""
+        text = _read("src/onionpress/start.py")
+        self.assertIn("derivatives.regeneration_pending(paths.data_dir, docker.docker_bin)", text)
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
-                self.assertEqual(self._pending_under_bash(f, host_marker=True), 0)
-                self.assertEqual(self._pending_under_bash(f, host_marker=False), 1)
+                self.assertNotIn("\nregenerate_derivatives_pending() {", _read(f))
 
     def test_the_container_marker_is_asked_of_docker(self):
         """derivatives.regeneration_pending, what the subcommand runs: the

@@ -33,10 +33,10 @@ bin systemctl --user mask --runtime onionpress-heartbeat.service
 log Heartbeat client held until WordPress is installed (no hub registration before setup)
 bin systemctl --user is-active onionpress-heartbeat.service
 bin systemctl --user stop onionpress-heartbeat.service
+docker volume ls --format {{.Name}}
 docker compose up -d tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp
 docker container inspect onionpress-cloudflared
-fn start_onionheaven_activation_watcher
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Installing Internet Archive Wayback Machine Link Fixer 1.4.2...
 docker exec onionpress-wordpress true
@@ -57,6 +57,7 @@ py deactivate-wp-statistics
 py provision-post-install --themes-dir $TMP/opt/themes --plugins-dir $TMP/opt/plugins
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
 log WordPress not installed yet — Cache Enabler and the Link Fixer are set up after setup
+fn start_onionheaven_activation_watcher
 rc=0
 markers=
 volumes=onionpress-onion-keys onionpress-tor-state

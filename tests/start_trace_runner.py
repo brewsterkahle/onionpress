@@ -37,7 +37,7 @@ REAL = {
     "migrate-tor-network", "using-local-images",
     "regenerate-derivatives-pending", "wordpress-egress",
     "apply-pending-key-import", "start-containers", "setup-bundled-plugins",
-    "install-bundled-plugins",
+    "install-bundled-plugins", "start-post-up",
     "start-core", "start-post-up", "seed-onion-key",
 }
 # Only ever started in the background by a start.

@@ -17,6 +17,7 @@ log Restoring .htaccess rewrite rules (missing or empty)
 docker exec -i -u www-data onionpress-wordpress sh -c t=$(mktemp "$1.XXXXXX") || exit 1; if cat > "$t" && chmod "$2" "$t" && mv -f "$t" "$1"; then exit 0; fi; rm -f "$t"; exit 1 sh /var/www/html/.htaccess 644
 log ✓ .htaccess restored
 log Starting Tor containers...
+docker volume ls --format {{.Name}}
 docker compose up -d tor onionheaven
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed

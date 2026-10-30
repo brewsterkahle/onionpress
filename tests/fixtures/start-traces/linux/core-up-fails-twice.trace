@@ -19,10 +19,10 @@ docker port onionpress-wordpress 80/tcp
 log WordPress is installed: moving its port 8080 from 127.0.0.1 to 0.0.0.0 (ONIONPRESS_BIND_HOST)
 docker compose up -d wordpress [BIND=0.0.0.0]
 bin systemctl --user is-enabled onionpress-heartbeat.service
+docker volume ls --format {{.Name}}
 docker compose up -d tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp
 docker container inspect onionpress-cloudflared
-fn start_onionheaven_activation_watcher
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
@@ -45,6 +45,7 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp plugin activate internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php --url=http://site.onion/
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
+fn start_onionheaven_activation_watcher
 rc=0
 markers=.wordpress-installed
 volumes=onionpress-onion-keys onionpress-tor-state

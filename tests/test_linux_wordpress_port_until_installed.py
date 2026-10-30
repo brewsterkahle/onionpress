@@ -182,8 +182,9 @@ class TestUnderBash(unittest.TestCase):
         self.assertRegex(body, r'if \$wp_installed; then\n[^\n]*\n\s*after_wordpress_installed\n')
         self.assertRegex(body, r'\n\s*bind_wordpress_port_for_install_state false\n'
                                r'\s*hold_heartbeat_client_until_installed\n')
+        # ...before Tor starts (in start-post-up, #442.7).
         self.assertLess(body.index("hold_heartbeat_client_until_installed"),
-                        body.index("docker compose up -d tor onionheaven"))
+                        body.index('start_post_up "$wp_installed"'))
 
     def test_only_wordpress_s_port_follows_the_variable(self):
         """The per-command override reaches only the service it is for."""

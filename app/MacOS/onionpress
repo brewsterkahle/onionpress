@@ -1208,21 +1208,13 @@ set_address_prefix_for() {
     log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
 }
 
-# Cache Enabler and the Internet Archive Link Fixer (onionpress.bundled_plugins,
-# #442.3): install_bundled_plugins puts the pinned releases in the WordPress
-# container (downloaded over Tor, checked against their pins; INSTALL_*=no
-# leaves one out); setup_bundled_plugins configures, then activates them
-# (Cache Enabler network-wide with its cache policy, the Link Fixer site by
-# site), once provision-post-install has installed the policy mu-plugins.
-# The setup-bundled-plugins subcommand, which setup_logic.install_fresh_wordpress
-# starts once setup has made the user's site, runs the second. Best effort:
-# both log in this script's format, tee'd into the log, and never stop a start.
-install_bundled_plugins() {
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" install-bundled-plugins \
-        --scripts-dir "$SCRIPTS_DIR" 2>&1 | tee -a "$LOG_FILE"
-    return 0
-}
-
+# Configure, then activate, Cache Enabler (network-wide, with its cache
+# policy) and the Internet Archive Link Fixer (site by site), once
+# WordPress is installed (onionpress.bundled_plugins, #442.3; a start does
+# it inside start-post-up). The setup-bundled-plugins case, which
+# setup_logic.install_fresh_wordpress starts once setup has made the
+# user's site, runs it. Best effort: logged in this script's format, tee'd
+# into the log, never a stopped command.
 setup_bundled_plugins() {
     bundled_python -m onionpress.cli --data-dir "$DATA_DIR" setup-bundled-plugins \
         --scripts-dir "$SCRIPTS_DIR" 2>&1 | tee -a "$LOG_FILE"
@@ -1396,52 +1388,6 @@ update_images() {
     return 0
 }
 
-# Install OnionPress theme and plugins into the WordPress container
-configure_site_timezones() {
-    # Set each site's timezone_string to the host machine's IANA TZ
-    # (e.g. America/Los_Angeles) the first time we see each site.
-    # Without this, fresh WordPress installs default to empty string /
-    # gmt_offset=0, and imported tweet timestamps (stored as UTC
-    # post_date_gmt) end up displayed in UTC. Matching the host TZ
-    # reflects the times the user saw when they posted originally.
-    #
-    # Only sets when timezone_string is empty — never clobbers a
-    # user's intentional choice. Idempotent across launches.
-    if ! wp_is_installed; then
-        return 0
-    fi
-
-    local host_tz
-    host_tz="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
-    if [ -z "$host_tz" ]; then
-        log "Skipping timezone config: host TZ undetectable"
-        return 0
-    fi
-
-    # On multisite, iterate all sites; on single-site, fall back to the
-    # main siteurl. Empty output from `wp site list` means single-site.
-    local sites
-    sites="$(wp_cli site list --field=url 2>/dev/null)"
-    if [ -z "$sites" ]; then
-        sites="$(wp_cli option get siteurl 2>/dev/null)"
-    fi
-
-    local site_url current
-    for site_url in $sites; do
-        current="$(wp_cli option get timezone_string --url="$site_url" 2>/dev/null || echo "")"
-        if [ -z "$current" ]; then
-            if wp_cli option update timezone_string "$host_tz" --url="$site_url" >> "$LOG_FILE" 2>&1; then
-                log "✓ Set timezone_string=$host_tz for $site_url"
-            else
-                log "WARNING: Failed to set timezone for $site_url"
-            fi
-            # With timezone_string set, gmt_offset becomes redundant;
-            # blank it so WP uses the IANA name rather than a fixed offset.
-            wp_cli option update gmt_offset "" --url="$site_url" >> "$LOG_FILE" 2>&1 || true
-        fi
-    done
-}
-
 # Function to set up OnionHeaven (onionheaven mode only)
 # Registration API now runs in the onionheaven container (web-server.py),
 # which creates its own data directories on the shared volume at startup.
@@ -1537,6 +1483,25 @@ wait_for_docker_or_recover_vm() {
     recover_lima_vm "$who" || return 1
     wait_for_docker "$limit"
 }
+# The end of the start, once the core is up (start.post_up, #442.7): the
+# .htaccess repair, Tor (`tor` in the START SUMMARY when it will not
+# start), the pinned plugins, an install-from-backup's import, the
+# provisioning steps (each named in the START SUMMARY when it fails), the
+# plugins' setup, the image rebuild and the archive.org login (detached,
+# outliving this script), the site timezones, the Cloudflare tunnel. Best
+# effort: it never stops the start. $1: whether WordPress is installed.
+start_post_up() {
+    local errors
+    errors=$(start_errors_file)
+    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" start-post-up \
+        --wordpress-installed "$([ "$1" = true ] && echo yes || echo no)" \
+        --docker-dir "$DOCKER_DIR" --scripts-dir "$SCRIPTS_DIR" \
+        --themes-dir "$RESOURCES_DIR/themes" --plugins-dir "$RESOURCES_DIR/plugins" \
+        ${errors:+--errors-file "$errors"} 2>&1 | tee -a "$LOG_FILE"
+    note_start_errors "$errors"
+    return 0
+}
+
 
 # Run a command inside the VM through `limactl shell`, bounded to $1
 # seconds. limactl shell hangs for good when the guest's sshd is wedged
@@ -1730,21 +1695,6 @@ migrate_key_volume() {
     return "${PIPESTATUS[0]}"
 }
 
-# Image derivatives (issue #257): backups carry original images only, so a
-# restore leaves the resized copies (-WxH sizes, -scaled) to be rebuilt. True
-# when that rebuild is still owed: the host marker the restore paths write,
-# or the marker a backup archive carries inside wp-content/uploads/ (which a
-# restore by an OnionPress version that predates the host marker still copies
-# into the container). start_containers then runs
-# `onionpress.cli regenerate-derivatives` detached in the background; it uses
-# `wp media regenerate --only-missing`, so an interrupted sweep resumes on the
-# next start, and it clears both markers only when it completes. The check
-# is onionpress.cli's (derivatives.regeneration_pending, the same one the
-# sweep uses), asked through the CLI (Phase 4, #120).
-regenerate_derivatives_pending() {
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" regenerate-derivatives-pending 2>>"$LOG_FILE"
-}
-
 # Function to start containers
 start_containers() {
     log "Starting OnionPress containers..."
@@ -1809,159 +1759,9 @@ start_containers() {
         *) return 1 ;;
     esac
 
-    # Ensure .htaccess exists — WordPress REST API (block editor publishing)
-    # requires rewrite rules. These can be lost if WordPress auto-updates or
-    # the volume is recreated. Check on every launch, not just first setup.
-    if $wp_installed; then
-        log "WordPress is installed"
-        if ! docker exec onionpress-wordpress test -s /var/www/html/.htaccess 2>/dev/null; then
-            log "Restoring .htaccess rewrite rules (missing or empty)"
-            # Written as www-data, whose folder the web root is (wp_put).
-            if wp_put /var/www/html/.htaccess 644 2>>"$LOG_FILE" << "HTEOF"
-# Privacy: prevent onion address leaking in Referer headers
-<IfModule mod_headers.c>
-Header set Referrer-Policy "no-referrer"
-</IfModule>
-
-# My Creations is a publishing folder: serve its files, never run them
-RewriteEngine On
-RewriteCond %{REQUEST_URI} /wp-content/creations/ [NC]
-RewriteCond %{REQUEST_URI} \.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]
-RewriteRule ^ - [F]
-# ...and never its hidden files and folders (.git/, .DS_Store, .thumbs/)
-RewriteCond %{REQUEST_URI} /wp-content/creations/(.*/)?\. [NC]
-RewriteRule ^ - [F]
-
-# Blog importer snapshots (drafts, private posts, author emails) went to
-# blog-archives/ through 2.5.2. They live in the hidden .blog-archives/ now;
-# until the importer has moved the old folder there, refuse it as well.
-RewriteCond %{REQUEST_URI} /wp-content/creations/blog-archives(/|$) [NC]
-RewriteRule ^ - [F]
-
-# Uploads are media: serve them, never run them
-RewriteCond %{REQUEST_URI} /wp-content/uploads/ [NC]
-RewriteCond %{REQUEST_URI} \.(php[0-9]*|pht(ml)?|phar|phps|cgi|shtml)(/|$) [NC]
-RewriteRule ^ - [F]
-
-# BEGIN WordPress Multisite
-RewriteEngine On
-RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
-RewriteBase /
-RewriteRule ^index\.php$ - [L]
-
-# add a trailing slash to /wp-admin
-RewriteRule ^([_0-9a-zA-Z.-]+/)?wp-admin$ $1wp-admin/ [R=301,L]
-
-RewriteCond %{REQUEST_FILENAME} -f [OR]
-RewriteCond %{REQUEST_FILENAME} -d
-RewriteRule ^ - [L]
-RewriteRule ^([_0-9a-zA-Z.-]+/)?(wp-(content|admin|includes).*) $2 [L]
-RewriteRule ^([_0-9a-zA-Z.-]+/)?(.*\.php)$ $2 [L]
-RewriteRule . index.php [L]
-# END WordPress Multisite
-HTEOF
-            then
-                log "✓ .htaccess restored"
-            else
-                log "WARNING: Failed to restore .htaccess"
-            fi
-        fi
-    else
-        log "WordPress not yet installed — will be configured by setup window"
-    fi
-
-    # Always start Tor — generate the onion address in parallel with WordPress
-    # setup so it's ready when the user finishes configuring.
-    log "Starting Tor containers..."
-    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 \
-        || { log "ERROR: Failed to start tor/onionheaven containers (rc=$?) — see $LOG_FILE"; START_ERRORS="$START_ERRORS tor"; }
-
-    # Put the pinned Internet Archive Link Fixer and Cache Enabler releases
-    # in place (downloaded over Tor, checked against their pins).
-    # setup_bundled_plugins configures and activates them below, once
-    # provision-post-install has installed the mu-plugins that say what
-    # they may do.
-    install_bundled_plugins
-
-    # The WP-side post-start provisioning is shared with Linux now:
-    # deactivate-wp-statistics, then provision-post-install (which
-    # internally handles ensure_multisite, install_multisite_domain_map,
-    # install_onionpress_theme, the perm fixes, and the shared-onion-address
-    # write — in the right order), then setup_bundled_plugins.
-    # See src/onionpress/multisite.py.
-    # install-from-backup: if a backup was staged for this install, import its
-    # DB + content into the now-running containers BEFORE the WP provisioning
-    # below, so provision-post-install and the plugin setup operate on the
-    # restored site.
-    # provision-post-install then refreshes the OnionPress-managed theme/
-    # mu-plugins/sunrise.php to the CURRENT version, fixing any backup version skew.
-    _ifb_marker="$DATA_DIR/.install-from-backup"
-    _ifb_staging=""
-    if [ -f "$_ifb_marker" ]; then
-        _ifb_staging=$(head -1 "$_ifb_marker" 2>/dev/null)
-        if [ -n "$_ifb_staging" ] && [ -d "$_ifb_staging" ]; then
-            log "Install-from-backup: importing artifacts from $_ifb_staging"
-            if ! bundled_python -m onionpress.cli import-backup-artifacts --staging "$_ifb_staging"; then
-                log "ERROR: install-from-backup import failed — leaving marker for retry"
-                _ifb_staging=""
-            fi
-        else
-            log "Install-from-backup: marker present but staging missing ($_ifb_staging); ignoring"
-            _ifb_staging=""
-        fi
-    fi
-
-    # Each of these exits 1 on failure; under set -e a bare call would end
-    # `onionpress start` here with only a traceback on stderr, skipping the
-    # timezone, clearnet-logging and readiness steps. Log and carry on.
-    local _step
-    for _step in deactivate-wp-statistics; do
-        bundled_python -m onionpress.cli "$_step" >> "$LOG_FILE" 2>&1 \
-            || { log "WARNING: $_step failed (rc=$?) — continuing; see $LOG_FILE"; START_ERRORS="$START_ERRORS $_step"; }
-    done
-    bundled_python -m onionpress.cli --data-dir "$DATA_DIR" provision-post-install \
-        --themes-dir "$RESOURCES_DIR/themes" \
-        --plugins-dir "$RESOURCES_DIR/plugins" >> "$LOG_FILE" 2>&1 \
-        || { log "WARNING: provision-post-install failed (rc=$?) — themes/plugins may be missing; see $LOG_FILE"; START_ERRORS="$START_ERRORS provision-post-install"; }
-    setup_bundled_plugins
-
-    # install-from-backup: clean up staging + marker only after a successful
-    # import + provisioning, so an interrupted run re-imports on the next start.
-    if [ -n "$_ifb_staging" ]; then
-        rm -rf "$_ifb_staging"
-        rm -f "$_ifb_marker"
-        log "Install-from-backup: complete (staging cleaned up)"
-    fi
-
-    # Image derivatives (#257): if a restore left resized images to rebuild,
-    # do it in the background — niced, detached from this script's job table
-    # (see the subshell note below), resumable across restarts. After
-    # provision-post-install so the image-fallback mu-plugin is in place.
-    if $wp_installed && regenerate_derivatives_pending; then
-        log "Image derivatives: rebuild pending — starting in the background"
-        ( bundled_python -m onionpress.cli regenerate-derivatives >> "$LOG_FILE" 2>&1 & )
-    fi
-
-    # Tor-routed archive.org login can take 30s — background it so the
-    # rest of start_containers returns promptly. No-op if keys are set.
-    # Run it from a subshell so it is not in this script's job table: the
-    # EXIT trap kills $(jobs -p), and `onionpress start` returns within a
-    # second on a not-yet-installed site, which used to SIGTERM this 30s
-    # login every time with nothing in the log.
-    ( bundled_python -m onionpress.cli ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 & )
-
-    # Configure site timezones to match the host machine so imported
-    # social-media timestamps display in local time. Idempotent.
-    configure_site_timezones
-
-    # Conditionally start Cloudflare Tunnel
-    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-        log "Cloudflare Tunnel enabled, starting cloudflared..."
-        docker compose $CF_COMPOSE up -d cloudflared >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start cloudflared container"
-    else
-        # Stop cloudflared if it was previously running but token was removed
-        docker stop onionpress-cloudflared 2>/dev/null || true
-    fi
+    # Tor, the plugins, provisioning, the backup import, the image rebuild,
+    # the timezones and the Cloudflare tunnel (start_post_up): best effort.
+    start_post_up "$wp_installed"
 }
 
 # Function to stop containers

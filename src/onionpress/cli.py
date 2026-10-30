@@ -2651,6 +2651,43 @@ def _run_start_core(run):
     return 0 if installed else 3
 
 
+def _add_start_post_up(sub, name):
+    p = sub.add_parser(
+        name,
+        help="The end of a launcher's start, once the core services are up: "
+             "Tor, the pinned plugins, provisioning, the Mac's .htaccess, "
+             "backup import and site timezones, the image rebuild, the "
+             "Cloudflare tunnel; best effort, always exits 0")
+    p.add_argument("--wordpress-installed", choices=("yes", "no"), required=True,
+                   help="What start-core found")
+    p.add_argument("--docker-dir", default=None, help="The compose files' folder")
+    p.add_argument("--scripts-dir", default=None,
+                   help="Where install_plugin.sh and activate_plugin.sh are")
+    p.add_argument("--themes-dir", required=True, help="The bundled themes")
+    p.add_argument("--plugins-dir", required=True, help="The bundled mu-plugins")
+    _add_errors_file(p)
+
+
+def _run_start_post_up(run):
+    # The launchers' post-up block of start_containers (#442.7):
+    # start.post_up, in the launcher's words; best effort, so 0.
+    from . import start
+    args = run.args
+    paths = _start_paths(args)
+    manager = _start_step_manager(paths)
+    errors = StartErrors(args.errors_file) if args.errors_file else None
+    try:
+        start.post_up(manager, mac=detect_os() == OS.MACOS,
+                      installed=args.wordpress_installed == "yes", errors=errors,
+                      themes_dir=args.themes_dir, plugins_dir=args.plugins_dir,
+                      scripts_dir=args.scripts_dir or "", log=manager.log_func)
+    except Exception as e:
+        manager.log_func(f"WARNING: the start's last steps failed: {e}")
+        if errors is not None:
+            errors.add("start-post-up")
+    return 0
+
+
 def _run_apply_pending_key_import(run):
     # The launchers' apply_pending_key_import() (#442.4): ContainerManager's,
     # logged in the launcher's format; no OnionPressCLI setup (it runs
@@ -3215,6 +3252,7 @@ _COMMANDS = [
      _run_apply_pending_key_import),
     ("seed-onion-key", _add_seed_onion_key, _run_seed_onion_key),
     ("start-core", _add_start_core, _run_start_core),
+    ("start-post-up", _add_start_post_up, _run_start_post_up),
     ("migrate-key-volume",
      _plain("Before anything starts Tor: copy the onion service key out of "
             "onionpress-arti-state (its name until 2026-09-25) into "

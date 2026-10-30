@@ -60,9 +60,9 @@ class TestLauncherWiring(unittest.TestCase):
                         body.index("read_cloudflare_token"))
 
     def test_start_runs_the_tunnel_after_tor(self):
+        # start.post_up: Tor, then the tunnel (tests/test_start_post_up.py).
         body = _function(self.text, "start_containers")
-        self.assertLess(body.index("up -d tor onionheaven"),
-                        body.index('start_cloudflare_tunnel "$wp_installed"'))
+        self.assertIn('start_post_up "$wp_installed"', body)
         # The start's pull takes the Cloudflare file with a token
         # (start.start_core, #442.6; tests/test_start_core.py).
         self.assertIn("start_core_services || rc=$?", body)
@@ -81,67 +81,8 @@ class TestLauncherWiring(unittest.TestCase):
                         body.index("cloudflare/cloudflared:"))
 
 
-class TestTunnelBehaviour(unittest.TestCase):
-    """read_cloudflare_token and start_cloudflare_tunnel, run for real."""
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="op-cf-tunnel-")
-        self.log = os.path.join(self.dir, "launcher.log")
-        self.calls = os.path.join(self.dir, "docker-calls")
-        text = _read(LAUNCHER)
-        compose_line = re.search(r"(?m)^COMPOSE_WITH_CF=\(.*\)$", text).group(0)
-        self.script = "\n".join([
-            "set -e",
-            f'DATA_DIR="{self.dir}"',
-            f'LOG_FILE="{self.log}"',
-            'log() { echo "$1" >> "$LOG_FILE"; }',
-            # `docker container inspect` answers per $CF_EXISTS.
-            'docker() {',
-            f'    echo "docker $* TOKEN=$CLOUDFLARE_TUNNEL_TOKEN" >> "{self.calls}"',
-            '    if [ "$1 $2" = "container inspect" ]; then [ "$CF_EXISTS" = yes ]; fi',
-            '}',
-            compose_line,
-            config_value_function(),
-            _function(text, "read_cloudflare_token"),
-            _function(text, "start_cloudflare_tunnel"),
-        ])
-
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def _run(self, config, installed, exists="no"):
-        with open(os.path.join(self.dir, "config"), "w") as f:
-            f.write(config)
-        script = self.script + (
-            "\nread_cloudflare_token"
-            f"\nCF_EXISTS={exists} start_cloudflare_tunnel {installed}\n")
-        subprocess.run(["bash", "-c", script], check=True)
-        calls = _read(self.calls) if os.path.exists(self.calls) else ""
-        log = _read(self.log) if os.path.exists(self.log) else ""
-        return calls, log
-
-    def test_token_with_padding_starts_cloudflared(self):
-        calls, log = self._run(
-            f"ADDRESS_PREFIX=op2\nCLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n", "true")
-        self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml"
-            f" up -d cloudflared TOKEN={TOKEN}\n", calls)
-        self.assertNotIn(TOKEN, log, "the token must never reach the log")
-
-    def test_not_before_wordpress_is_installed(self):
-        calls, log = self._run(f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n", "false")
-        self.assertEqual(calls, "")
-        self.assertIn("waiting until WordPress is set up", log)
-
-    def test_removed_token_removes_the_container(self):
-        calls, _ = self._run("CLOUDFLARE_TUNNEL_TOKEN=\n", "true", exists="yes")
-        self.assertIn("docker rm -f onionpress-cloudflared", calls)
-        self.assertNotIn(" up ", calls)
-
-    def test_no_token_no_container_does_nothing(self):
-        calls, _ = self._run("ADDRESS_PREFIX=op2\n", "true")
-        self.assertNotIn("rm -f", calls)
-        self.assertNotIn(" up ", calls)
+# The tunnel's behaviour (start.cloudflare_tunnel since #442.7) is held in
+# tests/test_start_post_up.py: TestCloudflareTunnel.
 
 
 class TestSettingsPage(unittest.TestCase):

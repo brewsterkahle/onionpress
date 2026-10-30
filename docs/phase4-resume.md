@@ -429,3 +429,39 @@ launchers' `retire_old_onionheaven_containers` and `migrate_tor_network`
 (Linux keeps `block_wordpress_egress` for its status loop). The ordering
 tests live in `tests/test_start_core.py`. Traces unchanged (the harness
 now has empty compose files in its docker folder, as an install has).
+
+### After the core is up (#449)
+
+`start.post_up(manager, mac=…, installed=…, errors=…, themes_dir=…,
+plugins_dir=…, scripts_dir=…)`, fast path `start-post-up`
+(`--wordpress-installed yes|no`, always 0), bash `start_post_up
+"$wp_installed"`. In the bash order: Mac `.htaccess` repair (written as
+www-data from `multisite.HTACCESS_BODY`, which the heredoc matched byte for
+byte; the heredoc is gone), Tor (`tor` in START_ERRORS on the Mac), Linux's
+SOCKS check and Cloudflare, `install_bundled_plugins`, the Mac's
+install-from-backup import, `deactivate-wp-statistics` and
+`provision-post-install` (`run_cli_step`; output to the log on the Mac, to
+the terminal on Linux), `setup_bundled_plugins`, the staging cleanup, the
+detached `regenerate-derivatives` (`run_detached_cli`: a session of its
+own, or `systemd-run --user` from the Settings-page watcher) and the Mac's
+detached `ensure-archive-s3-keys`, `configure_site_timezones`, the Mac's
+Cloudflare. Settled:
+- Tor now starts only when `key_volume_not_ready()` says nothing
+  (as `ContainerManager.start_tor`): one more `volume ls` in every trace.
+- Linux's `deactivate-wp-statistics` / `provision-post-install` failures
+  are WARNINGs: under `set -e` the bare bash calls ended the whole start
+  (the `steps-fail` trace had `rc=1`). Both platforms carry on now.
+- Linux's install-state steps (`after_wordpress_installed`, the port and
+  heartbeat hold, #464) stay bash, before the call: they name
+  `ONIONPRESS_BIND_HOST`, which no Python may (`test_linux_bind_scope`).
+  `note_if_lan_looks_local` stays bash too, now before Tor; the OnionHeaven
+  activation watcher (a bash background loop) after the call: the Linux
+  traces moved its line to the end.
+- Each platform's Cloudflare behaviour is kept: the Mac starts cloudflared
+  whenever there is a token and only stops it without one; Linux waits for
+  an installed WordPress and removes the container.
+Gone: the Mac's `configure_site_timezones` and `.htaccess` heredoc, both
+launchers' `regenerate_derivatives_pending` and `install_bundled_plugins`,
+Linux's `start_cloudflare_tunnel`, `warn_if_socks_port_exposed`,
+`run_detached` and `OP_PY`. Their behavioural tests moved to
+`tests/test_start_post_up.py`.

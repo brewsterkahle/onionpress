@@ -202,16 +202,13 @@ class TestLaunchers(unittest.TestCase):
                 subprocess.run(["bash", "-n", os.path.join(PROJECT_ROOT, rel)], check=True)
 
     def test_start_installs_then_provisions_then_sets_up(self):
+        """The start's post-up step (start.post_up, #442.7) installs, then
+        provisions, then sets up: tests/test_start_post_up.py holds the
+        order; configuration happens in setup_bundled_plugins only."""
         for rel in LAUNCHERS:
             start = _bash_function(_read(rel), "start_containers")
             with self.subTest(rel):
-                install = start.index("\n    install_bundled_plugins\n")
-                provision = start.index('onionpress.cli --data-dir "$DATA_DIR" provision-post-install' if "MacOS" in rel
-                                        else "op_py provision-post-install")
-                setup = start.index("\n    setup_bundled_plugins\n")
-                self.assertLess(install, provision)
-                self.assertLess(provision, setup)
-                # Configuration happens in setup_bundled_plugins only.
+                self.assertIn('start_post_up "$wp_installed"', start)
                 self.assertNotIn("configure-ia-plugin", start)
                 self.assertNotIn("configure_cache_enabler", start)
 
@@ -221,8 +218,7 @@ class TestLaunchers(unittest.TestCase):
         for rel, runner in ((LAUNCHERS[0], "bundled_python -m onionpress.cli"),
                             (LAUNCHERS[1], "op_py")):
             text = _read(rel)
-            for name, sub in (("install_bundled_plugins", "install-bundled-plugins"),
-                              ("setup_bundled_plugins", "setup-bundled-plugins")):
+            for name, sub in (("setup_bundled_plugins", "setup-bundled-plugins"),):
                 with self.subTest(rel=rel, name=name):
                     self.assertEqual(
                         _bash_function(text, name),
@@ -231,7 +227,8 @@ class TestLaunchers(unittest.TestCase):
                         f'        --scripts-dir "$SCRIPTS_DIR" 2>&1 | tee -a "$LOG_FILE"\n'
                         "    return 0\n}\n")
             with self.subTest(rel=rel):
-                for gone in ("plugin_wanted", "wp_plugin_present", "wp_plugin_version",
+                for gone in ("install_bundled_plugins",
+                             "plugin_wanted", "wp_plugin_present", "wp_plugin_version",
                              "install_wp_org_plugin", "install_ia_plugin",
                              "install_cache_enabler"):
                     self.assertNotIn(f"\n{gone}() {{", text)

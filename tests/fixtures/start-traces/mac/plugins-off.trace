@@ -14,6 +14,7 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 log WordPress is installed
 docker exec onionpress-wordpress test -s /var/www/html/.htaccess
 log Starting Tor containers...
+docker volume ls --format {{.Name}}
 docker compose up -d tor onionheaven
 log Internet Archive plugin installation disabled in config
 log Cache Enabler plugin installation disabled in config

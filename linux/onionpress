@@ -74,15 +74,11 @@ ONIONPRESS_PYTHONPATH="${ONIONPRESS_PYTHONPATH:-$INSTALL_DIR/lib}"
 # stays in the environment for the Python the CLI itself starts.
 op_py() {
     # Run a subcommand of the shared Python CLI. Self-contained (tests
-    # extract this function alone); OP_PY below is the same command line
-    # for run_detached, which cannot run a function.
+    # extract this function alone).
     PYTHONPATH="$ONIONPRESS_PYTHONPATH" python3 -I -B -c 'import sys, runpy
 sys.path[:0] = sys.argv.pop(1).split(":")
 runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' "$ONIONPRESS_PYTHONPATH" "$@"
 }
-OP_PY=(python3 -I -B -c 'import sys, runpy
-sys.path[:0] = sys.argv.pop(1).split(":")
-runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' "$ONIONPRESS_PYTHONPATH")
 
 # True only for a well-formed v3 onion address: 56 lowercase base32
 # characters, then ".onion", and nothing else (no newline, no "/"). The
@@ -1109,22 +1105,13 @@ set_address_prefix_for() {
     log "Updated ADDRESS_PREFIX to '$addr_prefix' to match imported key"
 }
 
-# ─── Plugin installation ─────────────────────────────────────────────
-# Cache Enabler and the Internet Archive Link Fixer (onionpress.bundled_plugins,
-# #442.3): install_bundled_plugins puts the pinned releases in the WordPress
-# container (downloaded over Tor, checked against their pins; INSTALL_*=no
-# leaves one out); setup_bundled_plugins configures, then activates them
-# (Cache Enabler network-wide with its cache policy, the Link Fixer site by
-# site), once provision-post-install has installed the policy mu-plugins.
-# The setup-bundled-plugins subcommand, which setup_logic.install_fresh_wordpress
-# starts once setup has made the user's site, runs the second. Best effort:
-# both log in this script's format, tee'd into the log, and never stop a start.
-install_bundled_plugins() {
-    op_py --data-dir "$DATA_DIR" install-bundled-plugins \
-        --scripts-dir "$SCRIPTS_DIR" 2>&1 | tee -a "$LOG_FILE"
-    return 0
-}
-
+# Configure, then activate, Cache Enabler (network-wide, with its cache
+# policy) and the Internet Archive Link Fixer (site by site), once
+# WordPress is installed (onionpress.bundled_plugins, #442.3; a start does
+# it inside start-post-up). The setup-bundled-plugins case, which
+# setup_logic.install_fresh_wordpress starts once setup has made the
+# user's site, runs it. Best effort: logged in this script's format, tee'd
+# into the log, never a stopped command.
 setup_bundled_plugins() {
     op_py --data-dir "$DATA_DIR" setup-bundled-plugins \
         --scripts-dir "$SCRIPTS_DIR" 2>&1 | tee -a "$LOG_FILE"
@@ -1603,6 +1590,21 @@ stop_onionheaven_activation_watcher() {
         ONIONHEAVEN_WATCHER_PID=""
     fi
 }
+# The end of the start, once the core is up (start.post_up, #442.7): Tor,
+# the SOCKS port check, the Cloudflare tunnel (only once WordPress is
+# installed; removed when the token goes), the pinned plugins, the
+# provisioning steps, the plugins' setup and the image rebuild (detached:
+# out of this script's job table, and out of the settings watcher's
+# cgroup through systemd-run). Best effort: it never stops the start.
+# $1: whether WordPress is installed.
+start_post_up() {
+    op_py --data-dir "$DATA_DIR" start-post-up \
+        --wordpress-installed "$([ "$1" = true ] && echo yes || echo no)" \
+        --docker-dir "$DOCKER_DIR" --scripts-dir "$SCRIPTS_DIR" \
+        --themes-dir "$THEMES_DIR" --plugins-dir "$PLUGINS_DIR" 2>&1 | tee -a "$LOG_FILE"
+    return 0
+}
+
 
 # ─── Container management ────────────────────────────────────────────
 # The middle of the start (start.start_core over ContainerManager.start_core,
@@ -1695,58 +1697,6 @@ apply_pending_key_import() {
 migrate_key_volume() {
     op_py --data-dir "$DATA_DIR" migrate-key-volume 2>&1 | tee -a "$LOG_FILE"
     return "${PIPESTATUS[0]}"
-}
-
-# Image derivatives (issue #257): backups carry original images only, so a
-# restore leaves the resized copies (-WxH sizes, -scaled) to be rebuilt. True
-# when that rebuild is still owed: the host marker the restore paths write,
-# or the marker a backup archive carries inside wp-content/uploads/ (which a
-# restore by an OnionPress version that predates the host marker still copies
-# into the container). start_containers then runs
-# `onionpress.cli regenerate-derivatives` detached in the background; it uses
-# `wp media regenerate --only-missing`, so an interrupted sweep resumes on the
-# next start, and it clears both markers only when it completes. The check
-# is onionpress.cli's (derivatives.regeneration_pending, the same one the
-# sweep uses), asked through the CLI (Phase 4, #120).
-# Run "$@" in the background so that it outlives this script; its output
-# goes to $LOG_FILE. The settings watcher (onionpress-watcher.service) is a
-# Type=oneshot unit: systemd kills everything left in its cgroup when
-# handle-action returns, a `( cmd & )` included, so there the command goes
-# into a transient user unit of its own (issue #316). Only the environment
-# it needs is passed (systemd-run puts --setenv values on a command line
-# and in the unit's properties, so never a secret). Anywhere else (the
-# long-running onionpress.service, a terminal) a detached subshell lives
-# long enough.
-run_detached() {
-    if [ "${ONIONPRESS_IN_WATCHER:-}" = "true" ] && command -v systemd-run >/dev/null 2>&1; then
-        local setenv=(--setenv=PYTHONDONTWRITEBYTECODE=1)
-        [ -z "${DOCKER_HOST:-}" ] || setenv+=(--setenv=DOCKER_HOST="$DOCKER_HOST")
-        if systemd-run --user --quiet --collect --no-block \
-                --property=StandardOutput=append:"$LOG_FILE" \
-                --property=StandardError=append:"$LOG_FILE" \
-                "${setenv[@]}" -- "$@" 2>>"$LOG_FILE"; then
-            return 0
-        fi
-        log "WARNING: systemd-run failed; running in the background here (it may not finish)"
-    fi
-    ( "$@" >> "$LOG_FILE" 2>&1 & )
-}
-
-regenerate_derivatives_pending() {
-    op_py --data-dir "$DATA_DIR" regenerate-derivatives-pending 2>>"$LOG_FILE"
-}
-
-# Tor's SOCKS port must be published on 127.0.0.1 only (docker-compose.yml).
-# A compose file from before that, which re-running install.sh leaves in
-# place (it copies the new one into docker/docker), still publishes it on
-# ONIONPRESS_BIND_HOST. Docker's own mapping is the authority, so ask it
-# and say so on every start; the site itself is unaffected.
-warn_if_socks_port_exposed() {
-    local exposed
-    exposed=$(docker port onionpress-tor 9050/tcp 2>/dev/null | grep -v '^127\.0\.0\.1:' | tr '\n' ' ' || true)
-    if [ -n "$exposed" ]; then
-        log "WARNING: Tor's SOCKS port is published beyond this machine (${exposed% }): $DOCKER_DIR/docker-compose.yml is out of date. Install the current OnionPress .deb to replace it."
-    fi
 }
 
 # Rootless Docker's default port driver (RootlessKit "builtin") does not
@@ -1879,72 +1829,15 @@ start_containers() {
         bind_wordpress_port_for_install_state false
         hold_heartbeat_client_until_installed
     fi
-    docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
-    warn_if_socks_port_exposed
     note_if_lan_looks_local
-    start_cloudflare_tunnel "$wp_installed"
+    # Tor, the SOCKS port check, the Cloudflare tunnel, the plugins,
+    # provisioning and the image rebuild (start_post_up): best effort.
+    start_post_up "$wp_installed"
 
     # OnionHeaven: the API server runs inside the tor container (always on).
     # On a hub, the watcher keeps the onionheaven container (heartbeat
     # monitor + takeover Tor) running (signaled by an activation flag file).
     start_onionheaven_activation_watcher
-
-    # Put the pinned Internet Archive Link Fixer and Cache Enabler releases
-    # in place (downloaded over Tor, checked against their pins).
-    # setup_bundled_plugins configures and activates them below, once
-    # provision-post-install has installed the mu-plugins that say what
-    # they may do.
-    install_bundled_plugins
-
-    # Everything else is now in src/onionpress/multisite.py. Each call
-    # used to be a bash function defined later in this file; the bash
-    # implementations are kept for now (called from no one but ourselves)
-    # and can be deleted in a follow-up once we're confident the Python
-    # ports cover every scenario.
-    op_py deactivate-wp-statistics
-    # provision-post-install handles the wp_is_installed gating
-    # internally — the multisite/theme steps short-circuit when WP
-    # isn't yet set up; the permission fixes run unconditionally so
-    # the Setup dialog's later wp-cli calls can write under
-    # /var/lib/onionpress and wp-content/uploads.
-    op_py provision-post-install \
-        --themes-dir "$THEMES_DIR" \
-        --plugins-dir "$PLUGINS_DIR"
-    setup_bundled_plugins
-
-    # Image derivatives (#257): if a restore left resized images to rebuild,
-    # do it in the background — niced, detached (run_detached: out of this
-    # script's job table, and out of the settings watcher's cgroup when a
-    # Settings-page restore got here), resumable across restarts. After
-    # provision-post-install so the image-fallback mu-plugin is in place.
-    if $wp_installed && regenerate_derivatives_pending; then
-        log "Image derivatives: rebuild pending — starting in the background"
-        run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" "${OP_PY[@]}" regenerate-derivatives
-    fi
-}
-
-# Cloudflare Tunnel (#352): cloudflared runs when the config holds a token,
-# as on the Mac. Only once WordPress is installed: before that its install
-# page would be on the open internet. Without a token the container is
-# removed, not just stopped, so a removed token does not linger in its
-# configuration. Its ingress must point at http://wordpress:80; the
-# ONIONPRESS-TOR chain refuses anything on the LAN or this host.
-start_cloudflare_tunnel() {
-    local wp_installed=$1
-    if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-        if docker container inspect onionpress-cloudflared >/dev/null 2>&1; then
-            log "Cloudflare Tunnel token removed, removing cloudflared"
-            docker rm -f onionpress-cloudflared >> "$LOG_FILE" 2>&1 || true
-        fi
-        return 0
-    fi
-    if [ "$wp_installed" != true ]; then
-        log "Cloudflare Tunnel: waiting until WordPress is set up (restart OnionPress afterwards)"
-        return 0
-    fi
-    log "Cloudflare Tunnel enabled, starting cloudflared..."
-    docker compose "${CF_COMPOSE[@]}" up -d cloudflared >> "$LOG_FILE" 2>&1 \
-        || log "ERROR: Failed to start cloudflared container"
 }
 
 stop_containers() {

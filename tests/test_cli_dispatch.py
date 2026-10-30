@@ -393,6 +393,17 @@ ROWS = [
     Row("start-core", ["start-core"], "start.start_core",
         mock.call(ANY, mac=False, wp_port=8080, errors=None, log=ANY), rc=1,
         returns=(False, False)),
+    # #442.7: the launchers' start_post_up() is start.post_up; best effort, 0.
+    Row("start-post-up", ["start-post-up", "--wordpress-installed", "yes", "--docker-dir", "/d",
+                          "--scripts-dir", "/s", "--themes-dir", "/t", "--plugins-dir", "/p"],
+        "start.post_up", mock.call(ANY, mac=False, installed=True, errors=None,
+                                   themes_dir="/t", plugins_dir="/p", scripts_dir="/s", log=ANY),
+        rc=0, returns=None),
+    Row("start-post-up", ["start-post-up", "--wordpress-installed", "no", "--themes-dir", "/t",
+                          "--plugins-dir", "/p", "--errors-file", "/e"],
+        "start.post_up", mock.call(ANY, mac=True, installed=False, errors=ANY,
+                                   themes_dir="/t", plugins_dir="/p", scripts_dir="", log=ANY),
+        rc=0, os_name="macos", returns=mock.Mock(side_effect=RuntimeError("x"))),
     # #442.4: the launchers' apply_pending_key_import() is ContainerManager's;
     # 1 stops the start (an old keystore survived, the marker stays).
     Row("apply-pending-key-import", ["apply-pending-key-import"],

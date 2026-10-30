@@ -502,3 +502,233 @@ def start_core(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
             return True, True
         time.sleep(2)
     return True, False
+
+
+# ---- after the core is up (#442.7) ----
+
+INSTALL_FROM_BACKUP = ".install-from-backup"
+
+
+def _host_timezone() -> str:
+    """This machine's IANA zone from /etc/localtime ("" when it is not a
+    link into a zoneinfo folder): what the Mac launcher read."""
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return ""
+    i = target.find("zoneinfo/")
+    return target[i + len("zoneinfo/"):] if i != -1 else ""
+
+
+def configure_site_timezones(docker, log, log_file: str) -> None:
+    """Each site's timezone_string set to this Mac's zone the first time
+    it is seen (an empty one only, never a choice someone made), so
+    imported posts' times read as their authors saw them; gmt_offset
+    blanked beside it. Idempotent. The Mac launcher's
+    configure_site_timezones."""
+    from .wp_files import wp_cli_args
+
+    def wp(*args):
+        return docker.run(wp_cli_args(*args), timeout=60, quiet=True)
+
+    if not wp("core", "is-installed").ok:
+        return
+    zone = _host_timezone()
+    if not zone:
+        log("Skipping timezone config: host TZ undetectable")
+        return
+    listed = wp("site", "list", "--field=url")
+    sites = listed.stdout.split() if listed.ok else []
+    if not sites:
+        siteurl = wp("option", "get", "siteurl")
+        sites = siteurl.stdout.split() if siteurl.ok else []
+    for url in sites:
+        current = wp("option", "get", "timezone_string", f"--url={url}")
+        if current.ok and current.stdout.strip():
+            continue
+        updated = wp("option", "update", "timezone_string", zone, f"--url={url}")
+        _append(log_file, updated)
+        log(f"✓ Set timezone_string={zone} for {url}" if updated.ok
+            else f"WARNING: Failed to set timezone for {url}")
+        _append(log_file, wp("option", "update", "gmt_offset", "", f"--url={url}"))
+
+
+def _append(log_file: str, result) -> None:
+    text = (result.stdout or "") + (result.stderr or "")
+    if not text:
+        return
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(text if text.endswith("\n") else text + "\n")
+    except OSError:
+        pass
+
+
+def cloudflare_tunnel(manager, *, mac: bool, installed: bool, log) -> None:
+    """cloudflared runs when the config holds a token (issue #352). Linux
+    starts it only once WordPress is installed (before that its install
+    page would be on the open internet) and removes the container, not
+    just stops it, when the token goes, so a removed token does not linger
+    in its configuration; the Mac stops it. Its ingress points at
+    http://wordpress:80. A failure is logged, never a stopped start."""
+    from .config import read_value
+    token = read_value(manager.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
+    docker = manager.docker
+    if not token:
+        if mac:
+            docker.run(["stop", "onionpress-cloudflared"], timeout=60, quiet=True)
+        elif docker.run(["container", "inspect", "onionpress-cloudflared"],
+                        timeout=30, quiet=True).ok:
+            log("Cloudflare Tunnel token removed, removing cloudflared")
+            _append(manager.paths.log_file,
+                    docker.run(["rm", "-f", "onionpress-cloudflared"], timeout=60, quiet=True))
+        return
+    if not mac and not installed:
+        log("Cloudflare Tunnel: waiting until WordPress is set up (restart OnionPress "
+            "afterwards)")
+        return
+    log("Cloudflare Tunnel enabled, starting cloudflared...")
+    if manager.run_compose_to(["up", "-d", "cloudflared"], out="log",
+                              include_cloudflare=True) != 0:
+        log("ERROR: Failed to start cloudflared container")
+
+
+def warn_if_socks_port_exposed(manager, log) -> None:
+    """Linux: Tor's SOCKS port must be published on 127.0.0.1 only. A
+    compose file from before that (re-running install.sh leaves it) still
+    publishes it more widely; Docker's own mapping is the authority."""
+    result = manager.docker.run(["port", "onionpress-tor", "9050/tcp"], timeout=30, quiet=True)
+    exposed = [l for l in result.stdout.splitlines()
+               if l.strip() and not l.startswith("127.0.0.1:")] if result.ok else []
+    if exposed:
+        compose = os.path.join(manager.paths.docker_dir, "docker-compose.yml")
+        log(f"WARNING: Tor's SOCKS port is published beyond this machine "
+            f"({' '.join(exposed)}): {compose} is out of date. Install the current "
+            "OnionPress .deb to replace it.")
+
+
+def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
+            themes_dir: str, plugins_dir: str, scripts_dir: str, log=None) -> None:
+    """Everything after the core services are up, in the launchers' order:
+    the Mac's .htaccess repair, Tor (`tor` in the START SUMMARY when it
+    will not start), Linux's SOCKS port check, the pinned plugins, the
+    Mac's install-from-backup import, deactivate-wp-statistics and
+    provision-post-install (each a WARNING and a START SUMMARY name when it
+    fails), the plugins' setup, the image-derivative rebuild and the Mac's
+    archive.org login (both detached: they outlive the launcher), the Mac's
+    site timezones, the Cloudflare tunnel. Best effort: nothing here stops
+    the start. Linux's install-state steps (WordPress's port, the
+    heartbeat hold, issue #464) and its OnionHeaven activation watcher stay
+    in the launcher, around this step."""
+    from . import bundled_plugins, derivatives, multisite
+    from .wp_files import put_file_args
+    log = log or manager._log
+    paths, docker = manager.paths, manager.docker
+
+    def name_failure(name):
+        if errors is not None:
+            errors.add(name)
+
+    if mac:
+        if installed:
+            log("WordPress is installed")
+            # The block editor's REST API needs the rewrite rules, which a
+            # WordPress auto-update or a recreated volume can lose.
+            if not docker.run(["exec", "onionpress-wordpress", "test", "-s",
+                               "/var/www/html/.htaccess"], timeout=30, quiet=True).ok:
+                log("Restoring .htaccess rewrite rules (missing or empty)")
+                written = docker.run(put_file_args("/var/www/html/.htaccess", "644"),
+                                     input=multisite.HTACCESS_BODY, timeout=30, quiet=True)
+                log("✓ .htaccess restored" if written.ok else "WARNING: Failed to restore .htaccess")
+        else:
+            log("WordPress not yet installed — will be configured by setup window")
+        log("Starting Tor containers...")
+
+    # Always Tor: the address is ready by the time setup is done. Never
+    # before its key volume is in place (the steps before this made sure;
+    # starting tor would create an empty one that later starts take for
+    # the key), as ContainerManager.start_tor.
+    why = manager.key_volume_not_ready()
+    rc = 1 if why else manager.run_compose_to(["up", "-d", "tor", "onionheaven"], out="log")
+    if why:
+        log(f"ERROR: not starting Tor: {why}")
+        name_failure("tor")
+    elif rc != 0:
+        if mac:
+            log(f"ERROR: Failed to start tor/onionheaven containers (rc={rc}) — see "
+                f"{paths.log_file}")
+            name_failure("tor")
+        else:
+            log("ERROR: Failed to start tor/onionheaven containers")
+    if not mac:
+        warn_if_socks_port_exposed(manager, log)
+        cloudflare_tunnel(manager, mac=False, installed=installed, log=log)
+
+    host = bundled_plugins.PluginHost(
+        docker=docker, config_file=paths.config_file, scripts_dir=scripts_dir,
+        log_file=paths.log_file, log=log,
+        run_step=lambda argv: run_cli_step(argv, data_dir=paths.data_dir,
+                                           log_file=paths.log_file))
+    bundled_plugins.install_bundled_plugins(host)
+
+    # A backup staged for this install: its database and content go into
+    # the running containers before the provisioning, which then refreshes
+    # the theme and mu-plugins to this version's.
+    staging = ""
+    marker = os.path.join(paths.data_dir, INSTALL_FROM_BACKUP)
+    if mac and os.path.isfile(marker):
+        try:
+            with open(marker, encoding="utf-8") as f:
+                staging = f.readline().rstrip("\n")
+        except OSError:
+            staging = ""
+        if staging and os.path.isdir(staging):
+            log(f"Install-from-backup: importing artifacts from {staging}")
+            if run_cli_step(["import-backup-artifacts", "--staging", staging],
+                            data_dir=paths.data_dir) != 0:
+                log("ERROR: install-from-backup import failed — leaving marker for retry")
+                staging = ""
+        else:
+            log(f"Install-from-backup: marker present but staging missing ({staging}); "
+                "ignoring")
+            staging = ""
+
+    step_log = paths.log_file if mac else None
+    rc = run_cli_step(["deactivate-wp-statistics"], data_dir=paths.data_dir, log_file=step_log)
+    if rc != 0:
+        log(f"WARNING: deactivate-wp-statistics failed (rc={rc}) — continuing; see "
+            f"{paths.log_file}")
+        name_failure("deactivate-wp-statistics")
+    rc = run_cli_step(["provision-post-install", "--themes-dir", themes_dir,
+                       "--plugins-dir", plugins_dir],
+                      data_dir=paths.data_dir, log_file=step_log)
+    if rc != 0:
+        log(f"WARNING: provision-post-install failed (rc={rc}) — themes/plugins may be "
+            f"missing; see {paths.log_file}")
+        name_failure("provision-post-install")
+    bundled_plugins.setup_bundled_plugins(host)
+
+    # Only after a successful import and provisioning: an interrupted run
+    # imports again at the next start.
+    if staging:
+        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
+        log("Install-from-backup: complete (staging cleaned up)")
+
+    # Image derivatives (#257): a restore's resized images, rebuilt in the
+    # background (niced, resumable), after provision-post-install put the
+    # image-fallback mu-plugin in place.
+    if installed and derivatives.regeneration_pending(paths.data_dir, docker.docker_bin):
+        log("Image derivatives: rebuild pending — starting in the background")
+        run_detached_cli(["regenerate-derivatives"], data_dir=paths.data_dir,
+                         log_file=paths.log_file)
+    if mac:
+        # The archive.org login over Tor can take 30 s; a no-op once the
+        # keys are there.
+        run_detached_cli(["ensure-archive-s3-keys"], data_dir=paths.data_dir,
+                         log_file=paths.log_file)
+        configure_site_timezones(docker, log, paths.log_file)
+        cloudflare_tunnel(manager, mac=True, installed=installed, log=log)
