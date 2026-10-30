@@ -366,6 +366,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             rumps.MenuItem("View Logs", callback=self.view_logs),
             rumps.MenuItem("View Web Usage Log", callback=self.view_web_log),
             rumps.MenuItem("Settings...", callback=self.open_settings),
+            rumps.MenuItem("OnionHeaven...", callback=self.open_onionheaven),
             rumps.separator,
             rumps.MenuItem("Backup...", callback=self.backup),
             rumps.MenuItem("Restore...", callback=self.restore),
@@ -2037,6 +2038,37 @@ class OnionPressApp(PortAttributes, rumps.App):
         # apply_config_changes.
         show_settings_dialog(
             config_path=self.config_file,
+            icon_path=icon_path,
+            launcher_script=self.launcher_script,
+            log_func=self.log,
+            callbacks={'write_config': self.write_config_value},
+        )
+
+    @rumps.clicked("OnionHeaven...")
+    def open_onionheaven(self, _):
+        """The OnionHeaven screen: which hub keeps this site reachable and
+        whom this OnionPress keeps reachable, from the daemon's state file
+        (onionheaven.overview, no docker here), with the registration
+        choice, the hub address and a hub's takeover settings as its
+        controls. Every change goes through `onionpress config set`
+        (write_config_value)."""
+        from onionpress.onionheaven_ui import show_onionheaven_dialog
+
+        # A missing config is made by the launcher (from the template,
+        # 0600) before any subcommand runs; `config list` changes nothing
+        # else (issue #474: the menubar writes no config itself).
+        if not os.path.exists(self.config_file):
+            try:
+                subprocess.run([self.launcher_script, "config", "list"],
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               timeout=60)
+            except (OSError, subprocess.SubprocessError) as e:
+                self.log(f"config list failed to run: {e}")
+
+        icon_path = os.path.join(self.resources_dir, "app-icon.png")
+        show_onionheaven_dialog(
+            app=self,
+            state=self.state if self._state_fresh else None,
             icon_path=icon_path,
             launcher_script=self.launcher_script,
             log_func=self.log,

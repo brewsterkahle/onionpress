@@ -90,7 +90,7 @@ OPTIONS = {
                  'onionpress.image_overrides',
                  'onionpress.colima',
                  'onionpress.ports', 'onionpress.secrets_file',
-                 'onionpress.ui_helpers', 'onionpress.settings_ui',
+                 'onionpress.ui_helpers', 'onionpress.settings_ui', 'onionpress.onionheaven_ui',
                  'onionpress.browser', 'onionpress.log_rotation',
                  'onionpress.analytics_sharing', 'onionpress.power',
                  'onionpress.onion_proxy', 'onionpress.onion_auth',

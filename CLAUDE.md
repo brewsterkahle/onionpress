@@ -920,3 +920,19 @@
   read it (status.json, daemon-state.json, `onionpress onionheaven
   overview`) and never ask docker themselves. Registry rows are validated
   before display (`hub_sites`). `tests/test_onionheaven_overview.py`.
+
+## The OnionHeaven Screen
+- **One screen shows the overview on both platforms**: Mac OnionHeaven…
+  in the menu (`src/onionpress/onionheaven_ui.py`, an NSAlert form read
+  from the daemon's state file, `overview(app, hub=False)` while it is
+  stale, no docker); WordPress OnionPress → OnionHeaven
+  (`onionpress_onionheaven_page`, owner-only: submenu registered and page
+  served only under `onionpress_settings_owner_allowed()`).
+- `REGISTER_WITH_ONIONHEAVEN` / `ONIONHEAVEN_ADDRESS` live on that screen
+  only (fields carry `'page' => 'onionheaven'`; the main Settings page
+  skips them; the Settings dialog no longer has them). Every write goes
+  through `config set` (`settings_ui.confirm_and_write_changes`); hub
+  checks run the launcher's `validate-oh-address`
+  (`settings_ui.probe_hub_address` / `validate_hub_address`). Accepting
+  registrations stays hand-edit only. Screenshots:
+  `docs/screenshots/onionheaven-screen/`. `tests/test_onionheaven_screen.py`.

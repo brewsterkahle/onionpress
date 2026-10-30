@@ -68,9 +68,12 @@ class TestDefaultsAreOn(unittest.TestCase):
                 self.assertIn("REGISTER_WITH_ONIONHEAVEN=yes\n", f.read())
 
     def test_settings_dialog_shows_unset_as_on(self):
-        text = _read("src/onionpress/settings_ui.py")
+        # The choice lives on the OnionHeaven screen (onionheaven_ui), not
+        # the general Settings dialog.
+        text = _read("src/onionpress/onionheaven_ui.py")
         self.assertIn('("REGISTER_WITH_ONIONHEAVEN", "yes")', text)
         self.assertIn('if old_values["REGISTER_WITH_ONIONHEAVEN"].strip() == "":', text)
+        self.assertNotIn('"REGISTER_WITH_ONIONHEAVEN", "yes")', _read("src/onionpress/settings_ui.py"))
 
     def test_settings_page_has_no_undecided_choice(self):
         php = _read("app/Resources/plugins/onionpress-settings.php")
