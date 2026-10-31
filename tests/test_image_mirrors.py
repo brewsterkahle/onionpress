@@ -61,6 +61,11 @@ class TestMirrorWorkflow(unittest.TestCase):
     def setUp(self):
         self.text = _read(".github/workflows/mirror-images.yml")
 
+    def test_mirrors_only_into_the_namespace_the_pins_name(self):
+        self.assertIn("IMAGE_NAMESPACE: brewsterkahle", self.text)
+        self.assertNotIn("repository_owner }}", self.text)
+        self.assertIn("if: github.repository_owner == 'brewsterkahle'", self.text)
+
     def test_runs_when_the_pins_change(self):
         self.assertRegex(self.text, r"(?s)push:\s+paths:.*?- build/image-pins\.env")
 

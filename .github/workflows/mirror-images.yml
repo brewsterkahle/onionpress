@@ -13,6 +13,8 @@
 # here builds an image. The release's tag-release job (docker-publish.yml)
 # adds a :<version> tag to each mirror.
 #
+# Runs only in brewsterkahle/onionpress; a fork skips it.
+#
 # GHCR creates a package private the first time it is pushed. Make each
 # onionpress-* mirror package public (package settings) once, or an
 # anonymous first run cannot pull it.
@@ -29,13 +31,16 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # GHCR namespace: the owner of the repository this run belongs to, so a
-  # fork mirrors into its own account (see docker-publish.yml).
-  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || github.repository_owner }}
+  # Always brewsterkahle's namespace: build/image-pins.env names these
+  # packages, so a copy anywhere else would pin nothing. A fork's run is
+  # skipped (below) rather than mirroring into, or failing against, an
+  # account that is not its own.
+  IMAGE_NAMESPACE: brewsterkahle
 
 jobs:
   mirror:
     name: Mirror the pinned third-party images
+    if: github.repository_owner == 'brewsterkahle'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
