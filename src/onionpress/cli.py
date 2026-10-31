@@ -411,7 +411,7 @@ def cmd_update(paths, log, *, check: bool = False, yes: bool = False,
         launcher = os.path.join(app_path, "Contents", "MacOS", "onionpress")
 
     def _stop_daemon():
-        if _daemon.daemon_pid(paths.data_dir) or _daemon.agent_loaded_pid()[0]:
+        if _daemon.daemon_pid(paths.data_dir) or _daemon.agent_loaded_pid(paths.data_dir)[0]:
             log("Update: stopping the OnionPress daemon before the bundle swap")
             _daemon.stop_agent(paths.data_dir, log, offline=False)
 

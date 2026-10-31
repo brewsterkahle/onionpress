@@ -765,7 +765,9 @@ def apply_side_effects(keys, config_path: str, os_name: str, log,
     if "LAUNCH_ON_LOGIN" in keys and os_name == "macos":
         from . import login_item
         want = values.get("LAUNCH_ON_LOGIN", DEFAULTS["LAUNCH_ON_LOGIN"]) == "yes"
+        # The install's own login item: its data dir is the config's folder.
         kwargs = {"path": launchagent_path} if launchagent_path else {}
+        kwargs["data_dir"] = os.path.dirname(os.path.abspath(config_path))
         if want:
             ok = login_item.install(app_bundle, log, **kwargs)
             lines.append("Login item installed." if ok

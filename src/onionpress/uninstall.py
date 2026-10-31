@@ -108,9 +108,9 @@ def run(paths, docker, log, launcher, out=None):
         pass
     time.sleep(2)
 
-    login_item.remove(log)
+    login_item.remove(log, data_dir=paths.data_dir)
     try:
-        op_daemon.remove_agent(log)
+        op_daemon.remove_agent(log, data_dir=paths.data_dir)
     except Exception as e:
         log(f"Uninstall: could not remove the daemon's LaunchAgent: {e}")
 

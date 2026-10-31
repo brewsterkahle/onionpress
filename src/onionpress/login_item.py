@@ -10,29 +10,38 @@ import os
 import plistlib
 import subprocess
 
+from .daemon_client import data_dir_label
+
+# The login item of the account's own ~/.onionpress; another data dir's
+# label is derived from it (launchagent_label, issue #505), so a second
+# install on the account never replaces the real one's login item.
 LAUNCHAGENT_LABEL = "com.onionpress.launcher"
 
 
-def launchagent_path() -> str:
-    return os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCHAGENT_LABEL}.plist")
+def launchagent_label(data_dir: str = "") -> str:
+    return data_dir_label(LAUNCHAGENT_LABEL, data_dir)
 
 
-def is_installed(path: str = "") -> bool:
-    return os.path.exists(path or launchagent_path())
+def launchagent_path(data_dir: str = "") -> str:
+    return os.path.expanduser(f"~/Library/LaunchAgents/{launchagent_label(data_dir)}.plist")
 
 
-def install(app_bundle: str, log, path: str = "") -> bool:
+def is_installed(path: str = "", data_dir: str = "") -> bool:
+    return os.path.exists(path or launchagent_path(data_dir))
+
+
+def install(app_bundle: str, log, path: str = "", data_dir: str = "") -> bool:
     """Write the LaunchAgent plist that opens *app_bundle* (OnionPress.app)
     at login. Without a bundle path nothing is written: `open -a` of a
     wrong path would open nothing at every login."""
-    path = path or launchagent_path()
+    path = path or launchagent_path(data_dir)
     if not app_bundle or not os.path.isdir(app_bundle):
         log("LaunchAgent not installed: no app bundle found "
             f"({app_bundle or 'none'})")
         return False
     try:
         plist = {
-            "Label": LAUNCHAGENT_LABEL,
+            "Label": launchagent_label(data_dir),
             "ProgramArguments": ["open", "-a", app_bundle],
             "RunAtLoad": True,
             "LimitLoadToSessionType": "Aqua",
@@ -47,9 +56,9 @@ def install(app_bundle: str, log, path: str = "") -> bool:
         return False
 
 
-def remove(log, path: str = "", run=None) -> bool:
+def remove(log, path: str = "", run=None, data_dir: str = "") -> bool:
     """Unload and delete the LaunchAgent plist (nothing to do is success)."""
-    path = path or launchagent_path()
+    path = path or launchagent_path(data_dir)
     run = run or subprocess.run
     try:
         if os.path.exists(path):

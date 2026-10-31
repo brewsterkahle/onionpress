@@ -12,15 +12,20 @@ onionpress.daemon re-exports every name here, so `daemon.read_state` and
 the rest keep working for the CLI, the uninstaller and the tests.
 """
 
+import hashlib
 import json
 import os
 import plistlib
+import pwd
 import signal
 import subprocess
 import time
 
 STATE_FILENAME = "daemon-state.json"
 PID_FILENAME = "daemon.pid"
+# The agent of the account's own ~/.onionpress; any other data dir's is
+# derived from it by agent_label() (issue #505). e2e/harness/safety.py
+# reads this literal.
 AGENT_LABEL = "org.onionpress.daemon"
 ONIONNAME_RETRY_MARKER = ".onionname-retry"
 OFFLINE_ACK_MARKER = ".daemon-offline-ack"
@@ -131,11 +136,46 @@ def display_state_of(state, now=None):
 # The launchd agent
 # ---------------------------------------------------------------------------
 
-def agent_plist_path():
-    return os.path.expanduser(f"~/Library/LaunchAgents/{AGENT_LABEL}.plist")
+def default_data_dir():
+    """The account's own ~/.onionpress, from the passwd database: never
+    $HOME, which a test install or a developer's shell overrides."""
+    try:
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        home = os.path.expanduser("~")
+    return os.path.join(home, ".onionpress")
 
 
-def agent_plist(launcher_script, logs_dir, port_offset_env=None):
+def data_dir_label(base, data_dir=""):
+    """A launchd label for *data_dir*'s install, under *base* (issue #505).
+
+    launchd's gui domain is per user, not per install: a second OnionPress
+    on the same macOS account (a test install with its own HOME, a dev
+    build, a QA node) with the same label would take the real install's
+    agent for its own, kickstart it or replace it. So the account's own
+    ~/.onionpress (default_data_dir, the passwd home) keeps *base*, and any
+    other data dir gets `<base>.<8 hex of sha256(its real path)>`: the
+    same path always gives the same label, two paths never share one. ''
+    means the default."""
+    if not data_dir:
+        return base
+    real = os.path.realpath(data_dir)
+    if real == os.path.realpath(default_data_dir()):
+        return base
+    digest = hashlib.sha256(real.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+    return f"{base}.{digest}"
+
+
+def agent_label(data_dir=""):
+    """The daemon's launchd label for *data_dir* (data_dir_label)."""
+    return data_dir_label(AGENT_LABEL, data_dir)
+
+
+def agent_plist_path(data_dir=""):
+    return os.path.expanduser(f"~/Library/LaunchAgents/{agent_label(data_dir)}.plist")
+
+
+def agent_plist(launcher_script, logs_dir, port_offset_env=None, label=AGENT_LABEL):
     """The LaunchAgent: `<launcher> daemon`, kept alive across crashes
     (SuccessfulExit false: a clean exit 0, which `daemon stop`'s TERM and
     a `quit` produce, stays down; a crash or a kill -9 is restarted after
@@ -146,7 +186,7 @@ def agent_plist(launcher_script, logs_dir, port_offset_env=None):
     before the bundle swap and must outlive it; so must a Settings-page
     restore in flight when the daemon is restarted."""
     plist = {
-        "Label": AGENT_LABEL,
+        "Label": label,
         "ProgramArguments": [launcher_script, "daemon"],
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
@@ -178,10 +218,11 @@ def _launchctl(args, timeout=20):
         return subprocess.CompletedProcess(["launchctl", *args], 1, "", str(e))
 
 
-def agent_loaded_pid():
+def agent_loaded_pid(data_dir=""):
     """(loaded, pid) from `launchctl print gui/<uid>/<label>`: pid None
-    when loaded but not running (between KeepAlive restarts)."""
-    r = _launchctl(["print", f"{_gui_domain()}/{AGENT_LABEL}"])
+    when loaded but not running (between KeepAlive restarts). The label is
+    *data_dir*'s (agent_label)."""
+    r = _launchctl(["print", f"{_gui_domain()}/{agent_label(data_dir)}"])
     if r.returncode != 0:
         return False, None
     for line in r.stdout.splitlines():
@@ -199,13 +240,13 @@ def install_agent(launcher_script, data_dir, log, path="", port_offset=None):
     update moves nothing, since the bundle path stays, but a bundle run
     from somewhere else must point the agent at itself). Returns the
     path, or '' when there is no launcher to run."""
-    path = path or agent_plist_path()
+    path = path or agent_plist_path(data_dir)
     if not launcher_script or not os.path.isfile(launcher_script):
         log(f"daemon: LaunchAgent not installed: no launcher at {launcher_script or 'none'}")
         return ""
     logs_dir = os.path.join(data_dir, "logs")
     os.makedirs(logs_dir, exist_ok=True)
-    wanted = agent_plist(launcher_script, logs_dir, port_offset)
+    wanted = agent_plist(launcher_script, logs_dir, port_offset, label=agent_label(data_dir))
     try:
         with open(path, "rb") as f:
             if plistlib.load(f) == wanted:
@@ -227,20 +268,21 @@ def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
     path = install_agent(launcher_script, data_dir, log, path, port_offset)
     if not path:
         return False
-    loaded, pid = agent_loaded_pid()
+    target = f"{_gui_domain()}/{agent_label(data_dir)}"
+    loaded, pid = agent_loaded_pid(data_dir)
     if loaded and pid:
         return True
     if loaded:
-        r = _launchctl(["kickstart", f"{_gui_domain()}/{AGENT_LABEL}"])
+        r = _launchctl(["kickstart", target])
     else:
         r = _launchctl(["bootstrap", _gui_domain(), path])
         if r.returncode != 0 and "already" in (r.stderr or "").lower():
-            r = _launchctl(["kickstart", f"{_gui_domain()}/{AGENT_LABEL}"])
+            r = _launchctl(["kickstart", target])
     if r.returncode != 0:
         log(f"daemon: launchctl failed (rc {r.returncode}): {(r.stderr or r.stdout).strip()}")
         return False
     for _ in range(20):
-        loaded, pid = agent_loaded_pid()
+        loaded, pid = agent_loaded_pid(data_dir)
         if pid:
             log(f"daemon: started under launchd (pid {pid})")
             return True
@@ -259,7 +301,7 @@ def stop_agent(data_dir, log, path="", wait=30, offline=True):
     daemon tells the hub /offline first; `update` passes False, since it
     comes right back. True when no daemon is left running. The plist
     stays: `start` bootstraps it again."""
-    path = path or agent_plist_path()
+    path = path or agent_plist_path(data_dir)
     pid = daemon_pid(data_dir)
     marker = os.path.join(data_dir, QUITTING_MARKER)
     try:
@@ -270,9 +312,9 @@ def stop_agent(data_dir, log, path="", wait=30, offline=True):
             os.remove(marker)
     except OSError:
         pass
-    loaded, agent_pid = agent_loaded_pid()
+    loaded, agent_pid = agent_loaded_pid(data_dir)
     if loaded:
-        r = _launchctl(["bootout", f"{_gui_domain()}/{AGENT_LABEL}"])
+        r = _launchctl(["bootout", f"{_gui_domain()}/{agent_label(data_dir)}"])
         if r.returncode != 0:
             log(f"daemon: launchctl bootout failed (rc {r.returncode}): "
                 f"{(r.stderr or r.stdout).strip()}")
@@ -294,12 +336,12 @@ def stop_agent(data_dir, log, path="", wait=30, offline=True):
     return True
 
 
-def remove_agent(log, path=""):
+def remove_agent(log, path="", data_dir=""):
     """Boot the agent out and delete its plist (uninstall)."""
-    path = path or agent_plist_path()
-    loaded, _pid = agent_loaded_pid()
+    path = path or agent_plist_path(data_dir)
+    loaded, _pid = agent_loaded_pid(data_dir)
     if loaded:
-        _launchctl(["bootout", f"{_gui_domain()}/{AGENT_LABEL}"])
+        _launchctl(["bootout", f"{_gui_domain()}/{agent_label(data_dir)}"])
     if os.path.exists(path):
         os.remove(path)
         log("daemon: LaunchAgent removed")
@@ -307,14 +349,15 @@ def remove_agent(log, path=""):
 
 def agent_status(data_dir):
     """What `onionpress daemon status` prints."""
-    loaded, pid = agent_loaded_pid()
+    loaded, pid = agent_loaded_pid(data_dir)
     state = read_state(data_dir)
     now = time.time()
     doc = {
         "loaded": loaded,
         "pid": pid or daemon_pid(data_dir),
-        "plist": agent_plist_path(),
-        "plist_installed": os.path.exists(agent_plist_path()),
+        "label": agent_label(data_dir),
+        "plist": agent_plist_path(data_dir),
+        "plist_installed": os.path.exists(agent_plist_path(data_dir)),
         "state_file": state_path(data_dir),
         "state_fresh": state_is_fresh(state, now),
     }
