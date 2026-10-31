@@ -658,11 +658,18 @@
   `install_fresh_wordpress` runs (the tray, `provision`), the `setup`
   case, `start_containers` for an installed site. Only the wordpress
   service's port reads `ONIONPRESS_BIND_HOST` (test-held), so the
-  per-command override reaches nothing else. The .deb postinst's
-  upgrade `try-restart onionpress-heartbeat` fails while the unit is
-  held (it prints the commands and never fails the install).
+  per-command override reaches nothing else.
   `tests/test_linux_wordpress_port_until_installed.py` (the functions
   under bash against stub docker/systemctl).
+- **The hold never outlives the package** (#506: the runtime mask under
+  `/run/user` survived `apt purge`, and the reinstall's `enable --now`
+  failed, starting nothing): the postinst's first install unmasks before
+  `enable --now` (install.sh too), `prerm` remove and `postrm` purge run
+  `lift_heartbeat_holds` (identical in both: every `/run/user/<uid>` with
+  the mask, the user's own manager unmasks), and the postinst's upgrade
+  try-restarts the site's unit alone while the heartbeat is held, then
+  reports each unit's `is-active`, never what it asked for.
+  `TestHeartbeatHold` in `tests/test_deb_upgrade_restarts.py`.
 - **The image denies `install.php` and `setup-config.php` to every
   source but the owner's**: `onionpress-install-page.conf` (`<Files ~>`,
   `Require ip 127.0.0.0/8 ::1` or `%{REMOTE_ADDR} == osenv('ONIONPRESS_WP_GATEWAY')`,
