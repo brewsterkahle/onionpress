@@ -188,8 +188,6 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
     $host_uptime   = $status ? ( $status['host_uptime_seconds'] ?? 0 ) : 0;
     // C Tor is the only implementation since 2026-09-24 (Arti was removed);
     // the field stays in the status JSON for the OnionHome schema.
-    $tor_impl      = $status ? ( $status['tor_impl'] ?? 'tor' ) : 'tor';
-    $tor_impl_label = $tor_impl === 'tor' ? 'C Tor' : $tor_impl;
 
     // State color
     $state_colors = array(
@@ -372,7 +370,7 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
         </div>
         <div class="status-stat">
             <div class="label">Tor Implementation</div>
-            <div class="value" id="op-tor-impl"><?php echo esc_html( $tor_impl_label ); ?></div>
+            <div class="value" id="op-tor-impl">C Tor</div>
         </div>
         <div class="status-stat" id="op-wayback-row" <?php if ( $wayback_queue <= 0 ) echo 'style="display:none"'; ?>>
             <div class="label">Wayback Queue</div>
@@ -553,9 +551,6 @@ function onionpress_render_status_page( $status, $wp_stats, $logs ) {
             if(el)el.textContent=fmtUptime(s.uptime_seconds);
             el=document.getElementById('op-bootstrap');
             if(el)el.textContent=(s.bootstrap_pct||0)+'%';
-            // Tor Implementation
-            el=document.getElementById('op-tor-impl');
-            if(el){var ti=s.tor_impl||'tor';el.textContent=(ti==='tor'?'C Tor':ti);}
             var wq=s.wayback_queue_count||0;
             el=document.getElementById('op-wayback-row');
             if(el)el.style.display=wq>0?'':'none';

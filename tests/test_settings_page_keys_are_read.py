@@ -48,7 +48,7 @@ HOST_READERS = {
     "LAUNCH_ON_LOGIN": ("src/menubar.py", 'read_config_value("LAUNCH_ON_LOGIN"'),
     "START_ON_BOOT": ("linux/onionpress", "$(config_value START_ON_BOOT)"),
     "PREVENT_SLEEP": ("src/onionpress/power.py", '_read_config("PREVENT_SLEEP"'),
-    "VM_MEMORY": ("src/onionpress/colima.py", '"VM_MEMORY"'),
+    "VM_MEMORY": ("app/MacOS/onionpress", "$(config_value VM_MEMORY)"),
     "REGISTER_WITH_ONIONHEAVEN": ("src/onionpress/onionheaven.py",
                                   'read_config_value("REGISTER_WITH_ONIONHEAVEN"'),
     "SHARE_ANALYTICS_WITH_ONIONHOME": ("src/onionpress/daemon.py",

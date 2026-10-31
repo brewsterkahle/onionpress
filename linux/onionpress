@@ -2051,37 +2051,18 @@ create_backup() {
     { [ -d "$staging/onionheaven" ] || [ -f "$staging/onionheaven.sealed" ]; } && has_onionheaven="true"
 
     log "Backup: writing metadata..."
-    python3 -I -c "
-import json, sys
-metadata = {
-    'onion_address': sys.argv[1],
-    'backup_date': sys.argv[2],
-    'onionpress_version': sys.argv[3],
-    'platform': 'linux',
-    'has_onionheaven': sys.argv[4] == 'true',
-    # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
-    'excludes_image_derivatives': sys.argv[6] == 'true'
-}
-if sys.argv[7]:
-    # A hub's: onionheaven_data sealed (with the recovery key id) or
-    # unsealed, as backup.stage_hub_backup printed them.
-    fields = json.loads(sys.argv[7])
-    for key in ('onionheaven_data', 'onionheaven_sealed_format',
-                'onionheaven_recovery_key_id'):
-        if key in fields:
-            metadata[key] = fields[key]
-if sys.argv[10] == 'true':
-    # The onionheaven container did not say whether this is a hub: the
-    # hub data may be missing (backup.unchecked_notes).
-    metadata['onionheaven_data_unchecked'] = True
-if sys.argv[8] == 'no':
-    # Handed to WordPress: no host secrets, and the names of those that
-    # were set (backup.TUNNEL_TOKEN_KEY).
-    metadata['excludes_host_secrets'] = True
-    metadata['secret_config_left_out'] = sys.argv[9].split()
-with open(sys.argv[5], 'w') as f:
-    json.dump(metadata, f, indent=2)
-" "$onion_addr" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ONIONPRESS_VERSION" "$has_onionheaven" "$staging/metadata.json" "$excludes_derivatives" "$hub_fields" "$with_host_secrets" "$secrets_left_out" "$hub_unchecked"
+    local meta_flags=()
+    [ "$has_onionheaven" = "true" ] && meta_flags+=(--has-onionheaven)
+    [ "$excludes_derivatives" = "true" ] && meta_flags+=(--excludes-image-derivatives)
+    [ "$hub_unchecked" = "true" ] && meta_flags+=(--hub-unchecked)
+    [ "$with_host_secrets" = "no" ] && meta_flags+=(--without-host-secrets)
+    if ! op_py --data-dir "$DATA_DIR" backup-metadata \
+            --onion-address "$onion_addr" --version "$ONIONPRESS_VERSION" \
+            --hub-fields "$hub_fields" --secrets-left-out "$secrets_left_out" \
+            ${meta_flags[@]+"${meta_flags[@]}"} > "$staging/metadata.json" 2>>"$LOG_FILE"; then
+        log "ERROR: could not write the backup's metadata"
+        return 1
+    fi
 
     # 7. Zip and encrypt — backup format 2, written by the shared Python
     #    helper so both platforms produce the one format (not `zip -P`,
@@ -2645,53 +2626,31 @@ except: print('false')
 
     # Build status.json
     local status_json
-    status_json=$(python3 -I -c "
-import json, sys
-try:
-    _ov = json.loads(sys.argv[26])
-    if not isinstance(_ov, dict):
-        _ov = {}
-except (ValueError, IndexError):
-    _ov = {}
-status = {
-    'state': sys.argv[1],
-    'version': sys.argv[2],
-    'onion_address': sys.argv[3],
-    'uptime_seconds': int(sys.argv[4]),
-    'bootstrap_pct': int(sys.argv[5]),
-    'containers': json.loads(sys.argv[6]),
-    'wayback_queue_count': int(sys.argv[7]),
-    'updated_at': sys.argv[8],
-    'platform': 'linux',
-    'load_avg': json.loads(sys.argv[17]),
-    'host_uptime_seconds': int(sys.argv[18]),
-    'onionheaven': {
-        'server_active': sys.argv[9] == 'true',
-        'registered_count': int(sys.argv[10]),
-        'online_count': int(sys.argv[11]),
-        'taken_over_count': int(sys.argv[12]),
-        'takeover_containers': int(sys.argv[13]),
-        'client_registered': sys.argv[14] == 'true',
-        'client_hub': sys.argv[15],
-        'client_enabled': sys.argv[16] == 'yes',
-        **{k: v for k, v in _ov.items() if k in ('client', 'hub', 'known_hosts', 'generated_at')},
-    },
-    'wp_installed': sys.argv[19] == 'true',
-    'onboarded': sys.argv[20] == 'true',
-    'mkp224o_available': sys.argv[21] == 'true',
-    'wp_admin_password_path': sys.argv[22] or None,
-    'vanity_in_progress': sys.argv[23] == 'true',
-    'serving_from_wayback': sys.argv[24] == 'true',
-    'wp_port': int(sys.argv[25]),
-}
-print(json.dumps(status, indent=2))
-" "$state" "$ONIONPRESS_VERSION" "$onion_addr" "$uptime_seconds" "$bootstrap_pct" "$containers_json" "$wayback_queue" "$now_iso" \
-  "$oh_server_active" "$oh_registered_count" "$oh_online_count" "$oh_taken_over_count" "$oh_takeover_containers" \
-  "$oh_client_registered" "$oh_client_hub" "$oh_config_enabled" \
-  "$load_avg_json" "$host_uptime_seconds" \
-  "$wp_installed_str" "$onboarded" "$mkp224o_available" \
-  "$wp_admin_password_file" "$vanity_in_progress" "$serving_from_wayback" \
-  "${ONIONPRESS_WP_PORT:-8080}" "$oh_overview_json")
+    status_json=$(op_py --data-dir "$DATA_DIR" linux-status \
+        --field "state=$state" --field "version=$ONIONPRESS_VERSION" \
+        --field "onion_address=$onion_addr" \
+        --field "uptime_seconds=$uptime_seconds" \
+        --field "bootstrap_pct=$bootstrap_pct" \
+        --field "containers=$containers_json" \
+        --field "wayback_queue_count=$wayback_queue" \
+        --field "updated_at=$now_iso" \
+        --field "oh_server_active=$oh_server_active" \
+        --field "oh_registered_count=$oh_registered_count" \
+        --field "oh_online_count=$oh_online_count" \
+        --field "oh_taken_over_count=$oh_taken_over_count" \
+        --field "oh_takeover_containers=$oh_takeover_containers" \
+        --field "oh_client_registered=$oh_client_registered" \
+        --field "oh_client_hub=$oh_client_hub" \
+        --field "oh_client_enabled=$oh_config_enabled" \
+        --field "load_avg=$load_avg_json" \
+        --field "host_uptime_seconds=$host_uptime_seconds" \
+        --field "wp_installed=$wp_installed_str" --field "onboarded=$onboarded" \
+        --field "mkp224o_available=$mkp224o_available" \
+        --field "wp_admin_password_path=$wp_admin_password_file" \
+        --field "vanity_in_progress=$vanity_in_progress" \
+        --field "serving_from_wayback=$serving_from_wayback" \
+        --field "wp_port=${ONIONPRESS_WP_PORT:-8080}" \
+        --field "onionheaven_overview=$oh_overview_json")
 
     # Write to shared volume (consumed by the WP settings/status page): only
     # the fields those pages show (redact.WORDPRESS_STATUS_KEYS, shared with

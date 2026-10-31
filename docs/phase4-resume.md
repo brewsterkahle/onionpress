@@ -481,9 +481,9 @@ the activation watcher. Settled:
   must run between the core and Tor (the heartbeat hold before Tor).
 - `update_images` runs before the key steps now (it only pulls): the
   `update-on-launch` traces moved its lines up.
-- `OnionPressCLI.cmd_start` / `cmd_restart` run the launcher's `start` /
-  `restart` (`handle_action.default_launcher`); the thinner Python start
-  (no migration, seed or provisioning) and its PID-lock helpers are gone.
+- The thinner Python start (`OnionPressCLI.cmd_start` / `cmd_restart`: no
+  migration, seed or provisioning) is gone; #405 removed it upstream, and
+  this branch's interim launcher wrappers went with the merge.
 - The intermediate subcommands (`apply-pending-key-import`,
   `seed-onion-key`, `start-core`) and their bash functions are gone; the
   Python functions keep their unit tests (`test_pending_key_import`,

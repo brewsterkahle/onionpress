@@ -136,10 +136,9 @@
   anything starts tor and before first-run detection, fails loudly rather
   than copy into an empty volume, and is resumable via
   `.key-volume-migration-pending`. Every identity wipe drops that marker
-  and keeps the old volume name in its wipe list. `cli start` /
-  `ContainerManager.start_tor` refuse while a migration is due. A failed
-  first-run key seed removes its volume and stops (`start.KeySeed`, the
-  launchers' `seed-onion-key`; one seed, `containers.run_key_seed`, for
+  and keeps the old volume name in its wipe list. `ContainerManager.start_tor` refuses while a
+  migration is due. A failed
+  first-run key seed removes its volume and stops (`start.KeySeed`; one seed, `containers.run_key_seed`, for
   start and restore). `tests/test_install_invariants.py`,
   `tests/test_first_run_key_seed.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
@@ -356,8 +355,8 @@
   start-containers`** (`start.start_containers`): pending key import →
   key volume migration → first-run key → core services → post-up, each key
   step stopping the start. Linux runs `--until-core`, its install-state
-  steps (#464) and `start-post-up`. `onionpress start`/`restart` run the
-  launcher. `tests/test_start_sequence.py`.
+  steps (#464) and `start-post-up`. The CLI has no start of its own
+  (#405). `tests/test_start_sequence.py`.
 - **A change to the start is checked against the recorded traces**
   (`tests/test_start_traces.py`, fixtures under
   `tests/fixtures/start-traces/`); a fixture changes only on purpose

@@ -25,7 +25,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from onionpress import key_manager
+from onionpress import hub_record, key_manager
 from onionpress.platform import docker_env, find_docker_bin, resolve_paths
 
 # The default hub (run by the Internet Archive), and what a malformed
@@ -350,7 +350,7 @@ def _hub_lock(app, timeout=RELEASE_LOCK_TIMEOUT):
 
 REGISTRATION_RECORD = "onionheaven-registration.json"
 RELEASE_HOLD_SECONDS = 10 * 60
-_RECORD_CARRIED = ("left_on_hubs", "released")
+_RECORD_CARRIED = hub_record.CARRIED
 
 
 def _registration_status_file(app):
@@ -380,15 +380,9 @@ def _save_registration_status(app, status):
     """
     path = _registration_status_file(app)
     status = dict(status)
-    missing = [key for key in _RECORD_CARRIED if key not in status]
-    if missing:
-        previous = _load_registration_status(app)
-        for key in missing:
-            if key in previous:
-                status[key] = previous[key]
-    for key in _RECORD_CARRIED:
-        if status.get(key) is None:
-            status.pop(key, None)
+    status = hub_record.carry_over(
+        status, _load_registration_status(app)
+        if hub_record.missing_carried(status) else {})
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
         with open(tmp, 'w') as f:
@@ -399,8 +393,7 @@ def _save_registration_status(app, status):
             os.remove(tmp)
 
 
-def _now_iso():
-    return datetime.now(timezone.utc).isoformat()
+_now_iso = hub_record.now_iso
 
 
 def _main_registration(status, app=None):
@@ -420,36 +413,10 @@ def _main_registration(status, app=None):
     return addr, hub
 
 
-def _pair(entry):
-    return entry["content_address"], entry["onionheaven_address"]
-
-
-def _left_on_hubs(status):
-    """The well-formed left_on_hubs entries of *status*."""
-    entries = status.get("left_on_hubs")
-    if not isinstance(entries, list):
-        return []
-    return [e for e in entries
-            if isinstance(e, dict)
-            and key_manager.is_valid_onion_address(e.get("content_address"))
-            and key_manager.is_valid_onion_address(e.get("onionheaven_address"))]
-
-
-def _note_left_on_hub(status, addr, hub, reason):
-    """Add (addr, hub) to *status*'s left_on_hubs, once."""
-    entries = _left_on_hubs(status)
-    if not any(_pair(e) == (addr, hub) for e in entries):
-        entries.append({"content_address": addr, "onionheaven_address": hub,
-                        "since": _now_iso(), "reason": reason})
-    status["left_on_hubs"] = entries
-
-
-def _forget_left_on_hub(status, addr, hub):
-    """Drop (addr, hub) from *status*'s left_on_hubs; True if it was there."""
-    entries = _left_on_hubs(status)
-    kept = [e for e in entries if _pair(e) != (addr, hub)]
-    status["left_on_hubs"] = kept
-    return len(kept) != len(entries)
+_pair = hub_record.pair
+_left_on_hubs = hub_record.left_on_hubs
+_note_left_on_hub = hub_record.note_left_on_hub
+_forget_left_on_hub = hub_record.forget_left_on_hub
 
 
 def _registrations(status, app=None):
@@ -473,12 +440,7 @@ def registrations_left(app):
 
 def _address_on_hold(app, addr, now=None):
     """True while the record's "released" hold covers *addr*."""
-    released = _load_registration_status(app).get("released")
-    if not isinstance(released, dict) or released.get("content_address") != addr:
-        return False
-    until = released.get("until")
-    now = time.time() if now is None else now
-    return isinstance(until, (int, float)) and now < until
+    return hub_record.address_on_hold(_load_registration_status(app), addr, now)
 
 
 def _key_address():

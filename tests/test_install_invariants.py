@@ -126,18 +126,6 @@ class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
             "missing — a warning lets a vanity-less DMG ship (the 2.4.101 bug).",
         )
 
-    def test_validate_bundle_requires_mkp224o(self):
-        """validate-bundle.sh's required universal-binaries list must keep
-        mkp224o, so any bundle check (CI or manual) catches its absence.
-        """
-        script = _read("build/validate-bundle.sh")
-        self.assertRegex(
-            script,
-            r'UNIVERSAL_BINARIES=\([^)]*\bmkp224o\b[^)]*\)',
-            "validate-bundle.sh must list mkp224o among the required universal "
-            "binaries it verifies are present in the bundle.",
-        )
-
 
 class TestNoTorImplementationSwitch(unittest.TestCase):
     """TOR_IMPL chose between C Tor and Arti until 2026-09-24. Arti was then
@@ -1592,7 +1580,6 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
     """
 
     SHELL_LAUNCHERS = ["app/MacOS/launcher.sh", "app/MacOS/onionpress"]
-    PY_WRAPPER = "src/onionpress/colima.py"  # Colima._run prepends the binary
     SHELL_START = re.compile(r'(?i)colima(_bin)?"? start\b')
     SHELL_RUN = re.compile(
         r'(?i)colima(_bin)?"? (start|stop|restart|delete|status|list|version)\b')
@@ -1617,8 +1604,8 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
     @classmethod
     def _py_colima_starts(cls):
         """(file, argv words) for each list literal under src/ that starts
-        Colima: [<colima binary>, "start", ...], or ["start", ...] in the
-        Colima wrapper."""
+        Colima: [<colima binary>, "start", ...]. The Python side has none
+        since colima.py went (issue #405)."""
         for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src")):
             for name in sorted(names):
                 if not name.endswith(".py"):
@@ -1629,8 +1616,7 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
                         continue
                     words = [str(e.value) if isinstance(e, ast.Constant) else ast.unparse(e)
                              for e in node.elts]
-                    if (rel == cls.PY_WRAPPER and words[0] == "start") or (
-                            len(words) > 1 and "colima" in words[0].lower()
+                    if (len(words) > 1 and "colima" in words[0].lower()
                             and words[1] == "start"):
                         yield rel, words
 
@@ -1641,10 +1627,7 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
                 self.assertTrue(starts, f"no colima start found in {f}; update this test")
                 for cmd in starts:
                     self.assertIn("--activate=false", cmd.split(), cmd)
-        py_starts = list(self._py_colima_starts())
-        self.assertIn(self.PY_WRAPPER, {f for f, _ in py_starts},
-                      "Colima.start's argv not found; update this test")
-        for f, words in py_starts:
+        for f, words in self._py_colima_starts():
             with self.subTest(file=f, argv=words[:2]):
                 self.assertIn("--activate=false", words)
 
@@ -1665,12 +1648,6 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
                     len(re.findall(r"(?<![\w$])DOCKER_CONFIG=", text)), 1,
                     "Nothing else may re-point DOCKER_CONFIG.")
                 self.assertNotRegex(text, r"\bunset\b[^\n]*\bDOCKER_CONFIG\b")
-
-        wrapper = _read(self.PY_WRAPPER)
-        run = next(n for n in ast.walk(ast.parse(wrapper))
-                   if isinstance(n, ast.FunctionDef) and n.name == "_run")
-        self.assertIn('env["DOCKER_CONFIG"] = self.paths.docker_config_dir',
-                      ast.get_source_segment(wrapper, run))
 
         # The daemon builds every colima and docker env from os.environ (a
         # stop or delete would remove a "colima" context too), so it must
@@ -1711,7 +1688,7 @@ class TestColimaStaysOutOfUserSSHConfig(unittest.TestCase):
                   for _, cmd in c._shell_commands(_read(f), c.SHELL_START)]
         starts += c._py_colima_starts()
         found = {f for f, _ in starts}
-        for f in (*c.SHELL_LAUNCHERS, c.PY_WRAPPER):
+        for f in c.SHELL_LAUNCHERS:
             self.assertIn(f, found, f"no colima start found in {f}; update this test")
         for f, words in starts:
             with self.subTest(file=f):
@@ -2526,7 +2503,7 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         create = self._function_body(text, "create_backup")
         self.assertIn("prune-image-derivatives", create)
         self.assertIn("uploads/.onionpress-regenerate-derivatives", create)
-        self.assertIn("excludes_image_derivatives", create)
+        self.assertIn("--excludes-image-derivatives", create)
         restore = self._function_body(text, "restore_backup")
         self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', restore)
 

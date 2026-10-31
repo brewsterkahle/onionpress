@@ -187,7 +187,7 @@ class TestRecoveryKey(unittest.TestCase):
         shared = os.path.join(self.data_dir, "shared")
         self.assertFalse(os.path.commonpath([path, shared]) == shared)
         # Every Colima mount is shared/ or the Documents folder.
-        for rel in ("app/MacOS/launcher.sh", "src/onionpress/colima.py"):
+        for rel in ("app/MacOS/launcher.sh",):
             text = _read(rel)
             mounts = re.findall(r"--mount[\"'],?\s*f?[\"']?([^\s\"']+)", text)
             mounts += re.findall(r"--mount (\S+)", text)

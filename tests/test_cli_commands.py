@@ -636,7 +636,7 @@ class TestCmdUninstallAtATerminal(Sandbox):
 
 
 # ---------------------------------------------------------------------------
-# start, stop, restart, status, logs
+# stop, status, logs
 # ---------------------------------------------------------------------------
 
 class TestLifecycleCommands(Sandbox):
@@ -644,41 +644,6 @@ class TestLifecycleCommands(Sandbox):
     def setUp(self):
         super().setUp()
         self.cli = make_cli(self.dir)
-        self.cli.containers.key_volume_not_ready.return_value = None
-        self.cli.containers.start_core.return_value = True
-        self.cli.containers.wait_for_wordpress.return_value = True
-        self.cli.containers.wp_is_installed.return_value = True
-        self.cli.containers.wait_for_tor.return_value = True
-        self.cli.containers.get_onion_address.return_value = ADDR
-        self.stack = contextlib.ExitStack()
-        self.addCleanup(self.stack.close)
-        self.detect_os = self.stack.enter_context(
-            mock.patch("onionpress.cli.detect_os", return_value=OS.LINUX))
-        self.spawn = self.stack.enter_context(
-            mock.patch("onionpress.derivatives.spawn_regeneration"))
-
-    def test_start_is_the_launchers(self):
-        """One start path (#442.8): `onionpress start` runs this install's
-        launcher, whose start never skips the key steps (a pending import,
-        the key volume's migration, the first run's key)."""
-        for verb, method in (("start", self.cli.cmd_start), ("restart", self.cli.cmd_restart)):
-            with self.subTest(verb), \
-                 mock.patch("onionpress.handle_action.default_launcher",
-                            return_value="/opt/onionpress/onionpress") as where, \
-                 mock.patch("onionpress.cli.subprocess.run",
-                            return_value=mock.Mock(returncode=7)) as run:
-                self.assertEqual(method(), 7)
-                self.assertEqual(run.call_args.args[0], ["/opt/onionpress/onionpress", verb])
-                self.assertEqual(where.call_args.args[1], "linux")
-        self.cli.containers.start_core.assert_not_called()
-        self.cli.containers.start_tor.assert_not_called()
-        self.cli.containers.stop.assert_not_called()
-
-    def test_a_launcher_that_will_not_run_is_1(self):
-        with mock.patch("onionpress.handle_action.default_launcher", return_value="/nonexistent"), \
-             mock.patch("onionpress.cli.subprocess.run", side_effect=OSError("gone")):
-            self.assertEqual(self.cli.cmd_start(), 1)
-        self.assertIn("ERROR: cannot run the launcher /nonexistent: gone", self.cli.logged)
 
     def test_stop_releases_the_lock(self):
         self.write("onionpress.pid", str(os.getpid()))
@@ -686,6 +651,7 @@ class TestLifecycleCommands(Sandbox):
         self.cli.containers.stop.assert_called_once()
         self.assertFalse(os.path.exists(self.cli.paths.pid_file))
         self.assertIn("OnionPress stopped", self.cli.logged)
+
 
     def test_status_is_json(self):
         self.cli.containers.get_status.return_value = ContainerStatus(

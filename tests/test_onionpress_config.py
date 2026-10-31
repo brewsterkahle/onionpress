@@ -406,7 +406,7 @@ class TestDefaults(unittest.TestCase):
             with open(os.path.join(root, path)) as f:
                 lines = re.findall(r"^UPDATE_ON_LAUNCH=(.*)$", f.read(), re.M)
             self.assertEqual(lines, ["no"], path)
-        # `onionpress start` is the launcher's since #442.8: no Python
+        # Starting is the launcher's (#405, #442.8): no Python
         # fallback read is left.
         with open(os.path.join(root, "src/onionpress/cli.py")) as f:
             self.assertNotIn("UPDATE_ON_LAUNCH", f.read())

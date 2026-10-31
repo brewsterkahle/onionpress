@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
-    derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
+    derivatives, docker_versions, handle_action, launcher_ops, linux_status, multisite, onionheaven,
     redact, scrub, setup_logic, start, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
@@ -59,7 +59,7 @@ def parser_tree():
 
     with mock.patch.object(argparse.ArgumentParser, "parse_args", grab):
         with contextlib.suppress(Captured):
-            cli.main(["start"])
+            cli.main(["stop"])
     tree = {}
 
     def walk(parser, path):
@@ -126,10 +126,7 @@ def positional_launcher(test, m):
 
 ROWS = [
     # ---- OnionPressCLI's own commands (constructed with the data dir) ----
-    Row("start", [], "CLI().cmd_start", mock.call()),
-    Row("start", ["start"], "CLI().cmd_start", mock.call()),
     Row("stop", ["stop"], "CLI().cmd_stop", mock.call()),
-    Row("restart", ["restart"], "CLI().cmd_restart", mock.call()),
     Row("status", ["status"], "CLI().cmd_status", mock.call()),
     Row("logs", ["logs"], "CLI().cmd_logs", mock.call()),
     # The app's functions as subcommands (issue #382, onionpress.app_commands):
@@ -205,6 +202,10 @@ ROWS = [
         "CLI().cmd_prune_image_derivatives", mock.call("/st/uploads")),
     Row("pack-backup", ["pack-backup", "--staging", "/st", "--output", "/b.zip"],
         "CLI().cmd_pack_backup", mock.call("/st", "/b.zip", "pw"), stdin="pw\n"),
+    Row("backup-metadata", ["backup-metadata", "--version", "1"],
+        "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
+        excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
+        with_host_secrets=True, secrets_left_out=[]), rc=0, returns={"a": 1}),
     Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
         "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 
@@ -328,6 +329,8 @@ ROWS = [
         "redact.wordpress_log_excerpt", mock.call("/l.log", D("")), rc=0, returns="tail\n"),
     Row("wordpress-status", ["wordpress-status"], "redact.status_for_wordpress",
         mock.call({"a": 1}), rc=0, returns={"a": 1}, stdin='{"a": 1}'),
+    Row("linux-status", ["linux-status", "--field", "state=running"],
+        "linux_status.build", mock.call(ANY), rc=0, returns={"state": "running"}),
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
         returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"],
@@ -504,7 +507,7 @@ MODULES = {
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
-    "start": start, "setup_logic": setup_logic,
+    "start": start, "setup_logic": setup_logic, "linux_status": linux_status,
 }
 
 
