@@ -9,6 +9,51 @@ has none.
 Each section's heading is `## X.Y.Z — YYYY-MM-DD`. Full lists of changes are
 on each [GitHub release](https://github.com/brewsterkahle/onionpress/releases).
 
+## 2.6.1 — 2026-10-31
+
+Fixes from the first live checks of 2.6.0 on Ubuntu 24.04 with rootless
+Docker, fresh images, and the terminal setup moved into Python.
+
+### Highlights
+- **Linux: the OnionHeaven heartbeat works under rootless Docker** (#503).
+  On the `.deb`'s default install the heartbeat service could not reach
+  Docker, so the hub never heard from the site and the Tor recovery loop
+  never ran. It now finds the same Docker socket the launcher uses.
+- **`onionpress restore` works from any folder on Linux** (#508), no longer
+  fails on the My Creations folder, and starts Tor again if the import
+  fails, so the site stays reachable while you try again.
+- **`onionpress setup --from-backup` restores the backup's site** (#509).
+  It used to install an empty site under the backup's address; now it does
+  what `onionpress restore` does, in one step.
+- **Fresh images** (tor and WordPress, still WordPress 7.1 on PHP 8.3.36)
+  with the hub API limits, the installer rule and the smaller hub changes
+  of the 2.6.0 series; the third-party images are re-pinned and now served
+  from our own registry namespace, so a publisher cleaning up old versions
+  cannot leave a first run unable to start (#501).
+
+### Also in this release
+- **Linux:** the `.deb` sets up rootless Docker and Compose v2 on
+  Ubuntu 24.04 (#486); `onionpress start` refuses too old a Docker or
+  Compose and says how to upgrade (`onionpress check-docker`).
+- **Both platforms:** `onionpress start` and `setup` run in Python
+  (#442); a start no longer refreshes images (they change only with a
+  release) and prunes the ones a release superseded; cloudflared starts at
+  one point on both platforms.
+- The onion key handling is one module (#408); dead code and vestigial
+  files are gone (#411, #412).
+
+### Worth knowing
+- A restore keeps its unpacked backup if it fails, and the next start
+  imports it again, on Linux as on the Mac.
+- A backup's `wp-content/creations` is never written by a restore: My
+  Creations is your `~/OnionPress` folder on this machine.
+
+### OnionHeaven hub and OnionHome operators
+- Dead registry rows are bounded (#492); request bodies get onion-circuit
+  time and bad lengths are refused before reading (#461).
+- As before: take a backup and note the registry and name counts before
+  updating, compare them afterwards, and never downgrade.
+
 ## 2.6.0 — 2026-10-26
 
 A large security round and a new way the Mac app runs.

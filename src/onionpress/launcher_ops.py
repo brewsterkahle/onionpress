@@ -38,7 +38,7 @@ from .ports import get_running_wp_port  # noqa: F401  (moved there, #482)
 # same image the rest of a locally built stack uses.
 DEFAULT_TOR_IMAGE = os.environ.get(
     "ONIONPRESS_TOR_IMAGE",
-    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc",
+    "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3",
 )
 
 # How the menubar, the tray, scrub and the launchers hand a backup password

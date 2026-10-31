@@ -430,7 +430,7 @@ is_onionheaven_hub() {
 # built one. Never a floating tag such as `alpine`, which a registry or a
 # mirror could swap for an image that reads the key. Each run overrides the
 # entrypoint and joins no network (tests/test_container_capabilities.py).
-KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc}"
+KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:c309c64ac057c83b74a77921f5fc39f0f41bd63e386825a584eb43aef7ed1fe3}"
 
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing

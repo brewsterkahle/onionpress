@@ -224,7 +224,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         self.icon = self.icon_stopped
 
         # Set version to placeholder (will be updated in background)
-        self.version = "2.6.0"
+        self.version = "2.6.1"
 
         # The environment of this process's children: the launcher (which
         # sets its own), auto_login's token mint and the first-run setup's
