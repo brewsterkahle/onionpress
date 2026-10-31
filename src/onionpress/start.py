@@ -292,7 +292,11 @@ class KeySeed:
     def _seed_or_roll_back(self, key_dir: str, image: str, *, first_run: bool,
                            tor_starts_without: str) -> bool:
         from .containers import KEY_VOLUME
-        if self.manager.run_key_seed(key_dir, image).ok:
+        # The helper's own words (a cp error) go to the log file, as the
+        # bash's `>> "$LOG_FILE" 2>&1` put them.
+        seeded = self.manager.run_key_seed(key_dir, image)
+        self.manager._to_log_file(seeded)
+        if seeded.ok:
             self.log(f"Address key installed to the {KEY_VOLUME} volume")
             return True
         if not first_run:
@@ -414,7 +418,9 @@ class KeySeed:
 
         if os.path.isfile(os.path.join(key_dir, "hs_ed25519_secret_key")):
             self._create_volume(TOR_STATE_VOLUME)
-            if self.manager.run_tor_state_seed(key_dir, image).ok:
+            seeded = self.manager.run_tor_state_seed(key_dir, image)
+            self.manager._to_log_file(seeded)
+            if seeded.ok:
                 self.log("Address key installed to tor-state volume (C Tor)")
             else:
                 self.log("WARNING: Failed to copy address key to tor-state volume")

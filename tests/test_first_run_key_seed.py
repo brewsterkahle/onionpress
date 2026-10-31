@@ -132,6 +132,11 @@ class TestBothPlatforms(Base):
                                  "left behind it would end the first run with no key")
                 self.assertEqual(self.lines[-1], "ERROR: Failed to copy address key to the "
                                  "onionpress-onion-keys volume; not starting")
+                # Why it failed is in the log file, as the bash's
+                # `>> "$LOG_FILE" 2>&1` left it (found by the live checks).
+                with open(os.path.join(self.data, "onionpress.log"), encoding="utf-8") as f:
+                    self.assertIn("stub: fails", f.read())
+                os.unlink(os.path.join(self.data, "onionpress.log"))
                 shutil.rmtree(os.path.join(self.data, "shared"), True)
 
     def test_a_volume_that_will_not_go_says_how_to_remove_it(self):
