@@ -337,6 +337,32 @@ def _registration_choice(config):
 # Docker exec helper
 # ---------------------------------------------------------------------------
 
+def point_docker_at_the_daemon(environ=None):
+    """Give every `docker` this process runs the daemon the rest of
+    OnionPress uses (issue #503). The unit runs without the launcher, which
+    exports DOCKER_HOST to the user's rootless socket when there is one
+    (linux/onionpress); without it, under the .deb's rootless Docker, plain
+    `docker` went to /var/run/docker.sock and every call here failed, so
+    there was no heartbeat and no republish. Same rule as the rest of the
+    Python side (onionpress.platform.resolve_paths: the rootless socket
+    when it exists, else the system one); a DOCKER_HOST already in the
+    environment is kept. Returns the DOCKER_HOST in force, or ""."""
+    environ = os.environ if environ is None else environ
+    if environ.get("DOCKER_HOST"):
+        return environ["DOCKER_HOST"]
+    try:
+        from onionpress.platform import resolve_paths
+        sock = resolve_paths(data_dir=DATA_DIR, app_bundle="").docker_socket
+    except Exception as e:  # an install without lib/: docker's own default
+        log.warning("Could not resolve the Docker socket (%s); using docker's default", e)
+        return ""
+    if not os.path.exists(sock):
+        return ""
+    environ["DOCKER_HOST"] = f"unix://{sock}"
+    log.info("Docker: %s", environ["DOCKER_HOST"])
+    return environ["DOCKER_HOST"]
+
+
 def docker_exec(container, args, timeout=30, input=None, user=None):
     """Run a command inside a Docker container. Returns (success, stdout).
     *input*, if given, is written to the command's stdin (docker exec -i);
@@ -1842,6 +1868,8 @@ def main():
     signal.signal(signal.SIGUSR2, _usr2_handler)
 
     log.info("heartbeat client starting...")
+    # Before the first docker call (issue #503).
+    point_docker_at_the_daemon()
     # Signing goes on without libsodium (a heartbeat that cannot be signed
     # lets the hub take the site over), but on variable-time pure Python.
     if not onion_auth.signing_uses_libsodium():

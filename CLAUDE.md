@@ -203,6 +203,11 @@
   `launcher_ops.py` and `tor-watchdog.py`. Every Python entry point in
   `linux/` is installed by both `install.sh` and `build-linux.sh`.
   `tests/test_linux_recovery_loop.py`.
+- **The Linux heartbeat reaches the daemon the launcher uses** (#503): its
+  main() runs `point_docker_at_the_daemon()` before its first `docker` call
+  (`resolve_paths`' socket into DOCKER_HOST, a preset one kept; the unit
+  sets no DOCKER_HOST, and must not: a system-Docker install has none).
+  `tests/test_linux_heartbeat_docker_socket.py`.
 - The watchdog is started only through entrypoint.sh's `supervise_watchdog`
   (a function, not a `*tor-watchdog*` script: hosts signal
   `pgrep -f '[t]or-watchdog'`). `tests/test_tor_watchdog_supervised.py`.
