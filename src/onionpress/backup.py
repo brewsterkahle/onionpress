@@ -988,8 +988,8 @@ def keep_installed_address(metadata, log_func):
         log_func("Restore: refused: the backup holds no onion service key and "
                  "this install's own address could not be read")
         raise ValueError(NO_KEY_TO_KEEP_MSG)
-    log_func(f"Restore: the backup holds no onion service key (made from the "
-             f"Settings page); this install keeps its key and its address "
+    log_func(f"Restore: the backup holds no onion service key (a Settings-page backup, "
+             f"or one whose key could not be read, issue #519); this install keeps its key and its address "
              f"{address}")
     metadata['onion_address'] = address
     return address
@@ -1328,8 +1328,9 @@ def restore_from_backup(zip_path, password, log_func, *, data_dir=None,
             # No key in the backup: this install's key, key volume,
             # vanity-keys/ and cached address stay as they are.
             if current_address:
-                log_func(f"Restore: the backup holds no onion service key (made "
-                         f"from the Settings page); this install keeps its key "
+                log_func(f"Restore: the backup holds no onion service key (a "
+                         f"Settings-page backup, or one whose key could not be "
+                         f"read, issue #519); this install keeps its key "
                          f"and its address {current_address}")
                 metadata['onion_address'] = current_address
             else:
@@ -2081,9 +2082,14 @@ def backup_filename_username(path):
 def linux_backup_metadata(onion_address, version, *, has_onionheaven=False,
                           excludes_image_derivatives=False, hub_fields=None,
                           hub_unchecked=False, with_host_secrets=True,
-                          secrets_left_out=(), now=None):
+                          secrets_left_out=(), excludes_onion_key=False, now=None):
     """metadata.json's content for a backup the Linux launcher stages
     (issue #406; it was an inline python3 -c in create_backup).
+
+    *excludes_onion_key*: no onion service key could be read (issue
+    #519), so the archive carries none and says so, the way the Mac page's
+    backup does: a restore keeps the install's own key and address
+    (staged_onion_key_address) instead of failing on the missing PEM.
 
     *hub_fields* are what stage_hub_backup printed (onionheaven_data and
     its sealed-format and recovery-key fields). pack_backup stamps
@@ -2111,4 +2117,6 @@ def linux_backup_metadata(onion_address, version, *, has_onionheaven=False,
         # were set (TUNNEL_TOKEN_KEY).
         metadata['excludes_host_secrets'] = True
         metadata['secret_config_left_out'] = list(secrets_left_out)
+    if excludes_onion_key:
+        metadata['excludes_onion_key'] = True
     return metadata

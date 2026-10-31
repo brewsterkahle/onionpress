@@ -13,6 +13,7 @@ docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 log First run detected
 log First run with ADDRESS_PREFIX=op2 -- checking tor image for mkp224o...
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
 py generate-vanity
 log Vanity generation skipped or failed; falling back to random address
 log No imported key found -- using random onion address

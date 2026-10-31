@@ -2831,6 +2831,9 @@ def _add_backup_metadata(sub, name):
                    help="JSON stage-hub-backup printed (empty for none)")
     p.add_argument("--hub-unchecked", action="store_true")
     p.add_argument("--without-host-secrets", action="store_true")
+    p.add_argument("--excludes-onion-key", action="store_true",
+                   help="No onion service key could be read: the archive carries none "
+                        "and a restore keeps the install's key (issue #519)")
     p.add_argument("--secrets-left-out", default="",
                    help="Space-separated names of the secrets left out")
 
@@ -2852,7 +2855,8 @@ def _run_backup_metadata(run):
         excludes_image_derivatives=a.excludes_image_derivatives,
         hub_fields=hub_fields, hub_unchecked=a.hub_unchecked,
         with_host_secrets=not a.without_host_secrets,
-        secrets_left_out=a.secrets_left_out.split())
+        secrets_left_out=a.secrets_left_out.split(),
+        excludes_onion_key=a.excludes_onion_key)
     print(json.dumps(metadata, indent=2))
     return 0
 

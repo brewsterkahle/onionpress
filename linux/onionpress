@@ -1870,11 +1870,36 @@ create_backup() {
         else
             key_volume_cat onionpress-tor-state hidden_service/wordpress/hs_ed25519_public_key > "$staging/tor-keys/hs_ed25519_public_key" 2>/dev/null || true
             [ ! -s "$staging/tor-keys/hs_ed25519_public_key" ] && rm -f "$staging/tor-keys/hs_ed25519_public_key"
+            key_volume_cat onionpress-tor-state hidden_service/wordpress/hostname > "$staging/tor-keys/hostname" 2>/dev/null || true
+            [ ! -s "$staging/tor-keys/hostname" ] && rm -f "$staging/tor-keys/hostname"
         fi
     fi
 
-    if [ -z "$(ls -A "$staging/tor-keys/" 2>/dev/null)" ]; then
-        log "WARNING: No Tor keys found — backup will not include keys"
+    # The restore takes the PEM and nothing else. A key Tor minted itself
+    # (a first start that could not seed one, issue #519) exists only in C
+    # Tor's form: derive the PEM from it, as the Mac's backup does; no key
+    # at all is no backup, not an archive no restore accepts.
+    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ] \
+       && [ -s "$staging/tor-keys/hs_ed25519_secret_key" ]; then
+        if python3 "$SCRIPTS_DIR/key_manager.py" ctor-to-arti "$staging/tor-keys" >>"$LOG_FILE" 2>&1 \
+           && [ -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
+            log "Backup: onion service key PEM derived from C Tor's key files"
+        else
+            log "WARNING: could not derive the onion service key PEM from C Tor's key files"
+        fi
+    fi
+    rm -f "$staging/tor-keys/hostname"
+    # No key at all: the archive says so (metadata excludes_onion_key, as
+    # the Mac page's backup does), and a restore keeps the install's own
+    # key and address; an archive with no PEM and no such word failed
+    # every restore ("Backup is missing ks_hs_id.ed25519_expanded_private").
+    local keyless_backup=no
+    if [ ! -s "$staging/tor-keys/ks_hs_id.ed25519_expanded_private" ]; then
+        keyless_backup=yes
+        rm -rf "$staging/tor-keys"
+        mkdir -p "$staging/tor-keys"
+        log "WARNING: Backup: no onion service key could be read (the PEM in onionpress-onion-keys, or C Tor's key in onionpress-tor-state): this backup carries none, and a restore of it keeps the key and address of the install it is restored onto"
+        echo "WARNING: No onion service key could be read: this backup carries none (a restore of it keeps the target install's address). See $LOG_FILE." >&2
     fi
 
     # The healthcheck onion service's key is never backed up, as on the
@@ -1988,6 +2013,7 @@ create_backup() {
     [ "$excludes_derivatives" = "true" ] && meta_flags+=(--excludes-image-derivatives)
     [ "$hub_unchecked" = "true" ] && meta_flags+=(--hub-unchecked)
     [ "$with_host_secrets" = "no" ] && meta_flags+=(--without-host-secrets)
+    [ "$keyless_backup" = "yes" ] && meta_flags+=(--excludes-onion-key)
     if ! op_py --data-dir "$DATA_DIR" backup-metadata \
             --onion-address "$onion_addr" --version "$ONIONPRESS_VERSION" \
             --hub-fields "$hub_fields" --secrets-left-out "$secrets_left_out" \
