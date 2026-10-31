@@ -826,6 +826,22 @@
 - `wp_files.own(recursive=True)` never enters `creations` and follows no
   link.
 
+## A Restore Works From Any Folder and Leaves the Site Up (issue #508)
+- Linux's compose files are the install tree's: `resolve_paths` takes
+  `platform.linux_docker_dir()` (`$ONIONPRESS_INSTALL_DIR/docker`,
+  `<root>/docker` beside `lib/onionpress`, a checkout's
+  `app/Resources/docker`); nothing in the Python side depends on the
+  current folder. `TestLinuxDockerDir` in `tests/test_onionpress_platform.py`.
+- A restore never writes `wp-content/creations` (the host's `~/OnionPress`,
+  bind-mounted; under rootless Docker www-data's tar cannot set its
+  times): `put_wp_content` passes `WP_CONTENT_NEVER_RESTORED` as
+  `put_tree(skip=)`. `TestPutTree` in `tests/test_wordpress_writes_as_www_data.py`.
+- A restore that fails past its teardown starts Tor again (`tor_back` in
+  `cmd_restore`) and keeps its staging; **both** platforms' starts import a
+  kept `.install-from-backup` (`start.post_up`). `TestCmdRestore` in
+  `tests/test_cli_commands.py`, `tests/test_start_post_up.py`, the
+  `install-from-backup*` start traces.
+
 ## Backup Encryption (backup format 2)
 - Format 2: plain `.zip` with `README.txt` + `onionpress-backup.enc`
   (Argon2id INTERACTIVE + secretstream XChaCha20-Poly1305 via PyNaCl, as

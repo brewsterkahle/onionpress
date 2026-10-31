@@ -216,15 +216,19 @@ def own(path: str, recursive: bool = False, *, docker_bin: str = "docker",
         capture_output=True, timeout=timeout, env=env)
 
 
-def write_tar(src_dir: str, out) -> None:
+def write_tar(src_dir: str, out, *, skip: tuple = ()) -> None:
     """Write *src_dir*'s contents to the binary stream *out* as a tar of
     plain folders and files, names relative to *src_dir*. Anything else
     (a link, a device) raises ValueError: the trees handed over are the
-    app's own files and backups already checked for links."""
+    app's own files and backups already checked for links. *skip* names
+    top-level entries left out whole (a restore's `creations`, #508)."""
     with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tf:
         for root, dirs, files in os.walk(src_dir):
-            dirs.sort()
             rel_root = os.path.relpath(root, src_dir)
+            if rel_root == "." and skip:
+                dirs[:] = [d for d in dirs if d not in skip]
+                files = [f for f in files if f not in skip]
+            dirs.sort()
             for name in dirs + sorted(files):
                 path = os.path.join(root, name)
                 arcname = name if rel_root == "." else f"{rel_root}/{name}"
@@ -257,7 +261,7 @@ PUT_TREE_FLOOR_S = 300
 def put_tree(src_dir: str, dest: str, *, merge: bool = False,
              docker_bin: str = "docker", env: Optional[dict] = None,
              timeout: Optional[int] = None,
-             container: str = WP_CONTAINER) -> subprocess.CompletedProcess:
+             container: str = WP_CONTAINER, skip: tuple = ()) -> subprocess.CompletedProcess:
     """Hand *src_dir*'s contents to the container at *dest*, as www-data.
 
     *merge* unpacks over what is at *dest* (a restore into wp-content);
@@ -266,6 +270,7 @@ def put_tree(src_dir: str, dest: str, *, merge: bool = False,
     www-data can replace it. Returns the unpacking exec's result; raises
     ValueError for a link or special file in *src_dir*. *timeout* (each of
     the two steps) defaults to one sized to *src_dir* (sized_timeout).
+    *skip*: top-level names of *src_dir* left out (write_tar).
     """
     if timeout is None:
         timeout = sized_timeout(tree_bytes(src_dir), PUT_TREE_FLOOR_S)
@@ -282,7 +287,7 @@ def put_tree(src_dir: str, dest: str, *, merge: bool = False,
         killer.start()
         try:
             try:
-                write_tar(src_dir, proc.stdin)
+                write_tar(src_dir, proc.stdin, skip=skip)
             except BrokenPipeError:
                 pass  # the container side gave up; its exit status says why
             except BaseException:

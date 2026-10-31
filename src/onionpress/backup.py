@@ -526,14 +526,29 @@ def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None):
     scrub_staged_tree(dest, log_func, 'wp-content')
 
 
+# wp-content/creations is the host's ~/OnionPress folder, bind-mounted: a
+# restore writes nothing there (issue #508). An archive that carries the
+# entry anyway (an older backup, a Settings page backup) had www-data's tar
+# set the mount's own times, which rootless Docker refuses (the folder is
+# the host user's, root's inside), and the restore failed after the
+# database was imported.
+WP_CONTENT_NEVER_RESTORED = ('creations',)
+
+
 def put_wp_content(src, log_func, timeout=None):
     """Unpack the staged *src* over wp-content in the WordPress container,
     as www-data (wp_files.put_tree). Not docker cp + chown -R as root: the
     copy followed links www-data can plant in wp-content (the destination's
     own `wp-content/` too), and so did the trailing-slash chown. *timeout*
-    defaults to one sized to *src* (wp_files.put_tree)."""
+    defaults to one sized to *src* (wp_files.put_tree). A top-level
+    `creations` in *src* is left out (WP_CONTENT_NEVER_RESTORED)."""
+    for name in WP_CONTENT_NEVER_RESTORED:
+        if os.path.lexists(os.path.join(src, name)):
+            log_func(f"Restore: the backup's wp-content/{name} is left out: My "
+                     f"Creations is the ~/OnionPress folder on this machine, never "
+                     f"written by a restore")
     r = wp_files.put_tree(src, '/var/www/html/wp-content', merge=True,
-                          timeout=timeout)
+                          timeout=timeout, skip=WP_CONTENT_NEVER_RESTORED)
     if r.returncode != 0:
         log_func(f"Restore: wp-content copy failed: {r.stderr.strip()[-300:]}")
         raise Exception("Could not copy wp-content into the WordPress container")

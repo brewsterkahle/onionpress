@@ -155,7 +155,9 @@ def resolve_paths(data_dir: str = None, documents_dir: str = None,
         docker_dir = os.path.join(resources, "docker")
     else:
         bin_dir = ""
-        docker_dir = ""
+        # Linux: the install tree's (issue #508). Without it every compose
+        # call ran with no -f and worked only from /opt/onionpress/docker.
+        docker_dir = linux_docker_dir() if detect_os() == OS.LINUX else ""
 
     # On Linux, prefer the rootless Docker socket (what install.sh sets up);
     # fall back to the rootful system socket only if rootless is absent.
@@ -182,6 +184,29 @@ def resolve_paths(data_dir: str = None, documents_dir: str = None,
         docker_socket=docker_socket,
         app_bundle=app_bundle,
     )
+
+
+def linux_docker_dir(package_dir: str | None = None,
+                     environ: dict | None = None) -> str:
+    """Where a Linux install keeps its compose files (issue #508): the
+    first folder holding a docker-compose.yml among $ONIONPRESS_INSTALL_DIR/
+    docker (the launcher's override), <root>/docker (the .deb and
+    install.sh put the package at <root>/lib/onionpress, linux/
+    install-tree.sh) and <root>/app/Resources/docker (a checkout, with the
+    package at <root>/src/onionpress); "" when none is. *package_dir* is
+    this package's folder (for tests)."""
+    environ = os.environ if environ is None else environ
+    package_dir = package_dir or os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.dirname(package_dir))
+    candidates = []
+    if environ.get("ONIONPRESS_INSTALL_DIR"):
+        candidates.append(os.path.join(environ["ONIONPRESS_INSTALL_DIR"], "docker"))
+    candidates += [os.path.join(root, "docker"),
+                   os.path.join(root, "app", "Resources", "docker")]
+    for folder in candidates:
+        if os.path.isfile(os.path.join(folder, "docker-compose.yml")):
+            return folder
+    return ""
 
 
 def _is_app_bundle(path: str) -> bool:
