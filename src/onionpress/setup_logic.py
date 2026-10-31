@@ -1237,6 +1237,7 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
             say("  Tor not started: the onion service key volume is not in place (see "
                 f"{os.path.join(data_dir, 'onionpress.log')}).")
             return SETUP_FAILED
-        manager.run_compose_to(["up", "-d", "tor"] + ([] if mac else ["onionheaven"]),
+        # --no-deps: WordPress is up; recreating it would move its port (#464).
+        manager.run_compose_to(["up", "-d", "--no-deps", "tor"] + ([] if mac else ["onionheaven"]),
                                out="log")
     return SETUP_DONE

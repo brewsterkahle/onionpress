@@ -16,7 +16,7 @@ log WordPress is installed: moving its port 8080 from 127.0.0.1 to 0.0.0.0 (ONIO
 docker compose up -d wordpress [BIND=0.0.0.0]
 bin systemctl --user is-enabled onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
-docker compose up -d tor onionheaven [BIND=0.0.0.0]
+docker compose up -d --no-deps tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed

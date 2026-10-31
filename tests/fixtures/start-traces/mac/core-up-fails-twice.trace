@@ -19,7 +19,7 @@ log WordPress is installed
 docker exec onionpress-wordpress test -s /var/www/html/.htaccess
 log Starting Tor containers...
 docker volume ls --format {{.Name}}
-docker compose up -d tor onionheaven
+docker compose up -d --no-deps tor onionheaven
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php

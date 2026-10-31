@@ -28,7 +28,7 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 log WordPress not yet installed — will be configured by setup window
 log Starting Tor containers...
 docker volume ls --format {{.Name}}
-docker compose up -d tor onionheaven
+docker compose up -d --no-deps tor onionheaven
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Installing Internet Archive Wayback Machine Link Fixer 1.4.2...
 docker exec onionpress-wordpress true

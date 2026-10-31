@@ -196,7 +196,7 @@ class TestFlow(Base):
                          "the password leaves the environment once read")
         # Tor started, its key volume migrated first.
         manager.migrate_key_volume.assert_called_once_with()
-        manager.run_compose_to.assert_called_once_with(["up", "-d", "tor"], out="log")
+        manager.run_compose_to.assert_called_once_with(["up", "-d", "--no-deps", "tor"], out="log")
 
     def test_tor_never_without_its_key_volume(self):
         manager = mock.Mock(**{"migrate_key_volume.return_value": False})
@@ -307,6 +307,8 @@ class TestLaunchers(unittest.TestCase):
             text = self._read(rel)
             i = text.index("\nrun_setup() {")
             fn = text[i:text.index("\n}\n", i) + 3]
+            j = text.index("\nread_backup_password() {")
+            fn = text[j:text.index("\n}\n", j) + 3] + fn
             script = (f'{runner}() {{ printf "%s|" "$@"; echo; '
                       'echo "env:$ONIONPRESS_SETUP_PASSWORD:$ONIONPRESS_IA_PASSWORD:'
                       '$ONIONPRESS_BACKUP_PASSWORD"; }\n'
@@ -326,6 +328,33 @@ class TestLaunchers(unittest.TestCase):
                 self.assertEqual(out[1], "env::ia:bpw", "the last --pass had no value")
                 for secret in ("p w", "bpw", "ia"):
                     self.assertNotIn(secret, argv)
+
+    def test_a_backup_password_from_the_environment(self):
+        """`setup --from-backup <zip>` takes the password as backup and
+        restore do: the live Linux check gave it in the environment and the
+        zip was taken for the password."""
+        import subprocess
+        for rel, runner in (("app/MacOS/onionpress", "bundled_python"), ("linux/onionpress", "op_py")):
+            text = self._read(rel)
+            fns = ""
+            for name in ("read_backup_password", "run_setup"):
+                i = text.index(f"\n{name}() {{")
+                fns += text[i:text.index("\n}\n", i) + 3]
+            script = (f'{runner}() {{ [ "$1" = -m ] && shift 2; printf "%s|" "$@"; echo; '
+                      'echo "env:$ONIONPRESS_BACKUP_PASSWORD"; }\n'
+                      'DATA_DIR=/d; SCRIPT_DIR=/s; INSTALL_DIR=/s\n' + fns
+                      + 'run_setup --from-backup /b.zip --user bob\n')
+            r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True,
+                               env={"PATH": os.environ["PATH"],
+                                    "ONIONPRESS_BACKUP_PASSWORD": "envpw"},
+                               stdin=subprocess.DEVNULL, timeout=30)
+            with self.subTest(rel):
+                out = r.stdout.splitlines()
+                argv = out[0].split("|")
+                self.assertIn("--from-backup|/b.zip|--user|bob", "|".join(argv))
+                self.assertEqual(out[1], "env:envpw")
+                self.assertNotIn("envpw", argv)
+                self.assertNotIn("visible to other users", r.stderr)
 
     def test_the_case_restarts_only_for_a_backup(self):
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):

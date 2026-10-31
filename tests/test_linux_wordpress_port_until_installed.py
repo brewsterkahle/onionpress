@@ -314,5 +314,30 @@ class TestEverySetupPathEndsThere(unittest.TestCase):
         self.assertIn('rm -f "${DATA_DIR:?}/${WP_INSTALLED_MARKER:?}"', text)
 
 
+
+class TestTorStartsLeaveWordPressAlone(unittest.TestCase):
+    """tor depends on wordpress in docker-compose.yml: a plain `compose up
+    tor` recreates WordPress under the environment's ONIONPRESS_BIND_HOST
+    (the config's, exported by the launcher), so the start that bound the
+    port to 127.0.0.1 until setup published the installer to the network
+    as soon as Tor came up (found by the live Linux checks of #499; the
+    bash start did the same). Every Python start of Tor says --no-deps."""
+
+    def test_every_tor_up_says_no_deps(self):
+        import re
+        src = os.path.join(PROJECT_ROOT, "src", "onionpress")
+        found = []
+        for name in sorted(os.listdir(src)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(src, name), encoding="utf-8") as f:
+                text = f.read()
+            for m in re.finditer(r'\["up", "-d"(?:, "[^"]+")*, "tor"', text):
+                found.append((name, m.group(0)))
+        self.assertTrue(found, "no Tor start found: the pattern is stale")
+        self.assertEqual([f for f in found if '"--no-deps"' not in f[1]], [])
+        with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
+            self.assertNotRegex(f.read(), r"(?m)^[^#]*compose[^\n#]*\bup -d tor\b")
+
 if __name__ == "__main__":
     unittest.main()

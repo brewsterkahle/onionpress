@@ -15,7 +15,7 @@ log WordPress is installed
 docker exec onionpress-wordpress test -s /var/www/html/.htaccess
 log Starting Tor containers...
 docker volume ls --format {{.Name}}
-docker compose up -d tor onionheaven
+docker compose up -d --no-deps tor onionheaven
 log Internet Archive plugin installation disabled in config
 log Cache Enabler plugin installation disabled in config
 py deactivate-wp-statistics

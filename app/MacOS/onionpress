@@ -624,9 +624,19 @@ run_setup() {
             --pass) setup_pass="${2:-}"; shift; [ $# -eq 0 ] || shift ;;
             --ia-password) ia_pass="${2:-}"; shift; [ $# -eq 0 ] || shift ;;
             --from-backup)
-                backup_pass="${2:-}"
-                args+=(--from-backup "${3:-}")
-                shift; [ $# -eq 0 ] || shift; [ $# -eq 0 ] || shift ;;
+                # `--from-backup <zip>`: the password as backup and restore
+                # take it (ONIONPRESS_BACKUP_PASSWORD, stdin, a prompt). The
+                # old `--from-backup <password> <zip>` still works, warned.
+                if [ $# -ge 3 ] && [ "${3#-}" = "$3" ]; then
+                    read_backup_password "${2:-}"
+                    args+=(--from-backup "$3")
+                    shift 3
+                else
+                    read_backup_password ""
+                    args+=(--from-backup "${2:-}")
+                    shift; [ $# -eq 0 ] || shift
+                fi
+                backup_pass="$BACKUP_PASS" ;;
             *) args+=("$1"); shift ;;
         esac
     done
@@ -2240,7 +2250,7 @@ main() {
 
         setup)
             # Usage: onionpress setup [--user USER] [--pass PASS] [--title TITLE]
-            #        onionpress setup --from-backup <password> <backup.zip>
+            #        onionpress setup --from-backup <backup.zip>   (password: ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt)
             # The install the setup window makes (run_setup); a backup's
             # setup restarts the stack so the start installs its key.
             setup_db_passwords

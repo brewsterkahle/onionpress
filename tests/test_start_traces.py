@@ -60,7 +60,7 @@ SCENARIOS = [
         {"match": r"up -d wordpress db onionheaven autoheal", "rc": 1, "times": 2}]}),
     Scenario("core-up-fails", docker={"rules": [
         {"match": r"up -d wordpress db onionheaven autoheal", "rc": 1}]}),
-    Scenario("tor-up-fails", docker={"rules": [{"match": r"up -d tor onionheaven", "rc": 1}]}),
+    Scenario("tor-up-fails", docker={"rules": [{"match": r"up -d --no-deps tor onionheaven", "rc": 1}]}),
     Scenario("wordpress-slow", env={"STUB_RC_CURL": "7"}),
     Scenario("wordpress-not-installed", docker={"wp_installed": False, "plugins": {}}),
     Scenario("steps-fail", docker={"htaccess": False},

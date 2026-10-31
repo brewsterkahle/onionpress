@@ -32,7 +32,7 @@ log Heartbeat client held until WordPress is installed (no hub registration befo
 bin systemctl --user is-active onionpress-heartbeat.service
 bin systemctl --user stop onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
-docker compose up -d tor onionheaven [BIND=0.0.0.0]
+docker compose up -d --no-deps tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Installing Internet Archive Wayback Machine Link Fixer 1.4.2...

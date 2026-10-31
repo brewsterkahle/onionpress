@@ -323,7 +323,7 @@ class TestPostUp(Base):
 
     def test_mac_order(self):
         manager, order, errors = self.post_up(True)
-        self.assertEqual(manager.compose, [(["up", "-d", "tor", "onionheaven"], "log", False)])
+        self.assertEqual(manager.compose, [(["up", "-d", "--no-deps", "tor", "onionheaven"], "log", False)])
         self.assertEqual(order, [
             "install-plugins", "deactivate-wp-statistics",
             "provision-post-install --themes-dir /t --plugins-dir /p", "setup-plugins",

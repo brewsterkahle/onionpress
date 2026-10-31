@@ -716,9 +716,13 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     # Always Tor: the address is ready by the time setup is done. Never
     # before its key volume is in place (the steps before this made sure;
     # starting tor would create an empty one that later starts take for
-    # the key), as ContainerManager.start_tor.
+    # the key), as ContainerManager.start_tor. --no-deps: tor depends on
+    # wordpress, and without it compose recreates WordPress under the
+    # launcher's exported bind host, publishing the installer to the
+    # network before setup on Linux (#464; found by the live checks).
     why = manager.key_volume_not_ready()
-    rc = 1 if why else manager.run_compose_to(["up", "-d", "tor", "onionheaven"], out="log")
+    rc = 1 if why else manager.run_compose_to(["up", "-d", "--no-deps", "tor", "onionheaven"],
+                                              out="log")
     if why:
         log(f"ERROR: not starting Tor: {why}")
         name_failure("tor")

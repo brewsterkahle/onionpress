@@ -650,8 +650,10 @@ class ContainerManager:
             self._log(f"ERROR: not starting Tor: {why}")
             return False
         self._log("Starting Tor service...")
+        # --no-deps: the callers bring WordPress up first, and compose would
+        # otherwise recreate it, moving its port (#464).
         result = self.docker.compose(
-            ["up", "-d", "tor"],
+            ["up", "-d", "--no-deps", "tor"],
             compose_files=self._compose_files(),
             timeout=120,
             extra_env=self._build_env(),
