@@ -418,9 +418,8 @@ new `Docker.run_to`, so the docker-argv census did not grow), the egress
 step `start.egress_step` (the launcher's verdict, `wordpress-egress` in
 START_ERRORS on the Mac), retire, the network move, `compose up` × 3;
 then the host-side `curl` wait for the port (60 s, the Mac's WARNING) and
-`wp core is-installed` × 15. Settled: `update_images` (UPDATE_ON_LAUNCH)
-stays bash, before the delegation, because its per-image pin lists are
-`refresh-image-digests.sh` consumers and the Mac's `restart` calls it too.
+`wp core is-installed` × 15. (`update_images`, UPDATE_ON_LAUNCH's refresh,
+first stayed bash here; it is gone since, see "No image refresh" below.)
 Linux's WordPress address (#464) reaches compose as before, in the
 environment: `ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" op_py
 … start-core` (no Python code names the variable;
@@ -480,16 +479,14 @@ Linux's `start_cloudflare_tunnel`, `warn_if_socks_port_exposed`,
 `start.start_containers` (fast path `start-containers`: exit 1 stop, 0
 installed, 3 not) runs `apply_pending_key_import` → `migrate_key_volume`
 → `KeySeed` → `start_core` → `post_up`. The Mac's `start_containers` is
-the Docker wait, `ensure_vm_fsck_repair`, `update_images` and that one
-call (errors file → START_ERRORS); Linux's is the wait, `update_images`,
+the Docker wait, `ensure_vm_fsck_repair` and that one
+call (errors file → START_ERRORS); Linux's is the wait,
 `start-containers --until-core` (with `ONIONPRESS_BIND_HOST` in its
 environment), its install-state steps and LAN note, `start-post-up`, and
 the activation watcher. Settled:
 - Linux cannot be one call: the install-state steps name
   `ONIONPRESS_BIND_HOST` (no Python may, `test_linux_bind_scope`) and
   must run between the core and Tor (the heartbeat hold before Tor).
-- `update_images` runs before the key steps now (it only pulls): the
-  `update-on-launch` traces moved its lines up.
 - The thinner Python start (`OnionPressCLI.cmd_start` / `cmd_restart`: no
   migration, seed or provisioning) is gone; #405 removed it upstream, and
   this branch's interim launcher wrappers went with the merge.
@@ -541,3 +538,30 @@ Gone from both launchers: `setup_wordpress_cli` / `_interactive`,
 valid onionname and the password 6+ characters (the GUI's rules);
 `--email` is accepted and ignored (install_fresh_wordpress uses
 admin@onionpress.local).
+
+### No image refresh; the start prunes superseded images (review of #499)
+
+Decided in review: images change only with a release. With every image
+pinned by digest, `UPDATE_ON_LAUNCH` (both launchers' `update_images`, the
+Mac's `restart` too), `onionpress update-images` and the image pass of the
+menubar's Check for Updates could only re-pull the same digests, and the
+last one told the owner images were "up to date" as if they updated apart
+from OnionPress. All gone: the key, its UI (Mac settings window,
+`settings.html`, the WordPress Settings page), defaults and validators,
+the verb, the subcommand, `ContainerManager.pull_images*`. An old config
+line is ignored. The launchers keep one pin each (`KEY_HELPER_IMAGE`), so
+both stay refresher consumers; the third-party pins live in the compose
+files only. `tests/test_no_image_refresh.py` replaces
+`test_launch_pulls_once.py`; the settings tests that used the key as a
+sample yes/no key use `SHARE_ANALYTICS_WITH_ONIONHOME`.
+
+`start.prune_superseded_images`, last in `post_up` (both platforms), took
+over #230's prune: for each image `compose config --images` lists (the
+Cloudflare file included), once `image inspect` finds the pinned digest,
+`image ls <repo>` and a plain `image rm` of each other untagged image.
+Untagged only: OnionPress pulls by digest, so a user's tagged image on a
+shared Linux Docker is never touched; no global `image prune`. The
+`update-on-launch` trace scenario became `images-superseded`; every other
+trace gained the one `config --images` line. What a first run does when a
+pin has left its registry is #501.
+

@@ -36,9 +36,8 @@ BASELINE_CONFIG = {
     "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
     # The Link Fixer submits links in posts to the public Wayback Machine.
     "INSTALL_IA_PLUGIN": "no",
-    # A Mac node must not install a login item or update itself.
+    # A Mac node must not install a login item.
     "LAUNCH_ON_LOGIN": "no",
-    "UPDATE_ON_LAUNCH": "no",
 }
 
 _ONION = r"[a-z2-7]{56}\.onion"

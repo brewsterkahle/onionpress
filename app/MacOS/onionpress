@@ -328,7 +328,6 @@ if [ ! -f "$DATA_DIR/config" ]; then
         cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
-UPDATE_ON_LAUNCH=no
 LAUNCH_ON_LOGIN=no
 EOF
     fi
@@ -1331,81 +1330,6 @@ install_docker() {
     fi
 }
 
-# Function to update Docker images if enabled
-update_images() {
-    # Check if auto-update is enabled in config
-    local update_enabled="no"
-    if [ -f "$DATA_DIR/config" ]; then
-        local configured
-        configured=$(config_value UPDATE_ON_LAUNCH)
-        if [ ! -z "$configured" ]; then
-            update_enabled="$configured"
-        fi
-    fi
-
-    if [ "$update_enabled" != "yes" ]; then
-        return 0
-    fi
-
-    if using_local_images; then
-        log "Skipping image update: running locally built images"
-        return 0
-    fi
-
-    log "Checking for Docker image updates..."
-
-    cd "$DOCKER_DIR"
-
-    # Pull the images the stack actually runs. These were bare `:latest` tags
-    # while docker-compose.yml pinned by digest, so this loop warmed a layer
-    # the stack never started and then logged it as "up to date" — the Linux
-    # launcher has pinned here since v2.4.99. The pins come from
-    # build/image-pins.env via build/refresh-image-digests.sh, and
-    # tests/test_image_pins.py fails if they drift. Exporting
-    # ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE points this at a
-    # locally built stack.
-    #
-    # Every image is pinned by digest (the third-party ones too, since the
-    # start-time pull stopped refreshing them), so a pull here fetches
-    # something only when a new OnionPress moved a pin; otherwise it is one
-    # manifest check per image. cloudflared only when the tunnel is on:
-    # compose never starts it otherwise, and it is ~60 MB.
-    local images=(
-        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc}"
-        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:ef35899bf2dbed58f7a64ece2d3008e5e428b7a9ac5f4ddfcb363d8e8bce57a0}"
-        "mariadb:13.0.2@sha256:4844586367ef1b639ae699953e00a6a18f460f700e52df00401e1101a6ef2450"
-        "willfarrell/autoheal:latest@sha256:df19e62e64c515d914a67d7ad4e45351e31cb44482de60c58c8bfa1181bd0b03"
-        "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
-    )
-    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-        images+=("cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07")
-    fi
-    local updated=false
-
-    for image in "${images[@]}"; do
-        log "Pulling $image..."
-        if docker pull "$image" >> "$LOG_FILE" 2>&1; then
-            log "✓ $image up to date"
-            updated=true
-        else
-            log "WARNING: Failed to pull $image (continuing with cached version)"
-        fi
-    done
-
-    if [ "$updated" = true ]; then
-        log "✓ Image update check complete"
-        # Issue #230: reclaim disk from old <none> image tags created by
-        # the pull above. Dangling-only (no -a) so in-use and freshly
-        # tagged images are untouched.
-        local prune_out
-        prune_out=$(docker image prune -f 2>&1 | tail -1)
-        if [ -n "$prune_out" ]; then
-            log "$prune_out"
-        fi
-    fi
-
-    return 0
-}
 
 # Function to set up OnionHeaven (onionheaven mode only)
 # Registration API now runs in the onionheaven container (web-server.py),
@@ -1678,10 +1602,6 @@ start_containers() {
     # say so when this boot's check failed (the wedge recover_lima_vm
     # exists for; see ensure_vm_fsck_repair). Best effort, never blocks.
     ensure_vm_fsck_repair
-
-    # UPDATE_ON_LAUNCH's refresh of the pinned images (opt-in; restart runs
-    # it too). The start's own pull, below, fetches only what is missing.
-    update_images
 
     # The rest of the start is onionpress.start's (#442.8): a pending key
     # import, the key volume's migration and the first run's key (each
@@ -2178,13 +2098,6 @@ main() {
                 log "restart: resuming normal restart"
             fi
             setup_db_passwords
-            # Pull updated images before stop_containers: the OnionHeaven
-            # farm respawns takeover-* containers within ~2s of being
-            # stopped, racing the pull. If the pull runs after, takeover
-            # containers persist on a stale cached image while compose
-            # containers refresh, splitting the cluster across image
-            # versions (e.g. missing `has` command in queue-manager).
-            update_images
             stop_containers || log "WARNING: restart: the stop failed; starting the containers anyway"
             start_containers
             wait_for_services
@@ -2621,13 +2534,6 @@ main() {
                 bundled_python -m onionpress.cli --data-dir "$DATA_DIR" update "${@:2}"
             ;;
 
-        update-images)
-            # Pull the stack's pinned container images (the menubar's Check
-            # for Updates; a launch pulls only what is missing, issue #36).
-            setup_db_passwords
-            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" update-images "${@:2}"
-            ;;
-
         uninstall)
             # Remove OnionPress (onionpress.uninstall, issue #366): asks
             # first (--check --json and --confirmed for the menubar, or at
@@ -2719,8 +2625,6 @@ User commands:
                 (-i to include response headers, --max-time SECONDS)
   update        Check GitHub for a new release and install it
                 (--check to only check, -y to skip prompt, --json)
-  update-images Pull the stack's container images (a launch pulls only
-                what is missing)
   backup        Create an encrypted backup zip
   restore       Restore from an encrypted backup zip
   setup         Run the first-time WordPress setup

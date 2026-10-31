@@ -31,10 +31,6 @@ from .secrets_file import (  # noqa: F401  (re-exported, #482)
 DEFAULTS = {
     "ADDRESS_PREFIX": "op2",
     "INSTALL_IA_PLUGIN": "yes",
-    # Images are pinned by digest and a launch pulls only the pins a
-    # release moved; yes re-pulls every image at every launch, which
-    # contacts the registry each time (issue #36).
-    "UPDATE_ON_LAUNCH": "no",
     "LAUNCH_ON_LOGIN": "yes",
     "PREVENT_SLEEP": "normal",
     "VM_MEMORY": "1",
@@ -62,7 +58,7 @@ DEFAULTS = {
 SAFE_CONFIG_KEYS = frozenset({
     "ADDRESS_PREFIX",
     "VM_MEMORY", "VM_CPU", "VM_DISK",
-    "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "START_ON_BOOT",
+    "INSTALL_IA_PLUGIN", "LAUNCH_ON_LOGIN", "START_ON_BOOT",
     "PREVENT_SLEEP",
     "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
     "ONIONHEAVEN_PROPAGATION_DELAY",
@@ -124,7 +120,6 @@ def _int_between(low, high):
 CLOUDFLARE_TOKEN_PATTERN = r"[A-Za-z0-9+/_-]{32,2048}={0,2}"
 
 SETTINGS_PAGE_KEYS = {
-    "UPDATE_ON_LAUNCH": _one_of("yes", "no"),
     "LAUNCH_ON_LOGIN": _one_of("yes", "no"),      # macOS
     "START_ON_BOOT": _one_of("yes", "no"),        # Linux
     "PREVENT_SLEEP": _one_of("normal", "on-battery", "never"),
@@ -573,7 +568,6 @@ VM_CREATION_ONLY = frozenset({"VM_DISK"})
 # One line per key for `config list --help`.
 CONFIG_KEY_HELP = {
     "ADDRESS_PREFIX": "prefix a new onion address is generated with (restart; the old address stops working)",
-    "UPDATE_ON_LAUNCH": "re-pull every container image at each launch (default no: images are pinned, a launch fetches only what a release moved)",
     "LAUNCH_ON_LOGIN": "macOS: start OnionPress at login",
     "START_ON_BOOT": "Linux: start OnionPress at boot",
     "PREVENT_SLEEP": "normal (sleep as usual), on-battery (awake on AC) or never",

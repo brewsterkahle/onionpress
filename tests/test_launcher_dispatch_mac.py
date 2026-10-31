@@ -246,9 +246,9 @@ class TestQuit(_Case):
 class TestRestart(_Case):
     STUBS = ("docker_socket_forward_is_foreign", "lima_vm_running",
              "recover_docker_socket_forward", "recover_lima_vm", "setup_db_passwords",
-             "update_images", "stop_containers", "start_containers", "wait_for_services")
+             "stop_containers", "start_containers", "wait_for_services")
 
-    BOUNCE = ["setup_db_passwords", "update_images", "stop_containers",
+    BOUNCE = ["setup_db_passwords", "stop_containers",
               "start_containers", "wait_for_services"]
 
     def test_with_docker_up_it_bounces_the_containers(self):
@@ -320,7 +320,6 @@ class TestDelegations(_Case):
             (("backup", "-o", "/b/x.zip", "--json"), "backup -o /b/x.zip --json"),
             (("backup", "--check", "--json", "--user", "bob"), "backup --check --json --user bob"),
             (("update", "--check", "--json"), "update --check --json"),
-            (("update-images",), "update-images"),
             (("uninstall", "--check", "--json"), "uninstall --check --json"),
             (("reset", "--check", "--json"), "reset --check --json"),
             (("hub-recovery-key", "show"), "hub-recovery-key show"),

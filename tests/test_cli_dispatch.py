@@ -187,8 +187,6 @@ ROWS = [
                   "--confirmed", "hub-holds-key"], "CLI().cmd_reset",
         mock.call(yes=False, check=True, json_output=True,
                   confirmed=frozenset({"reset", "hub-holds-key"}))),
-    Row("update-images", ["update-images", "--json"], "CLI().cmd_update_images",
-        mock.call(json_output=True)),
     Row("smoke-test-wayback", ["smoke-test-wayback"], "CLI().cmd_smoke_test_wayback", mock.call()),
     Row("check-for-update", ["check-for-update", "--json", "--current", "1.2.3"],
         "CLI().cmd_check_for_update", mock.call(json_output=True, current="1.2.3")),

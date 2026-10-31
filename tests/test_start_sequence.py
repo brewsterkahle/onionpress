@@ -85,8 +85,7 @@ class TestLaunchers(unittest.TestCase):
                            (LINUX, "if ! wait_for_docker 180; then")):
             with self.subTest(path=os.path.relpath(path, ROOT)):
                 body = _function(_read(path), "start_containers")
-                self.assertLess(body.index(wait), body.index("update_images"))
-                self.assertLess(body.index("update_images"), body.index("start-containers"))
+                self.assertLess(body.index(wait), body.index("start-containers"))
                 self.assertIn('*) return 1 ;;', body)
                 for gone in ("docker compose", "docker_volume_state", "migrate_key_volume",
                              "docker run"):

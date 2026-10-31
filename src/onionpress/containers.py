@@ -561,27 +561,6 @@ class ContainerManager:
 
     # -- Core lifecycle --
 
-    def pull_images(self, timeout: int = 300) -> bool:
-        """Pull latest container images. Returns True on success."""
-        return self.pull_images_result(timeout).ok
-
-    def pull_images_result(self, timeout: int = 300):
-        """`docker compose pull` of the stack's pinned images: the
-        DockerResult (its stdout says whether anything was downloaded).
-        The opt-in refresh (`onionpress update-images`, the menubar's
-        Check for Updates); a launch pulls `--policy missing` instead.
-        Callers check using_local_images() first."""
-        self._log("Pulling container images...")
-        result = self.docker.compose(
-            ["pull"],
-            compose_files=self._compose_files(),
-            timeout=timeout,
-            extra_env=self._build_env(),
-        )
-        if not result.ok:
-            self._log(f"Image pull warning: {result.stderr.rstrip()}")
-        return result
-
     def run_compose_to(self, args: list, *, out: str, include_cloudflare: bool = False) -> int:
         """`docker compose ARGS` with the stack's environment, its output
         where the launchers sent it: *out* "log" appends it to the log

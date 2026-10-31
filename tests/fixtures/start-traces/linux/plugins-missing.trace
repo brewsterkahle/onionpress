@@ -40,6 +40,7 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 docker exec -u www-data onionpress-wordpress test -f /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
 docker exec -u www-data onionpress-wordpress test -f /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
 fn start_onionheaven_activation_watcher
 docker container inspect onionpress-cloudflared
 rc=0

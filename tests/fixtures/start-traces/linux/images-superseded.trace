@@ -1,45 +1,29 @@
 log Starting OnionPress containers...
-fn wait_for_docker_or_recover_vm 180 start
-fn ensure_vm_fsck_repair
-log Checking for Docker image updates...
-log Pulling ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN...
-docker pull ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
-log ✓ ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN up to date
-log Pulling ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:PIN...
-docker pull ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:PIN
-log ✓ ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:PIN up to date
-log Pulling mariadb:13.0.2@sha256:PIN...
-docker pull mariadb:13.0.2@sha256:PIN
-log ✓ mariadb:13.0.2@sha256:PIN up to date
-log Pulling willfarrell/autoheal:latest@sha256:PIN...
-docker pull willfarrell/autoheal:latest@sha256:PIN
-log ✓ willfarrell/autoheal:latest@sha256:PIN up to date
-log Pulling ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:PIN...
-docker pull ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:PIN
-log ✓ ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:PIN up to date
-log ✓ Image update check complete
-docker image prune -f
+fn wait_for_docker 180
 docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 log Pulling pre-built images (missing only)...
 docker compose pull --policy missing
-log ✓ WordPress network egress block in place: ok (test)
+log WordPress network egress block in place: ok (test)
 docker ps -a --format {{.Names}}
 docker network inspect --format {{json .Options}} onionpress-network
-docker compose up -d wordpress db onionheaven autoheal
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
 log WordPress, DB, and Tor client containers starting
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
-log WordPress is installed
-docker exec onionpress-wordpress test -s /var/www/html/.htaccess
-log Starting Tor containers...
+log WordPress is installed -- starting Tor
+docker port onionpress-wordpress 80/tcp
+log WordPress is installed: moving its port 8080 from 127.0.0.1 to 0.0.0.0 (ONIONPRESS_BIND_HOST)
+docker compose up -d wordpress [BIND=0.0.0.0]
+bin systemctl --user is-enabled onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
-docker compose up -d tor onionheaven
+docker compose up -d tor onionheaven [BIND=0.0.0.0]
+docker port onionpress-tor 9050/tcp
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
 log Cache Enabler 1.8.17 already installed
 py deactivate-wp-statistics
-py provision-post-install --themes-dir $TMP/App/Resources/themes --plugins-dir $TMP/App/Resources/plugins
+py provision-post-install --themes-dir $TMP/opt/themes --plugins-dir $TMP/opt/plugins
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
 docker exec -u www-data onionpress-wordpress test -f /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
 py configure-cache-enabler
@@ -56,10 +40,17 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp plugin activate internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php --url=http://site.onion/
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
-fn configure_site_timezones
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
+docker image ls --no-trunc --format {{.ID}} {{.Tag}} ghcr.io/brewsterkahle/onionpress-tor
+docker image rm sha256:1111111111111111111111111111111111111111111111111111111111111111
+docker image rm sha256:2222222222222222222222222222222222222222222222222222222222222222
+log Image cleanup: removed 1 superseded ghcr.io/brewsterkahle/onionpress-tor image(s)
+log Image cleanup: kept 1 older ghcr.io/brewsterkahle/onionpress-tor image(s) still in use
+docker image inspect --format {{.Id}} mariadb:13.0.2@sha256:PIN
+log Image cleanup: mariadb left as is (its pinned image is not here)
+fn start_onionheaven_activation_watcher
 docker container inspect onionpress-cloudflared
-detached py ensure-archive-s3-keys
 rc=0
-START_ERRORS=[]
-markers=
+markers=.wordpress-installed
 volumes=onionpress-onion-keys onionpress-tor-state

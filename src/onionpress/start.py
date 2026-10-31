@@ -456,9 +456,8 @@ def wordpress_answers(port: int) -> bool:
 def start_core(manager, *, mac: bool, wp_port: int, errors: StartErrors | None,
                log=None) -> tuple[bool, bool]:
     """The middle of the launchers' start: the images compose is about to
-    start, pulled when missing only (never for a locally built stack;
-    UPDATE_ON_LAUNCH's refresh is the launcher's update_images, before
-    this), then ContainerManager.start_core (egress, retire, network move,
+    start, pulled when missing only (never for a locally built stack),
+    then ContainerManager.start_core (egress, retire, network move,
     `compose up` of the core services, 3 attempts 5 s apart), WordPress's
     port for up to 60 s and `wp core is-installed` 15 times 2 s apart (a
     cold MariaDB reads as "not installed" until it answers).
@@ -564,6 +563,76 @@ def _append(log_file: str, result) -> None:
         pass
 
 
+def _stack_images(manager) -> list[str]:
+    """The image references the stack runs, as compose resolves them (the
+    pins, or ONIONPRESS_*_IMAGE overrides), cloudflared's included; one
+    each, in compose's order. [] when compose does not answer."""
+    result = manager.docker.compose(
+        ["config", "--images"], compose_files=manager._compose_files(include_cloudflare=True),
+        timeout=60, extra_env=manager._build_env())
+    if not result.ok:
+        return []
+    refs = []
+    for line in result.stdout.splitlines():
+        ref = line.strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def _repository(ref: str) -> str:
+    """`mariadb:13.0.2@sha256:…` -> `mariadb`; a registry's port stays."""
+    name = ref.split("@", 1)[0]
+    slash = name.rfind("/")
+    colon = name.rfind(":")
+    return name[:colon] if colon > slash else name
+
+
+def prune_superseded_images(manager, log) -> None:
+    """Remove the images a release's new pins superseded (the start's
+    pull fetched the new ones; the old ones stayed on the VM's fixed disk).
+    For each image the stack runs, only once its pinned image is here: the
+    other images of that repository that have no tag. OnionPress pulls by
+    digest, so every image it pulled has none; a tagged one (`mariadb:11`
+    of the user's own on a Linux Docker, a local build) is never touched.
+    Plain `docker image rm`, never forced: an image a container still uses,
+    running or stopped, stays. Nothing for a locally built stack. Best
+    effort: a failure is a log line, never a stopped start."""
+    from .containers import using_local_images
+    if using_local_images(manager.paths.config_file):
+        return
+    docker = manager.docker
+    for ref in _stack_images(manager):
+        if "@sha256:" not in ref:
+            continue
+        repo = _repository(ref)
+        pinned = docker.run(["image", "inspect", "--format", "{{.Id}}", ref],
+                            timeout=30, quiet=True)
+        if not pinned.ok or not pinned.stdout.strip():
+            log(f"Image cleanup: {repo} left as is (its pinned image is not here)")
+            continue
+        listed = docker.run(["image", "ls", "--no-trunc", "--format", "{{.ID}} {{.Tag}}", repo],
+                            timeout=30, quiet=True)
+        if not listed.ok:
+            continue
+        older = []
+        for line in listed.stdout.splitlines():
+            image_id, _, tag = line.strip().partition(" ")
+            if (re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) and tag == "<none>"
+                    and image_id != pinned.stdout.strip() and image_id not in older):
+                older.append(image_id)
+        removed = kept = 0
+        for image_id in older:
+            if docker.run(["image", "rm", image_id], timeout=60, quiet=True).ok:
+                removed += 1
+            else:
+                kept += 1
+        if removed:
+            log(f"Image cleanup: removed {removed} superseded {repo} image(s)")
+        if kept:
+            log(f"Image cleanup: kept {kept} older {repo} image(s) still in use")
+
+
 def warn_if_socks_port_exposed(manager, log) -> None:
     """Linux: Tor's SOCKS port must be published on 127.0.0.1 only. A
     compose file from before that (re-running install.sh leaves it) still
@@ -587,7 +656,7 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     provision-post-install (each a WARNING and a START SUMMARY name when it
     fails), the plugins' setup, the image-derivative rebuild and the Mac's
     archive.org login (both detached: they outlive the launcher), the Mac's
-    site timezones. Best effort: nothing here stops the start. Linux's
+    site timezones, then the superseded images' cleanup. Best effort: nothing here stops the start. Linux's
     install-state steps (WordPress's port, the heartbeat hold, issue #464),
     its OnionHeaven activation watcher and both platforms' Cloudflare
     tunnel (start_cloudflare_tunnel, one bash function held identical in
@@ -703,6 +772,9 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
         run_detached_cli(["ensure-archive-s3-keys"], data_dir=paths.data_dir,
                          log_file=paths.log_file)
         configure_site_timezones(docker, log, paths.log_file)
+    # Last: everything this start runs is up, so what an older image still
+    # serves is in use and kept.
+    prune_superseded_images(manager, log)
 
 
 # ---- the whole start (#442.8) ----

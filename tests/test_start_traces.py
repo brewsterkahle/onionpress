@@ -28,6 +28,8 @@ FRESH = {"volumes": [], "wp_installed": False, "plugins": {}}
 OLD_KEYS = ["onionpress-onion-keys", "onionpress-arti-state", "onionpress-tor-state",
             "onionpress-tor-keys"]
 
+SUPERSEDED_TOR = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:" + "e" * 64
+
 SCENARIOS = [
     Scenario("restart"),
     Scenario("docker-never-answers", env={"STUB_RC_WAIT_FOR_DOCKER_OR_RECOVER_VM": "1",
@@ -80,7 +82,15 @@ SCENARIOS = [
     Scenario("cloudflare-token-removed", docker={"cloudflared": True}),
     Scenario("local-images", config="ONIONPRESS_TOR_IMAGE=onionpress-tor:local\n"
                                      "ONIONPRESS_WORDPRESS_IMAGE=onionpress-wordpress:local\n"),
-    Scenario("update-on-launch", config="UPDATE_ON_LAUNCH=yes\n"),
+    # A release moved the tor pin and the mariadb image is not here yet:
+    # the old tor images go (one still in use stays), mariadb is left.
+    Scenario("images-superseded", docker={"rules": [
+        {"match": r"config --images$",
+         "stdout": f"{SUPERSEDED_TOR}\nmariadb:13.0.2@sha256:{'d' * 64}\n"},
+        {"match": r"^image inspect --format \{\{\.Id\}\} mariadb", "rc": 1},
+        {"match": r"^image ls .* ghcr\.io/brewsterkahle/onionpress-tor$",
+         "stdout": f"sha256:{'1' * 64} <none>\nsha256:{'2' * 64} <none>\nsha256:{'3' * 64} dev\n"},
+        {"match": rf"^image rm sha256:{'2' * 64}$", "rc": 1}]}),
     Scenario("port-moves-after-setup", docker={"wp_port_host": "127.0.0.1"},
              files={".wordpress-installed": ""}, config="ONIONPRESS_BIND_HOST=0.0.0.0\n",
              platforms=("linux",)),

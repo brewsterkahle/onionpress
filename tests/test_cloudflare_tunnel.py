@@ -94,11 +94,6 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertIn('docker compose "${COMPOSE_WITH_CF[@]}" down -v', self.text)
         self.assertNotRegex(self.text, r"docker compose down\b")
 
-    def test_update_pulls_cloudflared_only_with_a_tunnel(self):
-        body = _function(self.text, "update_images")
-        self.assertLess(body.index('if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]'),
-                        body.index("cloudflare/cloudflared:"))
-
 
 class TestOneTimingOnBothPlatforms(unittest.TestCase):
     """Where each launcher starts cloudflared: the same places."""

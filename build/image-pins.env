@@ -10,8 +10,8 @@
 #                                             (+ its ONIONHEAVEN_IMAGE env),
 #                                             db, autoheal, autoheal-proxy
 #   app/Resources/docker/docker-compose.cloudflare.yml   cloudflared
-#   app/MacOS/onionpress                      update_images(), takeover worker
-#   linux/onionpress                          update_images()
+#   app/MacOS/onionpress                      KEY_HELPER_IMAGE (one-shot key helpers)
+#   linux/onionpress                          KEY_HELPER_IMAGE (one-shot key helpers)
 #   src/onionpress/containers.py              ONIONHEAVEN_IMAGE
 #   src/onionpress/launcher_ops.py            DEFAULT_TOR_IMAGE
 #

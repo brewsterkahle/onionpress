@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The end of a launcher's start (issue #442.7): start.post_up, which both
 launchers run through `onionpress start-post-up` once the core is up, and
-its pieces: start.warn_if_socks_port_exposed,
+its pieces: start.prune_superseded_images, start.warn_if_socks_port_exposed,
 start.configure_site_timezones, start.run_detached_cli.
 
 These were bash until #442.7, tested by running the launchers' functions;
@@ -39,6 +39,10 @@ class FakeDocker:
                 return DockerResult(rc, out, "")
         return DockerResult(0, "", "")
 
+    def compose(self, args, compose_files=None, timeout=120, extra_env=None, **_kw):
+        files = [a for f in compose_files or [] for a in ("-f", os.path.basename(f))]
+        return self.run(["compose", *files, *args])
+
 
 class FakeManager:
     def __init__(self, data, docker, compose_rc=0):
@@ -58,6 +62,14 @@ class FakeManager:
         self.compose.append((args, out, include_cloudflare))
         return self.compose_rc
 
+    def _compose_files(self, include_cloudflare=False):
+        files = ["/opt/onionpress/docker/docker-compose.yml"]
+        return files + (["/opt/onionpress/docker/docker-compose.cloudflare.yml"]
+                        if include_cloudflare else [])
+
+    def _build_env(self):
+        return {}
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -73,6 +85,106 @@ class Base(unittest.TestCase):
 
 # The Cloudflare tunnel is the launchers' start_cloudflare_tunnel, last in
 # a start after this step (tests/test_cloudflare_tunnel.py).
+
+
+def _id(c):
+    return "sha256:" + c * 64
+
+
+TOR_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:" + "e" * 64
+DB_PIN = "mariadb:13.0.2@sha256:" + "d" * 64
+CONFIG_IMAGES = "compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images"
+
+
+class TestPruneSupersededImages(Base):
+    """A release that moves a pin leaves the old image on the VM's fixed
+    disk; the start removes it once the new one is here. Only untagged
+    images of the stack's own repositories (OnionPress pulls by digest),
+    never forced, never the pinned one."""
+
+    def prune(self, answers):
+        docker = FakeDocker(answers)
+        start.prune_superseded_images(FakeManager(self.data, docker), self.lines.append)
+        return docker
+
+    def removals(self, docker):
+        return [c for c in docker.calls if c.startswith("image rm")]
+
+    def test_the_older_untagged_images_go(self):
+        docker = self.prune({
+            CONFIG_IMAGES: (0, f"{TOR_PIN}\n{DB_PIN}\n{TOR_PIN}\n"),
+            f"image inspect --format {{{{.Id}}}} {TOR_PIN}": (0, _id("1") + "\n"),
+            f"image inspect --format {{{{.Id}}}} {DB_PIN}": (0, _id("5") + "\n"),
+            "image ls --no-trunc --format {{.ID}} {{.Tag}} ghcr.io/brewsterkahle/onionpress-tor":
+                (0, f"{_id('1')} <none>\n{_id('2')} <none>\n{_id('2')} <none>\n"
+                    f"{_id('3')} latest\n{_id('4')} dev\n"),
+            "image ls --no-trunc --format {{.ID}} {{.Tag}} mariadb":
+                (0, f"{_id('5')} <none>\n{_id('6')} 11.4\n"),
+        })
+        # Each repository once, though compose lists tor for two services.
+        self.assertEqual(docker.calls.count(
+            "image ls --no-trunc --format {{.ID}} {{.Tag}} ghcr.io/brewsterkahle/onionpress-tor"), 1)
+        # Not the pinned image, not a tagged one (a user's mariadb:11.4, a dev build).
+        self.assertEqual(self.removals(docker), [f"image rm {_id('2')}"])
+        self.assertEqual(self.lines, [
+            "Image cleanup: removed 1 superseded ghcr.io/brewsterkahle/onionpress-tor image(s)"])
+
+    def test_nothing_without_the_pinned_image(self):
+        docker = self.prune({
+            CONFIG_IMAGES: (0, DB_PIN + "\n"),
+            "image inspect": (1, ""),
+            "image ls": (0, f"{_id('6')} <none>\n"),
+        })
+        self.assertFalse([c for c in docker.calls if c.startswith(("image ls", "image rm"))])
+        self.assertEqual(self.lines, ["Image cleanup: mariadb left as is (its pinned image is not here)"])
+
+    def test_an_image_in_use_is_kept(self):
+        docker = self.prune({
+            CONFIG_IMAGES: (0, DB_PIN + "\n"),
+            "image inspect": (0, _id("5")),
+            "image ls": (0, f"{_id('6')} <none>\n{_id('7')} <none>\n"),
+            f"image rm {_id('6')}": (1, ""),
+        })
+        self.assertEqual(self.removals(docker), [f"image rm {_id('6')}", f"image rm {_id('7')}"])
+        self.assertEqual(self.lines, ["Image cleanup: removed 1 superseded mariadb image(s)",
+                                      "Image cleanup: kept 1 older mariadb image(s) still in use"])
+
+    def test_never_forced(self):
+        docker = self.prune({
+            CONFIG_IMAGES: (0, DB_PIN + "\n"),
+            "image inspect": (0, _id("5")),
+            "image ls": (0, f"{_id('6')} <none>\n"),
+        })
+        self.assertTrue(all("-f" not in c.split() and "--force" not in c
+                            for c in self.removals(docker)))
+
+    def test_locally_built_images_are_left_alone(self):
+        self.config("ONIONPRESS_TOR_IMAGE=onionpress-tor:dev\n")
+        docker = self.prune({CONFIG_IMAGES: (0, TOR_PIN + "\n")})
+        self.assertEqual(docker.calls, [])
+
+    def test_compose_or_docker_not_answering_removes_nothing(self):
+        for answers in ({CONFIG_IMAGES: (1, "")},
+                        {CONFIG_IMAGES: (0, DB_PIN + "\n"), "image inspect": (0, _id("5")),
+                         "image ls": (1, "")},
+                        # A reference without a digest is not a pin.
+                        {CONFIG_IMAGES: (0, "mariadb:latest\n")}):
+            with self.subTest(answers=answers):
+                self.lines.clear()
+                docker = self.prune(answers)
+                self.assertEqual(self.removals(docker), [])
+                self.assertEqual(self.lines, [])
+        # Junk in the listing is never passed to docker.
+        docker = self.prune({CONFIG_IMAGES: (0, DB_PIN + "\n"), "image inspect": (0, _id("5")),
+                             "image ls": (0, "-f <none>\nsha256:xyz <none>\n")})
+        self.assertEqual(self.removals(docker), [])
+
+    def test_repository_names(self):
+        for ref, repo in ((TOR_PIN, "ghcr.io/brewsterkahle/onionpress-tor"),
+                          (DB_PIN, "mariadb"),
+                          ("registry:5000/x/y:1@sha256:" + "a" * 64, "registry:5000/x/y"),
+                          ("registry:5000/x/y@sha256:" + "a" * 64, "registry:5000/x/y")):
+            self.assertEqual(start._repository(ref), repo)
 
 
 class TestSocksExposureWarning(Base):
@@ -169,6 +281,8 @@ class TestPostUp(Base):
                                side_effect=lambda argv, **k: order.append("detached " + argv[0])), \
              mock.patch.object(start, "configure_site_timezones",
                                side_effect=lambda *a: order.append("timezones")), \
+             mock.patch.object(start, "prune_superseded_images",
+                               side_effect=lambda *a: order.append("prune")), \
              mock.patch.object(start, "warn_if_socks_port_exposed",
                                side_effect=lambda *a: order.append("socks")), \
              mock.patch.object(bundled_plugins, "install_bundled_plugins",
@@ -188,7 +302,7 @@ class TestPostUp(Base):
             "install-plugins", "deactivate-wp-statistics",
             "provision-post-install --themes-dir /t --plugins-dir /p", "setup-plugins",
             "detached regenerate-derivatives", "detached ensure-archive-s3-keys",
-            "timezones"])
+            "timezones", "prune"])
         self.assertEqual(errors.names, [])
 
     def test_linux_order(self):
@@ -196,7 +310,7 @@ class TestPostUp(Base):
         self.assertEqual(order, [
             "socks", "install-plugins", "deactivate-wp-statistics",
             "provision-post-install --themes-dir /t --plugins-dir /p", "setup-plugins",
-            "detached regenerate-derivatives"])
+            "detached regenerate-derivatives", "prune"])
 
     def test_failed_steps_are_named_and_never_stop_it(self):
         for mac in (True, False):

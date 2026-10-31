@@ -1217,66 +1217,8 @@ class TestHubRecoveryKeyCommands(Sandbox):
 
 
 # ---------------------------------------------------------------------------
-# update-images, generate-vanity, admin-password
+# generate-vanity, admin-password
 # ---------------------------------------------------------------------------
-
-class TestUpdateImages(Sandbox):
-
-    def setUp(self):
-        super().setUp()
-        self.cli = make_cli(self.dir)
-        self.local = self.stack = contextlib.ExitStack()
-        self.addCleanup(self.stack.close)
-        self.local = self.stack.enter_context(
-            mock.patch("onionpress.containers.using_local_images", return_value=False))
-
-    def test_locally_built_images_are_never_pulled(self):
-        self.local.return_value = True
-        self.assertEqual(self.cli.cmd_update_images(json_output=True), 0)
-        self.assertEqual(self.answer(), {"ok": True, "pulled": False, "local_images": True})
-        self.cli.containers.pull_images_result.assert_not_called()
-        self.local.assert_called_once_with(self.cli.paths.config_file)
-
-    def test_a_failed_pull_is_the_error(self):
-        self.cli.containers.pull_images_result.return_value = DockerResult(
-            1, "", "x" * 500 + "manifest unknown\n")
-        self.assertEqual(self.cli.cmd_update_images(json_output=True), 1)
-        error = self.answer()["error"]
-        self.assertTrue(error.startswith("image pull failed: "))
-        self.assertTrue(error.endswith("manifest unknown"))
-        self.assertLessEqual(len(error), len("image pull failed: ") + 400)
-        self.cli.docker.run.assert_not_called()
-
-    def test_a_fresh_pull_prunes_dangling_images(self):
-        self.cli.containers.pull_images_result.return_value = DockerResult(
-            0, "tor Pulled\nwordpress Downloaded newer image\n", "")
-        self.cli.docker.run.return_value = DockerResult(
-            0, "Deleted Images:\nsha256:abc\n\nTotal reclaimed space: 1.2GB\n", "")
-        self.assertEqual(self.cli.cmd_update_images(json_output=True), 0)
-        self.assertEqual(self.answer(), {"ok": True, "pulled": True, "local_images": False,
-                                         "reclaimed": "1.2GB"})
-        self.cli.docker.run.assert_called_once_with(["image", "prune", "-f"], timeout=60,
-                                                    quiet=True)
-        self.assertIn("Pruned dangling images: 1.2GB", self.cli.logged)
-        self.assertIn("Docker images updated successfully", self.cli.logged)
-        self.assertEqual(self.cli.cmd_update_images(), 0)
-        self.assertIn("Images updated.", self.out.getvalue())
-
-    def test_a_failed_prune_is_not_a_failed_update(self):
-        self.cli.containers.pull_images_result.return_value = DockerResult(0, "Pulled\n", "")
-        self.cli.docker.run.return_value = DockerResult(1, "", "busy")
-        self.assertEqual(self.cli.cmd_update_images(json_output=True), 0)
-        self.assertEqual(self.answer()["reclaimed"], "")
-        self.assertNotIn("Pruned dangling images", self.cli.logged)
-
-    def test_up_to_date_prunes_nothing(self):
-        self.cli.containers.pull_images_result.return_value = DockerResult(
-            0, "tor Image is up to date\n", "")
-        self.assertEqual(self.cli.cmd_update_images(), 0)
-        self.assertEqual(self.out.getvalue(), "Images are up to date.\n")
-        self.cli.docker.run.assert_not_called()
-        self.assertIn("Docker images are up to date", self.cli.logged)
-
 
 class TestGenerateVanity(Sandbox):
 

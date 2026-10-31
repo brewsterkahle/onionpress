@@ -40,6 +40,7 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp plugin activate internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php --url=http://site.onion/
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
 fn start_onionheaven_activation_watcher
 log Cloudflare Tunnel enabled, starting cloudflared...
 docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d --no-deps cloudflared [BIND=0.0.0.0]

@@ -1338,41 +1338,6 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         """Check GitHub for a newer release (check_for_update_report)."""
         return check_for_update_report(current or __version__, self.log, json_output)
 
-    def cmd_update_images(self, json_output: bool = False) -> int:
-        """`onionpress update-images`: pull the stack's pinned images (the
-        menubar's Check for Updates; a launch pulls only what is missing).
-        Never for locally built images (containers.using_local_images). A
-        fresh download is followed by a prune of dangling images (#230)."""
-        from . import confirm as _confirm
-        from .containers import using_local_images
-        if using_local_images(self.paths.config_file):
-            self.log("Skipping image update: running locally built images")
-            return _confirm.answer_ok(
-                json_output, text="Skipping image update: running locally built images",
-                pulled=False, local_images=True)
-        result = self.containers.pull_images_result(timeout=600)
-        if not result.ok:
-            return _confirm.answer_error(
-                f"image pull failed: {(result.stderr or '').strip()[-400:]}", json_output)
-        pulled = "Downloaded" in result.stdout or "Pulled" in result.stdout
-        reclaimed = ""
-        if pulled:
-            # Issue #230: prune dangling images right after a fresh pull,
-            # exactly when old tags become <none>. Dangling-only (no -a),
-            # so in-use and tagged images are untouched.
-            r = self.docker.run(["image", "prune", "-f"], timeout=60, quiet=True)
-            if r.ok:
-                for line in (r.stdout or "").splitlines():
-                    if line.strip().startswith("Total reclaimed space:"):
-                        reclaimed = line.split(":", 1)[1].strip()
-                self.log(f"Pruned dangling images: {reclaimed}" if reclaimed
-                         else "Pruned dangling images")
-        self.log("Docker images updated successfully" if pulled
-                 else "Docker images are up to date")
-        return _confirm.answer_ok(
-            json_output, text=("Images updated." if pulled else "Images are up to date."),
-            pulled=pulled, local_images=False, reclaimed=reclaimed)
-
     # ─── Vanity address + admin-password (shared with Mac/tray) ─────────
 
     def cmd_generate_vanity(self) -> int:
@@ -2017,14 +1982,6 @@ def _run_update(run):
     paths = resolve_paths(data_dir=args.data_dir)
     return cmd_update(paths, _make_log_func(paths.log_file), check=args.check,
                       yes=args.yes, json_output=args.json)
-
-
-def _add_update_images(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Pull the stack's pinned container images (the opt-in refresh)")
-    p.add_argument("--json", action="store_true",
-                   help="Answer with one JSON object on the last line")
 
 
 def _add_uninstall(sub, name):
@@ -2710,8 +2667,7 @@ def _run_is_onionheaven_hub(run):
 
 def _run_using_local_images(run):
     # The launchers' using_local_images(): the one copy of the rule
-    # (containers.using_local_images; the menubar and update-images
-    # call it in-process). Before the stack is up, so no OnionPressCLI
+    # (containers.using_local_images; the start calls it in-process). Before the stack is up, so no OnionPressCLI
     # setup (config/secrets creation, port probing).
     from .containers import using_local_images
     paths = resolve_paths(data_dir=run.args.data_dir)
@@ -3136,8 +3092,6 @@ _COMMANDS = [
     ("restore", _add_restore, _run_restore),
     ("reset", _add_reset, _run_reset),
     ("update", _add_update, _run_update),
-    ("update-images", _add_update_images,
-     lambda run: _cli(run).cmd_update_images(json_output=run.args.json)),
     ("uninstall", _add_uninstall, _run_uninstall),
     ("onionheaven-unregister", _add_onionheaven_unregister, _run_onionheaven_unregister),
     ("onionheaven-registrations",

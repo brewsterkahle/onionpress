@@ -1967,7 +1967,7 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
 
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
-                 "config_value", "update_images",
+                 "config_value",
                  "using_local_images", "ensure_key_helper_image",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).

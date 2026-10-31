@@ -159,9 +159,18 @@
   (`--propagate` without a daemon; resolves from the registry, `--local`
   only on request). Pins are multi-arch index digests; **mariadb moves
   forward only**. `tests/test_image_pins.py`.
-- Starts pull `--policy missing` only (once per launch, in the launcher's
-  `update_images()`); unconditional pulls only on opt-in refresh paths.
-  `tests/test_launch_pulls_once.py`, `tests/test_image_pins.py`.
+- Starts pull `--policy missing` only (`start.start_core`). **Images change
+  only with a release**: no refresh toggle, no `update-images`, no image
+  pass in Check for Updates (with every image pinned they re-pulled the
+  same digests); Linux's `onionpress update` pulls its release's pins.
+  `tests/test_no_image_refresh.py`, `tests/test_image_pins.py`.
+- **The start removes what a moved pin superseded**
+  (`start.prune_superseded_images`, last in post-up): per image the stack
+  runs (`compose config --images`), only once its pinned image is here,
+  only untagged images of that repository (OnionPress pulls by digest; a
+  user's tagged image is never touched), plain `image rm`, never forced
+  (an image a container uses stays); nothing for local images.
+  `TestPruneSupersededImages` in `tests/test_start_post_up.py`.
 - **A release builds no images**: it only points `:latest`/`:<version>` at
   the pinned digests. `tests/test_publish_workflow.py`.
 - `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoint the stack at
@@ -351,8 +360,7 @@
 
 ## The Start Is onionpress.start (issue #442)
 - **Each launcher's `start_containers` is the Docker wait (Mac: VM
-  recovery, fsck drop-in), `update_images`, then `onionpress
-  start-containers`** (`start.start_containers`): pending key import →
+  recovery, fsck drop-in), then `onionpress start-containers`** (`start.start_containers`): pending key import →
   key volume migration → first-run key → core services → post-up, each key
   step stopping the start. Linux runs `--until-core`, its install-state
   steps (#464) and `start-post-up`. The CLI has no start of its own

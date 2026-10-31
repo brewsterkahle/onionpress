@@ -459,7 +459,6 @@ if [ ! -f "$DATA_DIR/config" ]; then
     cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
-UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
 # OnionHeaven is on by default: yes (or unset) = on, no = off.
 # Turn off with: onionpress onionheaven disable
@@ -1120,74 +1119,6 @@ setup_bundled_plugins() {
 
 # ─── Image updates ────────────────────────────────────────────────────
 
-update_images() {
-    local update_enabled="no"
-    if [ -f "$DATA_DIR/config" ]; then
-        local configured
-        configured=$(config_value UPDATE_ON_LAUNCH)
-        if [ ! -z "$configured" ]; then
-            update_enabled="$configured"
-        fi
-    fi
-
-    if [ "$update_enabled" != "yes" ]; then
-        return 0
-    fi
-
-    if using_local_images; then
-        log "Skipping image update: running locally built images"
-        return 0
-    fi
-
-    log "Checking for Docker image updates..."
-
-    cd "$DOCKER_DIR"
-
-    # GHCR images pinned to digest. The pins come from build/image-pins.env,
-    # which build/refresh-image-digests.sh regenerates at each release and
-    # propagates here; tests/test_image_pins.py fails the build if they drift.
-    # Exporting ONIONPRESS_TOR_IMAGE / ONIONPRESS_WORDPRESS_IMAGE overrides
-    # them, which is how a locally built stack is pulled into this loop
-    # (build/build-images.sh prints the exports). The third-party images are
-    # pinned too (they floated on :latest through 2.5.3), so a pull here
-    # fetches something only when a new OnionPress moved a pin. cloudflared
-    # only when the tunnel is on: compose never starts it otherwise, and it
-    # is ~60 MB.
-    local images=(
-        "${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:eea0b54a04ebe60a0db66ebcff2d5cf1875485cadcee1df3ce80e36374a039dc}"
-        "${ONIONPRESS_WORDPRESS_IMAGE:-ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:ef35899bf2dbed58f7a64ece2d3008e5e428b7a9ac5f4ddfcb363d8e8bce57a0}"
-        "mariadb:13.0.2@sha256:4844586367ef1b639ae699953e00a6a18f460f700e52df00401e1101a6ef2450"
-        "willfarrell/autoheal:latest@sha256:df19e62e64c515d914a67d7ad4e45351e31cb44482de60c58c8bfa1181bd0b03"
-        "ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:e78e68ba3ea4a6bf8ee47865ac1d1f98d525c3660df948554e766283c40d3f4b"
-    )
-    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-        images+=("cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07")
-    fi
-    local pulled=0
-
-    for image in "${images[@]}"; do
-        log "Pulling $image..."
-        if docker pull "$image" >> "$LOG_FILE" 2>&1; then
-            log "$image up to date"
-            pulled=1
-        else
-            log "WARNING: Failed to pull $image (continuing with cached version)"
-        fi
-    done
-
-    if [ "$pulled" = "1" ]; then
-        # Issue #230: reclaim disk from old <none> image tags created by
-        # the pull above. Dangling-only (no -a) so in-use and freshly
-        # tagged images are untouched.
-        local prune_out
-        prune_out=$(docker image prune -f 2>&1 | tail -1)
-        if [ -n "$prune_out" ]; then
-            log "$prune_out"
-        fi
-    fi
-
-    return 0
-}
 
 # ─── WordPress multisite ─────────────────────────────────────────────
 
@@ -1443,10 +1374,6 @@ start_containers() {
         log "ERROR: Docker daemon not ready after 180s; not starting"
         return 1
     fi
-
-    # UPDATE_ON_LAUNCH's refresh of the pinned images (opt-in). The
-    # start's own pull fetches only what is missing.
-    update_images
 
     # onionpress.start (#442.8), up to the core services: a pending key
     # import, the key volume's migration and the first run's key (each

@@ -1807,7 +1807,7 @@ def _prefix_of_restored_address(value, address):
 # not what runs (image overrides), where it listens (ports, bind host),
 # where data goes (paths), what leaves the machine (CLOUDFLARE_TUNNEL_TOKEN,
 # SHARE_ANALYTICS_WITH_ONIONHOME), the OnionHeaven hub and admission
-# (REGISTER_WITH_ONIONHEAVEN, ONIONHEAVEN_*), or updates (UPDATE_ON_LAUNCH).
+# (REGISTER_WITH_ONIONHEAVEN, ONIONHEAVEN_*).
 # Those keep this install's values; the user sets them again. ONIONNAME
 # comes from the validated metadata username, and ADDRESS_PREFIX only when
 # the restored address starts with it.

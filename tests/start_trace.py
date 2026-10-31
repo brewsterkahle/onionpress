@@ -137,8 +137,7 @@ def run(test, platform, scenario):
     os.makedirs(launcher.data_dir, mode=0o700)
     with open(os.path.join(launcher.data_dir, "config"), "w", encoding="utf-8") as f:
         # The scenario's lines first: a key's first line is its value.
-        f.write(scenario.config + "ADDRESS_PREFIX=op2\nINSTALL_IA_PLUGIN=yes\n"
-                "UPDATE_ON_LAUNCH=no\n")
+        f.write(scenario.config + "ADDRESS_PREFIX=op2\nINSTALL_IA_PLUGIN=yes\n")
     for rel, body in scenario.files.items():
         path = os.path.join(launcher.data_dir, rel.format(tmp=tmp))
         if body is None:
