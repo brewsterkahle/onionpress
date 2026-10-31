@@ -881,8 +881,9 @@ class TestCli(unittest.TestCase):
 
     def test_the_launchers_pass_it_through_without_argv(self):
         """Taken out of the launcher's environment before anything runs and
-        handed only to the restore and hub-recovery-key commands, in their
-        environment, never as an argument."""
+        handed only to the restore, hub-recovery-key and setup commands (a
+        backup's setup is the restore), in their environment, never as an
+        argument."""
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
             text = _read(rel)
             with self.subTest(rel):
@@ -895,10 +896,11 @@ class TestCli(unittest.TestCase):
                 self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
                                        r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" \S+ '
                                        r'(-m onionpress\.cli )?--data-dir "\$DATA_DIR" restore "\$restore_path"')
-                # restore --check, restore, hub-recovery-key
+                # restore --check, restore, hub-recovery-key, and run_setup
+                # (setup --from-backup is the restore, #509)
                 uses = [ln.strip() for ln in text.splitlines()
                         if "$_HUB_RECOVERY_KEY" in ln and not ln.lstrip().startswith("#")]
-                self.assertEqual(len(uses), 3, uses)
+                self.assertEqual(len(uses), 4, uses)
                 for line in uses:
                     self.assertTrue(line.startswith(('ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ',
                                                      'if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ')),

@@ -379,9 +379,13 @@
 - The launchers' `setup)` case is `run_setup` (passwords moved into the
   environment, never the CLI's argv) → `setup_logic.setup_from_terminal`,
   which installs through `install_fresh_wordpress`; its exit says what the
-  launcher does next (10: restart for a backup's key). `--from-backup`
-  takes the address from the key (`stage_setup_from_backup`), never
-  metadata.json; no key, no new one. `tests/test_terminal_setup.py`.
+  launcher does next (10: restart after a backup's restore).
+- **`setup --from-backup` is the restore** (#509): `setup_from_terminal`
+  runs `cmd_restore`'s install-from-backup rebuild (the backup's key,
+  database and content; the address from the key, never metadata.json; no
+  key, no new one), marks the setup complete and has the launcher restart.
+  Never a WordPress under temporary credentials. `tests/test_terminal_setup.py`,
+  `TestLauncherRestorePaths` in `tests/test_backup_metadata_validation.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`

@@ -2530,7 +2530,8 @@ def _add_setup(sub, name):
         name,
         help="Set up WordPress from a terminal (the launchers' `setup`): the "
              "install the setup window makes, with the answers given here or "
-             "asked; --from-backup takes a backup's settings and key. "
+             "asked; --from-backup restores the backup's site instead (what "
+             "`restore` does: its key, database and content; issue #509). "
              f"Passwords only in the environment (${{{_SETUP_PASSWORD_ENV}}}, "
              f"${{{_IA_PASSWORD_ENV}}}, ${{{BACKUP_PASSWORD_ENV}}} for the "
              "backup's). Exit 0 done, 2 already installed, 10 the launcher "
@@ -2543,7 +2544,8 @@ def _add_setup(sub, name):
     p.add_argument("--ia-account", default="",
                    help="An archive.org account to keep S3 keys from (Linux's setup)")
     p.add_argument("--from-backup", default="", metavar="BACKUP_ZIP",
-                   help="Set up from this backup (its password in the environment)")
+                   help="Restore this backup's site (its password in the environment; "
+                        "a hub's recovery key as `restore` takes it)")
     p.add_argument("--launcher", default=None,
                    help="The launcher that runs provision-post-install and "
                         "setup-bundled-plugins (default: this install's)")
@@ -2564,12 +2566,20 @@ def _run_setup(run):
         print("WARNING: --email is ignored: the admin's email is set the way the "
               "setup window sets it", file=sys.stderr)
         log("WARNING: setup: --email given and ignored")
+
+    def restore(password, zip_path):
+        # A backup's setup is the restore (issue #509): cmd_restore's
+        # install-from-backup rebuild, OnionPressCLI and all, with the hub
+        # recovery key main() took out of the environment. Only here is
+        # OnionPressCLI constructed for a setup.
+        return _cli(run).cmd_restore(password, zip_path, run.hub_recovery_key)
+
     return setup_logic.setup_from_terminal(
         data_dir=paths.data_dir, mac=mac,
         launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
         docker=Docker(paths), manager=_start_step_manager(paths), user=args.user,
         title=args.title, from_backup=args.from_backup, ia_account=args.ia_account,
-        log=log)
+        log=log, restore=restore)
 
 
 def _add_start_post_up(sub, name):

@@ -997,81 +997,14 @@ def _write_config(data_dir: str, key: str, value: str,
 #
 # The launchers' `setup)` case runs `onionpress setup` (cli._run_setup):
 # setup_from_terminal below decides everything and says what the launcher
-# has to do after it (SETUP_* exit codes): restart the stack for a backup's
-# key, or nothing. Passwords reach it in the environment (the launcher
-# moves `--pass`, `--ia-password` and `--from-backup`'s password there),
-# never on argv.
+# has to do after it (SETUP_* exit codes): restart the stack after a
+# backup's restore, or nothing. Passwords reach it in the environment (the
+# launcher moves `--pass`, `--ia-password` and `--from-backup`'s password
+# there), never on argv.
 
 SETUP_DONE, SETUP_FAILED, SETUP_ALREADY_INSTALLED, SETUP_RESTART = 0, 1, 2, 10
 SETUP_PASSWORD_ENV = "ONIONPRESS_SETUP_PASSWORD"
 IA_PASSWORD_ENV = "ONIONPRESS_IA_PASSWORD"
-_KEY_FILES = ("hs_ed25519_secret_key", "hs_ed25519_public_key",
-              "ks_hs_id.ed25519_expanded_private")
-
-
-def stage_setup_from_backup(zip_path: str, password: str, data_dir: str,
-                            log: Callable[[str], None],
-                            say: Callable[[str], None]) -> tuple[bool, str]:
-    """`setup --from-backup`'s host side (#442.9): extract the backup
-    (either format) into a private temp folder, check it and take the
-    address from its key (backup.staged_backup_address, never from
-    metadata.json), merge its allowlisted settings into this install's
-    config, and put its key in shared/vanity-keys/<address>/ for the next
-    start (which the setup flags as a key import). (ok, address): address
-    "" when the backup holds no key, and then this install keeps its own; a
-    backup without a key never mints one. Refused before anything is copied
-    when the backup does not check out. The temp folder always goes."""
-    import shutil
-    import tempfile
-    from onionpress import backup
-    staging = tempfile.mkdtemp(prefix="onionpress-setup-")
-    try:
-        os.chmod(staging, 0o700)
-        say("  Extracting config from backup...")
-        try:
-            backup.extract_backup(zip_path, password, log, staging=staging)
-        except Exception as e:
-            log(f"Restore: could not extract the backup: {e}")
-            say("ERROR: Failed to extract backup (wrong password, corrupt zip or not a "
-                "valid OnionPress backup)")
-            return False, ""
-        try:
-            address = backup.staged_backup_address(staging, log)
-        except Exception as e:
-            log(f"Restore: refusing the backup: {str(e)[:300]}")
-            address = None
-        if address is None or (address and not key_manager.is_valid_onion_address(address)):
-            say("ERROR: Not a valid OnionPress backup (invalid metadata or onion service key)")
-            return False, ""
-        config_file = os.path.join(data_dir, "config")
-        try:
-            backup.restore_backup_config(staging, config_file, log, address)
-            log("Setup: restored settings from backup")
-            say("  Settings restored from backup.")
-        except Exception as e:
-            log(f"Restore: could not restore settings: {str(e)[:300]}")
-        keys = os.path.join(staging, "tor-keys")
-        has_key = any(os.path.isfile(os.path.join(keys, n)) for n in _KEY_FILES[0::2])
-        if address and has_key and os.path.isfile(os.path.join(staging, "metadata.json")):
-            vanity = os.path.join(data_dir, "shared", "vanity-keys")
-            shutil.rmtree(vanity, ignore_errors=True)
-            folder = os.path.join(vanity, address)
-            os.makedirs(folder, mode=0o700)
-            for name in _KEY_FILES:
-                if os.path.isfile(os.path.join(keys, name)):
-                    shutil.copyfile(os.path.join(keys, name), os.path.join(folder, name))
-            with open(os.path.join(folder, "hostname"), "w", encoding="utf-8") as f:
-                f.write(address + "\n")
-            log(f"Setup: restored Tor keys for {address} from backup")
-            say(f"  Tor keys restored from backup ({address}).")
-            return True, address
-        log("Setup: the backup holds no onion service key; this install keeps its own")
-        say("  This backup holds no onion service key: this install keeps its own address.")
-        return True, ""
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-
-
 def ask_setup_answers(*, user: str = "", password: str = "", title: str = "",
                       input_func=input, getpass_func=None,
                       say: Callable[[str], None] = print) -> tuple[str, str, str]:
@@ -1139,16 +1072,19 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
                         manager, user: str = "", title: str = "", from_backup: str = "",
                         ia_account: str = "", log: Callable[[str], None],
                         say: Callable[[str], None] = print, input_func=input,
-                        getpass_func=None) -> int:
+                        getpass_func=None, restore: Callable[[str, str], int] | None = None
+                        ) -> int:
     """`onionpress setup` (#442.11): WordPress installed the way the setup
     window installs it (install_fresh_wordpress), with the answers given
-    or asked at the terminal, or with a backup's settings and key
-    (stage_setup_from_backup) under temporary credentials the restore
-    replaces. One of the SETUP_* codes: SETUP_RESTART when the launcher
-    must restart the stack (a backup's setup; with its key flagged as an
-    import first, after any hub holding the current key was asked to
-    delete it)."""
-    from onionpress.containers import IMPORT_KEY_PENDING
+    or asked at the terminal; or, `--from-backup`, the backup's own site
+    (issue #509): *restore(password, zip_path)* is `onionpress restore`'s
+    install-from-backup rebuild (cli.cmd_restore: the backup's key seeded,
+    the containers rebuilt, its database and content imported, Tor
+    started under its address), never a WordPress under temporary
+    credentials, which nothing replaced. One of the SETUP_* codes:
+    SETUP_RESTART when the launcher must restart the stack (a restored
+    site: the start's provisioning, plugins and install-state steps run
+    against it)."""
     docker_bin, docker_env = docker.docker_bin, docker.env
 
     def wp(*args):
@@ -1167,19 +1103,32 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
 
     password = os.environ.pop(SETUP_PASSWORD_ENV, "")
     ia_password = os.environ.pop(IA_PASSWORD_ENV, "")
-    address = ""
+    log_path = os.path.join(data_dir, "onionpress.log")
     if from_backup:
         from onionpress.launcher_ops import BACKUP_PASSWORD_ENV
         backup_password = os.environ.pop(BACKUP_PASSWORD_ENV, "")
         if not backup_password or not os.path.isfile(from_backup):
-            say("Usage: onionpress setup --from-backup <password> <backup.zip>")
+            say("Usage: onionpress setup --from-backup <backup.zip>   (the password in "
+                f"{BACKUP_PASSWORD_ENV}, on stdin or at the prompt)")
             return SETUP_FAILED
-        ok, address = stage_setup_from_backup(from_backup, backup_password, data_dir, log, say)
-        if not ok:
+        if restore is None:
+            raise TypeError("setup_from_terminal: a backup's setup needs restore()")
+        if user or title:
+            say("  (--user and --title are the backup's: the given ones are ignored)")
+        # The backup's site, as `onionpress restore` rebuilds it: its key
+        # (or this install's, for a backup without one), its database and
+        # content, the hubs that held the replaced key asked to delete it.
+        # A refused or failed restore sets nothing up (cmd_restore says
+        # why, and keeps its staging for a retry where it got that far).
+        say("")
+        say("  Restoring the backup's site (its key, database and content)...")
+        if restore(backup_password, from_backup) != 0:
+            say(f"  ERROR: the restore failed; the site is not set up. See {log_path}.")
             return SETUP_FAILED
-        # The restore replaces the database, and these credentials with it.
-        user, password, title = "admin", backup_password, title or "OnionPress"
-        say("  Installing WordPress with temporary credentials (restore will overwrite)...")
+        say("  Site restored from backup.")
+        # What install_fresh_wordpress writes for a new site: the setup is
+        # done, no welcome screen for it (issue #374).
+        mark_setup_complete(data_dir, log)
     else:
         try:
             user, password, title = ask_setup_answers(
@@ -1189,19 +1138,17 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
             say("ERROR: no terminal to ask on; give --user and --title (and the "
                 "password with --pass)")
             return SETUP_FAILED
-
-    say("")
-    say("  Installing WordPress...")
-    if not install_fresh_wordpress(
-            site_title=title, onionname=user, password=password,
-            onion_addr=(onion_hostname.read_served_address_with(docker_bin, env=docker_env)
-                        or "localhost"),
-            docker_bin=docker_bin, docker_env=docker_env, launcher_bin=launcher_bin,
-            log_func=log, data_dir=data_dir):
-        say(f"  ERROR: WordPress installation failed. Check {os.path.join(data_dir, 'onionpress.log')} "
-            "for details.")
-        return SETUP_FAILED
-    say("  WordPress installed successfully!")
+        say("")
+        say("  Installing WordPress...")
+        if not install_fresh_wordpress(
+                site_title=title, onionname=user, password=password,
+                onion_addr=(onion_hostname.read_served_address_with(docker_bin, env=docker_env)
+                            or "localhost"),
+                docker_bin=docker_bin, docker_env=docker_env, launcher_bin=launcher_bin,
+                log_func=log, data_dir=data_dir):
+            say(f"  ERROR: WordPress installation failed. Check {log_path} for details.")
+            return SETUP_FAILED
+        say("  WordPress installed successfully!")
 
     if ia_account and ia_password:
         say("  Logging in to Archive.org (over Tor)...")
@@ -1212,19 +1159,6 @@ def setup_from_terminal(*, data_dir: str, mac: bool, launcher_bin: str, docker,
             say("  WARNING: Archive.org login failed. You can set credentials later in Settings.")
 
     if from_backup:
-        if address:
-            # The backup's key replaces the one Tor serves now: hubs that
-            # may hold a copy of the current one are asked to delete it
-            # first (not the backup's own address, which stays).
-            from onionpress.onionheaven import release_onionheaven
-            try:
-                release_onionheaven("restore", keep_address=address, data_dir=data_dir)
-            except Exception as e:
-                log(f"Setup: could not ask the OnionHeaven hub to delete the old key ({e}); "
-                    "continuing")
-            log("Setup --from-backup: flagging key reimport...")
-            with open(os.path.join(data_dir, IMPORT_KEY_PENDING), "w", encoding="utf-8"):
-                pass
         return SETUP_RESTART
 
     # Tor, if it is not running, its key volume in place first (it would
