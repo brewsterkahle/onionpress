@@ -88,10 +88,19 @@ def _candidate_wordlist_dirs():
         if candidate:
             yield candidate
 
-    # Sibling to the calling script (py2app often flattens resources here).
-    if getattr(sys, "frozen", False):
-        yield os.path.join(os.path.dirname(sys.executable), "..",
-                           "Resources", "wordlists")
+    # The app bundle run through its own Python (`bundled_python -m
+    # onionpress.cli`: no RESOURCEPATH, not frozen; issue #507): this file
+    # is under MenubarApp/Contents/Resources/lib/python3.x/onionpress/, and
+    # the interpreter under MenubarApp/Contents/MacOS/, both beside the
+    # Resources folder that holds wordlists/.
+    parent = this
+    for _ in range(6):
+        parent = os.path.dirname(parent)
+        if os.path.basename(parent) == "Resources":
+            yield os.path.join(parent, "wordlists")
+            break
+    yield os.path.join(os.path.dirname(os.path.realpath(sys.executable)), "..",
+                       "Resources", "wordlists")
 
 
 def find_wordlist_dir():

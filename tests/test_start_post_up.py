@@ -403,6 +403,24 @@ class TestPostUp(Base):
         self.assertIn(f"import-backup-artifacts --staging {staging}", order)
         self.assertFalse(os.path.isdir(staging))
 
+    def test_the_import_makes_the_site_installed_for_the_rest_of_the_start(self):
+        """#507: start_core read "not installed" before the import put the
+        backup's database in; the image-derivative rebuild gated on that
+        and waited one more start."""
+        staging = os.path.join(self.data, "staging")
+        os.makedirs(staging)
+        with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
+            f.write(staging + "\n")
+        _, order, _ = self.post_up(False, installed=False)
+        self.assertIn(f"import-backup-artifacts --staging {staging}", order)
+        self.assertIn("detached regenerate-derivatives", order)
+        # A failed import changes nothing about it.
+        os.makedirs(staging, exist_ok=True)
+        with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
+            f.write(staging + "\n")
+        _, order, _ = self.post_up(False, installed=False, steps={"import-backup-artifacts": 1})
+        self.assertNotIn("detached regenerate-derivatives", order)
+
     def test_a_marker_without_its_staging_is_ignored(self):
         with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
             f.write("/nowhere\n")
