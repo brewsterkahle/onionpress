@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.platform import (
     OS, Arch, OnionPressPaths,
-    detect_os, detect_arch, detect_timezone, resolve_paths, find_app_bundle,
+    detect_os, detect_arch, detect_timezone, resolve_paths, find_app_bundle, linux_docker_dir,
 )
 
 
@@ -127,6 +127,24 @@ class TestResolvePaths(unittest.TestCase):
                 os.path.join(app, "Contents", "Resources", "docker"),
             )
 
+    @mock.patch("onionpress.platform.detect_os", return_value=OS.LINUX)
+    def test_linux_takes_the_install_trees_docker_dir(self, _os):
+        """#508: without an app bundle, Linux's compose files are the
+        install tree's; no command depends on the current folder."""
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             mock.patch("onionpress.platform.linux_docker_dir",
+                        return_value=os.path.join(tmpdir, "docker")):
+            # app_bundle="": None would find a Mac's /Applications/OnionPress.app.
+            paths = resolve_paths(data_dir=os.path.join(tmpdir, ".onionpress"), app_bundle="")
+            self.assertEqual(paths.docker_dir, os.path.join(tmpdir, "docker"))
+
+    @mock.patch("onionpress.platform.detect_os", return_value=OS.MACOS)
+    def test_mac_without_a_bundle_has_none(self, _os):
+        with mock.patch("onionpress.platform.linux_docker_dir") as linux:
+            paths = resolve_paths(data_dir="/tmp/test", app_bundle="")
+        self.assertEqual(paths.docker_dir, "")
+        linux.assert_not_called()
+
     def test_no_app_bundle(self):
         paths = resolve_paths(data_dir="/tmp/test", app_bundle=None)
         # bin_dir and docker_dir should be empty when no bundle found
@@ -148,3 +166,48 @@ class TestFindAppBundle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLinuxDockerDir(unittest.TestCase):
+    """platform.linux_docker_dir (#508): the .deb's tree, the launcher's
+    override, a checkout, or nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
+
+    def _compose(self, *parts):
+        folder = os.path.join(self.tmp, *parts)
+        os.makedirs(folder, exist_ok=True)
+        open(os.path.join(folder, "docker-compose.yml"), "w").close()
+        return folder
+
+    def test_the_installed_tree(self):
+        package = os.path.join(self.tmp, "opt", "lib", "onionpress")
+        os.makedirs(package)
+        self.assertEqual(linux_docker_dir(package, environ={}), "")
+        docker = self._compose("opt", "docker")
+        self.assertEqual(linux_docker_dir(package, environ={}), docker)
+
+    def test_the_launchers_override_wins(self):
+        package = os.path.join(self.tmp, "opt", "lib", "onionpress")
+        os.makedirs(package)
+        self._compose("opt", "docker")
+        other = self._compose("elsewhere", "docker")
+        env = {"ONIONPRESS_INSTALL_DIR": os.path.join(self.tmp, "elsewhere")}
+        self.assertEqual(linux_docker_dir(package, environ=env), other)
+        # An override without compose files falls through to the tree.
+        env = {"ONIONPRESS_INSTALL_DIR": os.path.join(self.tmp, "nowhere")}
+        self.assertEqual(linux_docker_dir(package, environ=env),
+                         os.path.join(self.tmp, "opt", "docker"))
+
+    def test_a_checkout(self):
+        package = os.path.join(self.tmp, "repo", "src", "onionpress")
+        os.makedirs(package)
+        docker = self._compose("repo", "app", "Resources", "docker")
+        self.assertEqual(linux_docker_dir(package, environ={}), docker)
+
+    def test_this_checkout(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.assertEqual(linux_docker_dir(environ={}),
+                         os.path.join(here, "app", "Resources", "docker"))

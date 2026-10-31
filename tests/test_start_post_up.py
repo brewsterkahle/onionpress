@@ -392,11 +392,23 @@ class TestPostUp(Base):
         self.assertFalse(os.path.exists(staging))
         self.assertIn("Install-from-backup: complete (staging cleaned up)", self.lines)
 
-    def test_install_from_backup_is_the_macs(self):
+    def test_install_from_backup_on_linux_too(self):
+        """#508: a restore that failed past its import keeps the staging on
+        both platforms, and both platforms' starts import it again."""
+        staging = os.path.join(self.data, "staging")
+        os.makedirs(staging)
+        with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
+            f.write(staging + "\n")
+        _, order, _ = self.post_up(False)
+        self.assertIn(f"import-backup-artifacts --staging {staging}", order)
+        self.assertFalse(os.path.isdir(staging))
+
+    def test_a_marker_without_its_staging_is_ignored(self):
         with open(os.path.join(self.data, start.INSTALL_FROM_BACKUP), "w") as f:
             f.write("/nowhere\n")
         _, order, _ = self.post_up(False)
         self.assertFalse([o for o in order if o.startswith("import-backup")])
+        self.assertTrue([m for m in self.lines if "marker present but staging missing" in m])
 
 
 class TestTimezones(Base):

@@ -828,6 +828,28 @@ class TestCmdRestore(Sandbox):
         self.assertIn("Restore complete.", self.out.getvalue())
         self.assertEqual(self._restore(json_output=False), 0)
 
+    def test_a_failed_import_starts_tor_again_and_keeps_the_staging(self):
+        """#508: Linux stayed down until a restart by hand."""
+        self.cli.cmd_import_backup_artifacts.return_value = 1
+        self.assertEqual(self._restore(), 1)
+        c = self.cli.containers
+        c.start_core.assert_called_once()
+        c.start_tor.assert_called_once()
+        self.assertTrue(os.path.isdir(self.staging))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, ".install-from-backup")))
+        self.assertTrue(any("starting Tor again" in m for m in self.cli.logged), self.cli.logged)
+        self.spawn.assert_not_called()
+
+    def test_a_failure_after_the_teardown_starts_tor_again(self):
+        self.name_registry.side_effect = RuntimeError("registry")
+        self.assertEqual(self._restore(), 1)
+        self.assertGreaterEqual(self.cli.containers.start_tor.call_count, 1)
+        self.assertTrue(any("after the containers were rebuilt" in m for m in self.cli.logged))
+        # Tor's own start failing is said, not raised.
+        self.cli.containers.start_tor.side_effect = RuntimeError("compose")
+        self.assertEqual(self._restore(), 1)
+        self.assertTrue(any("Tor could not be started again" in m for m in self.cli.logged))
+
     def test_without_the_tor_image_nothing_is_changed(self):
         self.cli.containers.ensure_tor_image.return_value = ""
         self.assertEqual(self._restore(), 1)
@@ -904,12 +926,6 @@ class TestCmdRestore(Sandbox):
         self.release.side_effect = RuntimeError("tor down")
         self.assertEqual(self._restore(), 0)
         self.assertTrue(any("could not ask the OnionHeaven hub" in m for m in self.cli.logged))
-
-    def test_a_failed_import_keeps_the_staging(self):
-        self.cli.cmd_import_backup_artifacts.return_value = 1
-        self.assertEqual(self._restore(), 1)
-        self.assertTrue(os.path.isdir(self.staging))
-        self.cli.containers.start_tor.assert_not_called()
 
     def test_a_failure_after_the_teardown_is_logged(self):
         self.cli.containers.start_core.side_effect = RuntimeError("compose")

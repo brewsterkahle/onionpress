@@ -679,7 +679,8 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     """Everything after the core services are up, in the launchers' order:
     the Mac's .htaccess repair, Tor (`tor` in the START SUMMARY when it
     will not start), Linux's SOCKS port check, the pinned plugins, the
-    Mac's install-from-backup import, deactivate-wp-statistics and
+    install-from-backup import (both platforms since #508: a restore that
+    failed past its import keeps the staging for it), deactivate-wp-statistics and
     provision-post-install (each a WARNING and a START SUMMARY name when it
     fails), the plugins' setup, the image-derivative rebuild and the Mac's
     archive.org login (both detached: they outlive the launcher), the Mac's
@@ -743,12 +744,13 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
                                            log_file=paths.log_file))
     bundled_plugins.install_bundled_plugins(host)
 
-    # A backup staged for this install: its database and content go into
-    # the running containers before the provisioning, which then refreshes
-    # the theme and mu-plugins to this version's.
+    # A backup staged for this install (the welcome screen's Restore from
+    # backup, or a restore that failed past its import, #508): its database
+    # and content go into the running containers before the provisioning,
+    # which then refreshes the theme and mu-plugins to this version's.
     staging = ""
     marker = os.path.join(paths.data_dir, INSTALL_FROM_BACKUP)
-    if mac and os.path.isfile(marker):
+    if os.path.isfile(marker):
         try:
             with open(marker, encoding="utf-8") as f:
                 staging = f.readline().rstrip("\n")

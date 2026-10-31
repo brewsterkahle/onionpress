@@ -803,11 +803,28 @@ class OnionPressCLI:
             except Exception as e:
                 self.log(f"Restore: could not ask the OnionHeaven hub to delete "
                          f"the old key ({e}); continuing")
+        torn_down = False
+
+        def tor_back(why):
+            # A failure past the teardown left the site down with its
+            # containers rebuilt (#508: Linux stayed down until a restart
+            # by hand). Tor comes back, best effort, so the site, however
+            # far the import got, is reachable at its address; the staging
+            # is kept and the next start imports it again (both platforms).
+            self.log(f"Restore: {why}; starting Tor again so the site is reachable "
+                     f"(the site may be incomplete: run the restore again, or start "
+                     f"OnionPress, which imports the kept backup once more)")
+            try:
+                self.containers.start_tor()
+            except Exception as e:
+                self.log(f"Restore: Tor could not be started again: {e}")
+
         try:
             # Teardown: stop + wipe data + keystore volumes so the rebuild adopts
             # the seeded key and imported backup cleanly (no stale keystore
             # overriding the restored identity, no in-place overwrite).
             self.containers.stop()
+            torn_down = True
             # onionpress-arti-state is the key volume's pre-2026-09-25 name;
             # wiping it too keeps the launcher's migration from bringing the
             # replaced identity back. The key volumes stay when the backup
@@ -861,6 +878,7 @@ class OnionPressCLI:
             if self.cmd_import_backup_artifacts(staging, name_registry=False,
                                                 hub_data=hub.get("data")) != 0:
                 self.log("Restore: artifact import failed — staging kept for retry")
+                tor_back("the import did not finish")
                 return 1
             self.containers.start_tor()
             self.containers.wait_for_tor()
@@ -900,6 +918,8 @@ class OnionPressCLI:
             return 0
         except Exception as e:
             self.log(f"Restore failed: {e}")
+            if torn_down:
+                tor_back("the restore failed after the containers were rebuilt")
             return 1
 
     def cmd_import_backup_artifacts(self, staging: str, name_registry: bool = True,

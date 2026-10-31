@@ -290,6 +290,40 @@ exit 1
         self.assertEqual(tree["uploads/kept.jpg"], b"jpg")
         self.assertEqual(tree["style.css"], b"body {}")
 
+    def test_skip_leaves_top_level_names_out(self):
+        """#508: a restore's wp-content never writes `creations` (the host's
+        folder, bind-mounted); a nested name of the same spelling is kept."""
+        dest = "/var/www/html/wp-content"
+        self._file("theme-src/creations/mine.txt", b"host's")
+        self._file("theme-src/creations.txt", b"a file")
+        self._file("theme-src/uploads/creations/kept.txt", b"nested")
+        r = wp_files.put_tree(self.src, dest, merge=True, docker_bin=self.docker,
+                              timeout=60, skip=("creations",))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tree = self._tree(dest[1:])
+        self.assertNotIn("creations/mine.txt", tree)
+        self.assertFalse(os.path.exists(os.path.join(self.box, dest[1:], "creations")))
+        self.assertEqual(tree["creations.txt"], b"a file")
+        self.assertEqual(tree["uploads/creations/kept.txt"], b"nested")
+        self.assertEqual(tree["style.css"], b"body {}")
+
+    def test_put_wp_content_leaves_creations_out_and_says_so(self):
+        from onionpress import backup
+        self._file("theme-src/creations/mine.txt", b"host's")
+        logs = []
+        with mock.patch.object(wp_files, "put_tree",
+                               return_value=subprocess.CompletedProcess([], 0, "", "")) as put:
+            backup.put_wp_content(self.src, logs.append)
+        self.assertEqual(put.call_args.kwargs["skip"], backup.WP_CONTENT_NEVER_RESTORED)
+        self.assertEqual(backup.WP_CONTENT_NEVER_RESTORED, ("creations",))
+        self.assertTrue([m for m in logs if "wp-content/creations is left out" in m], logs)
+        logs.clear()
+        os.rename(os.path.join(self.src, "creations"), os.path.join(self.src, "uploads"))
+        with mock.patch.object(wp_files, "put_tree",
+                               return_value=subprocess.CompletedProcess([], 0, "", "")):
+            backup.put_wp_content(self.src, logs.append)
+        self.assertEqual(logs, [])
+
     def test_the_launchers_cli_helper(self):
         """`onionpress.cli put-wp-tree`: the bash launchers' restore and
         plugin installs."""
