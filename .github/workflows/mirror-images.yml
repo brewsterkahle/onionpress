@@ -1,0 +1,71 @@
+# Mirrors the third-party images the stack runs (mariadb, autoheal,
+# cloudflared, the socket proxy) into this repository owner's ghcr.io
+# namespace, so every image a first run pulls is under our own retention
+# (issue #501). Before this a pinned digest that a publisher stopped serving
+# meant an install that could not start.
+#
+# build/image-pins.env names each mirror (ghcr.io/<owner>/onionpress-<name>:<tag>@
+# sha256:…); build/image-mirrors.txt says which upstream repository it copies.
+# The copy is made by digest, from the upstream, and read back: a registry-to-
+# registry copy of an index keeps its bytes, so the mirror serves exactly the
+# digest the pin says or this run fails. It runs when the pins change, on any
+# branch, so a pin is mirrored before it can be merged and released. Nothing
+# here builds an image. The release's tag-release job (docker-publish.yml)
+# adds a :<version> tag to each mirror.
+#
+# GHCR creates a package private the first time it is pushed. Make each
+# onionpress-* mirror package public (package settings) once, or an
+# anonymous first run cannot pull it.
+
+name: Mirror third-party images
+
+on:
+  push:
+    paths:
+      - build/image-pins.env
+      - build/image-mirrors.txt
+      - .github/workflows/mirror-images.yml
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # GHCR namespace: the owner of the repository this run belongs to, so a
+  # fork mirrors into its own account (see docker-publish.yml).
+  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || github.repository_owner }}
+
+jobs:
+  mirror:
+    name: Mirror the pinned third-party images
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Copy each pinned digest to its mirror
+        run: |
+          grep -Ev '^[[:space:]]*(#|$)' build/image-mirrors.txt | while read -r key upstream package; do
+            pin=$(grep "^$key=" build/image-pins.env | head -1 | cut -d= -f2- || :)
+            digest="${pin##*@}"
+            if ! printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
+              echo "::error::build/image-pins.env has no digest-pinned $key (got '$pin')"
+              exit 1
+            fi
+            # The tag is whatever the pin carries (an upstream version tag,
+            # or autoheal's :latest); the digest is what matters.
+            tag="${pin%@*}"; tag="${tag##*:}"
+            mirror="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/$package"
+            docker buildx imagetools create -t "$mirror:$tag" "$upstream@$digest"
+            got=$(docker buildx imagetools inspect "$mirror:$tag" | awk '$1 == "Digest:" {print $2; exit}')
+            if [ "$got" != "$digest" ]; then
+              echo "::error::$mirror:$tag is '$got', but $key pins $digest"
+              exit 1
+            fi
+            echo "$mirror:$tag -> $digest"
+          done

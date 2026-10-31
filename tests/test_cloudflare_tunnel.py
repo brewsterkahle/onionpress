@@ -95,7 +95,7 @@ class TestLauncherWiring(unittest.TestCase):
     def test_update_pulls_cloudflared_only_with_a_tunnel(self):
         body = _function(self.text, "update_images")
         self.assertLess(body.index('if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]'),
-                        body.index("cloudflare/cloudflared:"))
+                        body.index("onionpress-cloudflared:"))
 
 
 class TestOneTimingOnBothPlatforms(unittest.TestCase):

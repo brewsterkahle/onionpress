@@ -308,6 +308,8 @@ class ReleaseTagsPinnedDigestsTest(unittest.TestCase):
             with open(stub, "w") as f:
                 f.write(STUB_DOCKER)
             os.chmod(stub, 0o755)
+            shutil.copy(os.path.join(PROJECT_ROOT, "build/image-mirrors.txt"),
+                        os.path.join(tmp, "build", "image-mirrors.txt"))
             pins_path = os.path.join(tmp, "build", "image-pins.env")
             if pins is None:
                 shutil.copy(os.path.join(PROJECT_ROOT, "build/image-pins.env"), pins_path)
@@ -351,6 +353,23 @@ class ReleaseTagsPinnedDigestsTest(unittest.TestCase):
             for tag in ("latest", "9.9.9"):
                 self.assertIn(f"{target}:{tag} -> {pins[key].split('@', 1)[1]}",
                               result.stdout)
+
+    def test_mirrored_images_get_the_version_tag_only(self):
+        """Issue #501: each third-party mirror is tagged :<version> from its
+        pin, and never :latest (that would move a tag nobody pinned)."""
+        if not shutil.which("bash"):
+            self.skipTest("bash not available")
+        result, calls = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pins = self._pins()
+        for key, package in (("MARIADB_IMAGE", "onionpress-mariadb"),
+                             ("AUTOHEAL_IMAGE", "onionpress-autoheal"),
+                             ("CLOUDFLARED_IMAGE", "onionpress-cloudflared"),
+                             ("SOCKET_PROXY_IMAGE", "onionpress-socket-proxy")):
+            target = f"ghcr.io/someone/{package}"
+            self.assertIn(
+                f"buildx imagetools create -t {target}:9.9.9 {pins[key]}", calls)
+            self.assertNotIn(f"{target}:latest", calls)
 
     def test_fails_when_a_tag_does_not_read_back_as_the_pin(self):
         if not shutil.which("bash"):

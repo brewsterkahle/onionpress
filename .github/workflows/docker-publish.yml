@@ -359,15 +359,20 @@ jobs:
           # single source, imagetools create pushes it unchanged, so the
           # digest stays the same), then read both tags back.
           retag() {
-            key="$1"; image="$2"
+            key="$1"; image="$2"; latest="${3:-yes}"
             pin=$(grep "^$key=" build/image-pins.env | head -1 | cut -d= -f2- || :)
             digest="${pin##*@}"
             if ! printf '%s' "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}'; then
               echo "::error::build/image-pins.env has no digest-pinned $key (got '$pin')"
               exit 1
             fi
-            docker buildx imagetools create -t "$image:latest" -t "$image:$VERSION" "$pin"
-            for tag in latest "$VERSION"; do
+            if [ "$latest" = yes ]; then
+              tags="latest $VERSION"
+            else
+              tags="$VERSION"
+            fi
+            docker buildx imagetools create $(for t in $tags; do printf -- '-t %s ' "$image:$t"; done) "$pin"
+            for tag in $tags; do
               got=$(docker buildx imagetools inspect "$image:$tag" | awk '$1 == "Digest:" {print $2; exit}')
               if [ "$got" != "$digest" ]; then
                 echo "::error::$image:$tag is '$got', but the release pins $digest"
@@ -379,3 +384,12 @@ jobs:
 
           retag ONIONPRESS_TOR_IMAGE "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-tor"
           retag ONIONPRESS_WORDPRESS_IMAGE "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ env.IMAGE_PREFIX }}onionpress-wordpress"
+
+          # The mirrored third-party images (issue #501, mirror-images.yml)
+          # get the :<version> tag only, so each release keeps the digests
+          # it pinned under our own retention. Their pins already name the
+          # mirror, so this copies from it; a mirror that was never made
+          # fails the release here rather than every first run later.
+          grep -Ev '^[[:space:]]*(#|$)' build/image-mirrors.txt | while read -r key upstream package; do
+            retag "$key" "${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/$package" no
+          done
