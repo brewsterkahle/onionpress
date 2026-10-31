@@ -374,14 +374,16 @@ ROWS = [
     Row("setup", ["setup", "--user", "alice", "--title", "T", "--launcher", "/l"],
         "setup_logic.setup_from_terminal",
         mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
-                  user="alice", title="T", from_backup="", ia_account="", log=ANY),
+                  user="alice", title="T", from_backup="", ia_account="", log=ANY,
+                  restore=ANY),
         rc=0, returns=0, setup_cli=False,
         check=lambda t, m: t.assertEqual(
             (m.call_args.kwargs["user"], m.call_args.kwargs["title"],
              m.call_args.kwargs["launcher_bin"]), ("alice", "T", "/l"))),
     Row("setup", ["setup", "--from-backup", "/b.zip"], "setup_logic.setup_from_terminal",
         mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
-                  user="", title="", from_backup="/b.zip", ia_account="", log=ANY),
+                  user="", title="", from_backup="/b.zip", ia_account="", log=ANY,
+                  restore=ANY),
         rc=10, returns=10, setup_cli=False),
     # #442.8: the launchers' start_containers() is start.start_containers
     # (Linux --until-core); exit 1 stops the start, 0 / 3 say whether

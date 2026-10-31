@@ -732,6 +732,8 @@ run_setup() {
                 # `--from-backup <zip>`: the password as backup and restore
                 # take it (ONIONPRESS_BACKUP_PASSWORD, stdin, a prompt). The
                 # old `--from-backup <password> <zip>` still works, warned.
+                # The setup is then the restore (issue #509), so a hub's
+                # recovery key goes along as the restore case passes it.
                 if [ $# -ge 3 ] && [ "${3#-}" = "$3" ]; then
                     read_backup_password "${2:-}"
                     args+=(--from-backup "$3")
@@ -746,7 +748,7 @@ run_setup() {
         esac
     done
     ONIONPRESS_SETUP_PASSWORD="$setup_pass" ONIONPRESS_IA_PASSWORD="$ia_pass" \
-        ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
+        ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$backup_pass" \
         op_py --data-dir "$DATA_DIR" setup --launcher "$INSTALL_DIR/onionpress" "${args[@]}"
 }
 
@@ -3514,7 +3516,9 @@ main() {
             # Usage: onionpress setup [--user USER] [--pass PASS] [--title TITLE]
             #        onionpress setup --from-backup <backup.zip>   (password: ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt)
             # The install the setup window makes (run_setup); a backup's
-            # setup restarts the stack so the start installs its key.
+            # setup is the restore (issue #509: the backup's site, never a
+            # fresh one under temporary credentials), then a restart so
+            # the start provisions the restored site.
             setup_db_passwords
             cd "$DOCKER_DIR"
             shift  # remove "setup" from args

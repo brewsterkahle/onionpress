@@ -469,37 +469,49 @@ class TestLaunchersKeepTheAddress(unittest.TestCase):
         return mv.TestLauncherRestorePaths._fresh_data_dir(self)
 
     def _setup_from_backup(self, path):
+        """`setup --from-backup`'s host side (#509: the restore's
+        prepare_install_from_backup): (rc, the refusal); the log is read
+        with _log()."""
         return mv.TestLauncherRestorePaths._setup_from_backup(self, path)
 
+    def _log(self):
+        with open(os.path.join(self.tmp, "log")) as f:
+            return f.read()
+
     def test_setup_from_a_backup_without_a_key(self):
-        # `setup --from-backup` is setup_logic's since #442.9.
+        # `setup --from-backup` is the restore since #509: a keyless backup
+        # keeps the address Tor serves (read from the tor container; a
+        # setup runs with the stack up).
         path = _keyless_backup(self.tmp, "k.zip")
         data = self._fresh_data_dir()
-        rc, said = self._setup_from_backup(path)
+        with mock.patch("onionpress.backup.served_onion_address", return_value=OLD_ADDR):
+            rc, _ = self._setup_from_backup(path)
         self.assertEqual(rc, 0)
-        self.assertIn("this install keeps its own address", said)
+        self.assertIn(f"this install keeps its key and its address {OLD_ADDR}", self._log())
         self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")), [OLD_ADDR])
         self.assertFalse(os.path.exists(os.path.join(data, ".import-key-pending")))
 
     def test_setup_from_a_backup_with_a_key(self):
         path = _keyed_backup(self.tmp, "keyed.zip")
         data = self._fresh_data_dir()
-        rc, said = self._setup_from_backup(path)
+        rc, _ = self._setup_from_backup(path)
         self.assertEqual(rc, 0)
-        self.assertIn("Tor keys restored from backup", said)
+        self.assertIn(f"Restore: synced vanity-keys for {ADDR}", self._log())
         self.assertNotIn(OLD_ADDR, os.listdir(os.path.join(data, "shared", "vanity-keys")))
 
-    def test_the_setup_command_reimports_only_a_restored_key(self):
-        """setup_logic.setup_from_terminal asks the hubs to release the old
-        key and flags the import only when the backup's key was put in
-        place (tests/test_terminal_setup.py runs both cases)."""
+    def test_the_setup_command_leaves_the_key_to_the_restore(self):
+        """setup_logic.setup_from_terminal touches no key of its own (#509):
+        the backup's setup is cli.cmd_restore (the hubs asked to let the
+        replaced key go, the key volume seeded), passed in by cli._run_setup
+        (tests/test_terminal_setup.py runs the flow)."""
         text = mv._read("src/onionpress/setup_logic.py")
         flow = text[text.index("def setup_from_terminal("):]
-        gate = flow.index("        if address:\n            # The backup's key replaces")
-        end = flow.index("        return SETUP_RESTART", gate)
-        for what in ('release_onionheaven("restore"', "IMPORT_KEY_PENDING), \"w\""):
-            self.assertEqual(flow.count(what), 1, what)
-            self.assertTrue(gate < flow.index(what) < end, what)
+        for what in ("release_onionheaven", "IMPORT_KEY_PENDING", "vanity-keys"):
+            self.assertNotIn(what, flow, what)
+        self.assertIn("if restore(backup_password, from_backup) != 0:", flow)
+        runner = mv._read("src/onionpress/cli.py")
+        runner = runner[runner.index("def _run_setup("):runner.index("def _add_start_post_up(")]
+        self.assertIn(".cmd_restore(password, zip_path, run.hub_recovery_key)", runner)
 
 
 # ---------------------------------------------------------------------------

@@ -589,9 +589,10 @@ class TestBackupAddressCli(unittest.TestCase):
 
 class TestLauncherRestorePaths(unittest.TestCase):
     """The bash restore_backup (Linux) and `setup --from-backup` (both
-    launchers: setup_logic.stage_setup_from_backup since #442.9), run for
-    real against crafted backup files. The Mac launcher's `restore` goes
-    through onionpress.cli restore."""
+    launchers: the restore's own backup.prepare_install_from_backup since
+    #509, through cli.cmd_restore), run for real against crafted backup
+    files. The Mac launcher's `restore` goes through onionpress.cli
+    restore."""
 
     # Launchers with a bash restore_backup.
     RESTORE = ("linux/onionpress",)
@@ -613,17 +614,22 @@ class TestLauncherRestorePaths(unittest.TestCase):
         return data
 
     def _setup_from_backup(self, path):
-        """`setup --from-backup`'s staging, as `onionpress setup` runs it:
-        (rc, what it said); its log lines go to the log file."""
-        from onionpress import setup_logic
-        said = []
+        """`setup --from-backup`'s host side, as `onionpress setup` runs it
+        (#509: cmd_restore's prepare_install_from_backup, before any
+        container is touched): (rc, the refusal); the log lines go to the
+        log file, a refusal logged as cmd_restore logs it."""
+        from onionpress import backup
 
         def log(msg):
             with open(os.path.join(self.tmp, "log"), "a") as f:
                 f.write(msg + "\n")
         data = os.path.join(self.tmp, "home", ".onionpress")
-        ok, _ = setup_logic.stage_setup_from_backup(path, PW, data, log, said.append)
-        return (0 if ok else 1), "\n".join(said)
+        try:
+            backup.prepare_install_from_backup(path, PW, log, data_dir=data)
+        except Exception as e:
+            log(f"Restore failed during extract/seed: {e}")
+            return 1, str(e)
+        return 0, ""
 
     def _run(self, launcher, call):
         text = _read(launcher)
@@ -725,11 +731,13 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
             with self.subTest(case=label):
                     data = self._fresh_data_dir()
                     rc, err = self._setup_from_backup(path)
-                    self.assertNotEqual(rc, 0)
-                    # Refused by extract-backup (metadata) or the
-                    # backup-address gate (keys); either way, before
-                    # anything is copied out of the backup.
-                    self.assertIn("valid OnionPress backup", err)
+                    self.assertNotEqual(rc, 0, label)
+                    # Refused by the extraction (metadata) or the key
+                    # check (staged_onion_key_address / the seed); either
+                    # way before anything is copied out of the backup, and
+                    # the restore's staging folder is gone with it.
+                    self.assertTrue(err, label)
+                    self.assertFalse(os.path.exists(os.path.join(data, "restore-staging")))
                     self._assert_untouched(data)
 
     def test_a_valid_backup_restores_under_the_key_derived_address(self):
@@ -758,14 +766,19 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                     self.assertEqual(out.rstrip("\n").rsplit("\n", 1)[-1], ADDR)
         with self.subTest("setup --from-backup"):
                 data = self._fresh_data_dir()
-                self._setup_from_backup(path)
+                self.assertEqual(self._setup_from_backup(path), (0, ""))
                 self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")),
                                  [ADDR])
-                self.assertEqual(read_config(os.path.join(data, "config")), want_config)
+                # The restore's prepare records the backup's admin as
+                # ONIONNAME (the bash restore_backup leaves it, #508).
+                self.assertEqual(read_config(os.path.join(data, "config")),
+                                 dict(want_config, ONIONNAME="admin"))
 
     def _stage_source(self):
-        text = _read("src/onionpress/setup_logic.py")
-        i = text.index("def stage_setup_from_backup(")
+        """`setup --from-backup`'s host side: the restore's
+        prepare_install_from_backup (#509)."""
+        text = _read("src/onionpress/backup.py")
+        i = text.index("def prepare_install_from_backup(")
         return text[i:text.index("\ndef ", i + 10)]
 
     def test_launchers_never_copy_a_backups_config(self):
@@ -778,8 +791,9 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                                   '--config "$DATA_DIR/config"',
                                   _bash_function(code, func), func)
         stage = self._stage_source()
-        self.assertIn("backup.restore_backup_config(", stage)
-        self.assertNotIn('"config")', stage.split("config_file =", 1)[0])
+        self.assertIn("apply_config_overrides(", stage)
+        self.assertNotIn("'config'", stage)
+        self.assertNotIn('"config"', stage)
 
     def test_launchers_never_read_the_address_from_metadata(self):
         for launcher in LAUNCHERS:
@@ -792,11 +806,18 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
                     self.assertLess(gate, body.index("vanity-keys"), func)
                     if 'cp "$staging/config"' in body:
                         self.assertLess(gate, body.index('cp "$staging/config"'), func)
+        # The restore's prepare: the key is checked and the address derived
+        # from it (the seed overwrites metadata's) before the config takes
+        # the address; the setup flow itself never reads one.
         stage = self._stage_source()
-        self.assertNotIn('"onion_address"', stage)
-        self.assertNotIn("'onion_address'", stage)
-        self.assertLess(stage.index("backup.staged_backup_address("),
-                        stage.index('"vanity-keys"'))
+        self.assertLess(stage.index("staged_onion_key_address("),
+                        stage.index("apply_config_overrides("))
+        self.assertLess(stage.index("seed_onion_key_for_install("),
+                        stage.index("apply_config_overrides("))
+        flow = _read("src/onionpress/setup_logic.py")
+        flow = flow[flow.index("def setup_from_terminal("):]
+        self.assertNotIn("onion_address'", flow)
+        self.assertNotIn('onion_address"', flow)
 
     def test_failed_setup_and_restore_stop_the_launcher(self):
         for launcher in LAUNCHERS:
