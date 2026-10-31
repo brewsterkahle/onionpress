@@ -203,7 +203,8 @@ ROWS = [
     Row("backup-metadata", ["backup-metadata", "--version", "1"],
         "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
         excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
-        with_host_secrets=True, secrets_left_out=[]), rc=0, returns={"a": 1}),
+        with_host_secrets=True, secrets_left_out=[], excludes_onion_key=False),
+        rc=0, returns={"a": 1}),
     Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
         "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 

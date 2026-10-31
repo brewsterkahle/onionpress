@@ -5,6 +5,7 @@ docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 log First run detected
 log First run with ADDRESS_PREFIX=ab -- checking tor image for mkp224o...
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
 py generate-vanity
 log Vanity address generated; will be installed below
 log Using pre-imported key: op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion

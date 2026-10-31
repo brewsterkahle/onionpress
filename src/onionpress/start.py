@@ -380,8 +380,17 @@ class KeySeed:
             # mkp224o is in the tor image (multi-arch, so the .deb stays
             # Architecture: all); generate-vanity checks the prefix and the
             # image, and failing leaves a random address for this install.
+            # The image is pulled first: a fresh install's first start (the
+            # postinst's) has pulled nothing yet, and generate-vanity's
+            # image check read that as "no mkp224o", leaving a random
+            # address whose key never reached the key volume as a PEM, so
+            # no backup carried it (issue #519). A pull that fails only
+            # loses the vanity prefix, as before.
             self.log(f"First run with ADDRESS_PREFIX={prefix} -- checking tor image "
                      "for mkp224o...")
+            if self.manager.ensure_tor_image() is None:
+                self.log("WARNING: the tor image could not be pulled; the address "
+                         "will not carry the prefix")
             if run_cli_step(["generate-vanity"], data_dir=self.paths.data_dir,
                             log_file=self.paths.log_file) == 0:
                 self.log("Vanity address generated; will be installed below")

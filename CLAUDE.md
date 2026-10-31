@@ -141,6 +141,17 @@
   first-run key seed removes its volume and stops (`start.KeySeed`; one seed, `containers.run_key_seed`, for
   start and restore). `tests/test_install_invariants.py`,
   `tests/test_first_run_key_seed.py`.
+- **Linux's first run pulls the tor image before `generate-vanity`** (#519:
+  the postinst's first start had pulled nothing, "no image" read as "no
+  mkp224o", Tor minted a key that never reached the key volume as a PEM,
+  and every backup of that site was unrestorable). **A Linux backup holds
+  the PEM or says it has no key**: a C-Tor-only key is converted
+  (`key_manager.py ctor-to-arti`, the public key from `hostname` when tor
+  wrote none); no key at all is a WARNING and `excludes_onion_key` in
+  metadata (the restore then keeps the install's key, as for the Mac
+  page's backup), never an archive no restore accepts.
+  `TestLinux` in `tests/test_first_run_key_seed.py`,
+  `tests/test_linux_backup_key_pem.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
   multi-arch index digest, mkp224o by commit, wp-cli by sha256);
   `MKP224O_VERSION` matches `build/build-dmg-simple.sh`. Re-pin the
