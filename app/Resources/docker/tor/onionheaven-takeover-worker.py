@@ -3,8 +3,8 @@
 OnionHeaven Takeover Worker — runs inside onionheaven-takeover-N containers.
 
 Watches the registry DB for rows assigned to this container with
-takeover_pending or release_pending flags set. Executes the actual
-tor-manager takeover/release commands locally (this container has its
+release_pending flags set. Executes the actual
+tor-manager release commands locally (this container has its
 own Tor instance with a control port).
 
 Each takeover container has its own Tor guard pool, preventing the
@@ -16,7 +16,6 @@ Startup:
   2. Reconcile stale assignments (release any services from previous run)
 
 Main loop (every 2s):
-  - Process takeover_pending rows assigned to this container
   - Process release_pending rows assigned to this container
   - Heartbeat every 30s
 """
@@ -86,53 +85,6 @@ def startup_reconciliation(conn):
         log(f"takeover-worker: re-added {count} taken-over service(s) after restart")
     log("takeover-worker: reconciliation complete")
 
-
-
-def process_takeovers(conn):
-    """Process pending takeover requests one at a time with a pause between each.
-
-    Each ADD_ONION is instant and independent — the pause gives Tor time to
-    publish each descriptor before starting the next.
-    """
-    count = 0
-    while True:
-        # Fetch one pending row at a time — re-queries each iteration so we
-        # never act on stale data (e.g., a row released by /online mid-batch).
-        row = conn.execute(
-            "SELECT content_address, healthcheck_address FROM registry "
-            "WHERE takeover_container = ? AND takeover_pending IS NOT NULL "
-            "AND status = 'taken-over' LIMIT 1",
-            (CONTAINER_NAME,)
-        ).fetchone()
-
-        if not row:
-            break
-
-        ca = row["content_address"]
-        ha = row["healthcheck_address"]
-        log(f"takeover-worker: executing takeover for {ca}")
-        ok = _takeover_local(ca)
-
-        if ok:
-            # Clear pending flag — takeover succeeded
-            conn.execute(
-                "UPDATE registry SET takeover_pending = NULL "
-                "WHERE content_address = ? AND healthcheck_address = ?",
-                (ca, ha)
-            )
-            db_commit_with_retry(conn)
-            count += 1
-            # Pause between services to let Tor publish each descriptor
-            time.sleep(5)
-        else:
-            # Leave takeover_pending set — will retry next cycle
-            log(f"takeover-worker: will retry {ca} next cycle")
-            break  # stop this batch, retry after LOOP_INTERVAL
-
-    if count > 0:
-        update_active_count(conn)
-        log(f"takeover-worker: processed {count} takeover(s)")
-    return count
 
 
 def process_releases(conn):
@@ -348,7 +300,6 @@ def main():
         try:
             conn = db_connect()
 
-            takeovers = process_takeovers(conn)
             releases = process_releases(conn)
             audits = process_audits(conn)
 

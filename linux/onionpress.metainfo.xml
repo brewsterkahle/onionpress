@@ -66,7 +66,7 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="2.4.91" date="2026-05-23">
+    <release version="2.6.0" date="2026-10-26">
       <description>
         <p>First-class Linux release — feature parity with the macOS app.</p>
         <ul>

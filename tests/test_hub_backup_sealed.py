@@ -68,6 +68,11 @@ def _read(rel):
 
 
 def _load_key_convert():
+    # key-convert.py imports onion_auth as a top-level module: the tor image
+    # copies it next to the script at build time (src/onionpress/onion_auth.py).
+    pkg = os.path.join(PROJECT_ROOT, "src", "onionpress")
+    if pkg not in sys.path:
+        sys.path.append(pkg)
     spec = importlib.util.spec_from_file_location(
         "key_convert_hub_backup", os.path.join(DOCKER_TOR_DIR, "key-convert.py"))
     module = importlib.util.module_from_spec(spec)
@@ -182,7 +187,7 @@ class TestRecoveryKey(unittest.TestCase):
         shared = os.path.join(self.data_dir, "shared")
         self.assertFalse(os.path.commonpath([path, shared]) == shared)
         # Every Colima mount is shared/ or the Documents folder.
-        for rel in ("app/MacOS/launcher.sh", "src/onionpress/colima.py"):
+        for rel in ("app/MacOS/launcher.sh",):
             text = _read(rel)
             mounts = re.findall(r"--mount[\"'],?\s*f?[\"']?([^\s\"']+)", text)
             mounts += re.findall(r"--mount (\S+)", text)

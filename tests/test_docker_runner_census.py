@@ -38,7 +38,6 @@ REVIEWED = {
     "src/onionpress/analytics_sharing.py": 1,
     "src/onionpress/app_commands.py": 1,
     "src/onionpress/backup.py": 13,
-    "src/onionpress/colima.py": 1,
     "src/onionpress/daemon.py": 3,
     "src/onionpress/db_import.py": 2,
     "src/onionpress/derivatives.py": 3,

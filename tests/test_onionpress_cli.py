@@ -1,5 +1,6 @@
 """Tests for src/onionpress/cli.py."""
 
+import contextlib
 import io
 import json
 import os
@@ -198,11 +199,13 @@ class TestCLIArgParsing(unittest.TestCase):
             f"http://{ONION}/x", headers=True, max_time=5)
 
     @mock.patch("onionpress.cli.OnionPressCLI")
-    def test_default_is_start(self, MockCLI):
-        instance = MockCLI.return_value
-        instance.cmd_start.return_value = 0
-        result = main([])
-        instance.cmd_start.assert_called_once()
+    def test_no_command_prints_help(self, MockCLI):
+        # Starting is the launcher's; the CLI has no start of its own (#405).
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            result = main([])
+        self.assertEqual(result, 2)
+        self.assertIn("usage", out.getvalue())
+        MockCLI.assert_not_called()
 
     @mock.patch("onionpress.cli.OnionPressCLI")
     def test_data_dir_override(self, MockCLI):
@@ -483,34 +486,6 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
         self.assertEqual(self.calls[seed_at + 1:], [["volume", "rm", "onionpress-onion-keys"]])
         self.cli.containers.start_core.assert_not_called()
         self.cli.containers.start_tor.assert_not_called()
-
-
-class TestCmdStartWaitsForTheKeyVolume(unittest.TestCase):
-    """`onionpress.cli start` has no key volume migration of its own: while
-    one is due it starts nothing (starting tor would create an empty
-    onionpress-onion-keys that every later start takes for the key)."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.tmpdir, True)
-
-    def test_refuses_before_starting_anything(self):
-        from onionpress.config import PortConfig, Secrets
-        with mock.patch("onionpress.cli.detect_port_offset",
-                        return_value=PortConfig(0, 8080, 9050, 9077)), \
-             mock.patch("onionpress.cli.ensure_secrets",
-                        return_value=Secrets("p1", "p2", "p3")), \
-             mock.patch("onionpress.cli.Docker"):
-            cli = OnionPressCLI(data_dir=self.tmpdir, app_bundle="")
-        cli.log = mock.Mock()
-        cli.containers = mock.Mock()
-        cli.containers.key_volume_not_ready.return_value = "the key is still in onionpress-arti-state"
-        with mock.patch("onionpress.cli.detect_os", return_value=None):
-            rc = cli.cmd_start()
-        self.assertEqual(rc, 1)
-        cli.containers.pull_images.assert_not_called()
-        cli.containers.start_core.assert_not_called()
-        cli.containers.start_tor.assert_not_called()
 
 
 if __name__ == "__main__":

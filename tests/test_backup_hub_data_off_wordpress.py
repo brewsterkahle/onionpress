@@ -459,6 +459,9 @@ if cmd == "settings-page-backup-check":
     sys.exit(C.cmd_settings_page_backup_check(a[1], data_dir))
 if cmd == "prune-image-derivatives":
     sys.exit(cli.cmd_prune_image_derivatives(a[1]))
+if cmd == "backup-metadata":
+    from onionpress.cli import main
+    sys.exit(main(args))
 if cmd == "pack-backup":
     sys.exit(cli.cmd_pack_backup(a[1], a[3], sys.stdin.read()))
 sys.exit(2)' "$@"

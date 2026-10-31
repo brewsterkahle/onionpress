@@ -524,80 +524,12 @@ class OnionPressCLI:
             self.docker, self.paths, self.port_config, log_func=self.log,
         )
 
-    def cmd_start(self) -> int:
-        """Start OnionPress containers."""
-        # Check PID lock
-        if self._check_pid_lock():
-            print("OnionPress is already running.", file=sys.stderr)
-            return 1
-        self._write_pid_lock()
-
-        try:
-            # Detect container runtime (may start Colima on macOS)
-            if detect_os() == OS.MACOS:
-                from .colima import detect_container_runtime
-                runtime = detect_container_runtime(self.paths, log_func=self.log)
-                self.log(f"Container runtime: {runtime}")
-
-            # This start has no key volume migration (the launcher's
-            # migrate_key_volume): refuse while one is due, before anything
-            # starts.
-            why = self.containers.key_volume_not_ready()
-            if why:
-                self.log(f"ERROR: not starting: {why}")
-                return 1
-
-            # Pull images if configured
-            if read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "no") == "yes":
-                self.containers.pull_images()
-
-            # Start core services
-            if not self.containers.start_core():
-                return 1
-
-            # Wait for WordPress
-            if not self.containers.wait_for_wordpress():
-                self.log("WARNING: WordPress not ready, continuing anyway")
-
-            # Start Tor if WordPress is installed
-            if self.containers.wp_is_installed():
-                # A restore may have left image sizes to rebuild (#257);
-                # runs detached, resumable, no-op without the marker.
-                from . import derivatives
-                derivatives.spawn_regeneration(
-                    self.paths.data_dir, self.log, self.paths.log_file)
-                self.containers.start_tor()
-
-                # Wait for Tor
-                if self.containers.wait_for_tor():
-                    addr = self.containers.get_onion_address()
-                    if addr:
-                        self.log(f"Onion address: {addr}")
-                        print(f"  Onion address: {addr}")
-            else:
-                self.log("WordPress not installed — skipping Tor startup")
-                print("  WordPress not installed. Run: onionpress setup")
-
-            wp_url = f"http://localhost:{self.port_config.wp_port}"
-            self.log(f"OnionPress is running! Local: {wp_url}")
-            print(f"  Local access: {wp_url}")
-            return 0
-
-        except Exception as e:
-            self.log(f"ERROR: {e}")
-            return 1
-
     def cmd_stop(self) -> int:
         """Stop OnionPress containers."""
         self.containers.stop()
         self._remove_pid_lock()
         self.log("OnionPress stopped")
         return 0
-
-    def cmd_restart(self) -> int:
-        """Restart OnionPress containers."""
-        self.containers.stop()
-        return self.cmd_start()
 
     def cmd_status(self) -> int:
         """Print container status as JSON."""
@@ -2520,6 +2452,26 @@ def _run_wordpress_status(run):
     return 0
 
 
+def _add_linux_status(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Print the Linux launcher's status.json from the probes it "
+             "gathered (named fields; see linux_status.FIELDS)")
+    p.add_argument("--field", action="append", default=[], metavar="NAME=VALUE",
+                   help="One probe result; repeatable")
+
+
+def _run_linux_status(run):
+    from . import linux_status
+    try:
+        fields = linux_status.parse_fields(run.args.field)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(json.dumps(linux_status.build(fields), indent=2))
+    return 0
+
+
 # ---- the launchers' start steps (Phase 4, #120) ----
 
 def _run_start_step(run):
@@ -2697,6 +2649,45 @@ def _add_pack_backup(sub, name):
         help="Staged backup tree (metadata.json, tor-keys/, database/, ...)")
     p.add_argument(
         "--output", required=True, help="Backup file to write")
+
+
+def _add_backup_metadata(sub, name):
+    p = sub.add_parser(
+        name,
+        help="Print metadata.json for a backup the Linux launcher staged "
+             "(backup helper)")
+    p.add_argument("--onion-address", default="")
+    p.add_argument("--version", required=True)
+    p.add_argument("--has-onionheaven", action="store_true")
+    p.add_argument("--excludes-image-derivatives", action="store_true")
+    p.add_argument("--hub-fields", default="",
+                   help="JSON stage-hub-backup printed (empty for none)")
+    p.add_argument("--hub-unchecked", action="store_true")
+    p.add_argument("--without-host-secrets", action="store_true")
+    p.add_argument("--secrets-left-out", default="",
+                   help="Space-separated names of the secrets left out")
+
+
+def _run_backup_metadata(run):
+    from .backup import linux_backup_metadata
+    a = run.args
+    try:
+        hub_fields = json.loads(a.hub_fields) if a.hub_fields else None
+    except ValueError:
+        print("ERROR: --hub-fields is not JSON", file=sys.stderr)
+        return 1
+    if hub_fields is not None and not isinstance(hub_fields, dict):
+        print("ERROR: --hub-fields is not a JSON object", file=sys.stderr)
+        return 1
+    metadata = linux_backup_metadata(
+        a.onion_address, a.version,
+        has_onionheaven=a.has_onionheaven,
+        excludes_image_derivatives=a.excludes_image_derivatives,
+        hub_fields=hub_fields, hub_unchecked=a.hub_unchecked,
+        with_host_secrets=not a.without_host_secrets,
+        secrets_left_out=a.secrets_left_out.split())
+    print(json.dumps(metadata, indent=2))
+    return 0
 
 
 def _add_extract_backup(sub, name):
@@ -2962,9 +2953,7 @@ def _run_settings_page_command(run):
 # each one through here.
 _COMMANDS = [
     # (name, adds its parser: build(sub, name), its handler: run(_Run) -> exit code)
-    ("start", _plain("Start OnionPress"), lambda run: _cli(run).cmd_start()),
     ("stop", _plain("Stop OnionPress"), lambda run: _cli(run).cmd_stop()),
-    ("restart", _plain("Restart OnionPress"), lambda run: _cli(run).cmd_restart()),
     ("status", _plain("Show container status (JSON)"), lambda run: _cli(run).cmd_status()),
     ("version", _add_version, _run_version),
     ("address", _add_address, _run_address),
@@ -3065,6 +3054,7 @@ _COMMANDS = [
      _plain("Read status JSON on stdin and print the fields the WordPress "
             "container may see"),
      _run_wordpress_status),
+    ("linux-status", _add_linux_status, _run_linux_status),
     ("retire-old-onionheaven-containers",
      _plain("Before the first `compose up`: remove every onionpress-tor, "
             "onionheaven and onionheaven-(poll|takeover)-N that does not "
@@ -3102,6 +3092,7 @@ _COMMANDS = [
      _run_apply_settings_updates),
     ("pack-backup", _add_pack_backup, _run_pack_or_extract_backup),
     ("extract-backup", _add_extract_backup, _run_pack_or_extract_backup),
+    ("backup-metadata", _add_backup_metadata, _run_backup_metadata),
     ("backup-address", _add_backup_address,
      lambda run: OnionPressCLI.cmd_backup_address(run.args.staging)),
     ("config", _add_config, _run_config),
@@ -3146,7 +3137,10 @@ def main(argv: list[str] = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.command:
-        args.command = "start"
+        # Starting is the launcher's (`onionpress start`); this CLI has no
+        # third copy of it (issue #405).
+        parser.print_help()
+        return 2
 
     # A hub's backup recovery key leaves the environment at once, whatever
     # the command: OnionPressCLI's Docker wrapper hands os.environ to every

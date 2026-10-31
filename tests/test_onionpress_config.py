@@ -391,8 +391,7 @@ class TestDefaults(unittest.TestCase):
         every launch. The default is no in each place it is written:
         config.DEFAULTS, the template, both launchers' inline fallback
         configs (what they write without the template), the Mac
-        Settings dialog's form defaults and `onionpress start`'s
-        fallback read. It used to be yes in the first two and no in the
+        Settings dialog's form defaults. It used to be yes in the first two and no in the
         launchers.
         """
         import re
@@ -407,9 +406,6 @@ class TestDefaults(unittest.TestCase):
             with open(os.path.join(root, path)) as f:
                 lines = re.findall(r"^UPDATE_ON_LAUNCH=(.*)$", f.read(), re.M)
             self.assertEqual(lines, ["no"], path)
-        with open(os.path.join(root, "src/onionpress/cli.py")) as f:
-            self.assertIn('read_value(self.paths.config_file, "UPDATE_ON_LAUNCH", "no") == "yes"',
-                          f.read())
 
 
 if __name__ == "__main__":
