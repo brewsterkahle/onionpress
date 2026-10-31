@@ -282,7 +282,6 @@ EOF
         cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
-UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
 # OnionHeaven is on by default: yes (or unset) = on, no = off.
 # Turn off with: onionpress onionheaven disable

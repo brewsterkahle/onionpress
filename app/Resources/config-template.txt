@@ -35,15 +35,6 @@ ADDRESS_PREFIX=op2
 #
 INSTALL_IA_PLUGIN=yes
 
-# Update Docker Images on Launch
-# Default: "no"
-#
-# Every container image is pinned by digest, and a launch pulls only the
-# pins a new release moved. "yes" re-pulls every image at every launch,
-# which contacts the image registry each time for nothing new.
-#
-UPDATE_ON_LAUNCH=no
-
 # Launch on Login
 # Default: "yes" (auto-start on login)
 #

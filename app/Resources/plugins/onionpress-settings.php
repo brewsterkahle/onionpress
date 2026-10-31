@@ -1208,12 +1208,6 @@ function onionpress_settings_fields() {
             'readonly'    => true,
             'placeholder' => 'op2',
         ),
-        'UPDATE_ON_LAUNCH' => array(
-            'label'       => 'Update on Launch',
-            'description' => 'Re-pull every container image when the app launches. Disabled by default: the images are pinned, and a launch fetches only what a new release moved.',
-            'type'        => 'select',
-            'options'     => array( 'yes' => 'Enabled', 'no' => 'Disabled' ),
-        ),
         'START_ON_BOOT' => array(
             'label'       => $is_linux ? 'Start on Boot' : 'Launch on Login',
             'description' => $is_linux

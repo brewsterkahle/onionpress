@@ -1,0 +1,17 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log First run detected
+log Using pre-imported key: op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion
+fn ensure_key_formats $TMP/home/.onionpress/shared/vanity-keys/op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion
+log Key formats synchronized
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
+docker volume create onionpress-onion-keys
+docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/dest --mount type=bind,source=$TMP/home/.onionpress/shared/vanity-keys/op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion,target=/src,readonly --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*
+docker volume rm onionpress-onion-keys
+log ERROR: Failed to copy address key to the onionpress-onion-keys volume; not starting
+rc=1
+markers=
+volumes=

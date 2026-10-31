@@ -136,10 +136,11 @@
   anything starts tor and before first-run detection, fails loudly rather
   than copy into an empty volume, and is resumable via
   `.key-volume-migration-pending`. Every identity wipe drops that marker
-  and keeps the old volume name in its wipe list. `cli start` /
-  `ContainerManager.start_tor` refuse while a migration is due. A failed
-  first-run key seed removes its volume and stops.
-  `tests/test_install_invariants.py`.
+  and keeps the old volume name in its wipe list. `ContainerManager.start_tor` refuses while a
+  migration is due. A failed
+  first-run key seed removes its volume and stops (`start.KeySeed`; one seed, `containers.run_key_seed`, for
+  start and restore). `tests/test_install_invariants.py`,
+  `tests/test_first_run_key_seed.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
   multi-arch index digest, mkp224o by commit, wp-cli by sha256);
   `MKP224O_VERSION` matches `build/build-dmg-simple.sh`. Re-pin the
@@ -158,9 +159,20 @@
   (`--propagate` without a daemon; resolves from the registry, `--local`
   only on request). Pins are multi-arch index digests; **mariadb moves
   forward only**. `tests/test_image_pins.py`.
-- Starts pull `--policy missing` only (once per launch, in the launcher's
-  `update_images()`); unconditional pulls only on opt-in refresh paths.
-  `tests/test_launch_pulls_once.py`, `tests/test_image_pins.py`.
+- Starts pull `--policy missing` only (`start.start_core`). **Images change
+  only with a release**: no refresh toggle, no `update-images`, no image
+  pass in Check for Updates (with every image pinned they re-pulled the
+  same digests); Linux's `onionpress update` pulls its release's pins.
+  `tests/test_no_image_refresh.py`, `tests/test_image_pins.py`.
+- **The start removes what a moved pin superseded**
+  (`start.prune_superseded_images`, last in post-up): per image the stack
+  runs (`compose config --images`), only once its pinned image is here,
+  only untagged images of that repository and of a mirror's former one
+  (`FORMER_REPOSITORIES`, held equal to `build/image-mirrors.txt`;
+  OnionPress pulls by digest; a
+  user's tagged image is never touched), plain `image rm`, never forced
+  (an image a container uses stays); nothing for local images.
+  `TestPruneSupersededImages` in `tests/test_start_post_up.py`.
 - **A release builds no images**: it only points `:latest`/`:<version>` at
   the pinned digests. `tests/test_publish_workflow.py`.
 - `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoint the stack at
@@ -310,6 +322,11 @@
   page's import needs the person at the Mac (native dialog, Cancel default,
   5 min = Cancel); Linux refuses it from the page.
   `tests/test_onion_key_replacement.py`.
+- An import Docker was not up for (`.import-key-pending`) is finished by
+  the next start, first: `ContainerManager.apply_pending_key_import` wipes
+  the old key, migration-era and C Tor volumes, each confirmed absent;
+  anything else keeps the marker and stops the start.
+  `tests/test_pending_key_import.py`.
 - **Code in WordPress never reads or replaces the site's onion key without
   the owner at the host**: the Mac page's backup excludes it
   (`include_onion_key=False`; every `create_backup` call says which); a
@@ -342,6 +359,29 @@
   VM is a crash restart's or a terminal start's live site; its port is read
   (`resolve_port_offset`). `TestResolvePorts` in
   `tests/test_mac_daemon_paths.py`.
+
+## The Start Is onionpress.start (issue #442)
+- **Each launcher's `start_containers` is the Docker wait (Mac: VM
+  recovery, fsck drop-in), then `onionpress start-containers`** (`start.start_containers`): pending key import →
+  key volume migration → first-run key → core services → post-up, each key
+  step stopping the start. Linux runs `--until-core`, its install-state
+  steps (#464) and `start-post-up`. The CLI has no start of its own
+  (#405). `tests/test_start_sequence.py`.
+- **A change to the start is checked against the recorded traces**
+  (`tests/test_start_traces.py`, fixtures under
+  `tests/fixtures/start-traces/`); a fixture changes only on purpose
+  (`OP_UPDATE_START_TRACES=1`), said in the commit.
+- Best-effort steps name their failures in the Mac START SUMMARY through
+  `--errors-file` (`start.StartErrors`, read by `note_start_errors`).
+  `tests/test_start_errors_contract.py`.
+
+## `onionpress setup` Is setup_logic's (issue #442)
+- The launchers' `setup)` case is `run_setup` (passwords moved into the
+  environment, never the CLI's argv) → `setup_logic.setup_from_terminal`,
+  which installs through `install_fresh_wordpress`; its exit says what the
+  launcher does next (10: restart for a backup's key). `--from-backup`
+  takes the address from the key (`stage_setup_from_backup`), never
+  metadata.json; no key, no new one. `tests/test_terminal_setup.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
@@ -558,9 +598,9 @@
   writes `~/.onionpress/.wordpress-installed-by-onionpress`
   (`setup_logic.INSTALLED_BY_ONIONPRESS_MARKER`: user 1's `user_registered`
   as WordPress records it, else `unknown`): `install_fresh_wordpress`
-  (after the password is set) and both launchers' bash `setup`
-  (`note_wordpress_installed_by_onionpress`, test-held identical, right
-  after `wp core multisite-install`). `provision_existing_wordpress`
+  (after the password is set), the one install path (the setup window,
+  the Linux tray, `onionpress setup` since #442.10).
+  `provision_existing_wordpress`
   refuses an installed WordPress whose marker is missing or does not
   match the live install (`FOREIGN_INSTALL_MSG`, False; the Linux tray's
   legacy branch gets the same answer) unless `adopt_existing`:
@@ -854,10 +894,11 @@
   `tests/test_plugin_pins.py`. App and WordPress image ship together.
 
 ## Cache Enabler and the Link Fixer Are Active
-- Both launchers install pinned releases, configure (refusing without
-  their policy mu-plugin) and activate: Cache Enabler `--network`, Link
-  Fixer `--each-site`. `INSTALL_IA_PLUGIN` / `INSTALL_CACHE_ENABLER=no`
-  skip one.
+- `onionpress.bundled_plugins` (both launchers delegate:
+  `install-bundled-plugins`, `setup-bundled-plugins`) installs pinned
+  releases, configures (refusing without their policy mu-plugin) and
+  activates: Cache Enabler `--network`, Link Fixer `--each-site`.
+  `INSTALL_IA_PLUGIN` / `INSTALL_CACHE_ENABLER=no` skip one.
 - Cache policy: store only anonymous pages for Host == the onion address;
   serve-time exclusions are forced on every site; stray hosts' settings
   files are removed. Link Fixer policy: never names an onion/local/private

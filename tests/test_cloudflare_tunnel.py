@@ -77,12 +77,14 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertLess(body.index("config-updates.json 2>>"),
                         body.index("read_cloudflare_token"))
 
-    def test_start_runs_the_tunnel_after_tor(self):
+    def test_start_runs_the_tunnel_after_post_up(self):
+        # start.post_up: Tor, the plugins, provisioning (tests/test_start_post_up.py).
         body = _function(self.text, "start_containers")
-        self.assertLess(body.index("up -d tor onionheaven"),
+        self.assertLess(body.index('start_post_up "$wp_installed"'),
                         body.index('start_cloudflare_tunnel "$wp_installed"'))
-        self.assertIn('docker compose "${CF_COMPOSE[@]}" pull --policy missing',
-                      body)
+        # The start's pull takes the Cloudflare file with a token
+        # (start.start_core, #442.6; tests/test_start_core.py).
+        self.assertIn("start-containers --until-core", body)
 
     def test_stop_and_uninstall_take_cloudflared_down(self):
         """Always with the override file: a token removed since the last
@@ -91,11 +93,6 @@ class TestLauncherWiring(unittest.TestCase):
         self.assertIn('docker compose "${COMPOSE_WITH_CF[@]}" down', body)
         self.assertIn('docker compose "${COMPOSE_WITH_CF[@]}" down -v', self.text)
         self.assertNotRegex(self.text, r"docker compose down\b")
-
-    def test_update_pulls_cloudflared_only_with_a_tunnel(self):
-        body = _function(self.text, "update_images")
-        self.assertLess(body.index('if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]'),
-                        body.index("onionpress-cloudflared:"))
 
 
 class TestOneTimingOnBothPlatforms(unittest.TestCase):
@@ -120,16 +117,30 @@ class TestOneTimingOnBothPlatforms(unittest.TestCase):
     def test_start_runs_it_last_after_provisioning(self):
         """The clearnet's first page comes from a provisioned site with the
         cache policy in place, as on the Mac before; and never before the
-        install check, which the Mac start used to skip."""
+        install check, which the Mac start used to skip. Provisioning, the
+        plugins and the image rebuild are onionpress.start's post_up
+        (#442.7), which neither starts nor names cloudflared."""
+        steps = {"mac": "start-containers \\", "linux": 'start_post_up "$wp_installed"'}
         for name, text in self.texts.items():
             with self.subTest(launcher=name):
                 body = _function(text, "start_containers")
                 call = body.index('start_cloudflare_tunnel "$wp_installed"')
                 self.assertEqual(body.count("start_cloudflare_tunnel"), 1)
-                self.assertLess(body.index("provision-post-install"), call)
-                self.assertLess(body.rindex("setup_bundled_plugins"), call)
-                self.assertLess(body.index("regenerate-derivatives"), call)
+                self.assertLess(body.index(steps[name]), call)
                 self.assertLess(body.index("local wp_installed=false"), call)
+                self.assertEqual(body[call:].split(), ["start_cloudflare_tunnel",
+                                                       '"$wp_installed"', "}"])
+        mac = _function(self.texts["mac"], "start_containers")
+        # 0 from start-containers is an installed WordPress; 3 is not yet.
+        self.assertIn("0) wp_installed=true ;;", mac)
+        with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "start.py"),
+                  encoding="utf-8") as f:
+            text = f.read()
+        # (Its pull step names the image's compose file and its image cleanup
+        # the mirror's repository, ghcr.io/…/onionpress-cloudflared; neither
+        # is the service or the container.)
+        self.assertNotIn('"cloudflared"', text)
+        self.assertNotRegex(text, r'(?<![/\w-])onionpress-cloudflared\b')
 
     def test_every_setup_path_starts_it(self):
         """A new site's tunnel needs no restart after setup."""
@@ -143,9 +154,13 @@ class TestOneTimingOnBothPlatforms(unittest.TestCase):
             with self.subTest(launcher=name, verb="setup"):
                 body = _case(text, "setup")
                 self.assertIn("start_cloudflare_tunnel true", body)
-        linux_setup = _case(self.texts["linux"], "setup")
-        self.assertLess(linux_setup.index("setup_bundled_plugins"),
-                        linux_setup.index("start_cloudflare_tunnel true"))
+        # `setup` installs through setup_logic.install_fresh_wordpress (#442),
+        # which runs provision-post-install (above) and the plugins first.
+        for name, text in self.texts.items():
+            with self.subTest(launcher=name, verb="setup", after="run_setup"):
+                body = _case(text, "setup")
+                self.assertLess(body.index('run_setup "$@"'),
+                                body.index("start_cloudflare_tunnel true"))
 
     def test_mac_provisioning_keeps_its_status(self):
         """setup_logic reads provision-post-install's exit status."""

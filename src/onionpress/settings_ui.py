@@ -59,13 +59,6 @@ SETTINGS_HELP = {
         "Automatically start OnionPress when you log in to macOS.\n"
         "Installs a LaunchAgent that runs OnionPress at login."
     ),
-    "UPDATE_ON_LAUNCH": (
-        "Update Docker Images on Launch\n\n"
-        "Re-pull every WordPress, MariaDB, and Tor container image when the app "
-        "launches. Off by default: the images are pinned, and a launch fetches "
-        "only what a new release moved. On, every launch contacts the image "
-        "registry."
-    ),
     "INSTALL_IA_PLUGIN": (
         "Archive Your Posts to Make Your Site Robust\n\n"
         "Automatically installs and activates the Internet Archive Wayback "
@@ -146,10 +139,6 @@ SETTINGS_CONSEQUENCES = {
         "yes": "OnionPress will start automatically on login.",
         "no": "OnionPress will no longer auto-start.",
     },
-    "UPDATE_ON_LAUNCH": {
-        "yes": "Docker images will update automatically on launch.",
-        "no": "Automatic updates disabled.",
-    },
     "INSTALL_IA_PLUGIN": {
         "yes": "Internet Archive plugin will be installed.",
         "no": "Internet Archive plugin will not be auto-installed.",
@@ -185,7 +174,6 @@ _LABELS = {
     "VM_CPU": "VM CPUs",
     "PREVENT_SLEEP": "Sleep Prevention",
     "LAUNCH_ON_LOGIN": "Launch on Login",
-    "UPDATE_ON_LAUNCH": "Update Docker on Launch",
     "INSTALL_IA_PLUGIN": "Install IA Plugin",
     "REGISTER_WITH_ONIONHEAVEN": "Keep Site Reachable via OnionHeaven",
     "ONIONHEAVEN_ADDRESS": "OnionHeaven Hub",
@@ -200,7 +188,6 @@ SETTINGS_KEYS = [
     ("VM_CPU", "2"),
     ("PREVENT_SLEEP", "normal"),
     ("LAUNCH_ON_LOGIN", "yes"),
-    ("UPDATE_ON_LAUNCH", "no"),  # images are pinned; a launch pulls only what a release moved
     ("INSTALL_IA_PLUGIN", "yes"),
     ("REGISTER_WITH_ONIONHEAVEN", "yes"),  # on by default; unset shows checked
     ("SHARE_ANALYTICS_WITH_ONIONHOME", "no"),
@@ -373,8 +360,6 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         y -= row_h
         add_check_row(y, "Launch on Login", "LAUNCH_ON_LOGIN", form_values["LAUNCH_ON_LOGIN"])
         y -= row_h
-        add_check_row(y, "Update Docker on Launch", "UPDATE_ON_LAUNCH", form_values["UPDATE_ON_LAUNCH"])
-        y -= row_h
         add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
         y -= row_h
         add_check_row(y, "Keep site reachable via OnionHeaven (recommended)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
@@ -408,7 +393,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             if key == "PREVENT_SLEEP":
                 idx = widget.indexOfSelectedItem()
                 new_values[key] = sleep_options_map[idx] if 0 <= idx < len(sleep_options_map) else "normal"
-            elif key in ("LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH",
+            elif key in ("LAUNCH_ON_LOGIN",
                          "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN",
                          "SHARE_ANALYTICS_WITH_ONIONHOME"):
                 new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"

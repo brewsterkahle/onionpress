@@ -34,13 +34,13 @@ class TestAutohealStarted(unittest.TestCase):
         self.assertRegex(block, r"(?m)^    depends_on:\n      - autoheal-proxy$")
 
     def test_each_launcher_starts_autoheal_with_wordpress(self):
+        """The launchers' core `compose up` is ContainerManager.start_core's
+        (CORE_SERVICES, below) since #442.6: none keeps its own."""
         for rel in LAUNCHERS:
             src = _read(rel)
-            # Commands only, not the log messages that quote them.
             ups = re.findall(r"(?m)^\s*(?:if\s+)?(docker compose up -d wordpress db [^\n>|']*)", src)
-            self.assertTrue(ups, f"{rel}: no `docker compose up -d wordpress db ...`")
-            for cmd in ups:
-                self.assertIn("autoheal", cmd.split(), f"{rel}: {cmd!r}")
+            self.assertEqual(ups, [], f"{rel}: a core `compose up` of its own")
+            self.assertIn("start-containers", src)
 
     def test_python_container_manager_starts_autoheal(self):
         from onionpress import containers

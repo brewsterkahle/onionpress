@@ -455,7 +455,6 @@ class TestLaunchersKeepTheAddress(unittest.TestCase):
     """The bash restore_backup (Linux: the Settings page's) and setup
     --from-backup of both launchers, run for real."""
 
-    SETUP = mv.TestLauncherRestorePaths.SETUP
     RESTORE = mv.TestLauncherRestorePaths.RESTORE
 
     def setUp(self):
@@ -469,43 +468,38 @@ class TestLaunchersKeepTheAddress(unittest.TestCase):
     def _fresh_data_dir(self):
         return mv.TestLauncherRestorePaths._fresh_data_dir(self)
 
+    def _setup_from_backup(self, path):
+        return mv.TestLauncherRestorePaths._setup_from_backup(self, path)
+
     def test_setup_from_a_backup_without_a_key(self):
+        # `setup --from-backup` is setup_logic's since #442.9.
         path = _keyless_backup(self.tmp, "k.zip")
-        for launcher, func in self.SETUP.items():
-            with self.subTest(launcher):
-                data = self._fresh_data_dir()
-                _, out, _ = self._run(
-                    launcher, f'{func} --from-backup "$PW" {path!r}\n'
-                              f'echo "key-restored=[$SETUP_BACKUP_KEY_RESTORED]"')
-                self.assertIn("key-restored=[]", out)
-                self.assertIn("this install keeps its own address", out)
-                self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")),
-                                 [OLD_ADDR])
-                self.assertFalse(os.path.exists(os.path.join(data, ".import-key-pending")))
+        data = self._fresh_data_dir()
+        rc, said = self._setup_from_backup(path)
+        self.assertEqual(rc, 0)
+        self.assertIn("this install keeps its own address", said)
+        self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")), [OLD_ADDR])
+        self.assertFalse(os.path.exists(os.path.join(data, ".import-key-pending")))
 
     def test_setup_from_a_backup_with_a_key(self):
         path = _keyed_backup(self.tmp, "keyed.zip")
-        for launcher, func in self.SETUP.items():
-            with self.subTest(launcher):
-                self._fresh_data_dir()
-                _, out, _ = self._run(
-                    launcher, f'{func} --from-backup "$PW" {path!r}\n'
-                              f'echo "key-restored=[$SETUP_BACKUP_KEY_RESTORED]"')
-                self.assertIn("key-restored=[yes]", out)
+        data = self._fresh_data_dir()
+        rc, said = self._setup_from_backup(path)
+        self.assertEqual(rc, 0)
+        self.assertIn("Tor keys restored from backup", said)
+        self.assertNotIn(OLD_ADDR, os.listdir(os.path.join(data, "shared", "vanity-keys")))
 
     def test_the_setup_command_reimports_only_a_restored_key(self):
-        for launcher in self.SETUP:
-            with self.subTest(launcher):
-                text = mv._read(launcher)
-                start = text.index("\n        setup)\n")
-                branch = text[start:text.index("\n            ;;\n", start)]
-                gate = branch.index('if [ "${SETUP_BACKUP_KEY_RESTORED:-}" = "yes" ]; then')
-                end = branch.index("\n                fi\n", gate)
-                for what in ("onionheaven_release restore",
-                             'touch "$DATA_DIR/.import-key-pending"'):
-                    self.assertEqual(branch.count(what), 1, what)
-                    self.assertLess(gate, branch.index(what))
-                    self.assertLess(branch.index(what), end)
+        """setup_logic.setup_from_terminal asks the hubs to release the old
+        key and flags the import only when the backup's key was put in
+        place (tests/test_terminal_setup.py runs both cases)."""
+        text = mv._read("src/onionpress/setup_logic.py")
+        flow = text[text.index("def setup_from_terminal("):]
+        gate = flow.index("        if address:\n            # The backup's key replaces")
+        end = flow.index("        return SETUP_RESTART", gate)
+        for what in ('release_onionheaven("restore"', "IMPORT_KEY_PENDING), \"w\""):
+            self.assertEqual(flow.count(what), 1, what)
+            self.assertTrue(gate < flow.index(what) < end, what)
 
 
 # ---------------------------------------------------------------------------

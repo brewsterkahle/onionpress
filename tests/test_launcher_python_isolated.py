@@ -80,14 +80,12 @@ class TestLinuxCensus(unittest.TestCase):
                 'sys.path[:0] = sys.argv.pop(1).split(":")\n'
                 'runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)\''
                 ' "$ONIONPRESS_PYTHONPATH"')
-        # op_py (self-contained: the harnesses extract it alone) and the
-        # OP_PY array for run_detached carry the same command line.
+        # op_py, self-contained: the harnesses extract it alone. The start's
+        # detached rebuild is the Python's own spawn since #442.7
+        # (derivatives.isolated_cli_argv, tests/test_python_spawns_isolated.py).
         self.assertIn('    PYTHONPATH="$ONIONPRESS_PYTHONPATH" ' + boot + ' "$@"\n}\n', text)
-        self.assertIn("OP_PY=(" + boot + ")\n", text)
+        self.assertNotIn("OP_PY", text)
         self.assertNotIn("python3 -m onionpress", text)
-        # The detached regeneration and `provision` go the same way.
-        self.assertIn('run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" "${OP_PY[@]}" regenerate-derivatives',
-                      text)
         self.assertNotRegex(text, r'PYTHONPATH="\$ONIONPRESS_PYTHONPATH" python3 -c ')
 
 

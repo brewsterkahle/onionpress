@@ -810,21 +810,11 @@ class TestLaunchers(unittest.TestCase):
             return f.read().splitlines(), took
 
     def test_the_launchers_delegate_the_retirement(self):
-        """Phase 4 (#120): one implementation,
-        ContainerManager.retire_old_onionheaven_containers, run through the
-        CLI with its log lines teed into the launcher's log; the pipe's
-        status is tee's, so the step never stops a start."""
-        for launcher, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
-                                 ("linux/onionpress", "op_py")):
+        """One implementation, ContainerManager.retire_old_onionheaven_containers:
+        start_core runs it (#442.6), and no launcher keeps a bash step."""
+        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
             with self.subTest(launcher=launcher):
-                body = _bash_function(hd._read(launcher), "retire_old_onionheaven_containers")
-                code = [l.strip() for l in body.splitlines()
-                        if l.strip() and not l.strip().startswith("#")]
-                self.assertEqual(code, [
-                    "retire_old_onionheaven_containers() {",
-                    f'{runner} --data-dir "$DATA_DIR" retire-old-onionheaven-containers '
-                    '2>&1 | tee -a "$LOG_FILE"',
-                    "}"])
+                self.assertNotIn("\nretire_old_onionheaven_containers() {", hd._read(launcher))
 
     def _retire(self, containers, rm_seconds=0):
         """ContainerManager.retire_old_onionheaven_containers against a
@@ -906,11 +896,14 @@ class TestLaunchers(unittest.TestCase):
         self.assertEqual(removed, [])
 
     def test_every_start_retires_them_before_compose_up(self):
+        """Both launchers' start runs ContainerManager.start_core
+        (`onionpress start-core`, #442.6), which retires them first; the
+        order is held in tests/test_start_core.py."""
         for launcher in LAUNCHERS:
             with self.subTest(launcher=launcher):
                 body = _bash_function(hd._read(launcher), "start_containers")
-                self.assertLess(body.index("\n    retire_old_onionheaven_containers\n"),
-                                body.index("docker compose up"))
+                self.assertIn("start-containers", body)
+                self.assertNotIn("up -d wordpress db", body)
 
     def test_the_farm_stops_all_at_once(self):
         workers = {f"onionheaven-takeover-{i}": NEW_MOUNTS for i in range(4)}

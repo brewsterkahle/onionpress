@@ -714,6 +714,9 @@ ALLOWED_HOSTNAME_READS = {
     ("src/onionpress/key_manager.py", "<module>"),
     ("src/onionpress/key_manager.py", "extract_keys"),
     ("src/onionpress/wp_files.py", "<module>"),
+    # TOR_STATE_SEED_SCRIPT copies the key folder's hostname into C Tor's
+    # state (Linux's first-run seed): a write, not a read of the address.
+    ("src/onionpress/containers.py", "<module>"),
 }
 
 

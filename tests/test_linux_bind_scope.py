@@ -305,41 +305,8 @@ class TestPrintedWordPressUrls(unittest.TestCase):
                          "Build WordPress URLs with $(wp_access_host).")
 
 
-class TestSocksExposureWarning(unittest.TestCase):
-    """Re-running install.sh leaves an older docker-compose.yml in place, and
-    that one still publishes SOCKS on ONIONPRESS_BIND_HOST. The launcher asks
-    Docker for the real mapping after Tor starts and warns."""
-
-    FUNC = r"^warn_if_socks_port_exposed\(\) \{\n.*?^\}$"
-
-    def _warn(self, docker_body):
-        func = _extract(self.FUNC, _read(LINUX_LAUNCHER), "warn_if_socks_port_exposed()")
-        with tempfile.TemporaryDirectory() as bin_dir:
-            _stub(bin_dir, "docker", docker_body)
-            script = ("set -e\n"
-                      'log() { echo "$1"; }\n'
-                      "DOCKER_DIR=/opt/onionpress/docker\n"
-                      + func + "\nwarn_if_socks_port_exposed\n")
-            result = _run_bash(script, bin_dir=bin_dir)
-        self.assertEqual(0, result.returncode, result.stderr)
-        return result.stdout
-
-    def test_loopback_mapping_is_quiet(self):
-        self.assertEqual("", self._warn("echo 127.0.0.1:19050"))
-
-    def test_wider_mapping_warns(self):
-        out = self._warn(r"printf '0.0.0.0:9050\n[::]:9050\n'")
-        self.assertIn("WARNING", out)
-        self.assertIn("0.0.0.0:9050", out)
-
-    def test_no_container_is_quiet(self):
-        self.assertEqual("", self._warn("exit 1"))
-
-    def test_start_containers_runs_it_after_tor_starts(self):
-        text = _read(LINUX_LAUNCHER)
-        self.assertRegex(
-            text,
-            r"docker compose up -d tor onionheaven [^\n]*\n\s*warn_if_socks_port_exposed\n")
+# The SOCKS exposure warning is start.warn_if_socks_port_exposed since
+# #442.7: tests/test_start_post_up.py, TestSocksExposureWarning.
 
 
 class TestDocumentedSetting(unittest.TestCase):
