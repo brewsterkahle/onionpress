@@ -40,7 +40,7 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
 fn configure_site_timezones
-docker stop onionpress-cloudflared
+docker container inspect onionpress-cloudflared
 detached py ensure-archive-s3-keys
 rc=0
 START_ERRORS=[]

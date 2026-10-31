@@ -486,9 +486,10 @@ fi
 # it: everything after the first `=`, since a token can end in `=` padding
 # (#323). It reaches cloudflared only through compose's environment; never
 # log it. docker-compose.cloudflare.yml adds the cloudflared service, so the
-# calls that start or pull it take CF_COMPOSE (that file only with a token),
-# and the ones that stop or remove take COMPOSE_WITH_CF, so a tunnel whose
-# token was just removed still goes down with the rest (#352).
+# calls that pull it take CF_COMPOSE (that file only with a token), the ones
+# that stop or remove take COMPOSE_WITH_CF, so a tunnel whose token was just
+# removed still goes down with the rest (#352), and start_cloudflare_tunnel
+# names both files itself.
 # apply_config_updates reads it again: the Settings page's Restart applies
 # the page's changes in this same process before start_containers.
 COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
@@ -1479,7 +1480,7 @@ start_containers() {
         hold_heartbeat_client_until_installed
     fi
     note_if_lan_looks_local
-    # Tor, the SOCKS port check, the Cloudflare tunnel, the plugins,
+    # Tor, the SOCKS port check, the plugins,
     # provisioning and the image rebuild (start_post_up): best effort.
     start_post_up "$wp_installed"
 
@@ -1487,6 +1488,38 @@ start_containers() {
     # On a hub, the watcher keeps the onionheaven container (heartbeat
     # monitor + takeover Tor) running (signaled by an activation flag file).
     start_onionheaven_activation_watcher
+
+    # Last: the clearnet sees the site once it is provisioned.
+    start_cloudflare_tunnel "$wp_installed"
+}
+
+# Cloudflare Tunnel (#352), one rule on both platforms (this function is
+# test-held identical in the two launchers): cloudflared runs only while the
+# config holds a token AND WordPress is installed. Before that its install
+# page, then an unprovisioned site, would be on the open internet. Called at
+# the end of a start, after provisioning and the bundled plugins (the
+# clearnet's first page comes from a site with its cache policy in place),
+# and at the end of every setup path, so a new site needs no restart.
+# Otherwise the container is removed, not just stopped, so a removed token
+# does not linger in its configuration. --no-deps: wordpress is up already,
+# and a setup path's call must not recreate it. Its ingress must point at
+# http://wordpress:80; the ONIONPRESS-TOR chain refuses the LAN and the host.
+start_cloudflare_tunnel() {
+    local wp_installed=$1
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ] && [ "$wp_installed" = true ]; then
+        log "Cloudflare Tunnel enabled, starting cloudflared..."
+        (cd "$DOCKER_DIR" && docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml \
+            up -d --no-deps cloudflared) >> "$LOG_FILE" 2>&1 \
+            || log "ERROR: Failed to start cloudflared container"
+        return 0
+    fi
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        log "Cloudflare Tunnel: waiting until WordPress is set up (it starts when setup finishes)"
+    fi
+    if docker container inspect onionpress-cloudflared >/dev/null 2>&1; then
+        log "Cloudflare Tunnel off (no token, or WordPress not set up): removing cloudflared"
+        docker rm -f onionpress-cloudflared >> "$LOG_FILE" 2>&1 || true
+    fi
 }
 
 stop_containers() {
@@ -3551,7 +3584,10 @@ main() {
             local setup_rc=0
             run_setup "$@" || setup_rc=$?
             case "$setup_rc" in
-                0) ;;
+                0)
+                    # The site is set up: the tunnel, if there is a token.
+                    start_cloudflare_tunnel true
+                    ;;
                 2) exit 0 ;;
                 10)
                     stop_containers || log "WARNING: setup: the stop failed; starting the containers anyway"
@@ -3611,8 +3647,10 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Every setup ends here (setup_logic.install_fresh_wordpress
             # runs this subcommand): WordPress's port goes where the config
             # says and the heartbeat client is released (issue #464).
+            # The tunnel too, when there is a token (start_cloudflare_tunnel).
             if wp_is_installed; then
                 after_wordpress_installed
+                start_cloudflare_tunnel true
             fi
             ;;
 

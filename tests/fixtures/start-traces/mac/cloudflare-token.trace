@@ -40,7 +40,7 @@ log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
 fn configure_site_timezones
 log Cloudflare Tunnel enabled, starting cloudflared...
-docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d cloudflared
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml up -d --no-deps cloudflared
 detached py ensure-archive-s3-keys
 rc=0
 START_ERRORS=[]

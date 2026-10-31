@@ -42,7 +42,7 @@ log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 log Install-from-backup: complete (staging cleaned up)
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
 fn configure_site_timezones
-docker stop onionpress-cloudflared
+docker container inspect onionpress-cloudflared
 detached py ensure-archive-s3-keys
 rc=0
 START_ERRORS=[]

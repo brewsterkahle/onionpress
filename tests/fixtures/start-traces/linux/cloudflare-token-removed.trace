@@ -18,9 +18,6 @@ bin systemctl --user is-enabled onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
 docker compose up -d tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp
-docker container inspect onionpress-cloudflared
-log Cloudflare Tunnel token removed, removing cloudflared
-docker rm -f onionpress-cloudflared
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
 log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed
 docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
@@ -44,6 +41,9 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
 fn start_onionheaven_activation_watcher
+docker container inspect onionpress-cloudflared
+log Cloudflare Tunnel off (no token, or WordPress not set up): removing cloudflared
+docker rm -f onionpress-cloudflared
 rc=0
 markers=.wordpress-installed
 volumes=onionpress-onion-keys onionpress-tor-state

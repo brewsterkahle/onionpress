@@ -292,7 +292,8 @@ class TestEverySetupPathEndsThere(unittest.TestCase):
     def test_provision_post_install_subcommand(self):
         case = _case(_read(LAUNCHER), "provision-post-install")
         self.assertRegex(case, r"op_py provision-post-install \\\n[^\n]*\n[^\n]*\n(\s*#[^\n]*\n)*"
-                               r"\s*if wp_is_installed; then\n\s*after_wordpress_installed\n\s*fi$")
+                               r"\s*if wp_is_installed; then\n\s*after_wordpress_installed\n"
+                               r"\s*start_cloudflare_tunnel true\n\s*fi$")
 
     def test_the_setup_case(self):
         # `onionpress setup` installs through install_fresh_wordpress

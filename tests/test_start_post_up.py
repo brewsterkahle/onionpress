@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The end of a launcher's start (issue #442.7): start.post_up, which both
 launchers run through `onionpress start-post-up` once the core is up, and
-its pieces: start.cloudflare_tunnel, start.warn_if_socks_port_exposed,
+its pieces: start.warn_if_socks_port_exposed,
 start.configure_site_timezones, start.run_detached_cli.
 
 These were bash until #442.7, tested by running the launchers' functions;
@@ -71,51 +71,8 @@ class Base(unittest.TestCase):
             f.write(text)
 
 
-class TestCloudflareTunnel(Base):
-
-    def run_tunnel(self, mac, installed, exists=False):
-        docker = FakeDocker({"container inspect onionpress-cloudflared": (0 if exists else 1, "")})
-        manager = FakeManager(self.data, docker)
-        start.cloudflare_tunnel(manager, mac=mac, installed=installed, log=self.lines.append)
-        return manager, docker
-
-    def test_a_token_starts_cloudflared_with_its_compose_file(self):
-        self.config(f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n")
-        for mac in (True, False):
-            with self.subTest(mac=mac):
-                manager, _ = self.run_tunnel(mac, installed=True)
-                self.assertEqual(manager.compose, [(["up", "-d", "cloudflared"], "log", True)])
-        self.assertFalse([l for l in self.lines if TOKEN in l],
-                         "the token must never reach the log")
-
-    def test_linux_waits_until_wordpress_is_installed(self):
-        """Before that its install page would be on the open internet."""
-        self.config(f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n")
-        manager, docker = self.run_tunnel(False, installed=False)
-        self.assertEqual((manager.compose, docker.calls), ([], []))
-        self.assertIn("Cloudflare Tunnel: waiting until WordPress is set up (restart "
-                      "OnionPress afterwards)", self.lines)
-
-    def test_a_removed_token_removes_the_container_on_linux(self):
-        manager, docker = self.run_tunnel(False, installed=True, exists=True)
-        self.assertIn("rm -f onionpress-cloudflared", docker.calls)
-        self.assertEqual(manager.compose, [])
-
-    def test_no_token_no_container_does_nothing_on_linux(self):
-        manager, docker = self.run_tunnel(False, installed=True)
-        self.assertEqual(docker.calls, ["container inspect onionpress-cloudflared"])
-        self.assertEqual(manager.compose, [])
-
-    def test_no_token_stops_it_on_the_mac(self):
-        manager, docker = self.run_tunnel(True, installed=True)
-        self.assertEqual(docker.calls, ["stop onionpress-cloudflared"])
-
-    def test_a_failure_is_an_error_line(self):
-        self.config(f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n")
-        docker = FakeDocker()
-        manager = FakeManager(self.data, docker, compose_rc=1)
-        start.cloudflare_tunnel(manager, mac=False, installed=True, log=self.lines.append)
-        self.assertEqual(self.lines[-1], "ERROR: Failed to start cloudflared container")
+# The Cloudflare tunnel is the launchers' start_cloudflare_tunnel, last in
+# a start after this step (tests/test_cloudflare_tunnel.py).
 
 
 class TestSocksExposureWarning(Base):
@@ -212,8 +169,6 @@ class TestPostUp(Base):
                                side_effect=lambda argv, **k: order.append("detached " + argv[0])), \
              mock.patch.object(start, "configure_site_timezones",
                                side_effect=lambda *a: order.append("timezones")), \
-             mock.patch.object(start, "cloudflare_tunnel",
-                               side_effect=lambda *a, **k: order.append("cloudflare")), \
              mock.patch.object(start, "warn_if_socks_port_exposed",
                                side_effect=lambda *a: order.append("socks")), \
              mock.patch.object(bundled_plugins, "install_bundled_plugins",
@@ -233,13 +188,13 @@ class TestPostUp(Base):
             "install-plugins", "deactivate-wp-statistics",
             "provision-post-install --themes-dir /t --plugins-dir /p", "setup-plugins",
             "detached regenerate-derivatives", "detached ensure-archive-s3-keys",
-            "timezones", "cloudflare"])
+            "timezones"])
         self.assertEqual(errors.names, [])
 
     def test_linux_order(self):
         _, order, _ = self.post_up(False)
         self.assertEqual(order, [
-            "socks", "cloudflare", "install-plugins", "deactivate-wp-statistics",
+            "socks", "install-plugins", "deactivate-wp-statistics",
             "provision-post-install --themes-dir /t --plugins-dir /p", "setup-plugins",
             "detached regenerate-derivatives"])
 

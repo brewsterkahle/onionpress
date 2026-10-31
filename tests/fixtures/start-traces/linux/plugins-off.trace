@@ -18,7 +18,6 @@ bin systemctl --user is-enabled onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
 docker compose up -d tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp
-docker container inspect onionpress-cloudflared
 log Internet Archive plugin installation disabled in config
 log Cache Enabler plugin installation disabled in config
 py deactivate-wp-statistics
@@ -26,6 +25,7 @@ py provision-post-install --themes-dir $TMP/opt/themes --plugins-dir $TMP/opt/pl
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
 fn start_onionheaven_activation_watcher
+docker container inspect onionpress-cloudflared
 rc=0
 markers=.wordpress-installed
 volumes=onionpress-onion-keys onionpress-tor-state

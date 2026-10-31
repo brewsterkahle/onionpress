@@ -438,14 +438,13 @@ plugins_dir=…, scripts_dir=…)`, fast path `start-post-up`
 "$wp_installed"`. In the bash order: Mac `.htaccess` repair (written as
 www-data from `multisite.HTACCESS_BODY`, which the heredoc matched byte for
 byte; the heredoc is gone), Tor (`tor` in START_ERRORS on the Mac), Linux's
-SOCKS check and Cloudflare, `install_bundled_plugins`, the Mac's
+SOCKS check, `install_bundled_plugins`, the Mac's
 install-from-backup import, `deactivate-wp-statistics` and
 `provision-post-install` (`run_cli_step`; output to the log on the Mac, to
 the terminal on Linux), `setup_bundled_plugins`, the staging cleanup, the
 detached `regenerate-derivatives` (`run_detached_cli`: a session of its
 own, or `systemd-run --user` from the Settings-page watcher) and the Mac's
-detached `ensure-archive-s3-keys`, `configure_site_timezones`, the Mac's
-Cloudflare. Settled:
+detached `ensure-archive-s3-keys`, `configure_site_timezones`. Settled:
 - Tor now starts only when `key_volume_not_ready()` says nothing
   (as `ContainerManager.start_tor`): one more `volume ls` in every trace.
 - Linux's `deactivate-wp-statistics` / `provision-post-install` failures
@@ -457,9 +456,19 @@ Cloudflare. Settled:
   `note_if_lan_looks_local` stays bash too, now before Tor; the OnionHeaven
   activation watcher (a bash background loop) after the call: the Linux
   traces moved its line to the end.
-- Each platform's Cloudflare behaviour is kept: the Mac starts cloudflared
-  whenever there is a token and only stops it without one; Linux waits for
-  an installed WordPress and removes the container.
+- The Cloudflare tunnel is not in `post_up`. Upstream's #500 (merged
+  2026-10-30) made it one bash `start_cloudflare_tunnel`, test-held
+  identical in both launchers (`tests/test_cloudflare_tunnel.py`): only
+  with a token and an installed WordPress, `up -d --no-deps cloudflared`
+  with both compose files, last in a start and at the end of every setup
+  path (the `provision-post-install` and `setup` cases); otherwise the
+  container is removed. Each launcher's `start_containers` calls it after
+  the Python start with the `wp_installed` its exit status gave (the Mac:
+  0 installed, 3 not), so the Python names neither `cloudflared` nor the
+  container. The branch's interim `start.cloudflare_tunnel` (each
+  platform's old behaviour) went with that merge; the Mac traces lost
+  their `docker stop onionpress-cloudflared` for the shared function's
+  `container inspect`, and the token scenarios were re-recorded.
 Gone: the Mac's `configure_site_timezones` and `.htaccess` heredoc, both
 launchers' `regenerate_derivatives_pending` and `install_bundled_plugins`,
 Linux's `start_cloudflare_tunnel`, `warn_if_socks_port_exposed`,

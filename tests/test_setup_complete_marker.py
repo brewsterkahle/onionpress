@@ -135,6 +135,7 @@ start_containers() { record start_containers; }
 wait_for_services() { record wait_for_services; }
 vanity_key_dir() { echo "$DATA_DIR/shared/vanity-keys/$ONION"; }
 onionheaven_release() { record "onionheaven_release $*"; }
+start_cloudflare_tunnel() { record "start_cloudflare_tunnel $*"; }
 """
 
 
@@ -184,6 +185,8 @@ class TestMacLauncherSetupWritesIt(unittest.TestCase):
         self.assertIn("run_setup --user alice --pass hunter22 --email a@example.org",
                       self._calls())
         self.assertNotIn("start_containers", self._calls())
+        # The tunnel starts with the site, not at the next start.
+        self.assertIn("start_cloudflare_tunnel true", self._calls())
 
     def test_a_completed_setup_from_backup(self):
         r = self._run("--from-backup", "pw", "/x/backup.zip", STUB_SETUP_RC=10)

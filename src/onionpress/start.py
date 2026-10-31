@@ -564,35 +564,6 @@ def _append(log_file: str, result) -> None:
         pass
 
 
-def cloudflare_tunnel(manager, *, mac: bool, installed: bool, log) -> None:
-    """cloudflared runs when the config holds a token (issue #352). Linux
-    starts it only once WordPress is installed (before that its install
-    page would be on the open internet) and removes the container, not
-    just stops it, when the token goes, so a removed token does not linger
-    in its configuration; the Mac stops it. Its ingress points at
-    http://wordpress:80. A failure is logged, never a stopped start."""
-    from .config import read_value
-    token = read_value(manager.paths.config_file, "CLOUDFLARE_TUNNEL_TOKEN", "")
-    docker = manager.docker
-    if not token:
-        if mac:
-            docker.run(["stop", "onionpress-cloudflared"], timeout=60, quiet=True)
-        elif docker.run(["container", "inspect", "onionpress-cloudflared"],
-                        timeout=30, quiet=True).ok:
-            log("Cloudflare Tunnel token removed, removing cloudflared")
-            _append(manager.paths.log_file,
-                    docker.run(["rm", "-f", "onionpress-cloudflared"], timeout=60, quiet=True))
-        return
-    if not mac and not installed:
-        log("Cloudflare Tunnel: waiting until WordPress is set up (restart OnionPress "
-            "afterwards)")
-        return
-    log("Cloudflare Tunnel enabled, starting cloudflared...")
-    if manager.run_compose_to(["up", "-d", "cloudflared"], out="log",
-                              include_cloudflare=True) != 0:
-        log("ERROR: Failed to start cloudflared container")
-
-
 def warn_if_socks_port_exposed(manager, log) -> None:
     """Linux: Tor's SOCKS port must be published on 127.0.0.1 only. A
     compose file from before that (re-running install.sh leaves it) still
@@ -616,10 +587,12 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
     provision-post-install (each a WARNING and a START SUMMARY name when it
     fails), the plugins' setup, the image-derivative rebuild and the Mac's
     archive.org login (both detached: they outlive the launcher), the Mac's
-    site timezones, the Cloudflare tunnel. Best effort: nothing here stops
-    the start. Linux's install-state steps (WordPress's port, the
-    heartbeat hold, issue #464) and its OnionHeaven activation watcher stay
-    in the launcher, around this step."""
+    site timezones. Best effort: nothing here stops the start. Linux's
+    install-state steps (WordPress's port, the heartbeat hold, issue #464),
+    its OnionHeaven activation watcher and both platforms' Cloudflare
+    tunnel (start_cloudflare_tunnel, one bash function held identical in
+    the two launchers, last in a start) stay in the launcher, around this
+    step."""
     from . import bundled_plugins, derivatives, multisite
     from .wp_files import put_file_args
     log = log or manager._log
@@ -662,7 +635,6 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
             log("ERROR: Failed to start tor/onionheaven containers")
     if not mac:
         warn_if_socks_port_exposed(manager, log)
-        cloudflare_tunnel(manager, mac=False, installed=installed, log=log)
 
     host = bundled_plugins.PluginHost(
         docker=docker, config_file=paths.config_file, scripts_dir=scripts_dir,
@@ -731,7 +703,6 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
         run_detached_cli(["ensure-archive-s3-keys"], data_dir=paths.data_dir,
                          log_file=paths.log_file)
         configure_site_timezones(docker, log, paths.log_file)
-        cloudflare_tunnel(manager, mac=True, installed=installed, log=log)
 
 
 # ---- the whole start (#442.8) ----
