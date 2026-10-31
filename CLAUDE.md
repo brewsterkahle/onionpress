@@ -81,6 +81,26 @@
   up rootless Docker, judging success by `docker info`, using
   `user_systemctl` (not `--machine`) and `--no-block`
   (`tests/test_deb_first_install_docker.py`).
+- The rootless setup tool is looked for on PATH, then in docker.io's
+  contrib, then in the package's own copy of Docker's two scripts
+  (`linux/docker-rootless/`, pinned by commit and sha256, Apache-2.0 in
+  `linux/copyright`; Ubuntu's docker.io ships none). A RootlessKit without
+  `--detach-netns` (Ubuntu 24.04's 1.1.1) gets the user's
+  `docker.service.d/onionpress-rootlesskit.conf` drop-in turning it off. A
+  skipped or failed attempt says why at the terminal and in
+  `~/.onionpress/docker-rootless-setup.log`. **No Compose v1 in
+  `Depends`**: every Compose alternative is v2 (`docker-compose-plugin |
+  docker-compose-v2 | docker-compose (>= 2)`), and the launcher's start
+  checks `docker compose version`. **The .deb Recommends nothing**:
+  torbrowser-launcher is a Suggests, since as a Recommends it brought the
+  system `tor` on to 9050 (Ubuntu installs Recommends by default) and the
+  site moved to 18080. `tests/test_docker_rootless_vendored.py`,
+  `tests/test_deb_first_install_docker.py`.
+- **Docker Engine 20.10+ and Compose 2.22+ are the floors**
+  (`docker_versions.py`, `onionpress check-docker`): the Linux launcher's
+  `start` refuses older ones with what was found and how to upgrade, the
+  postinst warns at install time (never fails). Moving a floor means new
+  evidence in that module's docstring. `tests/test_docker_versions.py`.
 - **Every Mac build input is pinned by hash**: downloads through
   `fetch_checked` against the `*_SHA256_*` constants; Python from the
   `build/*-macos.lock` files with `--require-hashes`
@@ -116,10 +136,11 @@
   anything starts tor and before first-run detection, fails loudly rather
   than copy into an empty volume, and is resumable via
   `.key-volume-migration-pending`. Every identity wipe drops that marker
-  and keeps the old volume name in its wipe list. `cli start` /
-  `ContainerManager.start_tor` refuse while a migration is due. A failed
-  first-run key seed removes its volume and stops.
-  `tests/test_install_invariants.py`.
+  and keeps the old volume name in its wipe list. `ContainerManager.start_tor` refuses while a
+  migration is due. A failed
+  first-run key seed removes its volume and stops (`start.KeySeed`; one seed, `containers.run_key_seed`, for
+  start and restore). `tests/test_install_invariants.py`,
+  `tests/test_first_run_key_seed.py`.
 - **All Dockerfile inputs are pinned** as `ARG` defaults (images by
   multi-arch index digest, mkp224o by commit, wp-cli by sha256);
   `MKP224O_VERSION` matches `build/build-dmg-simple.sh`. Re-pin the
@@ -138,9 +159,20 @@
   (`--propagate` without a daemon; resolves from the registry, `--local`
   only on request). Pins are multi-arch index digests; **mariadb moves
   forward only**. `tests/test_image_pins.py`.
-- Starts pull `--policy missing` only (once per launch, in the launcher's
-  `update_images()`); unconditional pulls only on opt-in refresh paths.
-  `tests/test_launch_pulls_once.py`, `tests/test_image_pins.py`.
+- Starts pull `--policy missing` only (`start.start_core`). **Images change
+  only with a release**: no refresh toggle, no `update-images`, no image
+  pass in Check for Updates (with every image pinned they re-pulled the
+  same digests); Linux's `onionpress update` pulls its release's pins.
+  `tests/test_no_image_refresh.py`, `tests/test_image_pins.py`.
+- **The start removes what a moved pin superseded**
+  (`start.prune_superseded_images`, last in post-up): per image the stack
+  runs (`compose config --images`), only once its pinned image is here,
+  only untagged images of that repository and of a mirror's former one
+  (`FORMER_REPOSITORIES`, held equal to `build/image-mirrors.txt`;
+  OnionPress pulls by digest; a
+  user's tagged image is never touched), plain `image rm`, never forced
+  (an image a container uses stays); nothing for local images.
+  `TestPruneSupersededImages` in `tests/test_start_post_up.py`.
 - **A release builds no images**: it only points `:latest`/`:<version>` at
   the pinned digests. `tests/test_publish_workflow.py`.
 - `ONIONPRESS_TOR_IMAGE` / `ONIONPRESS_WORDPRESS_IMAGE` repoint the stack at
@@ -194,9 +226,19 @@
 - `make coverage` enforces floors (`build/coverage-floors.sh`); raise a
   floor when tests catch up, never lower one to pass.
   `tests/test_coverage_gate.py`.
+- **The launchers' `main` is run, not just read**: `tests/launcher_harness.py`
+  runs a copy of each launcher with docker, the CLI and named helpers
+  stubbed. A launcher verb's options, exit status and the CLI argv it
+  produces go in `tests/test_launcher_dispatch_{mac,linux}.py`; the tray
+  runs only verbs the Linux `main` has (same file).
 - **A new `onionpress` subcommand needs a row in `tests/test_cli_dispatch.py`**
   (the census fails otherwise; grouping commands go in `PARENTS`), and its
   handler a case in `tests/test_cli_commands.py` / `test_cli_edges.py`.
+- The e2e suite's platforms are OS families, `macos` and `linux`
+  (`e2e/harness/platforms.py`); the distro is a node fact. Linux-host gates
+  use `HostFacts.debian_based` (`ID` or `ID_LIKE`), never `distro ==
+  "debian"`; a `linux-vm` guest is one of `LINUX_GUESTS` (Debian 13 the
+  default). `tests/test_e2e_harness.py`.
 
 ## Security
 - Database passwords are random per install (`ensure_secrets`,
@@ -254,6 +296,11 @@
   `CODE_DEFAULTS`); a UI only calls the command. `ONIONPRESS_*` and
   `ONIONHEAVEN_ACCEPT_REGISTRATIONS` are hand-edit only. Secrets only as
   `config set KEY -`. `tests/test_cli_config.py`.
+- **One rule reads the config** (#404): the first `KEY=` line wins, the
+  value is all after its first `=`, trimmed: `config.read_value` /
+  `read_config` and the launchers' `config_value` (identical in all three
+  scripts; never `grep | cut`). Writes are a temp file + rename under
+  `.config.lock`, one line per key. `tests/test_config_one_reader.py`.
 - The page's backup leaves out host secrets (`include_host_secrets=False`,
   config cut to `SAFE_CONFIG_KEYS`); no restore takes the token from a
   backup. `tests/test_backup_host_secrets_off_wordpress.py`.
@@ -275,6 +322,11 @@
   page's import needs the person at the Mac (native dialog, Cancel default,
   5 min = Cancel); Linux refuses it from the page.
   `tests/test_onion_key_replacement.py`.
+- An import Docker was not up for (`.import-key-pending`) is finished by
+  the next start, first: `ContainerManager.apply_pending_key_import` wipes
+  the old key, migration-era and C Tor volumes, each confirmed absent;
+  anything else keeps the marker and stops the start.
+  `tests/test_pending_key_import.py`.
 - **Code in WordPress never reads or replaces the site's onion key without
   the owner at the host**: the Mac page's backup excludes it
   (`include_onion_key=False`; every `create_backup` call says which); a
@@ -303,6 +355,33 @@
   (`setup_logic.mark_setup_complete`). `tests/test_setup_complete_marker.py`.
 - Quit takes the site down unless `QUIT_KEEPS_SITE_RUNNING=yes`. Update and
   uninstall stop the daemon first.
+- **The daemon's start never stops Colima**: with no daemon alive a running
+  VM is a crash restart's or a terminal start's live site; its port is read
+  (`resolve_port_offset`). `TestResolvePorts` in
+  `tests/test_mac_daemon_paths.py`.
+
+## The Start Is onionpress.start (issue #442)
+- **Each launcher's `start_containers` is the Docker wait (Mac: VM
+  recovery, fsck drop-in), then `onionpress start-containers`** (`start.start_containers`): pending key import →
+  key volume migration → first-run key → core services → post-up, each key
+  step stopping the start. Linux runs `--until-core`, its install-state
+  steps (#464) and `start-post-up`. The CLI has no start of its own
+  (#405). `tests/test_start_sequence.py`.
+- **A change to the start is checked against the recorded traces**
+  (`tests/test_start_traces.py`, fixtures under
+  `tests/fixtures/start-traces/`); a fixture changes only on purpose
+  (`OP_UPDATE_START_TRACES=1`), said in the commit.
+- Best-effort steps name their failures in the Mac START SUMMARY through
+  `--errors-file` (`start.StartErrors`, read by `note_start_errors`).
+  `tests/test_start_errors_contract.py`.
+
+## `onionpress setup` Is setup_logic's (issue #442)
+- The launchers' `setup)` case is `run_setup` (passwords moved into the
+  environment, never the CLI's argv) → `setup_logic.setup_from_terminal`,
+  which installs through `install_fresh_wordpress`; its exit says what the
+  launcher does next (10: restart for a backup's key). `--from-backup`
+  takes the address from the key (`stage_setup_from_backup`), never
+  metadata.json; no key, no new one. `tests/test_terminal_setup.py`.
 
 ## The App's Functions as Subcommands (issue #382)
 - `version`, `address`, `check-reachability`, `logs`, `open`, `onionname`
@@ -464,8 +543,9 @@
   (0600 from the first byte, a link at the name fails the write), a link
   or a non-folder/non-file at `~/.onionpress`, `secrets` or `config`
   refused with a message (the launcher makes what is missing), existing
-  files never rewritten; the root `chown -R` fixup is gone. Still root's:
-  the bootstrap's `docker-rootless-setup.log` write + chown.
+  files never rewritten; the root `chown -R` fixup is gone. The Docker
+  bootstrap's `docker-rootless-setup.log` is opened by the user's shell
+  (`as_user_logging_to`, #490): root opens nothing under the data dir.
   `tests/test_deb_postinst_data_dir.py`.
 
 ## Container Output Never Reaches Bash Arithmetic (issue #466)
@@ -518,9 +598,9 @@
   writes `~/.onionpress/.wordpress-installed-by-onionpress`
   (`setup_logic.INSTALLED_BY_ONIONPRESS_MARKER`: user 1's `user_registered`
   as WordPress records it, else `unknown`): `install_fresh_wordpress`
-  (after the password is set) and both launchers' bash `setup`
-  (`note_wordpress_installed_by_onionpress`, test-held identical, right
-  after `wp core multisite-install`). `provision_existing_wordpress`
+  (after the password is set), the one install path (the setup window,
+  the Linux tray, `onionpress setup` since #442.10).
+  `provision_existing_wordpress`
   refuses an installed WordPress whose marker is missing or does not
   match the live install (`FOREIGN_INSTALL_MSG`, False; the Linux tray's
   legacy branch gets the same answer) unless `adopt_existing`:
@@ -603,6 +683,11 @@
   `analytics_room`, `MAX_NAMES_PER_ADDRESS`); existing pairs always have
   room. The numbers are still the issue's decision.
   `tests/test_hub_registration_caps.py`.
+- **Dead rows are bounded too** (#492): `unregister_entry` keeps the
+  newest `MAX_DEAD_ROWS_PER_ADDRESS` (4, at least 1, so #467's 404 still
+  knows the address) and `MAX_DEAD_ROWS` (`MAX_REGISTRANTS` × 4) hub-wide
+  (`prune_dead_rows`); `/status`'s `unregistered` counts kept rows.
+  `DeadRowsTest` in the same file.
 
 ## The Hub Bounds What a Free Key Leaves and Tells (issues #467, #468, #469)
 - #467: `/offline`, `/unregister` and the signed status query answer 404
@@ -665,8 +750,14 @@
   `VerificationUnavailable` (503), never says yes. Signing composes
   libsodium primitives only (no arithmetic of our own); the pure-Python
   fallback warns and must never be reached in shipped builds.
-- The only verifier is web-server.py; the three copies of `onion_auth.py`
-  stay identical. `tests/test_onion_auth.py`.
+- The only verifier is web-server.py; `src/onionpress/onion_auth.py` is the
+  source of the image's and stress image's copies (`build/sync-onion-keys.sh`).
+  `tests/test_onion_auth.py`.
+- **A v3 address is derived only by `onion_auth.derive_onion_address`; an
+  onion key's OpenSSH PEM is read, built and checked only by
+  `onion_keys`** (source in `src/onionpress/`, copied into the tor image by
+  the same script). No second parser or derivation in web-server.py,
+  key-convert.py, tor-watchdog.py or key_manager.py. `tests/test_onion_keys.py`.
 - A verified request is accepted once (`note_signed_request`, replay →
   403). `tests/test_hub_signature_verification.py`.
 
@@ -705,6 +796,9 @@
 - The choice is re-read before every request carrying the key; nothing
   goes out unless registering. An explicit `no` sends one signed
   `/unregister`, retried every 15 min. `tests/test_onionheaven_opt_out.py`.
+- The Linux heartbeat holds the same hub lock as the Mac client
+  (`onionheaven-hub.lock` next to the record) around every /online,
+  /unregister and record write (#404). `tests/test_linux_heartbeat_hub_lock.py`.
 - **Every end of a hub's hold on a key takes it back** (uninstall, reset,
   key import, restore of another address, hub change) via
   `release_registration` / `onionheaven-unregister`; what could not be
@@ -800,10 +894,11 @@
   `tests/test_plugin_pins.py`. App and WordPress image ship together.
 
 ## Cache Enabler and the Link Fixer Are Active
-- Both launchers install pinned releases, configure (refusing without
-  their policy mu-plugin) and activate: Cache Enabler `--network`, Link
-  Fixer `--each-site`. `INSTALL_IA_PLUGIN` / `INSTALL_CACHE_ENABLER=no`
-  skip one.
+- `onionpress.bundled_plugins` (both launchers delegate:
+  `install-bundled-plugins`, `setup-bundled-plugins`) installs pinned
+  releases, configures (refusing without their policy mu-plugin) and
+  activates: Cache Enabler `--network`, Link Fixer `--each-site`.
+  `INSTALL_IA_PLUGIN` / `INSTALL_CACHE_ENABLER=no` skip one.
 - Cache policy: store only anonymous pages for Host == the onion address;
   serve-time exclusions are forced on every site; stray hosts' settings
   files are removed. Link Fixer policy: never names an onion/local/private
@@ -877,10 +972,13 @@
   py2app build.
 
 ## Cloudflare Tunnel Runs on Both Platforms (issue #352)
-- `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`. Linux
-  starts cloudflared only once WordPress is installed and removes it when
-  the token goes. Ingress must be `http://wordpress:80`.
-  `tests/test_linux_cloudflare_tunnel.py`.
+- `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`.
+  **Only `start_cloudflare_tunnel` starts cloudflared** (identical in both
+  launchers): with a token and an installed WordPress, last in a start
+  (after provisioning and the bundled plugins) and at the end of every
+  setup path (no restart needed); otherwise the container is removed.
+  Stops always name the override file. Ingress must be
+  `http://wordpress:80`. `tests/test_cloudflare_tunnel.py`.
 
 ## Colima Networking Gotcha
 - **SOCKS (9050) does not work through Colima port forwarding.** For any Tor

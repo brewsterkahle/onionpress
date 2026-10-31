@@ -385,9 +385,9 @@ class TestWiring(unittest.TestCase):
     def test_linux_status_carries_the_overview(self):
         src = _read("linux/onionpress")
         self.assertIn('op_py --data-dir "$DATA_DIR" onionheaven overview --json', src)
-        self.assertIn("_ov = json.loads(sys.argv[26])", src)
-        self.assertIn("'generated_at')}", src)
-        self.assertIn('"${ONIONPRESS_WP_PORT:-8080}" "$oh_overview_json")', src)
+        self.assertIn('--field "onionheaven_overview=$oh_overview_json"', src)
+        from onionpress import linux_status
+        self.assertIn("generated_at", linux_status.OVERVIEW_KEYS)
 
     def test_linux_heartbeat_keeps_the_timestamps(self):
         src = _read("linux/onionpress-heartbeat.py")

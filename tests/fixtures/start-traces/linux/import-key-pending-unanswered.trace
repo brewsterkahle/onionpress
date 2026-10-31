@@ -1,0 +1,9 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+log Pending key import detected -- removing old key and tor-state volumes...
+docker volume rm onionpress-onion-keys
+docker volume ls --format {{.Name}}
+log ERROR: could not remove the old onionpress-onion-keys volume; keeping the pending key import and not starting
+rc=1
+markers=.import-key-pending
+volumes=onionpress-arti-state onionpress-tor-keys onionpress-tor-state

@@ -858,10 +858,10 @@ class TestApplyConfig(_Case):
         self.assertEqual(ha.apply_config(self.host()), [])
 
     def test_truncated_json_is_left_for_the_next_run(self):
-        self.docker.put("config-updates.json", '{"UPDATE_ON_LAUNCH": "n')
+        self.docker.put("config-updates.json", '{"SHARE_ANALYTICS_WITH_ONIONHOME": "n')
         with open(os.devnull, "w") as devnull:
             self.assertIsNone(ha.apply_config(self.host(), out=devnull))
-        self.assertEqual(self.docker.get("config-updates.json"), '{"UPDATE_ON_LAUNCH": "n')
+        self.assertEqual(self.docker.get("config-updates.json"), '{"SHARE_ANALYTICS_WITH_ONIONHOME": "n')
 
     def test_the_mac_tick_applies_pending_settings(self):
         """QA on 2026-10-22: config-updates.json sat unapplied while the
@@ -871,25 +871,25 @@ class TestApplyConfig(_Case):
         from onionpress import config as op_config
         config = os.path.join(self.data_dir, "config")
         with open(config, "w") as f:
-            f.write("UPDATE_ON_LAUNCH=yes\n")
-        self.docker.put("config-updates.json", json.dumps({"UPDATE_ON_LAUNCH": "no"}))
+            f.write("SHARE_ANALYTICS_WITH_ONIONHOME=yes\n")
+        self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "no"}))
         with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
             result = ha.handle(self.host("linux"))
         self.assertEqual(result, {"handled": None})
-        self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "yes")
+        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "yes")
         with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
             result = ha.handle(self.host("macos"))
-        self.assertEqual(result, {"handled": None, "config": ["UPDATE_ON_LAUNCH"]})
-        self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "no")
+        self.assertEqual(result, {"handled": None, "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
+        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "no")
         self.assertIsNone(self.docker.get("config-updates.json"))
-        self.assertEqual(op_config.take_config_changes(self.data_dir), ["UPDATE_ON_LAUNCH"])
+        self.assertEqual(op_config.take_config_changes(self.data_dir), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
         # With a request in the same tick, both happen
-        self.docker.put("config-updates.json", json.dumps({"UPDATE_ON_LAUNCH": "yes"}))
+        self.docker.put("config-updates.json", json.dumps({"SHARE_ANALYTICS_WITH_ONIONHOME": "yes"}))
         self.request("check-reachability")
         with mock.patch.object(op_config, "apply_side_effects", return_value=[]):
             result = ha.handle(self.host("macos"))
-        self.assertEqual(result, {"handled": "check-reachability", "config": ["UPDATE_ON_LAUNCH"]})
-        self.assertEqual(op_config.read_value(config, "UPDATE_ON_LAUNCH"), "yes")
+        self.assertEqual(result, {"handled": "check-reachability", "config": ["SHARE_ANALYTICS_WITH_ONIONHOME"]})
+        self.assertEqual(op_config.read_value(config, "SHARE_ANALYTICS_WITH_ONIONHOME"), "yes")
 
 
 class TestTunnelToken(_Case):
@@ -974,9 +974,9 @@ class TestTunnelToken(_Case):
 
     def test_linux_refuses_and_says_how(self):
         applied = self.cfg.apply_settings_updates(
-            self.config, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN, "UPDATE_ON_LAUNCH": "no"})
+            self.config, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN, "SHARE_ANALYTICS_WITH_ONIONHOME": "no"})
         self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": self.TOKEN})
-        self.assertEqual(list(applied.accepted), ["UPDATE_ON_LAUNCH"])
+        self.assertEqual(list(applied.accepted), ["SHARE_ANALYTICS_WITH_ONIONHOME"])
         self.assertEqual(self.cfg.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
         with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
             launcher = f.read()

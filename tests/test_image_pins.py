@@ -69,16 +69,14 @@ TOR_REPO = "ghcr.io/brewsterkahle/onionpress-tor:latest"
 WP_REPO = "ghcr.io/brewsterkahle/onionpress-wordpress:latest"
 
 # The third-party pins: key in build/image-pins.env -> (repository, the
-# consumers that must carry it). Both launchers' update_images() list
-# cloudflared (only with a tunnel token). Keep in sync with
+# consumers that must carry it): the compose files only (the launchers
+# carry no third-party image since the image refresh went). Keep in sync with
 # THIRD_PARTY_KEYS in build/refresh-image-digests.sh (asserted below).
 THIRD_PARTY = {
-    "MARIADB_IMAGE": ("mariadb", (COMPOSE,) + LAUNCHERS),
-    "AUTOHEAL_IMAGE": ("willfarrell/autoheal", (COMPOSE,) + LAUNCHERS),
-    "CLOUDFLARED_IMAGE": ("cloudflare/cloudflared",
-                          (CLOUDFLARE_COMPOSE,) + LAUNCHERS),
-    "SOCKET_PROXY_IMAGE": ("ghcr.io/wollomatic/socket-proxy",
-                           (COMPOSE,) + LAUNCHERS),
+    "MARIADB_IMAGE": ("ghcr.io/brewsterkahle/onionpress-mariadb", (COMPOSE,)),
+    "AUTOHEAL_IMAGE": ("ghcr.io/brewsterkahle/onionpress-autoheal", (COMPOSE,)),
+    "CLOUDFLARED_IMAGE": ("ghcr.io/brewsterkahle/onionpress-cloudflared", (CLOUDFLARE_COMPOSE,)),
+    "SOCKET_PROXY_IMAGE": ("ghcr.io/brewsterkahle/onionpress-socket-proxy", (COMPOSE,)),
 }
 
 # A reference in "pin context": a quoted string, a ${VAR:-…} default, or end
@@ -158,7 +156,7 @@ class TestPinsFile(unittest.TestCase):
         the arm64 one. build/base-image-digest.sh refuses anything but an
         index."""
         script = _read("build/refresh-image-digests.sh")
-        self.assertIn('pin="$(build/base-image-digest.sh "$ref")"', script)
+        self.assertIn('resolved="$(build/base-image-digest.sh "$ref")"', script)
 
     def test_pins_are_digests_not_bare_tags(self):
         """A bare `:latest` here would silently un-pin the whole stack: the
@@ -236,18 +234,15 @@ class TestConsumersMatchPins(unittest.TestCase):
     def test_both_launchers_pin_the_same_images(self):
         """The macOS launcher pulled bare `:latest` while the Linux launcher
         pinned by digest, so the two platforms warmed different layers from
-        the same release. Both now pin; keep it that way.
+        the same release. Both pin the one image they name themselves, the
+        key helpers' tor image (KEY_HELPER_IMAGE); keep it that way.
         """
         for path in ("app/MacOS/onionpress", "linux/onionpress"):
             text = _read(path)
             with self.subTest(path=path):
                 self.assertIn(
-                    self.tor_digest, text,
-                    f"{path} must pull the pinned tor image, not a bare tag.",
-                )
-                self.assertIn(
-                    self.wp_digest, text,
-                    f"{path} must pull the pinned wordpress image, not a bare tag.",
+                    f'KEY_HELPER_IMAGE="${{ONIONPRESS_TOR_IMAGE:-{self.tor}}}"', text,
+                    f"{path} must run the pinned tor image, not a bare tag.",
                 )
 
     def test_third_party_images_are_pinned_everywhere_they_appear(self):
@@ -274,19 +269,6 @@ class TestConsumersMatchPins(unittest.TestCase):
                         "lets the registry swap the image under every user. "
                         "Fix with: build/refresh-image-digests.sh --propagate",
                     )
-
-    def test_mac_update_pulls_cloudflared_only_with_a_tunnel(self):
-        """cloudflared is ~60 MB and compose never starts it without a
-        token, so the opt-in updater must not fetch it for everyone."""
-        text = _read("app/MacOS/onionpress")
-        body = text[text.index("\nupdate_images() {"):]
-        body = body[:body.index("\n}\n")]
-        pin = _load_pins()["CLOUDFLARED_IMAGE"]
-        self.assertIn(pin, body)
-        self.assertLess(
-            body.index('if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]'), body.index(pin),
-            "the cloudflared pull must be inside the tunnel-token check",
-        )
 
 
 class TestRefreshScriptOwnsEveryConsumer(unittest.TestCase):
@@ -467,25 +449,22 @@ class TestLaunchPullsNothingItHas(unittest.TestCase):
     `docker compose pull` that also refreshed the then-floating mariadb and
     autoheal tags. With every image pinned, the only pull a launch needs is
     of a pin a new release moved, which `--policy missing` fetches and a
-    plain pull merely re-confirms over the network. The opt-in refresh
-    paths (update_images(), `onionpress update`, the menubar's Check for
-    Updates) keep their unconditional pulls.
+    plain pull merely re-confirms over the network. Nothing re-pulls
+    images on request any more (UPDATE_ON_LAUNCH, `update-images` and the
+    menubar's image pass are gone, tests/test_launch_pulls_once.py); only
+    Linux's `onionpress update`, installing a release, pulls its pins.
     """
 
     def test_start_time_compose_pull_is_missing_only(self):
-        for path in LAUNCHERS:
-            text = _read(path)
-            with self.subTest(path=path):
-                # Linux adds the Cloudflare override file with a tunnel token.
-                self.assertRegex(
-                    text,
-                    r'docker compose (?:"\$\{CF_COMPOSE\[@\]\}" )?'
-                    r'pull --policy missing')
+        """Both launchers' start pulls through start.start_core (#442.6);
+        Linux adds the Cloudflare override file with a tunnel token."""
+        text = _read("src/onionpress/start.py")
+        self.assertIn('run_compose_to(["pull", "--policy", "missing"]', text)
+        self.assertEqual(text.count('"pull"'), 1, "the start's one pull")
 
     def test_mac_launcher_has_no_unconditional_compose_pull(self):
-        """The Mac launcher's only `docker compose pull` is the start-time
-        one; its refresh path is update_images()'s per-image `docker pull`.
-        """
+        """The Mac launcher has no `docker compose pull` of its own: the
+        start's is onionpress.start's, missing only."""
         text = _read("app/MacOS/onionpress")
         unconditional = [
             line.strip() for line in text.splitlines()
@@ -536,8 +515,8 @@ class TestLocalImageOverride(unittest.TestCase):
         for path in ("app/MacOS/onionpress", "linux/onionpress"):
             text = _read(path)
             with self.subTest(path=path):
+                # The key helpers' image; the WordPress image is compose's.
                 self.assertIn("${ONIONPRESS_TOR_IMAGE:-", text)
-                self.assertIn("${ONIONPRESS_WORDPRESS_IMAGE:-", text)
 
     def test_python_modules_honour_overrides(self):
         """Checked as source text rather than by importing and mutating

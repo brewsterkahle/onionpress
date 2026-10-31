@@ -68,6 +68,11 @@ def _read(rel):
 
 
 def _load_key_convert():
+    # key-convert.py imports its siblings in the tor image (onion_auth,
+    # onion_keys), as the image runs it from that folder; run alone, as CI's
+    # PyNaCl 1.5 step does, nothing else has put the folder on sys.path.
+    if DOCKER_TOR_DIR not in sys.path:
+        sys.path.insert(0, DOCKER_TOR_DIR)
     spec = importlib.util.spec_from_file_location(
         "key_convert_hub_backup", os.path.join(DOCKER_TOR_DIR, "key-convert.py"))
     module = importlib.util.module_from_spec(spec)
@@ -182,7 +187,7 @@ class TestRecoveryKey(unittest.TestCase):
         shared = os.path.join(self.data_dir, "shared")
         self.assertFalse(os.path.commonpath([path, shared]) == shared)
         # Every Colima mount is shared/ or the Documents folder.
-        for rel in ("app/MacOS/launcher.sh", "src/onionpress/colima.py"):
+        for rel in ("app/MacOS/launcher.sh",):
             text = _read(rel)
             mounts = re.findall(r"--mount[\"'],?\s*f?[\"']?([^\s\"']+)", text)
             mounts += re.findall(r"--mount (\S+)", text)
@@ -889,7 +894,7 @@ class TestCli(unittest.TestCase):
                                        r'hub-recovery-key "\$\{@:2\}"')
                 self.assertRegex(text, r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
                                        r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" \S+ '
-                                       r'(-m onionpress\.cli )?restore "\$restore_path"')
+                                       r'(-m onionpress\.cli )?--data-dir "\$DATA_DIR" restore "\$restore_path"')
                 # restore --check, restore, hub-recovery-key
                 uses = [ln.strip() for ln in text.splitlines()
                         if "$_HUB_RECOVERY_KEY" in ln and not ln.lstrip().startswith("#")]

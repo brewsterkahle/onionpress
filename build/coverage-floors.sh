@@ -5,17 +5,20 @@
 # (`make coverage`, CI). Each floor sits a point or two under what the
 # run that set it measured (2026-10-23; the CLI's raised 2026-10-25 with
 # tests/test_cli_commands.py and tests/test_cli_edges.py; the modules split
-# out by #474-#484 added 2026-10-29); raise one when
+# out by #474-#484 added 2026-10-29; the daemon, launcher_ops, scrub,
+# key_manager, updater and colima added and the total raised the same day
+# with their tests; start, bundled_plugins and containers added and the
+# total and the CLI's raised 2026-10-30 with #442's); raise one when
 # the tests catch up, never lower one to pass. Runs under macOS /bin/bash 3.2 (no associative arrays).
 set -e
 set -o pipefail  # coverage's exit code, not tail's
 cd "$(dirname "$0")/.."
 
-TOTAL_FLOOR=63
+TOTAL_FLOOR=71
 
 # "<file> <floor>" per line.
 FILE_FLOORS="
-src/onionpress/cli.py 97
+src/onionpress/cli.py 98
 src/onionpress/app_commands.py 94
 src/onionpress/handle_action.py 95
 src/onionpress/confirm.py 98
@@ -28,6 +31,14 @@ src/onionpress/secrets_file.py 96
 src/onionpress/onion_hostname.py 98
 src/onionpress/reachability.py 87
 src/onionpress/image_overrides.py 95
+src/onionpress/daemon.py 81
+src/onionpress/launcher_ops.py 84
+src/onionpress/scrub.py 90
+src/onionpress/key_manager.py 87
+src/onionpress/updater.py 81
+src/onionpress/start.py 86
+src/onionpress/bundled_plugins.py 95
+src/onionpress/containers.py 93
 "
 
 # `python` is the interpreter that ran the tests (uv run / CI's venv).

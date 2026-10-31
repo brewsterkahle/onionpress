@@ -1594,7 +1594,8 @@ class TestBashBackupHelpers(unittest.TestCase):
             with self.subTest(rel):
                 self.assertNotRegex(code, r"\bzip\b[^\n]*\s-P\s")
                 self.assertNotRegex(code, r"\bunzip\b[^\n]*\s-P\s")
-                self.assertIn("extract-backup", code)
+                if rel.startswith("linux"):  # the Mac's restore and setup are the CLI's
+                    self.assertIn("extract-backup", code)
 
     def test_launchers_pass_the_password_on_stdin(self):
         for rel in self.LAUNCHERS:
@@ -1666,7 +1667,7 @@ class TestPyNaClIsWiredEverywhere(unittest.TestCase):
 
     def test_linux_package_and_installer_bring_it(self):
         control = self._read("build/build-linux.sh")
-        depends = control[control.index("Depends:"):control.index("Recommends:")]
+        depends = control[control.index("Depends:"):control.index("Suggests:")]
         self.assertIn("python3-nacl (>= 1.5.0)", depends)
         self.assertRegex(self._read("linux/install.sh"),
                          r"apt-get install -y -qq python3-nacl\b")

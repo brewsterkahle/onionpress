@@ -1,0 +1,15 @@
+# The third-party images OnionPress mirrors into its own ghcr.io namespace
+# (issue #501), one per line: <pin key in build/image-pins.env>
+# <upstream repository> <mirror package name under ghcr.io/<owner>/>.
+#
+# A pin names the mirror (ghcr.io/brewsterkahle/<package>:<tag>@sha256:…) with
+# the SAME multi-arch index digest the upstream serves: copying an index
+# registry-to-registry keeps its bytes, so the digest is unchanged and the
+# upstream is only needed to make the copy. .github/workflows/mirror-images.yml
+# makes it whenever build/image-pins.env changes;
+# build/refresh-image-digests.sh resolves the digest from the upstream and
+# writes the mirror's name. Read by both, and by tests/test_image_mirrors.py.
+MARIADB_IMAGE mariadb onionpress-mariadb
+AUTOHEAL_IMAGE willfarrell/autoheal onionpress-autoheal
+CLOUDFLARED_IMAGE cloudflare/cloudflared onionpress-cloudflared
+SOCKET_PROXY_IMAGE ghcr.io/wollomatic/socket-proxy onionpress-socket-proxy

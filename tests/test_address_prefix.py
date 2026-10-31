@@ -40,6 +40,9 @@ from onionpress.config import (  # noqa: E402
     validate_address_prefix,
 )
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -195,6 +198,7 @@ class TestEveryEntryPointUsesTheValidator(unittest.TestCase):
         "src/onionpress/launcher_ops.py",
         "src/onionpress/settings_ui.py",
         "src/onionpress/setup_window.py",
+        "src/onionpress/start.py",
     )
 
     def test_each_caller_calls_the_canonical_validator(self):
@@ -255,84 +259,55 @@ class TestEveryEntryPointUsesTheValidator(unittest.TestCase):
         )
 
 
-class TestLaunchersMatchThePythonRules(unittest.TestCase):
-    """The macOS launcher validates in bash, before any Python runs, so it
-    cannot call the validator. It must still agree with it.
-    """
+class TestFirstRunUsesTheValidator(unittest.TestCase):
+    """The Mac's first-run seed checked the prefix with a bash copy of the
+    rules; since #442.5 it is start.KeySeed, which calls the validator, and
+    no launcher keeps a copy."""
 
-    LAUNCHER = "app/MacOS/onionpress"
+    def _first_run(self, prefix):
+        from onionpress import start
+        lines, used = [], []
+        manager = mock.Mock(**{"volume_state.return_value": 1})
+        manager.paths.config_file = "/x/config"
+        manager.paths.data_dir = "/x"
+        with mock.patch.object(start, "configured_prefix", return_value=prefix), \
+             mock.patch.object(start, "vanity_key_dir", return_value=None), \
+             mock.patch.object(start, "generate_vanity_on_host",
+                               side_effect=lambda p, *a, **k: used.append(p)):
+            start.KeySeed(manager, mac=True, log=lines.append).run()
+        return lines, used[0]
 
-    def test_max_length_matches(self):
-        body = _read(self.LAUNCHER)
-        self.assertIn(
-            f"-gt {ADDRESS_PREFIX_MAX} ", body,
-            f"{self.LAUNCHER} must reject prefixes longer than "
-            f"{ADDRESS_PREFIX_MAX}, matching config.ADDRESS_PREFIX_MAX.",
-        )
-
-    def test_min_length_matches(self):
-        body = _read(self.LAUNCHER)
-        self.assertIn(
-            f"-lt {ADDRESS_PREFIX_MIN} ", body,
-            f"{self.LAUNCHER} must reject prefixes shorter than "
-            f"{ADDRESS_PREFIX_MIN}, matching config.ADDRESS_PREFIX_MIN.",
-        )
-
-    def test_character_class_matches(self):
-        body = _read(self.LAUNCHER)
-        self.assertIn(
-            "'^[a-z2-7]+$'", body,
-            f"{self.LAUNCHER}'s character class must match "
-            "config.ADDRESS_PREFIX_CHARS.",
-        )
+    def test_no_launcher_keeps_a_copy(self):
+        for rel in ("app/MacOS/onionpress", "linux/onionpress"):
+            with self.subTest(rel):
+                self.assertNotIn("_prefix_problem", _read(rel))
+                self.assertNotIn("[a-z2-7]", _read(rel))
 
     def test_validates_before_announcing(self):
         """The old order logged "Using address prefix: 'elphin'" and only then
         the rejection, so the log's first claim about the prefix was the one
-        that did not happen.
-        """
-        body = _read(self.LAUNCHER)
-        announce = body.index('log "Using address prefix:')
-        validate = body.index("_prefix_problem=")
-        self.assertLess(
-            validate, announce,
-            "The macOS launcher must validate the prefix before logging which "
-            "one it is using.",
-        )
+        that did not happen."""
+        lines, used = self._first_run("elphin")
+        self.assertEqual(used, "op2")
+        announce = lines.index("Using address prefix: 'op2'")
+        self.assertTrue(lines[announce - 3].startswith("ERROR: ADDRESS_PREFIX 'elphin' is invalid"))
 
     def test_tells_the_user_how_to_fix_it(self):
-        body = _read(self.LAUNCHER)
-        self.assertIn(
-            "_prefix_suggestion", body,
-            "On a bad prefix the launcher should offer the closest valid one "
-            "— it is the only feedback a user gets for a hand-edited config.",
-        )
-
-
-class TestLauncherSuggestionMatchesPython(unittest.TestCase):
-    """The launcher derives its suggestion in shell. It must produce the same
-    string the Python validator would, or the two would advise differently.
-    """
-
-    def _shell_suggestion(self, prefix):
-        import subprocess
-        out = subprocess.run(
-            ["sh", "-c",
-             "echo \"$1\" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z2-7' | cut -c1-5",
-             "sh", prefix],
-            capture_output=True, text=True, timeout=30,
-        )
-        return out.stdout.strip()
-
-    def test_agrees_with_the_validator(self):
-        for prefix in ("elphin", "Op1", "test0189", "op0", "ABCDEFGH"):
+        """The validator's suggestion: the only feedback a user gets for a
+        hand-edited config."""
+        for prefix in ("elphin", "Op1", "test0189", "ABCDEFGH"):
             with self.subTest(prefix=prefix):
-                _, _, python_suggestion = validate_address_prefix(prefix)
-                self.assertEqual(
-                    python_suggestion, self._shell_suggestion(prefix),
-                    "The launcher's shell suggestion and "
-                    "config.validate_address_prefix() must agree.",
-                )
+                lines, _ = self._first_run(prefix)
+                _, _, suggestion = validate_address_prefix(prefix)
+                self.assertIn(f"       ADDRESS_PREFIX={suggestion} in /x/config before "
+                              "first launch.", lines)
+        lines, _ = self._first_run("08")
+        self.assertIn("       Falling back to 'op2'. Edit ADDRESS_PREFIX in /x/config.", lines)
+
+    def test_a_good_prefix_is_used(self):
+        lines, used = self._first_run("abc")
+        self.assertEqual(used, "abc")
+        self.assertFalse([l for l in lines if l.startswith("ERROR")])
 
 
 class TestKeyImportKeepsPrefixLength(unittest.TestCase):
@@ -376,6 +351,7 @@ class TestKeyImportKeepsPrefixLength(unittest.TestCase):
             script = (
                 "log() { :; }\n"
                 f"DATA_DIR={tmp!r}\n"
+                + config_value_function() +
                 f"address={self.ADDRESS!r}\n"
                 "import_block() {\n" + block + "\n}\nimport_block\n"
             )

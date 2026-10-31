@@ -1,0 +1,21 @@
+log Starting OnionPress containers...
+fn wait_for_docker_or_recover_vm 180 start
+fn ensure_vm_fsck_repair
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log Pulling pre-built images (missing only)...
+docker compose pull --policy missing
+log ✓ WordPress network egress block in place: ok (test)
+docker ps -a --format {{.Names}}
+docker network inspect --format {{json .Options}} onionpress-network
+docker compose up -d wordpress db onionheaven autoheal
+log WARNING: 'docker compose up -d wordpress db onionheaven autoheal' failed (attempt 1/3). Check $TMP/home/.onionpress/onionpress.log for details.
+docker compose up -d wordpress db onionheaven autoheal
+log WARNING: 'docker compose up -d wordpress db onionheaven autoheal' failed (attempt 2/3). Check $TMP/home/.onionpress/onionpress.log for details.
+docker compose up -d wordpress db onionheaven autoheal
+log WARNING: 'docker compose up -d wordpress db onionheaven autoheal' failed (attempt 3/3). Check $TMP/home/.onionpress/onionpress.log for details.
+log ERROR: 'docker compose up -d wordpress db onionheaven autoheal' failed after 3 attempts.
+rc=1
+START_ERRORS=[]
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state

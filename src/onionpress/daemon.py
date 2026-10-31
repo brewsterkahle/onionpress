@@ -621,7 +621,7 @@ class Daemon(PortAttributes):
         os.environ["LIMA_HOME"] = os.path.join(self.colima_home, "_lima")
         # Colima honours COLIMA_HOME only when the directory exists (else it
         # uses ~/.colima, socket forward included): make it before the
-        # first colima call (stop_stale_colima), on a fresh install too (#370).
+        # first colima call, on a fresh install too (#370).
         os.makedirs(os.environ["LIMA_HOME"], exist_ok=True)
         os.environ["LIMA_INSTANCE"] = "onionpress"
         os.environ["DOCKER_HOST"] = f"unix://{self.docker_socket}"
@@ -645,18 +645,15 @@ class Daemon(PortAttributes):
             pass
 
     def _resolve_ports_at_start(self):
-        """Multi-user port offset (CLAUDE.md): stop an orphaned Colima of a
-        previous crash, wait for our previous instance's port to free
-        (.previous-port-offset), then read the running stack's published
-        port or allocate by bind-probing. The result goes into the
+        """Multi-user port offset (CLAUDE.md): wait for our previous
+        instance's port to free (.previous-port-offset), then read the
+        running stack's published port or allocate by bind-probing. A
+        Colima found running is left alone: with no daemon alive it is a
+        launchd restart after a crash, a `daemon stop` + `start` or a
+        terminal `onionpress start`, each a live site, and its port is read
+        rather than offset around. The result goes into the
         environment (the launcher honours ONIONPRESS_PORT_OFFSET) and the
         state file (the menubar reads its ports from there)."""
-        colima_bin = os.path.join(self.bin_dir, "colima") if self.bin_dir else "colima"
-        try:
-            op_config.stop_stale_colima(colima_bin, self.colima_home,
-                                        pid_path(self.app_support), log_func=self.log)
-        except Exception as e:
-            self.log(f"daemon: stale Colima check failed: {e}")
         prev_offset_sentinel = self._marker(".previous-port-offset")
         try:
             if os.path.exists(prev_offset_sentinel):

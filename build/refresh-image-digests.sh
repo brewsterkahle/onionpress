@@ -10,14 +10,20 @@
 #                                             (+ its ONIONHEAVEN_IMAGE env),
 #                                             db, autoheal, autoheal-proxy
 #   app/Resources/docker/docker-compose.cloudflare.yml   cloudflared
-#   app/MacOS/onionpress                      update_images(), takeover worker
-#   linux/onionpress                          update_images()
+#   app/MacOS/onionpress                      KEY_HELPER_IMAGE (one-shot key helpers)
+#   linux/onionpress                          KEY_HELPER_IMAGE (one-shot key helpers)
 #   src/onionpress/containers.py              ONIONHEAVEN_IMAGE
 #   src/onionpress/launcher_ops.py            DEFAULT_TOR_IMAGE
 #
 # Six pins: the two images this project builds (tor, wordpress) and four
 # third-party images the stack runs as published (mariadb, autoheal,
-# cloudflared, the autoheal socket proxy). Through v2.5.3 the third-party
+# cloudflared, the autoheal socket proxy). The four are pinned to OUR copies
+# (issue #501): build/image-mirrors.txt names each one's upstream and its
+# package under ghcr.io/brewsterkahle/. A pin carries the upstream's own
+# multi-arch index digest (copying an index keeps it), so this script
+# resolves the digest from the UPSTREAM and writes the mirror's name, and
+# .github/workflows/mirror-images.yml makes the copy when the pins change.
+# Arguments below name UPSTREAM tags. Through v2.5.3 the third-party
 # ones floated on `:latest` and every macOS launch ran an unconditional
 # `docker compose pull`, so a registry could swap them under every user and
 # each launch did clearnet DNS and registry traffic for nothing (issue #36).
@@ -79,6 +85,11 @@ WP_IMG="ghcr.io/brewsterkahle/onionpress-wordpress:latest"
 
 # The third-party pins, in the order they appear in build/image-pins.env.
 THIRD_PARTY_KEYS=(MARIADB_IMAGE AUTOHEAL_IMAGE CLOUDFLARED_IMAGE SOCKET_PROXY_IMAGE)
+
+# Where each third-party image is mirrored: <KEY>_UPSTREAM is the repository
+# it comes from, <KEY>_MIRROR the repository the pin names.
+MIRRORS_FILE="build/image-mirrors.txt"
+MIRROR_NAMESPACE="ghcr.io/brewsterkahle"
 
 MODE="refresh"
 SOURCE="registry"
@@ -196,6 +207,15 @@ for key in "${THIRD_PARTY_KEYS[@]}"; do
 done
 unset _val
 
+[ -f "$MIRRORS_FILE" ] || { echo "ERROR: $MIRRORS_FILE not found" >&2; exit 1; }
+for key in "${THIRD_PARTY_KEYS[@]}"; do
+    _row="$(grep -E "^$key " "$MIRRORS_FILE" | head -1 || :)"
+    [ -n "$_row" ] || { echo "ERROR: $MIRRORS_FILE has no row for $key" >&2; exit 1; }
+    set -- $_row
+    eval "${key}_UPSTREAM=\$2; ${key}_MIRROR=\$MIRROR_NAMESPACE/\$3"
+done
+unset _row
+
 if [ "$MODE" = "refresh" ]; then
     TOR_DIGEST="${TOR_DIGEST_ARG:-$(digest_of "$TOR_IMG")}"
     WP_DIGEST="${WP_DIGEST_ARG:-$(digest_of "$WP_IMG")}"
@@ -215,11 +235,16 @@ if [ "$MODE" = "refresh" ]; then
     # base-image-digest.sh exits 1 for a single-platform manifest, which is
     # exactly the mistake a hand-pinned digest invites.
     resolve_third_party() {
-        local key="$1" arg="$2" old_var ref pin
-        old_var="${key}_OLD"
-        ref="${arg:-${!old_var%%@*}}"
-        pin="$(build/base-image-digest.sh "$ref")"
-        check_digest "$pin"
+        local key="$1" arg="$2" old_var up_var mirror_var old tag ref resolved pin
+        old_var="${key}_OLD"; up_var="${key}_UPSTREAM"; mirror_var="${key}_MIRROR"
+        old="${!old_var%%@*}"
+        # The tag already pinned, on the upstream, unless an argument moves it.
+        ref="${arg:-${!up_var}:${old##*:}}"
+        resolved="$(build/base-image-digest.sh "$ref")"
+        check_digest "$resolved"
+        # The tag is what follows the last colon of the reference proper.
+        tag="${resolved%%@*}"; tag="${tag##*:}"
+        pin="${!mirror_var}:${tag}@${resolved##*@}"
         eval "${key}_PIN=\$pin"
     }
     resolve_third_party MARIADB_IMAGE "$MARIADB_REF_ARG"
@@ -329,17 +354,29 @@ def tagged(repo_tag):
     """Pattern for a project image: exact repo:tag, digest optional."""
     return re.compile(re.escape(repo_tag) + r"(@sha256:[a-f0-9]+)?(?=[\"}\n])")
 
-def any_tag(pin):
-    """Pattern for a third-party image: its repository with any tag."""
-    repo = pin.split("@", 1)[0].rsplit(":", 1)[0]
-    return re.compile(r"(?<![\w./-])" + re.escape(repo)
-                      + r":[\w][\w.-]*(@sha256:[a-f0-9]+)?(?=[\"}\n])")
+UPSTREAMS = {}
+for row in pathlib.Path("build/image-mirrors.txt").read_text().splitlines():
+    if row.strip() and not row.lstrip().startswith("#"):
+        key, upstream, _ = row.split()
+        UPSTREAMS[key] = upstream
+
+def any_tag(key, pin):
+    """Pattern for a third-party image: the mirror's repository (the pin's)
+    or the upstream's it was copied from, with any tag. An upstream name in
+    a consumer is a pin from before the mirror and is moved to it."""
+    mirror = pin.split("@", 1)[0].rsplit(":", 1)[0]
+    repos = "|".join(re.escape(r) for r in (mirror, UPSTREAMS[key]))
+    return re.compile(r"(?<![\w./-])(?:" + repos
+                      + r"):[\w][\w.-]*(@sha256:[a-f0-9]+)?(?=[\"}\n])")
 
 REWRITES = [
     (tagged("ghcr.io/brewsterkahle/onionpress-tor:latest"), os.environ["TOR_PIN"]),
     (tagged("ghcr.io/brewsterkahle/onionpress-wordpress:latest"), os.environ["WP_PIN"]),
-] + [(any_tag(os.environ[env]), os.environ[env])
-     for env in ("MARIADB_PIN", "AUTOHEAL_PIN", "CLOUDFLARED_PIN", "SOCKET_PROXY_PIN")]
+] + [(any_tag(key, os.environ[env]), os.environ[env])
+     for key, env in (("MARIADB_IMAGE", "MARIADB_PIN"),
+                      ("AUTOHEAL_IMAGE", "AUTOHEAL_PIN"),
+                      ("CLOUDFLARED_IMAGE", "CLOUDFLARED_PIN"),
+                      ("SOCKET_PROXY_IMAGE", "SOCKET_PROXY_PIN"))]
 
 CONSUMERS = [
     "app/Resources/docker/docker-compose.yml",

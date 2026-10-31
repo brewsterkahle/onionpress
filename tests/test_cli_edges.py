@@ -430,23 +430,23 @@ class TestApplyConfigOutput(HandleActionCase):
     def test_the_lines_and_the_side_effects(self):
         host = self.host()
         with open(host.paths.config_file, "w") as f:
-            f.write("UPDATE_ON_LAUNCH=no\nPREVENT_SLEEP=normal\n")
+            f.write("SHARE_ANALYTICS_WITH_ONIONHOME=no\nPREVENT_SLEEP=normal\n")
         self.docker.put("config-updates.json", json.dumps({
-            "UPDATE_ON_LAUNCH": "yes", "PREVENT_SLEEP": "normal", "ONIONPRESS_TOR_IMAGE": "evil",
+            "SHARE_ANALYTICS_WITH_ONIONHOME": "yes", "PREVENT_SLEEP": "normal", "ONIONPRESS_TOR_IMAGE": "evil",
             "VM_MEMORY": "999"}))
         out = io.StringIO()
         with mock.patch("onionpress.config.apply_side_effects",
                         return_value=["login item installed"]) as effects:
             accepted = ha.apply_config(host, out=out)
-        self.assertEqual(accepted, ["UPDATE_ON_LAUNCH", "PREVENT_SLEEP"])
+        self.assertEqual(accepted, ["SHARE_ANALYTICS_WITH_ONIONHOME", "PREVENT_SLEEP"])
         self.assertEqual(out.getvalue().splitlines(), [
-            "changed UPDATE_ON_LAUNCH", "unchanged PREVENT_SLEEP",
+            "changed SHARE_ANALYTICS_WITH_ONIONHOME", "unchanged PREVENT_SLEEP",
             "rejected ONIONPRESS_TOR_IMAGE", "rejected VM_MEMORY"])
-        self.assertEqual(effects.call_args.args[0], ["UPDATE_ON_LAUNCH", "PREVENT_SLEEP"])
+        self.assertEqual(effects.call_args.args[0], ["SHARE_ANALYTICS_WITH_ONIONHOME", "PREVENT_SLEEP"])
         self.assertEqual(effects.call_args.args[2], "macos")
         self.assertIn("login item installed", self.logs)
         with open(os.path.join(self.data_dir, ".config-changed")) as f:
-            self.assertIn("UPDATE_ON_LAUNCH", f.read())
+            self.assertIn("SHARE_ANALYTICS_WITH_ONIONHOME", f.read())
         self.assertIsNone(self.docker.get("config-updates.json"))
         self.assertTrue(any("ignored (not a setting it may change, or an invalid value): "
                             "ONIONPRESS_TOR_IMAGE, VM_MEMORY" in m for m in self.logs))

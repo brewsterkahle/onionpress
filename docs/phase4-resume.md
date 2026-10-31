@@ -292,3 +292,284 @@ Notes carried over from slice 7 that a later slice may want: the
 traceback); and a helper in `cli.py` that asks `detect_os()` must use the
 module-level import, so the dispatch census's `os_name` and a test's
 `mock.patch.object(cli, "detect_os", …)` reach it.
+
+## Phase 4b (#442): start_containers and setup
+
+Issue https://github.com/brewsterkahle/onionpress/issues/442 moves the
+two pieces phase 4 left in bash, one sub-issue per slice (#443–#453), on
+branch `cli-first-start-setup-442`. Same rules as the slices above. The
+Colima bootstrap and the Linux install/systemd code stay bash.
+
+### The start traces (#443)
+
+`tests/test_start_traces.py` runs each launcher's `start_containers`
+(`tests/start_trace.py`: `launcher_harness.Launcher`, so the real top
+level, with `main` replaced by one `start_containers` call under `set -e`)
+against a stateful fake docker (`tests/start_trace_docker.py`: volumes,
+in-use and stuck volumes, compose failures by count, WordPress installed,
+plugins, the published port) and records, in order: every `log` line,
+docker call (compose files by base name; `[BIND=…]` on Linux's `compose
+up`), Python step and stubbed function; then the detached steps, the
+status, START_ERRORS (Mac), the markers left and the volumes.
+`bundled_python`/`op_py` are `tests/start_trace_runner.py`: the start
+steps already in Python run for real in it (OS forced to the launcher's,
+no app bundle, `time.sleep` a no-op, `wordpress_egress.ensure` answering
+"ok"), the WordPress-side ones (`provision-post-install`, `configure-*`,
+…) are recorded as `py …`. When a step moves into the Python start, the
+runner patches the same seam (`start.run_cli_step`,
+`start.run_detached_cli`, `start.generate_vanity_on_host`,
+`start.configure_site_timezones`) so the recorded line stays the same.
+Fixtures: `tests/fixtures/start-traces/<platform>/<scenario>.trace`;
+`OP_UPDATE_START_TRACES=1` rewrites them, and a slice that changes one
+says why in its commit. About 100 s for the 55 runs.
+
+### The START SUMMARY contract (#444)
+
+In `src/onionpress/start.py`'s docstring: a Python start step appends the
+names of the steps it could not do to `--errors-file` (one per line,
+`^[a-z0-9]+(-[a-z0-9]+)*$`, `StartErrors`), the Mac reads them into
+START_ERRORS with `note_start_errors` (a name of any other shape is
+dropped) and removes the file; the exit status only says stop / carry on.
+`wordpress-egress --errors-file` exits 0 for a block not in place and
+writes `wordpress-egress` (without the flag its status is as before: the
+Linux status loop and `--check` read it). Linux gets no START SUMMARY:
+its launcher passes no file, and the WARNING/ERROR lines are the record.
+`tests/test_start_errors_contract.py` runs the Mac's reader and summary
+under /bin/bash.
+
+### The bundled plugins (#445)
+
+`onionpress.bundled_plugins`: `install_bundled_plugins` (the Link Fixer,
+then Cache Enabler, each unless `INSTALL_*=no`: `install_plugin.sh
+--pinned-version`, the installed header's `Version:` read as www-data, the
+download into a temp folder, `put-wp-tree`) and `setup_bundled_plugins`
+(`wp core is-installed`, then per wanted and present plugin
+`configure-*` → `activate_plugin.sh … --network|--each-site` →
+`apply-cache-policy`), with the bash's log words. The two scripts stay
+(they hold the pins and the activation scopes); the onionpress steps run
+through `start.run_cli_step` (a subprocess of this interpreter, isolated
+as `op_py` / `bundled_python` are, output appended to the log), the
+scripts in docker's environment. Fast paths `install-bundled-plugins` and
+`setup-bundled-plugins` (`--scripts-dir`), always exit 0; the bash
+functions are `… 2>&1 | tee -a "$LOG_FILE"; return 0`, and the six helpers
+(`plugin_wanted` … `install_cache_enabler`) are gone. Delta: put-wp-tree's
+stdout now goes to the log, not the terminal. Traces unchanged.
+
+### The pending key import (#446)
+
+`ContainerManager.apply_pending_key_import` (`containers.IMPORT_KEY_PENDING`,
+`TOR_STATE_VOLUME`, `OLD_TOR_KEYS_VOLUME`): the bash block, step for step,
+including the `docker rm -f` with no ids when `ps` finds none; docker's own
+output goes to the log file only (`_to_log_file`, the bash `>> "$LOG_FILE"
+2>&1`), so the trace and the terminal stay as they were. The "—" / "--"
+of the two launchers' lines follows `platform.detect_os()`. Fast path
+`apply-pending-key-import` (exit 1 stops the start); the bash function is
+the slice-5 shape (`tee`, `return "${PIPESTATUS[0]}"`) and
+`start_containers` runs it every start (it returns at once without the
+marker). The marker is only a regular file (`isfile`, as `[ -f ]`).
+`tests/test_install_invariants.py`'s bash harness now runs the CLI
+through `tests/cli_on_stub_docker.py` (no app bundle, so `Docker()` takes
+the stub on PATH, never an installed OnionPress.app's docker) with
+`DOCKER_HOST` at the no-docker socket and HOME at its scratch folder: the
+two migration end-to-end tests no longer skip on a Mac with the app.
+Traces unchanged.
+
+### The first-run key seed (#447)
+
+`start.KeySeed(manager, mac=…, bin_dir=…)`, fast path `seed-onion-key`
+(`--bin-dir` on the Mac, for mkp224o), bash `seed_onion_key` in the
+slice-5 shape. `volume_state(KEY_VOLUME)` 2 stops, 1 is a first run.
+Platform differences, as settled:
+- Generation: the Mac's `generate_vanity_address` is
+  `start.generate_vanity_on_host` (bundled mkp224o on the host, its
+  ERROR lines, the quarantine strip, stale empty folders removed, then
+  `start.ensure_key_formats` = `key_manager.ensure_key_formats`
+  in-process); Linux still runs `generate-vanity` in the tor image
+  (`run_cli_step`). The bash generator is gone.
+- Prefix: the Mac uses `config.validate_address_prefix` and logs its first
+  line (`ERROR: ADDRESS_PREFIX 'x' is invalid: …`) where the bash copy
+  said "too long (6 chars, max 5)"; the copy and its tests are gone
+  (`test_address_prefix.TestFirstRunUsesTheValidator`). Linux dropped its
+  `2 <= len <= 6` gate: generate-vanity validates.
+- Linux keeps re-syncing an imported key every start, the C Tor seed into
+  `onionpress-tor-state` and its format sync (in-process now, where the
+  bash ran `key_manager.py`); the Mac keeps neither (the entrypoint
+  re-derives C Tor's files from the PEM, #311). A failed `volume create` on
+  a Linux first run now stops the start, as the Mac's always did.
+- One seed: `containers.run_key_seed(docker, …)` (`KEY_SEED_SCRIPT`) for
+  both starts and `cmd_restore`; `run_tor_state_seed` (`TOR_STATE_SEED_SCRIPT`,
+  byte for byte the bash's) for Linux. The `docker run` census lost the
+  three bash rows and the restore's and gained these two.
+Trace deltas, on purpose: the Mac bad-prefix line, and Linux's
+`bin python3 …key_manager.py ensure-formats` became `fn ensure_key_formats`.
+Two fixtures (`plugins-off`, `update-on-launch`) were re-recorded against
+the bash first: the scenario's config had not applied (fe3636fc).
+
+### The core services (#448)
+
+`start.start_core(manager, mac=…, wp_port=…, errors=…)`, fast path
+`start-core` (`--docker-dir`, `--bin-dir`, `--wp-port`, `--errors-file`;
+exit 0 installed, 3 not, 1 stop), bash `start_core_services` + a `case`
+on its status in `start_containers`. It pulls `--policy missing` (gated on
+`using_local_images`; Linux with the Cloudflare file under a token), then
+`ContainerManager.start_core(launcher=…, egress=…)`: the launcher's words,
+compose output to the log (Mac) or streamed to stdout (Linux, through the
+new `Docker.run_to`, so the docker-argv census did not grow), the egress
+step `start.egress_step` (the launcher's verdict, `wordpress-egress` in
+START_ERRORS on the Mac), retire, the network move, `compose up` × 3;
+then the host-side `curl` wait for the port (60 s, the Mac's WARNING) and
+`wp core is-installed` × 15. (`update_images`, UPDATE_ON_LAUNCH's refresh,
+first stayed bash here; it is gone since, see "No image refresh" below.)
+Linux's WordPress address (#464) reaches compose as before, in the
+environment: `ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" op_py
+… start-core` (no Python code names the variable;
+`test_linux_bind_scope`). Gone: the Mac's `block_wordpress_egress`, both
+launchers' `retire_old_onionheaven_containers` and `migrate_tor_network`
+(Linux keeps `block_wordpress_egress` for its status loop). The ordering
+tests live in `tests/test_start_core.py`. Traces unchanged (the harness
+now has empty compose files in its docker folder, as an install has).
+
+### After the core is up (#449)
+
+`start.post_up(manager, mac=…, installed=…, errors=…, themes_dir=…,
+plugins_dir=…, scripts_dir=…)`, fast path `start-post-up`
+(`--wordpress-installed yes|no`, always 0), bash `start_post_up
+"$wp_installed"`. In the bash order: Mac `.htaccess` repair (written as
+www-data from `multisite.HTACCESS_BODY`, which the heredoc matched byte for
+byte; the heredoc is gone), Tor (`tor` in START_ERRORS on the Mac), Linux's
+SOCKS check, `install_bundled_plugins`, the Mac's
+install-from-backup import, `deactivate-wp-statistics` and
+`provision-post-install` (`run_cli_step`; output to the log on the Mac, to
+the terminal on Linux), `setup_bundled_plugins`, the staging cleanup, the
+detached `regenerate-derivatives` (`run_detached_cli`: a session of its
+own, or `systemd-run --user` from the Settings-page watcher) and the Mac's
+detached `ensure-archive-s3-keys`, `configure_site_timezones`. Settled:
+- Tor now starts only when `key_volume_not_ready()` says nothing
+  (as `ContainerManager.start_tor`): one more `volume ls` in every trace.
+- Linux's `deactivate-wp-statistics` / `provision-post-install` failures
+  are WARNINGs: under `set -e` the bare bash calls ended the whole start
+  (the `steps-fail` trace had `rc=1`). Both platforms carry on now.
+- Linux's install-state steps (`after_wordpress_installed`, the port and
+  heartbeat hold, #464) stay bash, before the call: they name
+  `ONIONPRESS_BIND_HOST`, which no Python may (`test_linux_bind_scope`).
+  `note_if_lan_looks_local` stays bash too, now before Tor; the OnionHeaven
+  activation watcher (a bash background loop) after the call: the Linux
+  traces moved its line to the end.
+- The Cloudflare tunnel is not in `post_up`. Upstream's #500 (merged
+  2026-10-30) made it one bash `start_cloudflare_tunnel`, test-held
+  identical in both launchers (`tests/test_cloudflare_tunnel.py`): only
+  with a token and an installed WordPress, `up -d --no-deps cloudflared`
+  with both compose files, last in a start and at the end of every setup
+  path (the `provision-post-install` and `setup` cases); otherwise the
+  container is removed. Each launcher's `start_containers` calls it after
+  the Python start with the `wp_installed` its exit status gave (the Mac:
+  0 installed, 3 not), so the Python names neither `cloudflared` nor the
+  container. The branch's interim `start.cloudflare_tunnel` (each
+  platform's old behaviour) went with that merge; the Mac traces lost
+  their `docker stop onionpress-cloudflared` for the shared function's
+  `container inspect`, and the token scenarios were re-recorded.
+Gone: the Mac's `configure_site_timezones` and `.htaccess` heredoc, both
+launchers' `regenerate_derivatives_pending` and `install_bundled_plugins`,
+Linux's `start_cloudflare_tunnel`, `warn_if_socks_port_exposed`,
+`run_detached` and `OP_PY`. Their behavioural tests moved to
+`tests/test_start_post_up.py`.
+
+### One delegation, one start path (#450)
+
+`start.start_containers` (fast path `start-containers`: exit 1 stop, 0
+installed, 3 not) runs `apply_pending_key_import` → `migrate_key_volume`
+→ `KeySeed` → `start_core` → `post_up`. The Mac's `start_containers` is
+the Docker wait, `ensure_vm_fsck_repair` and that one
+call (errors file → START_ERRORS); Linux's is the wait,
+`start-containers --until-core` (with `ONIONPRESS_BIND_HOST` in its
+environment), its install-state steps and LAN note, `start-post-up`, and
+the activation watcher. Settled:
+- Linux cannot be one call: the install-state steps name
+  `ONIONPRESS_BIND_HOST` (no Python may, `test_linux_bind_scope`) and
+  must run between the core and Tor (the heartbeat hold before Tor).
+- The thinner Python start (`OnionPressCLI.cmd_start` / `cmd_restart`: no
+  migration, seed or provisioning) is gone; #405 removed it upstream, and
+  this branch's interim launcher wrappers went with the merge.
+- The intermediate subcommands (`apply-pending-key-import`,
+  `seed-onion-key`, `start-core`) and their bash functions are gone; the
+  Python functions keep their unit tests (`test_pending_key_import`,
+  `test_first_run_key_seed`, `test_start_core`), the order is
+  `tests/test_start_sequence.py`.
+
+### The setup half (#451–#453)
+
+`onionpress setup` (`cli._run_setup`, no OnionPressCLI) runs
+`setup_logic.setup_from_terminal(data_dir, mac, launcher_bin, docker,
+manager, user, title, from_backup, ia_account, log)`; exit `SETUP_DONE` 0,
+`SETUP_FAILED` 1, `SETUP_ALREADY_INSTALLED` 2, `SETUP_RESTART` 10. Both
+launchers' `setup)` case: `setup_db_passwords`, `run_setup "$@"` (moves
+`--pass`, `--ia-password` and `--from-backup`'s password into
+`ONIONPRESS_SETUP_PASSWORD` / `ONIONPRESS_IA_PASSWORD` /
+`ONIONPRESS_BACKUP_PASSWORD`; the CLI pops them once read), then on 10
+`stop_containers; start_containers; wait_for_services` (Linux also
+`start_heartbeat_client`), Linux's `write_status`, the closing lines.
+- #451 `stage_setup_from_backup`: `backup.extract_backup` into a 0700
+  temp folder (always removed), `backup.staged_backup_address` (the key's
+  address; refused before anything is copied), `restore_backup_config`,
+  the key files into `vanity-keys/<address>/`. No key: this install keeps
+  its own. Not `prepare_install_from_backup`: that stages a full import
+  only the Mac's start performs.
+- #452 `ask_setup_answers` (username = an onionname, password ≥ 6 chars
+  typed twice through getpass, title defaulting to `default_site_title()`)
+  and `install_fresh_wordpress`, so the terminal installs as the setup
+  window does (single-site install, then the launcher's
+  `provision-post-install` converts to multisite and, on Linux, moves the
+  port and releases the heartbeat hold; the user's subsite; the bundled
+  plugins; the shared archive.org keys in the background). Linux's
+  `--ia-account` login is `multisite.fetch_archive_s3_keys` + `wp option
+  update` on stdin (`save_archive_login`).
+- #453 decided: both platforms now provision, set up the plugins and
+  fetch the archive.org keys at setup (install_fresh_wordpress does); both
+  check "WordPress running" with `wp --info` (Linux's hint keeps its
+  `systemctl` line); both write `.setup_complete` for an installed site.
+  `--from-backup` installs with `admin` / the backup's password, then
+  (with a key) asks the hubs to release the current one and flags the
+  import; the launcher restarts either way. Without a backup, Tor starts
+  if it is not running, behind `migrate_key_volume` and
+  `key_volume_not_ready`.
+Gone from both launchers: `setup_wordpress_cli` / `_interactive`,
+`note_wordpress_installed_by_onionpress`, `wp_set_user_password`,
+`wp_cli_in`, Linux's `fetch_archive_s3_keys`. Deltas: `--user` must be a
+valid onionname and the password 6+ characters (the GUI's rules);
+`--email` is accepted and ignored (install_fresh_wordpress uses
+admin@onionpress.local).
+
+### No image refresh; the start prunes superseded images (review of #499)
+
+Decided in review: images change only with a release. With every image
+pinned by digest, `UPDATE_ON_LAUNCH` (both launchers' `update_images`, the
+Mac's `restart` too), `onionpress update-images` and the image pass of the
+menubar's Check for Updates could only re-pull the same digests, and the
+last one told the owner images were "up to date" as if they updated apart
+from OnionPress. All gone: the key, its UI (Mac settings window,
+`settings.html`, the WordPress Settings page), defaults and validators,
+the verb, the subcommand, `ContainerManager.pull_images*`. An old config
+line is ignored. The launchers keep one pin each (`KEY_HELPER_IMAGE`), so
+both stay refresher consumers; the third-party pins live in the compose
+files only. `tests/test_no_image_refresh.py` replaces
+`test_launch_pulls_once.py`; the settings tests that used the key as a
+sample yes/no key use `SHARE_ANALYTICS_WITH_ONIONHOME`.
+
+`start.prune_superseded_images`, last in `post_up` (both platforms), took
+over #230's prune: for each image `compose config --images` lists (the
+Cloudflare file included), once `image inspect` finds the pinned digest,
+`image ls <repo>` and a plain `image rm` of each other untagged image.
+Untagged only: OnionPress pulls by digest, so a user's tagged image on a
+shared Linux Docker is never touched; no global `image prune`. The
+`update-on-launch` trace scenario became `images-superseded`; every other
+trace gained the one `config --images` line. What a first run does when a
+pin has left its registry is #501.
+
+Upstream #502 (merged in) moved the four third-party pins to mirrors under
+ghcr.io/brewsterkahle with the same digests. The prune also cleans each
+mirror's former repository (`start.FORMER_REPOSITORIES`, test-held equal
+to `build/image-mirrors.txt`): an upgraded install's Docker Hub copies of
+older versions go, while the same digest under the old name is the pinned
+image itself and stays. The launchers' conflicting hunks were #502's new
+pins in `update_images`, which this branch removed.
+

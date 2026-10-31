@@ -5,7 +5,8 @@
   stops the run before anything is started.
 - Tests take a `node` and are parametrized over the platforms this run
   tests, filtered by their `platform` mark: `any` (the default) runs once
-  per tested platform, `mac`/`linux` only there. A test with no platform to
+  per tested platform, `mac`/`linux` only there (`linux` is every
+  Debian-based guest, whichever --guest ran). A test with no platform to
   run on is reported skipped with the reason.
 - Modules marked `incremental` are one scenario per node: after a step
   fails, the rest of that module is skipped on that platform.
@@ -22,11 +23,11 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from harness import safety  # noqa: E402
-from harness.platforms import PLATFORMS  # noqa: E402
+from harness.platforms import DEFAULT_LINUX_GUEST, LINUX_GUESTS, PLATFORMS, canonical_platform  # noqa: E402
 from harness.report import Outcome  # noqa: E402
 from harness.session import Options, Session  # noqa: E402
 
-PLATFORM_MARKS = {"any": PLATFORMS, "mac": ("macos",), "linux": ("debian",)}
+PLATFORM_MARKS = {"any": PLATFORMS, "mac": ("macos",), "linux": ("linux",)}
 
 _SESSION_KEY = pytest.StashKey()
 _FAILED_STEP = {}        # (module, platform) -> name of the step that failed
@@ -34,7 +35,7 @@ _FAILED_STEP = {}        # (module, platform) -> name of the step that failed
 
 def pytest_addoption(parser):
     g = parser.getgroup("onionpress e2e")
-    g.addoption("--platforms", default="", help="comma list of macos,debian (default: all the host offers)")
+    g.addoption("--platforms", default="", help="comma list of macos,linux (default: all the host offers)")
     g.addoption("--max-nodes", type=int, default=4, help="most nodes this run creates")
     g.addoption("--mac-app", default="", help="an OnionPress.app to test (copied, never run in place)")
     g.addoption("--mac-dmg", default="", help="an onionpress.dmg to test")
@@ -43,7 +44,9 @@ def pytest_addoption(parser):
     g.addoption("--scratch-root", default=safety.DEFAULT_SCRATCH_ROOT)
     g.addoption("--results-dir", default="")
     g.addoption("--keep", action="store_true", help="leave the nodes running for inspection")
-    g.addoption("--limactl", default="", help="limactl to use for Debian VMs")
+    g.addoption("--limactl", default="", help="limactl to use for Linux VMs")
+    g.addoption("--guest", default=DEFAULT_LINUX_GUEST, choices=LINUX_GUESTS,
+                help=f"the linux-vm node's distro (default {DEFAULT_LINUX_GUEST})")
 
 
 def pytest_configure(config):
@@ -52,7 +55,8 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "incremental: later steps skip after a failed one")
     if config.option.collectonly or config.option.help:
         return
-    wanted = [p.strip() for p in config.getoption("--platforms").split(",") if p.strip()] or None
+    wanted = [canonical_platform(p.strip())
+              for p in config.getoption("--platforms").split(",") if p.strip()] or None
     unknown = [p for p in wanted or () if p not in PLATFORMS]
     if unknown:
         raise pytest.UsageError(f"unknown platform(s) {', '.join(unknown)}; know {', '.join(PLATFORMS)}")
@@ -62,7 +66,7 @@ def pytest_configure(config):
         deb=config.getoption("--deb"), release=config.getoption("--release"),
         scratch_root=config.getoption("--scratch-root"),
         results_dir=config.getoption("--results-dir"), keep=config.getoption("--keep"),
-        limactl=config.getoption("--limactl"))
+        limactl=config.getoption("--limactl"), guest=config.getoption("--guest"))
     try:
         session = Session(opts).prepare()
     except safety.UnsafeTarget as e:

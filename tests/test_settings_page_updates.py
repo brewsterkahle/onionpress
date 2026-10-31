@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import config as op_config  # noqa: E402
 from onionpress import wp_files  # noqa: E402
 from onionpress.redact import scrub_for_upload  # noqa: E402
+from test_config_one_reader import config_value_function  # noqa: E402
 
 PHP = "app/Resources/plugins/onionpress-settings.php"
 
@@ -42,7 +43,7 @@ TOKEN = "eyJhIjoiMGYxZTJkM2M0YjVhNjk3ODhmN2U2ZDVjNGIzYTI5MTgiLCJ0IjoidHVubmVsIn0
 CONFIG = """\
 # OnionPress config
 ADDRESS_PREFIX=op2
-UPDATE_ON_LAUNCH=yes
+SHARE_ANALYTICS_WITH_ONIONHOME=yes
 START_ON_BOOT=no
 REGISTER_WITH_ONIONHEAVEN=
 ONIONHEAVEN_ADDRESS=oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion
@@ -52,7 +53,7 @@ ATTACKER_ONION = "a" * 56 + ".onion"
 
 # What code inside WordPress could ask for, beside two legitimate changes.
 HOSTILE = {
-    "UPDATE_ON_LAUNCH": "no",
+    "SHARE_ANALYTICS_WITH_ONIONHOME": "no",
     "CLOUDFLARE_TUNNEL_TOKEN": TOKEN,
     "ONIONPRESS_TOR_IMAGE": "evil.example/tor:latest",
     "ONIONPRESS_WORDPRESS_IMAGE": "evil.example/wp:latest",
@@ -186,7 +187,7 @@ class TestAllowlist(unittest.TestCase):
         verdict = {key: op_config.check_config_value(key, value) == ""
                    for key, value in HOSTILE.items()}
         self.assertEqual(verdict, {
-            "UPDATE_ON_LAUNCH": True,
+            "SHARE_ANALYTICS_WITH_ONIONHOME": True,
             "CLOUDFLARE_TUNNEL_TOKEN": True,   # stdin only, in run_config_command
             "ONIONPRESS_TOR_IMAGE": False,
             "ONIONPRESS_WORDPRESS_IMAGE": False,
@@ -203,7 +204,7 @@ class TestAllowlist(unittest.TestCase):
     def test_only_the_page_keys_are_written(self):
         applied = op_config.apply_settings_updates(self.config, HOSTILE)
         config = op_config.read_config(self.config)
-        self.assertEqual(config["UPDATE_ON_LAUNCH"], "no")
+        self.assertEqual(config["SHARE_ANALYTICS_WITH_ONIONHOME"], "no")
         # Never set from the page unattended (#463): held for the host.
         self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)
         self.assertEqual(applied.held, {"CLOUDFLARE_TUNNEL_TOKEN": TOKEN})
@@ -215,8 +216,8 @@ class TestAllowlist(unittest.TestCase):
             self.assertNotIn(key, config)
         self.assertNotIn("evil", self._config())
         self.assertEqual(set(applied.rejected), set(HOSTILE) - {
-            "UPDATE_ON_LAUNCH", "CLOUDFLARE_TUNNEL_TOKEN"})
-        self.assertEqual([k for k, _, _ in applied.changes], ["UPDATE_ON_LAUNCH"])
+            "SHARE_ANALYTICS_WITH_ONIONHOME", "CLOUDFLARE_TUNNEL_TOKEN"})
+        self.assertEqual([k for k, _, _ in applied.changes], ["SHARE_ANALYTICS_WITH_ONIONHOME"])
 
     def test_a_tunnel_token_is_removed_but_never_set(self):
         """#463: a token puts the site on the clear web through a tunnel
@@ -236,23 +237,23 @@ class TestAllowlist(unittest.TestCase):
         self.assertEqual(op_config.read_value(self.config, "CLOUDFLARE_TUNNEL_TOKEN"), "")
 
     def test_comments_and_other_keys_survive(self):
-        op_config.apply_settings_updates(self.config, {"UPDATE_ON_LAUNCH": "no"})
+        op_config.apply_settings_updates(self.config, {"SHARE_ANALYTICS_WITH_ONIONHOME": "no"})
         self.assertEqual(self._config(), CONFIG.replace(
-            "UPDATE_ON_LAUNCH=yes", "UPDATE_ON_LAUNCH=no"))
+            "SHARE_ANALYTICS_WITH_ONIONHOME=yes", "SHARE_ANALYTICS_WITH_ONIONHOME=no"))
 
     def test_unchanged_values_are_accepted_but_not_rewritten(self):
         applied = op_config.apply_settings_updates(
-            self.config, {"UPDATE_ON_LAUNCH": "yes", "REGISTER_WITH_ONIONHEAVEN": ""})
+            self.config, {"SHARE_ANALYTICS_WITH_ONIONHOME": "yes", "REGISTER_WITH_ONIONHEAVEN": ""})
         self.assertEqual(applied.changes, [])
         self.assertEqual(applied.accepted,
-                         {"UPDATE_ON_LAUNCH": "yes", "REGISTER_WITH_ONIONHEAVEN": ""})
+                         {"SHARE_ANALYTICS_WITH_ONIONHOME": "yes", "REGISTER_WITH_ONIONHEAVEN": ""})
         self.assertEqual(self._config(), CONFIG)
 
     def test_invalid_values_are_rejected(self):
         bad = [
-            ("UPDATE_ON_LAUNCH", "maybe"), ("UPDATE_ON_LAUNCH", "yes "),
-            ("UPDATE_ON_LAUNCH", "yes\nVM_DISK=1"), ("UPDATE_ON_LAUNCH", "yes\r"),
-            ("UPDATE_ON_LAUNCH", True), ("UPDATE_ON_LAUNCH", None),
+            ("SHARE_ANALYTICS_WITH_ONIONHOME", "maybe"), ("SHARE_ANALYTICS_WITH_ONIONHOME", "yes "),
+            ("SHARE_ANALYTICS_WITH_ONIONHOME", "yes\nVM_DISK=1"), ("SHARE_ANALYTICS_WITH_ONIONHOME", "yes\r"),
+            ("SHARE_ANALYTICS_WITH_ONIONHOME", True), ("SHARE_ANALYTICS_WITH_ONIONHOME", None),
             ("REGISTER_WITH_ONIONHEAVEN", "true"), ("PREVENT_SLEEP", "always"),
             ("VM_MEMORY", "0"), ("VM_MEMORY", "65"), ("VM_MEMORY", "-1"),
             ("VM_MEMORY", "2.5"), ("VM_MEMORY", "\uff12"), ("VM_MEMORY", 2),
@@ -270,7 +271,7 @@ class TestAllowlist(unittest.TestCase):
 
     def test_valid_values_are_accepted(self):
         good = {
-            "UPDATE_ON_LAUNCH": "no", "LAUNCH_ON_LOGIN": "yes", "START_ON_BOOT": "no",
+            "LAUNCH_ON_LOGIN": "yes", "START_ON_BOOT": "no",
             "PREVENT_SLEEP": "on-battery", "VM_MEMORY": "64",
             "REGISTER_WITH_ONIONHEAVEN": "", "SHARE_ANALYTICS_WITH_ONIONHOME": "yes",
             "ONIONHEAVEN_MAX_SERVICES": "1", "ONIONHEAVEN_PROPAGATION_DELAY": "3600",
@@ -282,7 +283,7 @@ class TestAllowlist(unittest.TestCase):
                 ({"CLOUDFLARE_TUNNEL_TOKEN": token}, []))
 
     def test_not_an_object_writes_nothing(self):
-        for payload in (["UPDATE_ON_LAUNCH", "no"], "UPDATE_ON_LAUNCH=no", 7, None):
+        for payload in (["SHARE_ANALYTICS_WITH_ONIONHOME", "no"], "SHARE_ANALYTICS_WITH_ONIONHOME=no", 7, None):
             applied = op_config.apply_settings_updates(self.config, payload)
             self.assertEqual((applied.accepted, applied.changes), ({}, []))
             self.assertTrue(applied.rejected)
@@ -413,7 +414,7 @@ class TestMacApplyConfig(unittest.TestCase):
     def test_hostile_payload(self):
         payload = dict(HOSTILE, LAUNCH_ON_LOGIN="no")
         self.assertEqual(sorted(self._apply(json.dumps(payload))),
-                         ["LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"])
+                         ["LAUNCH_ON_LOGIN", "SHARE_ANALYTICS_WITH_ONIONHOME"])
         config = op_config.read_config(self.config)
         # Held for the person at the Mac (#463; test_handle_action.TestTunnelToken).
         self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)
@@ -426,7 +427,7 @@ class TestMacApplyConfig(unittest.TestCase):
         self.assertIn("CLOUDFLARE_TUNNEL_TOKEN waits for the person at this Mac", log)
         self.assertIn("ONIONPRESS_TOR_IMAGE", log)
         self.assertIn("ONIONHEAVEN_ADDRESS", log)
-        accepted = ["LAUNCH_ON_LOGIN", "UPDATE_ON_LAUNCH"]
+        accepted = ["LAUNCH_ON_LOGIN", "SHARE_ANALYTICS_WITH_ONIONHOME"]
         self.assertEqual(self.effects, [accepted])
         # What the running menubar owes (caffeinate, the tunnel flag,
         # status.json) waits in the marker it takes on its next tick.
@@ -447,8 +448,8 @@ class TestMacApplyConfig(unittest.TestCase):
                          ["LAUNCH_ON_LOGIN", "PREVENT_SLEEP", "SHARE_ANALYTICS_WITH_ONIONHOME"])
 
     def test_truncated_json_is_left_for_the_next_run(self):
-        self.assertIsNone(self._apply('{"UPDATE_ON_LAUNCH": "n'))
-        self.assertEqual(self.docker.get("config-updates.json"), '{"UPDATE_ON_LAUNCH": "n')
+        self.assertIsNone(self._apply('{"SHARE_ANALYTICS_WITH_ONIONHOME": "n'))
+        self.assertEqual(self.docker.get("config-updates.json"), '{"SHARE_ANALYTICS_WITH_ONIONHOME": "n')
         self.assertEqual(self.effects, [])
 
     def test_the_menubar_runs_it_through_the_launcher(self):
@@ -521,7 +522,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
         with open(os.path.join(self.out, "config-updates.json"), "w") as f:
             f.write(payload)
         launcher = _read("linux/onionpress")
-        script = (self._function(launcher, "op_py")
+        script = (config_value_function() + self._function(launcher, "op_py")
                   + self._function(launcher, "wp_exec")
                   + self._function(launcher, "apply_config_updates")
                   + self.STUBS + call)
@@ -539,7 +540,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
         result = self._run(json.dumps(dict(HOSTILE, START_ON_BOOT="yes")))
         self.assertEqual(result.returncode, 0, result.stderr)
         config = op_config.read_config(os.path.join(self.data, "config"))
-        self.assertEqual(config["UPDATE_ON_LAUNCH"], "no")
+        self.assertEqual(config["SHARE_ANALYTICS_WITH_ONIONHOME"], "no")
         self.assertEqual(config["START_ON_BOOT"], "yes")
         self.assertNotIn("CLOUDFLARE_TUNNEL_TOKEN", config)  # refused on Linux (#463)
         self.assertEqual(config["ONIONHEAVEN_ADDRESS"],
@@ -568,7 +569,7 @@ log() { echo "$1" >> "$LOG_FILE"; }
         self.assertIn("systemctl --user disable onionpress.service onionpress-heartbeat.service", self._read_out("calls"))
 
     def test_invalid_json_is_kept_and_nothing_written(self):
-        result = self._run('{"UPDATE_ON_LAUNCH": "n',
+        result = self._run('{"SHARE_ANALYTICS_WITH_ONIONHOME": "n',
                            call="apply_config_updates || echo rc=$?\n")
         self.assertIn("rc=1", result.stdout)
         with open(os.path.join(self.data, "config")) as f:
@@ -602,7 +603,7 @@ class TestMacLauncherKeepsTokenPadding(unittest.TestCase):
     """The Mac launcher read the token with `cut -d= -f2`, which keeps only
     the text up to the next "=": a base64 token's trailing padding was cut
     off (#323). It now reads everything after the first "=", the first
-    line only, as config.read_value does."""
+    line only, through config_value, as config.read_value does (#404)."""
 
     def test_token_read_whole(self):
         src = _read("app/MacOS/onionpress")
@@ -616,7 +617,8 @@ class TestMacLauncherKeepsTokenPadding(unittest.TestCase):
                         f.write(f"VM_CPU=2\nCLOUDFLARE_TUNNEL_TOKEN={token}\n"
                                 "CLOUDFLARE_TUNNEL_TOKEN=second\n")
                     out = subprocess.run(
-                        ["bash", "-c", m.group(0) + '\nprintf "%s" "$CLOUDFLARE_TUNNEL_TOKEN"'],
+                        ["bash", "-c", config_value_function() + m.group(0)
+                         + '\nprintf "%s" "$CLOUDFLARE_TUNNEL_TOKEN"'],
                         capture_output=True, text=True, timeout=30,
                         env={**os.environ, "DATA_DIR": tmp})
                     self.assertEqual(out.returncode, 0, out.stderr)

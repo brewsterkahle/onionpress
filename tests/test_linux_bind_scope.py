@@ -21,8 +21,12 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -223,7 +227,7 @@ class TestBindHostResolution(unittest.TestCase):
                 "set -e\n"
                 f"DATA_DIR={data_dir!r}\n"
                 f"LOG_FILE={os.path.join(data_dir, 'onionpress.log')!r}\n"
-                + block + '\nprintf "%s" "$ONIONPRESS_BIND_HOST"\n'
+                + config_value_function() + block + '\nprintf "%s" "$ONIONPRESS_BIND_HOST"\n'
             )
             env = {} if env_value is None else {"ONIONPRESS_BIND_HOST": env_value}
             result = _run_bash(script, env=env)
@@ -301,41 +305,8 @@ class TestPrintedWordPressUrls(unittest.TestCase):
                          "Build WordPress URLs with $(wp_access_host).")
 
 
-class TestSocksExposureWarning(unittest.TestCase):
-    """Re-running install.sh leaves an older docker-compose.yml in place, and
-    that one still publishes SOCKS on ONIONPRESS_BIND_HOST. The launcher asks
-    Docker for the real mapping after Tor starts and warns."""
-
-    FUNC = r"^warn_if_socks_port_exposed\(\) \{\n.*?^\}$"
-
-    def _warn(self, docker_body):
-        func = _extract(self.FUNC, _read(LINUX_LAUNCHER), "warn_if_socks_port_exposed()")
-        with tempfile.TemporaryDirectory() as bin_dir:
-            _stub(bin_dir, "docker", docker_body)
-            script = ("set -e\n"
-                      'log() { echo "$1"; }\n'
-                      "DOCKER_DIR=/opt/onionpress/docker\n"
-                      + func + "\nwarn_if_socks_port_exposed\n")
-            result = _run_bash(script, bin_dir=bin_dir)
-        self.assertEqual(0, result.returncode, result.stderr)
-        return result.stdout
-
-    def test_loopback_mapping_is_quiet(self):
-        self.assertEqual("", self._warn("echo 127.0.0.1:19050"))
-
-    def test_wider_mapping_warns(self):
-        out = self._warn(r"printf '0.0.0.0:9050\n[::]:9050\n'")
-        self.assertIn("WARNING", out)
-        self.assertIn("0.0.0.0:9050", out)
-
-    def test_no_container_is_quiet(self):
-        self.assertEqual("", self._warn("exit 1"))
-
-    def test_start_containers_runs_it_after_tor_starts(self):
-        text = _read(LINUX_LAUNCHER)
-        self.assertRegex(
-            text,
-            r"docker compose up -d tor onionheaven [^\n]*\n\s*warn_if_socks_port_exposed\n")
+# The SOCKS exposure warning is start.warn_if_socks_port_exposed since
+# #442.7: tests/test_start_post_up.py, TestSocksExposureWarning.
 
 
 class TestDocumentedSetting(unittest.TestCase):

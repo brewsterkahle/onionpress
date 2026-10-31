@@ -88,7 +88,10 @@ class TestTheList(unittest.TestCase):
                      # install.sh copies these on to the user's systemd folder
                      "onionpress.service", "onionpress-heartbeat.service",
                      "onionpress-watcher.service", "onionpress-watcher.timer",
-                     "app-icon.png"):
+                     "app-icon.png",
+                     # the postinst's last resort for rootless Docker (#486)
+                     "docker-rootless/dockerd-rootless.sh",
+                     "docker-rootless/dockerd-rootless-setuptool.sh"):
             with self.subTest(dest):
                 self.assertIn(dest, dests)
         # The moved modules come from the package, not their old place.

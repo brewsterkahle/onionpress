@@ -1,7 +1,7 @@
 """What every node can do, whatever it runs on.
 
 A subclass provides five primitives: `exec` (a command in the node's own
-context: the Mac host with the node's environment, or the Debian VM as the
+context: the Mac host with the node's environment, or the Linux VM as the
 install's user), `docker` (a docker command against the node's own
 daemon), `launcher` (the installed `onionpress` command), `read_file` and
 `fetch_files` (for evidence). Everything a platform-neutral test uses is
@@ -68,8 +68,23 @@ def parse_curl_include(text):
     return HttpResponse(status, headers, rest, raw)
 
 
+def wp_port_from_status(text):
+    """The WordPress port a node's launcher published, from its
+    `~/.onionpress/status.json`, or None. The launcher moves every port
+    up by 10000 while 8080, 9050 or 9077 is taken (a system tor on 9050
+    did that on an Ubuntu guest), so the port is 8080 + k * 10000; any
+    other value is not the launcher's and is ignored."""
+    try:
+        port = int(json.loads(text).get("wp_port", 0))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if port < 8080 or port > 65535 or (port - 8080) % 10000:
+        return None
+    return port
+
+
 class Node:
-    platform = ""       # "macos" | "debian"
+    platform = ""       # "macos" | "linux"
     kind = ""           # "mac" | "linux-vm" | ...
 
     def __init__(self, name, log, results_dir):
@@ -216,8 +231,12 @@ class Node:
         """Logs, config, container logs and inspect output into dest."""
         os.makedirs(dest, exist_ok=True)
         try:
+            # docker-rootless-setup.log: what the .deb's postinst saw when it
+            # tried rootless Docker (Linux only); without it a docker-group
+            # fallback cannot be explained from the report.
             self.fetch_files([".onionpress/config", ".onionpress/logs", ".onionpress/onionpress.log",
-                              ".onionpress/launcher.log", ".onionpress/onionheaven-registration.json"],
+                              ".onionpress/launcher.log", ".onionpress/onionheaven-registration.json",
+                              ".onionpress/docker-rootless-setup.log"],
                              os.path.join(dest, "data-dir"))
         except Exception as e:  # noqa: BLE001 - evidence is best effort
             self.log.write(f"evidence: data dir copy failed: {e}")

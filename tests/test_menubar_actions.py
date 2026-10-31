@@ -42,7 +42,6 @@ ACTIONS = (
     'launcher_ops.run_launcher_restore(',
     '["update", "--check", "--json"]',
     '["update", "--yes", "--json"]',
-    '["update-images", "--json"]',
     '["uninstall", "--check", "--json", *flags]',
     '["uninstall", "--json", *flags]',
     '[self.launcher_script, "handle-action", "--json", *args]',
@@ -130,7 +129,7 @@ class TestImports(unittest.TestCase):
         # No docker in an action: the status loop's reads are the only
         # docker calls left (status.json, the address, wp-cli reads).
         for name in ("backup", "restore", "check_for_updates", "_install_update",
-                     "update_docker_images", "uninstall", "_proceed_with_uninstall",
+                     "uninstall", "_proceed_with_uninstall",
                      "_view_tick", "_apply_state", "_answer_settings_page_question"):
             with self.subTest(method=name):
                 body = _method(self.src, name)

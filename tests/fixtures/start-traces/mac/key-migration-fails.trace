@@ -1,0 +1,55 @@
+log Starting OnionPress containers...
+fn wait_for_docker_or_recover_vm 180 start
+fn ensure_vm_fsck_repair
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
+log Migrating the onion service key volume: onionpress-arti-state -> onionpress-onion-keys
+docker volume create onionpress-onion-keys
+log onionpress-onion-keys
+docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-arti-state:/old:ro -v onionpress-onion-keys:/new --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c 
+            set -eu
+            dir="$1" dest="$2"
+            for name in state keystore hss; do
+                listing=$(ls -A "$dir")
+                if ! printf "%s\n" "$listing" | grep -qxF "$name"; then
+                    echo "the old key volume holds no keystore ($dir has no $name): nothing to copy"
+                    chmod 700 "$dest"
+                    exit 0
+                fi
+                dir="$dir/$name"
+                if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+                    echo "$dir is not a folder" >&2
+                    exit 1
+                fi
+            done
+            wanted=$(cd "$dir" && find .)
+            odd=$(cd "$dir" && find . ! -type d ! -type f)
+            if [ -n "$odd" ]; then
+                echo "the old keystore holds more than folders and files: $odd" >&2
+                exit 1
+            fi
+            cp -R "$dir/." "$dest/"
+            chmod 700 "$dest"
+            find "$dest" -mindepth 1 -type d -exec chmod 700 {} +
+            find "$dest" -type f -exec chmod 600 {} +
+            got=$(cd "$dest" && find .)
+            if [ "$(printf "%s\n" "$got" | sort)" != "$(printf "%s\n" "$wanted" | sort)" ]; then
+                echo "the copy does not hold what the old keystore holds" >&2
+                exit 1
+            fi
+            differ=$(cd "$dir" && find . -type f ! -exec cmp -s {} "$dest/{}" \; -print)
+            if [ -n "$differ" ]; then
+                echo "did not copy intact: $differ" >&2
+                exit 1
+            fi
+            echo "copied the old keystore: $(find "$dest" -type f | wc -l) files, each compared with its original"
+         migrate-key-volume /old /new
+docker volume rm onionpress-onion-keys
+log onionpress-onion-keys
+log ERROR: key volume migration failed; not starting so the old key volume stays intact (see $TMP/home/.onionpress/onionpress.log)
+log ERROR: cannot start without the onion service key volume
+rc=1
+START_ERRORS=[]
+markers=
+volumes=onionpress-arti-state

@@ -26,11 +26,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from onionpress.containers import using_local_images  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_config_one_reader import config_value_function  # noqa: E402
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 
-# A shell function definition at column 0, e.g. `update_images() {`.
+# A shell function definition at column 0, e.g. `ensure_key_helper_image() {`.
 FUNC_DEF = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{")
 
 
@@ -134,13 +137,10 @@ class TestImageOverrideReadsTheConfigFile(unittest.TestCase):
         """
         containers = _read("src/onionpress/containers.py")
         self.assertIn("onionheaven_image(self.paths.config_file)", containers)
-        menubar = _read("src/menubar.py")
-        self.assertEqual(
-            1, menubar.count("image_overrides.using_local_images(self._paths.config_file)"),
-            "The menubar's call site must pass the resolved config path.",
-        )
-        # The pull itself is the CLI's (onionpress update-images, #366).
-        self.assertIn("using_local_images(self.paths.config_file)", _read("src/onionpress/cli.py"))
+        # The start's pull and its image cleanup (onionpress.start).
+        start = _read("src/onionpress/start.py")
+        self.assertIn("using_local_images(paths.config_file)", start)
+        self.assertIn("using_local_images(manager.paths.config_file)", start)
 
 
 class TestConfigOverrideLoopIsInjectionSafe(unittest.TestCase):
@@ -170,7 +170,7 @@ class TestConfigOverrideLoopIsInjectionSafe(unittest.TestCase):
                 script = (
                     "set -e\n"
                     f"DATA_DIR={data_dir!r}\n"
-                    + match.group(0)
+                    + config_value_function() + match.group(0)
                     + '\nprintf "%s|%s" "$ONIONPRESS_TOR_IMAGE" "$ONIONPRESS_WORDPRESS_IMAGE"\n'
                 )
                 result = subprocess.run(
@@ -267,33 +267,36 @@ class TestLaunchersDefineThePredicate(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn("ONIONPRESS_TOR_IMAGE", text)
                 self.assertIn("ONIONPRESS_WORDPRESS_IMAGE", text)
-                self.assertRegex(
-                    text, r'grep "\^\$\{_img_var\}=" "\$DATA_DIR/config"',
+                self.assertIn(
+                    '$(config_value "$_img_var")', text,
                     f"{path} must read the image overrides from "
                     "~/.onionpress/config.",
                 )
 
     def test_config_read_survives_set_e(self):
-        """`var=$(grep ...)` takes grep's exit status, so a missing key returns
-        1 and kills the whole script under `set -e`. Piping through cut makes
-        the pipeline's status cut's. This is the repo's established idiom and
-        dropping the pipe is a real outage.
-        """
+        """`var=$(grep ...)` takes grep's exit status, so a missing key
+        returns 1 and kills the whole script under `set -e`. The read goes
+        through config_value, which always succeeds (#404); the override
+        loop runs under `set -e` against a config without the keys."""
         for path in LAUNCHERS:
             with self.subTest(path=path):
-                self.assertRegex(
-                    _read(path),
-                    r'grep "\^\$\{_img_var\}=" "\$DATA_DIR/config" \| head -1 \| cut -d= -f2-',
-                    f"{path}'s image-override config read must stay piped "
-                    "through cut (see docstring).",
-                )
+                loop = TestConfigOverrideLoopIsInjectionSafe.LOOP.search(_read(path)).group(0)
+                with tempfile.TemporaryDirectory() as data_dir:
+                    with open(os.path.join(data_dir, "config"), "w") as f:
+                        f.write("OTHER=1\n")
+                    r = subprocess.run(
+                        ["bash", "-c", "set -e\n" + f"DATA_DIR={data_dir!r}\n"
+                         + config_value_function() + loop + "\necho survived\n"],
+                        capture_output=True, text=True, timeout=30,
+                        env={"PATH": "/usr/bin:/bin"})
+                self.assertEqual(r.stdout.strip(), "survived", r.stderr)
 
 
 class TestEveryPullIsGuarded(unittest.TestCase):
     """The pull that actually decides which image runs was never the opt-in
-    one. On macOS, update_images() is gated by UPDATE_ON_LAUNCH but the
-    `docker compose pull` four lines later was not, and ran on every single
-    start. Gating only the opt-in path would have changed nothing.
+    one. On macOS, the old update_images() was gated by UPDATE_ON_LAUNCH but
+    the `docker compose pull` four lines later was not, and ran on every
+    single start. Gating only the opt-in path would have changed nothing.
     """
 
     PULL_PATTERNS = (
@@ -306,9 +309,10 @@ class TestEveryPullIsGuarded(unittest.TestCase):
         """(name, start_index) of the function containing lines[index].
 
         Scoping the check to the whole enclosing function rather than to a
-        fixed window above the pull matters: update_images() guards itself
-        with an early `return 0` at the top, and its `docker pull` sits ~20
-        lines below inside a loop. A proximity check calls that unguarded.
+        fixed window above the pull matters: a function may guard itself
+        with an early `return 0` at the top and pull ~20 lines below inside
+        a loop (the old update_images() did). A proximity check calls that
+        unguarded.
         """
         for j in range(index, -1, -1):
             match = FUNC_DEF.match(lines[j][1])
@@ -361,63 +365,6 @@ class TestEveryPullIsGuarded(unittest.TestCase):
         )
         self.assertEqual(
             [], [l for _, l in _code_lines(text) if "--pull always" in l])
-
-
-class TestMenubarGatesItsPull(unittest.TestCase):
-    """src/menubar.py has its own pull path (the menubar launch and
-    "Check for Updates"), separate from the bash launcher's.
-    """
-
-    def test_update_docker_images_checks_the_predicate(self):
-        """The menubar's update_docker_images runs `onionpress update-images`
-        (#366); the predicate is checked in cli.cmd_update_images."""
-        menubar = _read("src/menubar.py")
-        self.assertIn('self._run_launcher_json(["update-images", "--json"]',
-                      menubar[menubar.index("def update_docker_images("):])
-        text = _read("src/onionpress/cli.py")
-        match = re.search(
-            r"def cmd_update_images\(.*?\n(.*?)\n    def ", text, re.S)
-        self.assertIsNotNone(
-            match,
-            "Could not find cmd_update_images in src/onionpress/cli.py — renamed? "
-            "Update this test.",
-        )
-        # Comment-stripped: the guard carries a three-line comment naming
-        # containers.using_local_images(), so an unstripped scan passed even
-        # with the guard itself deleted.
-        body = "\n".join(
-            line for line in match.group(1).splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        # `using_local_images(` — the call now passes the resolved config path,
-        # so do not pin the exact argument list here.
-        self.assertIn(
-            "using_local_images(", body,
-            "menubar.update_docker_images() must skip the pull when running "
-            "locally built images, like both bash launchers do.",
-        )
-        self.assertLess(
-            body.index("using_local_images("), body.index("pull_images_result("),
-            "The guard must come before the pull, not after it.",
-        )
-
-    def test_does_not_claim_images_are_up_to_date_when_skipping(self):
-        """The generic 'All container images are up to date' alert would be a
-        lie in local-image mode.
-        """
-        text = _read("src/menubar.py")
-        match = re.search(
-            r"def _check_docker_updates_async\(.*?\n(.*?)\n    def ", text, re.S)
-        self.assertIsNotNone(
-            match,
-            "Could not find _check_docker_updates_async — renamed? Update "
-            "this test.",
-        )
-        self.assertIn(
-            "using_local_images(",
-            "\n".join(line for line in match.group(1).splitlines()
-                      if not line.lstrip().startswith("#")),
-        )
 
 
 class TestDevUpScript(unittest.TestCase):

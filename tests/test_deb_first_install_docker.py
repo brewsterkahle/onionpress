@@ -26,6 +26,21 @@ manual step needed to finish" on a fresh machine:
   XDG_RUNTIME_DIR), starts dbus.socket, and does not wait for the first
   start's image pulls (--no-block).
 
+The e2e run of 2026-10-30 (Ubuntu 24.04 guest, Ubuntu's docker.io 29.1.3)
+found two more, both the package's (issue #486):
+
+- Ubuntu's docker.io ships no dockerd-rootless-setuptool.sh at all (its
+  contrib holds check-config.sh and nuke-graph-directory.sh), so the
+  postinst fell back to the docker group without a word. The package now
+  carries Docker's own two scripts (linux/docker-rootless/, pinned by
+  hash; tests/test_docker_rootless_vendored.py) as the last resort after
+  PATH and docker.io's contrib, and every skipped or failed attempt says
+  why, at the terminal and in ~/.onionpress/docker-rootless-setup.log.
+- `docker compose` was missing: the Depends alternative
+  `docker-compose-plugin | docker-compose` resolved to Ubuntu's
+  docker-compose, the Python Compose v1 (Debian 13's docker-compose is
+  v2). Every Compose alternative is now v2.
+
 The behavioural part runs the generated postinst as this user under bash,
 every command that reaches the system replaced by a stub that records its
 arguments; runuser runs what it is given, so the setup tool and `docker
@@ -55,10 +70,39 @@ class TestPostinstText(unittest.TestCase):
         self.assertIn("rootlesskit | docker-ce-rootless-extras", _control_depends(),
                       "docker.io only suggests rootlesskit; the rootless setup needs it")
 
+    def test_compose_v1_never_satisfies_depends(self):
+        compose = [d for d in _control_depends() if "compose" in d]
+        self.assertEqual(
+            compose, ["docker-compose-plugin | docker-compose-v2 | docker-compose (>= 2)"],
+            "Ubuntu's docker-compose is the Python v1 with no `docker compose`; its v2 "
+            "is docker-compose-v2, Debian 13's docker-compose is v2")
+
+    def test_tor_browser_is_only_suggested(self):
+        # As a Recommends it brought the system tor daemon (its own
+        # Recommends) on to 127.0.0.1:9050 on Ubuntu, and the launcher then
+        # moved the site to 18080 (e2e, 2026-10-30).
+        control = _read(BUILD)
+        self.assertIn("\nSuggests: torbrowser-launcher\n", control)
+        self.assertNotRegex(control, r"^Recommends:", "nothing Recommended: apt installs it, "
+                            "and what it Recommends, by default on Ubuntu")
+
     def test_the_setup_tool_is_looked_for_in_docker_ios_contrib_too(self):
         self.assertIn("/usr/share/docker.io/contrib", self.postinst)
         self.assertIn("command -v dockerd-rootless-setuptool.sh", self.postinst,
                       "Docker CE's on PATH still counts")
+
+    def test_the_packages_own_scripts_are_the_last_resort(self):
+        self.assertIn("/opt/onionpress/docker-rootless", self.postinst)
+        self.assertLess(self.postinst.index("/usr/share/docker.io/contrib"),
+                        self.postinst.index("/opt/onionpress/docker-rootless"),
+                        "the distro's copy comes first")
+
+    def test_the_reasons_reach_the_log_through_the_users_shell(self):
+        # Issue #490's as_user_logging_to opens the log as the user; the
+        # notes about a skipped or failed attempt go the same way.
+        self.assertIn('as_user_logging_to "$_rootless_log" ">>" echo "$*"', self.postinst)
+        self.assertIn('as_user_logging_to "$_rootless_log" ">" true', self.postinst,
+                      "the log starts when an attempt starts, before the first note")
 
     def test_the_users_manager_is_never_only_reexeced(self):
         self.assertNotIn("daemon-reexec", self.postinst,
@@ -105,7 +149,7 @@ esac
 echo "docker DOCKER_HOST=${DOCKER_HOST:-} $*" >> "$STUB_LOG"
 case "$1" in
     info) [ "$DOCKER_HOST" = "unix:///run/user/1000/docker.sock" ] && [ -e "$STUB_LOG.rootless-up" ] ;;
-    ps) exit 0 ;;
+    ps) [ "${STUB_DOCKER_BUSY:-}" != "1" ] || echo 0123456789ab; exit 0 ;;
     *) exit 1 ;;
 esac
 ''',
@@ -133,6 +177,7 @@ for last; do :; done
 mkdir -p "$last"
 ''',
         "chown": '''#!/bin/bash
+echo "chown $*" >> "$STUB_LOG"
 exit 0
 ''',
         "id": '''#!/bin/bash
@@ -154,6 +199,33 @@ exec /bin/rm "$@"
         "usermod": '''#!/bin/bash
 echo "usermod $*" >> "$STUB_LOG"
 ''',
+        # The package's `onionpress check-docker` (warn_old_docker): fine
+        # unless STUB_OLD_DOCKER=1, when it is too old (exit 1), or
+        # STUB_NO_DOCKER_ANSWER=1, when docker did not answer (exit 2).
+        "python3": '''#!/bin/bash
+echo "python3 $*" >> "$STUB_LOG"
+case "$*" in
+    *"/opt/onionpress/lib check-docker --json")
+        if [ "${STUB_OLD_DOCKER:-}" = "1" ]; then
+            echo '{"ok": false, "engine": "29.1.3", "compose": "1.29.2", "problems": ["OnionPress needs Docker Compose 2.22 or later; this machine has 1.29.2. Debian 13: apt install docker-compose", "second line"]}'
+            exit 1
+        fi
+        if [ "${STUB_NO_DOCKER_ANSWER:-}" = "1" ]; then
+            echo '{"ok": false, "engine": "", "compose": "", "problems": ["Docker did not say its version"]}'
+            exit 2
+        fi
+        echo '{"ok": true, "engine": "29.1.3", "compose": "2.40.3", "problems": []}'
+        exit 0 ;;
+esac
+exit 0
+''',
+        # Ubuntu 24.04's RootlessKit 1.1.1 knows no --detach-netns;
+        # STUB_ROOTLESSKIT_V2=1 answers like 2.x, which does.
+        "rootlesskit": '''#!/bin/bash
+echo "rootlesskit $*" >> "$STUB_LOG"
+echo "   --copy-up value   mount a filesystem and copy-up the contents"
+[ "${STUB_ROOTLESSKIT_V2:-}" != "1" ] || echo "   --detach-netns   detach network namespaces"
+''',
         "logname": '''#!/bin/bash
 exit 1
 ''',
@@ -170,7 +242,7 @@ exit 127
 '''
 
     TOOLS = ("bash", "sh", "env", "grep", "awk", "cut", "cat", "mkdir",
-             "tr", "head", "date", "chmod", "touch")
+             "tr", "head", "date", "chmod", "touch", "printf", "echo", "true", "jq")
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="op-postinst-first-")
@@ -190,6 +262,8 @@ exit 127
         os.mkdir(self.contrib)
         self.ce_bin = os.path.join(self.tmp, "ce-bin")
         os.mkdir(self.ce_bin)
+        self.packaged = os.path.join(self.tmp, "opt-onionpress-docker-rootless")
+        os.mkdir(self.packaged)
         self.home = os.path.join(self.tmp, "home")
         os.mkdir(self.home)
         self.log = os.path.join(self.tmp, "calls.log")
@@ -210,12 +284,22 @@ exit 127
         self._write_exe(os.path.join(self.ce_bin, "dockerd-rootless-setuptool.sh"), self.SETUPTOOL)
         self._write_exe(os.path.join(self.ce_bin, "dockerd-rootless.sh"), "#!/bin/sh\n")
 
+    def _packaged_layout(self):
+        """The package's own copy of Docker's scripts (/opt/onionpress/docker-rootless)."""
+        self._write_exe(os.path.join(self.packaged, "dockerd-rootless-setuptool.sh"), self.SETUPTOOL)
+        self._write_exe(os.path.join(self.packaged, "dockerd-rootless.sh"), "#!/bin/sh\n")
+
+    def _rootless_log_text(self):
+        with open(os.path.join(self.home, ".onionpress", "docker-rootless-setup.log")) as f:
+            return f.read()
+
     def _run(self, path_extra=(), **stub_env):
         env = {
             "PATH": ":".join((self.bin, *path_extra)),
             "HOME": self.home, "SUDO_USER": "opuser", "LC_ALL": "C",
             "STUB_LOG": self.log, "STUB_HOME": self.home,
             "ONIONPRESS_DOCKER_IO_CONTRIB": self.contrib,
+            "ONIONPRESS_DOCKER_ROOTLESS_DIR": self.packaged,
         }
         env.update({k: str(v) for k, v in stub_env.items()})
         r = subprocess.run(["bash", self.script, "configure"], capture_output=True,
@@ -248,8 +332,89 @@ exit 127
         self.assertFalse([c for c in calls if "user@1000.service" in c], calls)
         self.assertNotIn("systemctl enable --now docker.socket docker.service", calls,
                          "the system daemon stays off once rootless runs")
-        with open(os.path.join(self.home, ".onionpress", "docker-rootless-setup.log")) as f:
-            self.assertIn("docker: not found", f.read(), "the tool's output is kept")
+        self.assertIn("docker: not found", self._rootless_log_text(), "the tool's output is kept")
+
+    def test_the_packages_own_scripts_set_up_rootless_where_docker_io_ships_none(self):
+        # Ubuntu 24.04's docker.io 29.1.3: no setup tool on PATH or in contrib.
+        self._packaged_layout()
+        r, calls = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tool = [c for c in calls if c.startswith("setuptool ")]
+        self.assertEqual(len(tool), 1, calls)
+        self.assertTrue(tool[0].startswith(f"setuptool PATH={self.packaged}:"), tool[0])
+        self.assertIn("Docker mode: rootless (no logout required).", r.stdout)
+        self.assertNotIn("One manual step needed", r.stdout)
+        self.assertFalse([c for c in calls if c.startswith("usermod")], calls)
+
+    def test_an_old_rootlesskit_gets_the_no_detach_netns_drop_in(self):
+        # Ubuntu 24.04: RootlessKit 1.1.1 refuses the --detach-netns that
+        # Docker's wrapper passes by default, so the daemon never started
+        # (e2e, 2026-10-30).
+        self._packaged_layout()
+        r, calls = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        drop_in = os.path.join(self.home, ".config", "systemd", "user", "docker.service.d",
+                               "onionpress-rootlesskit.conf")
+        with open(drop_in) as f:
+            self.assertEqual(f.read(), "[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=false\n")
+        probe = calls.index("rootlesskit --help")
+        tool = calls.index([c for c in calls if c.startswith("setuptool ")][0])
+        self.assertLess(probe, tool, "the drop-in is in place before the tool starts the unit")
+        self.assertIn("RootlessKit here predates --detach-netns", self._rootless_log_text())
+        self.assertIn("Docker mode: rootless (no logout required).", r.stdout)
+
+    def test_a_rootlesskit_with_detach_netns_gets_no_drop_in(self):
+        self._docker_io_layout()
+        r, calls = self._run(STUB_ROOTLESSKIT_V2=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config", "systemd", "user",
+                                                     "docker.service.d")))
+        self.assertNotIn("predates", r.stdout)
+
+    def test_too_old_a_docker_is_warned_about_and_the_install_goes_on(self):
+        self._docker_io_layout()
+        r, calls = self._run(STUB_OLD_DOCKER=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # The stub logs the multi-line -c program as several lines.
+        check = [c for c in calls if c.endswith("/opt/onionpress/lib check-docker --json")]
+        self.assertEqual(len(check), 1, calls)
+        self.assertTrue(any(c.startswith("python3 -I -B -c") for c in calls),
+                        "the package's Python, path injected through argv")
+        self.assertIn("WARNING: OnionPress will not start on this machine's Docker", r.stdout)
+        self.assertIn("  OnionPress needs Docker Compose 2.22 or later; this machine has 1.29.2", r.stdout)
+        self.assertIn("\n  second line\n", r.stdout)
+        self.assertIn("onionpress check-docker", r.stdout)
+        self.assertTrue(self._enabled_onionpress(calls), "the install still finishes")
+
+    def test_a_new_enough_or_silent_docker_gets_no_warning(self):
+        self._docker_io_layout()
+        for env in ({}, {"STUB_NO_DOCKER_ANSWER": 1}):
+            with self.subTest(env):
+                r, _calls = self._run(**env)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertNotIn("WARNING: OnionPress will not start", r.stdout)
+
+    def test_the_distros_copy_comes_before_the_packages(self):
+        self._docker_io_layout()
+        self._packaged_layout()
+        r, calls = self._run()
+        tool = [c for c in calls if c.startswith("setuptool ")]
+        self.assertEqual(len(tool), 1, calls)
+        self.assertTrue(tool[0].startswith(f"setuptool PATH={self.contrib}:"), tool[0])
+
+    def test_a_link_at_the_logs_name_is_not_followed(self):
+        self._docker_io_layout()
+        data_dir = os.path.join(self.home, ".onionpress")
+        os.mkdir(data_dir, 0o700)
+        target = os.path.join(self.tmp, "somebody-elses-file")
+        open(target, "w").close()
+        os.symlink(target, os.path.join(data_dir, "docker-rootless-setup.log"))
+        r, calls = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Docker mode: rootless (no logout required).", r.stdout,
+                      "a bad log name costs the log, not the setup")
+        with open(target) as f:
+            self.assertEqual(f.read(), "", "nothing was written through the link")
 
     def test_the_first_install_needs_no_session_bus(self):
         self._docker_io_layout()
@@ -309,12 +474,27 @@ exit 127
         self.assertFalse(self._enabled_onionpress(calls), calls)
         self.assertIn("One manual step needed to finish", r.stdout)
 
-    def test_no_setup_tool_goes_to_the_group_path_with_docker_left_on(self):
+    def test_no_setup_tool_goes_to_the_group_path_with_docker_left_on_and_says_why(self):
         r, calls = self._run()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("systemctl disable --now docker.service docker.socket", calls)
         self.assertIn("usermod -aG docker opuser", calls)
         self.assertIn("systemctl restart user@1000.service", calls)
+        self.assertIn("Docker mode: system daemon (docker group).", r.stdout)
+        why = ("Rootless Docker was not tried: no dockerd-rootless-setuptool.sh on PATH, "
+               f"in {self.contrib} or in {self.packaged}")
+        self.assertIn(why, r.stdout)
+        self.assertIn(why, self._rootless_log_text(), "the reason is kept for the evidence")
+
+    def test_a_busy_system_daemon_is_left_alone_and_said_so(self):
+        self._docker_io_layout()
+        r, calls = self._run(STUB_DOCKER_BUSY=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse([c for c in calls if c.startswith("setuptool ")], calls)
+        self.assertNotIn("systemctl disable --now docker.service docker.socket", calls)
+        why = "Rootless Docker was not tried: the system Docker daemon is running other containers"
+        self.assertIn(why, r.stdout)
+        self.assertIn(why, self._rootless_log_text())
         self.assertIn("Docker mode: system daemon (docker group).", r.stdout)
 
 

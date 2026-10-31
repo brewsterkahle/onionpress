@@ -1,0 +1,6 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+log ERROR: Docker daemon not ready after 180s; not starting
+rc=1
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state

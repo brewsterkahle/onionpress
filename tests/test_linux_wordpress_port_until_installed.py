@@ -172,16 +172,18 @@ class TestUnderBash(unittest.TestCase):
 
     def test_start_containers_composes_with_it(self):
         body = _bash_function(_read(LAUNCHER), "start_containers")
-        self.assertIn(
-            'ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \\\n'
-            '            docker compose up -d wordpress db onionheaven autoheal', body)
+        # The core `compose up` is start-containers' (#442.8), handed the
+        # address in its environment (tests/test_start_core.py).
+        self.assertIn('ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \\\n'
+                      '        op_py --data-dir "$DATA_DIR" start-containers --until-core', body)
         # Once the verdict is in: installed sites end as every setup does,
         # the rest stay on loopback with the heartbeat client held.
         self.assertRegex(body, r'if \$wp_installed; then\n[^\n]*\n\s*after_wordpress_installed\n')
         self.assertRegex(body, r'\n\s*bind_wordpress_port_for_install_state false\n'
                                r'\s*hold_heartbeat_client_until_installed\n')
+        # ...before Tor starts (in start-post-up, #442.7).
         self.assertLess(body.index("hold_heartbeat_client_until_installed"),
-                        body.index("docker compose up -d tor onionheaven"))
+                        body.index('start_post_up "$wp_installed"'))
 
     def test_only_wordpress_s_port_follows_the_variable(self):
         """The per-command override reaches only the service it is for."""
@@ -290,14 +292,20 @@ class TestEverySetupPathEndsThere(unittest.TestCase):
     def test_provision_post_install_subcommand(self):
         case = _case(_read(LAUNCHER), "provision-post-install")
         self.assertRegex(case, r"op_py provision-post-install \\\n[^\n]*\n[^\n]*\n(\s*#[^\n]*\n)*"
-                               r"\s*if wp_is_installed; then\n\s*after_wordpress_installed\n\s*fi$")
+                               r"\s*if wp_is_installed; then\n\s*after_wordpress_installed\n"
+                               r"\s*start_cloudflare_tunnel true\n\s*fi$")
 
     def test_the_setup_case(self):
+        # `onionpress setup` installs through install_fresh_wordpress
+        # (#442.10), which runs this launcher's provision-post-install case:
+        # that one ends with after_wordpress_installed.
         case = _case(_read(LAUNCHER), "setup")
-        self.assertRegex(case, r"op_py provision-post-install \\\n[^\n]*\n[^\n]*\n(\s*#[^\n]*\n)*"
-                               r"\s*after_wordpress_installed\n")
+        self.assertIn('run_setup "$@" || setup_rc=$?', case)
+        provision = _case(_read(LAUNCHER), "provision-post-install")
+        self.assertIn("after_wordpress_installed", provision)
         # --from-backup restarts the containers: start_containers decides.
-        self.assertIn("stop_containers\n                start_containers", case)
+        self.assertIn('stop_containers || log "WARNING: setup: the stop failed; starting the '
+                      'containers anyway"\n                    start_containers', case)
 
     def test_the_marker_is_removed_with_its_sibling(self):
         """A removal of ~/.onionpress state must not leave only this one."""
@@ -305,6 +313,31 @@ class TestEverySetupPathEndsThere(unittest.TestCase):
         self.assertIn('WP_INSTALLED_MARKER=".wordpress-installed"', text)
         self.assertIn('rm -f "${DATA_DIR:?}/${WP_INSTALLED_MARKER:?}"', text)
 
+
+
+class TestTorStartsLeaveWordPressAlone(unittest.TestCase):
+    """tor depends on wordpress in docker-compose.yml: a plain `compose up
+    tor` recreates WordPress under the environment's ONIONPRESS_BIND_HOST
+    (the config's, exported by the launcher), so the start that bound the
+    port to 127.0.0.1 until setup published the installer to the network
+    as soon as Tor came up (found by the live Linux checks of #499; the
+    bash start did the same). Every Python start of Tor says --no-deps."""
+
+    def test_every_tor_up_says_no_deps(self):
+        import re
+        src = os.path.join(PROJECT_ROOT, "src", "onionpress")
+        found = []
+        for name in sorted(os.listdir(src)):
+            if not name.endswith(".py"):
+                continue
+            with open(os.path.join(src, name), encoding="utf-8") as f:
+                text = f.read()
+            for m in re.finditer(r'\["up", "-d"(?:, "[^"]+")*, "tor"', text):
+                found.append((name, m.group(0)))
+        self.assertTrue(found, "no Tor start found: the pattern is stale")
+        self.assertEqual([f for f in found if '"--no-deps"' not in f[1]], [])
+        with open(os.path.join(PROJECT_ROOT, "linux", "onionpress"), encoding="utf-8") as f:
+            self.assertNotRegex(f.read(), r"(?m)^[^#]*compose[^\n#]*\bup -d tor\b")
 
 if __name__ == "__main__":
     unittest.main()

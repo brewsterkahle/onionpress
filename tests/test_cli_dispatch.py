@@ -34,9 +34,9 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
-    analytics_sharing, app_commands, backup, cli, config, confirm, containers, daemon,
-    derivatives, handle_action, launcher_ops, multisite, onionheaven, redact, scrub,
-    wordpress_egress,
+    analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
+    derivatives, docker_versions, handle_action, launcher_ops, linux_status, multisite, onionheaven,
+    redact, scrub, setup_logic, start, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -59,7 +59,7 @@ def parser_tree():
 
     with mock.patch.object(argparse.ArgumentParser, "parse_args", grab):
         with contextlib.suppress(Captured):
-            cli.main(["start"])
+            cli.main(["stop"])
     tree = {}
 
     def walk(parser, path):
@@ -126,10 +126,7 @@ def positional_launcher(test, m):
 
 ROWS = [
     # ---- OnionPressCLI's own commands (constructed with the data dir) ----
-    Row("start", [], "CLI().cmd_start", mock.call()),
-    Row("start", ["start"], "CLI().cmd_start", mock.call()),
     Row("stop", ["stop"], "CLI().cmd_stop", mock.call()),
-    Row("restart", ["restart"], "CLI().cmd_restart", mock.call()),
     Row("status", ["status"], "CLI().cmd_status", mock.call()),
     Row("logs", ["logs"], "CLI().cmd_logs", mock.call()),
     # The app's functions as subcommands (issue #382, onionpress.app_commands):
@@ -150,6 +147,8 @@ ROWS = [
     Row("check-reachability", ["check-reachability", "--json"],
         "app_commands.check_reachability_command",
         mock.call(ANY, ANY, json_output=True, out=ANY), rc=2, returns=2),
+    Row("check-docker", ["check-docker", "--json"], "docker_versions.check_command",
+        mock.call(ANY, json_output=True, out=ANY), rc=1, returns=1, setup_cli=False),
     Row("open", ["open", "onion"], "app_commands.open_command",
         mock.call("onion", ANY, ANY, out=ANY), rc=0, returns=0),
     Row("onionname show", ["onionname", "show", "--json"], "app_commands.onionname_show",
@@ -188,8 +187,6 @@ ROWS = [
                   "--confirmed", "hub-holds-key"], "CLI().cmd_reset",
         mock.call(yes=False, check=True, json_output=True,
                   confirmed=frozenset({"reset", "hub-holds-key"}))),
-    Row("update-images", ["update-images", "--json"], "CLI().cmd_update_images",
-        mock.call(json_output=True)),
     Row("smoke-test-wayback", ["smoke-test-wayback"], "CLI().cmd_smoke_test_wayback", mock.call()),
     Row("check-for-update", ["check-for-update", "--json", "--current", "1.2.3"],
         "CLI().cmd_check_for_update", mock.call(json_output=True, current="1.2.3")),
@@ -203,6 +200,10 @@ ROWS = [
         "CLI().cmd_prune_image_derivatives", mock.call("/st/uploads")),
     Row("pack-backup", ["pack-backup", "--staging", "/st", "--output", "/b.zip"],
         "CLI().cmd_pack_backup", mock.call("/st", "/b.zip", "pw"), stdin="pw\n"),
+    Row("backup-metadata", ["backup-metadata", "--version", "1"],
+        "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
+        excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
+        with_host_secrets=True, secrets_left_out=[]), rc=0, returns={"a": 1}),
     Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
         "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 
@@ -326,6 +327,8 @@ ROWS = [
         "redact.wordpress_log_excerpt", mock.call("/l.log", D("")), rc=0, returns="tail\n"),
     Row("wordpress-status", ["wordpress-status"], "redact.status_for_wordpress",
         mock.call({"a": 1}), rc=0, returns={"a": 1}, stdin='{"a": 1}'),
+    Row("linux-status", ["linux-status", "--field", "state=running"],
+        "linux_status.build", mock.call(ANY), rc=0, returns={"state": "running"}),
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
         returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"],
@@ -366,8 +369,49 @@ ROWS = [
             m.return_value.migrate_tor_network.assert_called_once_with(),
             m.return_value.retire_old_onionheaven_containers.assert_not_called(),
             t.assertEqual(m.call_args.args[2].wp_port, 8080))),
+    # #442.11: the launchers' `setup)` case runs this; setup_logic decides
+    # (tests/test_terminal_setup.py), never OnionPressCLI.
+    Row("setup", ["setup", "--user", "alice", "--title", "T", "--launcher", "/l"],
+        "setup_logic.setup_from_terminal",
+        mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
+                  user="alice", title="T", from_backup="", ia_account="", log=ANY),
+        rc=0, returns=0, setup_cli=False,
+        check=lambda t, m: t.assertEqual(
+            (m.call_args.kwargs["user"], m.call_args.kwargs["title"],
+             m.call_args.kwargs["launcher_bin"]), ("alice", "T", "/l"))),
+    Row("setup", ["setup", "--from-backup", "/b.zip"], "setup_logic.setup_from_terminal",
+        mock.call(data_dir=ANY, mac=False, launcher_bin=ANY, docker=ANY, manager=ANY,
+                  user="", title="", from_backup="/b.zip", ia_account="", log=ANY),
+        rc=10, returns=10, setup_cli=False),
+    # #442.8: the launchers' start_containers() is start.start_containers
+    # (Linux --until-core); exit 1 stops the start, 0 / 3 say whether
+    # WordPress is installed.
+    Row("start-containers", ["start-containers", "--docker-dir", "/d", "--bin-dir", "/b",
+                             "--scripts-dir", "/s", "--themes-dir", "/t", "--plugins-dir", "/p",
+                             "--wp-port", "18080", "--errors-file", "/e"],
+        "start.start_containers",
+        mock.call(ANY, mac=True, wp_port=18080, errors=ANY, bin_dir="/b", scripts_dir="/s",
+                  themes_dir="/t", plugins_dir="/p", until_core=False, log=ANY),
+        rc=0, os_name="macos", returns=0,
+        check=lambda t, m: (t.assertEqual(m.call_args.args[0].paths.docker_dir, "/d"),
+                            t.assertEqual(m.call_args.kwargs["errors"].path, "/e"))),
+    Row("start-containers", ["start-containers", "--until-core"], "start.start_containers",
+        mock.call(ANY, mac=False, wp_port=8080, errors=None, bin_dir=ANY, scripts_dir="",
+                  themes_dir="", plugins_dir="", until_core=True, log=ANY),
+        rc=3, returns=3),
+    # #442.7: the launchers' start_post_up() is start.post_up; best effort, 0.
+    Row("start-post-up", ["start-post-up", "--wordpress-installed", "yes", "--docker-dir", "/d",
+                          "--scripts-dir", "/s", "--themes-dir", "/t", "--plugins-dir", "/p"],
+        "start.post_up", mock.call(ANY, mac=False, installed=True, errors=None,
+                                   themes_dir="/t", plugins_dir="/p", scripts_dir="/s", log=ANY),
+        rc=0, returns=None),
+    Row("start-post-up", ["start-post-up", "--wordpress-installed", "no", "--themes-dir", "/t",
+                          "--plugins-dir", "/p", "--errors-file", "/e"],
+        "start.post_up", mock.call(ANY, mac=True, installed=False, errors=ANY,
+                                   themes_dir="/t", plugins_dir="/p", scripts_dir="", log=ANY),
+        rc=0, os_name="macos", returns=mock.Mock(side_effect=RuntimeError("x"))),
     # Phase 4 (#120): the launchers' migrate_key_volume() is ContainerManager's;
-    # unlike the two above its status matters: 1 stops the start.
+    # unlike the retire and move rows its status matters: 1 stops the start.
     Row("migrate-key-volume", ["migrate-key-volume"],
         "cli.ContainerManager", mock.call(ANY, ANY, ANY, log_func=ANY), rc=0,
         returns=mock.Mock(**{"migrate_key_volume.return_value": True}),
@@ -396,6 +440,17 @@ ROWS = [
         "onionheaven.is_onionheaven_instance", mock.call(ONION), rc=0, returns=True),
     Row("is-onionheaven-hub", ["is-onionheaven-hub"],
         "onionheaven.is_onionheaven_instance", mock.call(""), rc=1, returns=False),
+    # #442.3: the launchers' install_bundled_plugins() / setup_bundled_plugins()
+    # are onionpress.bundled_plugins, never OnionPressCLI; best effort, so 0
+    # whatever happens (a raised error is a logged WARNING).
+    Row("install-bundled-plugins", ["install-bundled-plugins", "--scripts-dir", "/s"],
+        "bundled_plugins.install_bundled_plugins", mock.call(ANY), rc=0, returns=None,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].scripts_dir, "/s")),
+    Row("setup-bundled-plugins", ["setup-bundled-plugins", "--scripts-dir", "/s"],
+        "bundled_plugins.setup_bundled_plugins", mock.call(ANY), rc=0, returns=None),
+    Row("setup-bundled-plugins", ["setup-bundled-plugins"],
+        "bundled_plugins.setup_bundled_plugins", mock.call(ANY), rc=0,
+        returns=mock.Mock(side_effect=RuntimeError("x"))),
     # Phase 4 (#120): the launchers' using_local_images() is this.
     Row("using-local-images", ["using-local-images"], "containers.using_local_images",
         mock.call(D("config")), rc=0, returns=True),
@@ -433,6 +488,14 @@ ROWS = [
         mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
         mock.call(password=None, clean=True), setup_cli=True),
+    # The password as backup's: from the environment (then gone from it),
+    # the old positional with a warning (TestScrubPassword).
+    Row("scrub", ["scrub"], "scrub.run_scrub",
+        mock.call(password="pw", clean=False), setup_cli=True,
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
+    Row("scrub", ["scrub", "argvpw"], "scrub.run_scrub",
+        mock.call(password="argvpw", clean=False), setup_cli=True,
+        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 ]
 
 MODULES = {
@@ -441,6 +504,8 @@ MODULES = {
     "wordpress_egress": wordpress_egress, "launcher_ops": launcher_ops,
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
+    "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
+    "start": start, "setup_logic": setup_logic, "linux_status": linux_status,
 }
 
 
@@ -551,6 +616,13 @@ class TestDispatch(unittest.TestCase):
         for row in ROWS:
             with self.subTest(row=repr(row)):
                 self.run_row(row)
+
+    def test_scrub_warns_only_about_a_password_on_argv(self):
+        scrub_rows = [r for r in ROWS if r.argv[:1] == ["scrub"]]
+        _, err = self.run_row(next(r for r in scrub_rows if "argvpw" in r.argv))
+        self.assertIn("visible to other users", err)
+        _, err = self.run_row(next(r for r in scrub_rows if r.argv == ["scrub"]))
+        self.assertNotIn("visible to other users", err)
 
     def test_handle_action_prints_the_result_as_json_only_when_asked(self):
         out, _ = self.run_row(ROWS[[r.argv[:1] == ["handle-action"] for r in ROWS].index(True)])

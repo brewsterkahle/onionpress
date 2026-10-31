@@ -22,7 +22,7 @@ def main():
                                                  "/Applications/OnionPress.app") if os.path.isdir(p)), None)
     facts = platforms.probe_host(mac_app=app_hint)
     offer_list = platforms.offers(facts)
-    wanted = [p for p in args.platforms.split(",") if p] or None
+    wanted = [platforms.canonical_platform(p) for p in args.platforms.split(",") if p] or None
     chosen, not_tested = platforms.choose(offer_list, wanted)
 
     built = [p for p in (args.mac_app, os.path.join(PROJECT_DIR, "OnionPress.app"),
@@ -43,8 +43,10 @@ def main():
             print(f"Would not test: {label} — {not_tested[plat]}")
     if "macos" in chosen:
         print(f"Mac build:      {built[0]}")
-    if "debian" in chosen:
-        print("Debian build:   built in the VM from this checkout (or pass --deb/--release)")
+    if "linux" in chosen:
+        print("Linux build:    built in the VM from this checkout (or pass --deb/--release)")
+        print(f"Linux guest:    {platforms.DEFAULT_LINUX_GUEST} (or --guest "
+              f"{'|'.join(g for g in platforms.LINUX_GUESTS if g != platforms.DEFAULT_LINUX_GUEST)})")
     live = safety.live_onion_address(real_home())
     if live:
         print(f"Live install:   {live} — test nodes are isolated from it and refused if they reach it")

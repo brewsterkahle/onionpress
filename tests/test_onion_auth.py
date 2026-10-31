@@ -585,7 +585,7 @@ class TestNothingShippedSignsWithoutLibsodium(unittest.TestCase):
         self.assertIn("if not onion_auth.signing_uses_libsodium():", main[:main.index("wait_for_ready()")])
         control = self._read("build/build-linux.sh")
         self.assertIn("python3-nacl (>= 1.5.0)",
-                      control[control.index("Depends:"):control.index("Recommends:")])
+                      control[control.index("Depends:"):control.index("Suggests:")])
 
 
 class TestCopiesAreOneFile(unittest.TestCase):

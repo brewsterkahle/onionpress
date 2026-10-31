@@ -5,13 +5,16 @@ Handles:
 - The Settings page allowlist and `onionpress config` (CLI_CONFIG_KEYS)
 - Validating onion address prefixes
 
-Database secrets live in secrets_file.py, port selection in ports.py and
-stop_stale_colima in colima.py (issue #482); their names are re-exported
-here so existing `config.X` callers keep working.
+Database secrets live in secrets_file.py and port selection in ports.py
+(issue #482); their names are re-exported here so existing `config.X`
+callers keep working.
 """
 
+import contextlib
+import fcntl
 import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 
@@ -24,23 +27,10 @@ from .secrets_file import (  # noqa: F401  (re-exported, #482)
 )
 
 
-def __getattr__(name):
-    # colima.py imports this module, so its stop_stale_colima is
-    # re-exported lazily rather than imported at the top.
-    if name == "stop_stale_colima":
-        from .colima import stop_stale_colima
-        return stop_stale_colima
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 # Default config values matching config-template.txt
 DEFAULTS = {
     "ADDRESS_PREFIX": "op2",
     "INSTALL_IA_PLUGIN": "yes",
-    # Images are pinned by digest and a launch pulls only the pins a
-    # release moved; yes re-pulls every image at every launch, which
-    # contacts the registry each time (issue #36).
-    "UPDATE_ON_LAUNCH": "no",
     "LAUNCH_ON_LOGIN": "yes",
     "PREVENT_SLEEP": "normal",
     "VM_MEMORY": "1",
@@ -68,7 +58,7 @@ DEFAULTS = {
 SAFE_CONFIG_KEYS = frozenset({
     "ADDRESS_PREFIX",
     "VM_MEMORY", "VM_CPU", "VM_DISK",
-    "INSTALL_IA_PLUGIN", "UPDATE_ON_LAUNCH", "LAUNCH_ON_LOGIN", "START_ON_BOOT",
+    "INSTALL_IA_PLUGIN", "LAUNCH_ON_LOGIN", "START_ON_BOOT",
     "PREVENT_SLEEP",
     "REGISTER_WITH_ONIONHEAVEN", "ONIONHEAVEN_ADDRESS", "ONIONHEAVEN_MAX_SERVICES",
     "ONIONHEAVEN_PROPAGATION_DELAY",
@@ -130,7 +120,6 @@ def _int_between(low, high):
 CLOUDFLARE_TOKEN_PATTERN = r"[A-Za-z0-9+/_-]{32,2048}={0,2}"
 
 SETTINGS_PAGE_KEYS = {
-    "UPDATE_ON_LAUNCH": _one_of("yes", "no"),
     "LAUNCH_ON_LOGIN": _one_of("yes", "no"),      # macOS
     "START_ON_BOOT": _one_of("yes", "no"),        # Linux
     "PREVENT_SLEEP": _one_of("normal", "on-battery", "never"),
@@ -243,86 +232,133 @@ def apply_settings_updates(path: str, updates) -> SettingsUpdate:
     return result
 
 
-def read_config(path: str) -> dict:
-    """Read all key=value pairs from a config file.
+# One rule for reading the config file, here and in the launchers'
+# `config_value` (issue #404; tests/test_config_one_reader.py holds them
+# together): a line is KEY's when, stripped, it starts with `KEY=`; the
+# first such line wins (the one write_value sets; #323 read the token so);
+# the value is everything after its first `=`, stripped. Comments (#) and blank lines are skipped. Values are NOT
+# unquoted: the format is bare KEY=value, not shell quoting.
+def _config_line(line: str):
+    """(key, value) of a config line, or None for a comment or blank."""
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    key, value = line.split("=", 1)
+    return key, value.strip()
 
-    Skips comments (#) and blank lines. Values are NOT unquoted —
-    the config format uses bare values (KEY=value), not shell quoting.
-    """
+
+def _read_lines(path: str) -> list:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.readlines()
+    except FileNotFoundError:
+        return []
+
+
+def read_config(path: str) -> dict:
+    """Every KEY=value of the config file, by the rule above."""
     result = {}
-    if not os.path.exists(path):
+    try:
+        lines = _read_lines(path)
+    except OSError:
         return result
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, value = line.split("=", 1)
-                result[key.strip()] = value.strip()
+    for line in lines:
+        parsed = _config_line(line)
+        if parsed:
+            result.setdefault(parsed[0], parsed[1])
     return result
 
 
 def read_value(path: str, key: str, default: str = "") -> str:
-    """Read a single value from the config file."""
-    if not os.path.exists(path):
-        return default
+    """One value of the config file, by the rule above."""
+    return read_config(path).get(key, default)
+
+
+@contextlib.contextmanager
+def _config_lock(path: str):
+    """An flock on `.config.lock` next to *path* around a read-modify-write
+    (issue #404): two writers no longer lose each other's change. Going on
+    without it when the lock file cannot be used, as before it existed."""
+    fd = None
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith(f"{key}="):
-                    return line.split("=", 1)[1]
+        fd = os.open(os.path.join(os.path.dirname(os.path.abspath(path)), CONFIG_LOCK),
+                     os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
     except OSError:
-        pass
-    return default
+        if fd is not None:
+            os.close(fd)
+        fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _replace_file(path: str, text: str) -> None:
+    """Write *path* whole by a temp file and a rename (issue #404): a reader
+    sees the old file or the new one, never a truncated one. A file this
+    creates is 0600 (issue #397: it may hold CLOUDFLARE_TUNNEL_TOKEN),
+    whatever the umask; an existing file keeps its mode."""
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+    tmp = f"{path}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fchmod(f.fileno(), mode)
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _with_values(lines: list, values: dict) -> list:
+    """*lines* with each KEY's first line set to KEY=value and its later
+    lines (duplicates a hand edit left) dropped; a new KEY is appended."""
+    out, done = [], set()
+    for line in lines:
+        parsed = _config_line(line)
+        if parsed and parsed[0] in values:
+            if parsed[0] not in done:
+                out.append(f"{parsed[0]}={values[parsed[0]]}\n")
+                done.add(parsed[0])
+            continue
+        out.append(line)
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    out += [f"{k}={v}\n" for k, v in values.items() if k not in done]
+    return out
 
 
 def write_value(path: str, key: str, value: str) -> None:
-    """Write a single key=value to the config file, updating in place or appending."""
-    lines = []
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-
-    found = False
-    for i, line in enumerate(lines):
-        if line.strip().startswith(f"{key}="):
-            lines[i] = f"{key}={value}\n"
-            found = True
-            break
-
-    if not found:
-        lines.append(f"{key}={value}\n")
-
-    with _open_for_writing(path) as f:
-        f.writelines(lines)
-
-
-def _open_for_writing(path: str):
-    """Open the config file for rewriting. A file this creates is 0600
-    (issue #397: it may hold CLOUDFLARE_TUNNEL_TOKEN), whatever the umask;
-    an existing file keeps its mode."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    return os.fdopen(fd, "w", encoding="utf-8")
+    """Set KEY=value in the config file: one line for KEY, where it was."""
+    write_config(path, {key: value})
 
 
 def remove_value(path: str, key: str) -> None:
     """Remove every KEY= line from the config file (comments stay)."""
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
-    kept = [line for line in lines if not line.strip().startswith(f"{key}=")]
-    if len(kept) != len(lines):
-        with _open_for_writing(path) as f:
-            f.writelines(kept)
+    with _config_lock(path):
+        lines = _read_lines(path)
+        kept = [line for line in lines if (_config_line(line) or ("",))[0] != key]
+        if len(kept) != len(lines):
+            _replace_file(path, "".join(kept))
 
 
 def write_config(path: str, values: dict) -> None:
-    """Write multiple key=value pairs, updating existing or appending new."""
-    for key, value in values.items():
-        write_value(path, key, value)
+    """Set several KEY=value pairs in one locked rewrite."""
+    if not values:
+        return
+    with _config_lock(path):
+        _replace_file(path, "".join(_with_values(_read_lines(path), dict(values))))
 
 
 def ensure_config(paths: OnionPressPaths) -> None:
@@ -532,7 +568,6 @@ VM_CREATION_ONLY = frozenset({"VM_DISK"})
 # One line per key for `config list --help`.
 CONFIG_KEY_HELP = {
     "ADDRESS_PREFIX": "prefix a new onion address is generated with (restart; the old address stops working)",
-    "UPDATE_ON_LAUNCH": "re-pull every container image at each launch (default no: images are pinned, a launch fetches only what a release moved)",
     "LAUNCH_ON_LOGIN": "macOS: start OnionPress at login",
     "START_ON_BOOT": "Linux: start OnionPress at boot",
     "PREVENT_SLEEP": "normal (sleep as usual), on-battery (awake on AC) or never",
@@ -654,40 +689,45 @@ def hand_edit_keys_present(path: str) -> list:
 # that its status loop reads and removes (take_config_changes), listing
 # the keys that changed.
 CONFIG_CHANGED_MARKER = ".config-changed"
+# The flock writers of the config file and of the marker take (#404).
+CONFIG_LOCK = ".config.lock"
 
 
 def note_config_changed(data_dir: str, keys) -> None:
-    """Add *keys* to the marker (kept if a reader has not taken it yet)."""
+    """Add *keys* to the marker (kept if a reader has not taken it yet).
+    Writers hold the config lock, so two never lose each other's keys."""
     keys = [k for k in keys if re.fullmatch(r"[A-Z][A-Z0-9_]*", k)]
     if not keys:
         return
     path = os.path.join(data_dir, CONFIG_CHANGED_MARKER)
-    present = take_config_changes(data_dir)
-    for k in keys:
-        if k not in present:
-            present.append(k)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(present) + "\n")
-        os.replace(tmp, path)
-    except OSError:
+    with _config_lock(path):
+        present = take_config_changes(data_dir)
+        for k in keys:
+            if k not in present:
+                present.append(k)
         try:
-            os.remove(tmp)
+            _replace_file(path, "\n".join(present) + "\n")
         except OSError:
             pass
 
 
 def take_config_changes(data_dir: str) -> list:
-    """The keys the marker names, removing it; [] without one."""
+    """The keys the marker names, removing it; [] without one. The marker
+    is renamed away before it is read, so a writer's new marker is either
+    taken whole or left for the next reader."""
     path = os.path.join(data_dir, CONFIG_CHANGED_MARKER)
+    taken = f"{path}.{os.getpid()}.taken"
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            names = f.read().split()
+        os.rename(path, taken)
     except OSError:
         return []
     try:
-        os.remove(path)
+        with open(taken, "r", encoding="utf-8", errors="replace") as f:
+            names = f.read().split()
+    except OSError:
+        names = []
+    try:
+        os.remove(taken)
     except OSError:
         pass
     return [n for n in names if re.fullmatch(r"[A-Z][A-Z0-9_]*", n)]

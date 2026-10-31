@@ -423,7 +423,7 @@ class TestBuildEntryPoints(unittest.TestCase):
         lowercase path onionpress.app — which resolves to the real
         OnionPress.app on case-insensitive APFS — ran `lipo -thin arm64` over
         its binaries, destroying the universal-binary invariant that
-        validate-bundle.sh and test-bundle.sh enforce, and then failed under
+        the release build enforces, and then failed under
         `set -e` on a background image that does not exist, leaving the damaged
         bundle behind.
         """

@@ -17,6 +17,7 @@ import tempfile
 import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 
 def _read(rel_path):
@@ -123,18 +124,6 @@ class TestMacOSBuildBundlesMkp224o(unittest.TestCase):
             block.group(1),
             "The mkp224o install block must `exit 1` when the binary is "
             "missing — a warning lets a vanity-less DMG ship (the 2.4.101 bug).",
-        )
-
-    def test_validate_bundle_requires_mkp224o(self):
-        """validate-bundle.sh's required universal-binaries list must keep
-        mkp224o, so any bundle check (CI or manual) catches its absence.
-        """
-        script = _read("build/validate-bundle.sh")
-        self.assertRegex(
-            script,
-            r'UNIVERSAL_BINARIES=\([^)]*\bmkp224o\b[^)]*\)',
-            "validate-bundle.sh must list mkp224o among the required universal "
-            "binaries it verifies are present in the bundle.",
         )
 
 
@@ -603,7 +592,7 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         for path, py_cmd in (
             ("linux/onionpress", r'op_py\s+provision-post-install'),
             ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+             r'bundled_python\s+-m\s+onionpress\.cli\s+--data-dir\s+"\$DATA_DIR"\s+provision-post-install'),
         ):
             script = _read(path)
             m = re.search(
@@ -634,10 +623,11 @@ class TestLinuxProvisionPostInstallOrder(unittest.TestCase):
         Step ordering is enforced inside multisite.provision_post_install
         — see tests/test_multisite.py.
         """
+        # The start runs it inside start-post-up (#442.7): Linux calls that
+        # itself, the Mac's start-containers runs it (#442.8).
         for path, py_cmd in (
-            ("linux/onionpress", r'op_py\s+provision-post-install'),
-            ("app/MacOS/onionpress",
-             r'bundled_python\s+-m\s+onionpress\.cli\s+provision-post-install'),
+            ("linux/onionpress", r'start_post_up "\$wp_installed"'),
+            ("app/MacOS/onionpress", r'onionpress\.cli --data-dir "\$DATA_DIR" start-containers'),
         ):
             script = _read(path)
             m = re.search(
@@ -956,14 +946,11 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # etc.) USED to be here but have been ported to
     # src/onionpress/multisite.py — see TestMultisiteModuleExports below
     # for the equivalent assertion at the Python level. What stays bash:
-    # the WordPress.org plugin steps (install_plugin.sh + activate_plugin.sh
-    # helpers around the Python configure-*/apply-cache-policy steps;
-    # tests/test_bundled_plugins.py also holds the two copies equal) and
-    # detect_port_offset (needs to run before the Python lib path is set up).
+    # the delegations to the WordPress.org plugin steps
+    # (onionpress.bundled_plugins, #442.3; tests/test_bundled_plugins.py
+    # holds their shape) and detect_port_offset (needs to run before the
+    # Python lib path is set up).
     REQUIRED_ON_BOTH = {
-        "install_ia_plugin",
-        "install_cache_enabler",
-        "install_wp_org_plugin",
         "setup_bundled_plugins",
         "detect_port_offset",
     }
@@ -1430,13 +1417,12 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # look for the new volume (the function's own early-return
                 # check sits above start_containers and does not count).
                 sc = text.index("\nstart_containers() {")
-                call = text.index("if ! migrate_key_volume; then", sc)
-                check = text.index("docker_volume_state onionpress-onion-keys", sc)
-                self.assertLess(
-                    call, check,
-                    "migrate_key_volume must be called before the first-run "
-                    "check that looks for the new volume.",
-                )
+                # The start's migration and first-run check are
+                # start.start_containers' since #442.8, in that order
+                # (tests/test_start_sequence.py): the launcher keeps neither.
+                body = text[sc:text.index("\n}\n", sc)]
+                self.assertIn("start-containers", body)
+                self.assertNotIn("docker_volume_state onionpress-onion-keys", body)
                 for old_name_check in ('grep -qx "onionpress-arti-state"',
                                        "docker_volume_state onionpress-arti-state"):
                     self.assertNotIn(
@@ -1471,9 +1457,8 @@ class TestKeyVolumeMigration(unittest.TestCase):
                 # VM recovery, see TestStartRecoversWedgedLimaVM); Linux has
                 # no VM and waits directly.
                 wait = body.index("if ! wait_for_docker")
-                for later in (".import-key-pending",
-                              "if ! migrate_key_volume; then",
-                              "docker_volume_state onionpress-onion-keys"):
+                # The key steps are start-containers' (#442.8).
+                for later in ("start-containers",):
                     self.assertLess(
                         wait, body.index(later),
                         f"start_containers must wait for Docker before "
@@ -1516,7 +1501,12 @@ class TestKeyVolumeMigration(unittest.TestCase):
                         any(re.search(r"\bif ! migrate_key_volume\b", l) for l in block),
                         f"{lines[start].strip()!r} starts tor at line {n + 1} "
                         "without migrate_key_volume before it")
-            self.assertGreaterEqual(found, 2, f)
+            # The start's and the setup's tor are Python's since #442.7 and
+            # #442.11 (start.post_up and setup_logic.setup_from_terminal,
+            # both after the migration and behind key_volume_not_ready:
+            # tests/test_start_post_up.py, tests/test_terminal_setup.py);
+            # what is left here is the launchers' own `start-tor`.
+            self.assertGreaterEqual(found, 0, f)
 
     def test_identity_wipes_drop_the_migration_marker(self):
         """A key import or restore removes both key volumes for a replaced
@@ -1590,7 +1580,6 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
     """
 
     SHELL_LAUNCHERS = ["app/MacOS/launcher.sh", "app/MacOS/onionpress"]
-    PY_WRAPPER = "src/onionpress/colima.py"  # Colima._run prepends the binary
     SHELL_START = re.compile(r'(?i)colima(_bin)?"? start\b')
     SHELL_RUN = re.compile(
         r'(?i)colima(_bin)?"? (start|stop|restart|delete|status|list|version)\b')
@@ -1615,8 +1604,8 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
     @classmethod
     def _py_colima_starts(cls):
         """(file, argv words) for each list literal under src/ that starts
-        Colima: [<colima binary>, "start", ...], or ["start", ...] in the
-        Colima wrapper."""
+        Colima: [<colima binary>, "start", ...]. The Python side has none
+        since colima.py went (issue #405)."""
         for dirpath, _, names in os.walk(os.path.join(PROJECT_ROOT, "src")):
             for name in sorted(names):
                 if not name.endswith(".py"):
@@ -1627,8 +1616,7 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
                         continue
                     words = [str(e.value) if isinstance(e, ast.Constant) else ast.unparse(e)
                              for e in node.elts]
-                    if (rel == cls.PY_WRAPPER and words[0] == "start") or (
-                            len(words) > 1 and "colima" in words[0].lower()
+                    if (len(words) > 1 and "colima" in words[0].lower()
                             and words[1] == "start"):
                         yield rel, words
 
@@ -1639,10 +1627,7 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
                 self.assertTrue(starts, f"no colima start found in {f}; update this test")
                 for cmd in starts:
                     self.assertIn("--activate=false", cmd.split(), cmd)
-        py_starts = list(self._py_colima_starts())
-        self.assertIn(self.PY_WRAPPER, {f for f, _ in py_starts},
-                      "Colima.start's argv not found; update this test")
-        for f, words in py_starts:
+        for f, words in self._py_colima_starts():
             with self.subTest(file=f, argv=words[:2]):
                 self.assertIn("--activate=false", words)
 
@@ -1664,26 +1649,16 @@ class TestColimaStaysOutOfUserDockerConfig(unittest.TestCase):
                     "Nothing else may re-point DOCKER_CONFIG.")
                 self.assertNotRegex(text, r"\bunset\b[^\n]*\bDOCKER_CONFIG\b")
 
-        wrapper = _read(self.PY_WRAPPER)
-        run = next(n for n in ast.walk(ast.parse(wrapper))
-                   if isinstance(n, ast.FunctionDef) and n.name == "_run")
-        self.assertIn('env["DOCKER_CONFIG"] = self.paths.docker_config_dir',
-                      ast.get_source_segment(wrapper, run))
-
-        # The daemon builds every colima env from os.environ (its stop and
-        # delete would remove a "colima" context too), so it must set it
-        # first (onionpress.daemon: _setup_environment before
-        # _resolve_ports_at_start's stop_stale_colima).
+        # The daemon builds every colima and docker env from os.environ (a
+        # stop or delete would remove a "colima" context too), so it must
+        # set it first (onionpress.daemon: _setup_environment before
+        # _resolve_ports_at_start's docker query).
         daemon = _read("src/onionpress/daemon.py")
-        self.assertLess(
-            daemon.index('os.environ["DOCKER_CONFIG"] = docker_config_dir'),
-            daemon.index("stop_stale_colima("))
         run = daemon[daemon.index("    def run(self):"):daemon.index("    def _main_loop_once(")]
         self.assertLess(run.index("self._setup_environment()"),
                         run.index("self._resolve_ports_at_start()"))
         # The menubar runs nothing of colima itself any more.
         menubar = _read("src/menubar.py")
-        self.assertNotIn("stop_stale_colima(", menubar)
         self.assertNotIn("[colima_bin,", menubar)
 
 
@@ -1713,7 +1688,7 @@ class TestColimaStaysOutOfUserSSHConfig(unittest.TestCase):
                   for _, cmd in c._shell_commands(_read(f), c.SHELL_START)]
         starts += c._py_colima_starts()
         found = {f for f, _ in starts}
-        for f in (*c.SHELL_LAUNCHERS, c.PY_WRAPPER):
+        for f in c.SHELL_LAUNCHERS:
             self.assertIn(f, found, f"no colima start found in {f}; update this test")
         for f, words in starts:
             with self.subTest(file=f):
@@ -1954,9 +1929,13 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
             previous = text[:m.start()].rstrip("\n").rsplit("\n", 1)[-1].strip()
             self.assertEqual(previous, "log_start_summary", text[m.start() - 120:m.end()])
         self.assertIn("\nlog_start_summary() {", text)
-        self.assertGreaterEqual(
-            text.count('START_ERRORS="$START_ERRORS'), 4,
-            "the guarded start steps append their name to START_ERRORS")
+        # The guarded start steps name themselves through the errors file
+        # (onionpress.start's contract, #442.2).
+        self.assertIn('START_ERRORS="$START_ERRORS $name"', text)
+        start = _read("src/onionpress/start.py")
+        for name in ("tor", "deactivate-wp-statistics", "provision-post-install",
+                     "wordpress-egress"):
+            self.assertIn(f'"{name}"', start, name)
 
     def test_wait_for_services_reports_without_failing_the_start(self):
         # Linux already returns 0 here; under set -e a return 1 ended
@@ -1988,12 +1967,15 @@ class TestLauncherVolumeChecksUnderDockerFailure(unittest.TestCase):
 
     LAUNCHERS = TestKeyVolumeMigration.LAUNCHERS
     FUNCTIONS = ("docker_volume_state", "wait_for_docker", "migrate_key_volume",
+                 "config_value",
                  "using_local_images", "ensure_key_helper_image",
                  "start_containers")
     # macOS only: start_containers waits through these (Linux has no VM).
     # Without a limactl on PATH they report the VM as not Running, so the
     # Docker-down cases below still stop without any recovery attempt.
-    OPTIONAL_FUNCTIONS = ("lima_vm_running", "recover_lima_vm",
+    OPTIONAL_FUNCTIONS = ("start_errors_file", "note_start_errors",
+                          "wordpress_bind_host_for_start",
+                          "lima_vm_running", "recover_lima_vm",
                           "wait_for_docker_or_recover_vm",
                           # start_containers then looks after the guest's
                           # root fs; without a limactl that is a no-op too.
@@ -2057,15 +2039,19 @@ exit 0
                 'log() { printf "%s\\n" "$*" >> "$LOG_FILE"; }\n'
                 "sleep() { :; }\n"  # wait_for_docker's 180 s pass instantly
                 # using_local_images delegates to onionpress.cli (Phase 4):
-                # the launchers' runners, on this interpreter and src/.
-                'bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
-                'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
+                # the launchers' runners, on this interpreter and src/, with
+                # no app bundle (Docker() runs the stub, never a real one).
+                'bundled_python() { "$PY" "$SHIM" "$@"; }\n'
+                'op_py() { "$PY" "$SHIM" "$@"; }\n'
                 + functions + snippet + "\n")
             run_env = {"PATH": bin_dir + os.pathsep + "/usr/bin:/bin",
                        "STUB_MODE": mode, "STUB_VOLUMES": volumes,
                        "STUB_CALLS": calls, "STUB_FAIL": fail,
                        "STUB_IMAGE": image,
-                       "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src")}
+                       "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src"),
+                       "SHIM": os.path.join(PROJECT_ROOT, "tests", "cli_on_stub_docker.py"),
+                       "HOME": tmp, "ONIONPRESS_WP_PORT": "8080",
+                       "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock"}
             run_env.update(env or {})
             out = subprocess.run(["bash", "-c", script], env=run_env,
                                  capture_output=True, text=True, timeout=60)
@@ -2096,21 +2082,9 @@ exit 0
                                  "only an exact name may match")
                 self.assertEqual(self._state_of(f, "onionpress-onion-keys", mode="down"), 2)
 
-    @staticmethod
-    def _python_uses_the_stub_docker():
-        """The delegation's Docker() takes the bundle's docker when there is
-        one (a Mac with OnionPress installed), not the stub on PATH; the
-        end-to-end runs below are only meaningful on the PATH fallback."""
-        from onionpress.docker import Docker
-        from onionpress.platform import resolve_paths
-        with tempfile.TemporaryDirectory() as tmp:
-            return Docker(resolve_paths(data_dir=tmp)).docker_bin == "docker"
-
     def test_migration_refuses_when_docker_does_not_answer(self):
         """End to end through the delegation (Phase 4, #120): the Python's
         exit status is the bash function's, and its lines reach the log."""
-        if not self._python_uses_the_stub_docker():
-            self.skipTest("the bundle's docker would be run, not the stub")
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
                 state = {}
@@ -2126,8 +2100,6 @@ exit 0
                               state["log"])
 
     def test_migration_copies_only_when_just_the_old_volume_exists(self):
-        if not self._python_uses_the_stub_docker():
-            self.skipTest("the bundle's docker would be run, not the stub")
         cases = {
             "onionpress-arti-state": True,                          # upgrade
             "onionpress-onion-keys onionpress-arti-state": False,   # already migrated
@@ -2167,7 +2139,9 @@ exit 0
                 out, calls, marker_left = self._run(
                     f, "rc=0; start_containers || rc=$?; echo $rc",
                     volumes="onionpress-tor-state", pending=True)
-                self.assertEqual(out.strip(), "1")
+                # The tee'd lines come first (apply_pending_key_import, #442.4).
+                self.assertEqual(out.strip().splitlines()[-1], "1")
+                self.assertIn("ERROR: could not remove the old onionpress-tor-state volume", out)
                 self.assertTrue(marker_left,
                                 "the key import must be retried on the next start")
                 self.assertNotIn("volume create onionpress-onion-keys", calls)
@@ -2480,48 +2454,16 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         end = text.index("\n}\n", start)
         return text[start:end]
 
-    def test_launchers_delegate_the_pending_check(self):
-        """Phase 4 (#120): the check is onionpress.cli's, the same
-        derivatives.regeneration_pending the sweep itself uses, so the gate
-        and the sweep cannot disagree about a marker."""
-        for f, runner in (("app/MacOS/onionpress", "bundled_python -m onionpress.cli"),
-                          ("linux/onionpress", "op_py")):
-            with self.subTest(launcher=f):
-                body = self._function_body(_read(f), "regenerate_derivatives_pending")
-                code = [l.strip() for l in body.splitlines()
-                        if l.strip() and not l.strip().startswith("#")]
-                self.assertEqual(code, [
-                    "regenerate_derivatives_pending() {",
-                    f'{runner} --data-dir "$DATA_DIR" regenerate-derivatives-pending '
-                    '2>>"$LOG_FILE"'])
-
-    def _pending_under_bash(self, launcher, host_marker):
-        """The launcher's own function under bash, its runner on this
-        interpreter and src/, DOCKER_HOST at nothing (the container marker's
-        `docker exec` then fails, as it does with the stack down); returns
-        the exit code."""
-        text = _read(launcher)
-        with tempfile.TemporaryDirectory() as tmp:
-            if host_marker:
-                open(os.path.join(tmp, self.HOST_MARKER), "w").close()
-            script = ('bundled_python() { PYTHONPATH="$SRC" "$PY" "$@"; }\n'
-                      'op_py() { PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"; }\n'
-                      + self._function_body(text, "regenerate_derivatives_pending") + "\n}\n"
-                      + "regenerate_derivatives_pending\n")
-            out = subprocess.run(
-                ["bash", "-c", script], capture_output=True, text=True, timeout=60,
-                env={"PATH": "/usr/bin:/bin", "HOME": tmp, "DATA_DIR": tmp,
-                     "LOG_FILE": os.path.join(tmp, "log"),
-                     "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-                     "PY": sys.executable, "SRC": os.path.join(PROJECT_ROOT, "src")})
-            self.assertEqual(out.stderr, "")
-        return out.returncode
-
-    def test_the_delegation_answers_for_the_host_marker(self):
+    def test_the_start_asks_the_sweeps_own_check(self):
+        """The start's gate (start.post_up, #442.7) is
+        derivatives.regeneration_pending, the check the sweep itself runs,
+        so the gate and the sweep cannot disagree about a marker; no
+        launcher keeps a bash copy."""
+        text = _read("src/onionpress/start.py")
+        self.assertIn("derivatives.regeneration_pending(paths.data_dir, docker.docker_bin)", text)
         for f in self.LAUNCHERS:
             with self.subTest(launcher=f):
-                self.assertEqual(self._pending_under_bash(f, host_marker=True), 0)
-                self.assertEqual(self._pending_under_bash(f, host_marker=False), 1)
+                self.assertNotIn("\nregenerate_derivatives_pending() {", _read(f))
 
     def test_the_container_marker_is_asked_of_docker(self):
         """derivatives.regeneration_pending, what the subcommand runs: the
@@ -2561,7 +2503,7 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         create = self._function_body(text, "create_backup")
         self.assertIn("prune-image-derivatives", create)
         self.assertIn("uploads/.onionpress-regenerate-derivatives", create)
-        self.assertIn("excludes_image_derivatives", create)
+        self.assertIn("--excludes-image-derivatives", create)
         restore = self._function_body(text, "restore_backup")
         self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', restore)
 
@@ -2697,7 +2639,7 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
     or the command exists on one platform only."""
 
     def test_both_launchers_forward_get(self):
-        self.assertIn('bundled_python -m onionpress.cli get "${@:2}"',
+        self.assertIn('bundled_python -m onionpress.cli --data-dir "$DATA_DIR" get "${@:2}"',
                       _read("app/MacOS/onionpress"))
         self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
 

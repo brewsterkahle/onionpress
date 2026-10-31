@@ -523,12 +523,11 @@ class TestLauncherPathsRefuseLinks(unittest.TestCase):
                     self.h._assert_untouched(data)
 
     def test_setup_from_backup_refuses(self):
-        for launcher, func in self.h.SETUP.items():
-            for fmt, path in self.backups.items():
-                with self.subTest(launcher=launcher, fmt=fmt):
+        # setup_logic.stage_setup_from_backup (#442.9), both launchers'.
+        for fmt, path in self.backups.items():
+            with self.subTest(fmt=fmt):
                     data = self.h._fresh_data_dir()
-                    rc, _, err = self.h._run(
-                        launcher, f'{func} --from-backup "$PW" {path!r}')
+                    rc, err = self.h._setup_from_backup(path)
                     self.assertNotEqual(rc, 0)
                     self.assertIn("valid OnionPress backup", err)
                     self.assertIn("symbolic link", self._log())

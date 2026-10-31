@@ -102,14 +102,31 @@ class TestText(unittest.TestCase):
         for where, get in SCRIPTS.items():
             with self.subTest(script=where):
                 code = _code(get())
-                # The folder, secrets and config; the Docker bootstrap's
-                # docker-rootless-setup.log is still root's write (not #471's).
-                names = r'"\$DATA_DIR(/secrets|/config)?"'
+                names = r'"\$DATA_DIR(/[^"]*)?"'
                 self.assertNotRegex(code, re.compile(r"\bchown\b.*" + names),
                                     f"{where}: the ownership fixup is for root writes that no longer happen")
                 self.assertNotRegex(code, re.compile(r"install -d -o.*" + names),
                                     f"{where}: the folder is made as the user, not for them")
                 self.assertNotRegex(code, re.compile(r'mkdir -p "\$DATA_DIR'))
+
+    def test_root_opens_no_file_under_the_data_dir(self):
+        """Issue #490: the Docker bootstrap's log was root's `>` and `chown`
+        under ~/.onionpress. Every redirection into $DATA_DIR (or the log's
+        variable) is inside a function the user's shell runs."""
+        code = _code(_postinst())
+        user_side = [_function(code, name, "postinst")
+                     for name in ("first_install_files", "as_user_logging_to")]
+        outside = code
+        for body in user_side:
+            outside = outside.replace(body, "")
+        self.assertNotRegex(outside, re.compile(r'>>?\s*"\$(DATA_DIR/|_rootless_log)'))
+        self.assertNotRegex(outside, re.compile(r"\bchown\b.*\$(DATA_DIR|_rootless_log)"))
+        self.assertIn('as_user_logging_to "$_rootless_log" ">"', outside)
+        self.assertIn('as_user_logging_to "$_rootless_log" ">>"', outside)
+        helper = user_side[1]
+        self.assertIn('runuser -u "$REAL_USER" -- bash -c', helper)
+        self.assertIn("umask 077", helper)
+        self.assertIn('[ -L "$log" ]', helper)
 
     def test_the_functions_make_0700_and_0600_without_a_window(self):
         fn = _functions(_postinst(), "postinst")
@@ -366,6 +383,30 @@ class TestWholePostinst(unittest.TestCase):
         self.assertEqual(self._mode(self.data), 0o700)
         self.assertEqual(sorted(os.listdir(self.data)), ["shared"])
         self.assertNotIn("; first_install_files\n", log)
+
+    def test_a_link_at_the_docker_log_is_not_written_through(self):
+        """Issue #490: a link planted at docker-rootless-setup.log gets no
+        output, its target stays untouched, the install goes on."""
+        os.makedirs(self.data, mode=0o700)
+        target = os.path.join(self.tmp, "root-owned-target")
+        with open(target, "w") as f:
+            f.write("untouched\n")
+        os.symlink(target, os.path.join(self.data, "docker-rootless-setup.log"))
+        r, log = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("docker-rootless-setup.log is a link or not a regular file", r.stderr)
+        with open(target) as f:
+            self.assertEqual(f.read(), "untouched\n")
+        self.assertTrue(os.path.islink(os.path.join(self.data, "docker-rootless-setup.log")))
+        self.assertIn("setuptool ", log, "the bootstrap still ran")
+
+    def test_the_docker_log_is_the_users_and_private(self):
+        r, _log = self._run()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        path = os.path.join(self.data, "docker-rootless-setup.log")
+        self.assertEqual(self._mode(path), 0o600)
+        with open(path) as f:
+            self.assertIn("docker: not found", f.read())
 
     def test_a_planted_link_stops_the_data_dir_not_the_install(self):
         target = os.path.join(self.tmp, "elsewhere")

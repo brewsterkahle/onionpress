@@ -485,7 +485,6 @@ class TestLauncherDelegations(unittest.TestCase):
     def test_mac_cases(self):
         mac = _read("app/MacOS/onionpress")
         for cmd, tail in (("uninstall", 'uninstall "${@:2}"'),
-                          ("update-images", 'update-images "${@:2}"'),
                           ("update", 'update "${@:2}"'),
                           ("reset", 'reset "${reset_args[@]}"')):
             with self.subTest(cmd=cmd):
@@ -495,7 +494,7 @@ class TestLauncherDelegations(unittest.TestCase):
         self.assertIn('[ "${ONIONPRESS_YES:-}" != "true" ] || reset_args+=(--yes)', mac)
         self.assertIn('ONIONPRESS_APP_PATH="$(dirname "$APP_DIR")"', mac)
         help_text = mac[mac.index("help|-h|--help)"):mac.index("Your WordPress site will be available at")]
-        for word in ("  uninstall     ", "  update-images ", "handle-action", "--check --json",
+        for word in ("  uninstall     ", "handle-action", "--check --json",
                      "--confirmed <what>", "ONIONPRESS_CONFIRMED"):
             self.assertIn(word, help_text)
 

@@ -375,6 +375,15 @@ class TestReleaseHistory(unittest.TestCase):
         with open(os.path.join(PROJECT_DIR, "RELEASE_HISTORY.md")) as f:
             self.headings = [l.rstrip("\n") for l in f if l.startswith("## ")]
 
+    def test_metainfo_names_the_tree_version(self):
+        """The AppStream metainfo ships in the .deb; bump-version.sh keeps its
+        newest <release> on the tree's version."""
+        with open(os.path.join(PROJECT_DIR, "linux", "onionpress.metainfo.xml")) as f:
+            m = re.search(r'<release version="([^"]+)"', f.read())
+        with open(os.path.join(PROJECT_DIR, "src", "onionpress", "__init__.py")) as f:
+            v = re.search(r'__version__ = "([^"]+)"', f.read())
+        self.assertEqual(m.group(1), v.group(1))
+
     def test_headings(self):
         versions = []
         for h in self.headings:

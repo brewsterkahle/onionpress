@@ -1,0 +1,88 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log First run detected
+log First run with ADDRESS_PREFIX=op2 -- checking tor image for mkp224o...
+py generate-vanity
+log Vanity address generated; will be installed below
+log Using pre-imported key: op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
+fn ensure_key_formats $TMP/home/.onionpress/shared/vanity-keys/op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
+log Key formats synchronized
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
+docker volume create onionpress-onion-keys
+docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/dest --mount type=bind,source=$TMP/home/.onionpress/shared/vanity-keys/op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion,target=/src,readonly --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*
+log Address key installed to the onionpress-onion-keys volume
+docker volume create onionpress-tor-state
+docker run --rm --network none --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --security-opt no-new-privileges:true -v onionpress-tor-state:/dest --mount type=bind,source=$TMP/home/.onionpress/shared/vanity-keys/op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion,target=/src,readonly --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c 
+                    set -e
+                    mkdir -p /dest/hidden_service/wordpress/authorized_clients
+                    cp /src/hs_ed25519_secret_key /dest/hidden_service/wordpress/
+                    cp /src/hs_ed25519_public_key /dest/hidden_service/wordpress/ 2>/dev/null || true
+                    cp /src/hostname /dest/hidden_service/wordpress/
+                    chown -R debian-tor:debian-tor /dest/hidden_service
+                    chmod 700 /dest/hidden_service /dest/hidden_service/wordpress
+                    chmod 600 /dest/hidden_service/wordpress/hs_ed25519_secret_key
+                    chmod 644 /dest/hidden_service/wordpress/hostname
+                
+log Address key installed to tor-state volume (C Tor)
+log Onion address: op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
+log Pulling pre-built images (missing only)...
+docker compose pull --policy missing
+log WordPress network egress block in place: ok (test)
+docker ps -a --format {{.Names}}
+docker network inspect --format {{json .Options}} onionpress-network
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
+log WordPress, DB, and Tor client containers starting
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+log WordPress not installed -- run 'onionpress setup' or open the OnionPress tray's Setup dialog to configure
+docker port onionpress-wordpress 80/tcp
+bin systemctl --user is-enabled onionpress-heartbeat.service
+bin systemctl --user mask --runtime onionpress-heartbeat.service
+log Heartbeat client held until WordPress is installed (no hub registration before setup)
+bin systemctl --user is-active onionpress-heartbeat.service
+bin systemctl --user stop onionpress-heartbeat.service
+docker volume ls --format {{.Name}}
+docker compose up -d --no-deps tor onionheaven [BIND=0.0.0.0]
+docker port onionpress-tor 9050/tcp
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
+log Installing Internet Archive Wayback Machine Link Fixer 1.4.2...
+docker exec onionpress-wordpress true
+docker exec onionpress-wordpress mktemp -d /tmp/onionpress-plugin-XXXXXX
+docker exec onionpress-wordpress curl -sSL -f --max-time 300 --speed-limit 1024 --speed-time 30 --socks5-hostname onionheaven:9050 -o /tmp/onionpress-plugin-abcdef/plugin.zip https://downloads.wordpress.org/plugin/internet-archive-wayback-machine-link-fixer.1.4.2.zip
+docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip $TEMPDIR/internet-archive-wayback-machine-link-fixer.zip
+docker exec onionpress-wordpress rm -rf /tmp/onionpress-plugin-abcdef
+log Failed to download and verify Internet Archive Wayback Machine Link Fixer - check log for details
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
+log Installing Cache Enabler 1.8.17...
+docker exec onionpress-wordpress true
+docker exec onionpress-wordpress mktemp -d /tmp/onionpress-plugin-XXXXXX
+docker exec onionpress-wordpress curl -sSL -f --max-time 300 --speed-limit 1024 --speed-time 30 --socks5-hostname onionheaven:9050 -o /tmp/onionpress-plugin-abcdef/plugin.zip https://downloads.wordpress.org/plugin/cache-enabler.1.8.17.zip
+docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip $TEMPDIR/cache-enabler.zip
+docker exec onionpress-wordpress rm -rf /tmp/onionpress-plugin-abcdef
+log Failed to download and verify Cache Enabler - check log for details
+py deactivate-wp-statistics
+py provision-post-install --themes-dir $TMP/opt/themes --plugins-dir $TMP/opt/plugins
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+log WordPress not installed yet — Cache Enabler and the Link Fixer are set up after setup
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
+fn start_onionheaven_activation_watcher
+docker container inspect onionpress-cloudflared
+rc=0
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state

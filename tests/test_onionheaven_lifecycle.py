@@ -885,14 +885,15 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         check = branch.index('if [ "$restore_check" = yes ]')
         real = branch[branch.index("exit $?", check):]
         self.assertNotIn("heartbeat_client", branch[:check])
-        self.assert_before(real, "stop_heartbeat_client", "op_py restore", "restore")
-        self.assert_before(real, "op_py restore", "start_heartbeat_client", "restore")
-        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
-            with self.subTest(rel=rel):
-                branch = _case_branch(_read(rel), "setup")
-                self.assert_before(branch, "onionheaven_release restore",
-                                   'touch "$DATA_DIR/.import-key-pending"', rel)
-                self.assertIn('$(basename "$restored_key_dir")', branch)
+        self.assert_before(real, "stop_heartbeat_client", 'op_py --data-dir "$DATA_DIR" restore', "restore")
+        self.assert_before(real, 'op_py --data-dir "$DATA_DIR" restore', "start_heartbeat_client", "restore")
+        # `setup --from-backup` is setup_logic.setup_from_terminal's since
+        # #442.11: the hubs are asked to delete the current key, keeping the
+        # backup's own address, before the key import is flagged.
+        flow = _read("src/onionpress/setup_logic.py")
+        flow = flow[flow.index("def setup_from_terminal("):]
+        self.assert_before(flow, 'release_onionheaven("restore", keep_address=address',
+                           "IMPORT_KEY_PENDING)", "setup")
 
 
 # ─── Linux heartbeat daemon ────────────────────────────────────────────

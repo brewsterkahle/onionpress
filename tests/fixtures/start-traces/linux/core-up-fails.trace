@@ -1,0 +1,19 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log Pulling pre-built images (missing only)...
+docker compose pull --policy missing
+log WordPress network egress block in place: ok (test)
+docker ps -a --format {{.Names}}
+docker network inspect --format {{json .Options}} onionpress-network
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
+log WARNING: docker compose up failed (attempt 1/3)
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
+log WARNING: docker compose up failed (attempt 2/3)
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
+log WARNING: docker compose up failed (attempt 3/3)
+log ERROR: docker compose up failed after 3 attempts
+rc=1
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state

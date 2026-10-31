@@ -1,0 +1,8 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+docker volume ls --format {{.Name}}
+log ERROR: Docker did not say whether onionpress-onion-keys exists; not starting
+log ERROR: cannot start without the onion service key volume
+rc=1
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state

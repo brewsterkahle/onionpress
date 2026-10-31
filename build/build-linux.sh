@@ -136,7 +136,18 @@ fi
 # against besides the latest; it has every binding OnionPress uses.
 # rootlesskit: Debian's docker.io only suggests it, and its rootless setup
 # tool (postinst) cannot start a daemon without it; Docker CE's comes in
-# docker-ce-rootless-extras.
+# docker-ce-rootless-extras. slirp4netns, uidmap and procps (sysctl) are
+# what dockerd-rootless.sh runs.
+# Compose: the launcher runs `docker compose` (v2, a CLI plugin). Debian
+# 13's docker-compose is v2; Ubuntu's (and Debian 12's) docker-compose is
+# the retired Python v1, which has no such command, and Ubuntu's v2 is
+# docker-compose-v2. A bare `docker-compose` alternative let apt pick v1
+# on Ubuntu 24.04 (e2e, 2026-10-30), so every alternative here is v2.
+# torbrowser-launcher is only Suggested: as a Recommends it brought its
+# own Recommends, the system `tor` daemon, on to 127.0.0.1:9050 wherever
+# apt installs Recommends (Ubuntu does by default), and the launcher then
+# moves every OnionPress port up by 10000, so the site answered on 18080
+# while this postinst promised 8080 (e2e, Ubuntu 24.04, 2026-10-30).
 # Depends is one line: a binary package's control file may not fold it
 # (lintian: multiline-field). No Description line may start with a dot
 # after the space: " .onion address" read as a control statement, and the
@@ -149,8 +160,8 @@ Version: $VERSION
 Section: web
 Priority: optional
 Architecture: $DEB_ARCH
-Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose, rootlesskit | docker-ce-rootless-extras, uidmap, dbus-user-session, fuse-overlayfs, slirp4netns, jq, python3, python3-nacl (>= 1.5.0), zip, unzip, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
-Recommends: torbrowser-launcher
+Depends: docker.io | docker-ce, docker-compose-plugin | docker-compose-v2 | docker-compose (>= 2), rootlesskit | docker-ce-rootless-extras, uidmap, dbus-user-session, fuse-overlayfs, slirp4netns, procps, jq, python3, python3-nacl (>= 1.5.0), zip, unzip, python3-gi, gir1.2-gtk-3.0, gir1.2-ayatanaappindicator3-0.1, gir1.2-notify-0.7, xdg-utils
+Suggests: torbrowser-launcher
 Maintainer: Brewster Kahle <brewster@archive.org>
 Homepage: https://onionpress.org
 Description: Your Decentralized Social Blog Site
@@ -271,7 +282,6 @@ EOF
         cat > "$DATA_DIR/config" <<EOF
 ADDRESS_PREFIX=op2
 INSTALL_IA_PLUGIN=yes
-UPDATE_ON_LAUNCH=no
 START_ON_BOOT=yes
 # OnionHeaven is on by default: yes (or unset) = on, no = off.
 # Turn off with: onionpress onionheaven disable
@@ -355,8 +365,33 @@ spawn_tray() {
 # `onionpress update` (the launcher's release install) runs apt-get and
 # then restarts the containers itself once more: two restarts, never two
 # at once, since try-restart returns only once the site is up again.
+# Too old a Docker or Compose for OnionPress (onionpress.docker_versions:
+# Engine 20.10+, Compose 2.22+, and `docker compose` at all): said here,
+# at install time, with what `onionpress start` will refuse on and how to
+# upgrade. The package's own Python runs the check (python3 -I ignores
+# PYTHONPATH, so the path goes in through argv, as the launcher's op_py
+# does); its JSON is read by jq (a Depends), so only a real verdict with
+# docker answering is worth a word: a docker that does not answer, or a
+# Python that fails, says nothing. Never fails the install.
+warn_old_docker() {
+    local out problems
+    out=$(python3 -I -B -c 'import sys, runpy
+sys.path[:0] = [sys.argv.pop(1)]
+runpy.run_module("onionpress.cli", run_name="__main__", alter_sys=True)' \
+        /opt/onionpress/lib check-docker --json 2>/dev/null) || true
+    problems=$(printf '%s' "$out" | jq -r 'select(.ok == false and .engine != "") | .problems[]' 2>/dev/null) || true
+    if [ -n "$problems" ]; then
+        echo
+        echo "WARNING: OnionPress will not start on this machine's Docker until it is upgraded:"
+        while IFS= read -r line; do echo "  $line"; done <<< "$problems"
+        echo "  Check again with: onionpress check-docker"
+    fi
+    return 0
+}
+
 if [ "$1" = "configure" ] && [ -n "$2" ] && [ "$REAL_USER" != "root" ]; then
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
+    warn_old_docker
     echo "  OnionPress $VERSION_INSTALLED installed over $2. Restarting the site for $REAL_USER (the running one is still version $2)..."
     if systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null \
        && systemctl --user --machine="${REAL_USER}@.host" try-restart \
@@ -385,10 +420,12 @@ fi
 #   1. Preferred: rootless Docker (user-level daemon at
 #      /run/user/$UID/docker.sock). No docker group, no logout — same
 #      session can immediately use Docker. Requires
-#      dockerd-rootless-setuptool.sh (docker.io's contrib on Debian 12+ /
-#      Ubuntu 22.04+, or docker-ce-rootless-extras) and rootlesskit/uidmap/
-#      dbus-user-session/fuse-overlayfs/slirp4netns (declared in Depends:). Refused if system Docker is
-#      already serving other containers.
+#      dockerd-rootless-setuptool.sh (Debian's docker.io contrib,
+#      docker-ce-rootless-extras, or the package's own copy) and
+#      rootlesskit/uidmap/dbus-user-session/fuse-overlayfs/slirp4netns
+#      (declared in Depends:). Refused if system Docker is already
+#      serving other containers. Why it was skipped or failed is said and
+#      kept in $DATA_DIR/docker-rootless-setup.log.
 #   2. Fallback: docker group. The user's systemd manager keeps the groups
 #      it started with (daemon-reexec does not refresh them), so it is
 #      restarted, but only while the user has no login session: a restart
@@ -396,20 +433,34 @@ fi
 #      With a session the user gets the "Log out and back in" message.
 
 # dockerd-rootless-setuptool.sh is on PATH with Docker CE's
-# docker-ce-rootless-extras; Debian's and Ubuntu's docker.io keep it in
-# contrib, beside the dockerd-rootless.sh it looks for on PATH (and writes
-# into the rootless docker.service). Prints the directory that holds both.
+# docker-ce-rootless-extras; Debian's docker.io keeps it in contrib, beside
+# the dockerd-rootless.sh it looks for on PATH (and writes into the
+# rootless docker.service). Ubuntu's docker.io (24.04's 29.1.3) ships
+# neither, so the package carries Docker's own two scripts
+# (linux/docker-rootless/, pinned by hash) as the last resort. Prints the
+# directory that holds both.
 DOCKER_IO_CONTRIB="${ONIONPRESS_DOCKER_IO_CONTRIB:-/usr/share/docker.io/contrib}"
+PACKAGED_ROOTLESS_DIR="${ONIONPRESS_DOCKER_ROOTLESS_DIR:-/opt/onionpress/docker-rootless}"
 rootless_setuptool_dir() {
-    local found
+    local found d
     if found=$(command -v dockerd-rootless-setuptool.sh 2>/dev/null); then
         echo "${found%/*}"; return 0
     fi
-    if [ -x "$DOCKER_IO_CONTRIB/dockerd-rootless-setuptool.sh" ] && \
-       [ -x "$DOCKER_IO_CONTRIB/dockerd-rootless.sh" ]; then
-        echo "$DOCKER_IO_CONTRIB"; return 0
-    fi
+    for d in "$DOCKER_IO_CONTRIB" "$PACKAGED_ROOTLESS_DIR"; do
+        if [ -x "$d/dockerd-rootless-setuptool.sh" ] && [ -x "$d/dockerd-rootless.sh" ]; then
+            echo "$d"; return 0
+        fi
+    done
     return 1
+}
+
+# Why rootless Docker was skipped or did not start: said at the terminal
+# and added to the setup log by the user's shell (as_user_logging_to
+# below; the e2e harness collects that file, and without it a
+# docker-group install cannot be explained).
+rootless_note() {
+    echo "  $*"
+    as_user_logging_to "$_rootless_log" ">>" echo "$*" || true
 }
 
 # The user's manager, as the user, over its private socket
@@ -417,6 +468,27 @@ rootless_setuptool_dir() {
 user_systemctl() {
     runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
         systemctl --user "$@"
+}
+
+# Runs "${@:3}" as the user with its output in the log $1, which the
+# user's shell opens, not root's (issue #490): the data dir is the user's,
+# and root's `>` there would follow a link planted at the name. $2 is
+# ">" (start the log) or ">>" (add to it). A link, or anything but a
+# regular file, at the name keeps no output and is left alone.
+as_user_logging_to() {
+    local log="$1" how="$2"
+    shift 2
+    runuser -u "$REAL_USER" -- bash -c '
+        log=$1 how=$2
+        shift 2
+        umask 077
+        if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then
+            echo "  $log is a link or not a regular file; its output is not kept" >&2
+            log=/dev/null
+        fi
+        if [ "$how" = ">" ]; then exec "$@" >"$log" 2>&1; fi
+        exec "$@" >>"$log" 2>&1
+    ' as_user_logging_to "$log" "$how" "$@"
 }
 
 # The user's rootless daemon answers `docker info` (within $1 seconds).
@@ -455,41 +527,56 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
         rootless_ok=1
     fi
 
-    # 3. Try fresh rootless setup. Skip if there is no setup tool (older
-    #    Docker releases) or if system Docker is actively serving other
+    # The setup log: the user's shell opens it (as_user_logging_to, #490),
+    # root never does.
+    _rootless_log="$DATA_DIR/docker-rootless-setup.log"
+
+    # 3. Try fresh rootless setup. Skip if there is no setup tool
+    #    anywhere or if system Docker is actively serving other
     #    containers (we'd be ripping the rug out from under another
     #    user's workloads). `docker ps -q` is empty on a fresh install
-    #    where apt just brought docker.service up.
-    if [ "$rootless_ok" = "0" ] && \
-       [ "$bootstrap_ok" = "1" ] && \
-       rootless_dir=$(rootless_setuptool_dir); then
-
-        system_busy=0
-        if docker ps -q 2>/dev/null | grep -q .; then
-            system_busy=1
-        fi
-
-        if [ "$system_busy" = "0" ]; then
+    #    where apt just brought docker.service up. Either way the reason
+    #    is said and logged.
+    if [ "$rootless_ok" = "0" ] && [ "$bootstrap_ok" = "1" ]; then
+        as_user_logging_to "$_rootless_log" ">" true || true
+        if ! rootless_dir=$(rootless_setuptool_dir); then
+            rootless_note "Rootless Docker was not tried: no dockerd-rootless-setuptool.sh on PATH, in $DOCKER_IO_CONTRIB or in $PACKAGED_ROOTLESS_DIR; using the system daemon."
+        elif docker ps -q 2>/dev/null | grep -q .; then
+            rootless_note "Rootless Docker was not tried: the system Docker daemon is running other containers; using it."
+        else
             # The rootless setup tool refuses to proceed while
             # /var/run/docker.sock exists, so stop + remove it.
             systemctl disable --now docker.service docker.socket 2>/dev/null || true
             rm -f /var/run/docker.sock
+
+            # Docker's wrapper asks RootlessKit for --detach-netns, which
+            # RootlessKit 2.0 brought (Ubuntu 24.04 has 1.1.1, which
+            # refuses the flag and the daemon never starts). Tell it not
+            # to, through the drop-in Docker documents for the purpose,
+            # written as the user (#471).
+            if ! runuser -u "$REAL_USER" -- rootlesskit --help 2>/dev/null | grep -q -- '--detach-netns'; then
+                as_user_logging_to "$_rootless_log" ">>" env HOME="$REAL_HOME" sh -c '
+                    d="$HOME/.config/systemd/user/docker.service.d"
+                    mkdir -p "$d" && printf "[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=false\n" > "$d/onionpress-rootlesskit.conf"
+                ' || true
+                rootless_note "RootlessKit here predates --detach-netns; the rootless daemon runs without it (docker.service.d/onionpress-rootlesskit.conf)."
+            fi
 
             # The tool's exit status is not the verdict: docker.io's ends
             # with `$BIN/docker version`, and contrib holds no docker CLI,
             # so it exits 127 after setting the daemon up. The verdict is
             # the user's rootless daemon answering. Its output is kept for
             # when that fails.
-            _rootless_log="$DATA_DIR/docker-rootless-setup.log"
-            runuser -u "$REAL_USER" -- env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
-                PATH="$rootless_dir:$PATH" \
-                dockerd-rootless-setuptool.sh install --force >"$_rootless_log" 2>&1 || true
-            chown "$REAL_USER:$REAL_USER" "$_rootless_log" 2>/dev/null || true
-            if user_systemctl enable --now docker.service >>"$_rootless_log" 2>&1 && \
+            as_user_logging_to "$_rootless_log" ">>" \
+                env XDG_RUNTIME_DIR="/run/user/$REAL_UID" PATH="$rootless_dir:$PATH" \
+                dockerd-rootless-setuptool.sh install --force || true
+            if as_user_logging_to "$_rootless_log" ">>" \
+                   env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+                   systemctl --user enable --now docker.service && \
                rootless_docker_answers 30; then
                 rootless_ok=1
             else
-                echo "  Rootless Docker did not start (see $_rootless_log); using the system daemon."
+                rootless_note "Rootless Docker did not start (see $_rootless_log); using the system daemon."
                 # The group path below needs the system daemon back.
                 systemctl enable --now docker.socket docker.service 2>/dev/null || true
             fi
@@ -543,6 +630,8 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
             onionpress-watcher.timer \
             >/dev/null 2>&1 || bootstrap_ok=0
     fi
+
+    warn_old_docker
 
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
     if [ "$bootstrap_ok" = "1" ]; then

@@ -376,8 +376,10 @@ class TestLaunchers(unittest.TestCase):
                               f"{path}: xtrace would print the password")
 
     def test_no_password_in_backup_or_restore_argv(self):
-        call = re.compile(r"(?:op_py|onionpress\.cli)\s+(?:backup|restore)\b([^\n]*)")
+        call = re.compile(r'(?:op_py|onionpress\.cli)\s+(?:--data-dir\s+"\$DATA_DIR"\s+)?'
+                          r"(?:backup|restore)\b([^\n]*)")
         for path in LAUNCHERS:
+            self.assertGreaterEqual(len(call.findall(_read(path))), 3, path)
             for m in call.finditer(_read(path)):
                 self.assertNotRegex(m.group(1), r"(?i)\$\{?\w*pass",
                                     f"{path}: {m.group(0).strip()}")
@@ -386,7 +388,8 @@ class TestLaunchers(unittest.TestCase):
         for path in LAUNCHERS:
             self.assertTrue(re.search(
                 r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '
-                r'(?:op_py|bundled_python -m onionpress\.cli) restore "\$restore_path"',
+                r'(?:op_py|bundled_python -m onionpress\.cli) --data-dir "\$DATA_DIR" '
+                r'restore "\$restore_path"',
                 _read(path)), path)
 
     def _run_helper(self, arg="", env_pw=None, stdin=""):
