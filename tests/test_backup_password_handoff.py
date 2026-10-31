@@ -56,20 +56,24 @@ class TestEnvName(unittest.TestCase):
 
 
 class TestReadBackupPassword(unittest.TestCase):
-    """onionpress.cli.read_backup_password: positional, env, stdin, prompt."""
+    """onionpress.cli.read_backup_password: env, stdin, prompt; a positional is refused."""
 
     def test_env_is_used_and_removed(self):
         with mock.patch.dict(os.environ, {BACKUP_PASSWORD_ENV: SECRET}):
             self.assertEqual(cli.read_backup_password(None), SECRET)
             self.assertNotIn(BACKUP_PASSWORD_ENV, os.environ)
 
-    def test_positional_still_works_with_a_warning(self):
+    def test_positional_is_refused(self):
+        # Issue #504: exit 2, the environment emptied all the same, the
+        # message naming no password.
         err = io.StringIO()
         with mock.patch.dict(os.environ, {BACKUP_PASSWORD_ENV: "other"}), \
              mock.patch("sys.stderr", err):
-            self.assertEqual(cli.read_backup_password(SECRET), SECRET)
+            with self.assertRaises(SystemExit) as cm:
+                cli.read_backup_password(SECRET)
             self.assertNotIn(BACKUP_PASSWORD_ENV, os.environ)
-        self.assertIn("WARNING", err.getvalue())
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("ERROR", err.getvalue())
         self.assertNotIn(SECRET, err.getvalue())
 
     def test_stdin_line_when_not_a_terminal(self):
@@ -97,7 +101,7 @@ class TestReadBackupPassword(unittest.TestCase):
 
 class TestCLIParsing(unittest.TestCase):
     """`backup [-o PATH] [--user U]` and `restore <zip>` take the password
-    from the environment; the old positional forms still parse."""
+    from the environment; the old positional forms are refused (#504)."""
 
     def test_backup_without_positionals(self):
         with mock.patch("onionpress.cli.OnionPressCLI") as M, \
@@ -123,17 +127,18 @@ class TestCLIParsing(unittest.TestCase):
         M.return_value.cmd_restore.assert_called_once_with(
             SECRET, "/tmp/b.zip", "", confirmed=frozenset(), json_output=False)
 
-    def test_legacy_positional_forms(self):
-        with mock.patch("onionpress.cli.OnionPressCLI") as M, \
-             mock.patch("sys.stderr", io.StringIO()):
-            M.return_value.cmd_backup.return_value = 0
-            M.return_value.cmd_restore.return_value = 0
-            cli.main(["backup", "pw", "/tmp/b.zip"])
-            cli.main(["restore", "pw", "/tmp/b.zip"])
-        M.return_value.cmd_backup.assert_called_once_with(
-            "pw", "/tmp/b.zip", None, check=False, json_output=False)
-        M.return_value.cmd_restore.assert_called_once_with(
-            "pw", "/tmp/b.zip", "", confirmed=frozenset(), json_output=False)
+    def test_legacy_positional_forms_are_refused(self):
+        for argv in (["backup", "pw", "/tmp/b.zip"], ["restore", "pw", "/tmp/b.zip"]):
+            err = io.StringIO()
+            with self.subTest(argv=argv), \
+                 mock.patch("onionpress.cli.OnionPressCLI") as M, \
+                 mock.patch("sys.stderr", err), \
+                 self.assertRaises(SystemExit) as cm:
+                cli.main(argv)
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("visible to other users", err.getvalue())
+            M.return_value.cmd_backup.assert_not_called()
+            M.return_value.cmd_restore.assert_not_called()
 
     def test_password_leaves_environ_before_the_cli_is_built(self):
         # The Docker wrapper copies os.environ for its children when the CLI
@@ -392,7 +397,7 @@ class TestLaunchers(unittest.TestCase):
                 r'restore "\$restore_path"',
                 _read(path)), path)
 
-    def _run_helper(self, arg="", env_pw=None, stdin=""):
+    def _run_helper(self, arg="", env_pw=None, stdin="", rc=0):
         func = _bash_function(_read("linux/onionpress"), "read_backup_password")
         script = (
             "set -e\n" + func +
@@ -405,7 +410,9 @@ class TestLaunchers(unittest.TestCase):
             env[BACKUP_PASSWORD_ENV] = env_pw
         r = subprocess.run(["bash", "-c", script, "bash", arg], input=stdin,
                            capture_output=True, text=True, env=env, timeout=10)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.returncode, rc, r.stderr)
+        if rc:
+            return r.stdout, "", r.stderr
         got, child = r.stdout.split("\n")[:2]
         return got, child, r.stderr
 
@@ -422,12 +429,16 @@ class TestLaunchers(unittest.TestCase):
         got, _, _ = self._run_helper(stdin="")
         self.assertEqual(got, "")
 
-    def test_helper_old_positional_warns(self):
-        got, child, err = self._run_helper(arg=SECRET, env_pw="other")
-        self.assertEqual(got, SECRET)
-        self.assertEqual(child, "unset")
-        self.assertIn("WARNING", err)
+    def test_helper_refuses_a_positional_password(self):
+        # Issue #504: the old positional form is an error (exit 2), not a
+        # warning; nothing is printed or passed on, the message names no
+        # password.
+        out, _, err = self._run_helper(arg=SECRET, env_pw="other", rc=2)
+        self.assertEqual(out, "")
+        self.assertIn("ERROR", err)
+        self.assertIn("refused", err)
         self.assertNotIn(SECRET, err)
+        self.assertNotIn("other\n", err)
 
 
 if __name__ == "__main__":

@@ -591,17 +591,21 @@ wp_is_installed() {
 # Backup passwords are handed over in ONIONPRESS_BACKUP_PASSWORD, never on a
 # command line: other local users can read any process's argv (ps,
 # /proc/<pid>/cmdline) but not its environment. Sets BACKUP_PASS from the
-# first of: $1 (the old positional form; warns), the variable, a line on
-# stdin, a no-echo prompt. Unsets the variable so the commands this script
-# runs don't inherit it; pass it on as ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
+# first of: the variable, a line on stdin, a no-echo prompt. A password
+# given as an argument ($1: the old positional form of backup, restore,
+# scrub and `setup --from-backup`) is refused, exit 2 (issue #504: a leaked
+# child kept one in ps until reboot). Unsets the variable so the commands
+# this script runs don't inherit it; pass it on as
+# ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
 # Identical in app/MacOS/onionpress and linux/onionpress (test-enforced).
 read_backup_password() {
     BACKUP_PASS="${ONIONPRESS_BACKUP_PASSWORD:-}"
     unset ONIONPRESS_BACKUP_PASSWORD
     if [ -n "${1:-}" ]; then
-        echo "WARNING: a password on the command line is visible to other users of this computer. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
-        BACKUP_PASS="$1"
-    elif [ -z "$BACKUP_PASS" ]; then
+        echo "ERROR: a password on the command line is visible to other users of this computer, so it is refused. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
+        exit 2
+    fi
+    if [ -z "$BACKUP_PASS" ]; then
         if [ -t 0 ]; then
             read -r -s -p "Backup password: " BACKUP_PASS || true
             echo "" >&2
@@ -626,7 +630,8 @@ run_setup() {
             --from-backup)
                 # `--from-backup <zip>`: the password as backup and restore
                 # take it (ONIONPRESS_BACKUP_PASSWORD, stdin, a prompt). The
-                # old `--from-backup <password> <zip>` still works, warned.
+                # old `--from-backup <password> <zip>` is refused by
+                # read_backup_password (never taken for a zip path).
                 # The setup is then the restore (issue #509), so a hub's
                 # recovery key goes along as the restore case passes it.
                 if [ $# -ge 3 ] && [ "${3#-}" = "$3" ]; then
@@ -2284,7 +2289,7 @@ main() {
             # backup [-o|--output <path>] [--user <login>]. The Python CLI
             # reads the password (must match a WordPress administrator) from
             # ONIONPRESS_BACKUP_PASSWORD, stdin or a no-echo prompt; the old
-            # `backup <password> [output_path]` still works, with a warning.
+            # `backup <password> [output_path]` is refused (issue #504).
             shift  # drop "backup"
             bundled_python -m onionpress.cli --data-dir "$DATA_DIR" backup "$@"
             ;;
@@ -2293,7 +2298,7 @@ main() {
             # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
             # the password comes from read_backup_password and goes on to
             # Python in the environment. The old `restore <password>
-            # <backup_file.zip>` still works. The flags are the check/confirm
+            # <backup_file.zip>` is refused. The flags are the check/confirm
             # protocol's (onionpress.confirm): --check answers what the
             # backup is, or {"ask": "password"} without one.
             setup_db_passwords
@@ -2390,7 +2395,7 @@ main() {
             # Proves backup/restore integrity and that reset truly cleans up.
             # Usage: onionpress scrub. The WordPress admin password comes
             # from read_backup_password (ONIONPRESS_BACKUP_PASSWORD, stdin or
-            # a prompt); `scrub <password>` still works, with a warning.
+            # a prompt); `scrub <password>` is refused (issue #504).
             echo ""
             echo "OnionPress Scrub"
             echo "================"

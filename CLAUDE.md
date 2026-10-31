@@ -252,6 +252,13 @@
   constructions of our own.**
 - Secrets never go on argv: stdin or the environment.
   `tests/test_secrets_off_argv.py`.
+- **A backup password given as an argument is refused** (#504; exit 2 from
+  the launchers' `read_backup_password`, identical in both, and
+  `cli.read_backup_password` / `scrub`): `backup`, `restore`, `scrub` and
+  `setup --from-backup` take it from `ONIONPRESS_BACKUP_PASSWORD`, stdin or
+  a prompt only. The old positional forms are still parsed so they get the
+  refusal, never a mis-read argument. `tests/test_backup_password_handoff.py`,
+  `tests/test_terminal_setup.py`.
 
 ## WordPress Branch Moves With the Image
 - `WORDPRESS_BRANCH` in the wordpress Dockerfile is the branch the audit
@@ -508,6 +515,14 @@
   `tests/test_wordpress_egress.py`.
 - `migrate_tor_network` removes an old onionpress-network before the first
   `compose up`, removing only known containers by exact name.
+
+## The onionheaven Container Is a Core Service (issue #504)
+- `onionheaven` is in `containers.CORE_SERVICES` with `restart:
+  unless-stopped` under autoheal: every start brings it up on every node.
+  **No launcher watcher for it** (the Linux 30 s poll forked from every CLI
+  run outlived it, one orphan per `restart`/`setup`, each with its parent's
+  argv in ps); web-server.py's activation flag is read by nothing on the
+  host. `tests/test_start_sequence.py`, `tests/test_start_post_up.py`.
 
 ## The Docker Socket Stays Out of onionheaven
 - Only `autoheal-proxy` and `onionheaven-farm` mount the socket (`:ro`,

@@ -81,7 +81,6 @@ py provision-post-install --themes-dir $TMP/opt/themes --plugins-dir $TMP/opt/pl
 docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
 log WordPress not installed yet — Cache Enabler and the Link Fixer are set up after setup
 docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
-fn start_onionheaven_activation_watcher
 docker container inspect onionpress-cloudflared
 rc=0
 markers=

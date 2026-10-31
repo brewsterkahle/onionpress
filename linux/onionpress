@@ -696,17 +696,21 @@ prompt_and_validate_wp_password() {
 # Backup passwords are handed over in ONIONPRESS_BACKUP_PASSWORD, never on a
 # command line: other local users can read any process's argv (ps,
 # /proc/<pid>/cmdline) but not its environment. Sets BACKUP_PASS from the
-# first of: $1 (the old positional form; warns), the variable, a line on
-# stdin, a no-echo prompt. Unsets the variable so the commands this script
-# runs don't inherit it; pass it on as ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
+# first of: the variable, a line on stdin, a no-echo prompt. A password
+# given as an argument ($1: the old positional form of backup, restore,
+# scrub and `setup --from-backup`) is refused, exit 2 (issue #504: a leaked
+# child kept one in ps until reboot). Unsets the variable so the commands
+# this script runs don't inherit it; pass it on as
+# ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" cmd.
 # Identical in app/MacOS/onionpress and linux/onionpress (test-enforced).
 read_backup_password() {
     BACKUP_PASS="${ONIONPRESS_BACKUP_PASSWORD:-}"
     unset ONIONPRESS_BACKUP_PASSWORD
     if [ -n "${1:-}" ]; then
-        echo "WARNING: a password on the command line is visible to other users of this computer. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
-        BACKUP_PASS="$1"
-    elif [ -z "$BACKUP_PASS" ]; then
+        echo "ERROR: a password on the command line is visible to other users of this computer, so it is refused. Leave it out to be prompted, or set ONIONPRESS_BACKUP_PASSWORD." >&2
+        exit 2
+    fi
+    if [ -z "$BACKUP_PASS" ]; then
         if [ -t 0 ]; then
             read -r -s -p "Backup password: " BACKUP_PASS || true
             echo "" >&2
@@ -731,7 +735,8 @@ run_setup() {
             --from-backup)
                 # `--from-backup <zip>`: the password as backup and restore
                 # take it (ONIONPRESS_BACKUP_PASSWORD, stdin, a prompt). The
-                # old `--from-backup <password> <zip>` still works, warned.
+                # old `--from-backup <password> <zip>` is refused by
+                # read_backup_password (never taken for a zip path).
                 # The setup is then the restore (issue #509), so a hub's
                 # recovery key goes along as the restore case passes it.
                 if [ $# -ge 3 ] && [ "${3#-}" = "$3" ]; then
@@ -1178,71 +1183,15 @@ print(json.dumps({"reset": True, **reset_onionheaven()}))
 ' 2>>"$LOG_FILE"
 }
 
-# ─── OnionHeaven lazy activation ──────────────────────────────────────
+# ─── OnionHeaven on a hub ─────────────────────────────────────────────
 #
-# The activation flag marks a hub. web-server.py writes it once it knows the
-# node is one (canonical hub address, or ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes)
-# and removes it on every other node; registrations no longer write it.
-
-ONIONHEAVEN_WATCHER_PID=""
-
-start_onionheaven_activation_watcher() {
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
-        log "OnionHeaven container already running"
-    fi
-
-    # If the activation flag already exists (this node is a hub), start immediately.
-    local activate_flag
-    activate_flag=$(docker exec onionpress-tor cat /var/lib/onionheaven/activate 2>/dev/null) || true
-    if [ -n "$activate_flag" ]; then
-        log "OnionHeaven activation flag found — starting heartbeat container"
-        _activate_onionheaven
-    fi
-
-    if [ -z "$activate_flag" ]; then
-        log "OnionHeaven: no activation flag — not a hub (the heartbeat monitor stays idle)"
-    fi
-
-    # Start persistent watcher — monitors the activation flag and restarts
-    # the onionheaven container if it goes down on a hub.
-    _onionheaven_activation_watcher &
-    ONIONHEAVEN_WATCHER_PID=$!
-}
-
-_onionheaven_activation_watcher() {
-    # Disable errexit — this runs as a background function and any transient
-    # docker failure would silently kill the entire watcher loop (bash 4+).
-    set +e
-    # Persistent loop: poll for the activation flag every 30s.
-    # If the flag exists but the onionheaven container is not running,
-    # restart it.  This handles the case where the container was stopped
-    # externally (e.g., by a test cleanup).
-    while true; do
-        sleep 30
-        local flag
-        flag=$(docker exec onionpress-tor cat /var/lib/onionheaven/activate 2>/dev/null) || true
-        if [ -n "$flag" ]; then
-            if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^onionheaven$'; then
-                log "OnionHeaven activation flag detected — starting heartbeat container"
-                _activate_onionheaven
-            fi
-        fi
-    done
-}
-
-_activate_onionheaven() {
-    cd "$DOCKER_DIR"
-    docker compose up -d onionheaven >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to start OnionHeaven container"
-    # Takeover container management is now handled by the heartbeat inside onionheaven
-}
-
-stop_onionheaven_activation_watcher() {
-    if [ -n "$ONIONHEAVEN_WATCHER_PID" ] && kill -0 "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null; then
-        kill "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null || true
-        wait "$ONIONHEAVEN_WATCHER_PID" 2>/dev/null || true
-        ONIONHEAVEN_WATCHER_PID=""
-    fi
-}
+# The onionheaven container is a core service (containers.CORE_SERVICES,
+# `restart: unless-stopped`, under autoheal): every start brings it up on
+# every node, hub or not, as the Mac's does. This launcher keeps no watcher
+# for it (issue #504: the old 30 s poll, forked from every CLI run, outlived
+# it, one orphan per `restart` or `setup`, each carrying its parent's
+# command line in ps). web-server.py's activation flag is a hint nothing
+# on the host reads.
 # The end of the start, once the core is up (start.post_up, #442.7): Tor,
 # the SOCKS port check, the Cloudflare tunnel (only once WordPress is
 # installed; removed when the token goes), the pinned plugins, the
@@ -1423,11 +1372,6 @@ start_containers() {
     # provisioning and the image rebuild (start_post_up): best effort.
     start_post_up "$wp_installed"
 
-    # OnionHeaven: the API server runs inside the tor container (always on).
-    # On a hub, the watcher keeps the onionheaven container (heartbeat
-    # monitor + takeover Tor) running (signaled by an activation flag file).
-    start_onionheaven_activation_watcher
-
     # Last: the clearnet sees the site once it is provisioned.
     start_cloudflare_tunnel "$wp_installed"
 }
@@ -1464,7 +1408,6 @@ start_cloudflare_tunnel() {
 stop_containers() {
     log "Stopping OnionPress containers..."
     stop_container_log_capture
-    stop_onionheaven_activation_watcher
     stop_onionheaven_farm
     # Capture the offset BEFORE compose-down so the next start can wait
     # for the TIME_WAIT sockets to clear and reuse the same offset.
@@ -3665,7 +3608,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
         backup)
             # backup [-o|--output <path>] [--check] [--json] [--user <login>];
             # the password comes from read_backup_password. The old `backup
-            # <password> [output_path]` still works. --check is the
+            # <password> [output_path]` is refused (issue #504). --check is the
             # check/confirm protocol's (onionpress.confirm, issue #375): the
             # shared CLI verifies the password as the owner's and names the
             # file, making no backup; the tray asks that first and then runs
@@ -3734,7 +3677,7 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
             # the password comes from read_backup_password and goes on to
             # Python in the environment. The old `restore <password>
-            # <backup_file.zip>` still works. The flags are the check/confirm
+            # <backup_file.zip>` is refused. The flags are the check/confirm
             # protocol's (onionpress.confirm): --check answers what the
             # backup is, or {"ask": "password"} without one.
             setup_db_passwords
@@ -4016,8 +3959,8 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # and verify checks.
             #
             # Args forwarded verbatim — "${@:2}" skips this case label
-            # itself. Supports: `onionpress scrub [<wp-admin-password>]
-            # [--clean]`.
+            # itself. Supports: `onionpress scrub [--clean]` (the password
+            # from the environment, stdin or a prompt; one on argv is refused).
             op_py scrub "${@:2}"
             ;;
 

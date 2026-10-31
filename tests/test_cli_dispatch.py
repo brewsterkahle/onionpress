@@ -490,13 +490,10 @@ ROWS = [
         mock.call(log_func=print), rc=1, returns=False, setup_cli=True),
     Row("scrub", ["scrub", "--clean"], "scrub.run_scrub",
         mock.call(password=None, clean=True), setup_cli=True),
-    # The password as backup's: from the environment (then gone from it),
-    # the old positional with a warning (TestScrubPassword).
+    # The password as backup's: from the environment (then gone from it);
+    # one on argv is refused (test_scrub_refuses_a_password_on_argv, #504).
     Row("scrub", ["scrub"], "scrub.run_scrub",
         mock.call(password="pw", clean=False), setup_cli=True,
-        env={cli.BACKUP_PASSWORD_ENV: "pw"}),
-    Row("scrub", ["scrub", "argvpw"], "scrub.run_scrub",
-        mock.call(password="argvpw", clean=False), setup_cli=True,
         env={cli.BACKUP_PASSWORD_ENV: "pw"}),
 ]
 
@@ -619,11 +616,19 @@ class TestDispatch(unittest.TestCase):
             with self.subTest(row=repr(row)):
                 self.run_row(row)
 
-    def test_scrub_warns_only_about_a_password_on_argv(self):
-        scrub_rows = [r for r in ROWS if r.argv[:1] == ["scrub"]]
-        _, err = self.run_row(next(r for r in scrub_rows if "argvpw" in r.argv))
-        self.assertIn("visible to other users", err)
-        _, err = self.run_row(next(r for r in scrub_rows if r.argv == ["scrub"]))
+    def test_scrub_refuses_a_password_on_argv(self):
+        err = io.StringIO()
+        with mock.patch.object(cli, "OnionPressCLI"), \
+             mock.patch.object(scrub, "run_scrub") as run, \
+             mock.patch.dict(os.environ, {cli.BACKUP_PASSWORD_ENV: "pw"}), \
+             contextlib.redirect_stderr(err):
+            rc = cli.main(["--data-dir", self.dir, "scrub", "argvpw"])
+        self.assertEqual(rc, 2)
+        self.assertIn("visible to other users", err.getvalue())
+        self.assertNotIn("argvpw", err.getvalue())
+        run.assert_not_called()
+        self.assertNotIn(cli.BACKUP_PASSWORD_ENV, os.environ)
+        _, err = self.run_row(next(r for r in ROWS if r.argv == ["scrub"]))
         self.assertNotIn("visible to other users", err)
 
     def test_handle_action_prints_the_result_as_json_only_when_asked(self):
