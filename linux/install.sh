@@ -540,6 +540,11 @@ run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user enable onionpress
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user enable --now onionpress-watcher.timer
+# A runtime mask of the heartbeat unit from an install removed in this boot
+# (the launcher's hold until WordPress is installed) would fail its enable
+# (issue #506); the first start holds it again while the site is not set up.
+run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    systemctl --user unmask --runtime onionpress-heartbeat 2>/dev/null || true
 run_as_user env XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
     systemctl --user enable onionpress-heartbeat
 echo "  Systemd user services installed and enabled (starts on boot)"

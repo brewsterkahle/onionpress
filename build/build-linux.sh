@@ -393,10 +393,29 @@ if [ "$1" = "configure" ] && [ -n "$2" ] && [ "$REAL_USER" != "root" ]; then
     VERSION_INSTALLED=$(cat /opt/onionpress/VERSION 2>/dev/null || echo "?")
     warn_old_docker
     echo "  OnionPress $VERSION_INSTALLED installed over $2. Restarting the site for $REAL_USER (the running one is still version $2)..."
+    # What the user's manager says a unit is doing (active, inactive,
+    # failed...), "unknown" when it does not answer: the message below
+    # reports that, never what try-restart was asked for (issue #506).
+    user_unit_state() {
+        local s
+        s=$(systemctl --user --machine="${REAL_USER}@.host" is-active "$1" 2>/dev/null) || true
+        echo "${s:-unknown}"
+    }
+    # The heartbeat is held (a runtime mask) while WordPress is not
+    # installed (issue #464): a masked unit fails the whole try-restart,
+    # and there is no site to restart either way, so then the site's unit
+    # alone. Otherwise both in one call: the heartbeat is After= the site,
+    # so systemd stops it first and starts it last.
+    restart_units="onionpress.service onionpress-heartbeat.service"
+    heartbeat_note=""
+    if [ "$(systemctl --user --machine="${REAL_USER}@.host" is-enabled onionpress-heartbeat.service 2>/dev/null)" = "masked-runtime" ]; then
+        restart_units="onionpress.service"
+        heartbeat_note=" (held until WordPress is set up)"
+    fi
     if systemctl --user --machine="${REAL_USER}@.host" daemon-reload 2>/dev/null \
        && systemctl --user --machine="${REAL_USER}@.host" try-restart \
-              onionpress.service onionpress-heartbeat.service 2>/dev/null; then
-        echo "  OnionPress restarted: now running $VERSION_INSTALLED where it was running."
+              $restart_units 2>/dev/null; then
+        echo "  OnionPress restarted, version $VERSION_INSTALLED: onionpress.service $(user_unit_state onionpress.service), onionpress-heartbeat.service $(user_unit_state onionpress-heartbeat.service)$heartbeat_note (a stopped unit stays stopped)."
     else
         cat <<EOF
   Could not restart OnionPress for $REAL_USER through systemd, so the old
@@ -624,6 +643,11 @@ if [ "$1" = "configure" ] && [ -z "$2" ] && [ "$REAL_USER" != "root" ]; then
     if [ "$bootstrap_ok" = "1" ]; then
         user_systemctl daemon-reload 2>/dev/null || true
         user_systemctl start dbus.socket 2>/dev/null || true
+        # A runtime mask of the heartbeat unit (the launcher's hold until
+        # WordPress is installed, issue #464) outlives an `apt purge` in
+        # the same boot and failed this enable (issue #506): lift it; the
+        # first start holds it again while the site is not set up.
+        user_systemctl unmask --runtime onionpress-heartbeat.service >/dev/null 2>&1 || true
         user_systemctl enable --now --no-block \
             onionpress.service \
             onionpress-heartbeat.service \
@@ -702,10 +726,31 @@ cat > "$DEB_ROOT/DEBIAN/prerm" <<'PRERM'
 #!/bin/bash
 set -e
 
+# Issue #506: the launcher holds the heartbeat unit with a runtime mask
+# until WordPress is installed (issue #464). That mask lives under
+# /run/user/<uid>, so it outlived the package and failed the next
+# install's `enable --now` in the same boot. Lift it for every user whose
+# manager has it (root reads /run/user; the user's own manager does the
+# unmask). The root folder is a variable only for the tests.
+lift_heartbeat_holds() {
+    local root="${ONIONPRESS_RUN_USER:-/run/user}" d uid user
+    for d in "$root"/*; do
+        [ -L "$d/systemd/user/onionpress-heartbeat.service" ] || continue
+        uid=${d##*/}
+        case "$uid" in ""|*[!0-9]*) continue ;; esac
+        user=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1)
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            systemctl --user unmask --runtime onionpress-heartbeat.service 2>/dev/null || true
+    done
+    return 0
+}
+
 case "$1" in
     remove)
         # Globally disable so the units don't relink on next login.
         systemctl --global disable onionpress.service onionpress-heartbeat.service onionpress-watcher.timer 2>/dev/null || true
+        lift_heartbeat_holds
 
         # Kill any running tray across all users. Without this, the
         # in-memory tray keeps painting its indicator icon and hitting
@@ -735,6 +780,26 @@ cat > "$DEB_ROOT/DEBIAN/postrm" <<'POSTRM'
 #!/bin/bash
 set -e
 
+# Issue #506: the launcher holds the heartbeat unit with a runtime mask
+# until WordPress is installed (issue #464). That mask lives under
+# /run/user/<uid>, so it outlived the package and failed the next
+# install's `enable --now` in the same boot. Lift it for every user whose
+# manager has it (root reads /run/user; the user's own manager does the
+# unmask). The root folder is a variable only for the tests.
+lift_heartbeat_holds() {
+    local root="${ONIONPRESS_RUN_USER:-/run/user}" d uid user
+    for d in "$root"/*; do
+        [ -L "$d/systemd/user/onionpress-heartbeat.service" ] || continue
+        uid=${d##*/}
+        case "$uid" in ""|*[!0-9]*) continue ;; esac
+        user=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1)
+        [ -n "$user" ] || continue
+        runuser -u "$user" -- env XDG_RUNTIME_DIR="$d" \
+            systemctl --user unmask --runtime onionpress-heartbeat.service 2>/dev/null || true
+    done
+    return 0
+}
+
 case "$1" in
     remove)
         # docker.service's drop-in is gone with the package. The rules it
@@ -743,6 +808,8 @@ case "$1" in
         systemctl daemon-reload 2>/dev/null || true
         ;;
     purge)
+        # A purge of a package removed earlier ran no prerm now.
+        lift_heartbeat_holds
         # Don't auto-remove ~/.onionpress/ — it holds the onion key and
         # DB passwords. Tell the user what's still there.
         cat <<EOF
