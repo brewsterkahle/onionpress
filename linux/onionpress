@@ -493,9 +493,10 @@ fi
 # it: everything after the first `=`, since a token can end in `=` padding
 # (#323). It reaches cloudflared only through compose's environment; never
 # log it. docker-compose.cloudflare.yml adds the cloudflared service, so the
-# calls that start or pull it take CF_COMPOSE (that file only with a token),
-# and the ones that stop or remove take COMPOSE_WITH_CF, so a tunnel whose
-# token was just removed still goes down with the rest (#352).
+# calls that pull it take CF_COMPOSE (that file only with a token), the ones
+# that stop or remove take COMPOSE_WITH_CF, so a tunnel whose token was just
+# removed still goes down with the rest (#352), and start_cloudflare_tunnel
+# names both files itself.
 # apply_config_updates reads it again: the Settings page's Restart applies
 # the page's changes in this same process before start_containers.
 COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
@@ -2216,7 +2217,6 @@ start_containers() {
     docker compose up -d tor onionheaven >> "$LOG_FILE" 2>&1 || log "ERROR: Failed to start tor/onionheaven containers"
     warn_if_socks_port_exposed
     note_if_lan_looks_local
-    start_cloudflare_tunnel "$wp_installed"
 
     # OnionHeaven: the API server runs inside the tor container (always on).
     # On a hub, the watcher keeps the onionheaven container (heartbeat
@@ -2256,30 +2256,38 @@ start_containers() {
         log "Image derivatives: rebuild pending — starting in the background"
         run_detached env PYTHONPATH="$ONIONPRESS_PYTHONPATH" "${OP_PY[@]}" regenerate-derivatives
     fi
+
+    # Last: the clearnet sees the site once it is provisioned.
+    start_cloudflare_tunnel "$wp_installed"
 }
 
-# Cloudflare Tunnel (#352): cloudflared runs when the config holds a token,
-# as on the Mac. Only once WordPress is installed: before that its install
-# page would be on the open internet. Without a token the container is
-# removed, not just stopped, so a removed token does not linger in its
-# configuration. Its ingress must point at http://wordpress:80; the
-# ONIONPRESS-TOR chain refuses anything on the LAN or this host.
+# Cloudflare Tunnel (#352), one rule on both platforms (this function is
+# test-held identical in the two launchers): cloudflared runs only while the
+# config holds a token AND WordPress is installed. Before that its install
+# page, then an unprovisioned site, would be on the open internet. Called at
+# the end of a start, after provisioning and the bundled plugins (the
+# clearnet's first page comes from a site with its cache policy in place),
+# and at the end of every setup path, so a new site needs no restart.
+# Otherwise the container is removed, not just stopped, so a removed token
+# does not linger in its configuration. --no-deps: wordpress is up already,
+# and a setup path's call must not recreate it. Its ingress must point at
+# http://wordpress:80; the ONIONPRESS-TOR chain refuses the LAN and the host.
 start_cloudflare_tunnel() {
     local wp_installed=$1
-    if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-        if docker container inspect onionpress-cloudflared >/dev/null 2>&1; then
-            log "Cloudflare Tunnel token removed, removing cloudflared"
-            docker rm -f onionpress-cloudflared >> "$LOG_FILE" 2>&1 || true
-        fi
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ] && [ "$wp_installed" = true ]; then
+        log "Cloudflare Tunnel enabled, starting cloudflared..."
+        (cd "$DOCKER_DIR" && docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml \
+            up -d --no-deps cloudflared) >> "$LOG_FILE" 2>&1 \
+            || log "ERROR: Failed to start cloudflared container"
         return 0
     fi
-    if [ "$wp_installed" != true ]; then
-        log "Cloudflare Tunnel: waiting until WordPress is set up (restart OnionPress afterwards)"
-        return 0
+    if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+        log "Cloudflare Tunnel: waiting until WordPress is set up (it starts when setup finishes)"
     fi
-    log "Cloudflare Tunnel enabled, starting cloudflared..."
-    docker compose "${CF_COMPOSE[@]}" up -d cloudflared >> "$LOG_FILE" 2>&1 \
-        || log "ERROR: Failed to start cloudflared container"
+    if docker container inspect onionpress-cloudflared >/dev/null 2>&1; then
+        log "Cloudflare Tunnel off (no token, or WordPress not set up): removing cloudflared"
+        docker rm -f onionpress-cloudflared >> "$LOG_FILE" 2>&1 || true
+    fi
 }
 
 stop_containers() {
@@ -4444,6 +4452,8 @@ main() {
                 # Then Cache Enabler and the Link Fixer, which need the
                 # mu-plugins provision-post-install has just installed.
                 setup_bundled_plugins
+                # The site is set up: the tunnel, if there is a token.
+                start_cloudflare_tunnel true
                 # Fetch archive.org S3 keys now that Tor is up and WP is
                 # installed — same timing as the Mac setup flow.
                 op_py ensure-archive-s3-keys >> "$LOG_FILE" 2>&1 &
@@ -4498,8 +4508,10 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             # Every setup ends here (setup_logic.install_fresh_wordpress
             # runs this subcommand): WordPress's port goes where the config
             # says and the heartbeat client is released (issue #464).
+            # The tunnel too, when there is a token (start_cloudflare_tunnel).
             if wp_is_installed; then
                 after_wordpress_installed
+                start_cloudflare_tunnel true
             fi
             ;;
 

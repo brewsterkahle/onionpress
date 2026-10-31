@@ -925,10 +925,13 @@
   py2app build.
 
 ## Cloudflare Tunnel Runs on Both Platforms (issue #352)
-- `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`. Linux
-  starts cloudflared only once WordPress is installed and removes it when
-  the token goes. Ingress must be `http://wordpress:80`.
-  `tests/test_linux_cloudflare_tunnel.py`.
+- `CLOUDFLARE_TUNNEL_TOKEN` adds `docker-compose.cloudflare.yml`.
+  **Only `start_cloudflare_tunnel` starts cloudflared** (identical in both
+  launchers): with a token and an installed WordPress, last in a start
+  (after provisioning and the bundled plugins) and at the end of every
+  setup path (no restart needed); otherwise the container is removed.
+  Stops always name the override file. Ingress must be
+  `http://wordpress:80`. `tests/test_cloudflare_tunnel.py`.
 
 ## Colima Networking Gotcha
 - **SOCKS (9050) does not work through Colima port forwarding.** For any Tor
