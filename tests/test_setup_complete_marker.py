@@ -128,6 +128,7 @@ start_containers() { record start_containers; }
 wait_for_services() { record wait_for_services; }
 vanity_key_dir() { echo "$DATA_DIR/shared/vanity-keys/$ONION"; }
 onionheaven_release() { record "onionheaven_release $*"; }
+start_cloudflare_tunnel() { record "start_cloudflare_tunnel $*"; }
 """
 
 
@@ -173,6 +174,8 @@ class TestMacLauncherSetupWritesIt(unittest.TestCase):
         self.assertTrue(os.path.exists(self.marker))
         self.assertIn("setup_wordpress_cli --user alice --pass hunter22 --email a@example.org",
                       self._calls())
+        # The tunnel starts with the site, not at the next start.
+        self.assertIn("start_cloudflare_tunnel true", self._calls())
         self.assertFalse(os.path.exists(os.path.join(self.data_dir, ".import-key-pending")))
 
     def test_a_completed_setup_from_backup(self):

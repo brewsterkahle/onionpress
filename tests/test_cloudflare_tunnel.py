@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Linux runs the Cloudflare Tunnel the Settings page saves a token for (#352).
+"""cloudflared starts at the same point on both platforms (#352).
 
 Through 2.5.4 the Linux launcher set CLOUDFLARE_TUNNEL_TOKEN="" and never
 read the config, so a token saved on the Settings page sat there unused:
-no cloudflared, no error. It now reads the token as the Mac launcher does,
-starts cloudflared once WordPress is installed, removes it when the token
-goes, and takes it down with the rest of the stack.
+no cloudflared, no error. It now reads the token as the Mac launcher does.
+
+The two launchers then started cloudflared at different points: the Mac at
+the very end of every start, installed WordPress or not (its install page,
+then an unprovisioned site, on the open internet); Linux right after Tor,
+before provisioning, only once installed, and not again until a restart
+after setup. Both now run one start_cloudflare_tunnel, held identical here:
+only with a token and an installed WordPress, last in a start (after
+provisioning and the bundled plugins) and at the end of every setup path;
+otherwise the container is removed. Both take it down with the rest.
 
 The behaviour tests run the launcher's own functions in bash with `docker`
 stubbed as a shell function, so no daemon is ever contacted.
@@ -24,6 +31,10 @@ from test_config_one_reader import config_value_function  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LAUNCHER = os.path.join(PROJECT_ROOT, "linux", "onionpress")
+MAC_LAUNCHER = os.path.join(PROJECT_ROOT, "app", "MacOS", "onionpress")
+LAUNCHERS = {"linux": LAUNCHER, "mac": MAC_LAUNCHER}
+COMPOSE_UP = ("docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml"
+              " up -d --no-deps cloudflared")
 SETTINGS_PHP = os.path.join(
     PROJECT_ROOT, "app", "Resources", "plugins", "onionpress-settings.php")
 
@@ -40,6 +51,13 @@ def _function(text, name):
     start = text.index(f"\n{name}() {{")
     end = text.index("\n}\n", start)
     return text[start:end] + "\n}\n"
+
+
+def _case(text, name):
+    """A verb's body in the launcher's main case statement."""
+    start = text.index(f"\n        {name})\n")
+    end = text.index("\n            ;;\n", start)
+    return text[start:end]
 
 
 class TestLauncherWiring(unittest.TestCase):
@@ -80,6 +98,68 @@ class TestLauncherWiring(unittest.TestCase):
                         body.index("cloudflare/cloudflared:"))
 
 
+class TestOneTimingOnBothPlatforms(unittest.TestCase):
+    """Where each launcher starts cloudflared: the same places."""
+
+    def setUp(self):
+        self.texts = {name: _read(path) for name, path in LAUNCHERS.items()}
+
+    def test_the_function_is_the_same_in_both_launchers(self):
+        bodies = {_function(text, "start_cloudflare_tunnel")
+                  for text in self.texts.values()}
+        self.assertEqual(len(bodies), 1, "start_cloudflare_tunnel drifted")
+
+    def test_only_the_function_starts_cloudflared(self):
+        for name, text in self.texts.items():
+            with self.subTest(launcher=name):
+                fn = _function(text, "start_cloudflare_tunnel")
+                rest = text.replace(fn, "")
+                self.assertNotRegex(rest, r"up -d[^\n]*\bcloudflared\b")
+                self.assertNotIn("docker stop onionpress-cloudflared", rest)
+
+    def test_start_runs_it_last_after_provisioning(self):
+        """The clearnet's first page comes from a provisioned site with the
+        cache policy in place, as on the Mac before; and never before the
+        install check, which the Mac start used to skip."""
+        for name, text in self.texts.items():
+            with self.subTest(launcher=name):
+                body = _function(text, "start_containers")
+                call = body.index('start_cloudflare_tunnel "$wp_installed"')
+                self.assertEqual(body.count("start_cloudflare_tunnel"), 1)
+                self.assertLess(body.index("provision-post-install"), call)
+                self.assertLess(body.rindex("setup_bundled_plugins"), call)
+                self.assertLess(body.index("regenerate-derivatives"), call)
+                self.assertLess(body.index("local wp_installed=false"), call)
+
+    def test_every_setup_path_starts_it(self):
+        """A new site's tunnel needs no restart after setup."""
+        for name, text in self.texts.items():
+            with self.subTest(launcher=name, verb="provision-post-install"):
+                body = _case(text, "provision-post-install")
+                self.assertLess(body.index("provision-post-install \\"),
+                                body.index("start_cloudflare_tunnel true"))
+                self.assertLess(body.index("if wp_is_installed; then"),
+                                body.index("start_cloudflare_tunnel true"))
+            with self.subTest(launcher=name, verb="setup"):
+                body = _case(text, "setup")
+                self.assertIn("start_cloudflare_tunnel true", body)
+        linux_setup = _case(self.texts["linux"], "setup")
+        self.assertLess(linux_setup.index("setup_bundled_plugins"),
+                        linux_setup.index("start_cloudflare_tunnel true"))
+
+    def test_mac_provisioning_keeps_its_status(self):
+        """setup_logic reads provision-post-install's exit status."""
+        body = _case(self.texts["mac"], "provision-post-install")
+        self.assertIn("|| ppi_rc=$?", body)
+        self.assertTrue(body.rstrip().endswith('exit "$ppi_rc"'))
+
+    def test_mac_stop_takes_cloudflared_down(self):
+        body = _function(self.texts["mac"], "stop_containers")
+        self.assertIn("docker compose -f docker-compose.yml "
+                      "-f docker-compose.cloudflare.yml down", body)
+        self.assertNotIn("CF_COMPOSE", self.texts["mac"])
+
+
 class TestTunnelBehaviour(unittest.TestCase):
     """read_cloudflare_token and start_cloudflare_tunnel, run for real."""
 
@@ -92,6 +172,7 @@ class TestTunnelBehaviour(unittest.TestCase):
         self.script = "\n".join([
             "set -e",
             f'DATA_DIR="{self.dir}"',
+            f'DOCKER_DIR="{self.dir}"',
             f'LOG_FILE="{self.log}"',
             'log() { echo "$1" >> "$LOG_FILE"; }',
             # `docker container inspect` answers per $CF_EXISTS.
@@ -122,15 +203,21 @@ class TestTunnelBehaviour(unittest.TestCase):
     def test_token_with_padding_starts_cloudflared(self):
         calls, log = self._run(
             f"ADDRESS_PREFIX=op2\nCLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n", "true")
-        self.assertIn(
-            "docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml"
-            f" up -d cloudflared TOKEN={TOKEN}\n", calls)
+        self.assertIn(f"{COMPOSE_UP} TOKEN={TOKEN}\n", calls)
         self.assertNotIn(TOKEN, log, "the token must never reach the log")
 
     def test_not_before_wordpress_is_installed(self):
         calls, log = self._run(f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n", "false")
-        self.assertEqual(calls, "")
+        self.assertNotIn(" up ", calls)
+        self.assertNotIn("rm -f", calls)
         self.assertIn("waiting until WordPress is set up", log)
+
+    def test_one_running_before_install_is_removed(self):
+        """An older Mac start ran it before setup."""
+        calls, _ = self._run(f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\n", "false",
+                             exists="yes")
+        self.assertIn("docker rm -f onionpress-cloudflared", calls)
+        self.assertNotIn(" up ", calls)
 
     def test_removed_token_removes_the_container(self):
         calls, _ = self._run("CLOUDFLARE_TUNNEL_TOKEN=\n", "true", exists="yes")

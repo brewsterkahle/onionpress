@@ -2235,7 +2235,7 @@ messages and pull requests.
   every `down` takes `COMPOSE_WITH_CF` so a tunnel outlives no token.
   A token set or removed on the Settings page shows Linux's restart prompt.
 - The ingress must be `http://wordpress:80`: the ONIONPRESS-TOR chain
-  refuses the LAN and the host. `tests/test_linux_cloudflare_tunnel.py`.
+  refuses the LAN and the host. `tests/test_cloudflare_tunnel.py`.
 
 ## Colima Networking Gotcha
 - **SOCKS proxy (port 9050) does NOT work through Colima VM port forwarding** — connections are accepted then immediately closed

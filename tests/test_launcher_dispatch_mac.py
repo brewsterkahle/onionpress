@@ -28,6 +28,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from launcher_harness import BASH, Launcher  # noqa: E402
 
+# Always with the Cloudflare override file, so a tunnel whose token was
+# just removed goes down too (tests/test_cloudflare_tunnel.py).
+MAC_COMPOSE_DOWN = ("bin docker compose -f docker-compose.yml"
+                    " -f docker-compose.cloudflare.yml down")
+
 START_STUBS = ("detect_container_runtime", "install_docker", "ensure_docker_socket",
                "setup_db_passwords", "start_containers", "wait_for_services",
                "log_start_summary")
@@ -136,13 +141,13 @@ class TestStop(_Case):
         calls = self.l.calls()
         self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline"])
         self.assertLess(calls.index(f"py {self.dd()} daemon offline"),
-                        calls.index("bin docker compose down"))
+                        calls.index(MAC_COMPOSE_DOWN))
         self.assertIn("Containers stopped", r.stdout)
 
     def test_a_daemon_that_cannot_go_offline_does_not_stop_the_stop(self):
         r = self.l.run("stop", env={"STUB_RC_PY": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("bin docker compose down", self.l.calls())
+        self.assertIn(MAC_COMPOSE_DOWN, self.l.calls())
 
     def test_a_failed_compose_down_is_the_exit_status(self):
         r = self.l.run("stop", env={"STUB_RC_DOCKER_DOWN": "3"})
@@ -167,10 +172,10 @@ class TestQuit(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.l.calls()
         self.assertEqual(calls[0], f"py {self.dd()} daemon stop")
-        self.assertIn("bin docker compose down", calls)
+        self.assertIn(MAC_COMPOSE_DOWN, calls)
         self.assertIn("bin colima stop", calls)
         self.assertIn("fn reap_lima_usernet", calls)
-        self.assertLess(calls.index("bin docker compose down"), calls.index("bin colima stop"))
+        self.assertLess(calls.index(MAC_COMPOSE_DOWN), calls.index("bin colima stop"))
         self.assertIn("quit: run from the menubar", r.stdout)
 
     def test_the_flags_are_read_in_either_order(self):
