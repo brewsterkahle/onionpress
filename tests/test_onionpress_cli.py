@@ -450,5 +450,47 @@ class TestCmdRestoreKeySeed(unittest.TestCase):
         self.cli.containers.start_tor.assert_not_called()
 
 
+class TestPortOffsetFromTheLauncher(unittest.TestCase):
+    """Issue #507: OnionPressCLI ran the bind probe beside this install's
+    own running stack, found its ports taken and moved a restore to the
+    next offset. With the launcher's ONIONPRESS_PORT_OFFSET in the
+    environment the CLI takes that, as the daemon and the start steps do;
+    without it the probe decides as before."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="op-cli-ports-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _cli(self, env):
+        from onionpress import cli as cli_mod
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(cli_mod, "Docker"), \
+             mock.patch.object(cli_mod, "ContainerManager"), \
+             mock.patch.object(cli_mod, "detect_port_offset") as probe:
+            from onionpress.ports import PortConfig
+            probe.return_value = PortConfig.from_offset(10000)
+            if "ONIONPRESS_PORT_OFFSET" not in env:
+                os.environ.pop("ONIONPRESS_PORT_OFFSET", None)
+            c = cli_mod.OnionPressCLI(data_dir=self.dir, app_bundle="")
+        return c, probe
+
+    def test_a_preset_offset_is_taken_without_the_probe(self):
+        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "35000"})
+        probe.assert_not_called()
+        self.assertEqual((c.port_config.offset, c.port_config.wp_port), (35000, 43080))
+
+    def test_zero_from_the_launcher_counts(self):
+        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "0"})
+        probe.assert_not_called()
+        self.assertEqual(c.port_config.wp_port, 8080)
+
+    def test_without_one_the_probe_decides(self):
+        c, probe = self._cli({})
+        probe.assert_called_once()
+        self.assertEqual(c.port_config.offset, 10000)
+        c, probe = self._cli({"ONIONPRESS_PORT_OFFSET": "junk"})
+        probe.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

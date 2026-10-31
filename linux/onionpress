@@ -545,6 +545,22 @@ wp_access_host() {
     esac
 }
 
+# Where WordPress answers now: the configured host once a start has seen it
+# installed, else this machine only (the port is on 127.0.0.1 until then,
+# issue #464; a LAN URL before setup pointed nowhere, issue #507).
+wp_access_url() {
+    if [ -f "$DATA_DIR/$WP_INSTALLED_MARKER" ]; then
+        echo "http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
+    else
+        echo "http://localhost:${ONIONPRESS_WP_PORT}"
+    fi
+}
+
+# The address line of a start: the address, or what to do for one.
+onion_address_line() {
+    echo "Onion address: ${ONION_ADDR:-none yet (set up the site: onionpress setup)}"
+}
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
@@ -953,9 +969,10 @@ HELPEOF
         printf '%s\n' "$REPLACE_KEY_KEPT" | sed 's/^/  /'
     fi
     echo ""
-    echo "Run 'onionpress restart' to use this address."
-    # Back on: it waits for Tor to serve the new key, and loads that one.
-    start_heartbeat_client
+    echo "Run 'onionpress restart' to use this address (it starts the heartbeat client again)."
+    # Not started here: the unit Wants= onionpress.service, so starting it
+    # would start the whole stack the line above says to restart (#507);
+    # the restart's end starts it, where it is enabled.
     return 0
 }
 
@@ -3374,14 +3391,14 @@ main() {
             write_status
 
             log "OnionPress is running!"
-            log "Onion address: $ONION_ADDR"
-            log "Local access: http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
+            log "$(onion_address_line)"
+            log "Local access: $(wp_access_url)"
 
             echo ""
             echo "OnionPress is running!"
-            echo "  Onion address: $ONION_ADDR"
-            echo "  Local access:  http://$(wp_access_host):${ONIONPRESS_WP_PORT}"
-            echo "  Status page:   http://$(wp_access_host):${ONIONPRESS_WP_PORT}/onionpress-status"
+            echo "  $(onion_address_line)"
+            echo "  Local access:  $(wp_access_url)"
+            echo "  Status page:   $(wp_access_url)/onionpress-status"
             echo "  Logs:          $LOG_FILE"
 
             # Keep main process alive so systemd (KillMode=control-group)
@@ -3547,6 +3564,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         import-key)
+            # The stop inside runs compose: with the DB passwords, or it
+            # warns about every missing one (issue #507).
+            setup_db_passwords
             import_key "${@:2}"
             ;;
 

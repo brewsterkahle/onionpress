@@ -992,7 +992,10 @@
   current user's processes). The daemon resolves the offset at start
   (`_resolve_ports_at_start`), sets `onion_proxy`'s module globals
   (`_apply_ports`) and publishes `ports`; the launcher's fallback respects a
-  preset `ONIONPRESS_PORT_OFFSET`.
+  preset `ONIONPRESS_PORT_OFFSET`, and so does `OnionPressCLI` (#507: its
+  bind probe beside this install's own running stack moved a restore to
+  the next offset). `TestPortOffsetFromTheLauncher` in
+  `tests/test_onionpress_cli.py`.
 - **No `LSMultipleInstancesProhibited`** in any Info.plist (enforced across
   users). Launcher `pgrep` uses `-u "$(whoami)"` and matches this bundle's
   MenubarApp only. `tests/test_launcher_pgrep_anchor.py`.

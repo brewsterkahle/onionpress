@@ -5,7 +5,6 @@ docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 docker volume ls --format {{.Name}}
 log First run detected - generating custom onion address...
-log Using address prefix: 'op2'
 log Using pre-imported key: op2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion
 docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
 docker volume create onionpress-onion-keys

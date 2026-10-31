@@ -518,8 +518,15 @@ class OnionPressCLI:
         # Ensure config exists
         ensure_config(self.paths)
 
-        # Detect ports
-        self.port_config = detect_port_offset()
+        # The ports: the launcher's own offset when it says so
+        # (ONIONPRESS_PORT_OFFSET, as the daemon and the start steps read
+        # it), else the bind probe. Beside this install's own running stack
+        # the probe found its ports taken and moved a restore to the next
+        # offset (issue #507).
+        from .config import PortConfig
+        offset = os.environ.get("ONIONPRESS_PORT_OFFSET", "")
+        self.port_config = (PortConfig.from_offset(int(offset)) if offset.isdigit()
+                            else detect_port_offset())
 
         # Build env for Docker
         secrets = ensure_secrets(self.paths.secrets_file)
@@ -839,8 +846,10 @@ class OnionPressCLI:
                 "onionpress-tor-state")
             for vol in key_volumes + ("onionpress-db-data", "onionpress-wordpress-data",
                                       "onionpress-persistent-data"):
-                self.docker.run(["volume", "rm", vol], timeout=20)
-                self.log(f"Removed volume: {vol}")
+                # Quiet: a volume that is not there (onionpress-arti-state
+                # on every install since 2026-09-25) is no failure (#507).
+                if self.docker.run(["volume", "rm", vol], timeout=20, quiet=True).ok:
+                    self.log(f"Removed volume: {vol}")
             if keeps_key:
                 self.log(f"Restore: the backup holds no onion service key; "
                          f"this install keeps its key volumes and its address {addr}")

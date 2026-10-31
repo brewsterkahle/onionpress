@@ -340,12 +340,14 @@ class KeySeed:
                 self.log(f"       Falling back to 'op2'. Edit ADDRESS_PREFIX in "
                          f"{self.paths.config_file}.")
             prefix = DEFAULT_PREFIX
-        self.log(f"Using address prefix: '{prefix}'")
 
         key_dir = vanity_key_dir(self.paths.data_dir)
         if key_dir:
+            # A hand-placed or imported key: the prefix plays no part (#507:
+            # the prefix line came first and read as if it had).
             self.log(f"Using pre-imported key: {os.path.basename(key_dir)}")
         else:
+            self.log(f"Using address prefix: '{prefix}'")
             key_dir = generate_vanity_on_host(prefix, self.paths.data_dir, self.bin_dir,
                                               self.log, self.paths.log_file)
             if key_dir:
@@ -762,6 +764,11 @@ def post_up(manager, *, mac: bool, installed: bool, errors: StartErrors | None,
                             data_dir=paths.data_dir) != 0:
                 log("ERROR: install-from-backup import failed — leaving marker for retry")
                 staging = ""
+            else:
+                # The backup's database is in: the site is installed from
+                # here on, whatever start_core saw before the import (the
+                # image rebuild below used to wait one more start, #507).
+                installed = True
         else:
             log(f"Install-from-backup: marker present but staging missing ({staging}); "
                 "ignoring")

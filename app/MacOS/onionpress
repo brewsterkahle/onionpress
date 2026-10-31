@@ -1953,7 +1953,7 @@ main() {
             log_start_summary
 
             log "OnionPress is running!"
-            log "Onion address: $ONION_ADDR"
+            log "Onion address: ${ONION_ADDR:-none yet (set up the site from the menu bar)}"
             log "Local access: http://localhost:${ONIONPRESS_WP_PORT:-8080}"
             log "OnionPress is now running! Check the menu bar for status."
             ;;
@@ -2118,6 +2118,8 @@ main() {
             stop_containers || log "WARNING: restart: the stop failed; starting the containers anyway"
             start_containers
             wait_for_services
+            # The same summary a start ends with (issue #507).
+            log_start_summary
             ;;
 
         status)
@@ -2166,6 +2168,9 @@ main() {
             ;;
 
         import-key)
+            # The stop inside runs compose: with the DB passwords, or it
+            # warns about every missing one (issue #507).
+            setup_db_passwords
             import_key "${@:2}"
             ;;
 

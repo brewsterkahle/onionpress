@@ -9,6 +9,9 @@
 #                          releases/latest/download/)
 
 set -e
+# The tree's folders are 755 whatever the builder's umask (a 002 umask gave
+# lintian non-standard-dir-perm warnings, issue #507).
+umask 022
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
