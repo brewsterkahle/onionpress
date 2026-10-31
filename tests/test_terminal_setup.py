@@ -12,6 +12,7 @@ install (install_fresh_wordpress).
   - passwords only in the environment, never on any argv, and dropped
     from it once read."""
 
+import io
 import os
 import shutil
 import sys
@@ -271,6 +272,25 @@ class TestSubcommand(unittest.TestCase):
         kw = flow.call_args.kwargs
         self.assertEqual((kw["user"], kw["title"], kw["from_backup"], kw["launcher_bin"]),
                          ("alice", "T", "/b.zip", "/l/onionpress"))
+
+
+    def test_email_is_ignored_out_loud(self):
+        """The old bash setup used --email; a script passing it learns it no
+        longer does, and the email goes nowhere (not to the flow, not the log)."""
+        for argv, warned in ((["--email", "a@example.org"], True), ([], False)):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as data, \
+                 mock.patch.object(setup_logic, "setup_from_terminal", return_value=0) as flow, \
+                 mock.patch.object(cli, "Docker"), \
+                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                rc = cli.main(["--data-dir", data, "setup", "--user", "alice",
+                               "--launcher", "/l/onionpress", *argv])
+                self.assertEqual(rc, 0)
+                self.assertEqual("--email is ignored" in err.getvalue(), warned)
+                self.assertNotIn("email", flow.call_args.kwargs)
+                log = os.path.join(data, "onionpress.log")
+                text = open(log, encoding="utf-8").read() if os.path.exists(log) else ""
+                self.assertEqual("--email given and ignored" in text, warned)
+                self.assertNotIn("a@example.org", text)
 
 
 class TestLaunchers(unittest.TestCase):

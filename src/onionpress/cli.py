@@ -2580,7 +2580,9 @@ def _add_setup(sub, name):
              "must restart the stack, 1 failed")
     p.add_argument("--user", default="", help="The admin username (an onionname)")
     p.add_argument("--title", default="", help="The site title")
-    p.add_argument("--email", default="", help="Accepted for compatibility; unused")
+    p.add_argument("--email", default="",
+                   help="Accepted for compatibility and ignored (with a warning): "
+                        "the admin's email is the setup window's")
     p.add_argument("--ia-account", default="",
                    help="An archive.org account to keep S3 keys from (Linux's setup)")
     p.add_argument("--from-backup", default="", metavar="BACKUP_ZIP",
@@ -2599,6 +2601,12 @@ def _run_setup(run):
     paths = resolve_paths(data_dir=args.data_dir)
     mac = detect_os() == OS.MACOS
     log = _make_log_func(paths.log_file)
+    if args.email:
+        # The old bash setup made it the admin's email; install_fresh_wordpress
+        # sets that the setup window's way. Say so rather than drop it unseen.
+        print("WARNING: --email is ignored: the admin's email is set the way the "
+              "setup window sets it", file=sys.stderr)
+        log("WARNING: setup: --email given and ignored")
     return setup_logic.setup_from_terminal(
         data_dir=paths.data_dir, mac=mac,
         launcher_bin=args.launcher or default_launcher(paths, "macos" if mac else "linux"),
@@ -2612,8 +2620,9 @@ def _add_start_post_up(sub, name):
         name,
         help="The end of a launcher's start, once the core services are up: "
              "Tor, the pinned plugins, provisioning, the Mac's .htaccess, "
-             "backup import and site timezones, the image rebuild, the "
-             "Cloudflare tunnel; best effort, always exits 0")
+             "backup import and site timezones, the image rebuild; best "
+             "effort, always exits 0 (the Cloudflare tunnel follows in the "
+             "launcher)")
     p.add_argument("--wordpress-installed", choices=("yes", "no"), required=True,
                    help="What start-core found")
     p.add_argument("--docker-dir", default=None, help="The compose files' folder")
