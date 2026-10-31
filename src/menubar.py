@@ -484,7 +484,7 @@ class OnionPressApp(PortAttributes, rumps.App):
         self._daemon_start_attempted_at = now
         if op_daemon.daemon_pid(self.app_support):
             return      # alive, its first state is on its way
-        loaded, pid = op_daemon.agent_loaded_pid()
+        loaded, pid = op_daemon.agent_loaded_pid(self.app_support)
         if pid:
             return      # launchd has it (restarting after a crash: KeepAlive)
         self.log("Daemon not running — starting it (onionpress daemon start)")
@@ -986,20 +986,25 @@ class OnionPressApp(PortAttributes, rumps.App):
 
     # The login item is onionpress.login_item's, shared with
     # `onionpress config set LAUNCH_ON_LOGIN` (config.apply_side_effects).
+    # Both are this install's (its data dir's label, issue #505).
     LAUNCHAGENT_LABEL = login_item.LAUNCHAGENT_LABEL
-    LAUNCHAGENT_PATH = login_item.launchagent_path()
+
+    @property
+    def LAUNCHAGENT_PATH(self):
+        return login_item.launchagent_path(self.app_support)
 
     def _is_login_item_installed(self):
         """Check if LaunchAgent plist exists"""
-        return login_item.is_installed()
+        return login_item.is_installed(data_dir=self.app_support)
 
     def add_login_item(self):
         """Install LaunchAgent plist for auto-start on login"""
-        return login_item.install(os.path.dirname(self.contents_dir), self.log)
+        return login_item.install(os.path.dirname(self.contents_dir), self.log,
+                                  data_dir=self.app_support)
 
     def remove_login_item(self):
         """Remove LaunchAgent plist"""
-        return login_item.remove(self.log)
+        return login_item.remove(self.log, data_dir=self.app_support)
 
 
     def run_command(self, command):

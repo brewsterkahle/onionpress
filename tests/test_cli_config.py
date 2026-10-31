@@ -373,7 +373,10 @@ class TestSideEffects(unittest.TestCase):
         with open(self.plist, "rb") as f:
             plist = plistlib.load(f)
         self.assertEqual(plist["ProgramArguments"], ["open", "-a", self.bundle])
-        self.assertEqual(plist["Label"], login_item.LAUNCHAGENT_LABEL)
+        # This install's own label (its config's folder is not the account's
+        # ~/.onionpress; issue #505).
+        self.assertEqual(plist["Label"], login_item.launchagent_label(self.dir))
+        self.assertNotEqual(plist["Label"], login_item.LAUNCHAGENT_LABEL)
         self.assertEqual(self.runs, [])
 
         self._write("LAUNCH_ON_LOGIN=no\n")

@@ -356,10 +356,20 @@
   `onionpress …` subcommand run through the launcher; it imports none of
   `backup`, `hub_backup`, `updater`. A new menu action gets its subcommand
   first. `tests/test_menubar_actions.py`.
-- launchd agent `org.onionpress.daemon` (one per user, `KeepAlive` on
-  failure only, `AbandonProcessGroup`); `onionpress daemon
-  start|stop|status|offline`. The launcher's `stop` runs `daemon offline`
-  before stopping containers; `quit` runs `daemon stop` first.
+- launchd agent `org.onionpress.daemon` (`KeepAlive` on failure only,
+  `AbandonProcessGroup`); `onionpress daemon start|stop|status|offline`.
+  The launcher's `stop` runs `daemon offline` before stopping containers;
+  `quit` runs `daemon stop` first.
+- **Labels are per data dir** (#505: launchd's gui domain is per user, and
+  a second install on the account took the real daemon for its own):
+  `daemon_client.data_dir_label` keeps `org.onionpress.daemon` /
+  `com.onionpress.launcher` for the account's own `~/.onionpress`
+  (`default_data_dir`, the passwd home, never `$HOME`) and derives
+  `<label>.<8 hex of the real path's sha256>` for any other; every
+  launchctl target and plist name goes through `agent_label(data_dir)` /
+  `login_item.launchagent_label(data_dir)`. The two literals stay
+  (e2e/harness/safety.py checks the default). `TestLabelPerDataDir` in
+  `tests/test_mac_daemon.py`.
 - State in `~/.onionpress/daemon-state.json` (atomic, 0600); a state older
   than 90 s or from a dead pid shows "Reconnecting", never "Stopped". Two
   processes never write one RotatingLog.
