@@ -49,7 +49,6 @@ log Image cleanup: removed 1 superseded ghcr.io/brewsterkahle/onionpress-tor ima
 log Image cleanup: kept 1 older ghcr.io/brewsterkahle/onionpress-tor image(s) still in use
 docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-mariadb:13.0.2@sha256:PIN
 log Image cleanup: ghcr.io/brewsterkahle/onionpress-mariadb left as is (its pinned image is not here)
-fn start_onionheaven_activation_watcher
 docker container inspect onionpress-cloudflared
 rc=0
 markers=.wordpress-installed

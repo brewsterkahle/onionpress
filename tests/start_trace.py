@@ -9,8 +9,7 @@ of `start_containers`, with:
     start steps that are Python for real (against that docker) and records
     the WordPress-side ones;
   - the Docker wait, the VM repair, `sleep` and the background pieces
-    (Mac `generate_vanity_address`; Linux `start_onionheaven_activation_watcher`,
-    `run_detached`) as recorders; `curl` (the WordPress port wait) answers
+    (Mac `generate_vanity_address`; `run_detached`) as recorders; `curl` (the WordPress port wait) answers
     $STUB_RC_CURL;
   - the real install_plugin.sh / activate_plugin.sh in the scripts folder.
 
@@ -54,7 +53,7 @@ MARKERS = (".import-key-pending", ".key-volume-migration-pending",
 STUBBED = {
     "mac": ("wait_for_docker_or_recover_vm", "ensure_vm_fsck_repair",
             "configure_site_timezones"),
-    "linux": ("wait_for_docker", "start_onionheaven_activation_watcher"),
+    "linux": ("wait_for_docker",),
 }
 
 RUNNER_STUBS = r'''

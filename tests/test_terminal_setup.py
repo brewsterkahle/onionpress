@@ -306,8 +306,8 @@ class TestLaunchers(unittest.TestCase):
                          '$ONIONPRESS_BACKUP_PASSWORD:$ONIONPRESS_HUB_RECOVERY_KEY"; }\n'
                          if runner == "bundled_python" else "")
                       + 'DATA_DIR=/d; SCRIPT_DIR=/s; INSTALL_DIR=/s; _HUB_RECOVERY_KEY=hk\n' + fn
-                      + 'run_setup --user alice --pass "p w" --ia-password ia '
-                        '--from-backup bpw /b.zip --title T --pass\n')
+                      + 'ONIONPRESS_BACKUP_PASSWORD=bpw run_setup --user alice --pass "p w" '
+                        '--ia-password ia --from-backup /b.zip --title T --pass\n')
             out = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True,
                                  timeout=30).stdout.splitlines()
             with self.subTest(rel):
@@ -319,6 +319,29 @@ class TestLaunchers(unittest.TestCase):
                                  "the hub recovery key goes along for the restore (#509)")
                 for secret in ("p w", "bpw", "ia", "hk"):
                     self.assertNotIn(secret, argv)
+
+    def test_a_backup_password_on_argv_is_refused(self):
+        """The old `--from-backup <password> <zip>` form is an error (issue
+        #504; the password would sit in ps): the CLI is never run, the
+        message names no password."""
+        import subprocess
+        for rel, runner in (("app/MacOS/onionpress", "bundled_python"), ("linux/onionpress", "op_py")):
+            text = self._read(rel)
+            fns = ""
+            for name in ("read_backup_password", "run_setup"):
+                i = text.index(f"\n{name}() {{")
+                fns += text[i:text.index("\n}\n", i) + 3]
+            script = (f'{runner}() {{ echo "CLI RAN: $*"; }}\n'
+                      'DATA_DIR=/d; SCRIPT_DIR=/s; INSTALL_DIR=/s\n' + fns
+                      + 'run_setup --from-backup argvpw /b.zip --user bob\necho "rc=$?"\n')
+            r = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True,
+                               env={"PATH": os.environ["PATH"]},
+                               stdin=subprocess.DEVNULL, timeout=30)
+            with self.subTest(rel):
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertNotIn("CLI RAN", r.stdout)
+                self.assertIn("refused", r.stderr)
+                self.assertNotIn("argvpw", r.stdout + r.stderr)
 
     def test_a_backup_password_from_the_environment(self):
         """`setup --from-backup <zip>` takes the password as backup and

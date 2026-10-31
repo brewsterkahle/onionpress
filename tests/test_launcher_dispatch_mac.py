@@ -376,12 +376,13 @@ class TestRestore(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("py-env piped", self.l.calls())
 
-    def test_the_old_positional_password_works_with_a_warning(self):
+    def test_the_old_positional_password_is_refused(self):
+        # Issue #504: nothing runs, the message names no password.
         r = self.l.run("restore", "oldpw", "/b/x.zip")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip")])
-        self.assertIn("py-env oldpw", self.l.calls())
-        self.assertIn("visible to other users", r.stderr)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(self.l.py_calls(), [])
+        self.assertIn("refused", r.stderr)
+        self.assertNotIn("oldpw", r.stderr + r.stdout)
 
     def test_no_path_is_the_usage(self):
         r = self.l.run("restore")
@@ -477,11 +478,13 @@ class TestScrub(_Case):
         self.assertIn("Cancelled. Backup kept at:", r.stdout)
         self.assertNotIn("stop_containers", self.l.fn_calls())
 
-    def test_the_old_positional_password_warns(self):
+    def test_the_old_positional_password_is_refused(self):
         r = self.l.run("scrub", "pw", env={"ONIONPRESS_YES": "true",
                                            "STUB_RC_ONIONHEAVEN_RELEASE": "1"})
-        self.assertIn("visible to other users", r.stderr)
-        self.assertIn("py-env pw", self.l.calls())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("refused", r.stderr)
+        self.assertNotIn("py-env pw", self.l.calls())
+        self.assertNotIn("stop_containers", self.l.fn_calls())
 
 
 class TestUsage(_Case):

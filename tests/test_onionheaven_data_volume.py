@@ -238,7 +238,8 @@ class TestPaths(unittest.TestCase):
                 checked += 1
                 with self.subTest(file=rel, at=m.start()):
                     self.assertNotEqual(found[-1], "onionpress-wordpress")
-        self.assertGreater(checked, 10)
+        # Ten since #504 (the Linux activation watcher's two reads went).
+        self.assertGreaterEqual(checked, 10)
 
     def test_wordpress_side_code_does_not_know_it(self):
         for top in ("app/Resources/plugins", "app/Resources/themes",

@@ -78,21 +78,26 @@ def normalize_get_url(url: str) -> str:
     return s
 
 
-def read_backup_password(positional: str | None = None) -> str:
-    """The password for `backup` / `restore`, or "" if none was given.
+PASSWORD_ON_ARGV_MSG = ("ERROR: a password on the command line is visible to other "
+                        "users of this computer, so it is refused. Leave it out to "
+                        f"be prompted, or set {BACKUP_PASSWORD_ENV}.")
 
-    Taken from the first of: the old positional argument (with a warning:
-    argv is readable by every local user), $ONIONPRESS_BACKUP_PASSWORD (how
-    the launchers, menubar and tray pass it), a line on stdin when stdin is
-    not a terminal, or a no-echo prompt. The variable is removed from this
-    process's environment so the docker/zip/unzip children don't inherit it.
+
+def read_backup_password(positional: str | None = None) -> str:
+    """The password for `backup` / `restore` / `scrub`, or "" if none was given.
+
+    Taken from the first of: $ONIONPRESS_BACKUP_PASSWORD (how the launchers,
+    menubar and tray pass it), a line on stdin when stdin is not a terminal,
+    or a no-echo prompt. A password given as an argument (the old positional
+    form) is refused, exit 2: argv is readable by every local user, and a
+    leaked child process kept one in ps until reboot (issue #504). The
+    variable is removed from this process's environment so the
+    docker/zip/unzip children don't inherit it.
     """
     from_env = os.environ.pop(BACKUP_PASSWORD_ENV, "")
     if positional:
-        print("WARNING: a password on the command line is visible to other "
-              "users of this computer. Leave it out to be prompted, or set "
-              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
-        return positional
+        print(PASSWORD_ON_ARGV_MSG, file=sys.stderr)
+        raise SystemExit(2)
     if from_env:
         return from_env
     if sys.stdin is None:
@@ -1901,8 +1906,8 @@ def _run_get(run):
 
 
 # The password is read by read_backup_password (environment, stdin or a
-# prompt). The positional is the old interface, kept so existing scripts
-# still work; it puts the password where other users can see it.
+# prompt). The positional is the old interface, still parsed so that a
+# script using it gets the refusal, not a mis-read argument (issue #504).
 def _add_backup(sub, name):
     p = sub.add_parser(
         name, help="Create a backup",
@@ -2146,13 +2151,11 @@ def _run_scrub(run):
     _cli(run)
     from . import scrub as _scrub
     # As backup's password: the environment (removed at once, so no child
-    # inherits it), the old positional with a warning, else scrub prompts.
+    # inherits it), else scrub prompts; one on argv is refused (#504).
     password = os.environ.pop(BACKUP_PASSWORD_ENV, "") or None
     if run.args.password:
-        print("WARNING: a password on the command line is visible to other "
-              "users of this computer. Leave it out to be prompted, or set "
-              f"{BACKUP_PASSWORD_ENV}.", file=sys.stderr)
-        password = run.args.password
+        print(PASSWORD_ON_ARGV_MSG, file=sys.stderr)
+        return 2
     return _scrub.run_scrub(
         password=password,
         clean=run.args.clean,

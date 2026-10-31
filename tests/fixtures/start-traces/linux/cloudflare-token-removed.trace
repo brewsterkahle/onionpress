@@ -41,7 +41,6 @@ docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpre
 log ✓ Internet Archive Wayback Machine Link Fixer active on every site
 docker exec onionpress-wordpress test -f /var/www/html/wp-content/uploads/.onionpress-regenerate-derivatives
 docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
-fn start_onionheaven_activation_watcher
 docker container inspect onionpress-cloudflared
 log Cloudflare Tunnel off (no token, or WordPress not set up): removing cloudflared
 docker rm -f onionpress-cloudflared

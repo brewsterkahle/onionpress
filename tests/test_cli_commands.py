@@ -131,13 +131,17 @@ class Sandbox(unittest.TestCase):
 
 class TestReadBackupPassword(Sandbox):
 
-    def test_the_positional_argument_wins_with_a_warning(self):
+    def test_a_positional_argument_is_refused(self):
+        # Issue #504: never from argv, whatever the environment holds.
         os.environ[BACKUP_PASSWORD_ENV] = "from-env"
-        self.assertEqual(cli.read_backup_password("argv"), "argv")
+        with self.assertRaises(SystemExit) as cm:
+            cli.read_backup_password("argv")
+        self.assertEqual(cm.exception.code, 2)
         # Removed from the environment either way: docker children must
         # not inherit it.
         self.assertNotIn(BACKUP_PASSWORD_ENV, os.environ)
-        self.assertIn("WARNING: a password on the command line", self.err.getvalue())
+        self.assertIn("ERROR: a password on the command line", self.err.getvalue())
+        self.assertNotIn("argv", self.err.getvalue().replace("the command line", ""))
 
     def test_the_environment_is_taken_and_removed(self):
         os.environ[BACKUP_PASSWORD_ENV] = "from-env"
