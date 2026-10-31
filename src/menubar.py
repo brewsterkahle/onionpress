@@ -452,6 +452,11 @@ class OnionPressApp(PortAttributes, rumps.App):
         was_fresh = self._state_fresh
         self._state_fresh = fresh
         if fresh:
+            # The copy every reader of self.state (auto_start's wait for
+            # the runtime, the port-conflict gate, the setup window's
+            # steps) looks at; without it they saw the empty dict from
+            # __init__ and every launch waited the full 3 minutes.
+            self.state = state
             if not self._daemon_seen:
                 self.log(f"Daemon state found (pid {state.get('pid')}, v{state.get('version')})")
             if self._daemon_missing_since is not None and self._daemon_seen:

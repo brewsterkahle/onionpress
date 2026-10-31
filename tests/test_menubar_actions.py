@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import textwrap
+import time
 import types
 import unittest
 from unittest import mock
@@ -143,6 +144,57 @@ class TestImports(unittest.TestCase):
         daemon = open(os.path.join(PROJECT_ROOT, "src", "onionpress", "daemon.py"), encoding="utf-8").read()
         self.assertIn("self.write_status_to_volume()\n                self.poll_settings_page()", daemon)
         self.assertIn('[self.launcher_script, "handle-action", "--json", *args]', self.src)
+
+
+class TestViewTickKeepsTheState(unittest.TestCase):
+    """The view loop's tick copies a fresh daemon state into self.state:
+    auto_start's wait for the runtime, its port-conflict gate and the
+    setup window's steps read it there. Without the copy self.state
+    stayed the empty dict from __init__, _wait_for_state never came
+    true and every launch waited the full 3 minutes (2.6.0, 2.6.1)."""
+
+    def _app(self, state):
+        src = _src()
+        ns = {"os": os,
+              "time": types.SimpleNamespace(time=time.time, monotonic=time.monotonic,
+                                            sleep=lambda s: None),
+              "op_daemon": types.SimpleNamespace(
+                  read_state=lambda data_dir: state,
+                  state_is_fresh=lambda doc, now: bool(doc))}
+        for name in ("_view_tick", "_wait_for_state"):
+            exec(textwrap.dedent(_method(src, name)), ns)
+        app = types.SimpleNamespace(
+            app_support=os.path.join(os.sep, "nonexistent", "onionpress"),
+            state={}, _state_fresh=False, _daemon_seen=False, _daemon_missing_since=None,
+            display_state="stopped", onion_address="", cloudflare_tunnel_enabled=False,
+            _last_bootstrap_pct=0, wp_port=8080, _start_failed_rc=None, _last_painted=None,
+            read_config_value=lambda key, default="": default,
+            log=mock.Mock(), _apply_state=mock.Mock(), ensure_daemon_running=mock.Mock(),
+            update_menu=mock.Mock(), handle_reopen=mock.Mock())
+        for name in ("_view_tick", "_wait_for_state"):
+            setattr(app, name, types.MethodType(ns[name], app))
+        return app
+
+    def test_a_fresh_state_is_copied_and_the_wait_sees_it(self):
+        state = {"pid": 1, "version": "2.6.1", "updated_at": time.time(),
+                 "runtime_ready": True, "port_conflict": [8080]}
+        app = self._app(state)
+        app._view_tick()
+        self.assertTrue(app._state_fresh)
+        self.assertEqual(app.state, state)
+        app._apply_state.assert_called_once_with(state)
+        self.assertTrue(app._wait_for_state(lambda s: s.get("runtime_ready"), 5))
+        self.assertEqual(app.state.get("port_conflict"), [8080])
+        app.ensure_daemon_running.assert_not_called()
+
+    def test_no_state_is_not_fresh_and_the_wait_times_out(self):
+        app = self._app(None)
+        app._view_tick()
+        self.assertFalse(app._state_fresh)
+        self.assertEqual(app.state, {})
+        app._apply_state.assert_not_called()
+        app.ensure_daemon_running.assert_called_once()
+        self.assertFalse(app._wait_for_state(lambda s: True, 0.05))
 
 
 class TestDialogs(unittest.TestCase):
