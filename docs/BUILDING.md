@@ -151,10 +151,10 @@ third-party ones:
 ```
 ONIONPRESS_TOR_IMAGE=ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:…
 ONIONPRESS_WORDPRESS_IMAGE=ghcr.io/brewsterkahle/onionpress-wordpress:latest@sha256:…
-MARIADB_IMAGE=mariadb:13.0.2@sha256:…
-AUTOHEAL_IMAGE=willfarrell/autoheal:latest@sha256:…
-CLOUDFLARED_IMAGE=cloudflare/cloudflared:2026.10.0@sha256:…
-SOCKET_PROXY_IMAGE=ghcr.io/wollomatic/socket-proxy:1.13.1@sha256:…
+MARIADB_IMAGE=ghcr.io/brewsterkahle/onionpress-mariadb:13.0.2@sha256:…
+AUTOHEAL_IMAGE=ghcr.io/brewsterkahle/onionpress-autoheal:latest@sha256:…
+CLOUDFLARED_IMAGE=ghcr.io/brewsterkahle/onionpress-cloudflared:2026.10.0@sha256:…
+SOCKET_PROXY_IMAGE=ghcr.io/brewsterkahle/onionpress-socket-proxy:1.13.1@sha256:…
 ```
 
 Six files embed those literals, so a bare `docker compose up` with no
@@ -247,7 +247,21 @@ the maintainer's Mac, breaks on every Intel machine". The script refuses
 one for any image (with `--local`, the two ghcr.io digests come from
 `docker images --digests`, which is the index for a multi-arch GHCR tag).
 
-### The third-party images are pinned too
+### The third-party images are pinned too, and mirrored
+
+The four third-party pins name **our copies** under
+`ghcr.io/brewsterkahle/` (`build/image-mirrors.txt` lists each upstream and
+its package), so a publisher cleaning up old versions cannot leave a first
+run with a digest it cannot pull ([issue #501](https://github.com/brewsterkahle/onionpress/issues/501)).
+A copy of a multi-arch index keeps its digest, so a pin is the upstream's
+digest under our name. `build/refresh-image-digests.sh` resolves the digest
+from the **upstream** (its `--mariadb` etc. arguments name upstream tags) and
+writes the mirror's name; `.github/workflows/mirror-images.yml` makes the
+copy whenever `build/image-pins.env` changes, on any branch, and reads it
+back. So a pin bump is: refresh, commit, push, **wait for the mirror run**,
+then merge. The release's `tag-release` job adds `:<version>` to each mirror.
+Each `onionpress-*` mirror package must be made **public** in its GHCR
+settings after its first push, or an anonymous first run cannot pull it.
 
 `mariadb`, `willfarrell/autoheal`, `cloudflare/cloudflared` and the socket
 proxy used to float on `:latest` (through 2.5.3), on the theory that upstream

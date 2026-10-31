@@ -194,7 +194,7 @@ class TestAutohealProxy(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertRegex(
             m.group(1),
-            r"^ghcr\.io/wollomatic/socket-proxy:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$",
+            r"^ghcr\.io/brewsterkahle/onionpress-socket-proxy:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$",
             "The proxy holds the socket: pin it by multi-arch index digest "
             "(build/base-image-digest.sh), never a bare tag.",
         )
