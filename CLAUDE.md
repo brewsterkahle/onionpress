@@ -167,7 +167,9 @@
 - **The start removes what a moved pin superseded**
   (`start.prune_superseded_images`, last in post-up): per image the stack
   runs (`compose config --images`), only once its pinned image is here,
-  only untagged images of that repository (OnionPress pulls by digest; a
+  only untagged images of that repository and of a mirror's former one
+  (`FORMER_REPOSITORIES`, held equal to `build/image-mirrors.txt`;
+  OnionPress pulls by digest; a
   user's tagged image is never touched), plain `image rm`, never forced
   (an image a container uses stays); nothing for local images.
   `TestPruneSupersededImages` in `tests/test_start_post_up.py`.

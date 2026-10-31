@@ -580,6 +580,19 @@ def _stack_images(manager) -> list[str]:
     return refs
 
 
+# The repository each mirrored image was pulled from before #502 put the
+# third-party pins under ghcr.io/brewsterkahle (build/image-mirrors.txt,
+# held equal by tests/test_start_post_up.py). An install that ran the old
+# pins keeps those images under the old names; they are the mirror's
+# predecessors, cleaned up by the same rule.
+FORMER_REPOSITORIES = {
+    "ghcr.io/brewsterkahle/onionpress-mariadb": "mariadb",
+    "ghcr.io/brewsterkahle/onionpress-autoheal": "willfarrell/autoheal",
+    "ghcr.io/brewsterkahle/onionpress-cloudflared": "cloudflare/cloudflared",
+    "ghcr.io/brewsterkahle/onionpress-socket-proxy": "ghcr.io/wollomatic/socket-proxy",
+}
+
+
 def _repository(ref: str) -> str:
     """`mariadb:13.0.2@sha256:…` -> `mariadb`; a registry's port stays."""
     name = ref.split("@", 1)[0]
@@ -592,7 +605,9 @@ def prune_superseded_images(manager, log) -> None:
     """Remove the images a release's new pins superseded (the start's
     pull fetched the new ones; the old ones stayed on the VM's fixed disk).
     For each image the stack runs, only once its pinned image is here: the
-    other images of that repository that have no tag. OnionPress pulls by
+    other images of that repository, and of the repository a mirrored
+    image was pulled from before (FORMER_REPOSITORIES), that have no tag
+    (the same digest under the old name is the pinned image itself, kept). OnionPress pulls by
     digest, so every image it pulled has none; a tagged one (`mariadb:11`
     of the user's own on a Linux Docker, a local build) is never touched.
     Plain `docker image rm`, never forced: an image a container still uses,
@@ -611,26 +626,32 @@ def prune_superseded_images(manager, log) -> None:
         if not pinned.ok or not pinned.stdout.strip():
             log(f"Image cleanup: {repo} left as is (its pinned image is not here)")
             continue
-        listed = docker.run(["image", "ls", "--no-trunc", "--format", "{{.ID}} {{.Tag}}", repo],
-                            timeout=30, quiet=True)
-        if not listed.ok:
-            continue
-        older = []
-        for line in listed.stdout.splitlines():
-            image_id, _, tag = line.strip().partition(" ")
-            if (re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) and tag == "<none>"
-                    and image_id != pinned.stdout.strip() and image_id not in older):
-                older.append(image_id)
-        removed = kept = 0
-        for image_id in older:
-            if docker.run(["image", "rm", image_id], timeout=60, quiet=True).ok:
-                removed += 1
-            else:
-                kept += 1
-        if removed:
-            log(f"Image cleanup: removed {removed} superseded {repo} image(s)")
-        if kept:
-            log(f"Image cleanup: kept {kept} older {repo} image(s) still in use")
+        for name in (repo, FORMER_REPOSITORIES.get(repo)):
+            if name:
+                _remove_older_untagged(docker, name, pinned.stdout.strip(), log)
+
+
+def _remove_older_untagged(docker, repo: str, pinned_id: str, log) -> None:
+    listed = docker.run(["image", "ls", "--no-trunc", "--format", "{{.ID}} {{.Tag}}", repo],
+                        timeout=30, quiet=True)
+    if not listed.ok:
+        return
+    older = []
+    for line in listed.stdout.splitlines():
+        image_id, _, tag = line.strip().partition(" ")
+        if (re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) and tag == "<none>"
+                and image_id != pinned_id and image_id not in older):
+            older.append(image_id)
+    removed = kept = 0
+    for image_id in older:
+        if docker.run(["image", "rm", image_id], timeout=60, quiet=True).ok:
+            removed += 1
+        else:
+            kept += 1
+    if removed:
+        log(f"Image cleanup: removed {removed} superseded {repo} image(s)")
+    if kept:
+        log(f"Image cleanup: kept {kept} older {repo} image(s) still in use")
 
 
 def warn_if_socks_port_exposed(manager, log) -> None:

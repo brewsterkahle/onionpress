@@ -73,10 +73,10 @@ WP_REPO = "ghcr.io/brewsterkahle/onionpress-wordpress:latest"
 # carry no third-party image since the image refresh went). Keep in sync with
 # THIRD_PARTY_KEYS in build/refresh-image-digests.sh (asserted below).
 THIRD_PARTY = {
-    "MARIADB_IMAGE": ("mariadb", (COMPOSE,)),
-    "AUTOHEAL_IMAGE": ("willfarrell/autoheal", (COMPOSE,)),
-    "CLOUDFLARED_IMAGE": ("cloudflare/cloudflared", (CLOUDFLARE_COMPOSE,)),
-    "SOCKET_PROXY_IMAGE": ("ghcr.io/wollomatic/socket-proxy", (COMPOSE,)),
+    "MARIADB_IMAGE": ("ghcr.io/brewsterkahle/onionpress-mariadb", (COMPOSE,)),
+    "AUTOHEAL_IMAGE": ("ghcr.io/brewsterkahle/onionpress-autoheal", (COMPOSE,)),
+    "CLOUDFLARED_IMAGE": ("ghcr.io/brewsterkahle/onionpress-cloudflared", (CLOUDFLARE_COMPOSE,)),
+    "SOCKET_PROXY_IMAGE": ("ghcr.io/brewsterkahle/onionpress-socket-proxy", (COMPOSE,)),
 }
 
 # A reference in "pin context": a quoted string, a ${VAR:-…} default, or end
@@ -156,7 +156,7 @@ class TestPinsFile(unittest.TestCase):
         the arm64 one. build/base-image-digest.sh refuses anything but an
         index."""
         script = _read("build/refresh-image-digests.sh")
-        self.assertIn('pin="$(build/base-image-digest.sh "$ref")"', script)
+        self.assertIn('resolved="$(build/base-image-digest.sh "$ref")"', script)
 
     def test_pins_are_digests_not_bare_tags(self):
         """A bare `:latest` here would silently un-pin the whole stack: the

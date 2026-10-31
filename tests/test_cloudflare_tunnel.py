@@ -136,9 +136,11 @@ class TestOneTimingOnBothPlatforms(unittest.TestCase):
         with open(os.path.join(PROJECT_ROOT, "src", "onionpress", "start.py"),
                   encoding="utf-8") as f:
             text = f.read()
-        # (Its pull step names the image's compose file, not the container.)
+        # (Its pull step names the image's compose file and its image cleanup
+        # the mirror's repository, ghcr.io/…/onionpress-cloudflared; neither
+        # is the service or the container.)
         self.assertNotIn('"cloudflared"', text)
-        self.assertNotIn("onionpress-cloudflared", text)
+        self.assertNotRegex(text, r'(?<![/\w-])onionpress-cloudflared\b')
 
     def test_every_setup_path_starts_it(self):
         """A new site's tunnel needs no restart after setup."""

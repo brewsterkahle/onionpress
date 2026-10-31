@@ -565,3 +565,11 @@ shared Linux Docker is never touched; no global `image prune`. The
 trace gained the one `config --images` line. What a first run does when a
 pin has left its registry is #501.
 
+Upstream #502 (merged in) moved the four third-party pins to mirrors under
+ghcr.io/brewsterkahle with the same digests. The prune also cleans each
+mirror's former repository (`start.FORMER_REPOSITORIES`, test-held equal
+to `build/image-mirrors.txt`): an upgraded install's Docker Hub copies of
+older versions go, while the same digest under the old name is the pinned
+image itself and stays. The launchers' conflicting hunks were #502's new
+pins in `update_images`, which this branch removed.
+

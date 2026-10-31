@@ -92,7 +92,8 @@ def _id(c):
 
 
 TOR_PIN = "ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:" + "e" * 64
-DB_PIN = "mariadb:13.0.2@sha256:" + "d" * 64
+DB_PIN = "ghcr.io/brewsterkahle/onionpress-mariadb:13.0.2@sha256:" + "d" * 64
+DB_REPO = "ghcr.io/brewsterkahle/onionpress-mariadb"
 CONFIG_IMAGES = "compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images"
 
 
@@ -118,7 +119,7 @@ class TestPruneSupersededImages(Base):
             "image ls --no-trunc --format {{.ID}} {{.Tag}} ghcr.io/brewsterkahle/onionpress-tor":
                 (0, f"{_id('1')} <none>\n{_id('2')} <none>\n{_id('2')} <none>\n"
                     f"{_id('3')} latest\n{_id('4')} dev\n"),
-            "image ls --no-trunc --format {{.ID}} {{.Tag}} mariadb":
+            f"image ls --no-trunc --format {{{{.ID}}}} {{{{.Tag}}}} {DB_REPO}":
                 (0, f"{_id('5')} <none>\n{_id('6')} 11.4\n"),
         })
         # Each repository once, though compose lists tor for two services.
@@ -136,18 +137,42 @@ class TestPruneSupersededImages(Base):
             "image ls": (0, f"{_id('6')} <none>\n"),
         })
         self.assertFalse([c for c in docker.calls if c.startswith(("image ls", "image rm"))])
-        self.assertEqual(self.lines, ["Image cleanup: mariadb left as is (its pinned image is not here)"])
+        self.assertEqual(self.lines, [f"Image cleanup: {DB_REPO} left as is (its pinned image is not here)"])
 
     def test_an_image_in_use_is_kept(self):
         docker = self.prune({
             CONFIG_IMAGES: (0, DB_PIN + "\n"),
             "image inspect": (0, _id("5")),
-            "image ls": (0, f"{_id('6')} <none>\n{_id('7')} <none>\n"),
+            f"image ls --no-trunc --format {{{{.ID}}}} {{{{.Tag}}}} {DB_REPO}":
+                (0, f"{_id('6')} <none>\n{_id('7')} <none>\n"),
             f"image rm {_id('6')}": (1, ""),
         })
         self.assertEqual(self.removals(docker), [f"image rm {_id('6')}", f"image rm {_id('7')}"])
-        self.assertEqual(self.lines, ["Image cleanup: removed 1 superseded mariadb image(s)",
-                                      "Image cleanup: kept 1 older mariadb image(s) still in use"])
+        self.assertEqual(self.lines, [f"Image cleanup: removed 1 superseded {DB_REPO} image(s)",
+                                      f"Image cleanup: kept 1 older {DB_REPO} image(s) still in use"])
+
+    def test_the_mirrors_former_repository_too(self):
+        """#502 moved the third-party pins to our ghcr mirrors with the
+        same digests: under the old name, the pinned version is the same
+        image (kept); an older version is a superseded one."""
+        docker = self.prune({
+            CONFIG_IMAGES: (0, DB_PIN + "\n"),
+            "image inspect": (0, _id("5")),
+            f"image ls --no-trunc --format {{{{.ID}}}} {{{{.Tag}}}} {DB_REPO}": (0, f"{_id('5')} <none>\n"),
+            "image ls --no-trunc --format {{.ID}} {{.Tag}} mariadb":
+                (0, f"{_id('5')} <none>\n{_id('8')} <none>\n{_id('9')} 11.4\n"),
+        })
+        self.assertEqual(self.removals(docker), [f"image rm {_id('8')}"])
+        self.assertEqual(self.lines, ["Image cleanup: removed 1 superseded mariadb image(s)"])
+
+    def test_former_repositories_match_the_mirror_table(self):
+        table = {}
+        with open(os.path.join(ROOT, "build", "image-mirrors.txt"), encoding="utf-8") as f:
+            for line in f:
+                if line.strip() and not line.startswith("#"):
+                    _key, upstream, package = line.split()
+                    table[f"ghcr.io/brewsterkahle/{package}"] = upstream
+        self.assertEqual(start.FORMER_REPOSITORIES, table)
 
     def test_never_forced(self):
         docker = self.prune({
@@ -181,7 +206,8 @@ class TestPruneSupersededImages(Base):
 
     def test_repository_names(self):
         for ref, repo in ((TOR_PIN, "ghcr.io/brewsterkahle/onionpress-tor"),
-                          (DB_PIN, "mariadb"),
+                          (DB_PIN, DB_REPO),
+                          ("mariadb:13.0.2@sha256:" + "d" * 64, "mariadb"),
                           ("registry:5000/x/y:1@sha256:" + "a" * 64, "registry:5000/x/y"),
                           ("registry:5000/x/y@sha256:" + "a" * 64, "registry:5000/x/y")):
             self.assertEqual(start._repository(ref), repo)

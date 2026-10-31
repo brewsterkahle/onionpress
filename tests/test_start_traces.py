@@ -86,8 +86,10 @@ SCENARIOS = [
     # the old tor images go (one still in use stays), mariadb is left.
     Scenario("images-superseded", docker={"rules": [
         {"match": r"config --images$",
-         "stdout": f"{SUPERSEDED_TOR}\nmariadb:13.0.2@sha256:{'d' * 64}\n"},
-        {"match": r"^image inspect --format \{\{\.Id\}\} mariadb", "rc": 1},
+         "stdout": f"{SUPERSEDED_TOR}\nghcr.io/brewsterkahle/onionpress-mariadb:13.0.2"
+                   f"@sha256:{'d' * 64}\n"},
+        {"match": r"^image inspect --format \{\{\.Id\}\} ghcr\.io/brewsterkahle/onionpress-mariadb",
+         "rc": 1},
         {"match": r"^image ls .* ghcr\.io/brewsterkahle/onionpress-tor$",
          "stdout": f"sha256:{'1' * 64} <none>\nsha256:{'2' * 64} <none>\nsha256:{'3' * 64} dev\n"},
         {"match": rf"^image rm sha256:{'2' * 64}$", "rc": 1}]}),
