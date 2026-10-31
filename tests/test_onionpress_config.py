@@ -384,29 +384,6 @@ class TestDefaults(unittest.TestCase):
         self.assertIn("VM_MEMORY", DEFAULTS)
         self.assertEqual(DEFAULTS["ADDRESS_PREFIX"], "op2")
 
-    def test_update_on_launch_defaults_to_no_everywhere(self):
-        """Issue #36: every image is pinned by digest and a launch pulls
-        only the pins a release moved, so UPDATE_ON_LAUNCH=yes adds an
-        unconditional re-pull (a registry contact before Tor is up) at
-        every launch. The default is no in each place it is written:
-        config.DEFAULTS, the template, both launchers' inline fallback
-        configs (what they write without the template), the Mac
-        Settings dialog's form defaults. It used to be yes in the first two and no in the
-        launchers.
-        """
-        import re
-        root = os.path.join(os.path.dirname(__file__), "..")
-        self.assertEqual(DEFAULTS["UPDATE_ON_LAUNCH"], "no")
-        # settings_ui imports AppKit: read it as text.
-        with open(os.path.join(root, "src/onionpress/settings_ui.py")) as f:
-            self.assertIn('("UPDATE_ON_LAUNCH", "no")', f.read())
-        for path in ("app/Resources/config-template.txt",
-                     "app/MacOS/onionpress", "linux/onionpress",
-                     "linux/install.sh", "build/build-linux.sh"):
-            with open(os.path.join(root, path)) as f:
-                lines = re.findall(r"^UPDATE_ON_LAUNCH=(.*)$", f.read(), re.M)
-            self.assertEqual(lines, ["no"], path)
-
 
 if __name__ == "__main__":
     unittest.main()

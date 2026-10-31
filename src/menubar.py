@@ -54,7 +54,6 @@ from onionpress.platform import resolve_paths
 from onionpress import config as op_config
 from onionpress.ports import PortAttributes, port_environ
 from onionpress import confirm as op_confirm
-from onionpress import image_overrides
 from onionpress.ui_helpers import (
     HelpButtonTarget as _HelpButtonTarget,
     parse_version,
@@ -971,11 +970,6 @@ class OnionPressApp(PortAttributes, rumps.App):
         if self._state_fresh and (self.state.get("port_conflict") or []) and not self.is_running:
             self.menu["Starting..."].title = "Status: Port conflict"
             return
-
-        # UPDATE_ON_LAUNCH is the launcher's: its `start` runs update_images()
-        # once, before the containers. The menubar used to run its own
-        # `update-images` here first, so a `yes` cost two registry passes
-        # per launch (issue #36); one is the launcher's.
 
         # First run: show welcome screen, wait for user to click "Set Up",
         # then start_service runs in the callback
@@ -2525,30 +2519,6 @@ class OnionPressApp(PortAttributes, rumps.App):
         return restored_addr
 
 
-    def update_docker_images(self, show_notifications=True):
-        """Pull the stack's container images through `onionpress
-        update-images` (cli.cmd_update_images: never for locally built
-        images, a prune of dangling images after a fresh download, #230).
-        True when something was downloaded."""
-        rc, ans, out, err = self._run_launcher_json(["update-images", "--json"], timeout=900)
-        if not ans:
-            self.log(f"Error updating Docker images: {self._launcher_failure(out, err, 'no answer')}")
-            return False
-        if ans.get("local_images"):
-            self.log("Skipping image update: running locally built images")
-            if show_notifications:
-                self.show_native_alert(
-                    "Running Locally Built Images",
-                    "Image updates are skipped because ONIONPRESS_TOR_IMAGE "
-                    "or ONIONPRESS_WORDPRESS_IMAGE points at a locally built "
-                    "image.\nUnset it to resume updates from the registry.",
-                )
-            return False
-        if ans.get("error"):
-            self.log(f"Failed to update Docker images: {ans['error']}")
-            return False
-        return bool(ans.get("pulled"))
-
     def _fix_app_bundle_permissions(self):
         """Make app bundle group-writable so any admin user can update it.
 
@@ -2596,8 +2566,7 @@ class OnionPressApp(PortAttributes, rumps.App):
     def check_for_updates(self, _):
         """Check GitHub for newer versions (`onionpress update --check
         --json`: cli.check_for_update_report, with the other macOS users
-        running OnionPress) and update Docker images. The dialogs are this
-        process's."""
+        running OnionPress). The dialogs are this process's."""
         app_update_available = False
         rc, ans, out, err = self._run_launcher_json(["update", "--check", "--json"], timeout=120)
         if not ans or ans.get("error"):
@@ -2666,10 +2635,14 @@ class OnionPressApp(PortAttributes, rumps.App):
                     args=(latest_version,),
                     daemon=True
                 ).start()
-                return  # Skip Docker update check — we're about to restart
+                return
 
-        # Check for Docker image updates
-        threading.Thread(target=self._check_docker_updates_async, args=(app_update_available,), daemon=True).start()
+        # Only a release updates OnionPress, its images with it: a start
+        # pulls what the new release pinned.
+        if ans and not ans.get("error") and not app_update_available:
+            self.show_native_alert(
+                "No Updates Available",
+                f"You're running the latest version (v{self.version}).")
 
     def _install_update(self, latest_version):
         """`onionpress update --yes --json`: the CLI downloads the DMG and
@@ -2735,21 +2708,6 @@ class OnionPressApp(PortAttributes, rumps.App):
 
         # Full quit — stops containers, VM, and relaunches with new images
         self.quit_app(None)
-
-    def _check_docker_updates_async(self, app_update_available):
-        """Check for Docker updates in background thread"""
-        images_updated = self.update_docker_images(show_notifications=True)
-
-        # Show final summary if no app update was available. Not when running
-        # locally built images — update_docker_images() has already said so,
-        # and "all container images are up to date" would be a lie.
-        if (not app_update_available and not images_updated
-                and not image_overrides.using_local_images(self._paths.config_file)):
-            version = self.version
-            self.show_native_alert(
-                "No Updates Available",
-                f"You're running the latest version (v{version})\nAll container images are up to date."
-            )
 
     def show_setup_dialog(self):
         """Show a persistent setup dialog during first run that stays until service is ready"""

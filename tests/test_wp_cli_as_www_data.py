@@ -139,8 +139,10 @@ class TestTheCopiesAgree(unittest.TestCase):
             with self.subTest(rel):
                 self.assertEqual(_function(text, "wp_cli"),
                                  "wp_cli() {\n    " + plain + "\n}\n")
-                self.assertEqual(_function(text, "wp_cli_in"),
-                                 "wp_cli_in() {\n    " + piped + "\n}\n")
+                # wp_cli_in went with the bash setup (#442.10): what reads
+                # stdin is the Python's (wp_files.wp_cli_args(stdin=True)).
+                self.assertNotIn("\nwp_cli_in() {", text)
+                self.assertTrue(piped)
 
     def test_activate_plugin_script(self):
         sh = _read("app/Resources/scripts/activate_plugin.sh")

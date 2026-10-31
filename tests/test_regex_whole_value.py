@@ -177,23 +177,27 @@ class TestAddressPrefix(unittest.TestCase):
                 launcher_ops.generate_vanity_in_container("op2\n", "/nonexistent")
         run.assert_not_called()
 
-    def _mac_launcher_check(self, prefix):
-        body = _read("app/MacOS/onionpress")
-        start = body.index('        _prefix_problem=""\n')
-        end = body.index("        unset _prefix_problem", start)
-        script = ("log() { :; }\nDATA_DIR=/nonexistent\nADDRESS_PREFIX=\"$1\"\n"
-                  + body[start:end] + 'printf %s "$ADDRESS_PREFIX"\n')
-        out = subprocess.run(["/bin/bash", "-c", script, "bash", prefix],
-                             capture_output=True, text=True, timeout=30)
-        self.assertEqual(out.returncode, 0, out.stderr)
-        return out.stdout
+    def _mac_first_run_prefix(self, prefix):
+        """The prefix the Mac's first-run seed generates with (start.KeySeed,
+        #442.5; it was a bash copy of the validator)."""
+        from onionpress import start
+        used = []
+        manager = mock.Mock(**{"volume_state.return_value": 1})
+        manager.paths.config_file = "/nonexistent/config"
+        manager.paths.data_dir = "/nonexistent"
+        with mock.patch.object(start, "configured_prefix", return_value=prefix), \
+             mock.patch.object(start, "vanity_key_dir", return_value=None), \
+             mock.patch.object(start, "generate_vanity_on_host",
+                               side_effect=lambda p, *a, **k: used.append(p)):
+            self.assertTrue(start.KeySeed(manager, mac=True, log=lambda _m: None).run())
+        return used[0]
 
-    def test_mac_launcher_tests_the_whole_value(self):
+    def test_mac_first_run_tests_the_whole_value(self):
         # Two ADDRESS_PREFIX= lines in the config read as "ab\ncd".
-        self.assertEqual(self._mac_launcher_check("ab\ncd"), "op2")
-        self.assertEqual(self._mac_launcher_check("ab\n"), "op2")
-        self.assertEqual(self._mac_launcher_check("abc"), "abc")
-        self.assertEqual(self._mac_launcher_check("ab0"), "op2")
+        self.assertEqual(self._mac_first_run_prefix("ab\ncd"), "op2")
+        self.assertEqual(self._mac_first_run_prefix("ab\n"), "op2")
+        self.assertEqual(self._mac_first_run_prefix("abc"), "abc")
+        self.assertEqual(self._mac_first_run_prefix("ab0"), "op2")
 
 
 def _bash_function(text, name):

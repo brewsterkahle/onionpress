@@ -1,0 +1,72 @@
+log Starting OnionPress containers...
+fn wait_for_docker_or_recover_vm 180 start
+fn ensure_vm_fsck_repair
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log First run detected - generating custom onion address...
+log ERROR: ADDRESS_PREFIX 'Elph1n' is invalid: Address prefix "Elph1n" contains invalid characters.
+log        Falling back to 'op2'. To use the closest valid prefix, set
+log        ADDRESS_PREFIX=elphn in $TMP/home/.onionpress/config before first launch.
+log Using address prefix: 'op2'
+fn generate_vanity_address op2
+log Custom onion address generated successfully
+docker image inspect --format {{.Id}} ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN
+docker volume create onionpress-onion-keys
+docker run --rm --network none --cap-drop ALL --cap-add DAC_OVERRIDE --security-opt no-new-privileges:true -v onionpress-onion-keys:/dest --mount type=bind,source=$TMP/home/.onionpress/shared/vanity-keys/op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion,target=/src,readonly --entrypoint sh ghcr.io/brewsterkahle/onionpress-tor:latest@sha256:PIN -c mkdir -p /dest/wordpress && cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && chown -R 0:0 /dest && chmod 700 /dest /dest/wordpress && chmod 600 /dest/wordpress/*
+log Address key installed to the onionpress-onion-keys volume
+log Onion address: op2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion
+log Pulling pre-built images (missing only)...
+docker compose pull --policy missing
+log ✓ WordPress network egress block in place: ok (test)
+docker ps -a --format {{.Names}}
+docker network inspect --format {{json .Options}} onionpress-network
+docker compose up -d wordpress db onionheaven autoheal
+log WordPress, DB, and Tor client containers starting
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+log WordPress not yet installed — will be configured by setup window
+log Starting Tor containers...
+docker volume ls --format {{.Name}}
+docker compose up -d --no-deps tor onionheaven
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
+log Installing Internet Archive Wayback Machine Link Fixer 1.4.2...
+docker exec onionpress-wordpress true
+docker exec onionpress-wordpress mktemp -d /tmp/onionpress-plugin-XXXXXX
+docker exec onionpress-wordpress curl -sSL -f --max-time 300 --speed-limit 1024 --speed-time 30 --socks5-hostname onionheaven:9050 -o /tmp/onionpress-plugin-abcdef/plugin.zip https://downloads.wordpress.org/plugin/internet-archive-wayback-machine-link-fixer.1.4.2.zip
+docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip $TEMPDIR/internet-archive-wayback-machine-link-fixer.zip
+docker exec onionpress-wordpress rm -rf /tmp/onionpress-plugin-abcdef
+log Failed to download and verify Internet Archive Wayback Machine Link Fixer - check log for details
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
+log Installing Cache Enabler 1.8.17...
+docker exec onionpress-wordpress true
+docker exec onionpress-wordpress mktemp -d /tmp/onionpress-plugin-XXXXXX
+docker exec onionpress-wordpress curl -sSL -f --max-time 300 --speed-limit 1024 --speed-time 30 --socks5-hostname onionheaven:9050 -o /tmp/onionpress-plugin-abcdef/plugin.zip https://downloads.wordpress.org/plugin/cache-enabler.1.8.17.zip
+docker cp onionpress-wordpress:/tmp/onionpress-plugin-abcdef/plugin.zip $TEMPDIR/cache-enabler.zip
+docker exec onionpress-wordpress rm -rf /tmp/onionpress-plugin-abcdef
+log Failed to download and verify Cache Enabler - check log for details
+py deactivate-wp-statistics
+py provision-post-install --themes-dir $TMP/App/Resources/themes --plugins-dir $TMP/App/Resources/plugins
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+log WordPress not installed yet — Cache Enabler and the Link Fixer are set up after setup
+fn configure_site_timezones
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
+docker container inspect onionpress-cloudflared
+detached py ensure-archive-s3-keys
+rc=0
+START_ERRORS=[]
+markers=
+volumes=onionpress-onion-keys

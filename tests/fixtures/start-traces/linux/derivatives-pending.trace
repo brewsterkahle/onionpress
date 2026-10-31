@@ -1,0 +1,49 @@
+log Starting OnionPress containers...
+fn wait_for_docker 180
+docker volume ls --format {{.Name}}
+docker volume ls --format {{.Name}}
+log Pulling pre-built images (missing only)...
+docker compose pull --policy missing
+log WordPress network egress block in place: ok (test)
+docker ps -a --format {{.Names}}
+docker network inspect --format {{json .Options}} onionpress-network
+docker compose up -d wordpress db onionheaven autoheal [BIND=127.0.0.1]
+log WordPress, DB, and Tor client containers starting
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+log WordPress is installed -- starting Tor
+docker port onionpress-wordpress 80/tcp
+log WordPress is installed: moving its port 8080 from 127.0.0.1 to 0.0.0.0 (ONIONPRESS_BIND_HOST)
+docker compose up -d wordpress [BIND=0.0.0.0]
+bin systemctl --user is-enabled onionpress-heartbeat.service
+docker volume ls --format {{.Name}}
+docker compose up -d --no-deps tor onionheaven [BIND=0.0.0.0]
+docker port onionpress-tor 9050/tcp
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
+log Internet Archive Wayback Machine Link Fixer 1.4.2 already installed
+docker exec -u www-data onionpress-wordpress sed -n s/^[[:space:]*]*Version:[[:space:]]*//p /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
+log Cache Enabler 1.8.17 already installed
+py deactivate-wp-statistics
+py provision-post-install --themes-dir $TMP/opt/themes --plugins-dir $TMP/opt/plugins
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data onionpress-wordpress test -f /var/www/html/wp-content/plugins/cache-enabler/cache-enabler.php
+py configure-cache-enabler
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed --network
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp plugin activate cache-enabler/cache-enabler.php --network
+py apply-cache-policy
+log ✓ Cache Enabler active, cache policy applied
+docker exec -u www-data onionpress-wordpress test -f /var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php
+py configure-ia-plugin
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp core is-installed --network
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp site list --field=url
+docker exec -u www-data -e WP_CLI_CACHE_DIR=/tmp/wp-cli-cache onionpress-wordpress wp plugin activate internet-archive-wayback-machine-link-fixer/internet-archive-wayback-machine-link-fixer.php --url=http://site.onion/
+log ✓ Internet Archive Wayback Machine Link Fixer active on every site
+log Image derivatives: rebuild pending — starting in the background
+docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml config --images
+fn start_onionheaven_activation_watcher
+docker container inspect onionpress-cloudflared
+detached py regenerate-derivatives
+rc=0
+markers=.wordpress-installed
+volumes=onionpress-onion-keys onionpress-tor-state

@@ -48,7 +48,6 @@ ONIONPRESS_TOR_IMAGE=onionpress-tor:dev
 # A good and a bad value for every key `config set` accepts.
 VALUES = {
     "ADDRESS_PREFIX": ("op3", "op2abc"),
-    "UPDATE_ON_LAUNCH": ("no", "maybe"),
     "LAUNCH_ON_LOGIN": ("no", "1"),
     "START_ON_BOOT": ("no", "true"),
     "PREVENT_SLEEP": ("never", "always"),

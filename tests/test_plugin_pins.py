@@ -49,23 +49,21 @@ class TestPins(unittest.TestCase):
                 # refuses one without it); build/pin-wp-plugin.sh prints it.
                 self.assertRegex(sha, r"^[0-9a-f]{64}$")
 
-    def test_launchers_install_only_pinned_slugs(self):
-        """Both launchers install every pinned plugin and nothing else, all
-        through install_wp_org_plugin, which hands install_plugin.sh only
-        its own slug argument."""
+    def test_only_pinned_slugs_are_installed(self):
+        """onionpress.bundled_plugins installs every pinned plugin and
+        nothing else, handing install_plugin.sh only the slug (the
+        launchers delegate to it, #442.3, and run neither script)."""
+        sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+        from onionpress import bundled_plugins
         pins = _pins(_read(SCRIPT))
+        self.assertEqual(set(bundled_plugins.NAMES), set(PLUGINS))
+        self.assertLessEqual(set(bundled_plugins.NAMES), set(pins))
+        source = _read("src/onionpress/bundled_plugins.py")
+        self.assertEqual(re.findall(r"\[install, ([^\]]+)\]", source),
+                         ['"--pinned-version", slug', "slug, temp_dir"])
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):
-            text = _read(rel)
             with self.subTest(rel):
-                self.assertEqual(
-                    re.findall(r'install_plugin\.sh" (?:--pinned-version )?"([^"]+)"', text),
-                    ["$slug", "$slug"])
-                self.assertEqual(
-                    set(re.findall(r"^\s+install_wp_org_plugin ([a-z0-9-]+)", text, re.M)),
-                    set(PLUGINS))
-            for slug in re.findall(r"^\s+install_wp_org_plugin ([a-z0-9-]+)", text, re.M):
-                with self.subTest(f"{rel}: {slug}"):
-                    self.assertIn(slug, pins)
+                self.assertNotIn("install_plugin.sh", _read(rel))
 
 
 class TestInstallPluginRuns(unittest.TestCase):

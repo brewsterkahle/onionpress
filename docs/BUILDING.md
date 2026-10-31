@@ -164,8 +164,8 @@ environment set still works:
 |---|---|
 | `app/Resources/docker/docker-compose.yml` | the `tor`, `wordpress` and `onionheaven` services, the `ONIONHEAVEN_IMAGE` the last one hands its takeover workers, and `db`, `autoheal`, `autoheal-proxy` |
 | `app/Resources/docker/docker-compose.cloudflare.yml` | `cloudflared` |
-| `app/MacOS/onionpress` | `update_images()` (cloudflared only when a tunnel token is set), the OnionHeaven takeover worker |
-| `linux/onionpress` | `update_images()` (cloudflared only when a tunnel token is set) |
+| `app/MacOS/onionpress` | `KEY_HELPER_IMAGE`, the tor image its one-shot key helpers run |
+| `linux/onionpress` | `KEY_HELPER_IMAGE`, the tor image its one-shot key helpers run |
 | `src/onionpress/containers.py` | `ONIONHEAVEN_IMAGE` — farm workers |
 | `src/onionpress/launcher_ops.py` | `DEFAULT_TOR_IMAGE` — vanity-key generation |
 
@@ -907,12 +907,12 @@ build. Nothing failed; the stack just was not running your code.
 Since then the start-time pull on both platforms is `docker compose pull
 --policy missing` and `start-tor` has no pull policy at all: with every image
 pinned by digest, a launch fetches exactly the pins a new release moved and
-nothing else, and never touches the registry otherwise. The refresh paths
-(`update_images()`, `onionpress update`, the menubar's Check for Updates)
-are the ones that still pull unconditionally. `UPDATE_ON_LAUNCH` therefore
-defaults to `no` everywhere (`config.DEFAULTS`, the template, both launchers'
-inline fallback configs): `yes` only adds a re-pull of every image at every
-launch, a registry contact before Tor is up (issue #36).
+nothing else, and never touches the registry otherwise. The opt-in refresh
+(`UPDATE_ON_LAUNCH`'s `update_images()`, `onionpress update-images`, the
+image pass of the menubar's Check for Updates) is gone: with every image
+pinned it could only re-pull the same digests. Images change with a release;
+Linux's `onionpress update` pulls the new release's pins, and each start
+removes the images a moved pin superseded (`start.prune_superseded_images`).
 
 All of them now check `using_local_images()` — true when
 `ONIONPRESS_TOR_IMAGE` or `ONIONPRESS_WORDPRESS_IMAGE` points at a reference

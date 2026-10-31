@@ -105,12 +105,13 @@ DOCKER_RUN_SITES = {
     # Reads arti's files (its own user's, 0700) into a copy root owns (the
     # launchers' migrate_key_volume runs it, Phase 4 #120).
     ("src/onionpress/containers.py", "migrate_key_volume"): [READ_USER_KEY],
-    ("app/MacOS/onionpress", "start_containers"): [READ_USER_KEY],
-    ("linux/onionpress", "start_containers"): [READ_USER_KEY, COPY_INTO_TOR_STATE],
+    # The first-run key seed (both launchers' start, #442.5, and the
+    # restore) and Linux's copy of C Tor's key files into its state.
+    ("src/onionpress/containers.py", "run_key_seed"): [READ_USER_KEY],
+    ("src/onionpress/containers.py", "run_tor_state_seed"): [COPY_INTO_TOR_STATE],
     # create_backup's four reads of debian-tor's (or arti's) key files out
     # of the volumes.
     ("linux/onionpress", "key_volume_cat"): [READ_USER_KEY],
-    ("src/onionpress/cli.py", "cmd_restore"): [READ_USER_KEY],
     # `--entrypoint test -x mkp224o`: a file test.
     ("src/onionpress/launcher_ops.py", "tor_image_has_mkp224o"): [set()],
     # mkp224o writes into the user's folder.
@@ -366,7 +367,9 @@ class TestDockerRunCensus(unittest.TestCase):
         expected = {site: len(caps) for site, caps in DOCKER_RUN_SITES.items()}
         expected.update(PRIVILEGED_SITES)
         self.assertEqual(found, expected)
-        self.assertGreaterEqual(sum(found.values()), 11)
+        # The scanner still finds sites (#442.5 made the launchers' three
+        # key seeds and the restore's one shared pair in containers.py).
+        self.assertGreaterEqual(sum(found.values()), 9)
 
     def test_only_the_listed_sites_are_privileged(self):
         for site, runs in self.sites.items():

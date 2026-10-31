@@ -171,9 +171,8 @@ class TestTheFloorsAreEvidence(unittest.TestCase):
         # launchers run it on every start (CLAUDE.md, "Container Image
         # Pins"). A floor below it would let a start fail at that call.
         self.assertEqual(dv.MIN_COMPOSE, (2, 22, 0))
-        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
-            with self.subTest(rel):
-                self.assertIn("pull --policy missing", _read(rel))
+        # Both launchers' start runs it through start.start_core (#442.6).
+        self.assertIn('["pull", "--policy", "missing"]', _read("src/onionpress/start.py"))
 
     def test_engine_floor_is_rootless_ga(self):
         self.assertEqual(dv.MIN_ENGINE, (20, 10, 0))

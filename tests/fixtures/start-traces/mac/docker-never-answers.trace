@@ -1,0 +1,7 @@
+log Starting OnionPress containers...
+fn wait_for_docker_or_recover_vm 180 start
+log ERROR: Docker daemon not ready after 180s (one Lima VM recovery attempted if it was Running); not starting
+rc=1
+START_ERRORS=[]
+markers=
+volumes=onionpress-onion-keys onionpress-tor-state

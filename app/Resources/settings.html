@@ -214,18 +214,6 @@
                 </div>
             </div>
             
-            <!-- Update on Launch -->
-            <div class="setting-group">
-                <h3>🔄 Auto-Update Docker Images</h3>
-                <p>Automatically check for and download updated WordPress, MariaDB, and Tor container images when launching the app. Ensures you have the latest security patches and features.</p>
-                <div class="input-group">
-                    <label>
-                        <input type="checkbox" id="updateOnLaunch" name="updateOnLaunch">
-                        Update on Launch
-                    </label>
-                </div>
-            </div>
-            
             <!-- Launch on Login -->
             <div class="setting-group">
                 <h3>🚀 Launch on Login</h3>
@@ -261,7 +249,6 @@
                 originalAddressPrefix = settings.ADDRESS_PREFIX;
                 
                 document.getElementById('installIaPlugin').checked = settings.INSTALL_IA_PLUGIN === 'yes';
-                document.getElementById('updateOnLaunch').checked = settings.UPDATE_ON_LAUNCH === 'yes';
                 document.getElementById('launchOnLogin').checked = settings.LAUNCH_ON_LOGIN === 'yes';
             } catch (error) {
                 console.error('Error loading settings:', error);
@@ -285,7 +272,6 @@
             const settings = {
                 ADDRESS_PREFIX: document.getElementById('addressPrefix').value,
                 INSTALL_IA_PLUGIN: document.getElementById('installIaPlugin').checked ? 'yes' : 'no',
-                UPDATE_ON_LAUNCH: document.getElementById('updateOnLaunch').checked ? 'yes' : 'no',
                 LAUNCH_ON_LOGIN: document.getElementById('launchOnLogin').checked ? 'yes' : 'no'
             };
             

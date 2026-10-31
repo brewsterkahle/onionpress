@@ -65,7 +65,6 @@ class TestWatcherBackgroundWork(unittest.TestCase):
 
     def setUp(self):
         self.launcher = _read(LAUNCHER)
-        self.fn = _bash_function(self.launcher, "run_detached")
 
     def test_handle_action_marks_the_watcher(self):
         # The shared handler (onionpress.handle_action) runs the actions
@@ -74,52 +73,9 @@ class TestWatcherBackgroundWork(unittest.TestCase):
         self.assertRegex(handle, r'\n            ONIONPRESS_IN_WATCHER=true op_py --data-dir "\$DATA_DIR" '
                                  r'handle-action --launcher "\$INSTALL_DIR/onionpress" "\$\{@:2\}"\n')
 
-    def test_derivative_rebuild_is_detached_through_it(self):
-        body = _bash_function(self.launcher, "start_containers")
-        # The isolated form of op_py (issue #470; tests/test_launcher_python_isolated.py).
-        self.assertRegex(body, r"\n\s*run_detached env PYTHONPATH=\"\$ONIONPRESS_PYTHONPATH\" "
-                               r"\"\$\{OP_PY\[@\]\}\" regenerate-derivatives\n")
-        self.assertNotRegex(body, r"\(\s*op_py regenerate-derivatives")
-
-    def _run(self, in_watcher):
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
-        bin_dir = os.path.join(tmp, "bin")
-        os.makedirs(bin_dir)
-        with open(os.path.join(bin_dir, "systemd-run"), "w") as f:
-            f.write('#!/bin/sh\nfor a in "$@"; do echo "$a"; done > "$OUT/systemd-run"\n')
-        os.chmod(os.path.join(bin_dir, "systemd-run"), 0o755)
-        script = (self.fn + 'log() { :; }\n'
-                  'ONIONPRESS_IN_WATCHER="$IN_WATCHER"\n'
-                  'run_detached sh -c \'echo ran > "$OUT/ran"\'\n')
-        r = _run_bash(script, env={
-            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-            "OUT": tmp, "IN_WATCHER": in_watcher, "LOG_FILE": os.path.join(tmp, "log"),
-            "DOCKER_HOST": "unix:///run/user/1000/docker.sock",
-            "MYSQL_ROOT_PASSWORD": "s3cret-not-for-argv",
-        })
-        self.assertEqual(r.returncode, 0, r.stderr)
-        return tmp
-
-    def test_from_the_watcher_it_goes_to_a_transient_user_unit(self):
-        tmp = self._run("true")
-        with open(os.path.join(tmp, "systemd-run")) as f:
-            argv = f.read().splitlines()
-        self.assertIn("--user", argv)
-        self.assertIn("--collect", argv)
-        self.assertIn("--setenv=DOCKER_HOST=unix:///run/user/1000/docker.sock", argv)
-        self.assertEqual(argv[argv.index("--") + 1:], ["sh", "-c", 'echo ran > "$OUT/ran"'])
-        self.assertFalse(any("s3cret" in a for a in argv))
-        self.assertFalse(os.path.exists(os.path.join(tmp, "ran")))
-
-    def test_elsewhere_it_runs_in_a_detached_subshell(self):
-        tmp = self._run("")
-        self.assertFalse(os.path.exists(os.path.join(tmp, "systemd-run")))
-        for _ in range(100):
-            if os.path.exists(os.path.join(tmp, "ran")):
-                break
-            time.sleep(0.05)
-        self.assertTrue(os.path.exists(os.path.join(tmp, "ran")))
+    # The detached rebuild (a transient user unit from the watcher, a
+    # session of its own elsewhere) is start.run_detached_cli since #442.7:
+    # tests/test_start_post_up.py, TestDetached.
 
 
 if __name__ == "__main__":

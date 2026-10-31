@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import onion_hostname, wordpress_egress
+from . import onion_hostname, platform, wordpress_egress
 from .docker import Docker, DockerError
 from .config import (
     DEFAULTS, SETTINGS_PAGE_KEYS, Secrets, default_value, ensure_secrets, load_secrets,
@@ -72,6 +72,14 @@ def tor_image(config_file: str | None = None) -> str:
 KEY_VOLUME = "onionpress-onion-keys"
 OLD_KEY_VOLUME = "onionpress-arti-state"
 KEY_VOLUME_MIGRATION_PENDING = ".key-volume-migration-pending"
+# Written by a key import or a restore of another address that could not
+# wipe the old keystores (Docker was not running): the next start does it
+# (ContainerManager.apply_pending_key_import) before anything else.
+IMPORT_KEY_PENDING = ".import-key-pending"
+# C Tor's keystore (/var/lib/tor/hidden_service/<name>/), and the volume a
+# migration of long ago left behind.
+TOR_STATE_VOLUME = "onionpress-tor-state"
+OLD_TOR_KEYS_VOLUME = "onionpress-tor-keys"
 
 
 def forget_key_volume_migration(data_dir: str) -> None:
@@ -83,6 +91,73 @@ def forget_key_volume_migration(data_dir: str) -> None:
         os.remove(os.path.join(data_dir, KEY_VOLUME_MIGRATION_PENDING))
     except FileNotFoundError:
         pass
+
+
+# The first-run key seed (ContainerManager.run_key_seed): the delivered PEM
+# where the tor entrypoint reads it, <name>/ks_hs_id.ed25519_expanded_private
+# in KEY_VOLUME, root's, 0700/0600. The launchers' start (#442.5) and the
+# restore (cli.cmd_restore) run it; the key folder is bind-mounted read-only.
+KEY_SEED_SCRIPT = ("mkdir -p /dest/wordpress && "
+                   "cp /src/ks_hs_id.ed25519_expanded_private /dest/wordpress/ && "
+                   "chown -R 0:0 /dest && "
+                   "chmod 700 /dest /dest/wordpress && "
+                   "chmod 600 /dest/wordpress/*")
+# Linux's start also puts C Tor's own key files in TOR_STATE_VOLUME
+# (/var/lib/tor/hidden_service/wordpress/), debian-tor's: the tor image's
+# user. The entrypoint re-derives them from the PEM anyway (issue #311);
+# kept as the Linux launcher always did it, word for word (its indentation
+# too: the start traces compare the argv).
+TOR_STATE_SEED_SCRIPT = """
+                    set -e
+                    mkdir -p /dest/hidden_service/wordpress/authorized_clients
+                    cp /src/hs_ed25519_secret_key /dest/hidden_service/wordpress/
+                    cp /src/hs_ed25519_public_key /dest/hidden_service/wordpress/ 2>/dev/null || true
+                    cp /src/hostname /dest/hidden_service/wordpress/
+                    chown -R debian-tor:debian-tor /dest/hidden_service
+                    chmod 700 /dest/hidden_service /dest/hidden_service/wordpress
+                    chmod 600 /dest/hidden_service/wordpress/hs_ed25519_secret_key
+                    chmod 644 /dest/hidden_service/wordpress/hostname
+                """
+
+
+def run_key_seed(docker, key_dir: str, image: str, *, timeout: int = 300):
+    """Copy the PEM in *key_dir* into KEY_VOLUME (KEY_SEED_SCRIPT) from
+    *image*, the pinned tor image (ensure_tor_image): no network, only
+    DAC_OVERRIDE (root reads the key out of the user's 0700 folder, which
+    Linux and a VM mount that enforces it check), no new privileges. The
+    DockerResult; the caller decides what a failure means (a first run
+    removes the volume and stops, a restore stops)."""
+    return docker.run(
+        ["run", "--rm",
+         "--network", "none",
+         "--cap-drop", "ALL",
+         "--cap-add", "DAC_OVERRIDE",
+         "--security-opt", "no-new-privileges:true",
+         "-v", f"{KEY_VOLUME}:/dest",
+         "--mount", f"type=bind,source={key_dir},target=/src,readonly",
+         "--entrypoint", "sh",
+         image, "-c", KEY_SEED_SCRIPT],
+        timeout=timeout, quiet=True)
+
+
+def run_tor_state_seed(docker, key_dir: str, image: str, *, timeout: int = 300):
+    """C Tor's key files from *key_dir* into TOR_STATE_VOLUME
+    (TOR_STATE_SEED_SCRIPT): no network; it reads the user's files and
+    writes into debian-tor's folders (DAC_OVERRIDE), chowns (CHOWN) and
+    chmods what is no longer root's (FOWNER). Linux's start only."""
+    return docker.run(
+        ["run", "--rm",
+         "--network", "none",
+         "--cap-drop", "ALL",
+         "--cap-add", "CHOWN",
+         "--cap-add", "DAC_OVERRIDE",
+         "--cap-add", "FOWNER",
+         "--security-opt", "no-new-privileges:true",
+         "-v", f"{TOR_STATE_VOLUME}:/dest",
+         "--mount", f"type=bind,source={key_dir},target=/src,readonly",
+         "--entrypoint", "sh",
+         image, "-c", TOR_STATE_SEED_SCRIPT],
+        timeout=timeout, quiet=True)
 
 
 # The copy ContainerManager.migrate_key_volume runs in the tor image
@@ -324,6 +399,70 @@ class ContainerManager:
             if line.strip():
                 self._log(line.rstrip())
 
+    def _to_log_file(self, result) -> None:
+        """A docker call's output, appended to the log file only (the bash
+        `>> "$LOG_FILE" 2>&1`)."""
+        text = result.stdout + result.stderr
+        if not text:
+            return
+        try:
+            with open(self.paths.log_file, "a", encoding="utf-8") as f:
+                f.write(text if text.endswith("\n") else text + "\n")
+        except OSError:
+            pass
+
+    def run_key_seed(self, key_dir: str, image: str, *, timeout: int = 300):
+        return run_key_seed(self.docker, key_dir, image, timeout=timeout)
+
+    def run_tor_state_seed(self, key_dir: str, image: str, *, timeout: int = 300):
+        return run_tor_state_seed(self.docker, key_dir, image, timeout=timeout)
+
+    def apply_pending_key_import(self) -> bool:
+        """Finish a key import Docker was not up for: with the
+        IMPORT_KEY_PENDING marker in the data dir, remove the old
+        keystores (KEY_VOLUME, which holds the delivered PEM; OLD_KEY_VOLUME,
+        or the migration would bring the replaced identity back;
+        TOR_STATE_VOLUME, C Tor's copy, which the entrypoint would keep
+        over the imported key), force-removing any container that holds
+        one, then drop the leftover OLD_TOR_KEYS_VOLUME, an unfinished
+        migration's marker and the import marker. False stops the start:
+        only Docker's confirmed "no such volume" counts as removed, and
+        the marker stays for the next start whenever a keystore survives
+        or could not be checked (a dropped marker beside an old keystore
+        would keep the replaced identity). Both launchers' start ran this
+        as bash until #442.4 (`onionpress apply-pending-key-import`)."""
+        data_dir = self.paths.data_dir
+        marker = os.path.join(data_dir, IMPORT_KEY_PENDING)
+        if not os.path.isfile(marker):
+            return True
+        dash = "—" if platform.detect_os() == platform.OS.MACOS else "--"
+        self._log(f"Pending key import detected {dash} removing old key and tor-state volumes...")
+        for vol in (KEY_VOLUME, OLD_KEY_VOLUME, TOR_STATE_VOLUME):
+            self._to_log_file(self.docker.run(["volume", "rm", vol], timeout=60, quiet=True))
+            state = self.volume_state(vol)
+            if state == 0:
+                self._log(f"Volume {vol} still in use {dash} force-removing containers using it...")
+                holders = self.docker.run(["ps", "-aq", "--filter", f"volume={vol}"],
+                                          timeout=30, quiet=True)
+                self._to_log_file(self.docker.run(
+                    ["rm", "-f", *(holders.stdout.split() if holders.ok else [])],
+                    timeout=60, quiet=True))
+                self._to_log_file(self.docker.run(["volume", "rm", vol], timeout=60, quiet=True))
+                state = self.volume_state(vol)
+            if state != 1:
+                self._log(f"ERROR: could not remove the old {vol} volume; keeping the "
+                          "pending key import and not starting")
+                return False
+        self._to_log_file(self.docker.run(["volume", "rm", OLD_TOR_KEYS_VOLUME],
+                                          timeout=60, quiet=True))
+        # No unfinished key volume migration survives a replaced identity.
+        forget_key_volume_migration(data_dir)
+        try:
+            os.remove(marker)
+        except FileNotFoundError:
+            pass
+        return True
+
     def migrate_key_volume(self) -> bool:
         """One-time migration of the onion service key volume from its
         historical name; False means the start must not go on.
@@ -422,39 +561,41 @@ class ContainerManager:
 
     # -- Core lifecycle --
 
-    def pull_images(self, timeout: int = 300) -> bool:
-        """Pull latest container images. Returns True on success."""
-        return self.pull_images_result(timeout).ok
+    def run_compose_to(self, args: list, *, out: str, include_cloudflare: bool = False) -> int:
+        """`docker compose ARGS` with the stack's environment, its output
+        where the launchers sent it: *out* "log" appends it to the log
+        file (the Mac's `>> "$LOG_FILE" 2>&1`), "stdout" streams it
+        (Linux's `| tee -a "$LOG_FILE"`: the journal sees a first pull's
+        progress as it happens). The exit status (Docker.run_to)."""
+        files = []
+        for f in self._compose_files(include_cloudflare) or []:
+            files += ["-f", f]
+        return self.docker.run_to(["compose", *files, *args],
+                                  log_file=self.paths.log_file if out == "log" else None,
+                                  extra_env=self._build_env())
 
-    def pull_images_result(self, timeout: int = 300):
-        """`docker compose pull` of the stack's pinned images: the
-        DockerResult (its stdout says whether anything was downloaded).
-        The opt-in refresh (`onionpress update-images`, the menubar's
-        Check for Updates); a launch pulls `--policy missing` instead.
-        Callers check using_local_images() first."""
-        self._log("Pulling container images...")
-        result = self.docker.compose(
-            ["pull"],
-            compose_files=self._compose_files(),
-            timeout=timeout,
-            extra_env=self._build_env(),
-        )
-        if not result.ok:
-            self._log(f"Image pull warning: {result.stderr.rstrip()}")
-        return result
+    def start_core(self, retries: int = 3, *, launcher: str | None = None,
+                   egress: Callable[[], object] | None = None) -> bool:
+        """Start core services (WordPress, DB, OnionHeaven, autoheal). Not
+        Tor yet. Before anything starts: the egress rules (issue #144),
+        retiring an older OnionPress's containers, the Tor network's move.
 
-    def start_core(self, retries: int = 3) -> bool:
-        """Start core services (WordPress, DB, OnionHeaven). Not Tor yet.
+        Returns True on success. Retries on failure (5 s apart).
 
-        Returns True on success. Retries on failure.
+        *launcher* ("mac" or "linux") is a launcher's start
+        (onionpress start-core, #442.6): its words, compose's output where
+        that launcher put it, and *egress* in place of this manager's (the
+        launcher's verdict lines and START SUMMARY name). WordPress's
+        published address on Linux comes in the environment, as the
+        launcher's `compose up` always had it (issue #464).
         """
-        self._log("Starting core services...")
-        compose_files = self._compose_files()
+        if launcher is None:
+            self._log("Starting core services...")
 
         # WordPress and MariaDB reach nothing outside Docker (issue #144):
         # the rules go on the Docker host before their network has a
         # container on it. Best effort, as in the launchers; ensure() logs.
-        self._egress()
+        (egress or self._egress)()
 
         # Nothing from before the OnionHeaven data volume may run beside the
         # containers about to start (the data move must not race them).
@@ -469,22 +610,36 @@ class ContainerManager:
         except Exception as e:
             self._log(f"Could not check onionpress-network's bridge: {e}")
 
+        up = ["up", "-d"] + CORE_SERVICES
+        shown = "docker compose " + " ".join(up)
         env = self._build_env()
         for attempt in range(1, retries + 1):
-            result = self.docker.compose(
-                ["up", "-d"] + CORE_SERVICES,
-                compose_files=compose_files,
-                timeout=120,
-                extra_env=env,
-            )
-            if result.ok:
-                self._log("Core services started")
+            if launcher is None:
+                result = self.docker.compose(up, compose_files=self._compose_files(),
+                                             timeout=120, extra_env=env)
+                ok, why = result.ok, result.stderr.rstrip()
+            else:
+                ok = self.run_compose_to(up, out="log" if launcher == "mac" else "stdout") == 0
+            if ok:
+                self._log("Core services started" if launcher is None
+                          else "WordPress, DB, and Tor client containers starting")
                 return True
-            self._log(f"Start attempt {attempt}/{retries} failed: {result.stderr.rstrip()}")
+            if launcher is None:
+                self._log(f"Start attempt {attempt}/{retries} failed: {why}")
+            elif launcher == "mac":
+                self._log(f"WARNING: '{shown}' failed (attempt {attempt}/{retries}). "
+                          f"Check {self.paths.log_file} for details.")
+            else:
+                self._log(f"WARNING: docker compose up failed (attempt {attempt}/{retries})")
             if attempt < retries:
                 time.sleep(5)
 
-        self._log("ERROR: Failed to start core services after retries")
+        if launcher is None:
+            self._log("ERROR: Failed to start core services after retries")
+        elif launcher == "mac":
+            self._log(f"ERROR: '{shown}' failed after {retries} attempts.")
+        else:
+            self._log(f"ERROR: docker compose up failed after {retries} attempts")
         return False
 
     def start_tor(self) -> bool:
@@ -495,8 +650,10 @@ class ContainerManager:
             self._log(f"ERROR: not starting Tor: {why}")
             return False
         self._log("Starting Tor service...")
+        # --no-deps: the callers bring WordPress up first, and compose would
+        # otherwise recreate it, moving its port (#464).
         result = self.docker.compose(
-            ["up", "-d", "tor"],
+            ["up", "-d", "--no-deps", "tor"],
             compose_files=self._compose_files(),
             timeout=120,
             extra_env=self._build_env(),

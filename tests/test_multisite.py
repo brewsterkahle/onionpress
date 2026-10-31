@@ -429,20 +429,6 @@ def _wp_content_strip_rule():
     return re.compile("^" + m.group(1) + "/")
 
 
-def _extract_mac_launcher_htaccess():
-    """Pull the heredoc the Mac launcher writes when .htaccess is missing
-    or empty (app/MacOS/onionpress, before provision-post-install runs).
-    """
-    path = (pathlib.Path(__file__).resolve().parent.parent
-            / "app" / "MacOS" / "onionpress")
-    m = re.search(
-        r'wp_put /var/www/html/\.htaccess 644 [^\n]*<< "HTEOF"\n(.*?)\nHTEOF\n',
-        path.read_text(encoding="utf-8"), re.S,
-    )
-    assert m, "could not find the .htaccess heredoc in app/MacOS/onionpress"
-    return m.group(1)
-
-
 class TestHtaccessMatchesOnionnameCharset(unittest.TestCase):
     """Regression test: the .htaccess strip rule's character class must
     cover every character onionnames_client._NAME_ALLOWED_RE allows.
@@ -496,12 +482,12 @@ class TestHtaccessDuplicatesStayInSync(unittest.TestCase):
         self.assertNotIn("multisite-install", text)
 
     def test_mac_launcher_htaccess_matches_multisite(self):
-        self.assertEqual(
-            multisite.HTACCESS_BODY.strip(),
-            _extract_mac_launcher_htaccess().strip(),
-            "app/MacOS/onionpress's .htaccess heredoc has drifted from "
-            "multisite.HTACCESS_BODY - keep the two in sync"
-        )
+        """The Mac start's .htaccess repair writes multisite.HTACCESS_BODY
+        itself (start.post_up, #442.7): no launcher keeps a copy."""
+        root = pathlib.Path(__file__).resolve().parent.parent
+        self.assertNotIn("HTEOF", (root / "app" / "MacOS" / "onionpress").read_text(encoding="utf-8"))
+        self.assertIn("input=multisite.HTACCESS_BODY",
+                      (root / "src" / "onionpress" / "start.py").read_text(encoding="utf-8"))
 
 
 class TestThemeOnionnameIsTheSubsiteOwner(unittest.TestCase):

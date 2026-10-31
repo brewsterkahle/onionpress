@@ -10,11 +10,11 @@ Link Fixer on the main site only, where the user's posts are not, after it
 had been configured there; and Cache Enabler with its own defaults, on a
 WordPress that answers to its .onion, localhost and the container names.
 
-Now (both launchers, the same functions):
-  install_ia_plugin / install_cache_enabler: the pinned release, in place
+Now (onionpress.bundled_plugins, both launchers delegating to it):
+  install-bundled-plugins: the pinned release, in place
       (an installed copy of another version is replaced)
   provision-post-install: the mu-plugins, among them the two policies
-  setup_bundled_plugins: configure-* → activate_plugin.sh → apply-cache-policy
+  setup-bundled-plugins: configure-* → activate_plugin.sh → apply-cache-policy
       (Cache Enabler network-wide, the Link Fixer site by site)
 and once setup has made the user's site, setup_logic starts the same.
 
@@ -40,9 +40,8 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
-from onionpress import multisite, setup_logic, wp_files  # noqa: E402
+from onionpress import bundled_plugins, multisite, setup_logic, wp_files  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_config_one_reader import config_value_function  # noqa: E402
 
 LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 ACTIVATE = os.path.join(PROJECT_ROOT, "app/Resources/scripts/activate_plugin.sh")
@@ -68,12 +67,6 @@ def _read(rel):
 def _bash_function(text, name):
     start = text.index(f"\n{name}() {{") + 1
     return text[start:text.index("\n}\n", start) + 3]
-
-
-def _normalized(text):
-    """The Mac launcher's spelling of the Linux one's helpers."""
-    return (text.replace("bundled_python -m onionpress.cli ", "op_py ")
-                .replace("docker exec -u www-data onionpress-wordpress ", "wp_exec "))
 
 
 def _done(stdout="", code=0, stderr=""):
@@ -209,49 +202,38 @@ class TestLaunchers(unittest.TestCase):
                 subprocess.run(["bash", "-n", os.path.join(PROJECT_ROOT, rel)], check=True)
 
     def test_start_installs_then_provisions_then_sets_up(self):
+        """The start's post-up step (start.post_up, #442.7) installs, then
+        provisions, then sets up: tests/test_start_post_up.py holds the
+        order; configuration happens in setup_bundled_plugins only."""
         for rel in LAUNCHERS:
             start = _bash_function(_read(rel), "start_containers")
             with self.subTest(rel):
-                ia = start.index("\n    install_ia_plugin\n")
-                ce = start.index("\n    install_cache_enabler\n")
-                provision = start.index('onionpress.cli --data-dir "$DATA_DIR" provision-post-install' if "MacOS" in rel
-                                        else "op_py provision-post-install")
-                setup = start.index("\n    setup_bundled_plugins\n")
-                self.assertLess(max(ia, ce), provision)
-                self.assertLess(provision, setup)
-                # Configuration happens in setup_bundled_plugins only.
+                self.assertIn("start-containers", start)
                 self.assertNotIn("configure-ia-plugin", start)
                 self.assertNotIn("configure_cache_enabler", start)
 
-    def test_setup_configures_then_activates_then_applies(self):
-        for rel in LAUNCHERS:
-            body = _normalized(_bash_function(_read(rel), "setup_bundled_plugins"))
-            with self.subTest(rel):
-                self.assertTrue(body.split("\n", 2)[1].strip().startswith("if ! wp_is_installed"))
-                ce = body[body.index("plugin_wanted INSTALL_CACHE_ENABLER"):
-                          body.index("plugin_wanted INSTALL_IA_PLUGIN")]
-                ia = body[body.index("plugin_wanted INSTALL_IA_PLUGIN"):]
-                self.assertIn(f"wp_plugin_present {CE}", ce)
-                self.assertLess(ce.index("op_py configure-cache-enabler"),
-                                ce.index('activate_plugin.sh" onionpress-wordpress'))
-                self.assertLess(ce.index('activate_plugin.sh" onionpress-wordpress'),
-                                ce.index("op_py apply-cache-policy"))
-                self.assertRegex(ce, re.escape(CE) + r" --network\b")
-                self.assertIn(f"wp_plugin_present {IA}", ia)
-                self.assertLess(ia.index("op_py configure-ia-plugin"),
-                                ia.index('activate_plugin.sh" onionpress-wordpress'))
-                self.assertRegex(ia, re.escape(IA) + r"\s*\\\n\s*--each-site\b")
-                # Each step only after the one before it succeeded.
-                self.assertEqual(ce.count("&&"), 3)
-                self.assertEqual(ia.count("&&"), 2)
-
-    def test_the_two_launchers_carry_the_same_functions(self):
-        for name in ("plugin_wanted", "wp_plugin_present", "wp_plugin_version",
-                     "install_wp_org_plugin", "install_ia_plugin",
-                     "install_cache_enabler", "setup_bundled_plugins"):
-            with self.subTest(name):
-                self.assertEqual(_normalized(_bash_function(_read(LAUNCHERS[0]), name)),
-                                 _bash_function(_read(LAUNCHERS[1]), name))
+    def test_the_bash_functions_are_the_delegation(self):
+        """#442.3: both launchers' bodies are the one call to the CLI,
+        tee'd into the log, never stopping a start."""
+        for rel, runner in ((LAUNCHERS[0], "bundled_python -m onionpress.cli"),
+                            (LAUNCHERS[1], "op_py")):
+            text = _read(rel)
+            for name, sub in (("setup_bundled_plugins", "setup-bundled-plugins"),):
+                with self.subTest(rel=rel, name=name):
+                    self.assertEqual(
+                        _bash_function(text, name),
+                        f"{name}() {{\n"
+                        f'    {runner} --data-dir "$DATA_DIR" {sub} \\\n'
+                        f'        --scripts-dir "$SCRIPTS_DIR" 2>&1 | tee -a "$LOG_FILE"\n'
+                        "    return 0\n}\n")
+            with self.subTest(rel=rel):
+                for gone in ("install_bundled_plugins",
+                             "plugin_wanted", "wp_plugin_present", "wp_plugin_version",
+                             "install_wp_org_plugin", "install_ia_plugin",
+                             "install_cache_enabler"):
+                    self.assertNotIn(f"\n{gone}() {{", text)
+                self.assertNotIn("install_plugin.sh", text)
+                self.assertNotIn("activate_plugin.sh", text)
 
     def test_subcommand_for_after_setup(self):
         for rel in LAUNCHERS:
@@ -259,43 +241,6 @@ class TestLaunchers(unittest.TestCase):
                 self.assertRegex(_read(rel),
                                  r"\n        setup-bundled-plugins\)\n(?:            #[^\n]*\n)*"
                                  r"            setup_bundled_plugins\n            ;;\n")
-
-    def test_install_replaces_an_unpinned_copy(self):
-        body = _bash_function(_read(LAUNCHERS[1]), "install_wp_org_plugin")
-        self.assertIn('install_plugin.sh" --pinned-version "$slug"', body)
-        self.assertIn('installed=$(wp_plugin_version "$slug/$slug.php")', body)
-        self.assertIn('[ "$installed" = "$pinned" ]', body)
-        self.assertIn('op_py put-wp-tree --src "$temp_dir/$slug"', body)
-        self.assertNotIn("activate", body)
-
-    def test_installed_version_is_read_from_the_plugin_header(self):
-        root = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, root, True)
-        headers = {
-            "cache-enabler/cache-enabler.php":
-                "<?php\n/*\nPlugin Name: Cache Enabler\nText Domain: cache-enabler\n"
-                "Version: 1.8.16\n*/\n",
-            IA: "<?php\n/**\n * The wayback-link-fixer bootstrap file.\n *\n"
-                " * @version     1.4.2\n * @wordpress-plugin\n"
-                " * Plugin Name:             Internet Archive Wayback Machine Link Fixer\n"
-                " * Version:                 1.4.2\r\n * Requires at least:       6.4\n */\n",
-            "evil/evil.php": "<?php\n/*\n * Version: 1.0$(touch /tmp/x)\x1b[2J\n */\n",
-        }
-        for rel, text in headers.items():
-            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
-            with open(os.path.join(root, rel), "w") as f:
-                f.write(text)
-        stub = ('wp_exec() { local a args=(); for a in "$@"; do '
-                'args+=("${a/\\/var\\/www\\/html\\/wp-content\\/plugins/$ROOT}"); done; "${args[@]}"; }\n')
-        script = stub + _bash_function(_read(LAUNCHERS[1]), "wp_plugin_version")
-        found = {}
-        for rel in list(headers) + ["missing/missing.php"]:
-            r = subprocess.run(["bash", "-c", script + 'wp_plugin_version "$1"', "bash", rel],
-                               capture_output=True, text=True, env={"ROOT": root, "PATH": "/usr/bin:/bin"},
-                               timeout=30)
-            found[rel] = r.stdout
-        self.assertEqual(found, {"cache-enabler/cache-enabler.php": "1.8.16", IA: "1.4.2",
-                                 "evil/evil.php": "1.0touchtmpx2J", "missing/missing.php": ""})
 
     def test_install_plugin_prints_the_pinned_version(self):
         for slug, version in (("cache-enabler", "1.8.17"),
@@ -308,28 +253,262 @@ class TestLaunchers(unittest.TestCase):
                            capture_output=True, text=True, timeout=30)
         self.assertEqual((r.returncode, r.stdout), (1, ""))
 
-    def _plugin_wanted(self, config):
-        data = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, data, True)
-        if config is not None:
-            with open(os.path.join(data, "config"), "w") as f:
-                f.write(config)
-        script = (config_value_function() + _bash_function(_read(LAUNCHERS[1]), "plugin_wanted")
-                  + 'plugin_wanted INSTALL_IA_PLUGIN && echo yes || echo no\n')
-        r = subprocess.run(["bash", "-c", "set -e\n" + script], capture_output=True,
-                           text=True, env={"DATA_DIR": data, "PATH": "/usr/bin:/bin"},
-                           timeout=30)
-        return r.stdout.strip()
+
+# ─── install and set up (onionpress.bundled_plugins) ─────────────────
+
+class _Result:
+    def __init__(self, ok=True, stdout=""):
+        self.ok, self.stdout, self.stderr = ok, stdout, ""
+
+
+class _FakeDocker:
+    """docker for bundled_plugins: wp-cli answers by *installed*, the
+    plugins folder is *root* on this machine (test -f and sed run here, on
+    the path under it)."""
+
+    def __init__(self, root, installed=True):
+        self.root, self.installed, self.calls = root, installed, []
+
+    @property
+    def env(self):
+        """What the scripts run with: docker's environment."""
+        return dict(os.environ)
+
+    def run(self, args, timeout=None, quiet=False):
+        self.calls.append(list(args))
+        if "wp" in args:
+            return _Result(self.installed)
+        user = args.index("-u")
+        self.assert_www_data(args, user)
+        local = [a.replace(bundled_plugins.PLUGINS_DIR, self.root) for a in args[user + 3:]]
+        done = subprocess.run(local, capture_output=True, text=True, timeout=30)
+        return _Result(done.returncode == 0, done.stdout)
+
+    @staticmethod
+    def assert_www_data(args, user):
+        assert args[:1] == ["exec"] and args[user + 1] == "www-data", args
+
+
+SCRIPT_STUB = """#!/bin/bash
+printf '%s\\n' "$(basename "$0") $*" >> "$CALLS"
+if [ "$1" = --pinned-version ]; then
+    case "$2" in cache-enabler) echo 1.8.17 ;; internet-archive-wayback-machine-link-fixer) echo 1.4.2 ;; *) exit 1 ;; esac
+    exit 0
+fi
+case "$(basename "$0")" in
+    install_plugin.sh) [ -z "${FAIL_DOWNLOAD:-}" ] || exit 1; mkdir -p "$2/$1" ;;
+    activate_plugin.sh) [ -z "${FAIL_ACTIVATE:-}" ] || exit 1 ;;
+esac
+echo "script output"
+"""
+
+
+class TestBundledPluginsPython(unittest.TestCase):
+    """onionpress.bundled_plugins against a fake docker, stub scripts and a
+    recording step runner: the bash bodies' order, words and conditions."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = os.path.join(self.tmp, "plugins")
+        os.makedirs(self.root)
+        self.scripts = os.path.join(self.tmp, "scripts")
+        os.makedirs(self.scripts)
+        for name in ("install_plugin.sh", "activate_plugin.sh"):
+            path = os.path.join(self.scripts, name)
+            with open(path, "w") as f:
+                f.write(SCRIPT_STUB)
+            os.chmod(path, 0o755)
+        self.config = os.path.join(self.tmp, "config")
+        open(self.config, "w").close()
+        self.calls_file = os.path.join(self.tmp, "calls")
+        self.log_file = os.path.join(self.tmp, "log")
+        self.lines, self.steps = [], []
+        self.step_rc = {}
+        self.env = mock.patch.dict(os.environ, {"CALLS": self.calls_file})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.docker = _FakeDocker(self.root)
+
+    def host(self):
+        def step(argv):
+            self.steps.append(" ".join(argv))
+            return self.step_rc.get(argv[0], 0)
+        return bundled_plugins.PluginHost(
+            docker=self.docker, config_file=self.config, scripts_dir=self.scripts,
+            log_file=self.log_file, log=self.lines.append, run_step=step)
+
+    def plugin(self, slug, version):
+        os.makedirs(os.path.join(self.root, slug), exist_ok=True)
+        with open(os.path.join(self.root, slug, slug + ".php"), "w") as f:
+            f.write(f"<?php\n/*\n * Version: {version}\n */\n")
+
+    def scripts_run(self):
+        try:
+            with open(self.calls_file) as f:
+                return [re.sub(r"/\S*/tmp\w*", "TMP", l) for l in f.read().splitlines()]
+        except FileNotFoundError:
+            return []
+
+    def test_installs_the_pinned_release_of_each(self):
+        bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(self.lines, [
+            "Installing Internet Archive Wayback Machine Link Fixer 1.4.2...",
+            "✓ Internet Archive Wayback Machine Link Fixer 1.4.2 installed with verified checksum",
+            "Installing Cache Enabler 1.8.17...",
+            "✓ Cache Enabler 1.8.17 installed with verified checksum"])
+        self.assertEqual(self.scripts_run(), [
+            "install_plugin.sh --pinned-version internet-archive-wayback-machine-link-fixer",
+            "install_plugin.sh internet-archive-wayback-machine-link-fixer TMP",
+            "install_plugin.sh --pinned-version cache-enabler",
+            "install_plugin.sh cache-enabler TMP"])
+        self.assertEqual([re.sub(r"/\S*/tmp\w*", "TMP", s) for s in self.steps], [
+            "put-wp-tree --src TMP/internet-archive-wayback-machine-link-fixer --dest "
+            "/var/www/html/wp-content/plugins/internet-archive-wayback-machine-link-fixer",
+            "put-wp-tree --src TMP/cache-enabler --dest /var/www/html/wp-content/plugins/cache-enabler"])
+        with open(self.log_file) as f:
+            self.assertEqual(f.read(), "script output\n" * 2)
+
+    def test_the_pinned_one_installed_is_left(self):
+        self.plugin("cache-enabler", "1.8.17")
+        self.plugin("internet-archive-wayback-machine-link-fixer", "1.4.2")
+        bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(self.lines, [
+            "Internet Archive Wayback Machine Link Fixer 1.4.2 already installed",
+            "Cache Enabler 1.8.17 already installed"])
+        self.assertEqual(self.steps, [])
+
+    def test_install_replaces_an_unpinned_copy(self):
+        self.plugin("cache-enabler", "1.8.16")
+        with open(self.config, "w") as f:
+            f.write("INSTALL_IA_PLUGIN=no\n")
+        bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(self.lines, [
+            "Internet Archive plugin installation disabled in config",
+            "Replacing Cache Enabler 1.8.16 with the pinned release 1.8.17...",
+            "✓ Cache Enabler 1.8.17 installed with verified checksum"])
+
+    def test_failures_are_lines_never_a_stop(self):
+        with open(self.config, "w") as f:
+            f.write("INSTALL_CACHE_ENABLER=no\n")
+        with mock.patch.dict(os.environ, {"FAIL_DOWNLOAD": "1"}):
+            bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(self.lines[1:], [
+            "Failed to download and verify Internet Archive Wayback Machine Link Fixer"
+            " - check log for details",
+            "Cache Enabler plugin installation disabled in config"])
+        self.lines.clear()
+        self.step_rc["put-wp-tree"] = 1
+        bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(self.lines[1], "Failed to copy Internet Archive Wayback Machine "
+                                        "Link Fixer to container")
+
+    def test_no_scripts_no_pin(self):
+        shutil.rmtree(self.scripts)
+        bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(self.lines, [
+            "Plugin installation scripts not available, skipping Internet Archive "
+            "Wayback Machine Link Fixer",
+            "Plugin installation scripts not available, skipping Cache Enabler"])
+
+    def test_the_temporary_folder_goes(self):
+        made = []
+        real = tempfile.mkdtemp
+        with mock.patch.object(bundled_plugins.tempfile, "mkdtemp",
+                               side_effect=lambda: made.append(real()) or made[-1]):
+            bundled_plugins.install_bundled_plugins(self.host())
+        self.assertEqual(len(made), 2)
+        self.assertFalse(any(os.path.exists(d) for d in made))
+
+    def test_setup_configures_then_activates_then_applies(self):
+        self.plugin("cache-enabler", "1.8.17")
+        self.plugin("internet-archive-wayback-machine-link-fixer", "1.4.2")
+        bundled_plugins.setup_bundled_plugins(self.host())
+        self.assertEqual(self.steps, ["configure-cache-enabler", "apply-cache-policy",
+                                      "configure-ia-plugin"])
+        self.assertEqual(self.scripts_run(), [
+            f"activate_plugin.sh onionpress-wordpress {CE} --network",
+            f"activate_plugin.sh onionpress-wordpress {IA} --each-site"])
+        self.assertEqual(self.lines, [
+            "✓ Cache Enabler active, cache policy applied",
+            "✓ Internet Archive Wayback Machine Link Fixer active on every site"])
+
+    def test_each_step_only_after_the_one_before(self):
+        self.plugin("cache-enabler", "1.8.17")
+        self.plugin("internet-archive-wayback-machine-link-fixer", "1.4.2")
+        self.step_rc["configure-cache-enabler"] = 1
+        with mock.patch.dict(os.environ, {"FAIL_ACTIVATE": "1"}):
+            bundled_plugins.setup_bundled_plugins(self.host())
+        self.assertEqual(self.steps, ["configure-cache-enabler", "configure-ia-plugin"])
+        self.assertEqual(self.scripts_run(), [
+            f"activate_plugin.sh onionpress-wordpress {IA} --each-site"])
+        self.assertEqual(self.lines, [
+            f"WARNING: Cache Enabler not set up — see {self.log_file}",
+            f"WARNING: Internet Archive Link Fixer not set up — see {self.log_file}"])
+
+    def test_not_before_wordpress_is_installed(self):
+        self.plugin("cache-enabler", "1.8.17")
+        self.docker.installed = False
+        bundled_plugins.setup_bundled_plugins(self.host())
+        self.assertEqual(self.lines, ["WordPress not installed yet — Cache Enabler and the "
+                                      "Link Fixer are set up after setup"])
+        self.assertEqual((self.steps, self.scripts_run()), ([], []))
+
+    def test_unwanted_or_absent_plugins_are_left(self):
+        self.plugin("cache-enabler", "1.8.17")
+        with open(self.config, "w") as f:
+            f.write("INSTALL_CACHE_ENABLER=no\n")
+        bundled_plugins.setup_bundled_plugins(self.host())
+        self.assertEqual((self.lines, self.steps, self.scripts_run()), ([], [], []))
+
+    def test_every_look_is_wp_cli_or_www_data(self):
+        self.plugin("cache-enabler", "1.8.17")
+        bundled_plugins.install_bundled_plugins(self.host())
+        bundled_plugins.setup_bundled_plugins(self.host())
+        self.assertTrue(self.docker.calls)
+        for call in self.docker.calls:
+            with self.subTest(call=call):
+                self.assertNotIn("--allow-root", call)
+                self.assertEqual(call[call.index("-u") + 1], "www-data")
+
+    def test_installed_version_is_read_from_the_plugin_header(self):
+        headers = {
+            "cache-enabler":
+                "<?php\n/*\nPlugin Name: Cache Enabler\nText Domain: cache-enabler\n"
+                "Version: 1.8.16\n*/\n",
+            "internet-archive-wayback-machine-link-fixer":
+                "<?php\n/**\n * The wayback-link-fixer bootstrap file.\n *\n"
+                " * @version     1.4.2\n * @wordpress-plugin\n"
+                " * Plugin Name:             Internet Archive Wayback Machine Link Fixer\n"
+                " * Version:                 1.4.2\r\n * Requires at least:       6.4\n */\n",
+            "evil": "<?php\n/*\n * Version: 1.0$(touch /tmp/x)\x1b[2J\n */\n",
+        }
+        for slug, text in headers.items():
+            os.makedirs(os.path.join(self.root, slug), exist_ok=True)
+            with open(os.path.join(self.root, slug, slug + ".php"), "w") as f:
+                f.write(text)
+        found = {slug: bundled_plugins.plugin_version(self.host(), slug)
+                 for slug in list(headers) + ["missing"]}
+        self.assertEqual(found, {"cache-enabler": "1.8.16",
+                                 "internet-archive-wayback-machine-link-fixer": "1.4.2",
+                                 "evil": "1.0touchtmpx2J", "missing": ""})
 
     def test_plugin_wanted(self):
-        self.assertEqual(self._plugin_wanted(None), "yes")
-        self.assertEqual(self._plugin_wanted("OTHER=no\n"), "yes")
-        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=\n"), "yes")
-        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=yes\n"), "yes")
-        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=no\n"), "no")
+        def wanted(config):
+            if config is None:
+                os.unlink(self.config)
+            else:
+                with open(self.config, "w") as f:
+                    f.write(config)
+            return bundled_plugins.plugin_wanted(self.config, "INSTALL_IA_PLUGIN")
+        self.assertTrue(wanted(None))
+        self.assertTrue(wanted("OTHER=no\n"))
+        self.assertTrue(wanted("INSTALL_IA_PLUGIN=\n"))
+        self.assertTrue(wanted("INSTALL_IA_PLUGIN=yes\n"))
+        self.assertFalse(wanted("INSTALL_IA_PLUGIN=no\n"))
         # A duplicated key: the first line, config.read_value's rule (#404).
-        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=no\nINSTALL_IA_PLUGIN=yes\n"), "no")
-        self.assertEqual(self._plugin_wanted("INSTALL_IA_PLUGIN=yes\nINSTALL_IA_PLUGIN=no\n"), "yes")
+        self.assertFalse(wanted("INSTALL_IA_PLUGIN=no\nINSTALL_IA_PLUGIN=yes\n"))
+        self.assertTrue(wanted("INSTALL_IA_PLUGIN=yes\nINSTALL_IA_PLUGIN=no\n"))
 
 
 class TestSetupStartsThePluginSetup(unittest.TestCase):
