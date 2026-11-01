@@ -56,9 +56,17 @@ class TestStartOnBoot(unittest.TestCase):
         self.launcher = _read(LAUNCHER)
 
     def test_start_on_boot_enables_the_user_units(self):
-        body = _bash_function(self.launcher, "apply_config_updates")
-        self.assertIn("systemctl --user enable onionpress.service onionpress-heartbeat.service", body)
-        self.assertIn("systemctl --user disable onionpress.service onionpress-heartbeat.service", body)
+        """config.apply_side_effects' Linux branch (run by `config set` and
+        by handle_action.apply_config for the page's channel); the launcher
+        has no copy of its own since 2026-10-31."""
+        self.assertNotIn("apply_config_updates", self.launcher)
+        self.assertNotIn("systemctl --user enable onionpress.service", self.launcher)
+        config = _read("src/onionpress/config.py")
+        body = config[config.index("def apply_side_effects("):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn('if "START_ON_BOOT" in keys and os_name == "linux":', body)
+        self.assertIn('run(["systemctl", "--user", verb, "onionpress.service",\n'
+                      '                     "onionpress-heartbeat.service"]', body)
 
 
 class TestWatcherBackgroundWork(unittest.TestCase):

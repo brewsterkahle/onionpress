@@ -44,7 +44,7 @@ LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
 # Keys the host itself acts on: (file, the expression that reads the key).
 HOST_READERS = {
     "LAUNCH_ON_LOGIN": ("src/menubar.py", 'read_config_value("LAUNCH_ON_LOGIN"'),
-    "START_ON_BOOT": ("linux/onionpress", "$(config_value START_ON_BOOT)"),
+    "START_ON_BOOT": ("src/onionpress/handle_action.py", "op_config.apply_side_effects("),
     "PREVENT_SLEEP": ("src/onionpress/power.py", '_read_config("PREVENT_SLEEP"'),
     "VM_MEMORY": ("app/MacOS/onionpress", "$(config_value VM_MEMORY)"),
     "REGISTER_WITH_ONIONHEAVEN": ("src/onionpress/onionheaven.py",

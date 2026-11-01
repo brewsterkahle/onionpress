@@ -441,8 +441,9 @@ fi
 # that stop or remove take COMPOSE_WITH_CF, so a tunnel whose token was just
 # removed still goes down with the rest (#352), and start_cloudflare_tunnel
 # names both files itself.
-# apply_config_updates reads it again: the Settings page's Restart applies
-# the page's changes in this same process before start_containers.
+# The Settings page's Restart applies the page's changes (handle-action
+# runs `apply-config`, then `restart`: this process reads the config
+# fresh).
 COMPOSE_WITH_CF=(-f docker-compose.yml -f docker-compose.cloudflare.yml)
 read_cloudflare_token() {
     CLOUDFLARE_TUNNEL_TOKEN=""
@@ -2232,11 +2233,6 @@ restore_backup() {
 # ─── Write status (on-demand) ────────────────────────────────────────
 
 write_status() {
-    # Apply any pending config changes from the WordPress settings page
-    if [ -z "${_IN_WRITE_STATUS:-}" ]; then
-        _IN_WRITE_STATUS=1 apply_config_updates 2>/dev/null || true
-    fi
-
     cd "$DOCKER_DIR"
 
     # Get container states
@@ -2593,58 +2589,6 @@ write_recent_logs() {
 
 # ─── Config watcher (on-demand) ──────────────────────────────────────
 
-apply_config_updates() {
-    # Check if settings page wrote config-updates.json
-    local updates result changed rejected
-    updates=$(wp_exec cat /var/lib/onionpress/config-updates.json 2>/dev/null || echo "")
-
-    if [ -z "$updates" ] || [ "$updates" = "{}" ]; then
-        return 0
-    fi
-
-    log "Applying config updates from settings page..."
-
-    # Anything running in WordPress can write that file, so the shared
-    # allowlist (config.SETTINGS_PAGE_KEYS, as on the Mac) applies only the
-    # settings page's own keys with valid values. It reports key names,
-    # never values.
-    if ! result=$(printf '%s' "$updates" | op_py --data-dir "$DATA_DIR" apply-settings-updates 2>>"$LOG_FILE"); then
-        log "WARNING: Could not apply config updates from settings page"
-        return 1
-    fi
-    changed=$(printf '%s\n' "$result" | sed -n 's/^changed //p' | tr '\n' ' ')
-    rejected=$(printf '%s\n' "$result" | sed -n 's/^rejected //p' | tr '\n' ' ')
-    [ -z "$changed" ] || log "Settings page changed: ${changed% }"
-    [ -z "$rejected" ] || log "WARNING: Settings page update ignored (not a setting it may change, or an invalid value): ${rejected% }"
-    # A tunnel token is never set from the page (#463): its owner would
-    # see this host's IP. Removing it is applied above.
-    if printf '%s\n' "$result" | grep -qx 'held CLOUDFLARE_TUNNEL_TOKEN'; then
-        log "WARNING: Settings page asked to set CLOUDFLARE_TUNNEL_TOKEN; not set. On this computer run: onionpress config set CLOUDFLARE_TUNNEL_TOKEN -"
-    fi
-
-    # Clear the updates file
-    wp_exec rm -f /var/lib/onionpress/config-updates.json 2>>"$LOG_FILE"
-
-    # A token set or removed on the page counts from the next start_containers
-    # (the page's Restart runs it in this process).
-    read_cloudflare_token
-
-    # Handle START_ON_BOOT (re-applied whenever the page sends it)
-    if printf '%s\n' "$result" | grep -qE '^(changed|unchanged) START_ON_BOOT$'; then
-        local boot_val
-        boot_val=$(config_value START_ON_BOOT)
-        if [ "$boot_val" = "yes" ]; then
-            systemctl --user enable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Enabled start on boot" || log "WARNING: Failed to enable start on boot"
-        else
-            systemctl --user disable onionpress.service onionpress-heartbeat.service 2>>"$LOG_FILE" && log "Disabled start on boot" || log "WARNING: Failed to disable start on boot"
-        fi
-    fi
-
-    # Write updated status
-    write_status
-
-    log "Config updates applied"
-}
 
 # ─── Main ─────────────────────────────────────────────────────────────
 
@@ -3760,8 +3704,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         apply-config)
-            setup_db_passwords
-            apply_config_updates
+            # The Settings page's config-updates.json, through the allowlist
+            # (config.SETTINGS_PAGE_KEYS) and config.apply_side_effects
+            # (START_ON_BOOT's units): onionpress.handle_action.apply_config,
+            # as on the Mac. handle-action applies it on every run too.
+            op_py --data-dir "$DATA_DIR" apply-config
             ;;
 
         onionheaven)

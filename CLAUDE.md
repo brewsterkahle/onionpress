@@ -286,8 +286,10 @@
 - Anything in WordPress can write the request files in
   `/var/lib/onionpress/`. Config changes go only through
   `config.apply_settings_updates` (`SETTINGS_PAGE_KEYS`, every value
-  checked; the rest dropped, logged by key name only).
-  `tests/test_settings_page_updates.py`.
+  checked; the rest dropped, logged by key name only), applied by
+  `handle_action.apply_config` on every `handle-action` run and by
+  `onionpress apply-config`, on both platforms (each launcher's case
+  delegates; no bash twin). `tests/test_settings_page_updates.py`.
 - **Never add to `SETTINGS_PAGE_KEYS`** image overrides,
   `ONIONHEAVEN_ADDRESS`, `ONIONHEAVEN_ACCEPT_REGISTRATIONS`,
   `ADDRESS_PREFIX`, ports, paths or secrets other than
