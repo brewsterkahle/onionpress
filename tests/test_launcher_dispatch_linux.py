@@ -15,7 +15,6 @@ Runs under /bin/bash where that is all there is (macOS: 3.2), so the
 launcher stays within what both platforms' bash accept."""
 
 import ast
-import json
 import os
 import re
 import subprocess
@@ -55,8 +54,13 @@ class TestStart(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.l.fn_calls(), [
             "setup_db_passwords", "start_containers", "wait_for_services"])
-        self.assertEqual(self.l.py_calls()[-1], f"{self.dd()} daemon start --launcher {self.l.script}")
+        # The daemon after the stack; the address line reads the served
+        # address through the CLI (#529).
+        self.assertEqual(self.l.py_calls(), ["check-docker",
+                                             f"{self.dd()} daemon start --launcher {self.l.script}",
+                                             f"{self.dd()} address"])
         self.assertIn("OnionPress is running!", r.stdout)
+        self.assertIn("Onion address: none yet", r.stdout)
         self.assertFalse(os.path.exists(self.l.pidfile), "the EXIT trap removes the lock")
 
     def test_no_verb_means_start(self):
@@ -105,8 +109,9 @@ class TestStartDaemon(_Case):
         r = self.l.run("start")
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.l.calls()
-        self.assertEqual(self.l.py_calls()[-1],
-                         f"{self.dd()} daemon start --launcher {self.l.script}")
+        # The daemon after the stack; the address line's `address` (#529) follows.
+        self.assertEqual(self.l.py_calls()[-2:],
+                         [f"{self.dd()} daemon start --launcher {self.l.script}", f"{self.dd()} address"])
         self.assertLess(calls.index("fn wait_for_services"),
                         calls.index(f"py {self.dd()} daemon start --launcher {self.l.script}"))
 
@@ -173,11 +178,12 @@ class TestStopAndRestart(_Case):
 
 
 class TestStatusAndLogs(_Case):
-    def test_status_is_one_json_array(self):
-        r = self.l.run("status", env={"STUB_PS": '{"Name":"onionpress-tor"}\n{"Name":"onionheaven"}'})
+    def test_status_is_the_clis(self):
+        # #529: `onionpress status` (cmd_status's JSON), no bash compose ps.
+        r = self.l.run("status")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([c["Name"] for c in json.loads(r.stdout)],
-                         ["onionpress-tor", "onionheaven"])
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} status"])
+        self.assertNotIn("bin docker compose ps", "\n".join(self.l.calls()))
 
     def test_bare_logs_follow_the_containers(self):
         r = self.l.run("logs")

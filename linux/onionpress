@@ -438,9 +438,12 @@ wp_access_url() {
     fi
 }
 
-# The address line of a start: the address, or what to do for one.
+# The address line of a start: the address the tor container serves
+# (`onionpress address`), or what to do for one.
 onion_address_line() {
-    echo "Onion address: ${ONION_ADDR:-none yet (set up the site: onionpress setup)}"
+    local addr
+    addr=$(op_py --data-dir "$DATA_DIR" address 2>/dev/null) || addr=""
+    echo "Onion address: ${addr:-none yet (set up the site: onionpress setup)}"
 }
 
 command_exists() {
@@ -984,10 +987,6 @@ stop_containers() {
 
 # ─── Status queries ──────────────────────────────────────────────────
 
-get_status() {
-    cd "$DOCKER_DIR"
-    docker compose ps --format json 2>/dev/null | jq -s '.' 2>/dev/null || echo "[]"
-}
 
 # ─── OnionHeaven on/off ─────────────────────────────────────────────
 
@@ -1027,110 +1026,18 @@ onionheaven_cmd() {
     op_py --data-dir "$DATA_DIR" onionheaven "$@"
 }
 
-# Read and cache healthcheck onion address
-get_healthcheck_address() {
-    cd "$DOCKER_DIR"
-    local addr
-    addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/healthcheck/hostname 2>/dev/null || echo "")
-    if is_onion_address "$addr"; then
-        echo "$addr"
-        echo "$addr" > "$DATA_DIR/healthcheck-address"
-        return 0
-    fi
-    return 1
-}
 
-# Copy the tor hostname into the shared volume so WP code (theme,
-# mu-plugins, REST endpoints) can answer "what's my .onion?" without
-# parsing Host headers — needed when the site is hit via localhost.
-# Idempotent; safe to call from multiple places. Read from the tor
-# container, written by www-data: root's cp in the tor container followed a
-# link www-data can plant at onion_address to any file there (its key).
-write_shared_onion_address() {
-    local addr
-    addr=$(docker exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null | tr -d '\n\r ')
-    is_onion_address "$addr" || return 1
-    printf '%s\n' "$addr" | wp_put /var/lib/onionpress/onion_address 644 >/dev/null 2>&1
-}
 
+# The wait after a start (issue #529): onionpress.start.wait_for_services
+# over a start step's manager, every log line as this bash body's, the
+# address into the shared volume and the healthcheck address into the data
+# dir once both are ready. A timeout is a WARNING (Linux has no START
+# SUMMARY); never a failed start, which would have systemd stop the
+# running containers. The site's address is read back afterwards by
+# onion_address_line.
 wait_for_services() {
-    cd "$DOCKER_DIR"
-    local max_wait=120
-    local waited=0
-    local wp_ready=false
-    local onion_ready=false
-    local onion_addr=""
-
-    log "Waiting for services to be ready..."
-
-    while [ $waited -lt $max_wait ]; do
-        # Get onion address
-        if [ -z "$onion_addr" ] || [ "$onion_addr" = "Generating..." ]; then
-            onion_addr=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-        fi
-
-        # Check WordPress
-        if [ "$wp_ready" = false ]; then
-            if curl -s --max-time 3 "http://localhost:${ONIONPRESS_WP_PORT}" >/dev/null 2>&1; then
-                log "WordPress is responding on localhost:${ONIONPRESS_WP_PORT}"
-                wp_ready=true
-
-                if ! wp_is_installed; then
-                    log "WordPress not installed -- setup required, skipping Tor wait"
-                    # Even on the early-bail path, write the address so
-                    # the Setup dialog (and later, the theme accessed via
-                    # localhost) can read it.  No-op if hostname not yet
-                    # generated.
-                    if [ -n "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-                        write_shared_onion_address && \
-                            log "Onion address written to shared volume" || true
-                    fi
-                    return 0
-                fi
-                log "Waiting for Tor to bootstrap and onion service to be reachable..."
-            fi
-        fi
-
-        # Check Tor bootstrap
-        if [ "$onion_ready" = false ] && [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-            if docker compose logs --tail 100 tor 2>/dev/null | grep -q -E "Bootstrapped 100% \(done\)|Sufficiently bootstrapped"; then
-                if docker compose exec -T tor wget -q -O /dev/null --timeout=5 http://wordpress:80/ 2>/dev/null; then
-                    log "Onion service ready: ${onion_addr}"
-                    onion_ready=true
-                fi
-            fi
-        fi
-
-        # Both ready
-        if [ "$wp_ready" = true ] && [ "$onion_ready" = true ]; then
-            log "All services are ready after ${waited}s"
-            ONION_ADDR="$onion_addr"
-
-            # Write onion address to shared volume for WordPress plugins
-            write_shared_onion_address && \
-                log "Onion address written to shared volume" || \
-                log "WARNING: Failed to write onion address to shared volume"
-
-            # Read and save healthcheck address
-            if hc_addr=$(get_healthcheck_address); then
-                log "Healthcheck address: ${hc_addr}"
-            fi
-
-            return 0
-        fi
-
-        sleep 2
-        waited=$((waited + 2))
-    done
-
-    log "WARNING: Services not fully ready after ${max_wait}s (wp=${wp_ready}, onion=${onion_ready})"
-    if [ ! -z "$onion_addr" ] && [ "$onion_addr" != "Generating..." ]; then
-        ONION_ADDR="$onion_addr"
-    else
-        ONION_ADDR="Generating..."
-    fi
-    # Return success — containers are running, Tor may still be bootstrapping.
-    # Failing here would cause systemd to kill the running containers.
+    op_py --data-dir "$DATA_DIR" wait-for-services \
+        --docker-dir "$DOCKER_DIR" --wp-port "$ONIONPRESS_WP_PORT" 2>&1 | tee -a "$LOG_FILE"
     return 0
 }
 
@@ -1487,13 +1394,14 @@ main() {
             # log capture): the user unit, where there is one.
             start_daemon
 
+            address_line=$(onion_address_line)
             log "OnionPress is running!"
-            log "$(onion_address_line)"
+            log "$address_line"
             log "Local access: $(wp_access_url)"
 
             echo ""
             echo "OnionPress is running!"
-            echo "  $(onion_address_line)"
+            echo "  $address_line"
             echo "  Local access:  $(wp_access_url)"
             echo "  Status page:   $(wp_access_url)/onionpress-status"
             echo "  Logs:          $LOG_FILE"
@@ -1522,7 +1430,7 @@ main() {
             ;;
 
         status)
-            get_status
+            op_py --data-dir "$DATA_DIR" status
             ;;
 
         address)

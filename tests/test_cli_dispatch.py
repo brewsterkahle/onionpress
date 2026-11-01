@@ -447,6 +447,17 @@ ROWS = [
         mock.call(D("config")), rc=1, returns=False),
     # Phase 4 (#120): the launchers' block_wordpress_egress() is this (the
     # verdict logged in their format; --check prints the bare line).
+    # #529: the launchers' wait_for_services() is start.wait_for_services
+    # on a start step's manager (no probe); always 0.
+    Row("wait-for-services", ["wait-for-services", "--wp-port", "18080", "--docker-dir", "/d",
+                              "--errors-file", "/e"],
+        "start.wait_for_services", mock.call(ANY, wp_port=18080, errors=ANY, log=ANY), rc=0,
+        returns=0, check=lambda t, m: (
+            t.assertEqual(m.call_args.args[0].paths.docker_dir, "/d"),
+            t.assertEqual(m.call_args.kwargs["errors"].path, "/e"))),
+    Row("wait-for-services", ["wait-for-services"], "start.wait_for_services",
+        mock.call(ANY, wp_port=28080, errors=None, log=ANY), rc=0,
+        returns=0, env={"ONIONPRESS_WP_PORT": "28080"}),
     Row("wordpress-egress", ["wordpress-egress", "--check", "--wp-port", "8080", "--bin-dir", "/b"],
         "wordpress_egress.ensure", mock.call(ANY, ANY, action="check", wp_port=8080),
         rc=0, returns=mock.Mock(ok=True, line=lambda: "ok"),

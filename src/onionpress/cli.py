@@ -2498,6 +2498,45 @@ def _run_start_post_up(run):
     return 0
 
 
+def _add_wait_for_services(sub, name):
+    p = sub.add_parser(
+        name,
+        help="After a start: wait up to 120 s for WordPress to answer on its "
+             "port and for Tor to be bootstrapped with WordPress reachable "
+             "from the tor container, then write the onion address to the "
+             "shared volume and the healthcheck address to the data dir; "
+             "a timeout is a WARNING (and wait-for-services in the START "
+             "SUMMARY), never a failed start; always exits 0")
+    p.add_argument("--docker-dir", default=None, help="The compose files' folder")
+    p.add_argument("--bin-dir", default=None, help="The launcher's bundled binaries")
+    p.add_argument("--wp-port", type=int, default=None,
+                   help="WordPress's published port (default: ONIONPRESS_WP_PORT, else 8080)")
+    _add_errors_file(p)
+
+
+def _run_wait_for_services(run):
+    # The launchers' wait_for_services() (issue #529): start.wait_for_services
+    # on a start step's manager (no OnionPressCLI), log lines in the
+    # launcher's format through its `tee`. Always 0; never a traceback.
+    from . import start
+    args = run.args
+    paths = _start_paths(args)
+    manager = _start_step_manager(paths)
+    errors = StartErrors(args.errors_file) if args.errors_file else None
+    wp_port = args.wp_port
+    if wp_port is None:
+        env_port = os.environ.get("ONIONPRESS_WP_PORT", "")
+        wp_port = int(env_port) if env_port.isdigit() else 8080
+    try:
+        return start.wait_for_services(manager, wp_port=wp_port, errors=errors,
+                                       log=manager.log_func)
+    except Exception as e:
+        manager.log_func(f"WARNING: the wait for the services failed: {e}")
+        if errors is not None:
+            errors.add("wait-for-services")
+        return 0
+
+
 def _add_is_onionheaven_hub(sub, name):
     p = sub.add_parser(
         name,
@@ -2992,6 +3031,7 @@ _COMMANDS = [
     ("setup", _add_setup, _run_setup),
     ("start-containers", _add_start_containers, _run_start_containers),
     ("start-post-up", _add_start_post_up, _run_start_post_up),
+    ("wait-for-services", _add_wait_for_services, _run_wait_for_services),
     ("migrate-key-volume",
      _plain("Before anything starts Tor: copy the onion service key out of "
             "onionpress-arti-state (its name until 2026-09-25) into "

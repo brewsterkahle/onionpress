@@ -16,7 +16,6 @@ Runs under macOS's /bin/bash 3.2, what the app runs it with."""
 
 import os
 import signal
-import json
 import re
 import subprocess
 import sys
@@ -286,16 +285,12 @@ class TestRestart(_Case):
 
 
 class TestStatus(_Case):
-    def test_compose_ps_lines_become_one_json_array(self):
-        r = self.l.run("status", env={"STUB_PS": '{"Name":"onionpress-tor"}\n{"Name":"onionpress-db"}'})
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([c["Name"] for c in json.loads(r.stdout)],
-                         ["onionpress-tor", "onionpress-db"])
-
-    def test_nothing_running_is_an_empty_array(self):
+    def test_status_is_the_clis(self):
+        # #529: `onionpress status` (cmd_status's JSON), no bash compose ps.
         r = self.l.run("status")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip().replace(" ", "").replace("\n", ""), "[]")
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} status"])
+        self.assertNotIn("bin docker compose ps", "\n".join(self.l.calls()))
 
 
 class TestDelegations(_Case):
