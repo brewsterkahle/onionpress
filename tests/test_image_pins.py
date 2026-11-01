@@ -367,34 +367,23 @@ class TestDeliberatelyUnpinned(unittest.TestCase):
     time and painful at runtime.
     """
 
-    def test_vanity_presence_check_stays_tag_only(self):
-        """linux/onionpress decides whether vanity-address generation is
-        available with `docker image inspect <tag>`. Pinning that to a digest
-        makes a locally built image fail the check, and the install silently
-        falls back to a random .onion — the v2.4.101 regression. A local build
-        tags `:latest` precisely so this keeps working.
+    def test_vanity_presence_check_is_generate_vanitys_image(self):
+        """The status's mkp224o_available (onionpress.status_writer, both
+        platforms since #523) and `onionpress generate-vanity` ask the same
+        image, launcher_ops.DEFAULT_TOR_IMAGE, which honours
+        ONIONPRESS_TOR_IMAGE (test_default_tor_image_honours_override): a
+        locally built stack is recognised by both or by neither, never
+        offered a vanity address the generator then cannot make (the
+        v2.4.101 regression was the two disagreeing).
         """
-        text = _read("linux/onionpress")
-        # The check just before `mkp224o_available="true"`; the key helpers'
-        # ensure_key_helper_image inspects its own (pinned) image earlier on.
-        text = text[:text.index('mkp224o_available="true"')]
-        match = list(re.finditer(r"docker image inspect \"?([^\"\n]+)\"?", text))[-1]
-        self.assertIsNotNone(
-            match,
-            "Could not find the mkp224o presence check in linux/onionpress — "
-            "has it moved or been renamed? Update this test.",
-        )
-        expr = match.group(1)
-        self.assertNotIn(
-            "@sha256:", expr,
-            "The presence check must not be digest-pinned: a locally built "
-            f"image would fail it. Got {expr!r}.",
-        )
-        # It follows ONIONPRESS_TOR_IMAGE so a local build is recognised, and
-        # falls back to the bare tag — which build/build-images.sh also
-        # shadow-tags, so the default keeps working either way.
-        self.assertIn("${ONIONPRESS_TOR_IMAGE:-", expr)
-        self.assertIn(TOR_REPO, expr)
+        writer = _read("src/onionpress/status_writer.py")
+        self.assertIn("image = image or launcher_ops.DEFAULT_TOR_IMAGE", writer)
+        self.assertIn("launcher_ops.tor_image_has_mkp224o(image, docker=docker)", writer)
+        cli = _read("src/onionpress/cli.py")
+        self.assertIn("if not tor_image_has_mkp224o(DEFAULT_TOR_IMAGE):", cli)
+        launcher = _read("linux/onionpress")
+        self.assertNotIn("mkp224o_available", launcher)
+        self.assertNotIn('docker image inspect "${ONIONPRESS_TOR_IMAGE:-', launcher)
 
     def test_in_container_takeover_image_is_the_running_one(self):
         """onionheaven-farm.py (the farm controller, which runs the `docker

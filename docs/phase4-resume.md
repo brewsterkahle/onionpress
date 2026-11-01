@@ -58,6 +58,16 @@ the harness is about something else.
 
 Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
 
+Later slices in the same shape, outside Phase 4's table: `write_status`
+(issue #523, consolidation stage 2): `onionpress write-status` is a fast
+path over `onionpress.status_writer` (the daemon's status pass as one
+run, `OneShotStatus`, until the daemon runs on Linux, #407); the bash
+body (347 lines, `write_recent_logs` and `linux_status.py` with it) is
+the delegation plus its `apply_config_updates` guard; its three bash
+harnesses (`test_wordpress_host_data`, `test_linux_safe_config`,
+`test_linux_hub_mode`) became tests of the writer against a fake docker
+(`tests/test_status_writer.py` has the field-by-field ones).
+
 ## Invariants each moved function must keep (CLAUDE.md has the sections)
 
 - `using_local_images`: every `docker pull` / `docker compose pull` /

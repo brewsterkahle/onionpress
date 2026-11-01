@@ -49,7 +49,6 @@ resets) is onionpress.reachability's RecoveryWindow, the one Linux's
 ReachabilityLoop runs too.
 """
 
-import json
 import os
 import plistlib
 import signal
@@ -68,6 +67,7 @@ from . import onion_hostname
 from . import onion_proxy
 from . import onionheaven
 from . import redact
+from . import status_writer
 from . import thumbnails
 from . import wp_files
 from .docker import Docker
@@ -123,26 +123,12 @@ from .daemon_client import (  # noqa: F401
 
 UPLOAD_TRIGGER_MARKER = ".upload-analytics"
 
-PLACEHOLDER_ADDRESSES = ("Starting...", "Not running", "Generating address...")
-
-
-def _utc_now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# ---------------------------------------------------------------------------
-# The state file (written here; read by the menubar through daemon_client)
-# ---------------------------------------------------------------------------
-
-def write_json_atomic(path, doc):
-    """Write *doc* to *path* through a temp file and a rename, so a reader
-    never sees a half-written file. mode 0600: the state names the
-    address and the pending question's facts."""
-    tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(doc, f, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+# The state file and status.json are written by onionpress.status_writer
+# (one writer for both platforms, issue #523); the names stay here for
+# the CLI, the uninstaller and the tests.
+PLACEHOLDER_ADDRESSES = status_writer.PLACEHOLDER_ADDRESSES
+write_json_atomic = status_writer.write_json_atomic
+_utc_now = status_writer.utc_now
 
 
 def poll_interval(display_state):
@@ -315,6 +301,8 @@ class Daemon(PortAttributes):
         self._capture_supervisor_thread = None
         self._images_present = {"wordpress": False, "mariadb": False, "tor": False}
         self._last_status_payload = None
+        self._containers_seen = {}       # the last pass's {name: state}
+        self._status_fields = {}         # status_writer.gather_fields' answers
 
         self._reachability_stats = ReachabilityStats()
         # The #266 recovery step (onionpress.reachability, shared with
@@ -424,7 +412,7 @@ class Daemon(PortAttributes):
         return f"http://localhost:{self.wp_port}"
 
     def _address_known(self):
-        return bool(self.onion_address) and self.onion_address not in PLACEHOLDER_ADDRESSES
+        return status_writer.address_known(self.onion_address)
 
     # -- the state file ----------------------------------------------------
 
@@ -438,45 +426,15 @@ class Daemon(PortAttributes):
         }
 
     def state_document(self, now=None):
-        now = time.time() if now is None else now
-        fields = self._state_fields()
-        return {
-            **fields,
-            "pid": os.getpid(),
-            "version": self.version,
-            "updated_at": now,
-            "started_at": self.startup_time,
-            "display_state": display_state_of(fields, now),
-            "runtime_ready": self.runtime_ready,
-            "port_conflict": list(self.port_conflict),
-            "ports": {"offset": self.port_offset, "wp": self.wp_port,
-                      "socks": self.socks_port, "proxy": self.proxy_port},
-            "onion_address": self.onion_address if self._address_known() else "",
-            "address_placeholder": "" if self._address_known() else self.onion_address,
-            "healthcheck_address": self.healthcheck_address or "",
-            "is_onionheaven": bool(self.is_onionheaven),
-            "bootstrap_pct": 100 if self.is_ready else self._last_bootstrap_pct,
-            "cloudflare_tunnel_enabled": self.cloudflare_tunnel_enabled,
-            "wp_installed": self._wp_installed,
-            "wordpress_up": self._wordpress_confirmed,
-            "images_present": dict(self._images_present),
-            "proxy_running": self.proxy_server is not None,
-            "sleeping": self._sleeping,
-            "onionheaven": self._onionheaven_overview,
-            "pending_question": self._pending_question,
-            "onionname_collision": self._onionname_collision,
-            "settings_page_error": self._settings_page_error,
-            "wedge_warning": self._wedge_warning_fired,
-            "probe": {"code": self._last_probe_code, "why": self._last_probe_why,
-                      "ms": self._last_probe_ms,
-                      "reachable": self._last_reachability[0]},
-        }
+        """daemon-state.json's content (status_writer.state_document: the
+        one builder, with status.json under "status")."""
+        return status_writer.state_document(self, now)
 
     def publish_state(self):
         """Rewrite daemon-state.json (where the menubar's update_menu was)."""
         try:
             with self._lock:
-                write_json_atomic(state_path(self.app_support), self.state_document())
+                status_writer.publish(self)
         except Exception as e:
             self.log(f"daemon: could not write the state file: {e}")
 
@@ -772,25 +730,9 @@ class Daemon(PortAttributes):
         return r.ok
 
     def _containers(self):
-        """[(name, state)] of this install's containers, from `docker ps
-        -a` by compose project label: cheaper than the launcher's `status`
-        (bash + compose + jq per tick, the way the menubar did it)."""
-        r = self._docker.run(
-            ["ps", "-a", "--filter", "label=com.docker.compose.project",
-             "--format", "{{.Names}}\t{{.State}}\t{{.Label \"com.docker.compose.project\"}}"],
-            timeout=10, quiet=True)
-        if not r.ok:
-            return None
-        out = []
-        for line in r.output.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and (parts[0].startswith("onionpress-") or parts[0] in (
-                    "onionheaven", "onionheaven-farm", "onionpress-autoheal",
-                    "onionpress-autoheal-proxy") or parts[0].startswith("onionheaven-")):
-                if parts[0].startswith("onionheaven-takeover") or parts[0].startswith("onionheaven-poll"):
-                    continue        # workers come and go; not the stack's health
-                out.append((parts[0], parts[1]))
-        return out
+        """[(name, state)] of this install's containers
+        (status_writer.list_containers), None when docker did not answer."""
+        return status_writer.list_containers(self._docker)
 
     def _check_images_present(self):
         """Which of the stack's images are here (the first-run setup
@@ -860,6 +802,7 @@ class Daemon(PortAttributes):
                 self._check_images_present()
 
             containers = self._containers() if self.runtime_ready else None
+            self._containers_seen = dict(containers or [])
             not_running = []
             if containers:
                 self.is_running = all(state.lower() == "running" for _, state in containers)
@@ -974,6 +917,9 @@ class Daemon(PortAttributes):
                 # would otherwise hold its own port against the conflict
                 # check below and answer for a stopped site).
                 self.stop_onion_proxy()
+                # The stopped status (the host copy, the state file's
+                # "status"); nothing goes into a volume that is down.
+                self.write_status_to_volume()
                 if self.runtime_ready:
                     self.port_conflict = self.check_port_conflict()
                     if self.port_conflict and not self._port_conflict_logged:
@@ -1137,11 +1083,7 @@ class Daemon(PortAttributes):
             self._wp_installed = False
 
     def check_wp_installed(self):
-        try:
-            r = self._docker.wp("core", "is-installed", timeout=10, quiet=True)
-            return r.ok
-        except Exception:
-            return None
+        return status_writer.wp_installed(self._docker)
 
     # -- the probe (the menubar's check_tor_reachability) ----------------
 
@@ -1434,91 +1376,12 @@ class Daemon(PortAttributes):
     # -- status.json (the menubar's write_status_to_volume) ----------------
 
     def write_status_to_volume(self):
-        """status.json, version, config-current.json and recent-logs.txt in
-        the shared volume, written as www-data (wp_files), for the
-        WordPress pages."""
-        try:
-            state = display_state_of(self._state_fields(), time.time())
-            state = {"available": "running", "stalled": "starting"}.get(state, state)
-            containers = {}
-            r = self._docker.run(["ps", "--format", "{{.Names}}\t{{.State}}", "--filter", "name=onionpress"],
-                                 timeout=5, quiet=True)
-            if r.ok:
-                for line in r.output.splitlines():
-                    parts = line.split("\t", 1)
-                    if len(parts) == 2:
-                        containers[parts[0]] = parts[1]
-            uptime_seconds = int(time.time() - self.startup_time) if self.is_running else 0
-            bootstrap_pct = 100 if self.is_ready else self._last_bootstrap_pct
-            onion_reachable, onion_http_code = self._last_reachability
-            # Both OnionHeaven roles, for the OnionHeaven screen (the Mac
-            # dialog reads it from the state file, the WordPress page from
-            # status.json): the registry is asked only on a hub.
-            try:
-                oh_overview = onionheaven.overview(self)
-            except Exception as e:
-                self.log(f"OnionHeaven: overview error: {e}")
-                oh_overview = onionheaven.overview(self, hub=False)
-            self._onionheaven_overview = oh_overview
-            # status.json's server_active stays the Mac's rule: the node
-            # serving the hub's address (tests/test_linux_hub_mode.py).
-            oh_server_active = bool(self.is_onionheaven)
-            oh_stats = onionheaven.status_block(oh_overview, server_active=oh_server_active)
-            onion_addr = self.onion_address if key_manager.is_valid_onion_address(self.onion_address) else ""
-            load_avg = list(os.getloadavg())
-            host_uptime = int(time.time() - self._host_boot_time())
-            safe_config = op_config.redact_config(op_config.read_config(self.config_file))
-            status = {
-                "state": state,
-                "version": self.version,
-                "onion_address": onion_addr,
-                "onionname": self.read_config_value("ONIONNAME", ""),
-                "tor_impl": "tor",
-                "uptime_seconds": uptime_seconds,
-                "bootstrap_pct": bootstrap_pct,
-                "onion_reachable": onion_reachable,
-                "onion_http_code": onion_http_code,
-                "containers": containers,
-                "updated_at": _utc_now(),
-                "platform": "macos",
-                "load_avg": load_avg,
-                "host_uptime_seconds": host_uptime,
-                "onionheaven": oh_stats,
-                "config": safe_config,
-            }
-            self._last_status_payload = status
-            status_json = json.dumps(redact.status_for_wordpress(status), indent=2)
-            self._docker.run(wp_files.put_file_args("/var/lib/onionpress/status.json"),
-                             input=status_json, timeout=5, quiet=True)
-            self._docker.run(wp_files.put_file_args("/var/lib/onionpress/version"),
-                             input=self.version, timeout=5, quiet=True)
-            self._docker.run(wp_files.put_file_args("/var/lib/onionpress/config-current.json"),
-                             input=json.dumps(safe_config, indent=2), timeout=5, quiet=True)
-            log_file = os.path.join(self.app_support, "onionpress.log")
-            try:
-                recent = redact.wordpress_log_excerpt(log_file, self.app_support)
-                self._docker.run(wp_files.put_file_args("/var/lib/onionpress/recent-logs.txt"),
-                                 input=recent, timeout=5, quiet=True)
-            except (OSError, IOError):
-                pass
-        except Exception:
-            pass
-
-    _boot_time = None
-
-    def _host_boot_time(self):
-        if self._boot_time is None:
-            try:
-                r = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True,
-                                   text=True, timeout=2)
-                import re
-                m = re.search(r"sec\s*=\s*(\d+)", r.stdout)
-                self._boot_time = int(m.group(1)) if m else time.time()
-            except Exception:
-                self._boot_time = time.time()
-        return self._boot_time
-
-    # -- the Settings page's requests (handle-action) ---------------------
+        """The status document from this pass (onionpress.status_writer,
+        the one writer for both platforms, issue #523): status.json,
+        version, config-current.json and recent-logs.txt in the shared
+        volume as www-data while the stack runs, the host copy always,
+        and the payload the analytics upload and the state file carry."""
+        status_writer.write(self)
 
     def poll_settings_page(self):
         """`onionpress handle-action --json` once per tick, one run at a

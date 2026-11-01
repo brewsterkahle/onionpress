@@ -373,21 +373,27 @@ class TestOverview(unittest.TestCase):
 class TestWiring(unittest.TestCase):
 
     def test_daemon_publishes_the_overview(self):
-        src = _read("src/onionpress/daemon.py")
-        self.assertIn("oh_overview = onionheaven.overview(self)", src)
+        # The daemon's status pass is onionpress.status_writer's (#523).
+        src = _read("src/onionpress/status_writer.py")
+        self.assertIn("overview = onionheaven.overview(app, hub=bool(app.is_running))", src)
         self.assertIn("onionheaven.status_block(", src)
-        self.assertIn('"onionheaven": self._onionheaven_overview,', src)
+        self.assertIn('"onionheaven": app._onionheaven_overview,', src)
         self.assertNotIn("SELECT COUNT(*)", src)  # the inline query moved
+        self.assertIn("        status_writer.write(self)\n", _read("src/onionpress/daemon.py"))
 
     def test_cli_knows_overview(self):
         self.assertIn("{enable,disable,status,overview}", _read("src/onionpress/cli.py"))
 
     def test_linux_status_carries_the_overview(self):
+        # Linux's status is the same writer's, through `onionpress
+        # write-status` (#523): no second query of the registry in bash.
         src = _read("linux/onionpress")
-        self.assertIn('op_py --data-dir "$DATA_DIR" onionheaven overview --json', src)
-        self.assertIn('--field "onionheaven_overview=$oh_overview_json"', src)
-        from onionpress import linux_status
-        self.assertIn("generated_at", linux_status.OVERVIEW_KEYS)
+        self.assertIn('op_py --data-dir "$DATA_DIR" write-status', src)
+        self.assertNotIn("sqlite3 /var/lib/onionheaven", src)
+        self.assertNotIn("onionheaven overview --json", src)
+        block = onionheaven.status_block(onionheaven.overview(
+            FakeApp(tempfile.mkdtemp(prefix="op-ov-")), hub=False))
+        self.assertIn("generated_at", block)
 
     def test_linux_heartbeat_keeps_the_timestamps(self):
         src = _read("linux/onionpress-heartbeat.py")

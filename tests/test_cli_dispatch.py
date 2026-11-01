@@ -35,8 +35,8 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
 from onionpress import (  # noqa: E402
     analytics_sharing, app_commands, backup, bundled_plugins, cli, config, confirm, containers, daemon,
-    derivatives, docker_versions, handle_action, launcher_ops, linux_status, multisite, onionheaven,
-    redact, scrub, setup_logic, start, wordpress_egress,
+    derivatives, docker_versions, handle_action, launcher_ops, multisite, onionheaven,
+    redact, scrub, setup_logic, start, status_writer, wordpress_egress,
 )
 from onionpress.platform import OS  # noqa: E402
 
@@ -338,8 +338,11 @@ ROWS = [
         "redact.wordpress_log_excerpt", mock.call("/l.log", D("")), rc=0, returns="tail\n"),
     Row("wordpress-status", ["wordpress-status"], "redact.status_for_wordpress",
         mock.call({"a": 1}), rc=0, returns={"a": 1}, stdin='{"a": 1}'),
-    Row("linux-status", ["linux-status", "--field", "state=running"],
-        "linux_status.build", mock.call(ANY), rc=0, returns={"state": "running"}),
+    # The Linux launcher's write_status() is the daemon's status pass (#523):
+    # a fast path, every 30 s beside the stack; always 0.
+    Row("write-status", ["write-status"], "status_writer.run_once",
+        mock.call(ANY, ANY), rc=0, returns=0,
+        check=lambda t, m: t.assertEqual(m.call_args.args[0].data_dir, t.dir)),
     Row("apply-settings-updates", ["apply-settings-updates"], "config.apply_settings_updates",
         mock.call(D("config"), {"VM_CPU": "2"}), rc=0, stdin='{"VM_CPU": "2"}',
         returns=mock.Mock(changes=[("VM_CPU", "1", "2")], accepted=["VM_CPU"], rejected=["X"],
@@ -515,7 +518,7 @@ MODULES = {
     "containers": containers, "daemon": daemon, "derivatives": derivatives,
     "analytics_sharing": analytics_sharing, "app_commands": app_commands,
     "docker_versions": docker_versions, "bundled_plugins": bundled_plugins,
-    "start": start, "setup_logic": setup_logic, "linux_status": linux_status,
+    "start": start, "setup_logic": setup_logic, "status_writer": status_writer,
 }
 
 

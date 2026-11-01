@@ -10,15 +10,14 @@ onion address (onionheaven.is_onionheaven_instance); the Linux launcher now
 asks the same rule through `onionpress is-onionheaven-hub <address>` and
 queries the hub's registry only on the hub.
 
-The write_status test runs the launcher's own function in bash with `docker`
-stubbed, as tests/test_linux_safe_config.py does.
+The status writer (onionpress.status_writer, one for both platforms since
+issue #523) decides by address too; its test runs it against a fake docker.
 """
 
 import io
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,6 +27,7 @@ from unittest import mock
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC = os.path.join(PROJECT_ROOT, "src")
 sys.path.insert(0, SRC)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # test_status_writer's fake
 
 from onionpress import cli, onionheaven  # noqa: E402
 
@@ -83,106 +83,66 @@ class TestBothPlatformsDecideByAddress(unittest.TestCase):
             _function(launcher, "is_onionheaven_hub"),
             '\nis_onionheaven_hub() {\n'
             '    op_py --data-dir "$DATA_DIR" is-onionheaven-hub "$1"\n}\n')
-        write_status = _function(launcher, "write_status")
-        self.assertIn('if is_onionheaven_hub "$onion_addr"; then', write_status)
-        # The old rule: a running onionheaven container, which every node has.
-        self.assertNotIn("grep -q '^onionheaven$'", write_status)
-        self.assertNotIn("grep -q \"^onionheaven$\"", write_status)
+        # The status is the writer's (#523): the rule by address there, and
+        # never the old one (a running onionheaven container, which every
+        # node has) in the launcher.
+        writer = _read("src/onionpress/status_writer.py")
+        self.assertIn("self.is_onionheaven = onionheaven.is_onionheaven_instance(addr)", writer)
+        self.assertIn('op_py --data-dir "$DATA_DIR" write-status', launcher)
+        self.assertNotIn("oh_server_active", launcher)
 
     def test_mac_daemon_uses_the_same_rule(self):
         daemon = _read("src/onionpress/daemon.py")
         self.assertIn("self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)",
                       daemon)
-        self.assertIn("oh_server_active = bool(self.is_onionheaven)", daemon)
+        self.assertIn("        status_writer.write(self)\n", daemon)
+        self.assertIn("server_active=bool(app.is_onionheaven)", _read("src/onionpress/status_writer.py"))
 
 
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
-class TestLinuxWriteStatusHubMode(unittest.TestCase):
-    """Run linux/onionpress's write_status() with docker stubbed: a node
-    serving the hub's address is the hub, any other address a client."""
-
-    DOCKER_STUB = r"""
-docker() {
-    # The tor container's hostname file: the address the test chose.
-    if [ "$1 $2 $3 $4 $5" = "compose exec -T tor cat" ]; then
-        printf '%s\n' "$ONION_ADDR"
-        return 0
-    fi
-    # Every node runs an onionheaven container.
-    if [ "$1" = "ps" ]; then
-        printf 'onionheaven\nonionpress-tor\nonionpress-wordpress\n'
-        return 0
-    fi
-    # The hub's registry query: recorded, then answered.
-    if [ "$1 $2 $3" = "exec onionheaven sqlite3" ]; then
-        echo "registry-query" >> "$OUT/docker-calls"
-        echo "3|2|1"
-        return 0
-    fi
-    # wp_put's `docker exec -i -u www-data onionpress-wordpress sh -c <script>
-    # sh /var/lib/onionpress/<f> <mode>` lands in $OUT/<f>; every other
-    # docker call fails, as with no daemon.
-    if [ "$1 $2 $3 $4 $5 $6 $7" = "exec -i -u www-data onionpress-wordpress sh -c" ]; then
-        cat > "$OUT/${10##*/}"
-        return 0
-    fi
-    return 1
-}
-log() { :; }
-wp_is_installed() { return 1; }
-wp_cli() { return 1; }
-"""
+class TestStatusWriterHubMode(unittest.TestCase):
+    """The status writer (Linux's `onionpress write-status` and the Mac
+    daemon's pass) with docker faked: a node serving the hub's address is
+    the hub, any other address a client; the registry is asked only on
+    the hub, through onionheaven.overview."""
 
     def setUp(self):
+        from test_status_writer import FakeDocker
+        from onionpress.platform import OS, resolve_paths
+        from onionpress import status_writer
         self.tmp = tempfile.mkdtemp(prefix="op-hub-mode-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.data = os.path.join(self.tmp, "data")
-        self.out = os.path.join(self.tmp, "volume")
-        bin_dir = os.path.join(self.tmp, "bin")
-        for d in (self.data, self.out, bin_dir):
-            os.makedirs(d)
-        # The launcher runs `python3`; make that this interpreter, which can
-        # import the package (the system python3 may be too old for it).
-        os.symlink(sys.executable, os.path.join(bin_dir, "python3"))
+        os.makedirs(self.data)
         with open(os.path.join(self.data, "config"), "w") as f:
             f.write("ADDRESS_PREFIX=op2\nREGISTER_WITH_ONIONHEAVEN=yes\n")
         with open(os.path.join(self.data, "onionheaven-registration.json"), "w") as f:
             json.dump({"registered": True, "hub": HUB}, f)
-        self.env = {
-            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": self.tmp,
-            "DATA_DIR": self.data,
-            "DOCKER_DIR": self.tmp,
-            "LOG_FILE": os.path.join(self.tmp, "onionpress.log"),
-            "ONIONPRESS_PYTHONPATH": SRC,
-            "ONIONPRESS_VERSION": "0.0.0-test",
-            "_IN_WRITE_STATUS": "1",
-            "OUT": self.out,
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        self.FakeDocker = FakeDocker
+        self.paths = resolve_paths(data_dir=self.data, app_bundle="")
+        self.OS = OS
+        self.sw = status_writer
 
     def _write_status(self, address):
-        launcher = _read("linux/onionpress")
-        script = (_function(launcher, "op_py") + _function(launcher, "is_onion_address")
-                  + _function(launcher, "is_onionheaven_hub") + _function(launcher, "wp_put")
-                  + _function(launcher, "write_status")
-                  + _function(launcher, "write_recent_logs")
-                  + self.DOCKER_STUB + "\nwrite_status\n")
-        result = subprocess.run(["bash", "-c", script], env={**self.env, "ONION_ADDR": address},
-                                capture_output=True, text=True, timeout=120)
-        path = os.path.join(self.out, "status.json")
-        self.assertTrue(os.path.exists(path),
-                        f"write_status wrote no status.json\n{result.stderr}")
-        with open(path) as f:
-            status = json.load(f)
+        docker = self.FakeDocker({
+            "ps -a --filter label=com.docker.compose.project":
+                "onionheaven\trunning\tdocker\nonionpress-tor\trunning\tdocker\n"
+                "onionpress-wordpress\trunning\tdocker\n",
+            "exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname": address + "\n",
+            "ps --format {{.Names}} --filter name=onionheaven-takeover": "",
+        })
+        app = self.sw.OneShotStatus(
+            self.paths, docker=docker, health=mock.Mock(**{"check_tor_bootstrap.return_value": (True, 100)}),
+            version="0.0.0-test", log=lambda m: None, os_name=self.OS.LINUX)
         calls = []
-        calls_path = os.path.join(self.out, "docker-calls")
-        if os.path.exists(calls_path):
-            with open(calls_path) as f:
-                calls = f.read().split()
-        return status, calls
+
+        def registry(app_, args, timeout=15, input=None):
+            calls.append("registry-query")
+            return True, "3\t2\t1" if "COUNT" in args[-1] else ""
+
+        app.gather()
+        with mock.patch.object(onionheaven, "_run_docker", side_effect=registry):
+            self.sw.write(app)
+        return json.loads(docker.volume["status.json"][0]), calls
 
     def test_a_node_with_the_onionheaven_container_is_a_client(self):
         status, calls = self._write_status(NODE)
@@ -203,7 +163,10 @@ wp_cli() { return 1; }
         self.assertTrue(oh["server_active"])
         self.assertEqual((oh["registered_count"], oh["online_count"], oh["taken_over_count"]),
                          (3, 2, 1))
-        self.assertEqual(calls, ["registry-query"])
+        # The counts and the sites (onionheaven.hub_counts / hub_sites), each
+        # through the overview: never a query of the writer's own.
+        self.assertEqual(set(calls), {"registry-query"})
+        self.assertGreaterEqual(len(calls), 2)
 
     def test_no_address_is_not_the_hub(self):
         status, calls = self._write_status("")

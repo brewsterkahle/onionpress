@@ -82,7 +82,7 @@ OPTIONS = {
     'includes': ['subprocess', 'threading', 'os', 'time', 'json',
                  '_cffi_backend',
                  'onionpress', 'onionpress.backup', 'onionpress.backup_crypto',
-                 'onionpress.hub_backup', 'onionpress.hub_record', 'onionpress.linux_status', 'onionpress.docker_versions',
+                 'onionpress.hub_backup', 'onionpress.hub_record', 'onionpress.status_writer', 'onionpress.docker_versions',
                  'onionpress.backup_archive', 'onionpress.db_import',
                  'onionpress.key_manager',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',

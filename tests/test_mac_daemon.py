@@ -28,8 +28,9 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 from onionpress import daemon as op_daemon  # noqa: E402
 from onionpress import daemon_client as op_daemon_client  # noqa: E402
 from onionpress import config as op_config  # noqa: E402
+from onionpress import status_writer  # noqa: E402
 from onionpress.docker import DockerResult  # noqa: E402
-from onionpress.platform import resolve_paths  # noqa: E402
+from onionpress.platform import OS, resolve_paths  # noqa: E402
 
 ADDR = "a" * 56 + ".onion"
 HC = "h" * 56 + ".onion"
@@ -238,6 +239,13 @@ class _DaemonCase(unittest.TestCase):
         self.health = FakeHealth()
         self.launcher_calls = []
         self.launcher_answers = {}
+        # The Mac daemon under test, wherever the tests run: the status
+        # writer's platform seam (#523).
+        patcher = mock.patch.object(status_writer, "detect_os", return_value=OS.MACOS)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        status_writer._BOOT_TIME.clear()
+        self.addCleanup(status_writer._BOOT_TIME.clear)
         self.d = op_daemon.Daemon(self.paths, version="9.9", launcher_script="/x/onionpress",
                                   docker=self.docker, health_checker=self.health)
         # Nothing that forks, binds or sleeps for real.
@@ -310,6 +318,20 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(doc["state"], "running")
         self.assertEqual(doc["onion_address"], ADDR)
         self.assertEqual(doc["platform"], "macos")
+        self.assertLessEqual(set(doc), op_daemon.redact.WORDPRESS_STATUS_KEYS)
+        # One writer for both platforms (#523): the fields Linux's tray
+        # reads are gathered here too, and the state file carries the
+        # whole status document.
+        full = self.d._last_status_payload
+        for key in ("wp_installed", "onboarded", "mkp224o_available", "wayback_queue_count",
+                    "vanity_in_progress", "serving_from_wayback", "wp_admin_password_path", "wp_port"):
+            self.assertIn(key, full)
+        self.assertEqual(full["wp_port"], self.d.wp_port)
+        self.assertEqual(full["containers"], {"onionpress-tor": "running", "onionpress-wordpress": "running",
+                                              "onionpress-db": "running", "onionheaven": "running"})
+        self.assertEqual(self.state()["status"], full)
+        with open(os.path.join(self.dir, "status.json")) as f:
+            self.assertEqual(json.load(f), full)
 
     def test_the_tick_runs_handle_action_once_at_a_time(self):
         self.launcher_answers["handle-action"] = (0, '{"handled": null}\n')
@@ -351,6 +373,9 @@ class TestStatusPass(_DaemonCase):
         self.assertEqual(s["display_state"], "stopped")
         self.assertEqual(s["healthcheck_address"], "")
         self.assertEqual(s["onion_address"], ADDR)       # the cached address stays visible
+        self.assertEqual(s["status"]["state"], "stopped")  # the status document too (#523)
+        self.assertEqual(s["status"]["containers"], {"onionpress-tor": "exited",
+                                                     "onionpress-wordpress": "running"})
         self.d.caffeine.stop.assert_called()
         self.assertIn("Service stopped", "".join(self._log_text()))
         self.assertTrue(self.proxy_stopped)

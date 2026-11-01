@@ -722,7 +722,8 @@ class TestSettingsPageOnlyChecks(unittest.TestCase):
 
     def test_handle_action_update_only_checks(self):
         handler = _read("src/onionpress/handle_action.py")
-        update = handler[handler.index("def _update(host):"):handler.index("# -- recent logs")]
+        update = handler[handler.index("def _update(host):"):]
+        update = update[:update.index("\n# ----")]
         self.assertIn('host.run_launcher(["update", "--check", "--json"]', update)
         for word in ('"--yes"', "settings-page-update-check", "apt-get", "sudo", "install_deb"):
             with self.subTest(word):
