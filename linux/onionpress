@@ -3222,17 +3222,18 @@ update_finish() {
         log "Updated plugins deployed to WordPress container"
     fi
 
-    # Pull latest docker images. Unlike the start path this has no
-    # --policy guard, so it would clobber a local build outright.
+    # Pull the release's images: every pin is a digest, so `--policy
+    # missing` fetches exactly what the new release moved (as the start
+    # does) and never clobbers a local build.
     cd "$INSTALL_DIR/docker"
     setup_db_passwords
     if using_local_images; then
         log "Skipping image pull: running locally built images"
         echo "  Skipping image pull (running locally built images)"
     else
-        log "Pulling latest Docker images..."
-        echo "  Pulling latest Docker images..."
-        docker compose "${CF_COMPOSE[@]}" pull >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
+        log "Pulling the release's Docker images..."
+        echo "  Pulling the release's Docker images..."
+        docker compose "${CF_COMPOSE[@]}" pull --policy missing >> "$LOG_FILE" 2>&1 || log "WARNING: docker compose pull failed"
     fi
 
     # Restart, the heartbeat client too (its script was replaced):
