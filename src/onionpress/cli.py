@@ -1003,178 +1003,6 @@ class OnionPressCLI:
             self.paths.data_dir, log, docker_bin=self.docker.docker_bin)
         return 0 if ok else 1
 
-    def cmd_prune_image_derivatives(self, uploads_dir: str) -> int:
-        """Delete regenerable -WxH/-scaled image copies from a backup's
-        staged uploads dir and print `<files> <bytes>`. Used by the Linux
-        launcher's bash create_backup so both platforms share one
-        classification (#257)."""
-        from . import derivatives
-        if not os.path.isdir(uploads_dir):
-            print("0 0")
-            return 0
-        removed, freed = derivatives.prune_image_derivatives(uploads_dir, self.log)
-        print(f"{removed} {freed}")
-        return 0
-
-    @staticmethod
-    def cmd_scrub_staging(path: str) -> int:
-        """Remove links and special files from a tree the Linux launcher's
-        bash create_backup just docker-cp'd out of a container (docker cp
-        copies a link as a link, and zip would store the host file it points
-        to). Messages go to stderr. A missing tree is nothing to do."""
-        from .backup import scrub_staged_tree
-        log = _make_log_func()
-        if not os.path.lexists(path):
-            return 0
-        try:
-            scrub_staged_tree(path, log)
-            return 0
-        except Exception as e:
-            log(f"Backup: could not check the staged files for links: {e}")
-            return 1
-
-    @staticmethod
-    def cmd_stage_wp_content(dest: str) -> int:
-        """Copy wp-content out of the WordPress container into *dest*, read
-        there as www-data and unpacked as plain files and folders
-        (backup.stage_wp_content): the Linux launcher's create_backup.
-        Messages go to stderr."""
-        from .backup import stage_wp_content
-        log = _make_log_func()
-        try:
-            stage_wp_content(dest, log)
-            return 0
-        except Exception as e:
-            log(f"Backup: could not copy wp-content: {e}")
-            return 1
-
-    @staticmethod
-    def cmd_stage_hub_data(dest: str) -> int:
-        """Copy a hub's OnionHeaven registry and registrants' keys out of
-        the onionheaven container into *dest* (backup.stage_hub_data): the
-        Linux launcher's create_backup. Exit 0 when copied, 3 when the
-        volume holds no hub data, 4 when the container did not answer, 1
-        when the copy failed. Messages go to stderr."""
-        from .backup import hub_data_state, stage_hub_data
-        log = _make_log_func()
-        state = hub_data_state()
-        if state is None:
-            log("Backup: the onionheaven container did not say whether it holds "
-                "OnionHeaven data")
-            return 4
-        if state != "hub":
-            return 3
-        try:
-            stage_hub_data(dest, log)
-            return 0
-        except Exception as e:
-            log(f"Backup: could not copy the OnionHeaven data: {e}")
-            return 1
-
-    @staticmethod
-    def cmd_settings_page_restore_check(staging: str) -> int:
-        """For the Linux launcher's restore_backup --from-settings-page:
-        exit 0 when the extracted backup in *staging* may be restored
-        through the Settings page; exit 3, printing why on stdout, when it
-        must not (backup.settings_page_restore_refusal: an OnionHeaven hub's
-        registrants' keys, or OnionHome's name registry)."""
-        from .backup import settings_page_restore_refusal
-        refusal = settings_page_restore_refusal(staging)
-        if refusal:
-            print(refusal)
-            return 3
-        return 0
-
-    @staticmethod
-    def cmd_wordpress_safe_config(config_path: str, dest: str) -> int:
-        """Write the config file *config_path*, cut to what a backup
-        handed to WordPress may carry (backup.write_wordpress_safe_config:
-        no Cloudflare tunnel token), to *dest*; print the names of the
-        secrets that were set and left out, one per line. For the Linux
-        launcher's create_backup --without-host-secrets. Messages go to
-        stderr."""
-        from .backup import write_wordpress_safe_config
-        log = _make_log_func()
-        try:
-            for name in write_wordpress_safe_config(config_path, dest, log):
-                print(name)
-            return 0
-        except Exception as e:
-            log(f"Backup: could not write the config for WordPress: {e}")
-            return 1
-
-    @staticmethod
-    def cmd_restore_hub_data(src: str) -> int:
-        """Put a backup's onionheaven/ (*src*) onto the hub data volume
-        (backup.restore_hub_data): the Linux launcher's restore_backup.
-        Messages go to stderr."""
-        from .backup import restore_hub_data
-        log = _make_log_func()
-        try:
-            restore_hub_data(src, log)
-            return 0
-        except Exception as e:
-            log(f"Restore: could not restore the OnionHeaven data: {e}")
-            return 1
-
-    @staticmethod
-    def cmd_stage_hub_backup(staging: str, data_dir: str) -> int:
-        """Put a hub's registry and registrants' keys into the staged backup
-        *staging* (backup.stage_hub_backup: sealed to the recovery key if
-        one is set up, else a plain onionheaven/ folder with a warning) and
-        print the metadata.json fields that say how, as JSON. Exit 3 when
-        the volume holds no hub data, 4 when the onionheaven container did
-        not answer, 1 when it failed. For the Linux launcher's
-        create_backup; messages go to stderr."""
-        from .backup import hub_data_state, stage_hub_backup
-        log = _make_log_func()
-        state = hub_data_state()
-        if state is None:
-            log("Backup: the onionheaven container did not say whether it holds "
-                "OnionHeaven data")
-            return 4
-        if state != "hub":
-            return 3
-        try:
-            fields = stage_hub_backup(staging, log, data_dir=data_dir)
-        except Exception as e:
-            log(f"Backup: could not back up the OnionHeaven data: {e}")
-            return 1
-        print(json.dumps(fields))
-        return 0
-
-    @staticmethod
-    def cmd_settings_page_backup_check(address: str, data_dir: str) -> int:
-        """For the Linux launcher's create_backup --without-hub-data (the
-        Settings page's backup): exit 0 when this node may be backed up
-        there; exit 3, printing why on stdout, on an OnionHeaven hub or
-        OnionHome, or when that could not be checked
-        (backup.settings_page_backup_refusal: fails closed). *address* is
-        the node's onion address, from its tor container (empty: refused)."""
-        from .backup import hub_data_state, settings_page_backup_refusal
-        refusal = settings_page_backup_refusal(address, hub_data_state(),
-                                               data_dir=data_dir)
-        if refusal:
-            print(refusal)
-            return 3
-        return 0
-
-    @staticmethod
-    def cmd_settings_page_restore_node_check(address: str, data_dir: str) -> int:
-        """For the Linux launcher's restore_backup --from-settings-page:
-        exit 0 when the Settings page may restore on this node; exit 3,
-        printing why on stdout, on an OnionHeaven hub or OnionHome, or when
-        that could not be checked (backup.settings_page_restore_node_refusal:
-        fails closed). *address* is the node's onion address, from its tor
-        container (empty: refused)."""
-        from .backup import hub_data_state, settings_page_restore_node_refusal
-        refusal = settings_page_restore_node_refusal(address, hub_data_state(),
-                                                     data_dir=data_dir)
-        if refusal:
-            print(refusal)
-            return 3
-        return 0
-
     # ─── An OnionHeaven hub's backup recovery key ───────────────────────
 
     @staticmethod
@@ -1302,70 +1130,6 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
         if r.returncode != 0:
             log(f"Could not copy {os.path.basename(src)} into WordPress: "
                 f"{r.stderr.strip()[-300:]}")
-            return 1
-        return 0
-
-    def cmd_pack_backup(self, staging: str, output_path: str, password: str) -> int:
-        """Zip and encrypt a staged backup tree into *output_path* (backup
-        format 2). Used by the Linux launcher's bash create_backup so both
-        platforms write the one format. Messages go to stderr only: the
-        launcher appends them to its own log."""
-        from .backup import pack_backup
-        log = _make_log_func()
-        try:
-            pack_backup(staging, output_path, password, log)
-            return 0
-        except Exception as e:
-            log(f"Backup: encrypting the archive failed: {e}")
-            return 1
-
-    def cmd_extract_backup(self, archive: str, dest: str, password: str) -> int:
-        """Decrypt and extract a backup of either format into *dest*. Used by
-        the bash launchers' restore and `setup --from-backup` paths, which
-        used to run `unzip -P` and cannot read format 2."""
-        from .backup import extract_backup
-        log = _make_log_func()
-        try:
-            extract_backup(archive, password, log, staging=dest)
-            return 0
-        except Exception as e:
-            log(f"Restore: could not extract the backup: {e}")
-            return 1
-
-    @staticmethod
-    def cmd_backup_address(staging: str) -> int:
-        """Print the onion address an extracted backup's key belongs to
-        (nothing if it has no key); exit 1, printing nothing, on invalid
-        metadata or key files. Used by the bash launchers' restore and
-        `setup --from-backup` paths, which name a directory after the
-        address: they never read it from metadata.json themselves."""
-        from .backup import staged_backup_address
-        log = _make_log_func()
-        try:
-            address = staged_backup_address(staging, log)
-        except Exception as e:
-            log(f"Restore: refusing the backup: {str(e)[:300]}")
-            return 1
-        if address:
-            print(address)
-        return 0
-
-    @staticmethod
-    def cmd_restore_config(staging: str, config_path: str, address: str = "") -> int:
-        """Merge an extracted backup's user preferences into *config_path*
-        (backup.restore_backup_config: an allowlist; every other key keeps
-        its value). *address* is the restored, key-derived address, which
-        ADDRESS_PREFIX must match. Used by the bash launchers instead of
-        copying the backup's config over the install's."""
-        from .backup import restore_backup_config
-        from .key_manager import is_valid_onion_address
-        log = _make_log_func()
-        try:
-            restore_backup_config(
-                staging, config_path, log,
-                address if is_valid_onion_address(address) else "")
-        except Exception as e:
-            log(f"Restore: could not restore settings: {str(e)[:300]}")
             return 1
         return 0
 
@@ -2230,100 +1994,6 @@ def _run_regenerate_derivatives_pending(run):
     return 0 if pending else 1
 
 
-def _add_prune_image_derivatives(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Delete regenerable -WxH/-scaled image copies from a staged "
-             "uploads dir (backup helper); prints '<files> <bytes>'")
-    p.add_argument(
-        "--uploads-dir", required=True,
-        help="Path to the staged wp-content/uploads directory")
-
-
-def _add_scrub_staging(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Remove symbolic links, hard links to outside files and "
-             "special files from a staged backup tree (backup helper)")
-    p.add_argument(
-        "--dir", required=True,
-        help="Staged tree copied out of a container (e.g. wp-content)")
-
-
-def _add_stage_wp_content(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Copy wp-content out of the WordPress container, read as "
-             "www-data, as plain files and folders (backup helper)")
-    p.add_argument("--dest", required=True, help="Folder to fill")
-
-
-def _add_stage_hub_data(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Copy a hub's OnionHeaven registry and keys out of the "
-             "onionheaven container (backup helper; exit 3: not a hub)")
-    p.add_argument("--dest", required=True, help="Folder to fill")
-
-
-def _add_settings_page_restore_check(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Exit 3 and say why if an extracted backup must not be restored "
-             "through the WordPress Settings page (restore helper)")
-    p.add_argument(
-        "--staging", required=True,
-        help="Directory the backup was extracted into")
-
-
-def _add_wordpress_safe_config(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Write a config file cut to what a backup handed to WordPress "
-             "may carry (backup helper); prints the secrets left out, by name")
-    p.add_argument("--config", required=True, help="Config file to read")
-    p.add_argument("--dest", required=True, help="File to write (new)")
-
-
-def _add_restore_hub_data(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Put a backup's OnionHeaven registry and keys onto the hub "
-             "data volume (restore helper)")
-    p.add_argument("--src", required=True,
-                   help="The backup's onionheaven/ folder")
-
-
-def _add_stage_hub_backup(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Put a hub's registry and keys into a staged backup, sealed to "
-             "its recovery key if one is set up; print the metadata fields "
-             "(backup helper; exit 3: not a hub, 4: no answer)")
-    p.add_argument("--staging", required=True,
-                   help="The staged backup folder")
-
-
-def _add_settings_page_backup_check(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Exit 3 and say why if this node must not be backed up through "
-             "the WordPress Settings page (an OnionHeaven hub or OnionHome, "
-             "or one that could not be checked)")
-    p.add_argument("--address", default="",
-                   help="This node's onion address")
-
-
-def _add_settings_page_restore_node_check(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Exit 3 and say why if nothing may be restored on this node "
-             "through the WordPress Settings page (an OnionHeaven hub or "
-             "OnionHome, or one that could not be checked)")
-    p.add_argument("--address", default="",
-                   help="This node's onion address")
-
-
 # An OnionHeaven hub's backup recovery key. Its private half is printed
 # once by create and otherwise read from $ONIONPRESS_HUB_RECOVERY_KEY,
 # stdin or a prompt, never from argv.
@@ -2688,40 +2358,6 @@ def _run_start_post_up(run):
     return 0
 
 
-def _add_db_import(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Import a restored database dump into the running onionpress-db "
-             "as the wordpress user (the Linux launcher's db_import; the "
-             "password is the first line of stdin, never an argument): the "
-             "client runs --sandbox --binary-mode --local-infile=0 with the "
-             "dump on its stdin after the password line, and a client too old "
-             "for --sandbox is refused; exit 1 on any failure")
-    p.add_argument(
-        "--sql-file", required=True, help="The dump to import (wordpress.sql)")
-
-
-def _run_db_import(run):
-    # The Linux launcher's db_import() (Phase 4, #120): backup.db_import,
-    # what restore_container_artifacts runs for the Mac's and the CLI's
-    # restores. The password is stdin's first line (the launcher pipes
-    # it in; argv is every user's to read); the dump follows it into the
-    # sandboxed client's stdin. No OnionPressCLI setup. Every refusal
-    # (an old client, a failed import) is one ERROR line and exit 1,
-    # which restore_backup turns into its "Database import failed".
-    from .backup import db_import
-    password = sys.stdin.readline().rstrip("\n") if sys.stdin is not None else ""
-    if not password:
-        print("ERROR: no database password on stdin", file=sys.stderr)
-        return 1
-    try:
-        db_import(run.args.sql_file, password)
-    except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    return 0
-
-
 def _add_is_onionheaven_hub(sub, name):
     p = sub.add_parser(
         name,
@@ -2840,94 +2476,6 @@ def _run_apply_settings_updates(run):
     return 0
 
 
-# Backup helpers for the bash launchers. The password comes on stdin,
-# never in argv.
-def _add_pack_backup(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Zip and encrypt a staged backup directory (backup helper; "
-             "reads the password from stdin)")
-    p.add_argument(
-        "--staging", required=True,
-        help="Staged backup tree (metadata.json, tor-keys/, database/, ...)")
-    p.add_argument(
-        "--output", required=True, help="Backup file to write")
-
-
-def _add_backup_metadata(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Print metadata.json for a backup the Linux launcher staged "
-             "(backup helper)")
-    p.add_argument("--onion-address", default="")
-    p.add_argument("--version", required=True)
-    p.add_argument("--has-onionheaven", action="store_true")
-    p.add_argument("--excludes-image-derivatives", action="store_true")
-    p.add_argument("--hub-fields", default="",
-                   help="JSON stage-hub-backup printed (empty for none)")
-    p.add_argument("--hub-unchecked", action="store_true")
-    p.add_argument("--without-host-secrets", action="store_true")
-    p.add_argument("--excludes-onion-key", action="store_true",
-                   help="No onion service key could be read: the archive carries none "
-                        "and a restore keeps the install's key (issue #519)")
-    p.add_argument("--secrets-left-out", default="",
-                   help="Space-separated names of the secrets left out")
-
-
-def _run_backup_metadata(run):
-    from .backup import linux_backup_metadata
-    a = run.args
-    try:
-        hub_fields = json.loads(a.hub_fields) if a.hub_fields else None
-    except ValueError:
-        print("ERROR: --hub-fields is not JSON", file=sys.stderr)
-        return 1
-    if hub_fields is not None and not isinstance(hub_fields, dict):
-        print("ERROR: --hub-fields is not a JSON object", file=sys.stderr)
-        return 1
-    metadata = linux_backup_metadata(
-        a.onion_address, a.version,
-        has_onionheaven=a.has_onionheaven,
-        excludes_image_derivatives=a.excludes_image_derivatives,
-        hub_fields=hub_fields, hub_unchecked=a.hub_unchecked,
-        with_host_secrets=not a.without_host_secrets,
-        secrets_left_out=a.secrets_left_out.split(),
-        excludes_onion_key=a.excludes_onion_key)
-    print(json.dumps(metadata, indent=2))
-    return 0
-
-
-def _add_extract_backup(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Decrypt and extract a backup, either format, into a directory "
-             "(restore helper; reads the password from stdin)")
-    p.add_argument(
-        "--archive", required=True, help="Backup file to read")
-    p.add_argument(
-        "--dest", required=True, help="Directory to extract into")
-
-
-def _run_pack_or_extract_backup(run):
-    args = run.args
-    cli = _cli(run)
-    pw = sys.stdin.read().rstrip("\n")
-    if not pw:
-        print("ERROR: no password on stdin", file=sys.stderr)
-        return 1
-    if args.command == "pack-backup":
-        return cli.cmd_pack_backup(args.staging, args.output, pw)
-    return cli.cmd_extract_backup(args.archive, args.dest, pw)
-
-
-def _add_backup_address(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Validate an extracted backup and print the onion address its "
-             "key belongs to (restore helper; exit 1 if invalid)")
-    p.add_argument(
-        "--staging", required=True,
-        help="Directory the backup was extracted into")
 
 
 # ---- settings ----
@@ -2997,20 +2545,6 @@ def _run_onionheaven(run):
     return onionheaven.run_onionheaven_command(
         run.args.onionheaven_command, _hub_context(run.args.data_dir),
         json_output=run.args.json)
-
-
-def _add_restore_config(sub, name):
-    p = sub.add_parser(
-        name,
-        help="Merge an extracted backup's user preferences into a config "
-             "file (restore helper; an allowlist, never a copy)")
-    p.add_argument(
-        "--staging", required=True,
-        help="Directory the backup was extracted into")
-    p.add_argument("--config", required=True, help="Config file to update")
-    p.add_argument(
-        "--address", default="",
-        help="The restored onion address (ADDRESS_PREFIX must match it)")
 
 
 # ---- the WordPress Settings page's requests and the Mac daemon ----
@@ -3152,9 +2686,11 @@ def _run_settings_page_command(run):
         args.backup_file, password, data_dir, args.json, _confirm.given(args))
 
 
-# Restore and backup helpers run by the launchers mid-restore or
-# mid-backup (put-wp-tree: plugin installs too) are OnionPressCLI's static
-# methods: no OnionPressCLI setup (config/secrets creation, port probing).
+# A helper run mid-start (put-wp-tree: the bundled plugins' installs) is
+# OnionPressCLI's static method: no OnionPressCLI setup (config/secrets
+# creation, port probing). The backup and restore helpers the Linux
+# launcher's bash spine called went with issue #406: the backup and the
+# restores are cmd_backup, cmd_restore and the settings-page commands.
 # Individual post-start provisioning steps are the helpers start_containers
 # used to inline as bash function calls; the bash launchers now delegate
 # each one through here.
@@ -3223,28 +2759,6 @@ _COMMANDS = [
             "container's uploads/), 1 when not; both launchers' start gates "
             "the detached regenerate-derivatives on it"),
      _run_regenerate_derivatives_pending),
-    ("prune-image-derivatives", _add_prune_image_derivatives,
-     lambda run: _cli(run).cmd_prune_image_derivatives(run.args.uploads_dir)),
-    ("scrub-staging", _add_scrub_staging,
-     lambda run: OnionPressCLI.cmd_scrub_staging(run.args.dir)),
-    ("stage-wp-content", _add_stage_wp_content,
-     lambda run: OnionPressCLI.cmd_stage_wp_content(run.args.dest)),
-    ("stage-hub-data", _add_stage_hub_data,
-     lambda run: OnionPressCLI.cmd_stage_hub_data(run.args.dest)),
-    ("settings-page-restore-check", _add_settings_page_restore_check,
-     lambda run: OnionPressCLI.cmd_settings_page_restore_check(run.args.staging)),
-    ("wordpress-safe-config", _add_wordpress_safe_config,
-     lambda run: OnionPressCLI.cmd_wordpress_safe_config(run.args.config, run.args.dest)),
-    ("restore-hub-data", _add_restore_hub_data,
-     lambda run: OnionPressCLI.cmd_restore_hub_data(run.args.src)),
-    ("stage-hub-backup", _add_stage_hub_backup,
-     lambda run: OnionPressCLI.cmd_stage_hub_backup(run.args.staging, run.data_dir)),
-    ("settings-page-backup-check", _add_settings_page_backup_check,
-     lambda run: OnionPressCLI.cmd_settings_page_backup_check(run.args.address,
-                                                              run.data_dir)),
-    ("settings-page-restore-node-check", _add_settings_page_restore_node_check,
-     lambda run: OnionPressCLI.cmd_settings_page_restore_node_check(run.args.address,
-                                                                    run.data_dir)),
     ("hub-recovery-key", _add_hub_recovery_key, _run_hub_recovery_key),
     ("put-wp-tree", _add_put_wp_tree,
      lambda run: OnionPressCLI.cmd_put_wp_tree(run.args.src, run.args.dest,
@@ -3286,7 +2800,6 @@ _COMMANDS = [
      _run_migrate_key_volume),
     ("install-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
     ("setup-bundled-plugins", _add_bundled_plugins, _run_bundled_plugins),
-    ("db-import", _add_db_import, _run_db_import),
     ("is-onionheaven-hub", _add_is_onionheaven_hub, _run_is_onionheaven_hub),
     ("using-local-images",
      _plain("Exit 0 when the stack points at images built on this machine "
@@ -3300,16 +2813,8 @@ _COMMANDS = [
             "the config — allowlisted keys with valid values only; prints "
             "'changed|unchanged|rejected KEY' lines, never values"),
      _run_apply_settings_updates),
-    ("pack-backup", _add_pack_backup, _run_pack_or_extract_backup),
-    ("extract-backup", _add_extract_backup, _run_pack_or_extract_backup),
-    ("backup-metadata", _add_backup_metadata, _run_backup_metadata),
-    ("backup-address", _add_backup_address,
-     lambda run: OnionPressCLI.cmd_backup_address(run.args.staging)),
     ("config", _add_config, _run_config),
     ("onionheaven", _add_onionheaven, _run_onionheaven),
-    ("restore-config", _add_restore_config,
-     lambda run: OnionPressCLI.cmd_restore_config(run.args.staging, run.args.config,
-                                                  run.args.address)),
     ("handle-action", _add_handle_action, _run_handle_action),
     ("apply-config",
      _plain("Apply the Settings page's config-updates.json (the allowlisted "

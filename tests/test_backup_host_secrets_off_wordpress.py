@@ -161,27 +161,6 @@ class TestWordPressSafeConfig(unittest.TestCase):
         self.assertTrue(config.SECRET_CONFIG_KEYS.isdisjoint(config.SAFE_CONFIG_KEYS))
         self.assertTrue(config.SECRET_CONFIG_KEYS.isdisjoint(backup.RESTORABLE_CONFIG))
 
-    def test_the_cli_helper_writes_the_file_and_names_the_secrets(self):
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        src = _write_config(os.path.join(tmp, "data"))
-        dest = os.path.join(tmp, "config")
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(cli.OnionPressCLI, "__init__",
-                               side_effect=AssertionError("OnionPressCLI built")), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = cli.main(["wordpress-safe-config", "--config", src, "--dest", dest])
-        self.assertEqual(rc, 0, err.getvalue())
-        self.assertEqual(out.getvalue(), TOKEN_KEY + "\n")
-        self.assertNotIn(TOKEN, err.getvalue())
-        self.assertEqual(config.read_config(dest), config.redact_config(CONFIG))
-        self.assertEqual(os.stat(dest).st_mode & 0o777, 0o600)
-        # Never over a file that is already there (or a link planted there).
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.main(["wordpress-safe-config", "--config", src,
-                                       "--dest", dest]), 1)
-
-
 # ---------------------------------------------------------------------------
 # Who leaves them out: every path that hands a backup to WordPress
 # ---------------------------------------------------------------------------

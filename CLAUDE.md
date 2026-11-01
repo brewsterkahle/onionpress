@@ -864,7 +864,7 @@
 
 ## Backups Carry Original Images Only (issue #257)
 - Backups prune WordPress derivatives by `src/onionpress/derivatives.py`'s
-  rule (shared with Linux via `prune-image-derivatives`); restores
+  rule (`backup.create_backup`, both platforms); restores
   regenerate them in the background (`--only-missing`, marker cleared
   only when complete) and the `onionpress-image-fallback.php` mu-plugin
   serves originals meanwhile. The two halves ship together.
@@ -924,8 +924,9 @@
   `build/py2app-extensions.sh`; `python3-nacl (>= 1.5.0)` on Linux),
   imported guarded so format 1 works without it.
 - **Format 1 (`zip -P`) must restore forever; never write `zip -P` again.**
-- Launchers go through `onionpress.cli pack-backup` / `extract-backup`
-  (password on stdin).
+- Every backup is written by `backup.pack_backup` and read by
+  `extract_backup` (both platforms', through the CLI's backup and
+  restores); nothing else zips or unzips one.
 
 ## Restores Extract Plain Files Only
 - `validate_archive_members` runs before any extractor (no links, devices,

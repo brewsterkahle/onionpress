@@ -650,24 +650,6 @@ class TestSettingsPageBackupRefusal(unittest.TestCase):
         self.onionhome.return_value = True
         self.assertEqual(refuse(mv.ADDR, "none", data_dir=self.tmp), home)
 
-    def test_the_cli_helper_says_why(self):
-        unverified = backup.UNVERIFIED_BACKUP_REFUSED_MSG
-        for hub_state, onionhome, address, rc, want in (
-                ("hub", False, mv.ADDR, 3, backup.HUB_BACKUP_REFUSED_MSG),
-                ("none", True, mv.ADDR, 3, backup.ONIONHOME_BACKUP_REFUSED_MSG),
-                (None, False, mv.ADDR, 3, unverified),
-                ("none", None, mv.ADDR, 3, unverified),
-                ("none", False, "", 3, unverified),
-                ("none", False, mv.ADDR, 0, "")):
-            with self.subTest(hub_state=hub_state, onionhome=onionhome, address=address):
-                self.onionhome.return_value = onionhome
-                out = io.StringIO()
-                with mock.patch.object(backup, "hub_data_state", return_value=hub_state), \
-                        contextlib.redirect_stdout(out):
-                    self.assertEqual(OnionPressCLI.cmd_settings_page_backup_check(
-                        address, self.tmp), rc)
-                self.assertEqual(out.getvalue().strip(), want)
-
     def test_the_addresses_are_the_tor_images(self):
         tor_dir = os.path.join(PROJECT_ROOT, "app", "Resources", "docker", "tor")
         sys.path.insert(0, tor_dir)
@@ -906,19 +888,6 @@ class TestSettingsPageRestoreRefusal(unittest.TestCase):
             with self.subTest(label):
                 staging = _staging(self.tmp, label, **kw)
                 self.assertEqual(backup.settings_page_restore_refusal(staging), want)
-
-    def test_the_cli_helper_says_why(self):
-        import contextlib
-        import io
-        for kw, rc, want in (({"keys": True}, 3, backup.HUB_DATA_RESTORE_REFUSED_MSG),
-                             ({"onionhome": True}, 3, backup.ONIONHOME_RESTORE_REFUSED_MSG),
-                             ({"registry": True}, 0, "")):
-            staging = _staging(self.tmp, f"cli-{rc}-{sorted(kw)}", **kw)
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(OnionPressCLI.cmd_settings_page_restore_check(staging), rc)
-            self.assertEqual(out.getvalue().strip(), want)
-
 
 class _KeyWritten(Exception):
     pass

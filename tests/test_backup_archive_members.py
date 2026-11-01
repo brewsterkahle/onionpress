@@ -7,13 +7,13 @@ restore then docker-cp's the staged wp-content/, tor-keys/, onionheaven/
 and onionhome/ trees, following a link in the source path: a member
 `wp-content -> ~` would publish the home folder through the onion service.
 These tests hand link-holding and oddly named archives, in both backup
-formats, to every extraction path (the unzip CLI, the zipfile fallback, the
-Python restore entry points, the extract-backup helper and the bash
-launchers that call it) and check that each refuses before anything is
-extracted or touched.
+formats, to every extraction path (the unzip CLI, the zipfile fallback and
+the Python restore entry points, which every launcher restore runs since
+issue #406) and check that each refuses before anything is extracted or
+touched.
 
-No docker: the Python paths fail the test on any docker call, and the bash
-paths run the launcher functions with docker stubbed (see
+No docker: the Python paths fail the test on any docker call; `setup
+--from-backup`'s host side runs for real (see
 test_backup_metadata_validation.TestLauncherRestorePaths).
 """
 
@@ -388,19 +388,6 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
                     backup.prepare_install_from_backup(
                         path, PW, self.logs.append, data_dir=self.data_dir)
                 self.assert_untouched()
-
-    def test_the_extract_backup_helper_refuses(self):
-        """What the bash launchers run (restore_backup, setup --from-backup)."""
-        dest = os.path.join(self.tmp, "dest")
-        os.makedirs(dest)
-        err = io.StringIO()
-        with mock.patch("sys.stderr", err):
-            for label, path in self.backups.items():
-                with self.subTest(label):
-                    self.assertEqual(
-                        cli.OnionPressCLI.cmd_extract_backup(None, path, dest, PW), 1)
-                    self.assertEqual(os.listdir(dest), [])
-        self.assertIn("symbolic link", err.getvalue())
 
     def test_a_wrong_password_on_format_2_still_says_so(self):
         path = self.backups["wp-content is a link to the home folder, format 2"]

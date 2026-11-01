@@ -258,8 +258,6 @@ class TestStagedOnionKeyAddress(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             backup.staged_onion_key_address(staging, meta)
         self.assertEqual(str(cm.exception), backup.KEY_IN_KEYLESS_BACKUP_MSG)
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(OnionPressCLI.cmd_backup_address(staging), 1)
 
 
 class TestRestoreFromBackupKeepsTheAddress(unittest.TestCase):
@@ -785,22 +783,6 @@ class TestSettingsPageRestoreNodeRefusal(unittest.TestCase):
                        backup.settings_page_restore_node_refusal(address, state,
                                                                  data_dir=self.tmp))
                 self.assertIn(got, pairs)
-
-    def test_the_cli_helper_says_why(self):
-        for hub_state, onionhome, address, rc, want in (
-                ("hub", False, ADDR, 3, backup.HUB_RESTORE_HERE_REFUSED_MSG),
-                ("none", True, ADDR, 3, backup.ONIONHOME_RESTORE_HERE_REFUSED_MSG),
-                (None, False, ADDR, 3, backup.UNVERIFIED_RESTORE_REFUSED_MSG),
-                ("none", False, "", 3, backup.UNVERIFIED_RESTORE_REFUSED_MSG),
-                ("none", False, ADDR, 0, "")):
-            with self.subTest(hub_state=hub_state, onionhome=onionhome, address=address):
-                self.onionhome.return_value = onionhome
-                out = io.StringIO()
-                with mock.patch.object(backup, "hub_data_state", return_value=hub_state), \
-                        contextlib.redirect_stdout(out):
-                    self.assertEqual(OnionPressCLI.cmd_settings_page_restore_node_check(
-                        address, self.tmp), rc)
-                self.assertEqual(out.getvalue().strip(), want)
 
     def test_the_messages_are_plain_text(self):
         for text in (backup.HUB_RESTORE_HERE_REFUSED_MSG,

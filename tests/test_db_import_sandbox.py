@@ -10,8 +10,8 @@ to `x'; \\! cmd` for the ALTER USER re-set — gave a root shell in the db
 container.
 
 So the one import, backup.db_import (Phase 4, #120: what
-restore_container_artifacts runs, and what the Linux launcher's db_import
-runs as `onionpress db-import`, the password on stdin's first line), streams
+restore_container_artifacts runs on both platforms; the Linux launcher's
+own db_import went with issue #406), streams
 the dump on stdin (never docker cp'd to a fixed /tmp/wordpress.sql and
 sourced) through a client run with ``--sandbox --binary-mode
 --local-infile=0``, and the password re-set validates its value (no
@@ -188,67 +188,6 @@ class TestDbImport(unittest.TestCase):
                 with self.assertRaises(Exception):
                     backup.db_import(self.sql, bad)
         self.assertEqual(runs, [])
-
-
-class TestDbImportSubcommand(unittest.TestCase):
-    """`onionpress db-import --sql-file F`, the Linux launcher's db_import:
-    the password on stdin's first line, exit 0/1, never OnionPressCLI."""
-
-    DUMP = b"SELECT 1;\n"
-    PASSWORD = "Abc123SecretsFilePwXYZ0987654321"
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="db-import-cli-test-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.sql = os.path.join(self.tmp, "wordpress.sql")
-        with open(self.sql, "wb") as f:
-            f.write(self.DUMP)
-
-    def _main(self, stdin, *, probe_rc=0, import_rc=0):
-        import contextlib
-        import io
-        runs = []
-
-        def fake_run(argv, **kw):
-            argv = list(argv)
-            runs.append((argv, kw.get("input")))
-            rc = probe_rc if "grep -q -- --sandbox" in " ".join(argv) else import_rc
-            return subprocess.CompletedProcess(argv, rc, stdout=b"", stderr=b"boom")
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(backup.subprocess, "run", fake_run), \
-                mock.patch.object(cli, "OnionPressCLI") as MockCLI, \
-                mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = cli.main(["--data-dir", self.tmp, "db-import", "--sql-file", self.sql])
-        MockCLI.assert_not_called()
-        return rc, runs, err.getvalue()
-
-    def test_imports_with_the_password_from_stdin(self):
-        rc, runs, err = self._main(self.PASSWORD + "\n")
-        self.assertEqual(rc, 0, err)
-        imports = [(a, i) for a, i in runs if _is_import_run(a, i)]
-        self.assertEqual(len(imports), 1, runs)
-        argv, stdin = imports[0]
-        self.assertEqual(stdin, self.PASSWORD.encode() + b"\n" + self.DUMP)
-        for a in argv:
-            self.assertNotIn(self.PASSWORD, a)
-
-    def test_no_password_is_exit_1_without_a_client_run(self):
-        rc, runs, err = self._main("")
-        self.assertEqual(rc, 1)
-        self.assertEqual(runs, [])
-        self.assertIn("ERROR: no database password", err)
-
-    def test_an_old_client_is_exit_1(self):
-        rc, runs, err = self._main(self.PASSWORD + "\n", probe_rc=1)
-        self.assertEqual(rc, 1)
-        self.assertIn("too old", err)
-        self.assertEqual(len(runs), 1)
-
-    def test_a_failed_import_is_exit_1(self):
-        rc, runs, err = self._main(self.PASSWORD + "\n", import_rc=1)
-        self.assertEqual(rc, 1)
-        self.assertIn("ERROR: Database import failed: boom", err)
 
 
 # ── backup.py restore behaviour ────────────────────────────────────────────

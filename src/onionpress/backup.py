@@ -1032,28 +1032,6 @@ def keep_installed_address(metadata, log_func):
     return address
 
 
-def staged_backup_address(staging, log_func):
-    """Validate an extracted backup and return the onion address its key
-    belongs to ('' if it carries no key).
-
-    For the bash launchers' `setup --from-backup` and Linux's
-    restore_backup, which name a directory after the address and write its
-    prefix into config: they take the address from here, never from
-    metadata.json. A metadata address that is well formed but differs from
-    the key's is logged, as the Python restore paths do (older clients left
-    it stale). Raises ValueError on invalid metadata or key files; nothing
-    is touched.
-    """
-    metadata = read_staged_metadata(staging)
-    address = staged_onion_key_address(staging, metadata)
-    metadata_address = metadata.get('onion_address', '')
-    if address and metadata_address and metadata_address != address:
-        log_func(f"Restore: KEY-MISMATCH — backup metadata.onion_address="
-                 f"{metadata_address} != key_derives_to={address}; "
-                 f"using DERIVED address for all persisted state.")
-    return address
-
-
 class SettingsPageRestoreRefused(ValueError):
     """A backup the Settings page's restore must not restore (its message
     says why and where to restore it instead)."""
@@ -1106,8 +1084,7 @@ def extract_backup(zip_path, password, log_func, staging=None):
     install-from-backup. Validates the password as a side effect — a wrong
     password raises ValueError here before any state is touched.
 
-    Handles both backup formats (extract_archive); also the bash launchers'
-    restore paths, via `onionpress.cli extract-backup`.
+    Handles both backup formats (extract_archive).
     """
     own_staging = staging is None
     if own_staging:
@@ -1567,9 +1544,9 @@ def restore_container_artifacts(staging, metadata, log_func, *, hub_volumes=True
         # otherwise ride into the ALTER USER below.
         db_password = _restore_db_password(data_dir, db_creds['password'])
 
-        # The one sandboxed import (db_import below; the Linux launcher's
-        # db_import runs it as `onionpress db-import`): the client's command
-        # parsing OFF, the dump on stdin after the password line.
+        # The one sandboxed import (db_import below, both platforms'): the
+        # client's command parsing OFF, the dump on stdin after the
+        # password line.
         db_import(sql_path, db_password,
                   user=db_creds['user'], name=db_creds['name'])
 
@@ -2026,18 +2003,6 @@ def wordpress_safe_config(values, log_func):
     return kept, secrets
 
 
-def write_wordpress_safe_config(config_path, dest, log_func):
-    """Write the config file at *config_path*, cut by wordpress_safe_config,
-    to *dest* (a new file, owner-only); return the secrets left out. For
-    the Linux launcher's create_backup --without-host-secrets, whose
-    backups carry the config file itself."""
-    kept, secrets = wordpress_safe_config(read_config(config_path), log_func)
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        f.writelines(f"{k}={v}\n" for k, v in kept.items())
-    return secrets
-
-
 def apply_config_overrides(staging, log_func, *, data_dir=None, onion_address=''):
     """Restore a backup's user preferences into ~/.onionpress/config
     (restore_backup_config)."""
@@ -2136,46 +2101,3 @@ def backup_filename_username(path):
         return None
     user = m.group('user').strip()
     return user if _BACKUP_USERNAME_RE.fullmatch(user) else None
-
-
-def linux_backup_metadata(onion_address, version, *, has_onionheaven=False,
-                          excludes_image_derivatives=False, hub_fields=None,
-                          hub_unchecked=False, with_host_secrets=True,
-                          secrets_left_out=(), excludes_onion_key=False, now=None):
-    """metadata.json's content for a backup the Linux launcher stages
-    (issue #406; it was an inline python3 -c in create_backup).
-
-    *excludes_onion_key*: no onion service key could be read (issue
-    #519), so the archive carries none and says so, the way the Mac page's
-    backup does: a restore keeps the install's own key and address
-    (staged_onion_key_address) instead of failing on the missing PEM.
-
-    *hub_fields* are what stage_hub_backup printed (onionheaven_data and
-    its sealed-format and recovery-key fields). pack_backup stamps
-    backup_format afterwards.
-    """
-    metadata = {
-        'onion_address': onion_address,
-        'backup_date': (now or datetime.now(timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'onionpress_version': version,
-        'platform': 'linux',
-        'has_onionheaven': bool(has_onionheaven),
-        # uploads/ holds originals only; resized copies are rebuilt on restore (#257)
-        'excludes_image_derivatives': bool(excludes_image_derivatives),
-    }
-    for key in ('onionheaven_data', 'onionheaven_sealed_format',
-                'onionheaven_recovery_key_id'):
-        if hub_fields and key in hub_fields:
-            metadata[key] = hub_fields[key]
-    if hub_unchecked:
-        # The onionheaven container did not say whether this is a hub: the
-        # hub data may be missing (unchecked_notes).
-        metadata['onionheaven_data_unchecked'] = True
-    if not with_host_secrets:
-        # Handed to WordPress: no host secrets, and the names of those that
-        # were set (TUNNEL_TOKEN_KEY).
-        metadata['excludes_host_secrets'] = True
-        metadata['secret_config_left_out'] = list(secrets_left_out)
-    if excludes_onion_key:
-        metadata['excludes_onion_key'] = True
-    return metadata

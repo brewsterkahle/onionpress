@@ -76,18 +76,6 @@ class TestCtorToPem(unittest.TestCase):
         private, public = key_manager.read_ctor_keys(self.dir)
         self.assertEqual((private, public), (self.private, self.public))
 
-    def test_ctor_to_arti_writes_the_pem_the_restore_needs(self):
-        # Run by path, as the launcher runs it: its own folder (with
-        # onion_auth.py and onion_keys.py beside it) on sys.path.
-        r = subprocess.run([sys.executable, KM, "ctor-to-arti", self.dir],
-                           capture_output=True, text=True, timeout=60,
-                           env={"PATH": os.environ["PATH"]})
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        pem = os.path.join(self.dir, "ks_hs_id.ed25519_expanded_private")
-        self.assertTrue(os.path.isfile(pem))
-        self.assertEqual(key_manager.read_arti_key(self.dir), (self.private, self.public))
-        self.assertEqual(stat.S_IMODE(os.stat(pem).st_mode), 0o600)
-
     def test_a_public_key_file_still_wins_when_present(self):
         with open(os.path.join(self.dir, "hs_ed25519_public_key"), "wb") as f:
             f.write(key_manager.CTOR_HEADER_PUBLIC + self.public)

@@ -10,10 +10,10 @@ its choosing and download it, so a link staged on the host as
 (no -y) stores the file a link points to. The derivative pruning would walk
 a linked uploads/ and delete host files, and the archive marker would be
 written through a link. These tests plant links, hard links and special
-files in what each staging step receives, on the Mac path (docker exec tar
-into unpack_plain_tar, docker cp) and the Linux one (docker cp, then the
-scrub-staging helper), and check that nothing outside the staging folder is
-packed, followed, pruned or written.
+files in what each staging step receives (docker exec tar into
+unpack_plain_tar, docker cp; one path for both platforms since issue #406),
+and check that nothing outside the staging folder is packed, followed,
+pruned or written.
 
 No docker: the container side is a stub script or bash function.
 """
@@ -322,22 +322,6 @@ class TestScrubStagedTree(_Base):
         self.assertEqual(backup.scrub_staged_tree(self.root, self.logs.append), 30)
         self.assertEqual(len(self.logs), backup._STAGE_LOG_LIMIT + 1)
         self.assertIn("10 more", self.logs[-1])
-
-    def test_the_cli_helper(self):
-        """`onionpress.cli scrub-staging`, what the Linux create_backup runs."""
-        os.symlink(os.path.join(self.home, "secret.txt"),
-                   os.path.join(self.root, "uploads", "x"))
-        with mock.patch("sys.stderr", io.StringIO()) as err:
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(self.root), 0)
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(
-                os.path.join(self.tmp, "missing")), 0)
-            link = os.path.join(self.tmp, "rootlink")
-            os.symlink(self.home, link)
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(link), 1)
-        self.assertFalse(os.path.lexists(os.path.join(self.root, "uploads", "x")))
-        self.assertIn("out of the backup", err.getvalue())
-        self.assert_home_untouched()
-
 
 class TestDerivativesNeverFollowALink(_Base):
 

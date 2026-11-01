@@ -169,7 +169,7 @@ class TestCommandLine(_KeyDirCase):
         self.assertIn("Usage:", out)
 
     def test_every_command_without_its_argument_prints_usage(self):
-        for cmd in ("ensure-formats", "ctor-to-arti", "arti-to-ctor", "write-keys",
+        for cmd in ("ensure-formats", "arti-to-ctor", "write-keys",
                     "import-key", "decode-key", "encode-key-file", "staged-address",
                     "keep-current"):
             with self.subTest(cmd=cmd):
@@ -190,11 +190,8 @@ class TestCommandLine(_KeyDirCase):
         self.assertEqual(code, 1)
         self.assertIn("Error: No key files found", err)
 
-    def test_ctor_to_arti_and_back(self):
-        key_manager.write_ctor_keys(self.dir, self.private, self.public)
-        self.assertEqual(self.main("ctor-to-arti", self.dir)[0], 0)
-        os.remove(self.path(SECRET))
-        os.remove(self.path(PUBLIC))
+    def test_arti_to_ctor(self):
+        key_manager.write_arti_key(self.dir, self.private, self.public)
         code, out, _ = self.main("arti-to-ctor", self.dir)
         self.assertEqual(code, 0)
         self.assertIn("Wrote C Tor keys", out)
