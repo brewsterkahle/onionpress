@@ -218,6 +218,18 @@ add_action( 'admin_menu', function () {
         $icon,
         80
     );
+    // The OnionHeaven page (onionpress_onionheaven_page) is the owner's:
+    // it reads the host's state and config.
+    if ( onionpress_settings_owner_allowed() ) {
+        add_submenu_page(
+            'onionpress-settings',
+            'OnionHeaven',
+            'OnionHeaven',
+            'manage_options',
+            'onionpress-onionheaven',
+            'onionpress_onionheaven_page'
+        );
+    }
     // Constrain the icon to match other sidebar icons
     add_action( 'admin_head', function () {
         echo '<style>
@@ -1244,6 +1256,7 @@ function onionpress_settings_fields() {
             'placeholder' => 'Paste a new token, or leave blank',
         ),
         'REGISTER_WITH_ONIONHEAVEN' => array(
+            'page'        => 'onionheaven',
             'label'       => 'Keep site reachable via OnionHeaven (recommended)',
             'description' => 'Keeps your .onion address working while this machine is off, asleep, or disconnected: when your heartbeats stop, the OnionHeaven hub takes over your address and sends visitors to the Wayback Machine\'s archived copy of your site; your live site takes over again when you come back online. What is shared: a copy of your onion service private key is sent to the hub (run by the Internet Archive) so it can publish your address on your behalf. It is used only to keep your site reachable. On by default. Disabling it stops the heartbeats at once and asks the hub to delete its copy of the key.',
             'type'        => 'select',
@@ -1256,6 +1269,7 @@ function onionpress_settings_fields() {
             'options'     => array( 'no' => 'Disabled', 'yes' => 'Enabled' ),
         ),
         'ONIONHEAVEN_ADDRESS' => array(
+            'page'        => 'onionheaven',
             'label'       => 'OnionHeaven Hub Address (advanced)',
             'description' => 'The .onion address of the OnionHeaven hub to register with for Wayback Machine fallback. Your onion service key is sent to this hub, so it cannot be changed from WordPress: on a Mac use Settings in the OnionPress menu, on Linux edit ~/.onionpress/config, then restart OnionPress.',
             'type'        => 'text',
@@ -1263,6 +1277,7 @@ function onionpress_settings_fields() {
             'placeholder' => 'oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion',
         ),
         'ONIONHEAVEN_MAX_SERVICES' => array(
+            'page'        => 'onionheaven',
             'label'       => 'Max Services per Takeover Worker',
             'description' => 'Maximum onion services each takeover container can handle. Lower values use more containers but are more reliable. Applied at the next restart.',
             'type'        => 'text',
@@ -1272,6 +1287,7 @@ function onionpress_settings_fields() {
             'max'         => 500,
         ),
         'ONIONHEAVEN_PROPAGATION_DELAY' => array(
+            'page'        => 'onionheaven',
             'label'       => 'Takeover Delay (seconds)',
             'description' => 'Seconds after a site\'s last successful healthcheck before the hub takes it over. Default 180 (~3 missed heartbeats). Applied at the next restart.',
             'type'        => 'text',
@@ -1390,6 +1406,11 @@ function onionpress_settings_page() {
 
         <hr style="border: none; border-top: 1px solid #c3c4c7; margin: 20px 0;">
 
+        <p style="margin: 0 0 12px; font-size: 13px;">
+            <strong>OnionHeaven</strong> &mdash; whether a hub keeps this site reachable, and whether this OnionPress is a hub for other sites &mdash;
+            has its own page: <a href="<?php echo esc_url( admin_url( 'admin.php?page=onionpress-onionheaven' ) ); ?>">OnionPress &rarr; OnionHeaven</a>.
+        </p>
+
         <form method="post">
             <?php wp_nonce_field( 'onionpress_settings_save', 'onionpress_settings_nonce' ); ?>
             <table class="form-table" role="presentation">
@@ -1401,6 +1422,10 @@ function onionpress_settings_page() {
                 }
                 // Skip fields that require OnionHeaven server to be active
                 if ( ! empty( $field['show_when'] ) && $field['show_when'] === 'onionheaven_server' && ! $oh_server_active ) {
+                    continue;
+                }
+                // The OnionHeaven fields have their own page (onionpress_onionheaven_page).
+                if ( ! empty( $field['page'] ) ) {
                     continue;
                 }
                 // Use config_key if specified (for renamed settings like LAUNCH_ON_LOGIN -> START_ON_BOOT)
@@ -1924,6 +1949,348 @@ function onionpress_settings_page() {
  * rest of the Settings page acts on the host and on every site, so it is
  * the owner's (onionpress_settings_owner_allowed()).
  */
+/**
+ * The OnionHeaven page (the owner's): which hub keeps this site reachable,
+ * and whom this OnionPress keeps reachable.
+ *
+ * What it shows is status.json's `onionheaven` object
+ * (onionheaven.status_block in src/onionpress/onionheaven.py: the flat keys
+ * the status page reads, plus `client`, `hub` and `known_hosts`), and the
+ * registration choice from config-current.json. Its form carries the
+ * settings form's nonce, so the config-save handler above applies the
+ * fields it posts (REGISTER_WITH_ONIONHEAVEN; on a hub the takeover
+ * settings) through config-updates.json like every other setting. The hub
+ * address is shown, never changed here: the site's key goes to it.
+ */
+function onionpress_oh_is_v3( $value ) {
+    return is_string( $value ) && preg_match( '/^[a-z2-7]{56}\.onion$/D', $value ) === 1;
+}
+
+function onionpress_oh_time( $iso ) {
+    $ts = is_string( $iso ) && $iso !== '' ? strtotime( $iso ) : false;
+    if ( ! $ts ) {
+        return array( '', '' );
+    }
+    return array(
+        date_i18n( 'j M Y, H:i', $ts ),
+        human_time_diff( $ts, time() ) . ' ago',
+    );
+}
+
+function onionpress_oh_pill( $text, $tone ) {
+    $tones = array(
+        'green'  => 'color:#116329;background:#dafbe1;border:1px solid #aceebb;',
+        'amber'  => 'color:#7a4d00;background:#fff4d6;border:1px solid #f2d78f;',
+        'blue'   => 'color:#0a4a8a;background:#e3f0fc;border:1px solid #b6d6f5;',
+        'gray'   => 'color:#50575e;background:#f0f0f1;border:1px solid #dcdcde;',
+    );
+    $dots = array( 'green' => '#1a7f37', 'amber' => '#c48a00', 'blue' => '#0a4a8a', 'gray' => '#8c8f94' );
+    return '<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;border-radius:999px;padding:3px 9px;white-space:nowrap;' . $tones[ $tone ] . '">'
+        . '<span style="width:8px;height:8px;border-radius:4px;display:inline-block;background:' . $dots[ $tone ] . '"></span>'
+        . esc_html( $text ) . '</span>';
+}
+
+function onionpress_onionheaven_page() {
+    // The host's state and config: the owner's (the submenu is registered
+    // only for the owner; a subsite administrator who finds the URL is
+    // refused here).
+    if ( ! onionpress_settings_owner_allowed() ) {
+        wp_die( 'Unauthorized' );
+    }
+
+    $status = null;
+    $status_file = '/var/lib/onionpress/status.json';
+    if ( file_exists( $status_file ) ) {
+        $raw = file_get_contents( $status_file );
+        if ( $raw !== false ) {
+            $status = json_decode( $raw, true );
+        }
+    }
+    $current = array();
+    $config_file = '/var/lib/onionpress/config-current.json';
+    if ( file_exists( $config_file ) ) {
+        $raw = file_get_contents( $config_file );
+        if ( $raw !== false ) {
+            $decoded = json_decode( $raw, true );
+            if ( is_array( $decoded ) ) {
+                $current = $decoded;
+            }
+        }
+    }
+    $fields   = onionpress_settings_fields();
+    $platform = is_array( $status ) && isset( $status['platform'] ) ? $status['platform'] : 'macos';
+    $updated  = is_array( $status ) ? ( $status['updated_at'] ?? '' ) : '';
+    $oh       = is_array( $status ) && is_array( $status['onionheaven'] ?? null ) ? $status['onionheaven'] : array();
+    $c        = is_array( $oh['client'] ?? null ) ? $oh['client'] : null;
+    $h        = is_array( $oh['hub'] ?? null ) ? $oh['hub'] : null;
+    $known    = is_array( $oh['known_hosts'] ?? null ) ? $oh['known_hosts'] : array();
+    $stale    = ! $status;
+
+    // An older OnionPress wrote only the flat keys: show those.
+    if ( $c === null && ! empty( $oh ) ) {
+        $c = array(
+            'enabled'      => ! empty( $oh['client_enabled'] ),
+            'hub'          => (string) ( $oh['client_hub'] ?? '' ),
+            'hub_known_as' => null,
+            'registered'   => ! empty( $oh['client_registered'] ),
+            'left_on_hubs' => array(),
+        );
+    }
+    if ( $c === null ) {
+        $c = array( 'enabled' => null, 'hub' => '', 'hub_known_as' => null, 'registered' => false, 'left_on_hubs' => array() );
+    }
+
+    $choice = strtolower( trim( (string) ( $current['REGISTER_WITH_ONIONHEAVEN'] ?? '' ) ) );
+    if ( $choice === '' ) {
+        $choice = 'yes';
+    }
+    $hub = onionpress_oh_is_v3( $c['hub'] ?? '' ) ? $c['hub'] : '';
+    $hub_active = is_array( $h ) && ! empty( $h['active'] );
+
+    // Headline and pill for the "kept reachable by" card.
+    if ( ! empty( $c['registered'] ) && $c['enabled'] === true ) {
+        list( , $beat_ago ) = onionpress_oh_time( $c['last_heartbeat_at'] ?? '' );
+        $client_title = 'This site is kept reachable by a hub';
+        $client_pill  = onionpress_oh_pill( $beat_ago ? "Registered · heartbeat accepted $beat_ago" : 'Registered', 'green' );
+    } elseif ( $c['enabled'] === true ) {
+        $client_title = 'This site is set to be kept reachable by a hub';
+        $client_pill  = onionpress_oh_pill( 'Pending · no heartbeat accepted yet', 'amber' );
+    } elseif ( $c['enabled'] === false ) {
+        $client_title = 'This site is not kept reachable by a hub';
+        $client_pill  = onionpress_oh_pill( 'Disabled', 'gray' );
+    } else {
+        $client_title = 'This site is not kept reachable by a hub';
+        $client_pill  = onionpress_oh_pill( 'Not enabled', 'gray' );
+    }
+    $known_as = isset( $c['hub_known_as'] ) && is_string( $c['hub_known_as'] ) ? $c['hub_known_as'] : '';
+    if ( $known_as !== '' ) {
+        $badge_text = 'Known host · ' . $known_as . ( ! empty( $c['hub_is_default'] ) ? ' (default)' : '' );
+        if ( ( $c['hub_kind'] ?? '' ) === 'onionhome' ) {
+            $badge_text .= ' (the onion name registry, not an OnionHeaven hub)';
+        }
+        $hub_badge = onionpress_oh_pill( $badge_text, 'blue' );
+    } else {
+        $hub_badge = onionpress_oh_pill( 'Not a known host · a copy of your key goes to whoever runs it', 'amber' );
+    }
+    list( $registered_when, ) = onionpress_oh_time( $c['registered_at'] ?? '' );
+    ?>
+    <style>
+        .op-oh-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+        @media (max-width: 1100px) { .op-oh-grid { grid-template-columns: minmax(0, 1fr); } }
+        .op-oh-card { background: #fff; border: 1px solid #c3c4c7; }
+        .op-oh-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #c3c4c7; flex-wrap: wrap; }
+        .op-oh-card-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
+        .op-oh-card-body { padding: 12px; display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+        .op-oh-k { font-size: 12px; color: #50575e; }
+        .op-oh-mono { font-family: Consolas, Monaco, monospace; font-size: 12px; word-break: break-all; line-height: 1.4; }
+        .op-oh-stat { display: flex; flex-direction: column; }
+        .op-oh-stat b { font-size: 20px; font-weight: 600; line-height: 1.1; }
+        .op-oh-stat span { font-size: 11px; color: #50575e; }
+        .op-oh-table { border-collapse: collapse; width: 100%; }
+        .op-oh-table th { font-size: 11px; font-weight: 600; color: #50575e; text-transform: uppercase; letter-spacing: 0.03em; padding: 8px 10px; border-bottom: 1px solid #c3c4c7; text-align: left; }
+        .op-oh-table td { font-size: 13px; padding: 8px 10px; border-bottom: 1px solid #dcdcde; vertical-align: top; }
+        .op-oh-note { background: #fffaf0; border: 1px solid #f2d78f; border-radius: 4px; padding: 10px 12px; }
+    </style>
+    <div class="wrap">
+        <h1>OnionHeaven</h1>
+        <p style="font-size: 13px; color: #50575e; max-width: 760px;">An OnionHeaven hub keeps a <code>.onion</code> address reachable when the computer behind it is off, asleep or disconnected: it holds a copy of the site's key and serves the Wayback Machine's copy of the site in its place.</p>
+        <?php if ( $stale ) : ?>
+        <div class="notice notice-warning inline"><p>OnionPress has not written its status yet (it may be starting): what is shown below is the saved configuration only.</p></div>
+        <?php endif; ?>
+
+        <form method="post">
+            <?php wp_nonce_field( 'onionpress_settings_save', 'onionpress_settings_nonce' ); ?>
+            <div class="op-oh-grid">
+
+                <section class="op-oh-card" aria-labelledby="op-oh-served">
+                    <div class="op-oh-card-head">
+                        <h2 id="op-oh-served"><?php echo esc_html( $client_title ); ?></h2>
+                        <?php echo $client_pill; ?>
+                    </div>
+                    <div class="op-oh-card-body">
+                        <div>
+                            <div class="op-oh-k">Hub</div>
+                            <?php if ( $hub !== '' ) : ?>
+                            <div class="op-oh-mono"><?php echo esc_html( $hub ); ?></div>
+                            <?php else : ?>
+                            <div class="op-oh-mono">&mdash;</div>
+                            <?php endif; ?>
+                            <div style="margin-top: 6px;"><?php echo $hub_badge; ?></div>
+                        </div>
+                        <?php if ( onionpress_oh_is_v3( $c['content_address'] ?? '' ) ) : ?>
+                        <div>
+                            <div class="op-oh-k">Your site</div>
+                            <div class="op-oh-mono"><?php echo esc_html( $c['content_address'] ); ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ( onionpress_oh_is_v3( $c['healthcheck_address'] ?? '' ) ) : ?>
+                        <div>
+                            <div class="op-oh-k">Health check</div>
+                            <div class="op-oh-mono"><?php echo esc_html( $c['healthcheck_address'] ); ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php if ( $registered_when !== '' ) : ?>
+                        <div>
+                            <div class="op-oh-k">Registered since</div>
+                            <div><?php echo esc_html( $registered_when ); ?></div>
+                        </div>
+                        <?php endif; ?>
+                        <?php foreach ( ( is_array( $c['left_on_hubs'] ?? null ) ? $c['left_on_hubs'] : array() ) as $entry ) :
+                            if ( ! is_array( $entry ) || ! onionpress_oh_is_v3( $entry['onionheaven_address'] ?? '' ) ) {
+                                continue;
+                            }
+                            list( $since_when, ) = onionpress_oh_time( $entry['since'] ?? '' );
+                            $who = $entry['onionheaven_address'] . ( ! empty( $entry['hub_known_as'] ) && is_string( $entry['hub_known_as'] ) ? ' (' . $entry['hub_known_as'] . ')' : '' );
+                        ?>
+                        <div class="op-oh-note">
+                            <strong style="color: #7a4d00;">A copy of <?php echo ! empty( $entry['key_here'] ) ? 'your key' : 'an earlier address\'s key'; ?> may still be held elsewhere</strong>
+                            <div class="op-oh-mono" style="margin-top: 4px;"><?php echo esc_html( $who ); ?></div>
+                            <div style="font-size: 12px; color: #50575e; margin-top: 4px;">
+                                <?php if ( ! empty( $entry['key_here'] ) ) : ?>
+                                    <?php echo esc_html( ( $entry['reason'] ?? 'left behind' ) . ( $since_when ? ", since $since_when" : '' ) ); ?>. OnionPress asks it to delete the copy every <?php echo (int) ( $c['retry_minutes'] ?? 15 ); ?> minutes.
+                                <?php else : ?>
+                                    The key of <?php echo esc_html( $entry['content_address'] ?? '' ); ?>, an address this install no longer has: OnionPress cannot ask for its deletion. Ask the hub's operator.
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                        <div style="padding-top: 8px; border-top: 1px solid #dcdcde;">
+                            <label for="op_REGISTER_WITH_ONIONHEAVEN" style="font-weight: 600;">Keep site reachable via OnionHeaven</label><br>
+                            <select name="op_REGISTER_WITH_ONIONHEAVEN" id="op_REGISTER_WITH_ONIONHEAVEN" style="margin-top: 6px;">
+                                <?php foreach ( $fields['REGISTER_WITH_ONIONHEAVEN']['options'] as $opt_val => $opt_label ) : ?>
+                                <option value="<?php echo esc_attr( $opt_val ); ?>" <?php selected( $choice, $opt_val ); ?>><?php echo esc_html( $opt_label ); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description" style="margin-top: 6px;">The hub holds a copy of your onion service key, used only to publish your address while your site is offline. Disabling asks the hub to delete it.</p>
+                        </div>
+                        <div style="padding-top: 8px; border-top: 1px solid #dcdcde;">
+                            <span style="font-weight: 600;">Change hub</span>
+                            <p class="description" style="margin-top: 4px;">Your key goes to the hub, so the hub address cannot be changed from WordPress.
+                            <?php if ( $platform === 'linux' ) : ?>
+                                Run <code>onionpress config set ONIONHEAVEN_ADDRESS &lt;address&gt;</code>, then restart OnionPress.
+                            <?php else : ?>
+                                Use OnionHeaven&hellip; in the OnionPress menu on your Mac.
+                            <?php endif; ?>
+                            </p>
+                        </div>
+                    </div>
+                </section>
+
+                <?php // On a hub the site table needs the width: that card spans both columns and comes first. ?>
+                <section class="op-oh-card" aria-labelledby="op-oh-serving"<?php if ( $hub_active ) : ?> style="grid-column: 1 / -1; order: -1;"<?php endif; ?>>
+                    <div class="op-oh-card-head">
+                        <?php if ( $hub_active ) : ?>
+                        <h2 id="op-oh-serving">This OnionPress is an OnionHeaven hub for <?php echo (int) ( $h['registered_count'] ?? 0 ); ?> site<?php echo (int) ( $h['registered_count'] ?? 0 ) === 1 ? '' : 's'; ?></h2>
+                        <?php echo onionpress_oh_pill( ! empty( $h['accepting_registrations'] ) ? 'Accepting registrations' : 'Serving the hub address', 'green' ); ?>
+                        <?php elseif ( is_array( $h ) ) : ?>
+                        <h2 id="op-oh-serving">This OnionPress is not a hub for other sites</h2>
+                        <?php echo onionpress_oh_pill( 'Not serving anyone', 'gray' ); ?>
+                        <?php else : ?>
+                        <h2 id="op-oh-serving">Serving as a hub</h2>
+                        <?php echo onionpress_oh_pill( 'Not known yet', 'gray' ); ?>
+                        <?php endif; ?>
+                    </div>
+                    <div class="op-oh-card-body">
+                        <?php if ( $hub_active ) : ?>
+                        <?php if ( onionpress_oh_is_v3( $h['address'] ?? '' ) ) : ?>
+                        <div>
+                            <div class="op-oh-k">Hub address</div>
+                            <div class="op-oh-mono"><?php echo esc_html( $h['address'] ); ?></div>
+                            <?php if ( ! empty( $h['known_as'] ) && is_string( $h['known_as'] ) ) : ?>
+                            <div style="margin-top: 6px;"><?php echo onionpress_oh_pill( 'Known host · this is ' . $h['known_as'], 'blue' ); ?></div>
+                            <?php endif; ?>
+                        </div>
+                        <?php endif; ?>
+                        <div style="display: flex; gap: 24px; flex-wrap: wrap;">
+                            <div class="op-oh-stat"><b><?php echo (int) ( $h['registered_count'] ?? 0 ); ?></b><span>registered</span></div>
+                            <div class="op-oh-stat"><b style="color:#116329"><?php echo (int) ( $h['online_count'] ?? 0 ); ?></b><span>online</span></div>
+                            <div class="op-oh-stat"><b style="color:#7a4d00"><?php echo (int) ( $h['taken_over_count'] ?? 0 ); ?></b><span>taken over</span></div>
+                            <div class="op-oh-stat"><b><?php echo (int) ( $h['takeover_containers'] ?? 0 ); ?></b><span>takeover worker<?php echo (int) ( $h['takeover_containers'] ?? 0 ) === 1 ? '' : 's'; ?></span></div>
+                        </div>
+                        <?php if ( ! empty( $h['counts_unavailable'] ) || ! empty( $h['sites_unavailable'] ) ) : ?>
+                        <p class="description">The registry did not answer when the status was written.</p>
+                        <?php endif; ?>
+                        <?php $sites = is_array( $h['sites'] ?? null ) ? $h['sites'] : array(); ?>
+                        <?php if ( ! empty( $sites ) ) : ?>
+                        <div>
+                            <div class="op-oh-k" style="margin-bottom: 4px;">Sites this hub keeps reachable</div>
+                            <table class="op-oh-table">
+                                <thead><tr><th scope="col">Site</th><th scope="col">Status</th><th scope="col">Last heartbeat</th><th scope="col">Version</th></tr></thead>
+                                <tbody>
+                                <?php foreach ( $sites as $site ) :
+                                    if ( ! is_array( $site ) || ! onionpress_oh_is_v3( $site['content_address'] ?? '' ) ) {
+                                        continue;
+                                    }
+                                    $st = (string) ( $site['status'] ?? 'unknown' );
+                                    list( , $beat ) = onionpress_oh_time( $site['last_healthy'] ?? '' );
+                                    $tone = $st === 'online' ? 'green' : ( $st === 'taken-over' ? 'amber' : 'gray' );
+                                    $label = $st === 'taken-over' ? 'Taken over' : ucfirst( $st );
+                                    if ( $st === 'online' && isset( $site['wordpress_healthy'] ) && $site['wordpress_healthy'] === false ) {
+                                        $label .= ' · WordPress unhealthy';
+                                    }
+                                ?>
+                                <tr>
+                                    <td><span class="op-oh-mono"><?php echo esc_html( $site['content_address'] ); ?></span></td>
+                                    <td><?php echo onionpress_oh_pill( $label, $tone ); ?></td>
+                                    <td><?php echo esc_html( $beat ?: '—' ); ?></td>
+                                    <td><?php echo esc_html( (string) ( $site['version'] ?? '' ) ?: '—' ); ?></td>
+                                </tr>
+                                <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                            <?php if ( ! empty( $h['sites_truncated'] ) ) : ?>
+                            <p class="description">Showing the first <?php echo (int) ( $h['sites_limit'] ?? count( $sites ) ); ?> of <?php echo (int) ( $h['registered_count'] ?? 0 ); ?>.</p>
+                            <?php endif; ?>
+                        </div>
+                        <?php endif; ?>
+                        <div style="padding-top: 8px; border-top: 1px solid #dcdcde; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; align-items: center;">
+                            <?php foreach ( array( 'ONIONHEAVEN_PROPAGATION_DELAY', 'ONIONHEAVEN_MAX_SERVICES' ) as $key ) :
+                                $field = $fields[ $key ];
+                                $val   = (string) ( $current[ $key ] ?? ( ( is_array( $h['settings'] ?? null ) ? $h['settings'][ $key ] ?? '' : '' ) ) );
+                            ?>
+                            <label for="op_<?php echo esc_attr( $key ); ?>">
+                                <span style="font-weight: 600;"><?php echo esc_html( $field['label'] ); ?></span><br>
+                                <span class="op-oh-k"><?php echo esc_html( $field['description'] ); ?></span>
+                            </label>
+                            <input type="text" name="op_<?php echo esc_attr( $key ); ?>" id="op_<?php echo esc_attr( $key ); ?>" value="<?php echo esc_attr( $val ); ?>" placeholder="<?php echo esc_attr( $field['placeholder'] ?? '' ); ?>" class="small-text" style="text-align: right;">
+                            <?php endforeach; ?>
+                        </div>
+                        <p class="description">Accepting registrations is set by hand on the host (<code>ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes</code> in <code>~/.onionpress/config</code>) and cannot be switched off here: the registered sites would lose their fallback.</p>
+                        <?php elseif ( is_array( $h ) ) : ?>
+                        <p style="margin: 0;">This OnionPress accepts no registrations and holds no other site's key.</p>
+                        <p class="description">A hub is turned on by hand on the host (<code>ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes</code> in <code>~/.onionpress/config</code>) and needs a machine that never sleeps. When this node is a hub, this card lists the sites it serves and its takeover settings.</p>
+                        <?php else : ?>
+                        <p class="description">OnionPress has not said yet whether this node accepts registrations.</p>
+                        <?php endif; ?>
+                    </div>
+                </section>
+            </div>
+
+            <?php if ( ! empty( $known ) ) : ?>
+            <h2 style="font-size: 12px; font-weight: 600; color: #50575e; text-transform: uppercase; letter-spacing: 0.04em; margin: 20px 0 6px;">Known hosts</h2>
+            <table style="border-collapse: collapse; font-size: 12px;">
+                <?php foreach ( $known as $host ) :
+                    if ( ! is_array( $host ) || ! onionpress_oh_is_v3( $host['address'] ?? '' ) ) {
+                        continue;
+                    }
+                ?>
+                <tr>
+                    <td style="padding: 3px 16px 3px 0;"><?php echo esc_html( (string) ( $host['name'] ?? '' ) ); ?></td>
+                    <td class="op-oh-mono" style="padding: 3px 0; color: #50575e;"><?php echo esc_html( $host['address'] ); ?><?php if ( $hub_active && ( $h['address'] ?? '' ) === $host['address'] ) : ?> <strong style="color:#116329;font-family:inherit;">(this node)</strong><?php endif; ?><?php if ( ! empty( $host['note'] ) && is_string( $host['note'] ) ) : ?> <span style="font-family:inherit;word-break:normal;">&mdash; <?php echo esc_html( $host['note'] ); ?></span><?php endif; ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+            <?php endif; ?>
+
+            <p style="margin-top: 16px;">
+                <?php submit_button( 'Save Changes', 'primary', 'submit', false ); ?>
+                <span class="description" style="margin-left: 10px;">Status written <?php list( , $upd_ago ) = onionpress_oh_time( $updated ); echo esc_html( $upd_ago ?: 'never' ); ?>.</span>
+            </p>
+        </form>
+    </div>
+    <?php
+}
+
 function onionpress_settings_site_page() {
     ?>
     <div class="wrap">

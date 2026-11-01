@@ -189,11 +189,12 @@ SETTINGS_KEYS = [
     ("PREVENT_SLEEP", "normal"),
     ("LAUNCH_ON_LOGIN", "yes"),
     ("INSTALL_IA_PLUGIN", "yes"),
-    ("REGISTER_WITH_ONIONHEAVEN", "yes"),  # on by default; unset shows checked
     ("SHARE_ANALYTICS_WITH_ONIONHOME", "no"),
-    ("ONIONHEAVEN_ADDRESS", "oheavenfhbohpdjijmxo3xgvvuo6eleyhhorbompoycle6x5eajlp7qd.onion"),
     ("CLOUDFLARE_TUNNEL_TOKEN", ""),
 ]
+# REGISTER_WITH_ONIONHEAVEN and ONIONHEAVEN_ADDRESS moved to the OnionHeaven
+# screen (onionheaven_ui.show_onionheaven_dialog); their help, consequence
+# and label texts stay here, shared.
 
 
 def _icon_alert(title, message, icon_path):
@@ -245,8 +246,6 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
     for key, default in SETTINGS_KEYS:
         old_values[key] = op_config.read_value(config_path, key, default)
     old_values["PREVENT_SLEEP"] = _normalize_sleep(old_values.get("PREVENT_SLEEP", "normal"))
-    if old_values["REGISTER_WITH_ONIONHEAVEN"].strip() == "":
-        old_values["REGISTER_WITH_ONIONHEAVEN"] = "yes"
 
     # Layout constants. NSAlert sizes itself to the accessory view, so the
     # form's width is what keeps the dialog from looking narrow; long fields
@@ -362,12 +361,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         y -= row_h
         add_check_row(y, "Install IA Plugin", "INSTALL_IA_PLUGIN", form_values["INSTALL_IA_PLUGIN"])
         y -= row_h
-        add_check_row(y, "Keep site reachable via OnionHeaven (recommended)", "REGISTER_WITH_ONIONHEAVEN", form_values["REGISTER_WITH_ONIONHEAVEN"])
-        y -= row_h
         add_check_row(y, "Share diagnostic logs with OnionHome", "SHARE_ANALYTICS_WITH_ONIONHOME", form_values["SHARE_ANALYTICS_WITH_ONIONHOME"])
-        y -= row_h
-        oh_addr_field = add_text_row(y, "OnionHeaven Hub (advanced):", "ONIONHEAVEN_ADDRESS", form_values["ONIONHEAVEN_ADDRESS"], input_w)
-        oh_addr_field.setPlaceholderString_("oheavenfhb...onion")
         y -= row_h
         cf_field = add_text_row(y, "Cloudflare Token (optional):", "CLOUDFLARE_TUNNEL_TOKEN", form_values["CLOUDFLARE_TUNNEL_TOKEN"], input_w)
         cf_field.setPlaceholderString_("paste tunnel token")
@@ -394,8 +388,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
                 idx = widget.indexOfSelectedItem()
                 new_values[key] = sleep_options_map[idx] if 0 <= idx < len(sleep_options_map) else "normal"
             elif key in ("LAUNCH_ON_LOGIN",
-                         "INSTALL_IA_PLUGIN", "REGISTER_WITH_ONIONHEAVEN",
-                         "SHARE_ANALYTICS_WITH_ONIONHOME"):
+                         "INSTALL_IA_PLUGIN", "SHARE_ANALYTICS_WITH_ONIONHOME"):
                 new_values[key] = "yes" if widget.state() == AppKit.NSControlStateValueOn else "no"
             else:
                 new_values[key] = widget.stringValue().strip()
@@ -447,82 +440,95 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
             form_values["VM_CPU"] = old_values["VM_CPU"]
             continue
 
-        # -- Validate OnionHeaven address --
-        oh_addr = new_values.get("ONIONHEAVEN_ADDRESS", "").strip()
-        if oh_addr and oh_addr != old_values.get("ONIONHEAVEN_ADDRESS", ""):
-            # The format is checked here as well as by the launcher, so a
-            # malformed address is refused even when the launcher check
-            # below cannot run (its exception path saves the value).
-            if not key_manager.is_valid_onion_address(oh_addr):
-                _icon_alert("Invalid OnionHeaven Address",
-                            "Address must be a valid 56-character .onion address.",
-                            icon_path)
-                form_values = new_values
-                form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
-                continue
-            log_func(f"Validating OnionHeaven address: {oh_addr}")
-            try:
-                result = subprocess.run(
-                    [launcher_script, "validate-oh-address", oh_addr],
-                    capture_output=True, text=True, encoding='utf-8', errors='replace',
-                    timeout=90
-                )
-                vr = json.loads(result.stdout.strip()) if result.stdout.strip() else {}
-                status = vr.get("status", "")
-                message = vr.get("message", "")
-
-                if status == "invalid_format" or status == "self":
-                    _icon_alert("Invalid OnionHeaven Address", message, icon_path)
-                    form_values = new_values
-                    form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
-                    continue
-                elif status == "site":
-                    resp = rumps.alert(
-                        title="Not an OnionHeaven Hub",
-                        message=f"{message}\n\nUse it anyway?",
-                        ok="Use Anyway",
-                        cancel="Cancel"
-                    )
-                    if resp != 1:
-                        form_values = new_values
-                        form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
-                        continue
-                    log_func(f"User accepted non-hub address: {oh_addr}")
-                elif status == "unreachable":
-                    resp = rumps.alert(
-                        title="Address Unreachable",
-                        message=f"{message}\n\nUse it anyway?",
-                        ok="Use Anyway",
-                        cancel="Cancel"
-                    )
-                    if resp != 1:
-                        form_values = new_values
-                        form_values["ONIONHEAVEN_ADDRESS"] = old_values["ONIONHEAVEN_ADDRESS"]
-                        continue
-                    log_func(f"User accepted unreachable address: {oh_addr}")
-                else:
-                    log_func(f"OnionHeaven hub validated: {oh_addr}")
-            except Exception as e:
-                log_func(f"OnionHeaven address validation error: {e}")
-
         # Validation passed
         break
 
+    confirm_and_write_changes([k for k, _ in SETTINGS_KEYS], old_values, new_values,
+                              callbacks, log_func, icon_path)
+
+
+def probe_hub_address(oh_addr, launcher_script, log_func):
+    """Ask the launcher's validate-oh-address whether *oh_addr* answers as
+    an OnionHeaven hub: (status, message), status one of "hub",
+    "invalid_format", "self", "site", "unreachable", or "error" when the
+    launcher could not be run."""
+    try:
+        result = subprocess.run(
+            [launcher_script, "validate-oh-address", oh_addr],
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=90
+        )
+        vr = json.loads(result.stdout.strip()) if result.stdout.strip() else {}
+        return vr.get("status", "") or "hub", vr.get("message", "")
+    except Exception as e:
+        log_func(f"OnionHeaven address validation error: {e}")
+        return "error", str(e)
+
+
+def validate_hub_address(oh_addr, launcher_script, log_func, icon_path):
+    """The dialogs' check of a new ONIONHEAVEN_ADDRESS: the format here,
+    then the launcher's validate-oh-address (does it answer as a hub?).
+    True when the value may be saved (validated, the check could not run,
+    or the person accepted a non-hub or unreachable address), False when
+    it is refused. The format is checked here as well as by the launcher,
+    so a malformed address is refused even when the launcher check cannot
+    run."""
+    if not key_manager.is_valid_onion_address(oh_addr):
+        _icon_alert("Invalid OnionHeaven Address",
+                    "Address must be a valid 56-character .onion address.",
+                    icon_path)
+        return False
+    log_func(f"Validating OnionHeaven address: {oh_addr}")
+    status, message = probe_hub_address(oh_addr, launcher_script, log_func)
+    if status in ("invalid_format", "self"):
+        _icon_alert("Invalid OnionHeaven Address", message, icon_path)
+        return False
+    if status == "site":
+        resp = rumps.alert(
+            title="Not an OnionHeaven Hub",
+            message=f"{message}\n\nUse it anyway?",
+            ok="Use Anyway",
+            cancel="Cancel"
+        )
+        if resp != 1:
+            return False
+        log_func(f"User accepted non-hub address: {oh_addr}")
+    elif status == "unreachable":
+        resp = rumps.alert(
+            title="Address Unreachable",
+            message=f"{message}\n\nUse it anyway?",
+            ok="Use Anyway",
+            cancel="Cancel"
+        )
+        if resp != 1:
+            return False
+        log_func(f"User accepted unreachable address: {oh_addr}")
+    elif status != "error":
+        log_func(f"OnionHeaven hub validated: {oh_addr}")
+    return True
+
+
+def confirm_and_write_changes(keys, old_values, new_values, callbacks, log_func, icon_path):
+    """What the dialogs do once a form is valid: the hazards confirmation
+    listing every changed key with its consequence, then each change
+    through callbacks['write_config'] (`onionpress config set`), then the
+    saved notice, with the restart note when a key in config.NEEDS_RESTART
+    changed. Returns the keys written."""
     # -- Find changed settings --
     changes = []
-    for key, _ in SETTINGS_KEYS:
-        if new_values[key] != old_values[key]:
+    for key in keys:
+        if new_values.get(key, "") != old_values.get(key, ""):
             changes.append(key)
 
     if not changes:
         _icon_alert("Settings", "No changes.", icon_path)
-        return
+        return []
 
     # -- Dialog 2: Hazards confirmation --
     change_lines = []
     for key in changes:
-        old_v = old_values[key]
-        new_v = new_values[key]
+        old_v = old_values.get(key, "")
+        new_v = new_values.get(key, "")
         label = _LABELS.get(key, key)
 
         disp_old = old_v if len(old_v) <= 20 else old_v[:17] + "..."
@@ -567,7 +573,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
 
     resp2 = hazard.runModal()
     if resp2 != 1000:  # Not "Apply"
-        return
+        return []
 
     # -- Write changed values, each through `onionpress config set` --
     write_config = callbacks.get('write_config')
@@ -584,7 +590,7 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         written.append(key)
     changes = written
     if not changes:
-        return
+        return []
 
     change_details = [f"{k}={op_config.loggable_value(k, new_values[k])}" for k in changes]
     log_func(f"Settings updated: {', '.join(change_details)}")
@@ -601,3 +607,4 @@ def show_settings_dialog(config_path, icon_path, launcher_script, log_func, call
         if icon3:
             saved.setIcon_(icon3)
     saved.runModal()
+    return changes
