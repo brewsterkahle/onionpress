@@ -510,18 +510,6 @@ class TestLauncherPathsRefuseLinks(unittest.TestCase):
         os.unlink(path)
         return text
 
-    def test_restore_backup_refuses(self):
-        for launcher in mv.TestLauncherRestorePaths.RESTORE:
-            for fmt, path in self.backups.items():
-                with self.subTest(launcher=launcher, fmt=fmt):
-                    data = self.h._fresh_data_dir()
-                    rc, out, err = self.h._run(launcher, f'restore_backup "$PW" {path!r}')
-                    self.assertNotEqual(rc, 0)
-                    # macOS says so on stderr, Linux in its log (on stdout here).
-                    self.assertIn("valid OnionPress backup", out + err)
-                    self.assertIn("symbolic link", self._log())
-                    self.h._assert_untouched(data)
-
     def test_setup_from_backup_refuses(self):
         # The restore's prepare_install_from_backup (#509), both launchers'.
         for fmt, path in self.backups.items():
@@ -532,17 +520,6 @@ class TestLauncherPathsRefuseLinks(unittest.TestCase):
                     self.assertIn("valid OnionPress backup", err)
                     self.assertIn("symbolic link", self._log())
                     self.h._assert_untouched(data)
-
-    def test_launchers_extract_only_through_the_helper(self):
-        for launcher in mv.LAUNCHERS:
-            code = mv._read(launcher)
-            for func in self.h._restore_functions(launcher):
-                body = "\n".join(line for line in mv._bash_function(code, func).splitlines()
-                                 if not line.lstrip().startswith("#"))
-                with self.subTest(launcher, func=func):
-                    self.assertIn("extract-backup --archive", body)
-                    self.assertNotRegex(body, r"\b(unzip|ditto|bsdtar)\b|\btar\s+-?x")
-
 
 if __name__ == "__main__":
     unittest.main()

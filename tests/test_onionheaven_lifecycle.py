@@ -812,8 +812,8 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
                            "Stopping user services", "uninstall")
         self.assert_before(branch, "onionheaven_release uninstall",
                            'docker volume rm "$vol"', "uninstall")
-        self.assert_before(branch, "create_backup", "onionheaven_release uninstall",
-                           "uninstall: the backup first")
+        self.assert_before(branch, 'op_py --data-dir "$DATA_DIR" backup -o "$bp_path"',
+                           "onionheaven_release uninstall", "uninstall: the backup first")
         self.assertIn("ONIONHEAVEN_RELEASE_RC", branch[branch.index("has been uninstalled"):])
 
     def test_resets_keep_the_record_when_a_hub_may_hold_a_key(self):
@@ -870,23 +870,34 @@ class TestLauncherPathsReleaseFirst(unittest.TestCase):
         self.assertIn("IMPORT_REFUSED_LINUX_MSG", branch)
         self.assertNotIn("generate-vanity", handler)
         self.assertNotIn("                generate-vanity)\n", text)
-        body = _shell_function(text, "restore_backup")
-        self.assert_before(body, 'onionheaven_release restore "$onion_address"',
-                           'touch "$DATA_DIR/.import-key-pending"', "restore_backup")
-        self.assert_before(body, "op_py backup-address",
-                           'onionheaven_release restore "$onion_address"', "restore_backup")
+        # The page's restore is the CLI's on both platforms (issue #406):
+        # the hubs are asked (release_onionheaven, the heartbeat client
+        # stopped first on Linux) by before_key_change, which
+        # restore_from_backup calls once the backup's key is checked and
+        # before it is written anywhere.
+        self.assertNotIn("\nrestore_backup() {", text)
+        cli = _read("src/onionpress/cli.py")
+        body = cli[cli.index("def cmd_settings_page_restore("):cli.index("def cmd_prepare_restore(")]
+        self.assert_before(body, "heartbeat_unit.stop(log)", 'release_onionheaven("restore"',
+                           "cmd_settings_page_restore")
+        self.assertIn("before_key_change=before_key_change", body)
+        restore = _read("src/onionpress/backup.py")
+        step = restore[restore.index("def _restore_backup_key("):]
+        self.assert_before(step, "key_pair_onion_address(priv, pub)", "before_key_change(derived_address)",
+                           "_restore_backup_key")
+        self.assert_before(step, "before_key_change(derived_address)", "write_private_key(priv, pub)",
+                           "_restore_backup_key")
 
     def test_restores_and_setup_from_backup(self):
         linux = _read("linux/onionpress")
         branch = _case_branch(linux, "restore")
         # `restore --check` runs the CLI before anything else (it changes
-        # nothing, onionpress.confirm); the real run stops the heartbeat
-        # client first (it holds the key) and starts it again after.
-        check = branch.index('if [ "$restore_check" = yes ]')
-        real = branch[branch.index("exit $?", check):]
-        self.assertNotIn("heartbeat_client", branch[:check])
-        self.assert_before(real, "stop_heartbeat_client", 'op_py --data-dir "$DATA_DIR" restore', "restore")
-        self.assert_before(real, 'op_py --data-dir "$DATA_DIR" restore', "start_heartbeat_client", "restore")
+        # nothing, onionpress.confirm); the real run is the CLI's too, which
+        # on Linux stops the heartbeat client first (it holds the key) and
+        # starts it again after (heartbeat_unit.paused around cmd_restore,
+        # issue #406): nothing of it in the launcher.
+        self.assertNotIn("heartbeat_client", branch)
+        self.assertIn('op_py --data-dir "$DATA_DIR" restore', branch)
         # `setup --from-backup` is the restore since #509: cmd_restore asks
         # the hubs to delete the current key, keeping the backup's own
         # address, before any key volume goes; the setup flow itself asks

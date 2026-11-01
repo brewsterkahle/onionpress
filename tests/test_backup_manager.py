@@ -1594,22 +1594,6 @@ class TestBashBackupHelpers(unittest.TestCase):
             with self.subTest(rel):
                 self.assertNotRegex(code, r"\bzip\b[^\n]*\s-P\s")
                 self.assertNotRegex(code, r"\bunzip\b[^\n]*\s-P\s")
-                if rel.startswith("linux"):  # the Mac's restore and setup are the CLI's
-                    self.assertIn("extract-backup", code)
-
-    def test_launchers_pass_the_password_on_stdin(self):
-        for rel in self.LAUNCHERS:
-            for line in self._read(rel).splitlines():
-                if re.search(r"\b(pack|extract)-backup\b", line) \
-                        and not line.lstrip().startswith("#"):
-                    with self.subTest(rel, line=line.strip()):
-                        self.assertRegex(line, r"""printf '%s' "\$\w+" \| """)
-        # create_backup embeds a python3 -c snippet with a bare "}" line, so
-        # take everything up to the next function instead.
-        linux = self._read("linux/onionpress")
-        start = linux.index("\ncreate_backup() {")
-        body = linux[start:linux.index("\nrestore_backup() {", start)]
-        self.assertIn('op_py pack-backup --staging "$staging" --output "$output_path"', body)
 
     def test_python_writer_does_not_use_zip_encryption(self):
         src = self._read("src/onionpress/backup_archive.py")

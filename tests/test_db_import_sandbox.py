@@ -82,28 +82,15 @@ class TestNoInsecureImportInSources(unittest.TestCase):
         # No `-e 'source ...'` SQL to run a file either.
         self.assertNotRegex(text, r"source\s+/tmp/")
 
-    def test_linux_db_import_is_the_delegation(self):
-        # Phase 4 (#120): the bash body is one line, the password piped in
-        # (never on op_py's argv) and the dump named; the flags, the
-        # capability check and the stream live in backup.db_import only.
-        fn = _shell_function(_read(LINUX), "db_import")
-        self.assertEqual(
-            fn.splitlines()[1:-1],
-            ['    printf \'%s\\n\' "$1" | op_py --data-dir "$DATA_DIR" '
-             'db-import --sql-file "$2"'])
-        for word in ("mariadb", "docker", "--sandbox", "MYSQL_PWD", "cat "):
-            self.assertNotIn(word, fn)
-
-    def test_launcher_restore_calls_db_import(self):
-        self.assertRegex(_read(LINUX), r'db_import "\$db_pass" "\$sql_file"',
-                         f"{LINUX}: restore does not call db_import")
-
-    def test_mac_launcher_imports_no_dump(self):
-        # Its `restore` is onionpress.cli restore (backup.py's sandboxed
-        # import); the launcher's own restore_backup and db_import are gone.
-        text = _read(MAC)
-        self.assertNotIn("db_import", text)
-        self.assertNotRegex(text, r"\bmariadb\b(?! *--sandbox)[^\n]*wordpress\s*$")
+    def test_launchers_import_no_dump(self):
+        # Every restore is onionpress.cli's (backup.py's sandboxed import):
+        # the launchers' own restore_backup and db_import are gone (the
+        # Linux ones with issue #406).
+        for path in (MAC, LINUX):
+            with self.subTest(path):
+                text = _read(path)
+                self.assertNotIn("db_import", text)
+                self.assertNotRegex(text, r"\bmariadb\b(?! *--sandbox)[^\n]*wordpress\s*$")
 
 
 # ── backup.db_import: the one implementation ───────────────────────────────
@@ -262,84 +249,6 @@ class TestDbImportSubcommand(unittest.TestCase):
         rc, runs, err = self._main(self.PASSWORD + "\n", import_rc=1)
         self.assertEqual(rc, 1)
         self.assertIn("ERROR: Database import failed: boom", err)
-
-
-class TestLinuxDelegationEndToEnd(unittest.TestCase):
-    """The Linux launcher's db_import, cut out and run under bash with op_py
-    on this interpreter and a `docker` stub on PATH: the password line and
-    the dump reach the stub's stdin, the flags its argv, and the Python's
-    exit status is the function's."""
-
-    DUMP = b"/*M!999999\\- enable the sandbox mode */\nSELECT 1;\n\x00\xff bin\n"
-    PASSWORD = "p a$s\\w'o\"rd`x"
-
-    DOCKER_STUB = """#!/bin/sh
-printf '%s\\n' "$*" >> "$CALLS"
-case "$*" in
-  *"grep -q -- --sandbox"*) exit "${PROBE_RC:-0}" ;;
-esac
-cat > "$STDIN_FILE"
-exit "${IMPORT_RC:-0}"
-"""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="db-import-bash-test-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.sql = os.path.join(self.tmp, "wordpress.sql")
-        with open(self.sql, "wb") as f:
-            f.write(self.DUMP)
-        self.bindir = os.path.join(self.tmp, "bin")
-        os.makedirs(self.bindir)
-        stub = os.path.join(self.bindir, "docker")
-        with open(stub, "w") as f:
-            f.write(self.DOCKER_STUB)
-        os.chmod(stub, 0o755)
-        self.calls = os.path.join(self.tmp, "calls")
-        self.stdin_file = os.path.join(self.tmp, "stdin")
-
-    def _run(self, **env_extra):
-        script = (
-            "set -u\n"
-            f"DATA_DIR={shlex.quote(os.path.join(self.tmp, 'data'))}\n"
-            f"op_py() {{ PYTHONPATH={shlex.quote(os.path.join(PROJECT_DIR, 'src'))} "
-            f"{shlex.quote(sys.executable)} -m onionpress.cli \"$@\"; }}\n"
-            + _shell_function(_read(LINUX), "db_import") + "\n"
-            f"db_import {shlex.quote(self.PASSWORD)} {shlex.quote(self.sql)}\n"
-            "echo \"rc=$?\"\n")
-        env = dict(os.environ, PATH=self.bindir + os.pathsep + os.environ.get("PATH", ""),
-                   CALLS=self.calls, STDIN_FILE=self.stdin_file,
-                   DOCKER_HOST="unix:///var/empty/no-docker-for-tests.sock", **env_extra)
-        res = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                             env=env, timeout=120)
-        self.assertEqual(res.returncode, 0, res.stderr)
-        return res.stdout.strip().splitlines()[-1], res.stderr
-
-    def test_the_stub_sees_the_password_line_then_the_dump(self):
-        last, err = self._run()
-        self.assertEqual(last, "rc=0", err)
-        with open(self.stdin_file, "rb") as f:
-            self.assertEqual(f.read(), self.PASSWORD.encode() + b"\n" + self.DUMP)
-        with open(self.calls) as f:
-            calls = f.read().splitlines()
-        self.assertEqual(len(calls), 2, calls)
-        self.assertIn("mariadb --help", calls[0])
-        self.assertTrue(calls[1].startswith("exec -i onionpress-db sh -c "), calls[1])
-        self.assertTrue(calls[1].endswith(
-            "mariadb --sandbox --binary-mode --local-infile=0 -u wordpress wordpress"),
-            calls[1])
-        for line in calls:
-            self.assertNotIn(self.PASSWORD, line)
-
-    def test_an_old_client_fails_the_function(self):
-        last, err = self._run(PROBE_RC="1")
-        self.assertEqual(last, "rc=1")
-        self.assertIn("too old", err)
-        self.assertFalse(os.path.exists(self.stdin_file), "the dump was sent anyway")
-
-    def test_a_failed_import_fails_the_function(self):
-        last, err = self._run(IMPORT_RC="1")
-        self.assertEqual(last, "rc=1")
-        self.assertIn("Database import failed", err)
 
 
 # ── backup.py restore behaviour ────────────────────────────────────────────

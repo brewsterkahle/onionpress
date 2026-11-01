@@ -2495,18 +2495,6 @@ class TestDerivativeRegenerationWiring(unittest.TestCase):
         self.assertEqual(derivatives.HOST_MARKER, self.HOST_MARKER)
         self.assertEqual(derivatives.CONTAINER_MARKER, self.CONTAINER_MARKER)
 
-    def test_linux_bash_backup_and_restore_carry_the_feature(self):
-        """linux/onionpress still has its own inline create_backup and
-        restore_backup (issue #203); they must prune via the shared Python
-        classification and leave the marker like the Python paths do."""
-        text = _read("linux/onionpress")
-        create = self._function_body(text, "create_backup")
-        self.assertIn("prune-image-derivatives", create)
-        self.assertIn("uploads/.onionpress-regenerate-derivatives", create)
-        self.assertIn("--excludes-image-derivatives", create)
-        restore = self._function_body(text, "restore_backup")
-        self.assertIn(f'"$DATA_DIR/{self.HOST_MARKER}"', restore)
-
     def test_fallback_mu_plugin_is_shipped(self):
         from onionpress import multisite
         self.assertIn("onionpress-image-fallback.php", multisite.MU_PLUGINS)

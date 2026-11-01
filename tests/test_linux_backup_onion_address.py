@@ -81,58 +81,6 @@ def _function(text, name):
     return chunk[:chunk.rindex("\n}\n") + 3]
 
 
-class TestCreateBackupAddress(unittest.TestCase):
-
-    def _run(self, hostname):
-        text = _read(LINUX)
-        # create_backup reads keys out of the volumes with the launcher's key
-        # helpers (KEY_HELPER_IMAGE, the stack's pinned tor image).
-        helpers = (next(l for l in text.splitlines() if l.startswith("KEY_HELPER_IMAGE="))
-                   + "\n" + "".join(_function(text, name) for name in (
-                       "using_local_images", "docker_volume_state",
-                       "ensure_key_helper_image", "key_volume_cat")))
-        script = (STUBS + helpers + _function(text, "is_onion_address")
-                  + _function(text, "create_backup")
-                  + 'rc=0; create_backup pw "$OUT" || rc=$?; echo "rc=$rc"\n')
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {"PATH": "/usr/bin:/bin", "HOME": tmp, "TMPDIR": tmp,
-                   "PY": sys.executable, "SRC": os.path.join(PROJECT_DIR, "src"), "ONIONPRESS_VERSION": "1", "DATA_DIR": os.path.join(tmp, "data"),
-                   "LOG_FILE": os.path.join(tmp, "log"), "CALLS": os.path.join(tmp, "calls"),
-                   "META_OUT": os.path.join(tmp, "metadata.json"),
-                   "OUT": os.path.join(tmp, "backup.zip"), "FAKE_HOSTNAME": hostname}
-            r = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
-                               text=True, timeout=60)
-            log = _read(env["LOG_FILE"]) if os.path.exists(env["LOG_FILE"]) else ""
-            calls = _read(env["CALLS"]).splitlines() if os.path.exists(env["CALLS"]) else []
-            meta = (json.loads(_read(env["META_OUT"]))
-                    if os.path.exists(env["META_OUT"]) else None)
-        return r, log, calls, meta
-
-    def test_a_whole_address_goes_into_the_metadata(self):
-        for hostname in (SITE + "\n", SITE):
-            with self.subTest(hostname=hostname):
-                r, log, _, meta = self._run(hostname)
-                self.assertEqual(r.stdout.strip(), "rc=0", r.stderr + log)
-                self.assertEqual(meta["onion_address"], SITE)
-
-    def test_no_address_stays_empty(self):
-        r, log, _, meta = self._run("")
-        self.assertEqual(r.stdout.strip(), "rc=0", r.stderr + log)
-        self.assertEqual(meta["onion_address"], "")
-
-    def test_anything_else_fails_before_any_work(self):
-        for hostname in LOOSE:
-            with self.subTest(hostname=hostname):
-                r, log, calls, meta = self._run(hostname)
-                self.assertEqual(r.stdout.strip(), "rc=1")
-                self.assertIn("not a valid v3 .onion address; no backup was made", r.stderr)
-                self.assertIn("ERROR: Backup: the tor container's onion address is not a valid v3 address", log)
-                self.assertNotIn(hostname, log, "the bad value is not logged")
-                self.assertIsNone(meta)
-                self.assertEqual(len(calls), 1, calls)
-                self.assertTrue(calls[0].startswith("exec onionpress-tor cat "), calls)
-
-
 class TestSettingsPageFileName(unittest.TestCase):
 
     def test_named_after_a_whole_address_only(self):

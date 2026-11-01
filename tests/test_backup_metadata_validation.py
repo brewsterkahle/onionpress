@@ -110,24 +110,6 @@ def _bash_function(text, name):
     return text[start:end + 3]
 
 
-# What linux/onionpress's create_backup calls to read keys out of the
-# volumes: the KEY_HELPER_IMAGE line (the stack's pinned tor image),
-# ensure_key_helper_image and key_volume_cat, and what they use. A harness
-# that runs create_backup loads them from the launcher itself; its docker
-# stub answers `image inspect` (the image is here) and `volume ls`.
-# using_local_images is a delegation to `onionpress.cli using-local-images`
-# (Phase 4, #120), stubbed here as "published images": these harnesses are
-# about the key reads, and the predicate has tests/test_local_image_mode.py.
-LINUX_KEY_HELPERS = ("docker_volume_state", "ensure_key_helper_image", "key_volume_cat")
-
-
-def _linux_key_helpers(text=None):
-    text = _read("linux/onionpress") if text is None else text
-    line = next(l for l in text.splitlines() if l.startswith("KEY_HELPER_IMAGE="))
-    return ("\n" + line + "\nusing_local_images() { return 1; }\n"
-            + "".join(_bash_function(text, n) for n in LINUX_KEY_HELPERS))
-
-
 def _cheap_kdf(test):
     for name, value in (("OPSLIMIT", 1), ("MEMLIMIT", 8192)):
         patcher = mock.patch.object(backup_crypto, name, value)
@@ -588,14 +570,12 @@ class TestBackupAddressCli(unittest.TestCase):
 
 
 class TestLauncherRestorePaths(unittest.TestCase):
-    """The bash restore_backup (Linux) and `setup --from-backup` (both
-    launchers: the restore's own backup.prepare_install_from_backup since
-    #509, through cli.cmd_restore), run for real against crafted backup
-    files. The Mac launcher's `restore` goes through onionpress.cli
-    restore."""
-
-    # Launchers with a bash restore_backup.
-    RESTORE = ("linux/onionpress",)
+    """`setup --from-backup` of both launchers (the restore's own
+    backup.prepare_install_from_backup since #509, through
+    cli.cmd_restore), run for real against crafted backup files. Every
+    launcher restore is onionpress.cli's: `restore` (install-from-backup)
+    and the Settings page's (restore_from_backup, through_wordpress=True;
+    Linux's bash restore_backup went with issue #406)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -631,60 +611,12 @@ class TestLauncherRestorePaths(unittest.TestCase):
             return 1, str(e)
         return 0, ""
 
-    def _run(self, launcher, call):
-        text = _read(launcher)
-        names = ["is_onion_address", "restore_backup"]
-        funcs = "".join(_bash_function(text, name) for name in names)
-        # Stubs. extract-backup goes straight to the Python helper (the CLI
-        # entry builds OnionPressCLI, which sets up ~/.onionpress);
-        # backup-address is the real CLI. docker only records the call.
-        prelude = r'''
-log() { echo "[log] $1" | tee -a "$LOG_FILE"; }
-docker() { echo "docker $*" >> "$CALLS"; return 1; }
-db_client() { echo "db_client $*" >> "$CALLS"; return 1; }
-setup_db_passwords() { :; }
-ensure_key_formats() { :; }
-wp_access_host() { echo localhost; }
-python3() { "$PY" "$@"; }
-_cli() {
-    if [ "$1" = extract-backup ]; then
-        PYTHONPATH="$SRC" "$PY" -c 'import sys
-from onionpress import cli
-sys.exit(cli.OnionPressCLI.cmd_extract_backup(
-    None, sys.argv[2], sys.argv[4], sys.stdin.read().rstrip("\n")))' "${@:2}"
-    else
-        PYTHONPATH="$SRC" "$PY" -m onionpress.cli "$@"
-    fi
-}
-op_py() { _cli "$@"; }
-bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$SRC" "$PY" "$@"; fi; }
-'''
-        home = os.path.join(self.tmp, "home")
-        tmpdir = os.path.join(self.tmp, "t")
-        os.makedirs(tmpdir, exist_ok=True)
-        env = {
-            "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
-            "DATA_DIR": os.path.join(home, ".onionpress"),
-            "LOG_FILE": os.path.join(self.tmp, "log"),
-            "CALLS": os.path.join(self.tmp, "calls"),
-            "SRC": SRC, "PY": sys.executable, "PW": PW,
-            "DOCKER_HOST": "unix:///var/empty/no-docker-for-tests.sock",
-        }
-        r = subprocess.run(["bash", "-c", prelude + funcs + call + '\necho "rc=$?"'],
-                           capture_output=True, text=True, timeout=120, env=env)
-        self.assertIn("rc=", r.stdout, r.stderr)
-        rc = int(r.stdout.rsplit("rc=", 1)[1].strip())
-        return rc, r.stdout.rsplit("rc=", 1)[0], r.stderr
-
-    def _restore_functions(self, launcher):
-        """The launcher's bash functions that restore from a backup."""
-        return ("restore_backup",) if launcher in self.RESTORE else ()
-
-    def test_restore_backup_only_where_listed(self):
+    def test_no_launcher_restores_in_bash(self):
         for launcher in LAUNCHERS:
             with self.subTest(launcher):
-                self.assertEqual("\nrestore_backup() {" in _read(launcher),
-                                 launcher in self.RESTORE)
+                code = _read(launcher)
+                self.assertNotIn("\nrestore_backup() {", code)
+                self.assertNotIn("\ncreate_backup() {", code)
 
     def _assert_untouched(self, data):
         self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")), [OLD_ADDR])
@@ -715,16 +647,6 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
             self.tmp, _metadata(), name="e.zip", config=evil_config,
             ctor_secret=OLD_PRIV)
 
-    def test_restore_backup_refuses_crafted_backups(self):
-        backups = list(self._crafted())
-        for launcher in self.RESTORE:
-            for label, path in backups:
-                with self.subTest(launcher=launcher, case=label):
-                    data = self._fresh_data_dir()
-                    rc, out, _ = self._run(launcher, f'restore_backup "$PW" {path!r}')
-                    self.assertNotEqual(rc, 0)
-                    self._assert_untouched(data)
-
     def test_setup_from_backup_refuses_crafted_backups(self):
         backups = list(self._crafted())
         for label, path in backups:
@@ -751,28 +673,15 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
         from onionpress.config import read_config
         want_config = dict(prefs, ONIONNAME="me")
 
-        for launcher in self.RESTORE:
-            with self.subTest(launcher):
-                data = self._fresh_data_dir()
-                rc, out, _ = self._run(launcher, f'restore_backup "$PW" {path!r}')
-                self.assertEqual(rc, 0, out)
-                vanity = os.path.join(data, "shared", "vanity-keys")
-                self.assertEqual(os.listdir(vanity), [ADDR])
-                with open(os.path.join(vanity, ADDR, "hostname")) as f:
-                    self.assertEqual(f.read(), ADDR + "\n")
-                self.assertEqual(read_config(os.path.join(data, "config")), want_config)
-                if launcher == "linux/onionpress":
-                    # The Settings page takes the address from the last line.
-                    self.assertEqual(out.rstrip("\n").rsplit("\n", 1)[-1], ADDR)
-        with self.subTest("setup --from-backup"):
-                data = self._fresh_data_dir()
-                self.assertEqual(self._setup_from_backup(path), (0, ""))
-                self.assertEqual(os.listdir(os.path.join(data, "shared", "vanity-keys")),
-                                 [ADDR])
-                # The restore's prepare records the backup's admin as
-                # ONIONNAME (the bash restore_backup leaves it, #508).
-                self.assertEqual(read_config(os.path.join(data, "config")),
-                                 dict(want_config, ONIONNAME="admin"))
+        data = self._fresh_data_dir()
+        self.assertEqual(self._setup_from_backup(path), (0, ""))
+        vanity = os.path.join(data, "shared", "vanity-keys")
+        self.assertEqual(os.listdir(vanity), [ADDR])
+        with open(os.path.join(vanity, ADDR, "hostname")) as f:
+            self.assertEqual(f.read(), ADDR + "\n")
+        # The restore's prepare records the backup's admin as ONIONNAME.
+        self.assertEqual(read_config(os.path.join(data, "config")),
+                         dict(want_config, ONIONNAME="admin"))
 
     def _stage_source(self):
         """`setup --from-backup`'s host side: the restore's
@@ -786,10 +695,8 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
             code = _read(launcher)
             with self.subTest(launcher):
                 self.assertNotIn('cp "$staging/config"', code)
-                for func in self._restore_functions(launcher):
-                    self.assertIn('restore-config --staging "$staging" '
-                                  '--config "$DATA_DIR/config"',
-                                  _bash_function(code, func), func)
+                self.assertNotIn("$staging/config", code)
+                self.assertNotIn("config-overrides", code)
         stage = self._stage_source()
         self.assertIn("apply_config_overrides(", stage)
         self.assertNotIn("'config'", stage)
@@ -800,12 +707,7 @@ bundled_python() { if [ "$1" = -m ]; then shift 2; _cli "$@"; else PYTHONPATH="$
             code = _read(launcher)
             with self.subTest(launcher):
                 self.assertNotIn("get('onion_address'", code)
-                for func in self._restore_functions(launcher):
-                    body = _bash_function(code, func)
-                    gate = body.index("backup-address --staging \"$staging\"")
-                    self.assertLess(gate, body.index("vanity-keys"), func)
-                    if 'cp "$staging/config"' in body:
-                        self.assertLess(gate, body.index('cp "$staging/config"'), func)
+                self.assertNotIn("metadata.json", code)
         # The restore's prepare: the key is checked and the address derived
         # from it (the seed overwrites metadata's) before the config takes
         # the address; the setup flow itself never reads one.

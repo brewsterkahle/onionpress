@@ -182,121 +182,6 @@ class TestWordPressSafeConfig(unittest.TestCase):
                                        "--dest", dest]), 1)
 
 
-class TestLinuxCreateBackup(unittest.TestCase):
-    """linux/onionpress create_backup, run for real with docker stubbed."""
-
-    PRELUDE = r'''
-log() { echo "[log] $1" >> "$LOG_FILE"; }
-docker() {
-    case "$*" in
-        "exec onionpress-tor "*) echo "$ADDR" ;;
-        "image inspect "*) return 0 ;;   # the key helpers' tor image is here
-        "volume ls "*) echo onionpress-tor-state ;;
-        *"hidden_service/healthcheck/hs_ed25519_secret_key"*) printf '%s' "$HC_SECRET" ;;
-        *"hidden_service/healthcheck/hostname"*) echo "$ADDR" ;;
-        *) return 1 ;;
-    esac
-}
-db_client() { echo "-- dump"; }
-verify_wp_admin_password() { cat >/dev/null; }
-setup_db_passwords() { :; }
-python3() { "$PY" "$@"; }
-op_py() {
-    PYTHONPATH="$SRC" "$PY" -c 'import sys
-from onionpress.cli import OnionPressCLI as C, main
-cli = object.__new__(C)
-cli.log = lambda m: print(m, file=sys.stderr)
-args = sys.argv[1:]
-data_dir = None
-if args[:1] == ["--data-dir"]:
-    data_dir, args = args[1], args[2:]
-cmd, a = args[0], args[1:]
-if cmd == "stage-wp-content":
-    sys.exit(C.cmd_stage_wp_content(a[1]))
-if cmd == "settings-page-backup-check":
-    sys.exit(C.cmd_settings_page_backup_check(a[1], data_dir))
-if cmd == "stage-hub-backup":
-    sys.exit(C.cmd_stage_hub_backup(a[1], data_dir))
-if cmd == "wordpress-safe-config":
-    sys.exit(main(args))
-if cmd == "prune-image-derivatives":
-    sys.exit(cli.cmd_prune_image_derivatives(a[1]))
-if cmd == "backup-metadata":
-    from onionpress.cli import main
-    sys.exit(main(args))
-if cmd == "pack-backup":
-    sys.exit(cli.cmd_pack_backup(a[1], a[3], sys.stdin.read()))
-sys.exit(2)' "$@"
-}
-'''
-
-    def setUp(self):
-        mv._cheap_kdf(self)
-        self.tmp = tempfile.mkdtemp(prefix="op-secrets-off-wp-linux-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-
-    def _run(self, *args):
-        hub._Container(self, self.tmp, hub=False)
-        out = os.path.join(self.tmp, "backup.zip")
-        home = os.path.join(self.tmp, "home")
-        data = os.path.join(home, ".onionpress")
-        _write_config(data)
-        tmpdir = os.path.join(self.tmp, "t")
-        os.makedirs(tmpdir, exist_ok=True)
-        env = {
-            "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
-            "DATA_DIR": data, "LOG_FILE": os.path.join(self.tmp, "log"),
-            "SRC": mv.SRC, "PY": sys.executable, "PW": PW, "ADDR": mv.ADDR,
-            "WORDPRESS_DB_PASSWORD": "x", "ONIONPRESS_VERSION": "2.5.3",
-            "HC_SECRET": HEALTHCHECK_SECRET.decode("latin-1"),
-            "DOCKER_HOST": DOCKER_HOST,
-        }
-        is_onion = mv._bash_function(mv._read("linux/onionpress"), "is_onion_address")
-        call = " ".join(["create_backup", '"$PW"', repr(out)] + list(args))
-        r = subprocess.run(
-            ["bash", "-c", self.PRELUDE + is_onion + mv._linux_key_helpers()
-             + hub._linux_create_backup()
-             + f'\n{call}\necho "rc=$?"'],
-            capture_output=True, text=True, timeout=120, env=env)
-        try:
-            with open(env["LOG_FILE"]) as f:
-                log = f.read()
-        except FileNotFoundError:
-            log = ""
-        self.assertIn("rc=0", r.stdout, log + r.stderr)
-        return bsl._inner_names_and_bytes(out, PW), log
-
-    def test_a_backup_for_wordpress_carries_no_host_secret(self):
-        members, log = self._run("--without-hub-data", "--without-host-secrets")
-        _assert_no_token(self, members, log)
-        kept = {}
-        for line in members["config"].decode().splitlines():
-            key, _, value = line.partition("=")
-            kept[key] = value
-        self.assertEqual(kept, config.redact_config(CONFIG))
-        self.assertFalse([n for n in members if n.startswith("tor-keys/healthcheck")],
-                         sorted(members))
-        self.assertFalse([n for n, d in members.items() if b"H" * 64 in d])
-        meta = json.loads(members["metadata.json"])
-        self.assertIs(meta["excludes_host_secrets"], True)
-        self.assertEqual(meta["secret_config_left_out"], [TOKEN_KEY])
-
-    def test_the_owners_backup_keeps_the_token_but_no_healthcheck_key(self):
-        # The healthcheck key is in no backup, as on the Mac: a start makes
-        # a new one (tests/test_healthcheck_key_never_backed_up.py).
-        members, _ = self._run()
-        self.assertIn(f"{TOKEN_KEY}={TOKEN}".encode(), members["config"])
-        self.assertFalse([n for n in members if n.startswith("tor-keys/healthcheck")],
-                         sorted(members))
-        self.assertFalse([n for n, d in members.items() if HEALTHCHECK_SECRET in d])
-        meta = json.loads(members["metadata.json"])
-        self.assertNotIn("excludes_host_secrets", meta)
-
-    def test_the_options_go_in_either_order(self):
-        members, _ = self._run("--without-host-secrets", "--without-hub-data")
-        _assert_no_token(self, members)
-
-
 # ---------------------------------------------------------------------------
 # Who leaves them out: every path that hands a backup to WordPress
 # ---------------------------------------------------------------------------
@@ -336,16 +221,13 @@ class TestEveryWordPressDeliveredBackupLeavesThemOut(unittest.TestCase):
         self.assertEqual(falses, ["src/onionpress/cli.py"])
 
     def test_the_linux_settings_page_backup_leaves_them_out(self):
+        # The case is the CLI's settings-page-backup (issue #406), the one
+        # path that passes include_host_secrets=False (the census above);
+        # no bash backup is left to say otherwise.
         text = mv._read("linux/onionpress")
-        calls = [line.strip() for line in text.splitlines()
-                 if re.search(r'\bcreate_backup "', line)
-                 and not line.lstrip().startswith("#")]
-        self.assertEqual(len(calls), 3, calls)
-        without = [c for c in calls if "--without-host-secrets" in c]
-        self.assertEqual(len(without), 1)
-        self.assertIn("--without-hub-data", without[0])
+        self.assertNotRegex(text, r'\bcreate_backup "')
         branch = hub._linux_case(text, "settings-page-backup")
-        self.assertIn(without[0], branch)
+        self.assertIn('op_py --data-dir "$DATA_DIR" settings-page-backup "${@:2}"', branch)
 
     def test_the_mac_settings_page_backup_leaves_them_out(self):
         cli_src = mv._read("src/onionpress/cli.py")

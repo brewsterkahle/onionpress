@@ -84,14 +84,6 @@ class TestCreateBackupWiring(unittest.TestCase):
     def setUp(self):
         self.text = _read(LINUX)
 
-    def test_create_backup_pipes_the_password_to_the_python_verifier(self):
-        body = _function(self.text, "create_backup")
-        self.assertIn(
-            """if ! printf '%s' "$password" | verify_wp_admin_password; then""",
-            body)
-        self.assertNotIn("wp eval", body)
-        self.assertNotIn("wp_check_password", body)
-
     def test_verifier_takes_the_password_on_stdin_only(self):
         body = _function(self.text, "verify_wp_admin_password")
         self.assertIn("\n    op_py verify-admin-password\n", body)
@@ -229,51 +221,6 @@ if tool == "curl":
                 with open(log, encoding="utf-8") as f:
                     logged = f.read()
         return out, made, logged
-
-
-class TestCreateBackupHarness(_Harness):
-
-    # create_backup reads keys out of the volumes with the key helpers, from
-    # the stack's pinned tor image (KEY_HELPER_IMAGE).
-    LINES = ("KEY_HELPER_IMAGE=",)
-    FUNCTIONS = ("op_py", "verify_wp_admin_password", "using_local_images",
-                 "docker_volume_state", "ensure_key_helper_image", "key_volume_cat",
-                 "create_backup")
-    RUN = 'rc=0; create_backup "$PW" "$OUT" || rc=$?; echo "rc=$rc"'
-
-    def _verify_calls(self, made):
-        return [c for c in made if c["tool"] == "docker"
-                and c["argv"][:9] == WP_EVAL_AS_WWW_DATA]
-
-    def test_wrong_password_is_refused_before_anything_else_runs(self):
-        for pw in TRICKY_PASSWORDS:
-            with self.subTest(pw=pw):
-                out, made, logged = self.run_bash(
-                    self.RUN, {"PW": pw, "STUB_ACCEPT": "the-real-password"})
-                self.assertEqual(out.stdout.strip(), "rc=1", out.stderr)
-                self.assertIn("Password does not match any WordPress admin account", logged)
-                self.assertEqual(len(made), 1, made)
-                [call] = self._verify_calls(made)
-                self.assertEqual(call["stdin"], pw)
-
-    def test_password_is_stdin_only_and_the_php_never_changes(self):
-        php = set()
-        for pw in TRICKY_PASSWORDS:
-            with self.subTest(pw=pw):
-                out, made, logged = self.run_bash(
-                    self.RUN, {"PW": pw, "STUB_ACCEPT": pw})
-                self.assertIn("Backup: password verified", logged, out.stderr)
-                [call] = self._verify_calls(made)
-                self.assertEqual(call["stdin"], pw)
-                php.add(call["argv"][9])
-                for c in made:
-                    for arg in c["argv"]:
-                        self.assertNotIn(pw, arg, f"password in argv: {c['argv']}")
-                # The stub fails the database dump, which ends the run there.
-                self.assertIn("ERROR: Database export failed", logged)
-                self.assertEqual(out.stdout.strip(), "rc=1")
-        self.assertEqual(len(php), 1, php)
-        self.assertIn("php://stdin", php.pop())
 
 
 class TestArchiveLoginPython(unittest.TestCase):

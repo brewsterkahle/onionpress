@@ -81,8 +81,8 @@ ONIONHOME_REGISTRY_FILES = ("onionnames.db", "onionnames.db-wal")
 # admin password WordPress sees in plain text: code running there would have
 # both. On an OnionHeaven hub or on OnionHome that backup is refused, and
 # on a node whose checks did not answer, since that could be either
-# (create_backup(include_hub_data=False) raises SettingsPageBackupRefused;
-# Linux: create_backup --without-hub-data returns 3): even without the hub's
+# (create_backup(include_hub_data=False) raises SettingsPageBackupRefused,
+# exit 3 from cli.cmd_settings_page_backup on both platforms): even without the hub's
 # registry and registrants' keys it carries the node's own onion service
 # key, and with it code in WordPress could run a rival hub that collects
 # registrants' keys from their heartbeats, or a rival OnionHome answering
@@ -147,12 +147,12 @@ UNVERIFIED_RESTORE_REFUSED_MSG = (
 # The site's own onion service key never changes through WordPress without
 # the owner at the host. Anything running in WordPress can write the
 # Settings page's requests, so:
-# - The Mac's Settings page backup leaves the key out
-#   (create_backup(include_onion_key=False), metadata excludes_onion_key,
+# - The Settings page's backup leaves the key out on both platforms
+#   (cli.cmd_settings_page_backup, the one path since issue #406:
+#   create_backup(include_onion_key=False), metadata excludes_onion_key,
 #   ONION_KEY_LEFT_OUT_NOTE with the result and in README.txt): the backup
 #   and its password are both WordPress's to read. The app's Backup... and
-#   `onionpress backup` keep it. Linux's Settings page backup keeps it for
-#   now (headless installs back up from the page).
+#   `onionpress backup` keep it.
 # - A restore of a backup without a key keeps the address of the install it
 #   is restored onto (staged_onion_key_address is '': no key written, no
 #   volume removed, no hub asked to let go), or is refused when that address
@@ -160,8 +160,9 @@ UNVERIFIED_RESTORE_REFUSED_MSG = (
 # - The Settings page's restore of a backup of another address needs the
 #   person at the Mac (restore_from_backup(confirm_address_change=), a
 #   native dialog; ADDRESS_CHANGE_NOT_CONFIRMED_MSG otherwise). Linux, which
-#   has no one to ask, refuses it (ADDRESS_CHANGE_REFUSED_MSG, restore_backup
-#   --from-settings-page) and refuses the page's key import outright.
+#   has no one to ask, refuses it (ADDRESS_CHANGE_REFUSED_MSG, raised by
+#   cmd_settings_page_restore's confirm_address_change) and refuses the
+#   page's key import outright.
 ONION_KEY_LEFT_OUT_NOTE = (
     "This backup does not contain your onion address's key; to move your "
     "address to another machine, use Backup... in the OnionPress menu.")
@@ -185,15 +186,14 @@ KEY_IN_KEYLESS_BACKUP_MSG = (
     "service key, but it does.")
 
 # The host's secrets never pass through WordPress in a backup either. The
-# Settings page's backup (create_backup(include_host_secrets=False); Linux:
-# create_backup --without-host-secrets) carries only the config WordPress's
-# status page already shows (config.redact_config, SAFE_CONFIG_KEYS): never
-# the Cloudflare tunnel token, which the page's write-only field keeps out of
-# WordPress, nor (Linux, whose backups carry the whole config file) image
-# overrides, bind host or hub admission. Linux also leaves out the
-# healthcheck onion service's key, which a start regenerates. The site's
-# own onion key stays on Linux; the Mac leaves it out too
-# (ONION_KEY_LEFT_OUT_NOTE above). metadata.json says so
+# Settings page's backup (create_backup(include_host_secrets=False), both
+# platforms') carries only the config WordPress's status page already shows
+# (config.redact_config, SAFE_CONFIG_KEYS): never the Cloudflare tunnel
+# token, which the page's write-only field keeps out of WordPress, nor
+# image overrides, bind host or hub admission. The healthcheck onion
+# service's key is in no backup (a start regenerates it), and the site's
+# own onion key is left out of the page's (ONION_KEY_LEFT_OUT_NOTE above).
+# metadata.json says so
 # (excludes_host_secrets) and names the secrets that were set
 # (secret_config_left_out, names only). No restore takes a secret from a
 # backup anyway (RESTORABLE_CONFIG): this install's token is kept, and on a
@@ -212,7 +212,7 @@ ONIONHOME_ADDRESS = "op2homeiwjb4fdqnfkj5kbokvcee45zpk2pwgvpz5rrkanp5qqwxzbyd.on
 # that data, and says so: the log (the WARNINGs), metadata.json
 # (onionheaven_data_unchecked, onionhome_registry_unchecked) and, with the
 # finished backup, the NOTEs (unchecked_notes: the Mac's finished-backup
-# message, `onionpress backup`; Linux create_backup prints the hub's).
+# message, `onionpress backup` on both platforms).
 HUB_DATA_UNCHECKED_WARNING = (
     "Backup: WARNING: the onionheaven container did not say whether it holds "
     "OnionHeaven data; this backup does not")
@@ -432,8 +432,8 @@ def verify_wp_admin_password_any(password):
 
     Returns (True, username) on success, or (False, error_message).
 
-    The Linux launcher's create_backup and scrub/uninstall checks call
-    this through `onionpress.cli verify-admin-password`, and password-only
+    The Linux launcher's uninstall check calls this through
+    `onionpress.cli verify-admin-password`, and password-only
     UI flows (e.g. the Linux tray's backup dialog) call it directly to give
     inline feedback without asking the user to remember their admin
     username. Uses wp_check_password directly so it bypasses login
@@ -528,8 +528,7 @@ def wp_content_tar_argv(*excludes):
 def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None):
     """Copy wp-content out of the WordPress container into *dest* as plain
     files and folders (wp_content_tar_argv, unpack_plain_tar), then
-    scrub_staged_tree. The Linux launcher's create_backup runs this through
-    `onionpress.cli stage-wp-content`. The time allowed is sized from
+    scrub_staged_tree. The time allowed is sized from
     *wpcontent_bytes*, measured in the container when not given."""
     if wpcontent_bytes is None:
         wpcontent_bytes = _du_bytes('onionpress-wordpress',

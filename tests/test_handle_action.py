@@ -1120,8 +1120,8 @@ class TestLaunchers(unittest.TestCase):
                                 r'            ONIONPRESS_IN_WATCHER=true op_py --data-dir "\$DATA_DIR" '
                                 r'handle-action --launcher "\$INSTALL_DIR/onionpress" "\$\{@:2\}"\n'
                                 r'            ;;\n')
-        for case, body in (("settings-page-backup", 'create_backup "$BACKUP_PASS" "$2" --without-hub-data --without-host-secrets'),
-                           ("settings-page-restore", 'restore_backup "$BACKUP_PASS" "$2" --from-settings-page'),
+        for case, body in (("settings-page-backup", 'op_py --data-dir "$DATA_DIR" settings-page-backup "${@:2}"'),
+                           ("settings-page-restore", 'op_py --data-dir "$DATA_DIR" settings-page-restore "${@:2}"'),
                            ("settings-page-update-check", "update_settings_page_check")):
             with self.subTest(case=case):
                 start = linux.index(f"\n        {case})\n")

@@ -6,24 +6,24 @@ Anything executing in WordPress (www-data) can write the Settings page's
 request files, so the page's owner check is no boundary for what the host
 does with them:
 
-- The Mac's Settings page backup leaves the onion service key out
-  (create_backup(include_onion_key=False): no tor-keys/, metadata
+- The Settings page's backup leaves the onion service key out on both
+  platforms (cli.cmd_settings_page_backup, the one path since issue #406:
+  create_backup(include_onion_key=False): no tor-keys/, metadata
   excludes_onion_key, the note with the result and in README.txt). The
-  app's Backup... keeps it. Linux's page backup keeps it for now.
+  app's Backup... and `onionpress backup` keep it.
 - A backup without a key restores onto the install's own address, on every
   path (the page's restore, the app's and the CLI's install-from-backup,
-  the launchers' restore_backup and setup --from-backup): no key written,
-  no key volume removed, no hub asked to let go, nothing new minted; with
-  no address to keep it is refused.
+  setup --from-backup): no key written, no key volume removed, no hub asked
+  to let go, nothing new minted; with no address to keep it is refused.
 - On a Mac, a page restore of a backup of another address asks the person
   at the Mac (a native dialog, Cancel the default, no answer is Cancel).
-  Linux refuses it, refuses the page's key import, and has no
-  generate-vanity branch any more.
+  Linux refuses it (cmd_settings_page_restore, ADDRESS_CHANGE_REFUSED_MSG),
+  refuses the page's key import, and has no generate-vanity branch any more.
 - On an OnionHeaven hub or OnionHome (or a node that cannot say) the page
   restores nothing, on either platform.
 
-No docker: the container side is stubbed (a docker stub script, bash
-functions, patched helpers); the Linux functions and branches run for real.
+No docker: the container side is stubbed (a docker stub script, patched
+helpers).
 """
 
 import ast
@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, cli, key_manager  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
-from onionpress.platform import resolve_paths  # noqa: E402
+from onionpress.platform import OS, resolve_paths  # noqa: E402
 import test_backup_hub_data_off_wordpress as hd  # noqa: E402
 import test_backup_metadata_validation as mv  # noqa: E402
 import test_backup_staging_links as bsl  # noqa: E402
@@ -452,18 +452,12 @@ class TestCliRestoreKeepsTheKeyVolumes(unittest.TestCase):
 
 
 class TestLaunchersKeepTheAddress(unittest.TestCase):
-    """The bash restore_backup (Linux: the Settings page's) and setup
-    --from-backup of both launchers, run for real."""
-
-    RESTORE = mv.TestLauncherRestorePaths.RESTORE
+    """setup --from-backup of both launchers, run for real."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         mv._cheap_kdf(self)
-
-    def _run(self, launcher, call):
-        return mv.TestLauncherRestorePaths._run(self, launcher, call)
 
     def _fresh_data_dir(self):
         return mv.TestLauncherRestorePaths._fresh_data_dir(self)
@@ -631,114 +625,84 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         self.assertIn("max_wait = 300", alert)
 
 
-class _LinuxRestore(unittest.TestCase):
-    """linux/onionpress restore_backup, run for real (the harness of
-    test_backup_hub_data_off_wordpress.TestLinuxRestoreBackup), on an
-    install serving OLD_ADDR."""
+class TestLinuxSettingsPageRestoreRefusesAnotherAddress(unittest.TestCase):
+    """cli.cmd_settings_page_restore on Linux (issue #406: the one path,
+    the Mac's): a backup of another address than the one served is refused
+    before anything is touched (ADDRESS_CHANGE_REFUSED_MSG, exit 3: no one
+    at this host to ask), a backup of this address or without a key is
+    restored, and the heartbeat client unit is stopped before the hubs are
+    asked to let go of the old key and started again after."""
 
     def setUp(self):
+        mv._cheap_kdf(self)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        mv._cheap_kdf(self)
+        self.install = _Install(self, self.tmp)
+        self.logs = []
+        self.served = OLD_ADDR
+        self.heartbeat = []
+        for target, kw in (
+                ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
+                ("onionpress.key_manager.write_private_key", {"side_effect": _KeyWritten}),
+                ("onionpress.backup.served_onion_address",
+                 {"side_effect": lambda: self.served}),
+                ("onionpress.backup.hub_data_state", {"return_value": "none"}),
+                ("onionpress.backup.onionhome_registry_present", {"return_value": False}),
+                ("onionpress.cli._settings_page_log", {"return_value": self.logs.append}),
+                ("onionpress.cli.detect_os", {"return_value": OS.LINUX}),
+                ("onionpress.cli.release_onionheaven",
+                 {"side_effect": lambda *a, **k: self.heartbeat.append("release")}),
+                ("onionpress.heartbeat_unit.stop",
+                 {"side_effect": lambda log, run=None: self.heartbeat.append("stop")}),
+                ("onionpress.heartbeat_unit.start",
+                 {"side_effect": lambda log, run=None: self.heartbeat.append("start")})):
+            p = mock.patch(target, **kw)
+            p.start()
+            self.addCleanup(p.stop)
 
-    def _run(self, path, *args, current=OLD_ADDR, node_rc=0, node_refusal=""):
-        home = os.path.join(self.tmp, "home")
-        shutil.rmtree(home, True)
-        data = os.path.join(home, ".onionpress")
-        vanity = os.path.join(data, "shared", "vanity-keys", OLD_ADDR)
-        os.makedirs(vanity)
-        with open(os.path.join(vanity, "hostname"), "w") as f:
-            f.write(OLD_ADDR + "\n")
-        with open(os.path.join(data, "config"), "w") as f:
-            f.write("ONIONNAME=me\n")
-        calls = os.path.join(self.tmp, "calls")
-        checks = os.path.join(self.tmp, "node-checks")
-        for f in (calls, checks):
-            if os.path.exists(f):
-                os.remove(f)
-        tmpdir = os.path.join(self.tmp, "t")
-        shutil.rmtree(tmpdir, True)
-        os.makedirs(tmpdir)
-        env = {
-            "PATH": os.environ["PATH"], "HOME": home, "TMPDIR": tmpdir,
-            "DATA_DIR": data, "LOG_FILE": os.path.join(self.tmp, "log"),
-            "CALLS": calls, "SRC": mv.SRC, "PY": sys.executable, "PW": PW,
-            "DOCKER_HOST": DOCKER_HOST, "CURRENT": current, "NODE_CHECKS": checks,
-            "NODE_RC": str(node_rc), "NODE_REFUSAL": node_refusal,
-        }
-        text = mv._read("linux/onionpress")
-        funcs = "".join(mv._bash_function(text, name)
-                        for name in ("is_onion_address", "restore_backup"))
-        prelude = hd.TestLinuxRestoreBackup.PRELUDE + (
-            'onionheaven_release() { echo "onionheaven_release $*" >> "$CALLS"; }\n')
-        call = " ".join(["restore_backup", '"$PW"', repr(path)] + list(args))
-        r = subprocess.run(["bash", "-c", prelude + funcs + call + '\necho "rc=$?"'],
-                           capture_output=True, text=True, timeout=120, env=env)
-        self.assertIn("rc=", r.stdout, r.stderr)
-        out, rc = r.stdout.rsplit("rc=", 1)
-        try:
-            with open(calls) as f:
-                made = f.read()
-        except FileNotFoundError:
-            made = ""
-        self.data = data
-        self.tmpdir = tmpdir
-        self.node_checks = checks
-        return int(rc.strip()), out.rstrip("\n").rsplit("\n", 1)[-1], made
+    def _restore(self, path, confirmed=()):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.cmd_settings_page_restore(path, PW, self.install.data, True,
+                                               frozenset(confirmed))
+        return rc, json.loads(out.getvalue().strip().splitlines()[-1])
 
-    def assert_untouched(self, made):
-        self.assertEqual(made, "")
-        self.assertEqual(os.listdir(os.path.join(self.data, "shared", "vanity-keys")),
-                         [OLD_ADDR])
-        self.assertFalse(os.path.exists(os.path.join(self.data, ".import-key-pending")))
-        with open(os.path.join(self.data, "config")) as f:
-            self.assertEqual(f.read(), "ONIONNAME=me\n")
-
-
-class TestLinuxSettingsPageRestoreKeepsTheAddress(_LinuxRestore):
-
-    def test_another_address_is_refused_untouched(self):
+    def test_another_address_is_refused_untouched_even_when_confirmed(self):
         path = _keyed_backup(self.tmp, "other.zip")
-        rc, last, made = self._run(path, "--from-settings-page")
-        self.assertEqual(rc, 3)
-        self.assertEqual(last, backup.ADDRESS_CHANGE_REFUSED_MSG)
-        self.assert_untouched(made)
-        # The decrypted backup is gone with its staging folder.
-        self.assertEqual(os.listdir(self.tmpdir), [])
+        for confirmed in ((), ("address-change",)):
+            with self.subTest(confirmed=confirmed):
+                rc, answer = self._restore(path, confirmed)
+                self.assertEqual(rc, 3)
+                self.assertEqual(answer, {"error": backup.ADDRESS_CHANGE_REFUSED_MSG})
+                self.install.assert_identity_kept()
+                self.assertEqual(self.heartbeat, [])
+                self.assertTrue([m for m in self.logs if "refused (the Settings page's restore)" in m])
 
-    def test_this_address_is_restored(self):
-        path = _keyed_backup(self.tmp, "same.zip")
-        rc, last, made = self._run(path, "--from-settings-page", current=ADDR)
-        self.assertEqual(rc, 0)
-        self.assertEqual(last, ADDR)
-        self.assertIn("db_import", made)
+    def test_this_address_is_restored_with_the_heartbeat_paused(self):
+        self.served = ADDR
+        with mock.patch.object(backup, "restore_container_artifacts"), \
+                mock.patch.object(backup, "apply_config_overrides"):
+            rc, answer = self._restore(_keyed_backup(self.tmp, "same.zip"))
+        # write_private_key raises _KeyWritten (the stub): the error path,
+        # after the heartbeat was stopped and the hubs asked, and the
+        # heartbeat is started again all the same.
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.heartbeat, ["stop", "release", "start"])
 
-    def test_a_backup_without_a_key_keeps_it(self):
-        path = _keyless_backup(self.tmp, "k.zip")
-        rc, last, made = self._run(path, "--from-settings-page")
-        self.assertEqual(rc, 0)
-        # The page shows the address the site keeps.
-        self.assertEqual(last, OLD_ADDR)
-        self.assertIn("db_import", made)
-        self.assertNotIn("onionheaven_release", made)
-        self.assertEqual(os.listdir(os.path.join(self.data, "shared", "vanity-keys")),
-                         [OLD_ADDR])
-        self.assertFalse(os.path.exists(os.path.join(self.data, ".import-key-pending")))
+    def test_a_backup_without_a_key_keeps_it_and_asks_nothing(self):
+        with mock.patch.object(backup, "restore_container_artifacts"), \
+                mock.patch.object(backup, "apply_config_overrides"):
+            rc, answer = self._restore(_keyless_backup(self.tmp, "k.zip"))
+        self.assertEqual((rc, answer), (0, {"ok": True}))
+        self.install.assert_identity_kept()
+        self.assertEqual(self.heartbeat, [])
+        self.assertTrue([m for m in self.logs if f"keeps its key and its address {OLD_ADDR}" in m])
 
-    def test_the_owners_restore_still_changes_it(self):
-        """Without --from-settings-page (the host's own restore) the
-        backup's address is installed, and no node check is made."""
-        path = _keyed_backup(self.tmp, "other.zip")
-        rc, last, made = self._run(path)
-        self.assertEqual(rc, 0)
-        self.assertEqual(last, ADDR)
-        self.assertTrue(os.path.exists(os.path.join(self.data, ".import-key-pending")))
-        self.assertFalse(os.path.exists(self.node_checks))
-
-    def test_the_words_are_the_pythons(self):
-        body = mv._bash_function(mv._read("linux/onionpress"), "restore_backup")
-        self.assertIn(f'local change_refusal="{backup.ADDRESS_CHANGE_REFUSED_MSG}"', body)
-        self.assertIn(f'node_refusal="{backup.UNVERIFIED_RESTORE_REFUSED_MSG}"', body)
+    def test_the_words_are_one_string(self):
+        # The refusal is the Python constant, in the handler's answer and
+        # on the page; no bash copy of it is left.
+        self.assertNotIn("never replaces this site's address", mv._read("linux/onionpress"))
+        self.assertIn("never changes this site's onion address", mv._read(PHP))
 
 
 class TestLinuxSettingsPageKeyActions(unittest.TestCase):
@@ -901,39 +865,6 @@ class TestMacSettingsPageRestoreOnAHub(unittest.TestCase):
         self.assertEqual(str(cm.exception), "upload opened")
 
 
-class TestLinuxSettingsPageRestoreOnAHub(_LinuxRestore):
-
-    def test_refused_before_the_upload_is_opened(self):
-        path = _keyed_backup(self.tmp, "same.zip")
-        for rc, refusal, want in (
-                (3, backup.HUB_RESTORE_HERE_REFUSED_MSG, backup.HUB_RESTORE_HERE_REFUSED_MSG),
-                (3, backup.ONIONHOME_RESTORE_HERE_REFUSED_MSG,
-                 backup.ONIONHOME_RESTORE_HERE_REFUSED_MSG),
-                (3, backup.UNVERIFIED_RESTORE_REFUSED_MSG, backup.UNVERIFIED_RESTORE_REFUSED_MSG),
-                # A crash or an older CLI: refused in the same words.
-                (1, "", backup.UNVERIFIED_RESTORE_REFUSED_MSG),
-                (3, "", backup.UNVERIFIED_RESTORE_REFUSED_MSG)):
-            with self.subTest(rc=rc, refusal=refusal[:30]):
-                got_rc, last, made = self._run(path, "--from-settings-page", current=ADDR,
-                                               node_rc=rc, node_refusal=refusal)
-                self.assertEqual(got_rc, 3)
-                self.assertEqual(last, want)
-                self.assert_untouched(made)
-                # No staging folder was made: nothing was decrypted.
-                self.assertEqual(os.listdir(self.tmpdir), [])
-                with open(self.node_checks) as f:
-                    self.assertEqual(f.read(), ADDR + "\n")
-
-    def test_the_address_asked_about_is_the_tor_containers(self):
-        path = _keyed_backup(self.tmp, "same.zip")
-        for current, asked in ((ADDR, ADDR), ("not-an-address", ""), ("", "")):
-            with self.subTest(current=current):
-                self._run(path, "--from-settings-page", current=current, node_rc=3,
-                          node_refusal=backup.UNVERIFIED_RESTORE_REFUSED_MSG)
-                with open(self.node_checks) as f:
-                    self.assertEqual(f.read(), asked + "\n")
-
-
 # ---------------------------------------------------------------------------
 # The Settings page says what each platform allows
 # ---------------------------------------------------------------------------
@@ -951,10 +882,12 @@ class TestSettingsPageSaysSo(unittest.TestCase):
         return section[start:middle], section[middle:end]
 
     def test_backup(self):
-        linux, mac = self._platforms(_branch(self.php, "<h2>Backup</h2>", "<!-- Restore -->"))
-        self.assertIn("Tor keys", linux)
-        self.assertNotIn("Tor keys", mac)
-        self.assertIn("does not contain your onion address's key", mac)
+        section = _branch(self.php, "<h2>Backup</h2>", "<!-- Restore -->")
+        self.assertNotIn("Tor keys", section)
+        linux, mac = self._platforms(section)
+        for text in (linux, mac):
+            self.assertIn("does not contain your onion address's key", text)
+        self.assertIn("<code>onionpress backup</code>", linux)
         self.assertIn("Backup&hellip; in the OnionPress menu", mac)
 
     def test_restore(self):
