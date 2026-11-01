@@ -104,12 +104,13 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
         self.assertIn('[ "$oh_config_enabled" = "yes" ] || oh_config_enabled=no', src)
 
     def test_linux_daemon_reads_the_choice_through_one_normalizer(self):
-        # Registration, the per-cycle re-read, the opt-out and the
-        # system-sleep hook's /offline all gate on _registration_choice.
+        # Registration, the per-cycle re-read and the opt-out all gate on
+        # _registration_choice (the system-sleep hook's one-shot /offline,
+        # which no hook called, went on 2026-10-31).
         src = _read("linux/onionpress-heartbeat.py")
         self.assertIn("def _registration_choice(config):", src)
         self.assertEqual(src.count('config.get("REGISTER_WITH_ONIONHEAVEN"'), 1)
-        self.assertEqual(src.count("_registration_choice(config)"), 4)
+        self.assertEqual(src.count("_registration_choice(config)"), 3)
 
     def test_mac_gates_go_through_get_registration_choice(self):
         # The loop, every /online and every /offline re-read the choice.

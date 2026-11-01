@@ -142,55 +142,6 @@ PIDFILE="$DATA_DIR/onionpress.pid"
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 
-# One-time host-side migration: ~/Documents/onionpress (Linux default)
-# or ~/Documents/OnionPress (cross-platform) → ~/OnionPress. Walks the
-# source tree recursively so empty subdirs in the destination (from a
-# previous launcher pass) don't block the mv. Issue #239.
-#
-# REMOVE-AFTER 2026-08-01: by then every active install will have
-# migrated. Delete this block and _op_migrate_tree.
-_op_migrate_tree() {
-    local src="$1" dst="$2"
-    [ -d "$src" ] || return 0
-    mkdir -p "$dst"
-    shopt -s dotglob nullglob 2>/dev/null || true
-    local entry base target
-    for entry in "$src"/*; do
-        [ -e "$entry" ] || continue
-        base=$(basename "$entry")
-        target="$dst/$base"
-        if [ -d "$entry" ] && [ -d "$target" ]; then
-            _op_migrate_tree "$entry" "$target"
-            rmdir "$entry" 2>/dev/null || true
-        else
-            mv -n "$entry" "$target" 2>/dev/null || true
-        fi
-    done
-}
-
-if ! grep -qE '^PATH_MIGRATION_2026_05=done$' "$DATA_DIR/config" 2>/dev/null; then
-    _migration_residual=0
-    _migration_did_work=0
-    for OLD in "$HOME/Documents/onionpress" "$HOME/Documents/OnionPress"; do
-        [ -d "$OLD" ] || continue
-        _migration_did_work=1
-        rm -f "$OLD/MOVED.txt" 2>/dev/null || true
-        _op_migrate_tree "$OLD" "$DOCUMENTS_DIR"
-        rmdir "$OLD" 2>/dev/null || true
-        if [ -d "$OLD" ]; then
-            _migration_residual=1
-            echo "OnionPress content moved to $DOCUMENTS_DIR" \
-                > "$OLD/MOVED.txt" 2>/dev/null || true
-        fi
-    done
-    if [ "$_migration_did_work" = "0" ]; then
-        mkdir -p "$DOCUMENTS_DIR"
-    fi
-    if [ "$_migration_residual" = "0" ]; then
-        printf 'PATH_MIGRATION_2026_05=done\n' >> "$DATA_DIR/config" 2>/dev/null || true
-    fi
-fi
-
 # Ensure subtree exists for compose bind-mounts.
 mkdir -p "$DOCUMENTS_DIR/backups"
 mkdir -p "$DOCUMENTS_DIR/Creations/My Creations"
@@ -435,8 +386,9 @@ KEY_HELPER_IMAGE="${ONIONPRESS_TOR_IMAGE:-ghcr.io/brewsterkahle/onionpress-tor:l
 # Make sure KEY_HELPER_IMAGE is here before a helper runs from it: the key
 # volume migration and the first-run seed come before any pull. A missing
 # image is pulled by its pinned reference, never when the stack runs locally
-# built images. Returns 1 when it is not here and cannot be. Kept identical
-# in the macOS and Linux launchers; a test enforces that.
+# built images. Returns 1 when it is not here and cannot be. Linux only:
+# create_backup's key read runs the helper; the Python start steps use
+# containers.ensure_key_helper_image.
 ensure_key_helper_image() {
     if docker image inspect --format '{{.Id}}' "$KEY_HELPER_IMAGE" >/dev/null 2>&1; then
         return 0
@@ -1533,19 +1485,6 @@ onionheaven_release() {
 # cycle, so it takes effect without a restart.
 onionheaven_cmd() {
     op_py --data-dir "$DATA_DIR" onionheaven "$@"
-}
-
-get_onion_address() {
-    cd "$DOCKER_DIR"
-    ONION_ADDR=$(docker compose exec -T tor cat /var/lib/tor/hidden_service/wordpress/hostname 2>/dev/null || echo "")
-    # The whole value must be an onion address: callers cache it and put it
-    # into URLs. Anything else reads as not generated yet.
-    if is_onion_address "$ONION_ADDR"; then
-        echo "$ONION_ADDR"
-        return 0
-    fi
-    echo "Generating..."
-    return 1
 }
 
 # Read and cache healthcheck onion address
