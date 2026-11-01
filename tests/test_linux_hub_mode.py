@@ -87,8 +87,9 @@ class TestBothPlatformsDecideByAddress(unittest.TestCase):
         # never the old one (a running onionheaven container, which every
         # node has) in the launcher.
         writer = _read("src/onionpress/status_writer.py")
-        self.assertIn("self.is_onionheaven = onionheaven.is_onionheaven_instance(addr)", writer)
-        self.assertIn('op_py --data-dir "$DATA_DIR" write-status', launcher)
+        self.assertIn("self.is_onionheaven = onionheaven.is_onionheaven_instance(addr)",
+                      _read("src/onionpress/daemon.py"))
+        self.assertNotIn("write-status", launcher)
         self.assertNotIn("oh_server_active", launcher)
 
     def test_mac_daemon_uses_the_same_rule(self):
@@ -100,15 +101,16 @@ class TestBothPlatformsDecideByAddress(unittest.TestCase):
 
 
 class TestStatusWriterHubMode(unittest.TestCase):
-    """The status writer (Linux's `onionpress write-status` and the Mac
-    daemon's pass) with docker faked: a node serving the hub's address is
+    """The status writer (the daemon's pass, on both platforms since
+    #407) with docker faked: a node serving the hub's address is
     the hub, any other address a client; the registry is asked only on
     the hub, through onionheaven.overview."""
 
     def setUp(self):
-        from test_status_writer import FakeDocker
+        from test_status_writer import FakeDocker, StatusApp
         from onionpress.platform import OS, resolve_paths
         from onionpress import status_writer
+        self.StatusApp = StatusApp
         self.tmp = tempfile.mkdtemp(prefix="op-hub-mode-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.data = os.path.join(self.tmp, "data")
@@ -130,7 +132,7 @@ class TestStatusWriterHubMode(unittest.TestCase):
             "exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname": address + "\n",
             "ps --format {{.Names}} --filter name=onionheaven-takeover": "",
         })
-        app = self.sw.OneShotStatus(
+        app = self.StatusApp(
             self.paths, docker=docker, health=mock.Mock(**{"check_tor_bootstrap.return_value": (True, 100)}),
             version="0.0.0-test", log=lambda m: None, os_name=self.OS.LINUX)
         calls = []

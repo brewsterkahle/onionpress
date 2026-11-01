@@ -9,13 +9,13 @@
 # key_manager, updater and colima added and the total raised the same day
 # with their tests; start, bundled_plugins and containers added and the
 # total and the CLI's raised 2026-10-30 with #442's; the updater's raised
-# 2026-10-31 with #525's Linux release tests); raise one when
+# 2026-10-31 with #525's Linux release tests; the total, the daemon's and reachability's raised 2026-11-01 with #407's Linux daemon tests); raise one when
 # the tests catch up, never lower one to pass. Runs under macOS /bin/bash 3.2 (no associative arrays).
 set -e
 set -o pipefail  # coverage's exit code, not tail's
 cd "$(dirname "$0")/.."
 
-TOTAL_FLOOR=71
+TOTAL_FLOOR=74
 
 # "<file> <floor>" per line.
 FILE_FLOORS="
@@ -30,9 +30,9 @@ src/onionpress/hub_backup.py 85
 src/onionpress/ports.py 86
 src/onionpress/secrets_file.py 96
 src/onionpress/onion_hostname.py 98
-src/onionpress/reachability.py 87
+src/onionpress/reachability.py 98
 src/onionpress/image_overrides.py 95
-src/onionpress/daemon.py 81
+src/onionpress/daemon.py 83
 src/onionpress/launcher_ops.py 84
 src/onionpress/scrub.py 90
 src/onionpress/key_manager.py 87

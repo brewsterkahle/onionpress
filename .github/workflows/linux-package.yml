@@ -259,7 +259,7 @@ jobs:
           [ -x /usr/local/bin/onionpress ] || fail "/usr/local/bin/onionpress missing"
           VERSION=$(grep 'self\.version *= *"' src/menubar.py | head -1 | sed 's/.*"\(.*\)".*/\1/')
           [ "$(cat /opt/onionpress/VERSION)" = "$VERSION" ] || fail "/opt/onionpress/VERSION is '$(cat /opt/onionpress/VERSION)', expected $VERSION"
-          for unit in onionpress.service onionpress-heartbeat.service onionpress-watcher.timer; do
+          for unit in onionpress.service onionpress-daemon.service; do
             systemctl --user is-enabled "$unit" || fail "$unit is not enabled"
           done
           find /opt/onionpress -maxdepth 2 -type d | sort

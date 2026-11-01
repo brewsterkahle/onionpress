@@ -412,23 +412,6 @@ class TestHandlerFailures(HandleActionCase):
         self.assertEqual(self.argvs(), [])
         self.assertFalse(os.path.exists(d))
 
-    def test_write_status_without_docker_still_exits_0(self):
-        # `onionpress write-status` (#523) is best effort, every 30 s
-        # beside the stack: a docker that answers nothing is in the log
-        # and the documents say "stopped".
-        from test_status_writer import FakeDocker
-        from onionpress import cli, daemon_client
-        d = tempfile.mkdtemp(prefix="op-write-status-")
-        self.addCleanup(shutil.rmtree, d, True)
-        out = io.StringIO()
-        with mock.patch("onionpress.docker.Docker", return_value=FakeDocker(raising=True)), \
-                mock.patch.object(cli, "OnionPressCLI", side_effect=AssertionError("setup ran")), \
-                mock.patch("sys.stdout", out):
-            self.assertEqual(cli.main(["--data-dir", d, "write-status"]), 0)
-        self.assertIn("status: could not read the stack's state", out.getvalue())
-        self.assertEqual(daemon_client.read_state(d)["status"]["state"], "stopped")
-        with open(os.path.join(d, "status.json")) as f:
-            self.assertEqual(json.load(f)["state"], "stopped")
 
 
 class TestApplyConfigOutput(HandleActionCase):

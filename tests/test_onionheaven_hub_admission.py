@@ -12,8 +12,8 @@ a docker call could otherwise happen):
   - the heartbeat monitor never opens the registry before admission;
   - web-server.py honours is_onionheaven only with its own signature, and
     the activation marker follows admission, never a registration;
-  - the Linux client takes its claim from config, never the marker, and
-    signs it under the label the hub checks;
+  - the daemon's client (both platforms, #407) takes its claim from
+    config, never the marker, and signs it under the label the hub checks;
   - the menubar knows it is the hub as soon as it knows its address (#235);
   - the opt-in reaches both containers from every compose caller.
 The HTTP behaviour is covered in test_onionheaven_integration.py.
@@ -76,30 +76,6 @@ ws = _load("web_server_hub_admission",
 hbm = _load("onionheaven_heartbeat_hub_admission",
             os.path.join(DOCKER_TOR_DIR, "onionheaven-heartbeat.py"))
 
-# linux/onionpress-heartbeat.py opens a log file under $HOME/.onionpress at
-# import, and imports onion_auth / key_manager flat from /opt/onionpress.
-_LINUX_HOME = tempfile.mkdtemp(prefix="op-hub-admission-")
-os.makedirs(os.path.join(_LINUX_HOME, ".onionpress"))
-
-
-def _load_linux_heartbeat():
-    saved_home = os.environ.get("HOME")
-    os.environ["HOME"] = _LINUX_HOME
-    sys.modules.setdefault("key_manager", key_manager)
-    sys.modules.setdefault("onion_auth", onion_auth)
-    try:
-        return _load("onionpress_heartbeat_hub_admission",
-                     os.path.join(PROJECT_DIR, "linux", "onionpress-heartbeat.py"))
-    finally:
-        if saved_home is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = saved_home
-
-
-linux_hb = _load_linux_heartbeat()
-
-
 def _no_docker(*_a, **_kw):
     raise AssertionError("no docker call may happen in these tests")
 
@@ -109,7 +85,7 @@ class AdmissionRuleTest(unittest.TestCase):
     def test_canonical_hub_address_matches_the_client_constants(self):
         self.assertEqual(oc.ONIONHEAVEN_HUB_ADDRESS, HUB)
         self.assertEqual(client_onionheaven._KNOWN_ONIONHEAVEN_ADDRESS, HUB)
-        self.assertEqual(linux_hb.DEFAULT_HUB, HUB)
+        self.assertEqual(client_onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS, HUB)
 
     def test_only_the_hub_address_admits_without_opt_in(self):
         with mock.patch.dict(os.environ, {}, clear=False):
@@ -353,49 +329,67 @@ class ActivateMarkerTest(unittest.TestCase):
                                 body.index(first_action))
 
 
-class LinuxClientClaimTest(unittest.TestCase):
+class ClientClaimTest(unittest.TestCase):
+    """The daemon's client makes the peer claim on both platforms (#407;
+    until then Linux's heartbeat client alone did)."""
 
     def setUp(self):
         self.priv, self.pub, self.addr = _keypair()
-        self.tmp = tempfile.mkdtemp(prefix="op-linux-claim-")
+        self.tmp = tempfile.mkdtemp(prefix="op-client-claim-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.config = os.path.join(self.tmp, "config")
-        for p in (mock.patch.object(linux_hb, "CONFIG_PATH", self.config),
-                  mock.patch.object(linux_hb, "docker_exec", side_effect=_no_docker)):
-            p.start()
-            self.addCleanup(p.stop)
+        open(self.config, "w").close()
+        self.app = mock.Mock()
+        self.app.read_config_value = lambda key, default="": __import__("onionpress.config", fromlist=["x"]).read_value(self.config, key, default)
 
     def _config(self, text):
         with open(self.config, "w") as f:
             f.write(text)
 
+    def _claim(self):
+        return client_onionheaven.peer_claim_fields(
+            self.app, self.priv, self.pub, self.addr, HC, onion_auth.make_timestamp())
+
     def test_label_matches_the_hub(self):
-        self.assertEqual(linux_hb.PEER_CLAIM_ENDPOINT, ws.PEER_CLAIM_ENDPOINT)
+        self.assertEqual(client_onionheaven.PEER_CLAIM_ENDPOINT, ws.PEER_CLAIM_ENDPOINT)
 
     def test_claim_comes_from_config_not_the_marker(self):
         self._config("REGISTER_WITH_ONIONHEAVEN=yes\n")
-        self.assertFalse(linux_hb._is_onionheaven_server())
+        self.assertFalse(client_onionheaven.is_onionheaven_server(self.app))
         self._config("ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes\n")
-        self.assertTrue(linux_hb._is_onionheaven_server())
+        self.assertTrue(client_onionheaven.is_onionheaven_server(self.app))
         self._config("ONIONHEAVEN_ACCEPT_REGISTRATIONS=no\n")
-        self.assertFalse(linux_hb._is_onionheaven_server())
-        self.assertNotIn("onionheaven/activate", _read("linux/onionpress-heartbeat.py"))
+        self.assertFalse(client_onionheaven.is_onionheaven_server(self.app))
+        self.assertNotIn("onionheaven/activate", _read("src/onionpress/onionheaven.py"))
 
     def test_claim_is_signed_and_accepted_by_the_hub(self):
-        payload = linux_hb._build_signed_payload(
-            "online", self.addr, HC, self.priv, self.pub,
-            extra={"is_onionheaven": True})
+        self._config("ONIONHEAVEN_ACCEPT_REGISTRATIONS=yes\n")
+        timestamp = onion_auth.make_timestamp()
+        payload = {
+            "content_address": self.addr, "healthcheck_address": HC, "timestamp": timestamp,
+            "signature": onion_auth.sign_payload(self.priv, self.pub, "online", self.addr, HC, timestamp),
+        }
+        payload.update(client_onionheaven.peer_claim_fields(
+            self.app, self.priv, self.pub, self.addr, HC, timestamp))
+        self.assertTrue(payload["is_onionheaven"])
         self.assertIn("onionheaven_peer_signature", payload)
-        ok, err = onion_auth.verify_payload(
-            self.addr, "online", HC, payload["timestamp"], payload["signature"])
+        ok, err = onion_auth.verify_payload(self.addr, "online", HC, timestamp, payload["signature"])
         self.assertTrue(ok, err)
         self.assertTrue(ws._signed_peer_claim(payload))
 
     def test_no_claim_no_peer_signature(self):
-        for extra in (None, {"is_onionheaven": False}, {"wordpress_healthy": True}):
-            payload = linux_hb._build_signed_payload(
-                "online", self.addr, HC, self.priv, self.pub, extra=extra)
-            self.assertNotIn("onionheaven_peer_signature", payload)
+        for text in ("", "ONIONHEAVEN_ACCEPT_REGISTRATIONS=no\n", "REGISTER_WITH_ONIONHEAVEN=yes\n"):
+            self._config(text)
+            self.assertEqual(self._claim(), {})
+
+    def test_every_online_carries_it(self):
+        src = _read("src/onionpress/onionheaven.py")
+        heartbeat = src[src.index("    def _send_heartbeat_locked("):]
+        heartbeat = heartbeat[:heartbeat.index("\n    def ", 1)]
+        self.assertIn("payload_dict.update(peer_claim_fields(self.app,", heartbeat)
+        notify = src[src.index("    def _send_notification_unlocked("):]
+        notify = notify[:notify.index("\n    def ", 1)]
+        self.assertIn('if endpoint == "online":\n            payload_dict.update(peer_claim_fields(self.app,', notify)
 
 
 class MenubarHubFlagTest(unittest.TestCase):

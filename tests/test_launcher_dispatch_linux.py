@@ -54,8 +54,8 @@ class TestStart(_Case):
         r = self.l.run("start")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.l.fn_calls(), [
-            "setup_db_passwords", "start_containers", "wait_for_services",
-            "start_container_log_capture", "write_status", "_status_poll_loop"])
+            "setup_db_passwords", "start_containers", "wait_for_services"])
+        self.assertEqual(self.l.py_calls()[-1], f"{self.dd()} daemon start --launcher {self.l.script}")
         self.assertIn("OnionPress is running!", r.stdout)
         self.assertFalse(os.path.exists(self.l.pidfile), "the EXIT trap removes the lock")
 
@@ -88,49 +88,88 @@ class TestStart(_Case):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("start_containers", self.l.fn_calls())
 
-    def test_systemd_is_told_when_ready(self):
+    def test_the_start_returns_and_the_daemon_is_the_units(self):
+        """onionpress.service is a oneshot that stays active (#407): no
+        systemd-notify, no loop; the daemon is asked to start, its
+        failure a warning."""
         r = self.l.run("start", env={"NOTIFY_SOCKET": "/run/x"})
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("bin systemd-notify --ready", self.l.calls())
+        self.assertNotIn("bin systemd-notify --ready", self.l.calls())
+        self.assertNotIn("_status_poll_loop", self.l.fn_calls())
+
+
+class TestStartDaemon(_Case):
+    STUBS = ("setup_db_passwords", "start_containers", "wait_for_services")
+
+    def test_start_runs_daemon_start_after_the_stack(self):
+        r = self.l.run("start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = self.l.calls()
+        self.assertEqual(self.l.py_calls()[-1],
+                         f"{self.dd()} daemon start --launcher {self.l.script}")
+        self.assertLess(calls.index("fn wait_for_services"),
+                        calls.index(f"py {self.dd()} daemon start --launcher {self.l.script}"))
+
+    def test_a_daemon_that_does_not_start_is_only_a_warning(self):
+        # start_daemon alone (STUB_RC_PY would fail the start's own
+        # check-docker call first): its op_py failing is a logged warning.
+        with open(LINUX) as f:
+            text = f.read()
+        start = text.index("\nstart_daemon() {")
+        fn = text[start:text.index("\n}\n", start) + 3]
+        log = os.path.join(self.l.data_dir, "onionpress.log")
+        os.makedirs(self.l.data_dir, exist_ok=True)
+        script = (f"DATA_DIR={self.l.data_dir!r}\nLOG_FILE={log!r}\nINSTALL_DIR=/opt/onionpress\n"
+                  'log() { echo "$1" >> "$LOG_FILE"; }\nop_py() { return 1; }\n'
+                  + fn + "start_daemon\necho rc=$?\n")
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.stdout.strip(), "rc=0", r.stderr)
+        with open(log) as f:
+            self.assertIn("WARNING: the OnionPress daemon could not be started", f.read())
 
 
 class TestStopAndRestart(_Case):
-    STUBS = ("setup_db_passwords", "stop_heartbeat_client", "start_heartbeat_client",
-             "stop_container_log_capture",
-             "stop_onionheaven_farm", "write_status", "start_containers",
-             "wait_for_services", "start_container_log_capture")
+    STUBS = ("setup_db_passwords", "stop_onionheaven_farm", "start_containers",
+             "wait_for_services", "start_daemon")
 
-    def test_stop_stops_the_heartbeat_then_the_stack(self):
+    def test_stop_asks_the_daemon_offline_then_stops_the_stack(self):
         r = self.l.run("stop")
         self.assertEqual(r.returncode, 0, r.stderr)
         calls = self.l.calls()
         # Always with the cloudflared override, so a removed token's tunnel goes too.
         down = "bin docker compose -f docker-compose.yml -f docker-compose.cloudflare.yml down"
-        self.assertLess(calls.index("fn stop_heartbeat_client"), calls.index(down))
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} daemon offline"])
+        self.assertLess(calls.index(f"py {self.dd()} daemon offline"), calls.index(down))
         self.assertIn("Containers stopped", r.stdout)
         with open(os.path.join(self.l.data_dir, ".previous-port-offset")) as f:
             self.assertEqual(f.read().strip(), "0")
+
+    def test_a_daemon_that_cannot_go_offline_does_not_stop_the_stop(self):
+        r = self.l.run("stop", env={"STUB_RC_PY": "1"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Containers stopped", r.stdout)
 
     def test_a_failed_compose_down_is_the_exit_status(self):
         r = self.l.run("stop", env={"STUB_RC_DOCKER_DOWN": "3"})
         self.assertEqual(r.returncode, 3)
         self.assertIn("ERROR: stopping the containers failed", r.stdout)
-        self.assertIn("write_status", self.l.fn_calls(), "the tray still learns the state")
+        self.assertNotIn("write_status", self.l.fn_calls(), "the daemon's pass reports the state")
 
     def test_restart(self):
         r = self.l.run("restart")
         self.assertEqual(r.returncode, 0, r.stderr)
         fns = self.l.fn_calls()
-        self.assertLess(fns.index("stop_heartbeat_client"), fns.index("start_containers"))
-        self.assertEqual(fns[-1], "start_heartbeat_client")
-        self.assertIn("start_container_log_capture", fns)
+        calls = self.l.calls()
+        self.assertLess(calls.index(f"py {self.dd()} daemon offline"), calls.index("fn start_containers"))
+        self.assertEqual(fns[-1], "start_daemon")
+        self.assertNotIn("start_container_log_capture", fns)
 
     def test_a_failed_stop_still_restarts(self):
         r = self.l.run("restart", env={"STUB_RC_DOCKER_DOWN": "1"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("WARNING: restart: the stop failed", r.stdout)
         self.assertIn("start_containers", self.l.fn_calls())
-        self.assertEqual(self.l.fn_calls()[-1], "start_heartbeat_client")
+        self.assertEqual(self.l.fn_calls()[-1], "start_daemon")
 
 
 class TestStatusAndLogs(_Case):
@@ -259,9 +298,9 @@ class TestRestore(_Case):
     def py(self, *rest):
         return f"{self.dd()} restore " + " ".join(rest)
 
-    def test_the_restore_is_the_clis_which_pauses_the_heartbeat(self):
-        # The heartbeat client is stopped and started by the CLI
-        # (onionpress.heartbeat_unit, issue #406), not here.
+    def test_the_restore_is_the_clis(self):
+        # Nothing stops a heartbeat around it: the daemon sees the stack
+        # go down and come back (issue #407).
         r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "s3cret"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip")])

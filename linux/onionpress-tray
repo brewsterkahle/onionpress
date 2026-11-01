@@ -20,8 +20,8 @@
 
 A thin presentation layer around the bash launcher: the widgets only.
 Polls the daemon's state file (~/.onionpress/daemon-state.json, written
-by `onionpress write-status` until the daemon runs on Linux, #407; read
-through onionpress.daemon_client as the Mac menubar reads it) every 2
+by `onionpress daemon`, the onionpress-daemon.service user unit since
+#407; read through onionpress.daemon_client as the Mac menubar reads it) every 2
 seconds and reflects state via the AppIndicator. Every action is `/opt/onionpress/onionpress <subcommand>`
 run through the UIs' shared client (src/onionpress/ui_client.py, issue
 #526: the Mac menubar runs the same code), so the headless / SSH-only
@@ -1030,7 +1030,7 @@ class SetupDialog:
 
         # Analytics share checkbox — opt-in, off by default. Writes
         # SHARE_ANALYTICS_WITH_ONIONHOME to ~/.onionpress/config so the
-        # heartbeat picks it up the next time it loads config (analytics
+        # daemon picks it up the next time it loads config (analytics
         # uploads gated in src/onionpress/analytics_sharing.py).
         row += 1
         self._analytics_check = Gtk.CheckButton(
@@ -1156,7 +1156,7 @@ class SetupDialog:
     def _provision(self, title, onionname, password, language, share_analytics):
         # Persist analytics preference up front so the setting takes
         # effect even if provisioning is interrupted mid-way (the
-        # bootstrap user is still set, and the heartbeat will respect
+        # bootstrap user is still set, and the daemon will respect
         # the opt-in/out flag on next config reload). Through
         # `onionpress config set`, the one writer of the config (#365).
         try:

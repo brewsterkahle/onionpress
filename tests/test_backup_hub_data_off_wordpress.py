@@ -420,7 +420,7 @@ class TestEveryWordPressDeliveredBackupLeavesItOut(unittest.TestCase):
 
     HANDOFF = re.compile(r"""umask 077; cat > "\$1"'""")
     SOURCES = ["src/menubar.py", "linux/onionpress", "app/MacOS/onionpress",
-               "linux/onionpress-tray", "linux/onionpress-heartbeat.py"]
+               "linux/onionpress-tray"]
 
     def _python_sources(self):
         root = os.path.join(PROJECT_ROOT, "src")
@@ -571,12 +571,10 @@ op_py() {
                              rc=3, answer=json.dumps({"error": backup.ADDRESS_CHANGE_REFUSED_MSG}))
         self.assertEqual(r.returncode, 3)
         self.assertEqual(len([c for c in calls if c.startswith("op_py")]), 1)
-        # No heartbeat or restart from the case: the CLI stops and starts
-        # the heartbeat client (onionpress.heartbeat_unit), the handler restarts.
+        # No heartbeat or restart from the case: the handler restarts.
         for case in ("settings-page-backup", "settings-page-restore"):
             body = _linux_case(mv._read("linux/onionpress"), case)
-            self.assertNotIn("heartbeat", body.replace("heartbeat_unit", "").replace(
-                "heartbeat client", ""))
+            self.assertNotIn("heartbeat", body)
             self.assertNotIn("$3", body)
             self.assertNotIn("read_backup_password", body)
 

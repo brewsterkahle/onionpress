@@ -19,7 +19,7 @@
 
 ~/.onionpress/onionheaven-registration.json says which hubs may hold this
 install's onion keys. The Mac client (onionheaven.py) and the Linux
-heartbeat daemon (linux/onionpress-heartbeat.py) both keep it; this is
+heartbeat daemon (linux/onionpress-heartbeat.py, until issue #407) both kept it; this is
 the one copy of how a record is read: the left_on_hubs entries, the
 "released" hold and the fields a rewrite carries over. Each client still
 decides where the file lives and what lock orders its writers.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """On Linux, WordPress's published port stays on 127.0.0.1 and the
-heartbeat client is held until WordPress is installed (issue #464).
+daemon registers nothing with the hub until WordPress is installed
+(issue #464).
 
 The Linux launcher binds WordPress's port to every interface by default
 (ONIONPRESS_BIND_HOST=0.0.0.0), the .deb starts the units at once, and a
@@ -13,13 +14,15 @@ Now start_containers brings WordPress up bound to 127.0.0.1 unless a
 start has seen it installed (the `.wordpress-installed` marker), then,
 once `wp core is-installed` has answered, records the verdict and moves
 the port where the config says (bind_wordpress_port_for_install_state:
-one recreate of the wordpress container, once per install) or holds the
-heartbeat client's user unit (a runtime mask, gone at reboot). Every
-setup path ends in after_wordpress_installed: the launcher's
-provision-post-install subcommand (what install_fresh_wordpress runs),
-the `setup` case, and start_containers for an installed site. The
-functions are extracted from the launcher and run under bash against
-stub docker and systemctl binaries.
+one recreate of the wordpress container, once per install). The hub
+side is the daemon's own gate (Daemon.hub_registration_allowed, issue
+#407, tests/test_linux_daemon.py; until then a runtime mask of the
+heartbeat client's unit, held here). Every setup path ends in
+after_wordpress_installed: the launcher's provision-post-install
+subcommand (what install_fresh_wordpress runs), the `setup` case, and
+start_containers for an installed site. The functions are extracted
+from the launcher and run under bash against stub docker and systemctl
+binaries.
 """
 
 import os
@@ -38,11 +41,7 @@ FUNCTIONS = (
     "wordpress_bind_host_for_start",
     "wordpress_port_bind_host",
     "bind_wordpress_port_for_install_state",
-    "heartbeat_client_held",
-    "hold_heartbeat_client_until_installed",
-    "release_heartbeat_client_hold",
     "after_wordpress_installed",
-    "start_heartbeat_client",
 )
 
 
@@ -136,7 +135,6 @@ class TestUnderBash(unittest.TestCase):
             f"ONIONPRESS_BIND_HOST={bind_host}\n"
             "ONIONPRESS_WP_PORT=8080\n"
             'WP_INSTALLED_MARKER=".wordpress-installed"\n'
-            "HEARTBEAT_UNIT=onionpress-heartbeat.service\n"
             'log() { echo "$1" >> "$LOG_FILE"; }\n'
             + "".join(_bash_function(text, f) for f in FUNCTIONS)
             + body
@@ -177,12 +175,12 @@ class TestUnderBash(unittest.TestCase):
         self.assertIn('ONIONPRESS_BIND_HOST="$(wordpress_bind_host_for_start)" \\\n'
                       '        op_py --data-dir "$DATA_DIR" start-containers --until-core', body)
         # Once the verdict is in: installed sites end as every setup does,
-        # the rest stay on loopback with the heartbeat client held.
+        # the rest stay on loopback (the hub gate is the daemon's, #407).
         self.assertRegex(body, r'if \$wp_installed; then\n[^\n]*\n\s*after_wordpress_installed\n')
-        self.assertRegex(body, r'\n\s*bind_wordpress_port_for_install_state false\n'
-                               r'\s*hold_heartbeat_client_until_installed\n')
+        self.assertRegex(body, r'\n\s*bind_wordpress_port_for_install_state false\n')
+        self.assertNotIn("heartbeat", body)
         # ...before Tor starts (in start-post-up, #442.7).
-        self.assertLess(body.index("hold_heartbeat_client_until_installed"),
+        self.assertLess(body.index("bind_wordpress_port_for_install_state false"),
                         body.index('start_post_up "$wp_installed"'))
 
     def test_only_wordpress_s_port_follows_the_variable(self):
@@ -234,50 +232,25 @@ class TestUnderBash(unittest.TestCase):
         self.assertFalse(os.path.exists(self.marker))
         self.assertFalse(any("compose up" in c for c in self._calls()))
 
-    # --- the heartbeat client ---
+    # --- the daemon's gate ---
 
-    def test_held_until_installed(self):
-        self._run("hold_heartbeat_client_until_installed\n")
-        calls = self._calls()
-        self.assertIn("systemctl --user mask --runtime onionpress-heartbeat.service", calls)
-        self.assertIn("systemctl --user stop onionpress-heartbeat.service", calls)
-        self.assertEqual(self._get("enabled"), "masked-runtime")
-        self.assertEqual(self._get("active"), "inactive")
-        self.assertIn("held until WordPress is installed", self._logged())
-        # Held again on the next start: no second mask, nothing to stop.
-        os.unlink(self.calls)
-        self._run("hold_heartbeat_client_until_installed\n")
-        self.assertFalse(any("mask" in c or "stop" in c for c in self._calls()))
+    def test_no_hold_in_the_launcher(self):
+        """The hub side of #464 is the daemon's own gate (#407): nothing
+        here masks, stops or starts a unit."""
+        text = _read(LAUNCHER)
+        for gone in ("hold_heartbeat_client_until_installed", "release_heartbeat_client_hold",
+                     "heartbeat_client_held", "start_heartbeat_client", "HEARTBEAT_UNIT",
+                     "mask --runtime"):
+            self.assertNotIn(gone, text, gone)
+        daemon = _read("src/onionpress/daemon.py")
+        self.assertIn("    def hub_registration_allowed(self):", daemon)
 
-    def test_start_heartbeat_client_respects_the_hold(self):
-        self._set(enabled="masked-runtime", active="inactive")
-        self._run("start_heartbeat_client\n")
-        self.assertFalse(any(" start " in c for c in self._calls()))
-        self.assertIn("stays held", self._logged())
-        self._set(enabled="enabled")
-        self._run("start_heartbeat_client\n")
-        self.assertIn("systemctl --user start onionpress-heartbeat", self._calls())
-
-    def test_released_once_installed(self):
-        self._set(enabled="masked-runtime", active="inactive")
-        self._run("release_heartbeat_client_hold\n")
-        calls = self._calls()
-        self.assertIn("systemctl --user unmask --runtime onionpress-heartbeat.service", calls)
-        self.assertIn("systemctl --user start onionpress-heartbeat", calls)
-        self.assertLess(calls.index("systemctl --user unmask --runtime onionpress-heartbeat.service"),
-                        calls.index("systemctl --user start onionpress-heartbeat"))
-        self.assertEqual(self._get("active"), "active")
-
-    def test_release_without_a_hold_does_nothing(self):
-        self._run("release_heartbeat_client_hold\n")
-        self.assertFalse(any("unmask" in c or " start " in c for c in self._calls()))
-
-    def test_after_wordpress_installed_does_both(self):
-        self._set(port="127.0.0.1:8080\n", enabled="masked-runtime", active="inactive")
+    def test_after_wordpress_installed_moves_the_port(self):
+        self._set(port="127.0.0.1:8080\n")
         self._run("after_wordpress_installed\n")
         calls = self._calls()
         self.assertIn("docker compose up -d wordpress [ONIONPRESS_BIND_HOST=0.0.0.0]", calls)
-        self.assertIn("systemctl --user start onionpress-heartbeat", calls)
+        self.assertFalse([c for c in calls if c.startswith("systemctl")], calls)
         self.assertTrue(os.path.exists(self.marker))
 
     def test_a_hostile_port_answer_runs_nothing(self):

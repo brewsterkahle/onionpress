@@ -580,9 +580,13 @@ class TestNothingShippedSignsWithoutLibsodium(unittest.TestCase):
         line = next(l for l in install.splitlines() if "has_crypto_core_ed25519" in l)
         self.assertIn("has_crypto_scalarmult_ed25519", line)
         self.assertTrue(line.startswith("if ! python3 -c "), line)
-        heartbeat = self._read("linux/onionpress-heartbeat.py")
-        main = heartbeat[heartbeat.index("\ndef main():"):]
-        self.assertIn("if not onion_auth.signing_uses_libsodium():", main[:main.index("wait_for_ready()")])
+        # The daemon says so at start, on both platforms (#407; the Mac
+        # bundle has libsodium, a Linux install needs python3-nacl).
+        daemon = self._read("src/onionpress/daemon.py")
+        info = daemon[daemon.index("    def _log_version_info(self):"):]
+        info = info[:info.index("\n    def ", 1)]
+        self.assertIn("if not onion_auth.signing_uses_libsodium():", info)
+        self.assertIn("python3-nacl", info)
         control = self._read("build/build-linux.sh")
         self.assertIn("python3-nacl (>= 1.5.0)",
                       control[control.index("Depends:"):control.index("Suggests:")])

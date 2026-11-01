@@ -318,86 +318,6 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
         self.assertIn("OnionHeaven: no content address for unregister", app.logs)
 
 
-# ─── Linux heartbeat ────────────────────────────────────────────────────
-
-_HB_HOME = tempfile.mkdtemp(prefix="op-hb-strict-test-")
-
-
-def _load_linux_heartbeat():
-    os.makedirs(os.path.join(_HB_HOME, ".onionpress"), exist_ok=True)
-    saved = os.environ.get("HOME")
-    os.environ["HOME"] = _HB_HOME
-    sys.modules.setdefault("key_manager", key_manager)
-    sys.modules.setdefault("onion_auth", onion_auth)
-    try:
-        return _load("linux/onionpress-heartbeat.py", "onionpress_heartbeat_strict_test")
-    finally:
-        if saved is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = saved
-
-
-class TestLinuxHeartbeat(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        cls.hb = _load_linux_heartbeat()
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(_HB_HOME, ignore_errors=True)
-
-    def test_hub_from_config(self):
-        hb = self.hb
-        self.assertEqual(hb._hub_address({}), hb.DEFAULT_HUB)
-        self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": ""}), hb.DEFAULT_HUB)
-        self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": OTHER_HUB}), OTHER_HUB)
-        for value in LOOSE:
-            with self.subTest(value=value), self.assertLogs(hb.log, "WARNING") as cm:
-                hb._bad_hub_value_logged = None
-                self.assertEqual(hb._hub_address({"ONIONHEAVEN_ADDRESS": value}),
-                                 hb.DEFAULT_HUB)
-            self.assertTrue(all("evil" not in line for line in cm.output))
-            self.assertTrue(any(hb.DEFAULT_HUB in line for line in cm.output))
-
-    def test_register_warns_again_for_a_rejected_hub(self):
-        hb = self.hb
-        priv = os.urandom(64)
-        pub = onion_auth.derive_public_key(priv)
-        hb._bad_hub_value_logged = None
-        for value, warned in ((LOOSE[0], True), (OTHER_HUB, False)):
-            with self.subTest(value=value):
-                with self.assertLogs(hb.log, "WARNING"):
-                    hb._hub_address({"ONIONHEAVEN_ADDRESS": value})
-                    hb.log.warning("marker")
-                hub = hb._hub_address({"ONIONHEAVEN_ADDRESS": value})
-                with self.assertLogs(hb.log, "DEBUG") as cm, \
-                        mock.patch.object(hb, "read_config",
-                                          return_value={"REGISTER_WITH_ONIONHEAVEN": "no"}), \
-                        mock.patch.object(hb, "_is_onionheaven_server", return_value=False):
-                    self.assertFalse(hb.register(hub, SITE, HC, priv, pub))
-                hits = [l for l in cm.output if "WARNING" in l and hb.DEFAULT_HUB in l]
-                self.assertEqual(bool(hits), warned, cm.output)
-
-    def test_every_config_read_goes_through_it(self):
-        src = _read("linux/onionpress-heartbeat.py")
-        self.assertNotIn('config.get("ONIONHEAVEN_ADDRESS", DEFAULT_HUB)', src)
-        self.assertEqual(src.count("= _hub_address(config)"), 2)
-
-    def test_sign_and_post_refuses_a_malformed_hub(self):
-        priv, pub = os.urandom(64), os.urandom(32)
-        for hub in LOOSE:
-            with self.subTest(hub=hub):
-                rec = _Recorder('{"online": true}')
-                with mock.patch.object(self.hb, "_hub_conn", None), \
-                        mock.patch.object(self.hb.subprocess, "run", rec):
-                    self.assertEqual(
-                        self.hb.sign_and_post("online", hub, SITE, HC, priv, pub),
-                        (False, None))
-                self.assertEqual(rec.calls, [])
-
-
 # ─── Hosts that route a request ─────────────────────────────────────────
 
 
@@ -881,11 +801,13 @@ class TestLaunchers(unittest.TestCase):
                     self.assertEqual((r.returncode, r.stdout, cache), (1, "", None))
 
     def test_linux_status_carries_only_a_whole_address(self):
-        # The status is the writer's (onionpress.status_writer, #523): the
-        # served address read by onion_hostname's rule, and status.json's
-        # address a whole v3 address or nothing.
+        # The status is the writer's (onionpress.status_writer, #523), fed
+        # by the daemon on both platforms (#407): the served address read
+        # by onion_hostname's rule, and status.json's address a whole v3
+        # address or nothing.
+        self.assertIn("return onion_hostname.read_served_address(self._docker)",
+                      _read("src/onionpress/daemon.py"))
         writer = _read("src/onionpress/status_writer.py")
-        self.assertIn("addr = onion_hostname.read_served_address(self._docker)", writer)
         self.assertIn('addr = app.onion_address if key_manager.is_valid_onion_address(app.onion_address) else ""',
                       writer)
 

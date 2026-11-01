@@ -13,12 +13,15 @@ kept offering the update just installed), while the watcher timer ran the
 new `handle-action` every 10 s against all of it.
 
 Now postinst's upgrade path, for the user it already works out, reloads
-the user manager and `try-restart`s onionpress.service and the heartbeat
-through the `--machine=USER@.host` mechanism of the first-install path
-(the heartbeat is ordered After= onionpress.service, so systemd stops it
-first, as the launcher's own `restart` does, and starts it last), replaces
-the tray the way a first install starts it, and says so. A failure leaves
-the old code running and prints what to run; it never fails the install.
+the user manager, stops the heartbeat and watcher units of a release
+before #407 (their files are gone; the heartbeat's runtime mask, the old
+install hold of #464/#506, is lifted), `try-restart`s onionpress.service
+and restarts onionpress-daemon.service (an upgrade from before #407 has
+none running) through the `--machine=USER@.host` mechanism of the
+first-install path (the daemon is ordered Before= onionpress.service, as
+the launcher's own `restart` orders them), replaces the tray the way a
+first install starts it, and says so. A failure leaves the old code
+running and prints what to run; it never fails the install.
 
 The static part reads the heredoc; the behavioural part runs the generated
 postinst under bash as this user, with every command that reaches the
@@ -34,7 +37,7 @@ import unittest
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BUILD = "build/build-linux.sh"
-UNITS = ("linux/onionpress.service", "linux/onionpress-heartbeat.service")
+UNITS = ("linux/onionpress.service", "linux/onionpress-daemon.service")
 
 
 def _read(rel_path):
@@ -73,33 +76,41 @@ class TestPostinstText(unittest.TestCase):
             "(`configure` with `$2`, the version being replaced) of a real user")
         return m.group(1)
 
-    def test_upgrade_reloads_then_try_restarts_both_units_for_the_user(self):
+    def test_upgrade_reloads_then_restarts_the_site_and_the_daemon_for_the_user(self):
         block = self._upgrade_block()
         reload_ = block.find('systemctl --user --machine="${REAL_USER}@.host" daemon-reload')
         self.assertGreaterEqual(reload_, 0, "the user manager must read the new unit files first")
-        m = re.search(
-            r'systemctl --user --machine="\$\{REAL_USER\}@\.host" try-restart \\\n\s*\$restart_units',
-            block)
-        self.assertIsNotNone(
-            m, "the units are try-restarted (a stopped site stays stopped) through "
-            "the same --machine mechanism")
-        self.assertIn('restart_units="onionpress.service onionpress-heartbeat.service"', block,
-                      "both units in one call: the heartbeat is After= the site")
-        self.assertIn('restart_units="onionpress.service"', block,
-                      "the site alone while the heartbeat is held (#506)")
+        m = re.search(r'systemctl --user --machine="\$\{REAL_USER\}@\.host" try-restart onionpress\.service',
+                      block)
+        self.assertIsNotNone(m, "the site is try-restarted (a stopped site stays stopped) through "
+                                "the same --machine mechanism")
+        d = re.search(r'systemctl --user --machine="\$\{REAL_USER\}@\.host" restart onionpress-daemon\.service',
+                      block)
+        self.assertIsNotNone(d, "the daemon unit is restarted (started, after an upgrade from before #407)")
         self.assertGreater(m.start(), reload_, "daemon-reload comes before the restart")
+        self.assertLess(m.start(), d.start(), "the site first: its ExecStop asks the daemon for /offline")
+        # The old units of a release before #407, stopped and their hold lifted.
+        old = re.search(r'systemctl --user --machine="\$\{REAL_USER\}@\.host" stop onionpress-heartbeat\.service onionpress-watcher\.timer',
+                        block)
+        self.assertIsNotNone(old)
+        self.assertLess(reload_, old.start())
+        self.assertLess(old.start(), m.start())
+        self.assertIn('unmask --runtime onionpress-heartbeat.service', block)
         self.assertNotIn("--no-block", block,
                          "the restart blocks, so `onionpress update`'s own restart "
                          "after apt-get never runs beside it")
         self.assertNotIn("enable --now", block, "an upgrade enables nothing anew")
-        self.assertNotIn(" restart onionpress", block.replace("try-restart", ""),
-                         "never a plain restart: that would start a site the user stopped")
+        self.assertNotIn(" restart onionpress.service", block.replace("try-restart", ""),
+                         "never a plain restart of the site: that would start one the user stopped")
+        self.assertNotIn("restart_units", block)
+        self.assertNotIn("masked-runtime", block)
 
     def test_upgrade_says_so_and_what_to_do_on_failure(self):
         block = self._upgrade_block()
         self.assertRegex(block, _m(r'^\s*echo "  OnionPress \$VERSION_INSTALLED installed over \$2\. Restarting the site'))
-        self.assertIn("systemctl --user try-restart onionpress onionpress-heartbeat", block,
+        self.assertIn("systemctl --user try-restart onionpress\n", block,
                       "the failure message names the commands to run by hand")
+        self.assertIn("systemctl --user restart onionpress-daemon\n", block)
         self.assertNotRegex(block, _m(r"^\s*exit [1-9]"), "a failed restart never fails the install")
 
     def test_upgrade_replaces_the_tray_the_way_a_first_install_starts_it(self):
@@ -121,11 +132,14 @@ class TestPostinstText(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1).strip(), "", "prerm does nothing on upgrade: postinst restarts")
 
-    def test_the_heartbeat_is_ordered_after_the_site(self):
-        # `try-restart a b` relies on the units' own ordering: systemd stops
-        # the heartbeat first (reverse of After=) and starts it last.
-        heartbeat = _read("linux/onionpress-heartbeat.service")
-        self.assertRegex(heartbeat, _m(r"^After=onionpress\.service$"))
+    def test_the_daemon_is_ordered_before_the_site(self):
+        # The site's ExecStop asks the daemon for /offline while the tor
+        # container is up: systemd stops the site first (reverse of
+        # Before=) and starts the daemon first, as the Mac's `start` does.
+        daemon = _read("linux/onionpress-daemon.service")
+        self.assertRegex(daemon, _m(r"^Before=onionpress\.service$"))
+        self.assertRegex(daemon, _m(r"^Wants=onionpress\.service$"))
+        self.assertNotIn("After=onionpress", daemon)
 
 
 class TestPostinstRuns(unittest.TestCase):
@@ -138,9 +152,8 @@ case " $* " in
     *" --machine="*) [ "${STUB_MACHINE_FAILS:-}" = "1" ] && exit 1 ;;
 esac
 case "$*" in
-    *" is-enabled onionpress-heartbeat.service") [ -z "${STUB_HEARTBEAT_ENABLED:-}" ] || echo "$STUB_HEARTBEAT_ENABLED" ;;
     *" is-active onionpress.service") echo "${STUB_SITE_ACTIVE:-active}" ;;
-    *" is-active onionpress-heartbeat.service") echo "${STUB_HEARTBEAT_ACTIVE:-active}" ;;
+    *" is-active onionpress-daemon.service") echo "${STUB_DAEMON_ACTIVE:-active}" ;;
 esac
 exit 0
 ''',
@@ -260,8 +273,12 @@ exit 1
         self.assertIn("installed over 2.5.6. Restarting the site for opuser", r.stdout)
         self.assertIn("OnionPress restarted", r.stdout)
         reload_ = calls.index("systemctl --user --machine=opuser@.host daemon-reload")
-        restart = calls.index(
-            "systemctl --user --machine=opuser@.host try-restart onionpress.service onionpress-heartbeat.service")
+        restart = calls.index("systemctl --user --machine=opuser@.host try-restart onionpress.service")
+        daemon = calls.index("systemctl --user --machine=opuser@.host restart onionpress-daemon.service")
+        self.assertLess(restart, daemon)
+        old = calls.index("systemctl --user --machine=opuser@.host stop onionpress-heartbeat.service onionpress-watcher.timer")
+        self.assertLess(reload_, old)
+        self.assertLess(old, restart)
         kill = calls.index("pkill -u opuser -f /onionpress-tray$")
         spawn = next(i for i, c in enumerate(calls)
                      if c.startswith("runuser -u opuser -- bash -lc setsid /usr/local/bin/onionpress-tray"))
@@ -283,13 +300,15 @@ exit 1
         r, calls = self._run("configure", "2.5.6", STUB_NO_DISPLAY=1)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse([c for c in calls if "onionpress-tray" in c and not c.startswith("pkill")], calls)
-        self.assertIn("systemctl --user --machine=opuser@.host try-restart onionpress.service onionpress-heartbeat.service", calls)
+        self.assertIn("systemctl --user --machine=opuser@.host try-restart onionpress.service", calls)
+        self.assertIn("systemctl --user --machine=opuser@.host restart onionpress-daemon.service", calls)
 
     def test_a_failed_restart_never_fails_the_install(self):
         r, calls = self._run("configure", "2.5.6", STUB_MACHINE_FAILS=1)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Could not restart OnionPress for opuser", r.stdout)
-        self.assertIn("systemctl --user try-restart onionpress onionpress-heartbeat", r.stdout)
+        self.assertIn("systemctl --user try-restart onionpress\n", r.stdout)
+        self.assertIn("systemctl --user restart onionpress-daemon\n", r.stdout)
         self.assertNotIn("OnionPress restarted", r.stdout)
 
     def test_a_first_install_restarts_nothing(self):
@@ -307,72 +326,44 @@ exit 1
         self.assertFalse([c for c in calls if "--machine" in c], calls)
 
 
-class TestHeartbeatHold(TestPostinstRuns):
-    """Issue #506: the launcher's runtime mask of the heartbeat unit (its
-    hold until WordPress is installed) outlived `apt purge`, so a reinstall
-    in the same boot failed `enable --now` and started nothing, and the
-    upgrade said "restarted where it was running" when nothing had."""
+class TestRetiredUnits(TestPostinstRuns):
+    """The heartbeat and watcher units of a release before #407, and the
+    heartbeat's runtime mask (the launcher's hold until WordPress was
+    installed, issue #464, which outlived `apt purge`, issue #506): an
+    upgrade stops them and lifts the mask, a first install lifts a stale
+    mask before enabling, and the maintainer scripts carry no hold code
+    (nothing holds the daemon's unit)."""
 
-    def test_a_first_install_lifts_a_stale_hold_before_enabling(self):
+    def test_a_first_install_lifts_a_stale_mask_before_enabling(self):
         r, calls = self._run("configure")
         self.assertEqual(r.returncode, 0, r.stderr)
         unmask = calls.index("runuser -u opuser -- env XDG_RUNTIME_DIR=/run/user/1000 "
                              "systemctl --user unmask --runtime onionpress-heartbeat.service")
         enable = next(i for i, c in enumerate(calls) if "enable --now" in c)
         self.assertLess(unmask, enable)
-
-    def test_an_upgrade_with_a_held_heartbeat_restarts_the_site_alone(self):
-        r, calls = self._run("configure", "2.6.1", STUB_HEARTBEAT_ENABLED="masked-runtime",
-                             STUB_HEARTBEAT_ACTIVE="inactive")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("systemctl --user --machine=opuser@.host try-restart onionpress.service", calls)
-        self.assertFalse([c for c in calls if "try-restart" in c and "heartbeat" in c], calls)
-        self.assertIn("OnionPress restarted", r.stdout)
-        self.assertIn("onionpress.service active, onionpress-heartbeat.service inactive "
-                      "(held until WordPress is set up)", r.stdout)
-        self.assertNotIn("where it was running", r.stdout)
+        self.assertTrue(calls[enable].endswith("onionpress.service onionpress-daemon.service"), calls[enable])
 
     def test_the_upgrade_message_reports_what_runs(self):
         r, _ = self._run("configure", "2.6.1")
-        self.assertIn("onionpress.service active, onionpress-heartbeat.service active", r.stdout)
-        r, _ = self._run("configure", "2.6.1", STUB_SITE_ACTIVE="inactive",
-                         STUB_HEARTBEAT_ACTIVE="inactive")
-        self.assertIn("onionpress.service inactive, onionpress-heartbeat.service inactive", r.stdout)
-        self.assertIn("a stopped unit stays stopped", r.stdout)
+        self.assertIn("onionpress.service active, onionpress-daemon.service active", r.stdout)
+        r, _ = self._run("configure", "2.6.1", STUB_SITE_ACTIVE="inactive", STUB_DAEMON_ACTIVE="inactive")
+        self.assertIn("onionpress.service inactive, onionpress-daemon.service inactive", r.stdout)
+        self.assertIn("a stopped site stays stopped", r.stdout)
 
-    def test_prerm_and_postrm_lift_the_holds(self):
+    def test_no_hold_code_is_left(self):
         build = _read(BUILD)
-        prerm, postrm = _heredoc(build, "PRERM"), _heredoc(build, "POSTRM")
-        fn = re.compile(r"^lift_heartbeat_holds\(\) \{\n.*?^\}\n", re.DOTALL | re.MULTILINE)
-        a, b = fn.search(prerm), fn.search(postrm)
-        self.assertIsNotNone(a); self.assertIsNotNone(b)
-        self.assertEqual(a.group(0), b.group(0), "one function in both maintainer scripts")
-        remove = re.search(r"^\s*remove\)\n(.*?)^\s*;;", _code(prerm), re.DOTALL | re.MULTILINE)
-        self.assertIn("lift_heartbeat_holds", remove.group(1))
-        purge = re.search(r"^\s*purge\)\n(.*?)^\s*;;", _code(postrm), re.DOTALL | re.MULTILINE)
-        self.assertIn("lift_heartbeat_holds", purge.group(1))
+        for tag in ("POSTINST", "PRERM", "POSTRM"):
+            with self.subTest(tag=tag):
+                text = _code(_heredoc(build, tag))
+                self.assertNotIn("lift_heartbeat_holds", text)
+                self.assertNotIn("masked-runtime", text)
+                self.assertNotIn("mask --runtime onionpress-daemon", text)
+        prerm = _code(_heredoc(build, "PRERM"))
+        remove = re.search(r"^\s*remove\)\n(.*?)^\s*;;", prerm, re.DOTALL | re.MULTILINE)
+        self.assertIn("systemctl --global disable onionpress.service onionpress-daemon.service "
+                      "onionpress-heartbeat.service onionpress-watcher.timer", remove.group(1))
         self.assertIn("systemctl --user unmask --runtime onionpress-heartbeat", _code(_read("linux/install.sh")),
-                      "install.sh lifts a stale hold before its enable too")
-        # Under bash: only a numeric /run/user/<uid> holding the mask is
-        # unmasked, by that user's own manager.
-        run = os.path.join(self.tmp, "run")
-        for name, masked in (("1000", True), ("1001", False), ("lock", True)):
-            d = os.path.join(run, name, "systemd", "user")
-            os.makedirs(d)
-            if masked:
-                os.symlink("/dev/null", os.path.join(d, "onionpress-heartbeat.service"))
-        getent = os.path.join(self.bin, "getent")
-        with open(getent, "w") as f:
-            f.write('#!/bin/bash\n[ "$2" = 1000 ] && echo "opuser:x:1000:1000::/h:/bin/bash"\n')
-        os.chmod(getent, 0o755)
-        script = a.group(0) + "lift_heartbeat_holds\necho rc=$?\n"
-        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30,
-                           env={"PATH": self.bin, "STUB_LOG": self.log, "ONIONPRESS_RUN_USER": run})
-        self.assertEqual(r.stdout.strip(), "rc=0", r.stderr)
-        with open(self.log) as f:
-            calls = [line.rstrip("\n") for line in f]
-        self.assertEqual(calls, [f"runuser -u opuser -- env XDG_RUNTIME_DIR={run}/1000 "
-                                 "systemctl --user unmask --runtime onionpress-heartbeat.service"])
+                      "install.sh lifts a stale mask too")
 
 
 if __name__ == "__main__":

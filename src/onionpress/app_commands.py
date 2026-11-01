@@ -196,12 +196,11 @@ def log_file_for(paths, kind, os_name):
     if kind == "launcher":
         return paths.log_file
     if kind == "app":
-        # The Mac daemon's rotating log; Linux's heartbeat and launcher
-        # share the flat onionpress.log.
-        if os_name == "macos":
-            path = current_log_path(logs_dir, "onionpress")
-            if path and os.path.exists(path):
-                return path
+        # The daemon's rotating log on both platforms (issue #407); the
+        # flat onionpress.log (the launcher's) until the daemon has one.
+        path = current_log_path(logs_dir, "onionpress")
+        if path and os.path.exists(path):
+            return path
         return paths.log_file
     if kind == "web":
         path = current_log_path(logs_dir, "wordpress-visitors")

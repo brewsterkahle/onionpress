@@ -84,7 +84,6 @@ OPTIONS = {
                  'onionpress', 'onionpress.backup', 'onionpress.backup_crypto',
                  'onionpress.hub_backup', 'onionpress.hub_record', 'onionpress.status_writer', 'onionpress.docker_versions',
                  'onionpress.backup_archive', 'onionpress.db_import',
-                 'onionpress.heartbeat_unit',
                  'onionpress.key_manager', 'onionpress.key_import',
                  'onionpress.setup_window', 'onionpress.platform', 'onionpress.docker',
                  'onionpress.config', 'onionpress.health', 'onionpress.containers',

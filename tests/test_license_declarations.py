@@ -57,7 +57,6 @@ ENTRY_SCRIPTS = (
     "app/MacOS/launcher.sh",
     "linux/onionpress",
     "linux/onionpress-tray",
-    "linux/onionpress-heartbeat.py",
     "app/Resources/docker/tor/entrypoint.sh",
     "app/Resources/docker/wordpress/onionpress-entrypoint.sh",
 )

@@ -30,7 +30,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 
-from . import config, confirm as _confirm, heartbeat_unit, key_manager, onion_hostname
+from . import config, confirm as _confirm, key_manager, onion_hostname
 from .containers import IMPORT_KEY_PENDING, forget_key_volume_migration
 from .onionheaven import _RETRYABLE
 
@@ -215,17 +215,14 @@ def replace_key(key_b32, *, data_dir, docker, containers, log, release,
                             "again; nothing was changed.", address=address)
         log("Key import: no current key to keep (no key volume)")
 
-    # 3. Only now: the hubs, then OnionPress.
-    if linux:
-        heartbeat_unit.stop(log)
+    # 3. Only now: the hubs, then OnionPress (the daemon's beats stay off
+    # a released key on both platforms, issue #407: no unit to stop).
     try:
         remaining = release("key-import")
     except Exception as e:
         log(f"onionheaven release failed: {e}")
         remaining = [{"why": "unanswered"}]
     if not hub_held_ok(remaining):
-        if linux:
-            heartbeat_unit.start(log)
         return fail("Cancelled: an OnionHeaven hub may still hold the current key",
                     address=address, kept=kept)
     try:
@@ -385,8 +382,8 @@ def run(args, *, paths, docker, containers, log, release, linux,
             print(f"  {path}", file=out)
     print("", file=out)
     if linux:
-        print("Run 'onionpress restart' to use this address (it starts the "
-              "heartbeat client again).", file=out)
+        print("Run 'onionpress restart' to use this address (the daemon registers "
+              "it with the hub).", file=out)
     else:
         print("Launch OnionPress to use this address.", file=out)
     if json_output:

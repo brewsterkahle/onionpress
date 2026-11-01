@@ -105,7 +105,7 @@ class TestLaunchers(unittest.TestCase):
                       '        op_py --data-dir "$DATA_DIR" start-containers --until-core', body)
         core = body.index("start-containers --until-core")
         post = body.index('start_post_up "$wp_installed"')
-        for between in ("after_wordpress_installed", "hold_heartbeat_client_until_installed",
+        for between in ("after_wordpress_installed", "bind_wordpress_port_for_install_state false",
                         "note_if_lan_looks_local"):
             self.assertTrue(core < body.index(between) < post, between)
         # Issue #504: no watcher for the onionheaven container (a core service).

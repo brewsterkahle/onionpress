@@ -2,8 +2,9 @@
 
 HealthChecker runs the checks and the dual probe; RepublishTrigger is the
 #266 republish policy, driven on both platforms through
-onionpress.reachability.RecoveryWindow; HealthMonitor tracks Linux's
-display state across cycles (onionpress.reachability.ReachabilityLoop).
+onionpress.reachability.RecoveryWindow (the daemon's, #407); HealthMonitor
+tracks a display state across full_check cycles (no driver in the tree
+since #407 retired Linux's ReachabilityLoop; its tests keep it).
 """
 
 import json
@@ -195,6 +196,30 @@ SICK_PATTERNS = [
 HEALTHY_PATTERNS = [
     "Sufficiently bootstrapped",
 ]
+
+
+def linux_has_default_route(route="/proc/net/route", route6="/proc/net/ipv6_route") -> bool:
+    """True if the kernel has a default route (v4 or v6); True on any
+    read error so a quirky /proc never reads as offline (the probes and
+    uploads report their own failures)."""
+    try:
+        with open(route, encoding="utf-8") as fh:
+            next(fh, None)  # header
+            for line in fh:
+                parts = line.split()
+                if len(parts) > 1 and parts[1] == "00000000":
+                    return True
+    except OSError:
+        return True
+    try:
+        with open(route6, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) > 1 and parts[0] == "0" * 32 and parts[1] == "00":
+                    return True
+    except OSError:
+        return True
+    return False
 
 
 class HealthChecker:
@@ -898,12 +923,17 @@ class HealthChecker:
     def check_internet_connectivity() -> bool:
         """Check if the host has network access without triggering TCC.
 
-        Scans `ifconfig` output for any non-loopback interface with an
-        IPv4 address. Does NOT call SCNetworkReachability (which fires
-        the macOS Local Network permission prompt on Sequoia+, even
-        though the call makes no traffic). On any failure, assumes
-        connected rather than block the app.
+        Linux: the kernel's routing table (linux_has_default_route; the
+        heartbeat's check until issue #407). Mac: scans `ifconfig`
+        output for any non-loopback interface with an IPv4 address. Does
+        NOT call SCNetworkReachability (which fires the macOS Local
+        Network permission prompt on Sequoia+, even though the call makes
+        no traffic). On any failure, assumes connected rather than block
+        the app.
         """
+        from .platform import OS, detect_os
+        if detect_os() == OS.LINUX:
+            return linux_has_default_route()
         try:
             result = subprocess.run(
                 ["ifconfig"],

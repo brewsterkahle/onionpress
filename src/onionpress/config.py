@@ -804,7 +804,7 @@ def apply_side_effects(keys, config_path: str, os_name: str, log,
         verb = "enable" if want else "disable"
         try:
             r = run(["systemctl", "--user", verb, "onionpress.service",
-                     "onionpress-heartbeat.service"],
+                     "onionpress-daemon.service"],
                     capture_output=True, text=True, timeout=60)
             ok = r.returncode == 0
         except (OSError, _sp.SubprocessError) as e:

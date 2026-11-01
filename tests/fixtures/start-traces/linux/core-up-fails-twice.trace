@@ -18,7 +18,6 @@ log WordPress is installed -- starting Tor
 docker port onionpress-wordpress 80/tcp
 log WordPress is installed: moving its port 8080 from 127.0.0.1 to 0.0.0.0 (ONIONPRESS_BIND_HOST)
 docker compose up -d wordpress [BIND=0.0.0.0]
-bin systemctl --user is-enabled onionpress-heartbeat.service
 docker volume ls --format {{.Name}}
 docker compose up -d --no-deps tor onionheaven [BIND=0.0.0.0]
 docker port onionpress-tor 9050/tcp

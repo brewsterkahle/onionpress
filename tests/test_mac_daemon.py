@@ -176,6 +176,13 @@ class FakeDocker:
         self.calls.append((args, input))
         return self._answer(args)
 
+    def wp(self, *args, timeout=30, check=False, quiet=False, **kw):
+        """wp-cli as www-data (status_writer.wp_installed asks `wp core
+        is-installed`): answered under the "wp ..." prefix."""
+        argv = ["wp", *args]
+        self.calls.append((argv, None))
+        return self._answer(argv)
+
 
 class FakeHealth:
     def __init__(self, *, bootstrapped=(True, 100), hostname=ADDR, internal=True,
@@ -211,6 +218,9 @@ class FakeHealth:
 
 
 class _DaemonCase(unittest.TestCase):
+    # The platform under test (the daemon's os_name seam, issue #407):
+    # tests/test_linux_daemon.py runs the same harness as Linux.
+    OS_NAME = OS.MACOS
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-daemon-")
@@ -239,15 +249,16 @@ class _DaemonCase(unittest.TestCase):
         self.health = FakeHealth()
         self.launcher_calls = []
         self.launcher_answers = {}
-        # The Mac daemon under test, wherever the tests run: the status
-        # writer's platform seam (#523).
-        patcher = mock.patch.object(status_writer, "detect_os", return_value=OS.MACOS)
+        # The platform under test, wherever the tests run: the daemon's
+        # os_name and the status writer's platform seam (#523).
+        patcher = mock.patch.object(status_writer, "detect_os", return_value=self.OS_NAME)
         patcher.start()
         self.addCleanup(patcher.stop)
         status_writer._BOOT_TIME.clear()
         self.addCleanup(status_writer._BOOT_TIME.clear)
         self.d = op_daemon.Daemon(self.paths, version="9.9", launcher_script="/x/onionpress",
-                                  docker=self.docker, health_checker=self.health)
+                                  docker=self.docker, health_checker=self.health,
+                                  os_name=self.OS_NAME)
         # Nothing that forks, binds or sleeps for real.
         self.d.caffeine = mock.Mock()
         self.d.start_onion_proxy = lambda: None
@@ -710,6 +721,11 @@ class TestLaunchdAgent(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="op-daemon-agent-")
         self.addCleanup(shutil.rmtree, self.dir, True)
+        # The launchd side, wherever the tests run (the systemd side is
+        # tests/test_linux_daemon.py's).
+        patcher = mock.patch.object(op_daemon_client, "_on_linux", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         # This temp dir plays the account's own ~/.onionpress: the default
         # label (another dir's is derived: TestLabelPerDataDir).
         patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.dir)
@@ -862,6 +878,9 @@ class TestLabelPerDataDir(unittest.TestCase):
         self.other = tempfile.mkdtemp(prefix="op-other-")
         for d in (self.default, self.other):
             self.addCleanup(shutil.rmtree, d, True)
+        patcher = mock.patch.object(op_daemon_client, "_on_linux", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = mock.patch.object(op_daemon_client, "default_data_dir", return_value=self.default)
         patcher.start()
         self.addCleanup(patcher.stop)

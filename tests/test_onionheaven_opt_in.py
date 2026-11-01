@@ -87,7 +87,6 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
         "src/onionpress/onionheaven.py",
         "src/menubar.py",
         "src/onionpress/daemon.py",
-        "linux/onionpress-heartbeat.py",
         "linux/onionpress-tray",
         "linux/onionpress",
     )
@@ -108,14 +107,22 @@ class TestTyposNeverCountAsYes(unittest.TestCase):
         self.assertIn("onionheaven.status_block(overview, server_active=bool(app.is_onionheaven))",
                       _read("src/onionpress/status_writer.py"))
 
-    def test_linux_daemon_reads_the_choice_through_one_normalizer(self):
-        # Registration, the per-cycle re-read and the opt-out all gate on
-        # _registration_choice (the system-sleep hook's one-shot /offline,
-        # which no hook called, went on 2026-10-31).
-        src = _read("linux/onionpress-heartbeat.py")
-        self.assertIn("def _registration_choice(config):", src)
-        self.assertEqual(src.count('config.get("REGISTER_WITH_ONIONHEAVEN"'), 1)
-        self.assertEqual(src.count("_registration_choice(config)"), 3)
+    def test_linux_runs_the_same_client(self):
+        # The daemon's OnionHeavenClient is the one client on both
+        # platforms (#407): no second normalizer or gate anywhere in
+        # linux/ (the launcher and install.sh only write the default).
+        self.assertFalse(os.path.exists(os.path.join(REPO, "linux", "onionpress-heartbeat.py")))
+        for name in sorted(os.listdir(os.path.join(REPO, "linux"))):
+            path = os.path.join(REPO, "linux", name)
+            if not os.path.isfile(path):
+                continue
+            with self.subTest(name=name):
+                text = _read(f"linux/{name}")
+                self.assertNotIn("_registration_choice", text)
+                for line in text.splitlines():
+                    if "REGISTER_WITH_ONIONHEAVEN" in line and not line.lstrip().startswith("#"):
+                        self.assertRegex(line, r"^REGISTER_WITH_ONIONHEAVEN=yes$|config set REGISTER_WITH_ONIONHEAVEN",
+                                         line)
 
     def test_mac_gates_go_through_get_registration_choice(self):
         # The loop, every /online and every /offline re-read the choice.

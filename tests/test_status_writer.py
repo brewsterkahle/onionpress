@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """One status writer for both platforms (issue #523, onionpress.status_writer).
 
-The Mac daemon's status pass and Linux's `onionpress write-status`
-(OneShotStatus, until the daemon runs on Linux, #407) build the same two
-documents, daemon-state.json and status.json, through the same builders;
-the fields Linux's bash gathered (the tray's) are each one function here,
-tested against a fake docker; what reaches the WordPress volume is cut
-to redact.WORDPRESS_STATUS_KEYS and the log excerpt scrubbed; the
-registry is asked only on a hub, through onionheaven.overview; the
-heartbeat's reachability.json is the one measure of reachability (no
-probe of the writer's own).
+The daemon's status pass (on both platforms since #407; until then
+Linux's `onionpress write-status` built them from one pass) builds the
+same two documents, daemon-state.json and status.json, through the same
+builders; the fields Linux's bash gathered (the tray's) are each one
+function here, tested against a fake docker; what reaches the WordPress
+volume is cut to redact.WORDPRESS_STATUS_KEYS and the log excerpt
+scrubbed; the registry is asked only on a hub, through
+onionheaven.overview. StatusApp below stands in for the daemon as the
+writer reads it.
 """
 
 import ast
@@ -34,6 +34,8 @@ from onionpress.config import SAFE_CONFIG_KEYS  # noqa: E402
 from onionpress.daemon_client import read_state  # noqa: E402
 from onionpress.docker import DockerResult  # noqa: E402
 from onionpress.platform import OS, resolve_paths  # noqa: E402
+from onionpress.ports import PortAttributes, PortConfig  # noqa: E402
+from onionpress import config as op_config, onion_hostname  # noqa: E402
 
 ADDR = "op2ujzdegxdncf32epf3dhodzdocis2jhtlgmxgedn73u55xtplpft7v.onion"
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
@@ -95,6 +97,104 @@ class FakeDocker:
         return [" ".join(a) for a, _ in self.calls]
 
 
+class StatusApp(PortAttributes):
+    """The daemon as the writer reads it (status_writer.write / publish):
+    the attributes the documents take, and gather() for what one pass
+    learns of the stack (the containers, the served address, Tor's
+    bootstrap) with the dual probe's verdict as the test says
+    (*reachable*: (reachable, http_code)). tests/test_mac_daemon.py runs
+    the real daemon's pass; this is the writer's own harness."""
+
+    def __init__(self, paths, *, docker, health, version, log, os_name=OS.LINUX,
+                 now=None, reachable=(None, None)):
+        now = time.time() if now is None else now
+        self.now = now
+        self.paths = paths
+        self.app_support = paths.data_dir
+        self.config_file = paths.config_file
+        self.bin_dir = paths.bin_dir
+        self.colima_home = paths.colima_home
+        self.docker_socket = paths.docker_socket
+        self.log_file = paths.log_file
+        self._docker = docker
+        self._health = health
+        self.version = version
+        self._log = log
+        self.os_name = os_name
+        self.reachable = reachable
+        self.ports = PortConfig.from_offset(0)
+        self.startup_time = now
+        self.runtime_ready = True
+        self.port_conflict = []
+        self.onion_address = op_config.cached_onion_address(self.app_support) or "Not running"
+        self.is_onionheaven = onionheaven.is_onionheaven_instance(self.onion_address)
+        self.healthcheck_address = ""
+        self.is_running = False
+        self.is_ready = False
+        self._has_internet = True
+        self._yellow_since = None
+        self._last_check_complete_ts = now
+        self._last_bootstrap_pct = 0
+        self._last_reachability = (None, None)
+        self._wp_installed = None
+        self._containers_seen = {}
+        self._onionheaven_overview = None
+        self._status_fields = {}
+        self._last_status_payload = None
+        self.cloudflare_tunnel_enabled = bool(self.read_config_value("CLOUDFLARE_TUNNEL_TOKEN"))
+        self._wordpress_confirmed = False
+        self._images_present = {}
+        self.proxy_server = None
+        self._sleeping = False
+        self._pending_question = None
+        self._onionname_collision = None
+        self._settings_page_error = ""
+        self._wedge_warning_fired = False
+        self._last_probe_code = ""
+        self._last_probe_why = ""
+        self._last_probe_ms = 0
+
+    def log(self, message):
+        self._log(message)
+
+    def read_config_value(self, key, default=""):
+        return op_config.read_value(self.config_file, key, default)
+
+    def _state_fields(self):
+        return {
+            "is_running": self.is_running,
+            "is_ready": self.is_ready,
+            "has_internet": self._has_internet,
+            "yellow_since": self._yellow_since,
+            "last_check_complete": self._last_check_complete_ts,
+        }
+
+    def gather(self):
+        containers = sw.list_containers(self._docker)
+        self._containers_seen = dict(containers or [])
+        self.is_running = bool(containers) and all(
+            state.lower() == "running" for _, state in containers)
+        if self.is_running:
+            addr = onion_hostname.read_served_address(self._docker)
+            if addr:
+                self.onion_address = addr
+                self.is_onionheaven = onionheaven.is_onionheaven_instance(addr)
+            else:
+                self.onion_address = "Generating address..."
+            try:
+                bootstrapped, pct = self._health.check_tor_bootstrap()
+            except Exception:
+                bootstrapped, pct = False, 0
+            self._last_bootstrap_pct = pct
+            if addr and bootstrapped:
+                self._last_reachability = tuple(self.reachable)
+                self._last_probe_code = self._last_reachability[1] or ""
+            self.is_ready = self._last_reachability[0] is True
+            if not self.is_ready:
+                self._yellow_since = self.now
+        self._wordpress_confirmed = self.is_ready
+
+
 class _Sandbox(unittest.TestCase):
 
     def setUp(self):
@@ -105,6 +205,7 @@ class _Sandbox(unittest.TestCase):
             f.write("REGISTER_WITH_ONIONHEAVEN=no\nONIONNAME=ivar\nSTART_ON_BOOT=no\n"
                     f"CLOUDFLARE_TUNNEL_TOKEN={TOKEN}\nSOME_FUTURE_API_KEY=k3y\n")
         self.logs = []
+        self._reachable = (None, None)
         # The seams: this test's platform is whichever it says.
         sw._BOOT_TIME.clear()
         self.addCleanup(sw._BOOT_TIME.clear)
@@ -132,15 +233,14 @@ class _Sandbox(unittest.TestCase):
         h.check_tor_bootstrap.return_value = bootstrapped
         return h
 
-    def reachability(self, reachable=True, address=ADDR, age=10, code="200", now=None):
-        now = time.time() if now is None else now
-        with open(os.path.join(self.dir, "reachability.json"), "w") as f:
-            json.dump({"checked_at": now - age, "onion_address": address,
-                       "reachable": reachable, "http_code": code}, f)
+    def reachability(self, reachable=True, code="200"):
+        """The dual probe's verdict the next app() carries."""
+        self._reachable = (reachable, code)
 
     def app(self, docker=None, health=None, os_name=OS.LINUX, now=None, version="9.9"):
-        return sw.OneShotStatus(self.paths, docker=docker or self.docker(), health=health or self.health(),
-                                version=version, log=self.log, os_name=os_name, now=now)
+        return StatusApp(self.paths, docker=docker or self.docker(), health=health or self.health(),
+                         version=version, log=self.log, os_name=os_name, now=now,
+                         reachable=self._reachable)
 
     def host_status(self):
         with open(os.path.join(self.dir, "status.json")) as f:
@@ -238,25 +338,6 @@ class TestFields(_Sandbox):
             with self.subTest(value=value):
                 self.assertEqual(sw.tor_uptime_seconds(self.docker(**{key: value}), now), 0)
         self.assertFalse(os.path.exists("/tmp/pwned"))
-
-    def test_the_heartbeats_verdict(self):
-        now = 1_000_000.0
-        self.reachability(now=now)
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (True, "200"))
-        self.reachability(now=now, reachable=False, code="000:rc=28")
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (False, "000:rc=28"))
-        # Stale, another address's, not a verdict, missing, garbage: nothing.
-        self.reachability(now=now, age=sw.REACHABILITY_FRESH_SECONDS + 1)
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (None, None))
-        self.reachability(now=now, address="b" * 56 + ".onion")
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (None, None))
-        self.reachability(now=now, reachable=None)
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (None, None))
-        with open(os.path.join(self.dir, "reachability.json"), "w") as f:
-            f.write("{nope")
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (None, None))
-        os.remove(os.path.join(self.dir, "reachability.json"))
-        self.assertEqual(sw.heartbeat_verdict(self.dir, ADDR, now), (None, None))
 
     def test_list_containers_skips_the_workers(self):
         d = self.docker()
@@ -494,151 +575,6 @@ class TestWrite(_Sandbox):
 
 
 # ---------------------------------------------------------------------------
-# The one-shot pass (Linux until #407)
-# ---------------------------------------------------------------------------
-
-class TestOneShot(_Sandbox):
-
-    def test_states(self):
-        self.reachability()
-        app = self.app()
-        app.gather()
-        self.assertTrue(app.is_running and app.is_ready)
-        self.assertEqual(sw.state_of(app, app.now), "running")
-        self.assertEqual(app._last_bootstrap_pct, 100)
-        # Bootstrapping: starting, the percentage shown.
-        app = self.app(health=self.health((False, 45)))
-        app.gather()
-        self.assertEqual(sw.state_of(app, app.now), "starting")
-        self.assertEqual(app._last_bootstrap_pct, 45)
-        self.assertEqual(app._last_reachability, (None, None))
-        # Bootstrapped, the heartbeat says unreachable: starting.
-        self.reachability(reachable=False, code="000:rc=28")
-        app = self.app()
-        app.gather()
-        self.assertEqual(sw.state_of(app, app.now), "starting")
-        self.assertEqual(app._last_reachability, (False, "000:rc=28"))
-        # No fresh verdict: nothing known, starting; never a probe of its own.
-        self.reachability(age=1000)
-        app = self.app()
-        app.gather()
-        self.assertEqual(sw.state_of(app, app.now), "starting")
-        self.assertEqual(app._last_reachability, (None, None))
-        self.assertFalse(any("curl" in a or ".onionpress-health" in a for a in app._docker.argv()))
-        # No containers: stopped, the cached address shown.
-        with open(os.path.join(self.dir, "onion_address"), "w") as f:
-            f.write(ADDR)
-        app = self.app(docker=self.docker(**{"ps -a --filter label=com.docker.compose.project": ""}))
-        app.gather()
-        self.assertEqual(sw.state_of(app, app.now), "stopped")
-        self.assertEqual(app.onion_address, ADDR)
-
-    def test_the_hub_by_address(self):
-        app = self.app(docker=self.docker(**{
-            "exec onionpress-tor cat /var/lib/tor/hidden_service/wordpress/hostname": HUB + "\n"}))
-        app.gather()
-        self.assertTrue(app.is_onionheaven)
-        app = self.app()
-        app.gather()
-        self.assertFalse(app.is_onionheaven)
-
-    def test_the_bash_write_statuss_log_lines(self):
-        now = 1_000_000.0
-        self.reachability(now=now)
-        self.app(now=now).gather()
-        self.assertEqual(self.logs, [f"Onion service is now reachable at http://{ADDR}/"])
-        self.app(now=now + 30).gather()
-        self.assertEqual(len(self.logs), 1, "the same state again says nothing")
-        self.reachability(now=now + 60, reachable=False)
-        self.app(now=now + 60).gather()
-        self.assertEqual(self.logs[-1], "Onion service is no longer reachable (state: starting)")
-        self.app(now=now + 90, docker=self.docker(**{"ps -a --filter label=com.docker.compose.project": ""})).gather()
-        self.assertEqual(self.logs[-1], "OnionPress stopped")
-        self.app(now=now + 120, docker=self.docker(**{"ps -a --filter label=com.docker.compose.project": ""})).gather()
-        self.assertEqual(len(self.logs), 3)
-        with open(os.path.join(self.dir, sw.LAST_STATE_FILE)) as f:
-            self.assertEqual(f.read(), "stopped\n")
-
-    def test_one_wedge_warning_after_ten_minutes_starting(self):
-        now = 1_000_000.0
-        self.reachability(now=now, reachable=False)
-        self.app(now=now).gather()
-        with open(os.path.join(self.dir, sw.YELLOW_SINCE_FILE)) as f:
-            self.assertEqual(f.read().strip(), str(int(now)))
-        self.reachability(now=now + 599, reachable=False)
-        app = self.app(now=now + 599)
-        app.gather()
-        self.assertFalse(any("WEDGE" in m for m in self.logs))
-        self.assertEqual(sw.state_of(app, app.now), "stuck", "the daemon's rule: 5 min yellow")
-        self.reachability(now=now + 600, reachable=False)
-        app = self.app(now=now + 600)
-        app.gather()
-        wedge = [m for m in self.logs if m.startswith("WEDGE WARNING")]
-        self.assertEqual(wedge, [sw.wedge_warning(OS.LINUX)])
-        self.assertIn("systemctl --user restart onionpress", wedge[0])
-        self.assertTrue(app._wedge_warning_fired)
-        self.assertTrue(os.path.exists(os.path.join(self.dir, sw.WEDGE_MARKER)))
-        self.reachability(now=now + 700, reachable=False)
-        self.app(now=now + 700).gather()
-        self.assertEqual(len([m for m in self.logs if m.startswith("WEDGE WARNING")]), 1)
-        # Reachable again: the memory is cleared.
-        self.reachability(now=now + 800)
-        app = self.app(now=now + 800)
-        app.gather()
-        self.assertIsNone(app._yellow_since)
-        self.assertFalse(app._wedge_warning_fired)
-        for name in (sw.YELLOW_SINCE_FILE, sw.WEDGE_MARKER):
-            self.assertFalse(os.path.exists(os.path.join(self.dir, name)), name)
-        self.assertIn("recovery: see the `probe verdict=`", sw.wedge_warning(OS.MACOS))
-
-    def test_the_port_offset_is_the_launchers(self):
-        with mock.patch.dict(os.environ, {"ONIONPRESS_PORT_OFFSET": "10000"}):
-            app = self.app()
-        self.assertEqual((app.wp_port, app.socks_port, app.proxy_port, app.port_offset),
-                         (18080, 19050, 19077, 10000))
-        with mock.patch.dict(os.environ, {"ONIONPRESS_PORT_OFFSET": "x"}):
-            self.assertEqual(self.app().wp_port, 8080)
-
-    def test_run_once_writes_both_documents_and_exits_0(self):
-        self.reachability()
-        d = self.docker()
-        with mock.patch.dict(os.environ, {"ONIONPRESS_VERSION": "7.7"}):
-            rc = sw.run_once(self.paths, self.log, docker=d, health=self.health(), os_name=OS.LINUX)
-        self.assertEqual(rc, 0)
-        state = read_state(self.dir)
-        self.assertEqual(state["status"]["state"], "running")
-        self.assertEqual(state["status"]["version"], "7.7")
-        self.assertEqual(state["display_state"], "available")
-        self.assertEqual(self.host_status()["version"], "7.7")
-        self.assertEqual(d.volume["version"][0], "7.7")
-        self.assertEqual(os.stat(os.path.join(self.dir, "daemon-state.json")).st_mode & 0o777, 0o600)
-
-    def test_run_once_without_docker_still_writes_what_it_knows(self):
-        rc = sw.run_once(self.paths, self.log, docker=FakeDocker(raising=True), health=self.health(),
-                         os_name=OS.LINUX, version="1")
-        self.assertEqual(rc, 0)
-        self.assertTrue(any(m.startswith("status: could not read the stack's state") for m in self.logs))
-        self.assertEqual(self.host_status()["state"], "stopped")
-        self.assertEqual(read_state(self.dir)["status"]["state"], "stopped")
-
-    def test_the_cli_fast_path(self):
-        self.reachability()
-        buf = io.StringIO()
-        with mock.patch.object(cli, "OnionPressCLI", side_effect=AssertionError("setup ran")), \
-                mock.patch("onionpress.docker.Docker", return_value=self.docker()), \
-                mock.patch("onionpress.health.HealthChecker", return_value=self.health()), \
-                mock.patch.object(sw, "detect_os", return_value=OS.LINUX), \
-                mock.patch.dict(os.environ, {"ONIONPRESS_VERSION": "7.7"}), \
-                mock.patch("sys.stdout", buf):
-            rc = cli.main(["--data-dir", self.dir, "write-status"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(self.host_status()["state"], "running")
-        self.assertRegex(buf.getvalue(), r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] Onion service is now reachable")
-        self.assertEqual([n for n in os.listdir(self.dir) if n in ("secrets",)], [],
-                         "the fast path ran OnionPressCLI's setup")
-
-
-# ---------------------------------------------------------------------------
 # One writer: the wiring
 # ---------------------------------------------------------------------------
 
@@ -656,21 +592,22 @@ class TestWiring(unittest.TestCase):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, daemon)
 
-    def test_the_linux_launcher_delegates(self):
+    def test_the_linux_launcher_writes_nothing(self):
+        """The daemon runs on Linux too (#407): no bash status pass, no
+        one-shot `write-status`, nothing of the old bash writer left."""
         launcher = _read("linux/onionpress")
-        start = launcher.index("\nwrite_status() {")
-        body = launcher[start:launcher.index("\n}\n", start)]
-        self.assertTrue(body.endswith('\n    op_py --data-dir "$DATA_DIR" write-status 2>&1 | tee -a "$LOG_FILE"'), body)
-        self.assertNotIn("apply_config_updates", body, "the page's settings are handle-action's (#522)")
-        self.assertNotIn("docker", body, "the bash is the delegation")
-        self.assertEqual(len([ln for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]), 2)
-        for gone in ("write_recent_logs", "linux-status", "sqlite3 /var/lib/onionheaven/registry.db",
+        self.assertNotIn("\nwrite_status() {", launcher)
+        for gone in ("write_recent_logs", "linux-status", "sqlite3 /var/lib/onionheaven",
                      "WEDGE WARNING", ".onionpress-health", "started_epoch", "wordpress-status",
-                     "wordpress-logs", "reachability.json"):
+                     "wordpress-logs", "reachability.json", "write-status", "_status_poll_loop"):
             with self.subTest(gone=gone):
                 self.assertNotIn(gone, launcher)
         self.assertNotIn("def write_recent_logs", _read("src/onionpress/handle_action.py"))
         self.assertFalse(os.path.exists(os.path.join(PROJECT_ROOT, "src", "onionpress", "linux_status.py")))
+        writer = _read("src/onionpress/status_writer.py")
+        for gone in ("class OneShotStatus", "def run_once", "def heartbeat_verdict", "def wedge_warning"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, writer)
 
     def test_one_writer_of_the_shared_files(self):
         """status.json, recent-logs.txt, version and config-current.json
@@ -716,7 +653,7 @@ class TestWiring(unittest.TestCase):
     def test_the_bundle_and_the_dispatch_know_it(self):
         self.assertIn("'onionpress.status_writer'", _read("setup.py"))
         self.assertNotIn("linux_status", _read("setup.py"))
-        self.assertIn('("write-status",', _read("src/onionpress/cli.py"))
+        self.assertNotIn('("write-status",', _read("src/onionpress/cli.py"))
         self.assertNotIn("linux-status", _read("src/onionpress/cli.py"))
 
 

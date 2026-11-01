@@ -845,15 +845,13 @@ class OnionPressCLI:
     def cmd_restore(self, password: str, backup_path: str,
                     hub_recovery_key: str = "", *, confirmed=frozenset(),
                     json_output: bool = False) -> int:
-        """Restore from a backup via install-from-backup (_restore). On Linux
-        the heartbeat client unit, which holds the current key, is stopped
-        before the restore asks the OnionHeaven hubs to delete their copy
-        and started again after it, with the restored key
-        (heartbeat_unit.paused: the one platform seam, issue #406)."""
-        from . import heartbeat_unit
-        with heartbeat_unit.paused(detect_os().value, self.log):
-            return self._restore(password, backup_path, hub_recovery_key,
-                                 confirmed=confirmed, json_output=json_output)
+        """Restore from a backup via install-from-backup (_restore). The
+        daemon (both platforms since issue #407) reads the key per
+        request and sees the stack go down and come back: nothing to
+        stop around the restore (until #407 Linux's heartbeat unit held
+        the key it loaded at start and was paused here)."""
+        return self._restore(password, backup_path, hub_recovery_key,
+                             confirmed=confirmed, json_output=json_output)
 
     def _restore(self, password: str, backup_path: str,
                  hub_recovery_key: str = "", *, confirmed=frozenset(),
@@ -1523,15 +1521,14 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
     "current", "new"}) and never on Linux, which has no one to ask
     (backup.ADDRESS_CHANGE_REFUSED_MSG, exit 3); one without a key keeps
     it. Before the key changes, the OnionHeaven hubs that may hold the
-    current one are asked to delete it, while it can still sign; on Linux
-    the heartbeat client unit that holds it is stopped first and started
-    again after (heartbeat_unit)."""
-    from . import confirm as _confirm, heartbeat_unit
+    current one are asked to delete it, while it can still sign (the
+    daemon's own beats are held off the released key by the record,
+    issue #407: no unit to stop on either platform)."""
+    from . import confirm as _confirm
     from .backup import (restore_from_backup, SettingsPageRestoreRefused,
                          ADDRESS_CHANGE_REFUSED_MSG)
     log = _settings_page_log(data_dir)
     linux = detect_os() == OS.LINUX
-    heartbeat_stopped = False
 
     def confirm_address_change(current, new):
         if linux:
@@ -1545,14 +1542,6 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
         return True
 
     def before_key_change(restored_address):
-        nonlocal heartbeat_stopped
-        if linux:
-            # The heartbeat client holds the key about to be replaced: stopped
-            # before the hubs are asked to let go of it, or its next beat
-            # would put it back (started again below; the handler's restart
-            # after a success stops and starts it once more).
-            heartbeat_unit.stop(log)
-            heartbeat_stopped = True
         try:
             release_onionheaven("restore", keep_address=restored_address,
                                 data_dir=data_dir, log_func=log, out=sys.stderr)
@@ -1572,9 +1561,6 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
     except Exception as e:
         log(f"Settings page restore failed: {e}")
         return _confirm.answer_error(e, json_output)
-    finally:
-        if heartbeat_stopped:
-            heartbeat_unit.start(log)
     return _confirm.answer_ok(json_output)
 
 
@@ -2291,16 +2277,6 @@ def _run_wordpress_status(run):
     return 0
 
 
-def _run_write_status(run):
-    # The Linux launcher's write_status() (issue #523): the daemon's two
-    # status documents from one pass (onionpress.status_writer, the one
-    # writer for both platforms), logged in the launcher's format. Every
-    # 30 s beside a live stack, so no OnionPressCLI setup; always 0.
-    from . import status_writer
-    paths = resolve_paths(data_dir=run.args.data_dir)
-    return status_writer.run_once(paths, _launcher_log_func())
-
-
 # ---- the launchers' start steps (Phase 4, #120) ----
 
 def _run_start_step(run):
@@ -2526,7 +2502,7 @@ def _add_is_onionheaven_hub(sub, name):
         name,
         help="Exit 0 when the onion address given is the OnionHeaven hub's "
              "(onionheaven.is_onionheaven_instance, the Mac daemon's rule), "
-             "1 otherwise; the Linux launcher's write_status asks it, so "
+             "1 otherwise; the Linux launcher asks it, so "
              "status.json's onionheaven.server_active is decided by the "
              "node's address, never by the onionheaven container, which "
              "every node runs (issue #345)")
@@ -2937,14 +2913,6 @@ _COMMANDS = [
      _plain("Read status JSON on stdin and print the fields the WordPress "
             "container may see"),
      _run_wordpress_status),
-    ("write-status",
-     _plain("Write the status documents from one pass over the stack: "
-            "daemon-state.json and ~/.onionpress/status.json, and, while "
-            "the stack runs, status.json, version, config-current.json and "
-            "recent-logs.txt in the shared volume (the Linux launcher's "
-            "write_status; the Mac daemon writes them itself); always "
-            "exits 0"),
-     _run_write_status),
     ("retire-old-onionheaven-containers",
      _plain("Before the first `compose up`: remove every onionpress-tor, "
             "onionheaven and onionheaven-(poll|takeover)-N that does not "

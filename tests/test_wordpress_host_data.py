@@ -236,11 +236,11 @@ class TestCliCommands(unittest.TestCase):
 
 class TestStatusWriter(unittest.TestCase):
     """The one status writer (onionpress.status_writer, issue #523: the
-    daemon's and `onionpress write-status`'s) hands the volume the
-    scrubbed log excerpt and the redacted status, never the raw files."""
+    daemon's, on both platforms) hands the volume the scrubbed log
+    excerpt and the redacted status, never the raw files."""
 
     def setUp(self):
-        from test_status_writer import FakeDocker
+        from test_status_writer import FakeDocker, StatusApp
         from onionpress import status_writer
         from onionpress.platform import OS, resolve_paths
         self.tmp = tempfile.mkdtemp(prefix="op-wp-writer-")
@@ -257,7 +257,7 @@ class TestStatusWriter(unittest.TestCase):
         self.docker = FakeDocker({
             "ps -a --filter label=com.docker.compose.project":
                 "onionpress-tor\trunning\tdocker\nonionpress-wordpress\trunning\tdocker\n"})
-        self.app = status_writer.OneShotStatus(
+        self.app = StatusApp(
             paths, docker=self.docker, health=mock.Mock(**{"check_tor_bootstrap.return_value": (False, 0)}),
             version="0.0.0-test", log=lambda m: None, os_name=OS.LINUX)
         self.app.gather()

@@ -377,7 +377,7 @@ class TestNoRootWritesIntoWwwDataFolders(unittest.TestCase):
     """The sources, scanned: nothing writes, chowns or copies into the
     WordPress container's www-data folders as root again."""
 
-    PY = ("src/menubar.py", "linux/onionpress-heartbeat.py",
+    PY = ("src/menubar.py", "src/onionpress/daemon.py",
           "src/onionpress/reachability.py",
           "src/onionpress/multisite.py", "src/onionpress/onion_proxy.py",
           "src/onionpress/derivatives.py", "src/onionpress/backup.py",

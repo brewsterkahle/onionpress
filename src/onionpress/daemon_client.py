@@ -1,5 +1,6 @@
 """The client side of `onionpress daemon` (issue #475): what a view reads
-and the launchd agent's controls, without the daemon's loops.
+and the agent's controls (launchd on a Mac, the systemd user unit on
+Linux, issue #407), without the daemon's loops.
 
 The menubar (src/menubar.py) is a view of the daemon's state file
 (CLAUDE.md, "The Mac Daemon"); it needs the state file's path and reader,
@@ -27,6 +28,9 @@ PID_FILENAME = "daemon.pid"
 # derived from it by agent_label() (issue #505). e2e/harness/safety.py
 # reads this literal.
 AGENT_LABEL = "org.onionpress.daemon"
+# Linux: the package's systemd user unit (linux/onionpress-daemon.service);
+# systemd_unit() derives any other data dir's name the same way.
+SYSTEMD_UNIT = "onionpress-daemon"
 ONIONNAME_RETRY_MARKER = ".onionname-retry"
 OFFLINE_ACK_MARKER = ".daemon-offline-ack"
 
@@ -171,6 +175,52 @@ def agent_label(data_dir=""):
     return data_dir_label(AGENT_LABEL, data_dir)
 
 
+def systemd_unit(data_dir=""):
+    """The daemon's systemd user unit for *data_dir*'s install: the
+    package's onionpress-daemon.service for the account's own
+    ~/.onionpress, `onionpress-daemon.<8 hex>.service` for any other
+    (data_dir_label, issue #505: the user manager is per user, not per
+    install). No unit file ships for a derived name: `daemon start` says
+    so, and a terminal's `onionpress daemon` serves such an install."""
+    return data_dir_label(SYSTEMD_UNIT, data_dir) + ".service"
+
+
+def _on_linux():
+    """Whether this is the systemd side (os.uname: this module imports
+    nothing of onionpress, see the docstring)."""
+    try:
+        return os.uname().sysname == "Linux"
+    except (AttributeError, OSError):
+        return False
+
+
+def _systemctl(args, timeout=60):
+    """`systemctl --user ARGS`; a CompletedProcess with rc 1 when it
+    could not run."""
+    try:
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return subprocess.CompletedProcess(["systemctl", "--user", *args], 1, "", str(e))
+
+
+def unit_loaded_pid(data_dir=""):
+    """(loaded, pid) from `systemctl --user show` of the install's unit:
+    loaded when the manager knows a unit file by that name, pid its
+    MainPID when running (None between restarts, or not running)."""
+    r = _systemctl(["show", "-p", "LoadState", "-p", "ActiveState", "-p", "MainPID",
+                    systemd_unit(data_dir)])
+    if r.returncode != 0:
+        return False, None
+    props = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    loaded = props.get("LoadState", "").strip() == "loaded"
+    try:
+        pid = int(props.get("MainPID", "0").strip() or 0)
+    except ValueError:
+        pid = 0
+    return loaded, (pid if pid > 0 else None)
+
+
 def agent_plist_path(data_dir=""):
     return os.path.expanduser(f"~/Library/LaunchAgents/{agent_label(data_dir)}.plist")
 
@@ -221,7 +271,9 @@ def _launchctl(args, timeout=20):
 def agent_loaded_pid(data_dir=""):
     """(loaded, pid) from `launchctl print gui/<uid>/<label>`: pid None
     when loaded but not running (between KeepAlive restarts). The label is
-    *data_dir*'s (agent_label)."""
+    *data_dir*'s (agent_label). On Linux: the unit's (unit_loaded_pid)."""
+    if _on_linux():
+        return unit_loaded_pid(data_dir)
     r = _launchctl(["print", f"{_gui_domain()}/{agent_label(data_dir)}"])
     if r.returncode != 0:
         return False, None
@@ -262,9 +314,40 @@ def install_agent(launcher_script, data_dir, log, path="", port_offset=None):
     return path
 
 
+def _start_unit(data_dir, log):
+    """Linux: `systemctl --user start --no-block` of the install's unit
+    (--no-block: the launcher's `start` runs inside onionpress.service,
+    which the unit is ordered before). True when the daemon runs
+    afterwards; a data dir without a unit file is said and False."""
+    unit = systemd_unit(data_dir)
+    loaded, pid = unit_loaded_pid(data_dir)
+    if pid:
+        return True
+    if not loaded:
+        log(f"daemon: no systemd user unit {unit} (another install's data dir, or no "
+            "user manager): run `onionpress daemon` to serve it")
+        return False
+    r = _systemctl(["start", "--no-block", unit])
+    if r.returncode != 0:
+        log(f"daemon: systemctl --user start {unit} failed (rc {r.returncode}): "
+            f"{(r.stderr or r.stdout).strip()}")
+        return False
+    for _ in range(20):
+        loaded, pid = unit_loaded_pid(data_dir)
+        if pid:
+            log(f"daemon: started under systemd ({unit}, pid {pid})")
+            return True
+        time.sleep(0.25)
+    log(f"daemon: systemd accepted the start of {unit} but it is not running yet")
+    return loaded
+
+
 def start_agent(launcher_script, data_dir, log, path="", port_offset=None):
     """Install the plist, bootstrap it (or kickstart a loaded one that is
-    not running). True when the agent is running afterwards."""
+    not running). True when the agent is running afterwards. On Linux:
+    the user unit (_start_unit)."""
+    if _on_linux():
+        return _start_unit(data_dir, log)
     path = install_agent(launcher_script, data_dir, log, path, port_offset)
     if not path:
         return False
@@ -313,7 +396,14 @@ def stop_agent(data_dir, log, path="", wait=30, offline=True):
     except OSError:
         pass
     loaded, agent_pid = agent_loaded_pid(data_dir)
-    if loaded:
+    if _on_linux() and agent_pid:
+        # The unit's stop (TERM, TimeoutStopSec): a `systemctl stop` is
+        # not restarted by Restart=; the pid is waited for below too.
+        r = _systemctl(["stop", systemd_unit(data_dir)], timeout=wait + 30)
+        if r.returncode != 0:
+            log(f"daemon: systemctl --user stop failed (rc {r.returncode}): "
+                f"{(r.stderr or r.stdout).strip()}")
+    elif loaded and not _on_linux():
         r = _launchctl(["bootout", f"{_gui_domain()}/{agent_label(data_dir)}"])
         if r.returncode != 0:
             log(f"daemon: launchctl bootout failed (rc {r.returncode}): "
@@ -337,7 +427,13 @@ def stop_agent(data_dir, log, path="", wait=30, offline=True):
 
 
 def remove_agent(log, path="", data_dir=""):
-    """Boot the agent out and delete its plist (uninstall)."""
+    """Boot the agent out and delete its plist (uninstall). On Linux the
+    unit file is the package's: the unit is stopped, nothing deleted."""
+    if _on_linux():
+        _loaded, pid = unit_loaded_pid(data_dir)
+        if pid:
+            _systemctl(["stop", systemd_unit(data_dir)])
+        return
     path = path or agent_plist_path(data_dir)
     loaded, _pid = agent_loaded_pid(data_dir)
     if loaded:
@@ -355,12 +451,17 @@ def agent_status(data_dir):
     doc = {
         "loaded": loaded,
         "pid": pid or daemon_pid(data_dir),
-        "label": agent_label(data_dir),
-        "plist": agent_plist_path(data_dir),
-        "plist_installed": os.path.exists(agent_plist_path(data_dir)),
         "state_file": state_path(data_dir),
         "state_fresh": state_is_fresh(state, now),
     }
+    if _on_linux():
+        doc["label"] = doc["unit"] = systemd_unit(data_dir)
+    else:
+        doc.update({
+            "label": agent_label(data_dir),
+            "plist": agent_plist_path(data_dir),
+            "plist_installed": os.path.exists(agent_plist_path(data_dir)),
+        })
     if state:
         doc["state_age_s"] = int(now - float(state.get("updated_at") or now))
         doc["display_state"] = display_state_of(state, now)

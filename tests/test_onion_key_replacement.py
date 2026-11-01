@@ -420,22 +420,22 @@ class TestReplaceKey(ReplaceKeyBase):
         self.assertEqual(self._replace(inst, b32(NEW)).status, "replaced")
         self.assertFalse(os.path.exists(marker))
 
-    def test_the_heartbeat_client_is_stopped_before_the_hubs_and_back_on_a_no(self):
-        for answer, restarted in (([], False), ([{"why": "unanswered"}], True)):
-            with self.subTest(restarted=restarted):
+    def test_no_unit_is_stopped_around_the_hubs(self):
+        # #407: the daemon's beats stay off a released key on both
+        # platforms; the hubs are asked, nothing else is touched.
+        for answer in ([], [{"why": "unanswered"}]):
+            with self.subTest(answer=answer):
                 inst = _Install(self, vanity=OLD)
                 events = []
-                with mock.patch.object(key_import.heartbeat_unit, "stop",
-                                       lambda log: events.append("stop")), \
-                        mock.patch.object(key_import.heartbeat_unit, "start",
-                                          lambda log: events.append("start")), \
-                        mock.patch.dict(os.environ, inst.env()):
+                with mock.patch.dict(os.environ, inst.env()):
                     key_import.replace_key(
                         b32(NEW), data_dir=inst.data, docker=_FakeDocker(inst),
                         containers=_FakeContainers(inst), log=lambda m: None,
                         release=lambda reason: events.append("release") or answer,
                         hub_held_ok=lambda remaining: not remaining, linux=True)
-                self.assertEqual(events, ["stop", "release"] + (["start"] if restarted else []))
+                self.assertEqual(events, ["release"])
+        self.assertNotIn("heartbeat_unit", open(os.path.join(
+            PROJECT_DIR, "src", "onionpress", "key_import.py"), encoding="utf-8").read())
 
 
 class TestPrefixRule(unittest.TestCase):

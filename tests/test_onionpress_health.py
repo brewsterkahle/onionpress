@@ -241,7 +241,14 @@ class TestCheckInternalConnectivity(unittest.TestCase):
 
 
 class TestCheckInternetConnectivity(unittest.TestCase):
-    """Interface-scan based check — no TCC-gated API calls."""
+    """Interface-scan based check — no TCC-gated API calls (the Mac's;
+    Linux reads the routing table: tests/test_linux_daemon.py)."""
+
+    def setUp(self):
+        from onionpress.platform import OS
+        p = mock.patch("onionpress.platform.detect_os", return_value=OS.MACOS)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _run(self, stdout, returncode=0):
         return mock.Mock(returncode=returncode, stdout=stdout)
@@ -1432,11 +1439,15 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         menubar = open(os.path.join(self.ROOT, "src/menubar.py"), encoding="utf-8").read()
         self.assertNotIn("def handle_wake(", menubar)
 
-    def test_linux_wake_resets_the_trigger(self):
-        body = self._body("src/onionpress/reachability.py",
-                          "    def note_wake(self) -> None:",
-                          "    def _slept_since_last_cycle(self)")
-        self.assertIn("self.recovery.note_wake()", body)
+    def test_linux_wake_is_the_daemons_too(self):
+        # One wake handler on both platforms since #407 (the daemon's
+        # handle_wake, run by power.LogindPowerHandler on Linux); the
+        # Linux ReachabilityLoop with its own reset is gone.
+        self.assertNotIn("class ReachabilityLoop", open(os.path.join(
+            self.ROOT, "src/onionpress/reachability.py"), encoding="utf-8").read())
+        daemon = open(os.path.join(self.ROOT, "src/onionpress/daemon.py"), encoding="utf-8").read()
+        self.assertIn("on_has_powered_on=lambda: None if self._quitting else self.handle_wake()", daemon)
+        self.assertIn("from .power import LogindPowerHandler", daemon)
 
     def test_the_shared_wake_reset_resets_the_window(self):
         from onionpress.reachability import RecoveryWindow
@@ -1450,12 +1461,11 @@ class TestWakeResetsRepublishWindow(unittest.TestCase):
         window.note_wake()
         self.assertIsNone(window.trigger.failing_since)
 
-    def test_linux_heartbeat_wake_handler_calls_note_wake(self):
-        body = self._body("linux/onionpress-heartbeat.py",
-                          "    def _on_prepare_for_sleep(self, going_to_sleep):",
-                          "    def _signal_watchdogs(self, sig):")
-        wake = body[body.index("else:"):]
-        self.assertIn("_reachability.note_wake()", wake)
+    def test_the_logind_handler_runs_the_wake_callback(self):
+        src = open(os.path.join(self.ROOT, "src/onionpress/power.py"), encoding="utf-8").read()
+        body = src[src.index("    def _on_prepare_for_sleep(self, going_to_sleep) -> None:"):]
+        wake = body[body.index("self._acquire()"):]
+        self.assertIn("self._on_has_powered_on()", wake)
 
 
 if __name__ == "__main__":
