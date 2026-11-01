@@ -54,6 +54,7 @@ the harness is about something else.
 | 5 | `migrate_key_volume` | done, 487a3e06 |
 | 6 | `db_import` | done, 14d3ff94 |
 | 7 | `block_wordpress_egress` | done, 7c22e46a |
+| 8 | Linux `update_*` (the release client; the apt-get and checkout leaves stay bash) | done, 2026-10-31 (`cli.cmd_update` + `updater.py` on both platforms) |
 
 Out of scope for now: `start_containers`, `setup`, the Colima bootstrap.
 

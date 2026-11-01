@@ -665,8 +665,8 @@ class UpdateOutcome(NamedTuple):
 
 
 def update_outcome(returncode: int, stdout: str, stderr: str) -> UpdateOutcome:
-    """One `onionpress update --check --json` run (cli.check_for_update_report;
-    the Linux tray's `check-for-update --json` is the same report). The
+    """One `onionpress update --check --json` run (cli.check_for_update_report,
+    the one report of both platforms' Check for Updates). The
     CLI exits 0 whatever happened and says so in its JSON: an `error` (no
     network, GitHub not answering, curl refusing to start) is "Update
     check failed", never "Up to date" (issue #355)."""

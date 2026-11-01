@@ -8,7 +8,8 @@
 # out by #474-#484 added 2026-10-29; the daemon, launcher_ops, scrub,
 # key_manager, updater and colima added and the total raised the same day
 # with their tests; start, bundled_plugins and containers added and the
-# total and the CLI's raised 2026-10-30 with #442's); raise one when
+# total and the CLI's raised 2026-10-30 with #442's; the updater's raised
+# 2026-10-31 with #525's Linux release tests); raise one when
 # the tests catch up, never lower one to pass. Runs under macOS /bin/bash 3.2 (no associative arrays).
 set -e
 set -o pipefail  # coverage's exit code, not tail's
@@ -35,7 +36,7 @@ src/onionpress/daemon.py 81
 src/onionpress/launcher_ops.py 84
 src/onionpress/scrub.py 90
 src/onionpress/key_manager.py 87
-src/onionpress/updater.py 81
+src/onionpress/updater.py 89
 src/onionpress/start.py 86
 src/onionpress/bundled_plugins.py 95
 src/onionpress/containers.py 93

@@ -1701,12 +1701,11 @@ class OnionPressTray:
     def _on_check_updates(self, *_):
         def _run():
             try:
-                # Through the launcher, as every tray action: the verb has
-                # no case of its own, so the launcher's default case hands
-                # it to onionpress.cli. ui_client.update_outcome reads the
-                # report (the Mac's Check for Updates reads the same one);
-                # with #525 this becomes `update --check --json`.
-                rc, _ans, out, err = Launcher.run_json("check-for-update", "--json")
+                # Through the launcher, as every tray action: the one
+                # updater of both platforms (cli.cmd_update, #525), the
+                # same lookup and report the Mac's Check for Updates reads
+                # (ui_client.update_outcome).
+                rc, _ans, out, err = Launcher.run_json("update", "--check", "--json")
                 outcome = ui_client.update_outcome(rc, out, err)
                 body = outcome.body
                 if outcome.kind == "available":

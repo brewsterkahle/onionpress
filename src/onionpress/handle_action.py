@@ -52,6 +52,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -797,53 +798,101 @@ def _settings_page_restore(host, local_zip, password, confirmed, work):
 
 
 UPDATE_CHECK_FAILED_MSG = "Could not check for updates"
-# The Mac page's answer when a release is newer than the installed one.
+# The page's answer when a release is newer than the installed one: how
+# to install it on this platform (the page itself never installs).
 MAC_UPDATE_AVAILABLE_MSG = ("OnionPress {latest} is available. To install it, choose "
                             "Check for Updates... in the OnionPress menu on this Mac, "
                             "or run `onionpress update` there.")
+LINUX_UPDATE_AVAILABLE_MSG = ("OnionPress {latest} is available. To install it, run "
+                              "`onionpress update` on this machine.")
+NOT_INSTALLABLE_MSG = ("OnionPress {latest} is available, but `onionpress update` "
+                       "cannot install it: {why}")
+# At most one GitHub lookup per 5 minutes, whatever the page asks (it can
+# ask every 10 s): GitHub allows 60 an hour, and running out would leave
+# `onionpress update` unable to find a release. The answer is kept in the
+# data dir, which no container mounts.
+UPDATE_CHECK_CACHE = "update-check.json"
+UPDATE_CHECK_CACHE_SECONDS = 300
+
+
+def _cached_update_check(host):
+    """The last check's result when it is a regular file under five
+    minutes old and still JSON; else None."""
+    path = os.path.join(host.paths.data_dir, UPDATE_CHECK_CACHE)
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or time.time() - st.st_mtime >= UPDATE_CHECK_CACHE_SECONDS:
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _cache_update_check(host, result):
+    path = os.path.join(host.paths.data_dir, UPDATE_CHECK_CACHE)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(result, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        host.log(f"WARNING: could not keep the update check's answer: {e}")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _update(host):
     """Report only, on both platforms: anything running in WordPress can
     write requested-action, so this never installs anything. The page
     learns whether a release is newer than the installed one and how to
-    install it. Linux: the launcher's settings-page-update-check (one
-    GitHub lookup per 5 minutes; it writes update-result.json). macOS:
-    `update --check --json`; installing is the menubar's Check for
-    Updates..., which asks the person at the Mac, or `onionpress update`.
-    Through 2.5.6 the Mac ran `update --yes` here: an unattended download
-    and install of the latest release on the page's say-so."""
+    install it: `onionpress update --check --json` (cli.cmd_update, the
+    one updater of both platforms), its answer kept five minutes
+    (_cached_update_check) and written to update-result.json with the
+    request's id. Installing is the menubar's Check for Updates... on a
+    Mac, which asks the person at the Mac, or `onionpress update` at a
+    terminal on either platform. Through 2.5.6 the Mac ran `update --yes`
+    here: an unattended download and install of the latest release on
+    the page's say-so; through 2.6.1 Linux had a bash twin of this."""
     host.log("Settings page: update check requested")
-    if host.os_name != "macos":
-        # The launcher writes the result: the request's id goes with it.
-        host.run_launcher(["settings-page-update-check"], timeout=300,
-                          env={"ONIONPRESS_REQUEST_ID": host.request_id})
+    result = _cached_update_check(host)
+    if result is not None:
+        host.log("Settings page update check: answered with the one from the last 5 minutes")
+        host.write_result("update-result.json", result)
         return
     r = host.run_launcher(["update", "--check", "--json"], timeout=300)
     ans = confirm.last_json_line(r.stdout) or {}
     if r.returncode != 0 or ans.get("error") or "update_available" not in ans:
         error = ans.get("error") or r.stderr.strip() or f"rc={r.returncode}"
-        host.write_result("update-result.json", {
+        host.log(f"Settings page update check failed: {error}")
+        result = {
             "success": False, "error": f"{UPDATE_CHECK_FAILED_MSG}: {error}",
             "current": ans.get("current"), "latest": ans.get("latest"),
-            "update_available": False, "completed_at": now_iso()})
-        return
-    current = ans.get("current") or host.version
-    if not ans.get("update_available"):
-        host.write_result("update-result.json", {
-            "success": True, "update_available": False,
-            "message": f"OnionPress {current} is up to date.",
-            "current": current, "latest": ans.get("latest") or current,
-            "completed_at": now_iso()})
-        return
-    latest = ans.get("latest", "")
-    host.log(f"Settings page: update check: installed {current}, latest {latest}; "
-             "the page never installs")
-    host.write_result("update-result.json", {
-        "success": True, "update_available": True, "installable": True,
-        "message": MAC_UPDATE_AVAILABLE_MSG.format(latest=latest),
-        "current": current, "latest": latest,
-        "completed_at": now_iso()})
+            "update_available": False, "installable": False, "checked_at": now_iso()}
+    else:
+        current = ans.get("current") or host.version
+        latest = ans.get("latest") or current
+        available = bool(ans.get("update_available"))
+        installable = available and bool(ans.get("installable", True))
+        if not available:
+            message = f"OnionPress {current} is up to date."
+        elif installable:
+            template = MAC_UPDATE_AVAILABLE_MSG if host.os_name == "macos" else LINUX_UPDATE_AVAILABLE_MSG
+            message = template.format(latest=latest)
+        else:
+            message = NOT_INSTALLABLE_MSG.format(
+                latest=latest, why=ans.get("install_problem") or "its package is not published.")
+        host.log(f"Settings page: update check: installed {current}, latest {latest}; "
+                 "the page never installs")
+        result = {
+            "success": True, "update_available": available, "installable": installable,
+            "message": message, "current": current, "latest": latest, "checked_at": now_iso()}
+    _cache_update_check(host, result)
+    host.write_result("update-result.json", result)
 
 
 # ---------------------------------------------------------------------------

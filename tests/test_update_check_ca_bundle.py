@@ -4,7 +4,8 @@
 updater.check_for_update ran `curl --cacert /etc/ssl/cert.pem`: that is
 macOS's bundle, Debian/Ubuntu/Raspberry Pi OS keep theirs at
 /etc/ssl/certs/ca-certificates.crt, so on Linux curl failed before
-connecting (exit 77). check-for-update --json still exited 0 with `error`
+connecting (exit 77). The check (`update --check --json`, once
+check-for-update --json) still exited 0 with `error`
 set and update_available false, and the tray's Check for Updates… showed
 "Up to date". Now --cacert is passed only where the file exists (both curl
 calls), and the tray reads `error` as "Update check failed".
@@ -42,7 +43,8 @@ class TestCurlCaBundle(unittest.TestCase):
 
         def fake_run(argv, **kw):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"tag_name": "v0.0.1"}), "")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(
+                {"tag_name": "v0.0.1", "draft": False, "prerelease": False, "assets": []}), "")
 
         with mock.patch.object(updater, "CA_BUNDLE", bundle), \
                 mock.patch.object(updater.subprocess, "run", fake_run):
@@ -62,20 +64,36 @@ class TestCurlCaBundle(unittest.TestCase):
             self.assertEqual(argv[argv.index("--cacert") + 1], f.name)
 
     def test_every_curl_call_goes_through_the_helper(self):
-        tree = ast.parse(_read(os.path.join(PROJECT_ROOT, "src/onionpress/updater.py")))
+        """One curl argv (_curl_argv: the TLS rule, --fail, HTTPS only),
+        one runner (_run_curl); the release lookup, the Mac's DMG and
+        SHA256SUMS and Linux's SHA256SUMS and .deb all go through it."""
+        src = _read(os.path.join(PROJECT_ROOT, "src/onionpress/updater.py"))
+        tree = ast.parse(src)
         curls = []
+        runs = []
         for node in ast.walk(tree):
             if isinstance(node, ast.List) and node.elts and isinstance(node.elts[0], ast.Constant) \
                     and node.elts[0].value == "curl":
                 curls.append(node)
-        # The release check, the DMG, and the release's SHA256SUMS (#386).
-        self.assertEqual(len(curls), 3)
-        for lst in curls:
-            names = [e.value.func.id for e in lst.elts
-                     if isinstance(e, ast.Starred) and isinstance(e.value, ast.Call)]
-            self.assertEqual(names, ["_curl_tls_args"])
-            self.assertNotIn("--cacert", [getattr(e, "value", None) for e in lst.elts])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "run" and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id == "subprocess" and node.args:
+                runs.append(node.args[0])
+        self.assertEqual(len(curls), 1)
+        names = [e.value.func.id for e in curls[0].elts
+                 if isinstance(e, ast.Starred) and isinstance(e.value, ast.Call)]
+        self.assertEqual(names, ["_curl_tls_args"])
+        self.assertNotIn("--cacert", [getattr(e, "value", None) for e in curls[0].elts])
+        # No other subprocess.run builds a curl argv of its own.
+        for arg in runs:
+            if isinstance(arg, ast.List) and arg.elts and isinstance(arg.elts[0], ast.Constant):
+                self.assertNotEqual(arg.elts[0].value, "curl")
+        self.assertEqual(src.count("_run_curl("), 6, "the def and five call sites")
         self.assertEqual(updater.CA_BUNDLE, "/etc/ssl/cert.pem")
+        argv = updater._curl_argv("https://x/")
+        for flag in ("--fail", "--proto", "=https", "--proto-redir", "--tlsv1.2", "--location"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[-1], "https://x/")
 
 
 class TestCheckForUpdateReportSaysError(unittest.TestCase):
@@ -83,20 +101,24 @@ class TestCheckForUpdateReportSaysError(unittest.TestCase):
     false. A consumer must look at `error`, never take a 0 for up to date."""
 
     def test_a_curl_failure_is_the_error_field(self):
-        def failing(current, log=None):
-            log("Update check curl failed: exit=77 stderr=error setting certificate file")
-            return None
+        def failing(argv, **kw):
+            return subprocess.CompletedProcess(argv, 77, "", "error setting certificate file")
 
         out = io.StringIO()
-        with mock.patch.object(updater, "check_for_update", failing), \
+        logged = []
+        with mock.patch.object(updater.subprocess, "run", failing), \
                 mock.patch.object(updater, "detect_other_instances", return_value=[]), \
                 contextlib.redirect_stdout(out):
-            rc = cli.check_for_update_report("1.2.3", lambda m: None, json_output=True)
+            rc = cli.check_for_update_report("1.2.3", logged.append, json_output=True,
+                                             os_name="linux")
         self.assertEqual(rc, 0)
         report = json.loads(out.getvalue())
-        self.assertIn("curl failed", report["error"])
+        self.assertIn("curl exit 77: error setting certificate file", report["error"])
         self.assertFalse(report["update_available"])
+        self.assertFalse(report["installable"])
         self.assertIsNone(report["latest"])
+        self.assertIn("Update check curl failed: exit=77 stderr=error setting certificate file",
+                      logged)
 
 
 class TestTrayOutcome(unittest.TestCase):
@@ -147,7 +169,8 @@ class TestTrayOutcome(unittest.TestCase):
     def test_the_menu_item_uses_it(self):
         tray = _read(TRAY)
         handler = tray[tray.index("def _on_check_updates("):tray.index("def _on_uninstall(")]
-        self.assertIn('Launcher.run_json("check-for-update", "--json")', handler)
+        self.assertIn('Launcher.run_json("update", "--check", "--json")', handler)
+        self.assertNotIn("check-for-update", handler)
         self.assertIn("ui_client.update_outcome(rc, out, err)", handler)
         self.assertNotIn("sys.executable", handler)
         self.assertIn("onionpress update", handler)
