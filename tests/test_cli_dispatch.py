@@ -196,17 +196,6 @@ ROWS = [
         "CLI().cmd_import_backup_artifacts", mock.call("/st")),
     Row("regenerate-derivatives", ["regenerate-derivatives"],
         "CLI().cmd_regenerate_derivatives", mock.call()),
-    Row("prune-image-derivatives", ["prune-image-derivatives", "--uploads-dir", "/st/uploads"],
-        "CLI().cmd_prune_image_derivatives", mock.call("/st/uploads")),
-    Row("pack-backup", ["pack-backup", "--staging", "/st", "--output", "/b.zip"],
-        "CLI().cmd_pack_backup", mock.call("/st", "/b.zip", "pw"), stdin="pw\n"),
-    Row("backup-metadata", ["backup-metadata", "--version", "1"],
-        "backup.linux_backup_metadata", mock.call("", "1", has_onionheaven=False,
-        excludes_image_derivatives=False, hub_fields=None, hub_unchecked=False,
-        with_host_secrets=True, secrets_left_out=[], excludes_onion_key=False),
-        rc=0, returns={"a": 1}),
-    Row("extract-backup", ["extract-backup", "--archive", "/b.zip", "--dest", "/d"],
-        "CLI().cmd_extract_backup", mock.call("/b.zip", "/d", "pw"), stdin="pw\n"),
 
     # ---- the Mac bundle's own: no OnionPressCLI setup ----
     Row("update", ["update", "--check", "--yes", "--json"], "cli.cmd_update",
@@ -306,28 +295,6 @@ ROWS = [
         env={cli.RECOVERY_KEY_ENV: "hubkey", cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- the launchers' backup and restore helpers ----
-    Row("backup-address", ["backup-address", "--staging", "/st"],
-        "CLI.cmd_backup_address", mock.call("/st")),
-    Row("restore-config", ["restore-config", "--staging", "/st", "--config", "/c", "--address", ONION],
-        "CLI.cmd_restore_config", mock.call("/st", "/c", ONION)),
-    Row("scrub-staging", ["scrub-staging", "--dir", "/st/wp-content"],
-        "CLI.cmd_scrub_staging", mock.call("/st/wp-content")),
-    Row("stage-wp-content", ["stage-wp-content", "--dest", "/st/wp-content"],
-        "CLI.cmd_stage_wp_content", mock.call("/st/wp-content")),
-    Row("stage-hub-data", ["stage-hub-data", "--dest", "/st/onionheaven"],
-        "CLI.cmd_stage_hub_data", mock.call("/st/onionheaven")),
-    Row("settings-page-restore-check", ["settings-page-restore-check", "--staging", "/st"],
-        "CLI.cmd_settings_page_restore_check", mock.call("/st")),
-    Row("wordpress-safe-config", ["wordpress-safe-config", "--config", "/c", "--dest", "/d"],
-        "CLI.cmd_wordpress_safe_config", mock.call("/c", "/d")),
-    Row("restore-hub-data", ["restore-hub-data", "--src", "/st/onionheaven"],
-        "CLI.cmd_restore_hub_data", mock.call("/st/onionheaven")),
-    Row("stage-hub-backup", ["stage-hub-backup", "--staging", "/st"],
-        "CLI.cmd_stage_hub_backup", mock.call("/st", D(""))),
-    Row("settings-page-backup-check", ["settings-page-backup-check", "--address", ONION],
-        "CLI.cmd_settings_page_backup_check", mock.call(ONION, D(""))),
-    Row("settings-page-restore-node-check", ["settings-page-restore-node-check"],
-        "CLI.cmd_settings_page_restore_node_check", mock.call("", D(""))),
     Row("put-wp-tree", ["put-wp-tree", "--src", "/s", "--dest", "/var/www/html/x", "--merge"],
         "CLI.cmd_put_wp_tree", mock.call("/s", "/var/www/html/x", True)),
 
@@ -443,9 +410,6 @@ ROWS = [
     # what restore_container_artifacts runs; the password is stdin's first
     # line, never argv. A failure raises there and is exit 1 here
     # (tests/test_db_import_sandbox.py).
-    Row("db-import", ["db-import", "--sql-file", "/st/database/wordpress.sql"],
-        "backup.db_import", mock.call("/st/database/wordpress.sql", "pw"), rc=0,
-        returns=None, stdin="pw\n"),
     # Phase 4 (#120): the launchers' regenerate_derivatives_pending() is this.
     Row("regenerate-derivatives-pending", ["regenerate-derivatives-pending"],
         "derivatives.regeneration_pending", mock.call(D(""), ANY), rc=0, returns=True),
@@ -723,12 +687,7 @@ class TestDispatch(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("usage: onionpress config", out)
 
-    def test_pack_extract_and_verify_need_a_password_on_stdin(self):
-        for argv in (["pack-backup", "--staging", "/st", "--output", "/b.zip"],
-                     ["extract-backup", "--archive", "/b.zip", "--dest", "/d"]):
-            with self.subTest(argv=argv):
-                rc, _, err = self._main(argv, stdin="\n")
-                self.assertEqual((rc, "no password on stdin" in err), (1, True))
+    def test_verify_needs_a_password_on_stdin(self):
         rc, _, _ = self._main(["verify-admin-password"], stdin="")
         self.assertEqual(rc, 1)
 

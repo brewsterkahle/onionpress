@@ -145,9 +145,9 @@ class TestTrayReadsTheDaemonsState(unittest.TestCase):
 
 
 class TestLinuxLauncherBackupCheck(unittest.TestCase):
-    """`onionpress backup --check --json [--user U]` on Linux is the shared
-    CLI's check, the password in the environment; without --check the
-    backup is bash's create_backup as before, at the path given."""
+    """`onionpress backup ...` on Linux is the shared CLI's, the password
+    in the environment: the check (`--check --json [--user U]`) and the
+    backup itself (issue #406; the bash create_backup is gone)."""
 
     def _case(self):
         text = _read(os.path.join(PROJECT_ROOT, "linux", "onionpress"))
@@ -157,12 +157,7 @@ class TestLinuxLauncherBackupCheck(unittest.TestCase):
     def _run(self, *args, env_password=None):
         script = (
             "#!/bin/bash\nset -u\nDATA_DIR=/d\nHOME=/h\n"
-            "setup_db_passwords() { echo setup_db_passwords; }\n"
-            "read_backup_password() { BACKUP_PASS=\"${ONIONPRESS_BACKUP_PASSWORD:-}\"; "
-            "unset ONIONPRESS_BACKUP_PASSWORD; [ -n \"${1:-}\" ] && BACKUP_PASS=\"$1\"; true; }\n"
             "op_py() { echo \"op_py $*\"; echo \"op_py sees password=${ONIONPRESS_BACKUP_PASSWORD:-none}\"; exit 4; }\n"
-            "create_backup() { echo \"create_backup $2\"; echo \"create_backup sees password=$1\"; }\n"
-            "mkdir() { :; }\n"
             "main() {\n    case \"$1\" in" + self._case() + "\n            ;;\n    esac\n}\n"
             "main \"$@\"\n")
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
@@ -193,32 +188,24 @@ class TestLinuxLauncherBackupCheck(unittest.TestCase):
         r = self._run("--check", "--json", "-o", "/x/b.zip", env_password="pw")
         self.assertIn("op_py --data-dir /d backup --check --json -o /x/b.zip\n", r.stdout)
 
-    def test_the_backup_itself_is_bash(self):
-        r = self._run("-o", "/x/b.zip", env_password="pw")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("create_backup /x/b.zip\n", r.stdout)
-        self.assertIn("create_backup sees password=pw", r.stdout)
-        self.assertIn("Backup saved to: /x/b.zip", r.stdout)
-        self.assertNotIn("op_py", r.stdout)
-        self.assertNotIn('"ok"', r.stdout)
-        r = self._run("--json", env_password="pw")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(confirm.last_json_line(r.stdout),
-                         {"ok": True, "output": re.search(r"create_backup (\S+)", r.stdout).group(1)})
+    def test_the_backup_itself_is_the_clis(self):
+        for argv in (("-o", "/x/b.zip"), ("--json",), ()):
+            with self.subTest(argv=argv):
+                r = self._run(*argv, env_password="pw")
+                self.assertEqual(r.returncode, 4, r.stderr)
+                self.assertIn("op_py --data-dir /d backup" + "".join(" " + a for a in argv) + "\n",
+                              r.stdout)
+                self.assertIn("op_py sees password=pw", r.stdout)
+                self.assertNotIn("create_backup", r.stdout)
 
     def test_the_trays_backup_form_is_accepted(self):
         """What ui_client.run_backup runs for the tray: `backup --json`
         with no path (the CLI's default) and the password in the
-        environment."""
+        environment, passed on to the CLI as given (issue #406)."""
         r = self._run("--json", env_password="pw")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(confirm.last_json_line(r.stdout).get("ok"), True)
-
-    def test_no_password_and_no_check_is_the_usage(self):
-        r = self._run()
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("Usage:", r.stdout)
-        self.assertIn("--check", r.stdout)
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertIn("op_py --data-dir /d backup --json\n", r.stdout)
+        self.assertIn("op_py sees password=pw", r.stdout)
 
 
 if __name__ == "__main__":

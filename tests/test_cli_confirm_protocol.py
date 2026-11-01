@@ -314,8 +314,10 @@ class TestSettingsPageRestoreAddressChange(unittest.TestCase):
 
     def _run(self, confirmed, restore):
         out = io.StringIO()
+        # The Mac's question; Linux refuses the change outright (issue #406).
         with mock.patch.object(backup, "restore_from_backup", side_effect=restore), \
                 mock.patch.object(cli, "release_onionheaven", return_value=[]), \
+                mock.patch.object(cli, "detect_os", return_value=cli.OS.MACOS), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             rc = cli.cmd_settings_page_restore("/x/upload.zip", "pw", tempfile.gettempdir(),
                                                True, confirmed)

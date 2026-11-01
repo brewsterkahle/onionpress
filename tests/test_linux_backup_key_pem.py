@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A Linux backup holds the onion service key's PEM, or it is not made
-(issue #519).
+"""A backup holds the onion service key's PEM, or says it has no key
+(issue #519; both platforms' since issue #406).
 
 A Linux first start that could not seed a key (the postinst's, before any
 image was pulled) left Tor to mint one: C Tor's hs_ed25519_secret_key and
@@ -8,11 +8,14 @@ hostname in onionpress-tor-state, no PEM in onionpress-onion-keys. The
 bash create_backup then warned "No PEM key found", packed the C Tor files
 and wrote the archive; every restore of it failed on the missing PEM.
 
-Now the backup derives the PEM from C Tor's files (key_manager.py
-ctor-to-arti; read_ctor_keys takes the public key from `hostname` when
-tor wrote no hs_ed25519_public_key, as newer tor does); with no key at
-all it marks the archive keyless (metadata excludes_onion_key, the Mac
-page backup's word: the restore keeps the install's key) with a WARNING.
+Now backup.create_backup reads the key out of the tor container with
+key_manager.extract_keys (the delivered PEM, else C Tor's files, the
+public key from `hostname` when tor wrote no hs_ed25519_public_key, as
+newer tor does) and writes the PEM; with no key readable at all it marks
+the archive keyless (metadata excludes_onion_key, the Mac page backup's
+word: the restore keeps the install's key; onion_key_unreadable, so the
+finished backup's notes say so) with a WARNING, never an archive no
+restore accepts, and never a new address.
 """
 import hashlib
 import os
@@ -23,11 +26,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from onionpress import key_manager  # noqa: E402
+from onionpress import backup, key_manager  # noqa: E402
 
 try:
     from nacl import signing
@@ -72,97 +76,77 @@ class TestCtorToPem(unittest.TestCase):
         private, public = key_manager.read_ctor_keys(self.dir)
         self.assertEqual((private, public), (self.private, self.public))
 
-    def test_ctor_to_arti_writes_the_pem_the_restore_needs(self):
-        # Run by path, as the launcher runs it: its own folder (with
-        # onion_auth.py and onion_keys.py beside it) on sys.path.
-        r = subprocess.run([sys.executable, KM, "ctor-to-arti", self.dir],
-                           capture_output=True, text=True, timeout=60,
-                           env={"PATH": os.environ["PATH"]})
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        pem = os.path.join(self.dir, "ks_hs_id.ed25519_expanded_private")
-        self.assertTrue(os.path.isfile(pem))
-        self.assertEqual(key_manager.read_arti_key(self.dir), (self.private, self.public))
-        self.assertEqual(stat.S_IMODE(os.stat(pem).st_mode), 0o600)
-
     def test_a_public_key_file_still_wins_when_present(self):
         with open(os.path.join(self.dir, "hs_ed25519_public_key"), "wb") as f:
             f.write(key_manager.CTOR_HEADER_PUBLIC + self.public)
         self.assertEqual(key_manager.read_ctor_keys(self.dir), (self.private, self.public))
 
 
-class TestLinuxBackupKeys(unittest.TestCase):
-    """The key section of linux/onionpress's create_backup, run under bash
-    with key_volume_cat stubbed: from a C-Tor-only volume the PEM is
-    derived; from no key at all there is no backup."""
+class TestBackupKeyFromTheContainer(unittest.TestCase):
+    """backup.create_backup's key step (_stage_onion_key), with the tor
+    container's answer patched."""
 
-    def _section(self):
-        text = _read("linux/onionpress")
-        i = text.index("\ncreate_backup() {")
-        body = text[i:text.index("\n}\n", i)]
-        start = body.index("    # 1. Extract Tor keys")
-        end = body.index("    # 2. Dump WordPress database")
-        return body[start:end]
-
-    def test_the_section_derives_the_pem_and_refuses_without_a_key(self):
-        section = self._section()
-        self.assertIn('key_manager.py" ctor-to-arti "$staging/tor-keys"', section)
-        self.assertIn("hidden_service/wordpress/hostname", section)
-        self.assertIn("keyless_backup=yes", section)
-        self.assertIn("WARNING: Backup: no onion service key could be read", section)
-        self.assertNotIn("backup will not include keys", section)
-        body = _read("linux/onionpress")
-        self.assertIn('[ "$keyless_backup" = "yes" ] && meta_flags+=(--excludes-onion-key)', body)
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="op-backup-keys-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.staging = os.path.join(self.tmp, "staging")
+        os.makedirs(self.staging)
+        self.logs = []
 
     @unittest.skipIf(signing is None, "PyNaCl not installed")
-    def test_under_bash(self):
-        tmp = tempfile.mkdtemp(prefix="op-backup-keys-")
-        self.addCleanup(shutil.rmtree, tmp, True)
+    def test_the_key_the_container_holds_is_the_backups(self):
         private, public = _expanded_key()
         address = key_manager.key_pair_onion_address(private, public)
-        vol = os.path.join(tmp, "vol")
-        os.makedirs(vol)
-        with open(os.path.join(vol, "hs_ed25519_secret_key"), "wb") as f:
-            f.write(key_manager.CTOR_HEADER_SECRET + private)
-        with open(os.path.join(vol, "hostname"), "w") as f:
-            f.write(address + "\n")
-        scripts = os.path.join(tmp, "scripts")
-        os.makedirs(scripts)
-        # The install tree's scripts/ (linux/install-tree.sh): key_manager.py
-        # with onion_auth.py and onion_keys.py beside it.
-        for name in ("key_manager.py", "onion_auth.py", "onion_keys.py"):
-            shutil.copy(os.path.join(ROOT, "src", "onionpress", name),
-                        os.path.join(scripts, name))
-        prelude = (
-            'set -e\n'
-            f'DATA_DIR="{tmp}/data"; LOG_FILE="{tmp}/log"; SCRIPTS_DIR="{scripts}"\n'
-            'mkdir -p "$DATA_DIR/shared/vanity-keys"; : > "$LOG_FILE"\n'
-            'log() { echo "$*"; echo "$*" >> "$LOG_FILE"; }\n'
-            # the stub volume reader: the files of $VOL, by name
-            'key_volume_cat() { [ -n "${VOL:-}" ] && cat "$VOL/$(basename "$2")" 2>/dev/null; }\n'
-            f'staging="{tmp}/staging"; rm -rf "$staging"; mkdir -p "$staging"\n'
-            'run_section() {\n' + self._section() + '\n echo "keyless=$keyless_backup"\n}\n'
-        )
-        with_key = subprocess.run(
-            ["bash", "-c", prelude + "run_section; echo rc=$?\n"],
-            capture_output=True, text=True, timeout=120,
-            env={"PATH": os.environ["PATH"], "VOL": vol, "PYTHONPATH": ""})
-        self.assertIn("rc=0", with_key.stdout, with_key.stdout + with_key.stderr)
-        self.assertIn("keyless=no", with_key.stdout)
-        self.assertIn("onion service key PEM derived from C Tor's key files", with_key.stdout)
-        staged = os.path.join(tmp, "staging", "tor-keys")
-        self.assertTrue(os.path.isfile(os.path.join(staged, "ks_hs_id.ed25519_expanded_private")))
-        self.assertFalse(os.path.exists(os.path.join(staged, "hostname")))
+        with mock.patch.object(key_manager, "extract_keys", return_value=(private, public)):
+            got = backup._stage_onion_key(self.staging, "", True, self.logs.append)
+        self.assertEqual(got, (address, False))
+        staged = os.path.join(self.staging, "tor-keys")
+        self.assertEqual(os.listdir(staged), ["ks_hs_id.ed25519_expanded_private"])
         self.assertEqual(key_manager.read_arti_key(staged), (private, public))
+        self.assertIn("Backup: extracting Tor keys...", self.logs)
 
-        without = subprocess.run(
-            ["bash", "-c", prelude + "run_section; echo rc=$?\n"],
-            capture_output=True, text=True, timeout=120,
-            env={"PATH": os.environ["PATH"], "VOL": os.path.join(tmp, "nowhere"), "PYTHONPATH": ""})
-        self.assertIn("rc=0", without.stdout, without.stdout + without.stderr)
-        self.assertIn("keyless=yes", without.stdout)
-        self.assertIn("WARNING: Backup: no onion service key could be read", without.stdout)
-        self.assertIn("this backup carries none", without.stderr)
-        self.assertEqual(os.listdir(staged), [], "nothing half-read goes into a keyless archive")
+    @unittest.skipIf(signing is None, "PyNaCl not installed")
+    def test_left_out_on_purpose_derives_the_address_only(self):
+        private, public = _expanded_key()
+        with mock.patch.object(key_manager, "extract_keys", return_value=(private, public)):
+            got = backup._stage_onion_key(self.staging, "", False, self.logs.append)
+        self.assertEqual(got, (key_manager.key_pair_onion_address(private, public), False))
+        self.assertEqual(os.listdir(self.staging), [])
+
+    def test_no_key_readable_is_a_keyless_backup_with_a_warning(self):
+        with mock.patch.object(key_manager, "extract_keys",
+                               side_effect=Exception("Could not read key file: no such file")):
+            got = backup._stage_onion_key(self.staging, "", True, self.logs.append)
+        self.assertEqual(got, ("", True))
+        self.assertEqual(os.listdir(self.staging), [], "nothing half-read goes into a keyless archive")
+        [warning] = [m for m in self.logs if m.startswith("Backup: WARNING")]
+        self.assertTrue(warning.startswith(backup.ONION_KEY_UNREADABLE_WARNING))
+        self.assertIn("no such file", warning)
+
+    def test_the_callers_address_is_kept_only_when_whole(self):
+        whole = "a" * 56 + ".onion"
+        with mock.patch.object(key_manager, "extract_keys", side_effect=Exception("down")):
+            self.assertEqual(backup._stage_onion_key(self.staging, whole, True, self.logs.append),
+                             (whole, True))
+            self.assertEqual(backup._stage_onion_key(self.staging, "../x.onion", True, self.logs.append),
+                             ("", True))
+
+    def test_the_metadata_and_the_notes_say_so(self):
+        # What create_backup records for the unreadable case, and what
+        # `onionpress backup` prints with the finished backup.
+        self.assertEqual(backup.unchecked_notes({"onion_key_unreadable": True}),
+                         [backup.ONION_KEY_UNREADABLE_NOTE])
+        self.assertEqual(backup.unchecked_notes({"excludes_onion_key": True}), [],
+                         "left out on purpose (the Mac page's backup): no note here")
+        src = _read("src/onionpress/backup.py")
+        body = src[src.index("def create_backup("):src.index("def staged_onion_key_address(")]
+        self.assertIn("if not include_onion_key or key_unreadable:\n"
+                      "            # No tor-keys/", body)
+        self.assertIn("if key_unreadable:\n", body)
+        self.assertIn("metadata['onion_key_unreadable'] = True", body)
+        # The restore keeps the install's key for such a backup, as for the
+        # Mac page's (staged_onion_key_address on excludes_onion_key).
+        self.assertIn("excludes_onion_key", src[src.index("def staged_onion_key_address("):][:1200])
 
 
 if __name__ == "__main__":

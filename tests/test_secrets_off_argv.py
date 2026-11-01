@@ -407,55 +407,21 @@ exit 0
 
 
 class TestLauncherDbClient(unittest.TestCase):
-    """The Linux launcher's db_client(), run in bash against a stub `docker`
-    that runs the container side here. The Mac launcher has none: its
-    database work goes through onionpress.cli (backup.py)."""
+    """Neither launcher runs a database client of its own any more: the
+    backup's dump and the restore's import are onionpress.cli's (backup.py,
+    the password on the client's stdin; issue #406 took Linux's db_client
+    and db_import)."""
 
     LAUNCHERS = ("app/MacOS/onionpress", "linux/onionpress")
-    DB_CLIENT_LAUNCHERS = ("linux/onionpress",)
 
     def test_no_password_flag_left(self):
         for rel in self.LAUNCHERS:
             with self.subTest(rel=rel):
-                self.assertNotRegex(_read(rel), r'"-p\$\{?db_pass')
-
-    def test_db_client_uses_backups_prelude(self):
-        for rel in self.DB_CLIENT_LAUNCHERS:
-            with self.subTest(rel=rel):
-                # The same container-side prelude as backup.py's.
-                self.assertIn(f"sh -c '{backup._DB_PASSWORD_FROM_STDIN}' sh",
-                              _shell_function(rel, "db_client"))
-
-    def test_db_client_feeds_password_on_stdin(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            argv_log = os.path.join(tmp, "argv.log")
-            client = os.path.join(tmp, "client")
-            with open(client, "w") as f:
-                f.write('#!/bin/sh\nprintf "pwd=%s args=%s\\n" "$MYSQL_PWD" "$*"\n')
-            os.chmod(client, 0o755)
-            for rel in self.DB_CLIENT_LAUNCHERS:
-                with self.subTest(rel=rel):
-                    script = (
-                        "set -e\n"
-                        'docker() {\n'
-                        '    printf "%s\\n" "$*" >> "$ARGV_LOG"\n'
-                        '    [ "$1 $2 $3" = "exec -i onionpress-db" ] || return 99\n'
-                        '    shift 3\n'
-                        '    "$@"\n'
-                        '}\n'
-                        + _shell_function(rel, "db_client") + "\n"
-                        'db_client "$PW" "$CLIENT" -u wordpress wordpress\n'
-                    )
-                    out = subprocess.run(
-                        ["bash", "-c", script], capture_output=True, text=True,
-                        timeout=30, env={**os.environ, "ARGV_LOG": argv_log,
-                                         "PW": TRICKY_PASSWORD, "CLIENT": client})
-                    self.assertEqual(out.returncode, 0, out.stderr)
-                    self.assertEqual(out.stdout.strip(),
-                                     f"pwd={TRICKY_PASSWORD} args=-u wordpress wordpress")
-                    with open(argv_log) as f:
-                        self.assertNotIn(TRICKY_PASSWORD, f.read())
-
+                text = _read(rel)
+                self.assertNotRegex(text, r'"-p\$\{?db_pass')
+                self.assertNotIn("\ndb_client() {", text)
+                self.assertNotIn("\ndb_import() {", text)
+                self.assertNotRegex(text, r"\bmariadb(-dump)?\b[^\n]*wordpress")
 
 class TestConfigSetTokenOnStdin(unittest.TestCase):
     """`onionpress config set CLOUDFLARE_TUNNEL_TOKEN` (issue #365): the

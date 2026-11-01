@@ -782,7 +782,6 @@ if __name__ == "__main__":
         print("Usage:")
         print("  key_manager.py extract")
         print("  key_manager.py ensure-formats <key_dir>")
-        print("  key_manager.py ctor-to-arti <key_dir>")
         print("  key_manager.py arti-to-ctor <key_dir>")
         print("  key_manager.py write-keys <hex_privkey> <hex_pubkey> <key_dir>")
         print("  key_manager.py import-key <base32_key> <output_dir>")
@@ -818,14 +817,6 @@ if __name__ == "__main__":
                 print(f"Converted key formats in {key_dir}")
             else:
                 print(f"Both formats already present in {key_dir}")
-
-        elif cmd == "ctor-to-arti":
-            if len(sys.argv) < 3:
-                _usage()
-            key_dir = sys.argv[2]
-            private_key, public_key = read_ctor_keys(key_dir)
-            write_arti_key(key_dir, private_key, public_key)
-            print(f"Wrote Arti PEM to {key_dir}")
 
         elif cmd == "arti-to-ctor":
             if len(sys.argv) < 3:

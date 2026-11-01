@@ -86,8 +86,8 @@ def db_import(sql_path, password, *, user='wordpress', name='wordpress'):
     onionpress-db as *user*, with *password*. Raises on any failure.
 
     The one implementation (Phase 4, #120): restore_container_artifacts
-    runs it, and the Linux launcher's db_import() is `onionpress db-import`
-    (backup.py's caller of this, the password on stdin's first line).
+    runs it, on both platforms (the Linux launcher's own db_import went
+    with issue #406).
 
     The client's own command parsing is OFF so a crafted dump cannot run
     \\! / system / \\. / tee / pager (a shell in the db container as OS

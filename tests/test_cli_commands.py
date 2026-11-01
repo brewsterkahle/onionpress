@@ -1072,88 +1072,6 @@ class TestStagingHelpers(Sandbox):
             self.cli.cmd_regenerate_derivatives()
         self.assertIs(regen.call_args.args[1], self.cli.log)
 
-    def test_prune_image_derivatives(self):
-        self.assertEqual(self.cli.cmd_prune_image_derivatives(os.path.join(self.dir, "x")), 0)
-        self.assertEqual(self.out.getvalue(), "0 0\n")
-        with mock.patch("onionpress.derivatives.prune_image_derivatives",
-                        return_value=(3, 4096)) as prune:
-            self.assertEqual(self.cli.cmd_prune_image_derivatives(self.dir), 0)
-        prune.assert_called_once_with(self.dir, self.cli.log)
-        self.assertEqual(self.out.getvalue(), "0 0\n3 4096\n")
-
-    def test_scrub_staging(self):
-        self.assertEqual(OnionPressCLI.cmd_scrub_staging(os.path.join(self.dir, "none")), 0)
-        with mock.patch("onionpress.backup.scrub_staged_tree") as scrub:
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(self.dir), 0)
-            scrub.side_effect = OSError("denied")
-            self.assertEqual(OnionPressCLI.cmd_scrub_staging(self.dir), 1)
-        self.assertIn("could not check the staged files for links: denied", self.err.getvalue())
-
-    def test_stage_wp_content(self):
-        with mock.patch("onionpress.backup.stage_wp_content") as stage:
-            self.assertEqual(OnionPressCLI.cmd_stage_wp_content("/dest"), 0)
-            self.assertEqual(stage.call_args.args[0], "/dest")
-            stage.side_effect = RuntimeError("tar failed")
-            self.assertEqual(OnionPressCLI.cmd_stage_wp_content("/dest"), 1)
-        self.assertIn("could not copy wp-content: tar failed", self.err.getvalue())
-
-    def test_stage_hub_data(self):
-        with mock.patch("onionpress.backup.hub_data_state", side_effect=[None, "none", "hub", "hub"]), \
-                mock.patch("onionpress.backup.stage_hub_data",
-                           side_effect=[None, RuntimeError("cp")]) as stage:
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 4)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 3)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 0)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_data("/dest"), 1)
-        self.assertEqual(stage.call_count, 2)
-        err = self.err.getvalue()
-        self.assertIn("did not say whether it holds", err)
-        self.assertIn("could not copy the OnionHeaven data: cp", err)
-
-    def test_stage_hub_backup(self):
-        with mock.patch("onionpress.backup.hub_data_state", side_effect=[None, "none", "hub", "hub"]), \
-                mock.patch("onionpress.backup.stage_hub_backup",
-                           side_effect=[{"onionheaven_data": "sealed"}, RuntimeError("seal")]) as stage:
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 4)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 3)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 0)
-            self.assertEqual(OnionPressCLI.cmd_stage_hub_backup("/stg", self.dir), 1)
-        self.assertEqual(stage.call_args.kwargs, {"data_dir": self.dir})
-        self.assertEqual(json.loads(self.out.getvalue()), {"onionheaven_data": "sealed"})
-        self.assertIn("could not back up the OnionHeaven data: seal", self.err.getvalue())
-
-    def test_the_settings_page_checks(self):
-        cases = (
-            ("settings_page_backup_refusal",
-             lambda: OnionPressCLI.cmd_settings_page_backup_check(ADDR, self.dir)),
-            ("settings_page_restore_node_refusal",
-             lambda: OnionPressCLI.cmd_settings_page_restore_node_check(ADDR, self.dir)),
-            ("settings_page_restore_refusal",
-             lambda: OnionPressCLI.cmd_settings_page_restore_check("/stg")),
-        )
-        for name, run in cases:
-            with self.subTest(name=name), \
-                    mock.patch("onionpress.backup.hub_data_state", return_value="none"), \
-                    mock.patch(f"onionpress.backup.{name}", side_effect=["", "this is a hub"]):
-                self.assertEqual(run(), 0)
-                self.assertEqual(run(), 3)
-        self.assertEqual(self.out.getvalue(), "this is a hub\n" * 3)
-
-    def test_wordpress_safe_config(self):
-        with mock.patch("onionpress.backup.write_wordpress_safe_config",
-                        side_effect=[["CLOUDFLARE_TUNNEL_TOKEN"], OSError("ro")]):
-            self.assertEqual(OnionPressCLI.cmd_wordpress_safe_config("/c", "/d"), 0)
-            self.assertEqual(OnionPressCLI.cmd_wordpress_safe_config("/c", "/d"), 1)
-        self.assertEqual(self.out.getvalue(), "CLOUDFLARE_TUNNEL_TOKEN\n")
-        self.assertIn("could not write the config for WordPress: ro", self.err.getvalue())
-
-    def test_restore_hub_data(self):
-        with mock.patch("onionpress.backup.restore_hub_data",
-                        side_effect=[None, RuntimeError("bad key")]):
-            self.assertEqual(OnionPressCLI.cmd_restore_hub_data("/src"), 0)
-            self.assertEqual(OnionPressCLI.cmd_restore_hub_data("/src"), 1)
-        self.assertIn("could not restore the OnionHeaven data: bad key", self.err.getvalue())
-
     def test_put_wp_tree(self):
         with mock.patch("onionpress.wp_files.put_tree", side_effect=[
                 mock.Mock(returncode=0), mock.Mock(returncode=1, stderr="tar: denied\n"),
@@ -1165,38 +1083,6 @@ class TestStagingHelpers(Sandbox):
         err = self.err.getvalue()
         self.assertIn("Could not copy theme into WordPress: tar: denied", err)
         self.assertIn("Could not copy theme into WordPress: no docker", err)
-
-    def test_pack_and_extract_failures(self):
-        with mock.patch("onionpress.backup.pack_backup", side_effect=[None, OSError("full")]):
-            self.assertEqual(self.cli.cmd_pack_backup("/stg", "/out.zip", "pw"), 0)
-            self.assertEqual(self.cli.cmd_pack_backup("/stg", "/out.zip", "pw"), 1)
-        with mock.patch("onionpress.backup.extract_backup",
-                        side_effect=[None, ValueError("wrong password")]) as extract:
-            self.assertEqual(self.cli.cmd_extract_backup("/b.zip", "/dest", "pw"), 0)
-            self.assertEqual(extract.call_args.kwargs, {"staging": "/dest"})
-            self.assertEqual(self.cli.cmd_extract_backup("/b.zip", "/dest", "pw"), 1)
-        err = self.err.getvalue()
-        self.assertIn("encrypting the archive failed: full", err)
-        self.assertIn("could not extract the backup: wrong password", err)
-
-    def test_backup_address(self):
-        with mock.patch("onionpress.backup.staged_backup_address",
-                        side_effect=[ADDR, "", ValueError("bad metadata")]):
-            self.assertEqual(OnionPressCLI.cmd_backup_address("/stg"), 0)
-            self.assertEqual(OnionPressCLI.cmd_backup_address("/stg"), 0)
-            self.assertEqual(OnionPressCLI.cmd_backup_address("/stg"), 1)
-        self.assertEqual(self.out.getvalue(), ADDR + "\n")
-        self.assertIn("refusing the backup: bad metadata", self.err.getvalue())
-
-    def test_restore_config(self):
-        with mock.patch("onionpress.backup.restore_backup_config",
-                        side_effect=[None, None, OSError("ro")]) as restore:
-            self.assertEqual(OnionPressCLI.cmd_restore_config("/stg", "/cfg", ADDR), 0)
-            self.assertEqual(restore.call_args.args[3], ADDR)
-            self.assertEqual(OnionPressCLI.cmd_restore_config("/stg", "/cfg", "junk"), 0)
-            self.assertEqual(restore.call_args.args[3], "")
-            self.assertEqual(OnionPressCLI.cmd_restore_config("/stg", "/cfg"), 1)
-        self.assertIn("could not restore settings: ro", self.err.getvalue())
 
     def test_passthroughs(self):
         with mock.patch("onionpress.wayback_smoke.smoke_test_wayback", return_value=5) as smoke:
@@ -1552,9 +1438,13 @@ class TestSettingsPageBackup(Sandbox):
 
 
 class TestSettingsPageRestore(Sandbox):
+    """The Mac's: the address-change question and the hub release. Linux
+    refuses the change and pauses the heartbeat unit instead
+    (tests/test_settings_page_onion_key.py), so the OS is pinned here."""
 
     def _restore(self, confirmed=frozenset(), json_output=True):
-        return cli.cmd_settings_page_restore("/up.zip", "pw", self.dir, json_output, confirmed)
+        with mock.patch("onionpress.cli.detect_os", return_value=cli.OS.MACOS):
+            return cli.cmd_settings_page_restore("/up.zip", "pw", self.dir, json_output, confirmed)
 
     def test_the_hubs_are_asked_before_the_key_changes_and_a_refusal_is_logged(self):
         seen = {}

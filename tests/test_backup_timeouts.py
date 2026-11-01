@@ -175,8 +175,7 @@ class TestSources(unittest.TestCase):
         self.assertIn("wpcontent_bytes=stats.get('wpcontent_bytes')", body)
 
     def test_the_import_is_sized(self):
-        # The import is db_import's (Phase 4, #120: the Linux launcher's
-        # db_import runs it as `onionpress db-import`).
+        # The import is db_import's (Phase 4, #120), on both platforms.
         restore = self._function("restore_container_artifacts")
         self.assertIn("db_import(sql_path, db_password", restore)
         body = self._function("db_import")
