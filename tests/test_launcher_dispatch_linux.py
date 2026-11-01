@@ -319,11 +319,13 @@ class TestUsage(_Case):
 
 
 class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
-    """Every `Launcher.run*("<verb>", ...)` in linux/onionpress-tray names
-    a case of linux/onionpress's main; `handle-action` takes its request
-    from the request files, never a positional argument (the tray's old
-    Regenerate item ran `handle-action regenerate-vanity`, which the CLI
-    refuses with exit 2)."""
+    """Every `Launcher.run*("<verb>", ...)` in linux/onionpress-tray (the
+    shared ui_client.Launcher) names a case of linux/onionpress's main or
+    a subcommand of onionpress.cli (the main's default case hands those
+    to it); `handle-action` takes its request from the request files,
+    never a positional argument (the tray's old Regenerate item ran
+    `handle-action regenerate-vanity`, which the CLI refuses with exit 2).
+    The tray runs no `python -m onionpress.cli` of its own."""
 
     def _verbs(self):
         with open(LINUX, encoding="utf-8") as f:
@@ -332,16 +334,27 @@ class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):
         verbs = set()
         for m in re.finditer(r"^        ([a-z|-]+)\)$", main, re.M):
             verbs.update(m.group(1).split("|"))
+        from test_cli_dispatch import parser_tree
+        verbs.update(key[0] for key in parser_tree())
         return verbs
 
     def _tray_calls(self):
         with open(TRAY, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "Launcher"
-                    and node.args and isinstance(node.args[0], ast.Constant)):
+            if not (isinstance(node, ast.Call) and node.args
+                    and isinstance(node.args[0], ast.Constant)):
+                continue
+            f = node.func
+            if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                    and f.value.id == "Launcher"):
                 yield node.lineno, [a.value if isinstance(a, ast.Constant) else None for a in node.args]
+
+    def test_the_tray_runs_no_python_of_its_own(self):
+        with open(TRAY, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn('"onionpress.cli"', text)
+        self.assertNotIn("sys.executable", text)
 
     def test_every_verb_is_the_launchers(self):
         verbs = self._verbs()

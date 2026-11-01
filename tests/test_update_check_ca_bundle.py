@@ -147,7 +147,9 @@ class TestTrayOutcome(unittest.TestCase):
     def test_the_menu_item_uses_it(self):
         tray = _read(TRAY)
         handler = tray[tray.index("def _on_check_updates("):tray.index("def _on_uninstall(")]
-        self.assertIn("ui_client.update_outcome(r.returncode, r.stdout, r.stderr)", handler)
+        self.assertIn('Launcher.run_json("check-for-update", "--json")', handler)
+        self.assertIn("ui_client.update_outcome(rc, out, err)", handler)
+        self.assertNotIn("sys.executable", handler)
         self.assertIn("onionpress update", handler)
         self.assertNotIn("Up to date", handler)
         # "Up to date" is said in one place, after the error field was read.
