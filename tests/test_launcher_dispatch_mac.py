@@ -501,11 +501,15 @@ class TestUsage(_Case):
         # The hub message channel went on 2026-10-25 (CLAUDE.md).
         self.assertNotIn("alerts", self.l.run("help").stdout)
 
-    def test_an_unknown_verb_is_refused(self):
-        r = self.l.run("frobnicate")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("help' for the full list", r.stderr)
-        self.assertEqual(self.l.calls(), [])
+    def test_an_unknown_verb_reaches_the_cli(self):
+        """The default case hands every other verb to onionpress.cli: a
+        subcommand with no case of its own (ensure-archive-s3-keys, which
+        the daemon runs; check-for-update) runs there, and the CLI's own
+        usage and exit status answer one it does not have either."""
+        r = self.l.run("frobnicate", "--json", env={"STUB_RC_PY": "2"})
+        self.assertEqual(r.returncode, 2)
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} frobnicate --json"])
+        self.assertEqual(self.l.fn_calls(), [])
 
 
 if __name__ == "__main__":

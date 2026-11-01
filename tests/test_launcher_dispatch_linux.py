@@ -307,12 +307,15 @@ class TestUsage(_Case):
                 self.assertIn("|backup|restore|", r.stdout)
                 self.assertNotIn("alerts", r.stdout)
 
-    def test_an_unknown_verb_is_refused_on_stderr(self):
-        r = self.l.run("frobnicate")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("unknown command: frobnicate", r.stderr)
+    def test_an_unknown_verb_reaches_the_cli(self):
+        """The default case hands every other verb to onionpress.cli (the
+        tray's check-for-update has no case of its own); the CLI's own
+        usage and exit status answer one it does not have either."""
+        r = self.l.run("frobnicate", "--json", env={"STUB_RC_PY": "2"})
+        self.assertEqual(r.returncode, 2)
         self.assertEqual(r.stdout, "")
-        self.assertEqual(self.l.calls(), [])
+        self.assertEqual(self.l.py_calls(), [f"{self.dd()} frobnicate --json"])
+        self.assertEqual(self.l.fn_calls(), [])
 
 
 class TestTrayRunsOnlyLauncherVerbs(unittest.TestCase):

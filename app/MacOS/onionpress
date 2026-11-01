@@ -2707,8 +2707,11 @@ EOF
             ;;
 
         *)
-            echo "Usage: $0 <command> [args]   (run '$0 help' for the full list)" >&2
-            exit 1
+            # Every other verb is onionpress.cli's: a subcommand with no
+            # case of its own reaches it here (ensure-archive-s3-keys,
+            # check-for-update, ...), and one the CLI does not have either
+            # gets the CLI's usage and exit status.
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" "$@"
             ;;
     esac
 }

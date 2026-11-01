@@ -4204,9 +4204,11 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         *)
-            echo "onionpress: unknown command: $1" >&2
-            usage >&2
-            exit 1
+            # Every other verb is onionpress.cli's: a subcommand with no
+            # case of its own reaches it here (check-for-update,
+            # ensure-archive-s3-keys, ...), and one the CLI does not have
+            # either gets the CLI's usage and exit status.
+            op_py --data-dir "$DATA_DIR" "$@"
             ;;
     esac
 }
