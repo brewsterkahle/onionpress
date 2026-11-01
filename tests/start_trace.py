@@ -7,7 +7,9 @@ of `start_containers`, with:
   - `docker`: the stateful fake in tests/start_trace_docker.py;
   - `bundled_python` / `op_py`: tests/start_trace_runner.py, which runs the
     start steps that are Python for real (against that docker) and records
-    the WordPress-side ones;
+    the WordPress-side ones; `launcher_environment` (what main() opens
+    with, issue #405) runs first, as main would, its `launcher-env` for
+    real too (the preset offset 0, so nothing is probed or logged);
   - the Docker wait, the VM repair, `sleep` and the background pieces
     (Mac `generate_vanity_address`; `run_detached`) as recorders; `curl` (the WordPress port wait) answers
     $STUB_RC_CURL;
@@ -81,6 +83,7 @@ set +e
 (
     trap '_op_rec "START_ERRORS=[${START_ERRORS:-}]"' EXIT
     set -e
+    launcher_environment
     start_containers
 )
 _op_rec "rc=$?"

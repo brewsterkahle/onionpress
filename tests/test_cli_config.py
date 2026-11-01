@@ -537,13 +537,14 @@ class TestCallers(unittest.TestCase):
         self.assertNotIn("onionheaven_explain", linux)
 
     def test_launcher_help_names_them(self):
-        mac = _read("app/MacOS/onionpress")
-        help_text = mac[mac.index("help|-h|--help)"):mac.index("Your WordPress site will be available at")]
-        self.assertIn("  config        ", help_text)
-        self.assertIn("  onionheaven   ", help_text)
-        self.assertIn("set KEY - with the", help_text)
-        linux = _read("linux/onionpress")
-        self.assertIn("|config|onionname|onionheaven|", linux)
+        # One text for both platforms (cli.launcher_help, #529).
+        from onionpress import cli
+        for os_name in ("macos", "linux"):
+            help_text = cli.launcher_help(os_name)
+            self.assertIn("  config        ", help_text, os_name)
+            self.assertIn("  onionheaven   ", help_text, os_name)
+            self.assertIn("  onionname     ", help_text, os_name)
+            self.assertIn("set KEY - with the", help_text, os_name)
 
     def test_guis_write_config_only_through_the_cli(self):
         for rel in ("src/onionpress/settings_ui.py", "linux/onionpress-tray"):

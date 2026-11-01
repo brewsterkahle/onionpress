@@ -57,6 +57,7 @@ import onionpress  # noqa: E402
 from onionpress import config as op_config  # noqa: E402
 from onionpress import daemon as op_daemon  # noqa: E402
 from onionpress import onion_proxy  # noqa: E402
+from onionpress import ports as op_ports  # noqa: E402
 from onionpress import thumbnails  # noqa: E402
 from onionpress.health import WedgeSignals  # noqa: E402
 from tests.test_mac_daemon import ADDR, _DaemonCase  # noqa: E402
@@ -456,7 +457,7 @@ class TestResolvePorts(_PathsCase):
     def resolve(self, pc=None, raises=None, busy=None):
         bound = []
         resolver = mock.Mock(return_value=pc, side_effect=raises)
-        with mock.patch.object(op_config, "resolve_port_offset", resolver), \
+        with mock.patch.object(op_ports, "resolve_port_offset", resolver), \
                 mock.patch("socket.socket", _BindSocket(busy or {}, bound)):
             self.d._resolve_ports_at_start()
         return bound

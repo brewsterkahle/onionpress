@@ -9,6 +9,7 @@ below has a comment pointing at the incident it's guarding against.
 """
 
 import ast
+import inspect
 import os
 import re
 import subprocess
@@ -743,13 +744,16 @@ class TestLinuxOnionAddressSharedToWp(unittest.TestCase):
     header showed "ubuntupress" without "@op2…onion".
     """
 
-    def test_launcher_defines_write_shared_onion_address(self):
-        script = _read("linux/onionpress")
-        self.assertRegex(
-            script, r'write_shared_onion_address\(\)\s*\{',
-            "linux/onionpress must define a write_shared_onion_address "
-            "helper that copies hostname into the shared volume.",
-        )
+    def test_no_launcher_writes_the_shared_address_in_bash(self):
+        # The write is start.write_shared_onion_address, run by
+        # start.wait_for_services (`onionpress wait-for-services`, #529) on
+        # both platforms, the not-installed early return included.
+        from onionpress import start
+        import inspect
+        for rel in ("linux/onionpress", "app/MacOS/onionpress"):
+            self.assertNotIn("write_shared_onion_address() {", _read(rel), rel)
+        self.assertIn("write_shared_onion_address(docker, log)",
+                      inspect.getsource(start.wait_for_services))
 
     def test_provision_post_install_writes_shared_address(self):
         # provision-post-install delegates to multisite.provision_post_install
@@ -823,11 +827,11 @@ class TestMacLinuxFunctionParity(unittest.TestCase):
     # for the equivalent assertion at the Python level. What stays bash:
     # the delegations to the WordPress.org plugin steps
     # (onionpress.bundled_plugins, #442.3; tests/test_bundled_plugins.py
-    # holds their shape) and detect_port_offset (needs to run before the
-    # Python lib path is set up).
+    # holds their shape) and launcher_environment, main's first call
+    # (issue #405: the ports and paths come from `onionpress launcher-env`).
     REQUIRED_ON_BOTH = {
         "setup_bundled_plugins",
-        "detect_port_offset",
+        "launcher_environment",
     }
     # `fetch_archive_s3_keys` exists only on Linux: it's a helper used by
     # the SSH/CLI `onionpress setup` interactive path, which on Mac is
@@ -1121,16 +1125,20 @@ class TestPortOffsetSticky(unittest.TestCase):
             "so the next start can wait for the prior ports to free.",
         )
 
-    def test_linux_reads_previous_offset_on_start(self):
-        src = _read("linux/onionpress")
-        # Detection block must read the sentinel and wait for the
-        # desired port to come back.
-        self.assertRegex(
-            src, r'_prev_sentinel.*\.previous-port-offset',
-            "linux/onionpress port-offset detection must read "
-            "$DATA_DIR/.previous-port-offset at startup so a quick "
-            "restart reuses the same offset instead of bumping.",
-        )
+    def test_the_start_waits_for_the_previous_offset_in_python(self):
+        # Issue #405: the wait is ports.wait_for_previous_port, run by
+        # ports.resolve_at_start, which both launchers' main() reach
+        # through `onionpress launcher-env` (and the daemon directly); no
+        # bash reads the sentinel any more.
+        from onionpress import ports
+        self.assertEqual(ports.PREVIOUS_OFFSET_SENTINEL, ".previous-port-offset")
+        self.assertIn("wait_for_previous_port(data_dir, log=log, sleep=sleep)",
+                      inspect.getsource(ports.resolve_at_start))
+        for launcher in ("linux/onionpress", "app/MacOS/onionpress"):
+            src = _read(launcher)
+            self.assertNotIn("_prev_sentinel", src)
+            self.assertIn(" launcher-env 2>>\"$LOG_FILE\")", src)
+            self.assertRegex(src, r"(?m)^main\(\) \{\n    launcher_environment\n")
 
 
 class TestScrubBashDelegatesToPython(unittest.TestCase):
@@ -1152,7 +1160,7 @@ class TestScrubBashDelegatesToPython(unittest.TestCase):
         body = m.group(1)
         # Must invoke the Python CLI's scrub subcommand.
         self.assertRegex(
-            body, r'op_py\s+scrub',
+            body, r'op_py( --data-dir "\$DATA_DIR")?\s+scrub',
             "scrub) must delegate to `op_py scrub` — the phase orchestration "
             "+ verify checks live in src/onionpress/scrub.py now.",
         )
@@ -1791,13 +1799,19 @@ class TestStartFailuresAreSurfaced(unittest.TestCase):
             self.assertIn(f'"{name}"', start, name)
 
     def test_wait_for_services_reports_without_failing_the_start(self):
-        # Linux already returns 0 here; under set -e a return 1 ended
-        # `onionpress start` before the summary and the running lines.
+        # Under set -e a return 1 ended `onionpress start` before the
+        # summary and the running lines; the wait is Python's now (#529,
+        # start.wait_for_services, always 0, the WARNING its report) and
+        # each bash delegation ends in `return 0`.
+        from onionpress import start
+        import inspect
+        src = inspect.getsource(start.wait_for_services)
+        self.assertIn("WARNING: Services not fully ready", src)
+        self.assertNotIn("return 1", src)
         for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
             body = TestKeyVolumeMigration._function_body(_read(launcher), "wait_for_services")
             with self.subTest(launcher=launcher):
-                self.assertNotRegex(body, r"\n\s+return 1\s*$")
-                self.assertIn("WARNING: Services not fully ready", body)
+                self.assertTrue(body.rstrip().endswith("return 0"))
 
     def test_menubar_reads_the_launchers_exit_status(self):
         text = _read(self.MENUBAR)
@@ -2487,8 +2501,10 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
         self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
 
     def test_both_launchers_list_get_in_usage(self):
-        self.assertRegex(_read("app/MacOS/onionpress"), r"(?m)^  get\s+Fetch a URL over Tor")
-        self.assertIn("|get|", _read("linux/onionpress"))
+        # The help is one text for both platforms (cli.launcher_help, #529).
+        from onionpress import cli
+        for os_name in ("macos", "linux"):
+            self.assertRegex(cli.launcher_help(os_name), r"(?m)^  get\s+Fetch a URL over Tor")
 
 
 class TestMigrationScriptLocally(unittest.TestCase):

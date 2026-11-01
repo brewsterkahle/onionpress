@@ -56,7 +56,7 @@ def make_cli(data_dir):
     """An OnionPressCLI whose setup touched nothing but *data_dir*
     (config written there), with its docker, containers and log
     replaced by stubs."""
-    with mock.patch("onionpress.cli.detect_port_offset",
+    with mock.patch("onionpress.ports.resolve_at_start",
                     return_value=PortConfig(0, 8080, 9050, 9077)), \
             mock.patch("onionpress.cli.ensure_secrets",
                        return_value=Secrets("p1", "p2", "p3")), \

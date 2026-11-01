@@ -660,12 +660,20 @@ class TestLauncher(unittest.TestCase):
         self.assertIn('ONIONPRESS_IN_WATCHER=true op_py --data-dir "$DATA_DIR" handle-action', handle)
 
     def test_uninstall_stops_the_daemon_and_the_old_units(self):
-        body = _code(_case(self.launcher, "uninstall"))
-        self.assertLess(body.index("daemon stop --no-offline"), body.index("onionheaven_release uninstall"))
+        # The uninstall is onionpress.uninstall's Linux branch (#529): the
+        # daemon stopped (no /offline) before the hub release, then the
+        # current and the pre-#407 units stopped, disabled and removed.
+        from onionpress import uninstall
+        self.assertIn('op_py --data-dir "$DATA_DIR" uninstall "${@:2}"', _case(self.launcher, "uninstall"))
+        src = _read("src/onionpress/uninstall.py")
+        body = src[src.index("def run("):]
+        self.assertLess(body.index("stop_agent(paths.data_dir, log, offline=False)"),
+                        body.index("release_onionheaven("))
         for unit in ("onionpress-daemon", "onionpress-heartbeat", "onionpress-watcher.timer"):
-            self.assertIn(f"systemctl --user stop {unit}", body)
-            self.assertIn(f"systemctl --user disable {unit}", body)
-        self.assertIn('"$USER_SYSTEMD_DIR/onionpress-daemon.service"', body)
+            self.assertIn(unit, uninstall.USER_UNITS)
+        self.assertIn("onionpress-daemon.service", uninstall.USER_UNIT_FILES)
+        linux = src[src.index("def _remove_linux("):src.index("def run(")]
+        self.assertLess(linux.index('"--user", "stop"'), linux.index('"--user", "disable"'))
 
     def test_start_on_boot_enables_the_daemon_unit(self):
         config = _read("src/onionpress/config.py")

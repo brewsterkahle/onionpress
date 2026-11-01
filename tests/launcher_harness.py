@@ -16,7 +16,11 @@ Colima or Python CLI can be reached from here.
 Every call lands in one file, one line each: `fn NAME ARGS` for a stubbed
 function, `py ARGS` (+ `py-env PASSWORD`) for the CLI, `bin NAME ARGS`
 for a stub executable. A stub's exit status is STUB_RC_<NAME> (an
-environment variable a test sets; 0 by default).
+environment variable a test sets; 0 by default). main()'s first CLI
+call, `launcher-env` (issue #405), is answered by the stub from
+$STUB_LAUNCHER_ENV (offset 0's ports by default; FAIL for no answer);
+setup_db_passwords' `ensure-secrets` (#529) by writing a stub secrets
+file (STUB_RC_ENSURE_SECRETS its exit).
 """
 
 import os
@@ -58,8 +62,28 @@ _op_rec() { printf '%s\n' "$*" >> "$OP_CALLS"; }
 _op_py() {
     _op_rec "py $*"
     _op_rec "py-env ${ONIONPRESS_BACKUP_PASSWORD:-<none>}"
+    # main's first call, `launcher-env` (issue #405): answered from
+    # $STUB_LAUNCHER_ENV (the lines the Python would print; FAIL: exit 1
+    # with no answer), by default the ports of offset 0; its own knob,
+    # so STUB_RC_PY keeps meaning the verb's own CLI call.
+    if [ "$3" = launcher-env ]; then
+        [ "${STUB_LAUNCHER_ENV-}" = FAIL ] && return 1
+        printf '%s\n' "${STUB_LAUNCHER_ENV-$STUB_LAUNCHER_ENV_DEFAULT}"
+        return 0
+    fi
+    # setup_db_passwords' `ensure-secrets` (issue #529): the file the
+    # Python would make, so the bash `source` that follows has one; its
+    # own knob, STUB_RC_ENSURE_SECRETS.
+    if [ "$3" = ensure-secrets ]; then
+        [ -f "$DATA_DIR/secrets" ] || printf "WORDPRESS_DB_PASSWORD='stub-wp'\nMYSQL_PASSWORD='stub-wp'\nMYSQL_ROOT_PASSWORD='stub-root'\n" > "$DATA_DIR/secrets"
+        return "${STUB_RC_ENSURE_SECRETS:-0}"
+    fi
     return "${STUB_RC_PY:-0}"
 }
+STUB_LAUNCHER_ENV_DEFAULT='ONIONPRESS_PORT_OFFSET=0
+ONIONPRESS_WP_PORT=8080
+ONIONPRESS_SOCKS_PORT=9050
+ONIONPRESS_PROXY_PORT=9077'
 bundled_python() {
     # The Mac's `bundled_python -m onionpress.cli ARGS` is recorded as ARGS.
     if [ "$1 $2" = "-m onionpress.cli" ]; then shift 2; else _op_rec "py-other $*"; return 99; fi
@@ -153,17 +177,32 @@ class Launcher:
             input=input, stdin=None if input is not None else subprocess.DEVNULL,
             timeout=timeout)
 
-    def calls(self):
-        """The recorded calls, in order."""
+    def calls(self, env=False):
+        """The recorded calls, in order. The `launcher-env` call main()
+        opens with (issue #405; tests/test_launcher_env.py has its own)
+        and its `py-env` line are left out unless *env*."""
         try:
             with open(self.calls_file, encoding="utf-8") as f:
-                return f.read().splitlines()
+                lines = f.read().splitlines()
         except FileNotFoundError:
             return []
+        if env:
+            return lines
+        kept, skip_env = [], False
+        for line in lines:
+            if line.startswith("py ") and line.endswith(" launcher-env"):
+                skip_env = True
+                continue
+            if skip_env and line.startswith("py-env "):
+                skip_env = False
+                continue
+            skip_env = False
+            kept.append(line)
+        return kept
 
-    def py_calls(self):
-        """The Python CLI's argvs (each a string), in order."""
-        return [c[3:] for c in self.calls() if c.startswith("py ")]
+    def py_calls(self, env=False):
+        """The Python CLI's argvs (each a string), in order (see calls)."""
+        return [c[3:] for c in self.calls(env) if c.startswith("py ")]
 
     def fn_calls(self):
         """The stubbed functions called, by name, in order."""

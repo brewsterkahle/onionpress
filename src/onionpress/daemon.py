@@ -79,6 +79,7 @@ from . import onion_auth
 from . import onion_hostname
 from . import onion_proxy
 from . import onionheaven
+from . import ports
 from . import redact
 from . import status_writer
 from . import thumbnails
@@ -585,7 +586,7 @@ class Daemon(PortAttributes):
         # The next daemon waits for this one's WordPress port to free before
         # detecting its offset (a Colima forward can outlast the process).
         try:
-            with open(self._marker(".previous-port-offset"), "w") as f:
+            with open(self._marker(ports.PREVIOUS_OFFSET_SENTINEL), "w") as f:
                 f.write(str(self.port_offset))
         except OSError:
             pass
@@ -678,37 +679,20 @@ class Daemon(PortAttributes):
             pass
 
     def _resolve_ports_at_start(self):
-        """Multi-user port offset (CLAUDE.md): wait for our previous
-        instance's port to free (.previous-port-offset), then read the
-        running stack's published port or allocate by bind-probing. A
-        Colima found running is left alone: with no daemon alive it is a
-        launchd restart after a crash, a `daemon stop` + `start` or a
-        terminal `onionpress start`, each a live site, and its port is read
-        rather than offset around. The result goes into the
-        environment (the launcher honours ONIONPRESS_PORT_OFFSET) and the
-        state file (the menubar reads its ports from there)."""
-        prev_offset_sentinel = self._marker(".previous-port-offset")
+        """Multi-user port offset (CLAUDE.md): ports.resolve_at_start, the
+        one rule (issue #405), with no preset: the daemon is the resolver
+        the launcher and the CLI take ONIONPRESS_PORT_OFFSET from. It
+        waits for our previous instance's port to free
+        (.previous-port-offset), then reads the running stack's published
+        port or allocates by bind-probing. A Colima found running is left
+        alone: with no daemon alive it is a launchd restart after a crash,
+        a `daemon stop` + `start` or a terminal `onionpress start`, each a
+        live site, and its port is read rather than offset around. The
+        result goes into the environment (the launcher honours
+        ONIONPRESS_PORT_OFFSET) and the state file (the menubar reads its
+        ports from there)."""
         try:
-            if os.path.exists(prev_offset_sentinel):
-                if time.time() - os.path.getmtime(prev_offset_sentinel) < 60:
-                    with open(prev_offset_sentinel) as f:
-                        prev_offset = int(f.read().strip())
-                    desired_port = 8080 + prev_offset
-                    import socket
-                    for _ in range(30):
-                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        try:
-                            s.bind(("127.0.0.1", desired_port))
-                            s.close()
-                            break
-                        except OSError:
-                            s.close()
-                            time.sleep(0.5)
-                os.remove(prev_offset_sentinel)
-        except (OSError, ValueError):
-            pass
-        try:
-            pc = op_config.resolve_port_offset()
+            pc = ports.resolve_at_start(self.app_support, docker=self._docker, log=self.log)
         except Exception as e:
             self.log(f"daemon: port detection failed ({e}); using the environment's offset")
             pc = op_config.PortConfig.from_offset(self.port_offset)

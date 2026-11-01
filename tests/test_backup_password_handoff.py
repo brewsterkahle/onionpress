@@ -371,18 +371,24 @@ class TestLaunchers(unittest.TestCase):
         call = re.compile(r'(?:op_py|onionpress\.cli)\s+(?:--data-dir\s+"\$DATA_DIR"\s+)?'
                           r"(?:backup|restore)\b([^\n]*)")
         for path in LAUNCHERS:
-            self.assertGreaterEqual(len(call.findall(_read(path))), 3, path)
+            # backup and restore (both pass-throughs since #535/#529).
+            self.assertGreaterEqual(len(call.findall(_read(path))), 2, path)
             for m in call.finditer(_read(path)):
                 self.assertNotRegex(m.group(1), r"(?i)\$\{?\w*pass",
                                     f"{path}: {m.group(0).strip()}")
 
-    def test_restore_hands_the_password_over_in_env(self):
+    def test_restore_hands_everything_to_the_cli(self):
+        # #529: the restore case is the pass-through; the CLI reads the
+        # password itself (cli.read_backup_password: the environment,
+        # stdin or a prompt) and refuses one on argv. A hub's recovery key
+        # still travels in the environment. `setup --from-backup` keeps
+        # the bash read (read_backup_password, below) for its own argv.
         for path in LAUNCHERS:
             self.assertTrue(re.search(
-                r'ONIONPRESS_BACKUP_PASSWORD="\$BACKUP_PASS" '
+                r'ONIONPRESS_HUB_RECOVERY_KEY="\$_HUB_RECOVERY_KEY" '
                 r'(?:op_py|bundled_python -m onionpress\.cli) --data-dir "\$DATA_DIR" '
-                r'restore "\$restore_path"',
-                _read(path)), path)
+                r'restore "\$\{@:2\}"', _read(path)), path)
+            self.assertNotIn('restore "$restore_path"', _read(path), path)
 
     def _run_helper(self, arg="", env_pw=None, stdin="", rc=0):
         func = _bash_function(_read("linux/onionpress"), "read_backup_password")

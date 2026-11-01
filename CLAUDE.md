@@ -515,6 +515,22 @@
 - Best-effort steps name their failures in the Mac START SUMMARY through
   `--errors-file` (`start.StartErrors`, read by `note_start_errors`).
   `tests/test_start_errors_contract.py`.
+- **The wait after a start is `start.wait_for_services`** (#529,
+  `onionpress wait-for-services`, both launchers' `wait_for_services` a
+  delegation): WordPress on its port, Tor bootstrapped and WordPress
+  reachable from the tor container; a WordPress not installed ends the
+  wait with the address written; then `write_shared_onion_address` (as
+  www-data) and `healthcheck_address` (one whole v3 address, cached for
+  the daemon). Always 0; a timeout is the WARNING and `wait-for-services`
+  in the Mac's START SUMMARY. The start's "Onion address:" line reads
+  `onionpress address`. `tests/test_wait_for_services.py`.
+- **The Mac's `start-tor` is `onionpress start-tor`** (#529:
+  `ContainerManager.migrate_key_volume` then `start_tor`, never before the
+  key volume is in place; the daemon runs the launcher verb once setup has
+  installed WordPress). **The database passwords are `onionpress
+  ensure-secrets`** (`secrets_file.ensure_secrets`, an incomplete file
+  refused); each launcher's `setup_db_passwords` keeps only the `source`
+  and the export compose reads. `tests/test_ensure_secrets.py`.
 
 ## `onionpress setup` Is setup_logic's (issue #442)
 - The launchers' `setup)` case is `run_setup` (passwords moved into the
@@ -553,6 +569,27 @@
   a word to type is `typed`), a flow in
   `tests/test_cli_confirm_protocol.py` and `tests/test_ui_client.py`. The
   tray's own side is `tests/test_linux_tray_protocol.py`.
+- **`uninstall` and `reset` are the CLI's on both platforms** (#529):
+  `cmd_uninstall` asks `hub-holds-key` then the typed `uninstall`, and on
+  Linux at a terminal offers the backup first (not under
+  `ONIONPRESS_YES=true`), then `uninstall.run`'s platform branch (Linux:
+  the units, the tray, the containers and volumes, `/opt/onionpress` and
+  the symlinks with sudo, the desktop entries, `~/.onionpress`); the tray
+  runs `uninstall --check --json` through `ui_client.run_confirmed` and
+  opens its terminal with the `--confirmed` flags. `cmd_reset` on Linux
+  ends with the launcher's start and `onionheaven.reset_hub_state`. Each
+  launcher's case is the delegation, `-y` confirming through
+  `ONIONPRESS_CONFIRMED` / `--yes`. `tests/test_uninstall_linux.py`.
+- **The launchers hold no verb of their own** (#529): `restore` is the
+  CLI's pass-through (its argparse and `cli.read_backup_password` do the
+  refusals), `scrub` is `scrub.run_scrub`'s platform cycle (the Mac's
+  reset in place: `tests/test_scrub_mac.py`), `validate-oh-address` is
+  `onionheaven.validate_hub_address` (`tests/test_validate_oh_address.py`),
+  `help` is `cli.launcher_help` (`tests/test_launcher_help.py`). What
+  stays bash: the Colima bootstrap, the Linux systemd/rootless and
+  install-state functions (`ONIONPRESS_BIND_HOST`), `config_value`,
+  `start_cloudflare_tunnel`, `read_backup_password`, the daemon's and
+  `start`'s pid lock and wait.
 
 ## Blog Snapshots Stay Off the Web
 - My Creations is published: nothing private there under a name not
@@ -1129,13 +1166,24 @@
   their own data dir, VM and containers. Extra users offset host ports by
   +10000 each (18080/19050/19077…); container-internal ports never.
 - **Detect ports with a socket bind test, never `lsof`** (it sees only the
-  current user's processes). The daemon resolves the offset at start
-  (`_resolve_ports_at_start`), sets `onion_proxy`'s module globals
-  (`_apply_ports`) and publishes `ports`; the launcher's fallback respects a
-  preset `ONIONPRESS_PORT_OFFSET`, and so does `OnionPressCLI` (#507: its
-  bind probe beside this install's own running stack moved a restore to
-  the next offset). `TestPortOffsetFromTheLauncher` in
-  `tests/test_onionpress_cli.py`.
+  current user's processes). **`ports.resolve_at_start` is the one rule**
+  (#405): a preset `ONIONPRESS_PORT_OFFSET` as it is (#507: a bind probe
+  beside this install's own running stack moved a restore to the next
+  offset), else the previous instance's port waited for
+  (`.previous-port-offset`, `wait_for_previous_port`), the running
+  stack's published port, else the probe. The daemon runs it with no
+  preset (`_resolve_ports_at_start`: it is the resolver the others take
+  their preset from), sets `onion_proxy`'s module globals (`_apply_ports`)
+  and publishes `ports`; `OnionPressCLI` and `onionpress launcher-env`
+  run it with the environment's. **Each launcher's `main` opens with
+  `launcher_environment`**: one `launcher-env` call whose `KEY=VALUE`
+  answer (the four port variables, `DOCKER_DIR`; on Linux `DOCKER_HOST`
+  and `DOCKER_SOCK` by the daemon's #503 rule, from `resolve_paths`) is
+  the only place the launchers export them; no answer keeps the preset
+  or 0 with an ERROR in the log. The Mac's Colima environment stays
+  bash. `tests/test_launcher_env.py`, `TestPortOffsetFromTheLauncher` in
+  `tests/test_onionpress_cli.py`, `TestResolvePorts` in
+  `tests/test_mac_daemon_paths.py`.
 - **No `LSMultipleInstancesProhibited`** in any Info.plist (enforced across
   users). Launcher `pgrep` uses `-u "$(whoami)"` and matches this bundle's
   MenubarApp only. `tests/test_launcher_pgrep_anchor.py`.
