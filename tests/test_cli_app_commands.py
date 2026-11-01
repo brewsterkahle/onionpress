@@ -475,72 +475,10 @@ class TestEncodeKeyFile(unittest.TestCase):
 
 
 class TestImportKeyFileFlag(unittest.TestCase):
-    """Both launchers' import_key take --file <hs_ed25519_secret_key> (and
-    Linux's `-` on stdin now too): the key reaches replace_onion_key as
-    the file's base32, after key_manager's check."""
-
-    PRELUDE = r'''
-log() { echo "[log] $*" >> "$LOG_FILE"; }
-bundled_python() { "$PY" "$@"; }
-python3() { "$PY" "$@"; }
-replace_onion_key() { printf '%s\n' "$1" >> "$CALLS"; return 0; }
-start_heartbeat_client() { :; }
-docker() { return 1; }
-'''
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="op-ikfile-")
-        self.addCleanup(shutil.rmtree, self.dir, True)
-        self.key_file = os.path.join(self.dir, "hs_ed25519_secret_key")
-        with open(self.key_file, "wb") as f:
-            f.write(CTOR_FILE)
-        self.calls = os.path.join(self.dir, "calls")
-
-    def _run(self, launcher, args, stdin=""):
-        text = _read(launcher)
-        funcs = "\n".join(_shell_function(text, n) for n in ("is_onion_address", "import_key"))
-        script = self.PRELUDE + funcs + f"\nimport_key {args}\n"
-        env = {**os.environ, "PY": sys.executable,
-               "SCRIPTS_DIR": os.path.join(PROJECT_ROOT, "src", "onionpress"),
-               "DATA_DIR": os.path.join(self.dir, "data"), "LOG_FILE": os.path.join(self.dir, "log"),
-               "CALLS": self.calls, "_BUNDLED_PYTHONHOME": "", "_BUNDLED_PYTHON_BIN": sys.executable}
-        env.pop("ONIONPRESS_CONFIRMED", None)
-        return subprocess.run(["bash", "-c", script], input=stdin, capture_output=True,
-                              text=True, timeout=120, env=env)
-
-    def _calls(self):
-        if not os.path.exists(self.calls):
-            return []
-        with open(self.calls) as f:
-            return f.read().split()
-
-    def test_mac(self):
-        r = self._run("app/MacOS/onionpress", f'--file "{self.key_file}" --json')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self._calls(), [base64.b32encode(CTOR_FILE).decode()])
-        self.assertEqual(json.loads(r.stdout.strip().splitlines()[-1]),
-                         {"ok": True, "address": KEY_ADDR})
-
-    def test_linux(self):
-        r = self._run("linux/onionpress", f'--file "{self.key_file}"')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self._calls(), [base64.b32encode(CTOR_FILE).decode()])
-        self.assertIn(f"Imported key for: {KEY_ADDR}", r.stdout)
-
-    def test_linux_reads_the_key_from_stdin(self):
-        r = self._run("linux/onionpress", "-", stdin=base64.b32encode(KEY).decode() + "\n")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(self._calls(), [base64.b32encode(KEY).decode()])
-
-    def test_a_bad_file_is_refused_before_anything(self):
-        with open(self.key_file, "wb") as f:
-            f.write(b"garbage")
-        for launcher in ("app/MacOS/onionpress", "linux/onionpress"):
-            with self.subTest(launcher=launcher):
-                r = self._run(launcher, f'--file "{self.key_file}"')
-                self.assertEqual(r.returncode, 1)
-                self.assertIn("96 bytes", r.stderr)
-                self.assertEqual(self._calls(), [])
+    """import-key --file <hs_ed25519_secret_key> (and `-` on stdin) is
+    onionpress.key_import's now (issue #524; tests/test_onion_key_replacement.py
+    runs it against a fake docker): both launchers just pass their
+    arguments on."""
 
     def test_the_launchers_list_the_new_commands(self):
         mac = _read("app/MacOS/onionpress")

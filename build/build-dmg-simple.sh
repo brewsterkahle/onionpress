@@ -75,7 +75,6 @@ cp "$PROJECT_DIR/app/Resources/logo.png" "$APP_PATH/Contents/Resources/"
 # runtime per the note below, kept for hot-patch / debugging).
 mkdir -p "$APP_PATH/Contents/Resources/scripts"
 cp "$PROJECT_DIR/src/menubar.py" "$APP_PATH/Contents/Resources/scripts/"
-cp "$PROJECT_DIR/src/onionpress/key_manager.py" "$APP_PATH/Contents/Resources/scripts/"
 
 echo "OnionPress.app assembled from app/ source"
 
@@ -763,19 +762,6 @@ find "$APP_PATH" -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # Universal binaries in MenubarApp are fine — macOS runs the arm64 slice
 # natively on Apple Silicon without triggering a Rosetta prompt.
-
-# Verify key_manager.py is present at the path the shell launcher expects —
-# app/MacOS/onionpress invokes "$SCRIPTS_DIR/key_manager.py" directly, so the
-# file itself must exist there (the previous check just grepped for the
-# string anywhere in MenubarApp, which passed even when the script was
-# missing and vanity-key import silently fell back to a random address).
-if [ -f "$APP_PATH/Contents/Resources/scripts/key_manager.py" ]; then
-    echo "  key_manager.py: present at Contents/Resources/scripts/"
-else
-    echo "  ERROR: key_manager.py missing from Contents/Resources/scripts/" >&2
-    echo "  Vanity onion generation will silently fall back to a random address." >&2
-    exit 1
-fi
 
 # Verify the built MenubarApp version matches src/menubar.py
 EXPECTED_VERSION=$(grep 'self\.version *= *"' "$PROJECT_DIR/src/menubar.py" | head -1 | sed 's/.*"\(.*\)".*/\1/')
