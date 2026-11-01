@@ -1034,7 +1034,7 @@ class OnionPressCLI:
             self.containers.start_tor()
             self.containers.wait_for_tor()
             from .backup import restore_staged_name_registry
-            restore_staged_name_registry(staging, self.log)
+            restore_staged_name_registry(staging, self.log, docker=self.docker)
 
             # Clean up staging + marker only after a successful import.
             shutil.rmtree(staging, ignore_errors=True)
@@ -1206,13 +1206,14 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
 
     @staticmethod
     def cmd_hub_recovery_key_restore(backup_path: str, password: str,
-                                     from_env: str = "") -> int:
+                                     from_env: str = "", *, docker) -> int:
         """Restore only a hub's sealed registry and registrants' keys from a
         backup (after a restore that did not have the recovery key, such as
         one from the welcome screen). OnionPress must be running. The
         backup password and then the key come from the environment, stdin
         or prompts. The key is checked before anything is written, and
-        every key is checked to be its address's (hub_backup.check)."""
+        every key is checked to be its address's (hub_backup.check). The
+        hub data goes in through *docker*."""
         from . import hub_backup
         from .backup import read_sealed_hub_member, write_hub_data
         log = _make_log_func()
@@ -1231,7 +1232,7 @@ Public half: {hub_backup.public_key_path(data_dir)}""")
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         try:
-            write_hub_data(hub, log)
+            write_hub_data(hub, log, docker=docker)
         except Exception as e:
             log(f"Restore: could not restore the OnionHeaven data: {e}")
             return 1
@@ -2204,7 +2205,8 @@ def _run_hub_recovery_key(run):
             print("ERROR: a password is required.", file=sys.stderr)
             return 1
         return OnionPressCLI.cmd_hub_recovery_key_restore(
-            args.backup_file, password, run.hub_recovery_key)
+            args.backup_file, password, run.hub_recovery_key,
+            docker=Docker(resolve_paths(data_dir=args.data_dir)))
     return run.help("hub-recovery-key")
 
 

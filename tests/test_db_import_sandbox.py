@@ -123,8 +123,7 @@ class TestDbImport(unittest.TestCase):
 
     def test_streams_the_dump_after_the_password_into_a_sandboxed_client(self):
         runs, fake_run = self._runner()
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            backup.db_import(self.sql, self.PASSWORD)
+        backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertEqual(len(runs), 2, runs)
         probe, (argv, kw) = runs[0][0], runs[1]
         # The capability check comes first, in the db container.
@@ -151,8 +150,8 @@ class TestDbImport(unittest.TestCase):
 
     def test_user_and_database_are_the_callers(self):
         runs, fake_run = self._runner()
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            backup.db_import(self.sql, self.PASSWORD, user="wpu", name="wpdb")
+        backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run),
+                         user="wpu", name="wpdb")
         self.assertEqual(runs[1][0][-3:], ["-u", "wpu", "wpdb"])
 
     def test_timeout_grows_with_the_dump(self):
@@ -160,35 +159,31 @@ class TestDbImport(unittest.TestCase):
         with open(big, "wb") as f:
             f.truncate(64 << 20)
         runs, fake_run = self._runner()
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            backup.db_import(big, self.PASSWORD)
+        backup.db_import(big, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertEqual(runs[1][1]["timeout"],
                          backup._DB_IMPORT_FLOOR_S + (64 << 20) // backup._DB_IMPORT_BYTES_PER_S)
         self.assertGreater(runs[1][1]["timeout"], backup._DB_IMPORT_FLOOR_S)
 
     def test_old_client_is_refused_before_anything_is_sent(self):
         runs, fake_run = self._runner(probe_rc=1)
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            with self.assertRaises(Exception) as cm:
-                backup.db_import(self.sql, self.PASSWORD)
+        with self.assertRaises(Exception) as cm:
+            backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertIn("too old", str(cm.exception).lower())
         self.assertEqual(len(runs), 1, "the import ran against an old client")
 
     def test_a_failed_import_raises_with_the_clients_words(self):
         runs, fake_run = self._runner(import_rc=1, stderr=b"ERROR 1064 near 'x'")
-        with mock.patch.object(backup.subprocess, "run", fake_run):
-            with self.assertRaises(Exception) as cm:
-                backup.db_import(self.sql, self.PASSWORD)
+        with self.assertRaises(Exception) as cm:
+            backup.db_import(self.sql, self.PASSWORD, docker=FakeDocker(fake_run))
         self.assertIn("Database import failed", str(cm.exception))
         self.assertIn("ERROR 1064", str(cm.exception))
 
     def test_a_password_that_is_not_one_stdin_line_is_refused(self):
         runs, fake_run = self._runner()
         for bad in ("", "a\nb", "a\rb", "x\n"):
-            with self.subTest(password=bad), \
-                    mock.patch.object(backup.subprocess, "run", fake_run):
+            with self.subTest(password=bad):
                 with self.assertRaises(Exception):
-                    backup.db_import(self.sql, bad)
+                    backup.db_import(self.sql, bad, docker=FakeDocker(fake_run))
         self.assertEqual(runs, [])
 
 
@@ -232,8 +227,7 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
              mock.patch.object(backup, "_restore_db_password",
                                return_value=self.PASSWORD), \
              mock.patch.object(backup, "_log_workload_stats"), \
-             mock.patch.object(backup, "_ensure_multisite_constants"), \
-             mock.patch.object(backup.subprocess, "run", fake_run):
+             mock.patch.object(backup, "_ensure_multisite_constants"):
             backup.restore_container_artifacts(staging, {}, lambda *a: None,
                                                docker=FakeDocker(fake_run), hub_volumes=False)
         return runs
@@ -290,8 +284,7 @@ class TestBackupImportStreamsSandboxed(unittest.TestCase):
              mock.patch.object(backup, "_get_db_credentials",
                                return_value={"name": "wordpress", "user": "wordpress",
                                              "password": "x"}), \
-             mock.patch.object(backup, "_restore_db_password", return_value="x"), \
-             mock.patch.object(backup.subprocess, "run", fake_run):
+             mock.patch.object(backup, "_restore_db_password", return_value="x"):
             with self.assertRaises(Exception) as cm:
                 backup.restore_container_artifacts(staging, {}, lambda *a: None,
                                                    docker=FakeDocker(fake_run), hub_volumes=False)

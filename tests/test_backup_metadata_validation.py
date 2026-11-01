@@ -329,10 +329,6 @@ class TestPythonRestorePaths(unittest.TestCase):
         with open(os.path.join(self.data_dir, "onion_address"), "w") as f:
             f.write(OLD_ADDR + "\n")
         self.logs = []
-        for target in ("onionpress.backup.subprocess.run",):
-            p = mock.patch(target, _NoDocker(self))
-            p.start()
-            self.addCleanup(p.stop)
         p = mock.patch.object(key_manager, "write_private_key",
                               side_effect=AssertionError("key written"))
         p.start()

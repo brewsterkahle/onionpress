@@ -218,14 +218,13 @@ def scrub_staged_tree(root, log_func, where=None):
     return len(left_out)
 
 
-def _stage_container_tar(argv, dest, log_func, where,
+def _stage_container_tar(docker, argv, dest, log_func, where,
                          timeout=_STAGE_COPY_FLOOR_S):
-    """Run *argv* (`docker exec … tar -cf - …`) and unpack its stdout into
-    *dest* with unpack_plain_tar; raise if either side fails. The copy gets
-    *timeout* seconds; then the docker client is killed, which closes the
-    pipe the container's tar writes to."""
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE)
+    """Run *argv* (`exec … tar -cf - …`, through *docker*'s popen) and
+    unpack its stdout into *dest* with unpack_plain_tar; raise if either
+    side fails. The copy gets *timeout* seconds; then the docker client is
+    killed, which closes the pipe the container's tar writes to."""
+    proc = docker.popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
     timed_out = threading.Event()
 
     def _kill():

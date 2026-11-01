@@ -477,8 +477,7 @@ class TestRestoreSealed(unittest.TestCase):
 
     def _restore(self, hub_data=None, docker=None):
         docker = docker or _Docker()
-        with mock.patch.object(backup.subprocess, "run", side_effect=docker), \
-                mock.patch.object(backup, "put_wp_content"), \
+        with mock.patch.object(backup, "put_wp_content"), \
                 mock.patch.object(backup, "_ensure_multisite_constants"):
             # data_dir: a sandbox, so the DB password is never read from
             # the live ~/.onionpress/secrets.
@@ -516,11 +515,10 @@ class TestRestoreSealed(unittest.TestCase):
         forged = dict(self.metadata, onionheaven_recovery_key_id=hub_backup.key_id(
             hub_backup.public_key_of(hub_backup.parse_private_key(other))))
         docker = _Docker()
-        with mock.patch.object(backup.subprocess, "run", side_effect=docker):
-            with self.assertRaises(hub_backup.WrongRecoveryKeyError):
-                backup.open_sealed_hub_data(self.staging, forged,
-                                            hub_backup.check_key_for_backup(other, forged),
-                                            self.logs.append)
+        with self.assertRaises(hub_backup.WrongRecoveryKeyError):
+            backup.open_sealed_hub_data(self.staging, forged,
+                                        hub_backup.check_key_for_backup(other, forged),
+                                        self.logs.append)
         self.assertEqual(docker.calls, [])
 
     def test_the_cli_takes_the_key_from_the_environment_or_goes_without(self):
@@ -555,8 +553,7 @@ class TestRestoreSealed(unittest.TestCase):
                 # The CLI's Docker answers through the same stand-in: the
                 # restore's wp-cli reads (the DB credentials) reach it.
                 cli.docker = FakeDocker(docker)
-                with mock.patch.object(backup.subprocess, "run", side_effect=docker), \
-                        mock.patch.object(backup, "put_wp_content"), \
+                with mock.patch.object(backup, "put_wp_content"), \
                         mock.patch.object(backup, "_ensure_multisite_constants"), \
                         mock.patch("onionpress.derivatives.spawn_regeneration"), \
                         mock.patch.object(sys, "stdin", io.StringIO()), \
@@ -806,15 +803,13 @@ class TestRegistryRestoreScript(unittest.TestCase):
         docker = _Docker(registry_answer=(3, "refused: it holds more than the hub's tables\n"))
         priv, pub, addr = _pair(0x0b)
         hub = hub_backup.HubData(b"SQLite format 3\x00", {addr: key_manager.build_openssh_key(priv, pub)})
-        with mock.patch.object(backup.subprocess, "run", side_effect=docker):
-            backup.write_hub_data(hub, logs.append)
+        backup.write_hub_data(hub, logs.append, docker=FakeDocker(docker))
         self.assertEqual(list(docker.restored_keys()), [addr])
         self.assertIn("Restore: the backup's OnionHeaven registry was not restored: "
                       "it holds more than the hub's tables", logs)
         docker = _Docker(registry_answer=(1, ""))
-        with mock.patch.object(backup.subprocess, "run", side_effect=docker):
-            with self.assertRaises(Exception):
-                backup.write_hub_data(hub, logs.append)
+        with self.assertRaises(Exception):
+            backup.write_hub_data(hub, logs.append, docker=FakeDocker(docker))
 
 
 @unittest.skipUnless(HAS_SODIUM, "PyNaCl is not installed")

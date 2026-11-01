@@ -1071,10 +1071,11 @@ esac
 
     def test_asking_never_makes_a_registry(self):
         from onionpress import backup
-        self.assertEqual(backup.hub_data_state(), "none")
+        from fake_docker import on_path
+        self.assertEqual(backup.hub_data_state(on_path()), "none")
         self.assertFalse(os.path.exists(os.path.join(self.hub, "registry.db")))
         self._write(f"keys/{A}/{KEY}", "KEY-A")
-        self.assertEqual(backup.hub_data_state(), "hub")
+        self.assertEqual(backup.hub_data_state(on_path()), "hub")
 
     def test_restore_goes_through_sqlite_and_takes_only_registry_and_keys(self):
         import io
@@ -1110,9 +1111,8 @@ esac
                 stderr="" if kwargs.get("text") else b"")
 
         from fake_docker import FakeDocker
-        with mock.patch.object(backup.subprocess, "run", side_effect=run):
-            backup.restore_container_artifacts(staging, {}, lambda msg: None,
-                                               docker=FakeDocker(run), data_dir=self.tmp)
+        backup.restore_container_artifacts(staging, {}, lambda msg: None,
+                                           docker=FakeDocker(run), data_dir=self.tmp)
         hub_calls = [(c, i) for c, i in calls if any("onionheaven" in a for a in c)]
         self.assertEqual([c for c, _ in hub_calls], [
             ["docker", "exec", "onionheaven", "mkdir", "-p", "/var/lib/onionheaven/keys"],

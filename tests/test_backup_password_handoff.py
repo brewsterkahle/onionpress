@@ -345,7 +345,7 @@ class TestUnzipTimeoutLog(unittest.TestCase):
                 self.killed = True
 
         with mock.patch("shutil.which", return_value="/usr/bin/unzip"), \
-             mock.patch.object(backup.subprocess, "Popen", return_value=_Stuck()), \
+             mock.patch.object(backup_archive.subprocess, "Popen", return_value=_Stuck()), \
              mock.patch.object(backup_archive, "_UNZIP_TIMEOUT_S", 0), \
              mock.patch.object(backup_archive, "_free_bytes", return_value=0):
             self.assertFalse(backup._unzip_cli_extract(

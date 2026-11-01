@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, wp_files  # noqa: E402
+from fake_docker import FakeDocker, over_binary  # noqa: E402
 
 TRAY = os.path.join(PROJECT_ROOT, "linux", "onionpress-tray")
 
@@ -60,6 +61,8 @@ class _Tmp(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        # A runner whose "docker" is env: it runs the test's script as given.
+        self.docker = over_binary("/usr/bin/env")
 
     def _script(self, name, body):
         path = os.path.join(self.tmp, name)
@@ -74,21 +77,22 @@ class TestDumpToFile(_Tmp):
     def test_streams_to_the_file_and_reads_the_password_from_stdin(self):
         client = self._script("client", 'read -r pw; echo "dump for $pw"; echo more\n')
         out = os.path.join(self.tmp, "wordpress.sql")
-        backup._run_db_client_to_file([client], "s3cret", out, 30, "Database export")
+        backup._run_db_client_to_file(self.docker, [client], "s3cret", out, 30,
+                                      "Database export")
         self.assertEqual(_read(out), "dump for s3cret\nmore\n")
 
     def test_a_failure_raises_with_its_stderr(self):
         client = self._script("client", 'cat >/dev/null; echo "access denied" >&2; exit 2\n')
         with self.assertRaisesRegex(Exception, "Database export failed: access denied"):
-            backup._run_db_client_to_file([client], "pw", os.path.join(self.tmp, "o"),
-                                          30, "Database export")
+            backup._run_db_client_to_file(self.docker, [client], "pw",
+                                          os.path.join(self.tmp, "o"), 30, "Database export")
 
     def test_a_hang_is_killed_at_the_limit(self):
         client = self._script("client", 'cat >/dev/null; exec sleep 30\n')
         start = time.monotonic()
         with self.assertRaisesRegex(Exception, "did not finish within 1 s"):
-            backup._run_db_client_to_file([client], "pw", os.path.join(self.tmp, "o"),
-                                          1, "Database export")
+            backup._run_db_client_to_file(self.docker, [client], "pw",
+                                          os.path.join(self.tmp, "o"), 1, "Database export")
         self.assertLess(time.monotonic() - start, 15)
 
 
@@ -98,27 +102,29 @@ class TestStageCopyLimit(_Tmp):
         tar = self._script("tar", "exec sleep 30\n")
         start = time.monotonic()
         with self.assertRaisesRegex(Exception, "wp-content copy did not finish within 1 s"):
-            backup._stage_container_tar([tar], os.path.join(self.tmp, "dest"),
+            backup._stage_container_tar(self.docker, [tar], os.path.join(self.tmp, "dest"),
                                         lambda m: None, "wp-content", timeout=1)
         self.assertLess(time.monotonic() - start, 15)
 
     def test_stage_wp_content_sizes_its_limit(self):
         seen = {}
 
-        def fake(argv, dest, log_func, where, timeout):
+        docker = FakeDocker()
+
+        def fake(docker_arg, argv, dest, log_func, where, timeout):
             seen["timeout"] = timeout
         with mock.patch.object(backup, "_stage_container_tar", fake), \
              mock.patch.object(backup, "scrub_staged_tree"), \
              mock.patch.object(backup, "_du_bytes", return_value=5 << 30) as du:
             backup.stage_wp_content(os.path.join(self.tmp, "a"), print,
-                                    "./creations", ".thumbs")
-            du.assert_called_once_with("onionpress-wordpress", "/var/www/html/wp-content",
+                                    "./creations", ".thumbs", docker=docker)
+            du.assert_called_once_with(docker, "onionpress-wordpress", "/var/www/html/wp-content",
                                        excludes=("creations", ".thumbs"))
             self.assertEqual(seen["timeout"],
                              wp_files.sized_timeout(5 << 30, backup._STAGE_COPY_FLOOR_S))
             du.reset_mock()
             backup.stage_wp_content(os.path.join(self.tmp, "b"), print,
-                                    wpcontent_bytes=1 << 30)
+                                    wpcontent_bytes=1 << 30, docker=docker)
             du.assert_not_called()
             self.assertEqual(seen["timeout"],
                              wp_files.sized_timeout(1 << 30, backup._STAGE_COPY_FLOOR_S))
@@ -147,7 +153,6 @@ class TestPutTreeLimit(_Tmp):
 
         def fake_own(*a, timeout, **k):
             timeouts.append(timeout)
-        from fake_docker import FakeDocker
         docker = FakeDocker(popen_factory=lambda argv, env=None, **k: _Proc())
         with mock.patch.object(wp_files, "own", fake_own), \
              mock.patch.object(wp_files.threading, "Timer") as timer:

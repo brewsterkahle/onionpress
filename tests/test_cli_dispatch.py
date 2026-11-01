@@ -305,7 +305,7 @@ ROWS = [
         "CLI.cmd_hub_recovery_key_check", mock.call(D(""), "hubkey"),
         env={cli.RECOVERY_KEY_ENV: "hubkey"}),
     Row("hub-recovery-key restore", ["hub-recovery-key", "restore", "/b.zip"],
-        "CLI.cmd_hub_recovery_key_restore", mock.call("/b.zip", "pw", "hubkey"),
+        "CLI.cmd_hub_recovery_key_restore", mock.call("/b.zip", "pw", "hubkey", docker=ANY),
         env={cli.RECOVERY_KEY_ENV: "hubkey", cli.BACKUP_PASSWORD_ENV: "pw"}),
 
     # ---- the launchers' backup and restore helpers ----

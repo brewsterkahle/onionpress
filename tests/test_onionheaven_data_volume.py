@@ -258,13 +258,14 @@ class TestPaths(unittest.TestCase):
         self.assertEqual(backup_module.ONIONHEAVEN_DATA_DIR, HUB_DIR)
         # The hub data's staging and restore moved into hub_backup (#484).
         backup = _read("src/onionpress/backup.py") + _read("src/onionpress/hub_backup.py")
-        self.assertEqual(backup.count("['docker', 'exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]"), 2)
-        self.assertIn("['docker', 'cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/']", backup)
-        self.assertIn("['docker', 'exec', '-i', 'onionheaven', 'sh', '-c',\n"
-                      "                            REGISTRY_RESTORE_SH]", backup)
+        # Through the one runner (docker.Docker, issue #477): the arguments
+        # after the binary.
+        self.assertEqual(backup.count("['exec', 'onionheaven', 'sh', '-c', HUB_DATA_TAR_SH]"), 2)
+        self.assertIn("['cp', '-', f'onionheaven:{ONIONHEAVEN_DATA_DIR}/keys/']", backup)
+        self.assertIn("['exec', '-i', 'onionheaven', 'sh', '-c', REGISTRY_RESTORE_SH]", backup)
         self.assertNotRegex(backup, r"www-data[^\n]*onionheaven")
         # Both launchers' backup and restore are onionpress.cli's (backup.py).
-        self.assertIn("restore_hub_data(onionheaven_dir, log_func)", backup)
+        self.assertIn("restore_hub_data(onionheaven_dir, log_func, docker=docker)", backup)
         for rel in ("linux/onionpress", "app/MacOS/onionpress"):
             self.assertNotIn("onionheaven:", _read(rel), rel)
 

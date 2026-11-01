@@ -94,8 +94,7 @@ class TestRestoreLeavesItOut(unittest.TestCase):
         logs = []
         # The tor container serves the backup's own address, and the
         # container-side steps are not the point here.
-        with mock.patch("onionpress.backup.subprocess.run", mv._NoDocker(self)), \
-                mock.patch.object(backup, "served_onion_address", return_value=mv.ADDR), \
+        with mock.patch.object(backup, "served_onion_address", return_value=mv.ADDR), \
                 mock.patch.object(backup, "hub_data_state", return_value="none"), \
                 mock.patch.object(backup, "onionhome_registry_present", return_value=False), \
                 mock.patch.object(backup, "_restore_backup_key"), \

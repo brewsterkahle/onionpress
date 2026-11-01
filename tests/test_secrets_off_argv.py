@@ -210,11 +210,11 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
         """Run what docker exec would run in the container, here."""
         argv = backup._db_client_argv(self._fake_client(), "-u", "wordpress",
                                       "wordpress")
-        self.assertEqual(argv[:5], ["docker", "exec", "-i", "onionpress-db", "sh"])
+        self.assertEqual(argv[:4], ["exec", "-i", "onionpress-db", "sh"])
         # The mariadb image's /bin/sh is dash; try it too where it exists.
         for shell in filter(None, ("sh", shutil.which("dash"))):
             with self.subTest(shell=shell):
-                out = subprocess.run([shell] + argv[5:], input=TRICKY_PASSWORD + "\n",
+                out = subprocess.run([shell] + argv[4:], input=TRICKY_PASSWORD + "\n",
                                      capture_output=True, text=True, timeout=10)
                 self.assertEqual(out.returncode, 0, out.stderr)
                 self.assertEqual(out.stdout.splitlines(), [
@@ -223,11 +223,10 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
 
     def test_workload_stats_query(self):
         rec = _Recorder(lambda argv: "1\t2\t3\t4\t5\t6\n")
-        with mock.patch.object(backup.subprocess, "run", rec):
-            stats = backup._query_workload_stats(self.CREDS)
+        stats = backup._query_workload_stats(FakeDocker(rec), self.CREDS)
         self.assertEqual(stats["db_bytes"], 1)
         argv, stdin = rec.calls[0]
-        self.assertEqual(argv, backup._db_client_argv(
+        self.assertEqual(argv[1:], backup._db_client_argv(
             "mariadb", "-B", "-N", "-u", "wordpress", "-D", "wordpress",
             "-e", argv[-1]))
         self.assertEqual(stdin, TRICKY_PASSWORD + "\n")
@@ -257,9 +256,8 @@ class TestBackupDbPasswordOnStdin(unittest.TestCase):
             return ""
         rec = _Recorder(reply)
         logs = []
-        with mock.patch.object(backup.subprocess, "run", rec):
-            backup.restore_container_artifacts(staging, {}, logs.append,
-                                               docker=FakeDocker(rec), data_dir=data_dir)
+        backup.restore_container_artifacts(staging, {}, logs.append,
+                                           docker=FakeDocker(rec), data_dir=data_dir)
         rec.assert_secret_not_in_argv(self, safe_password)
 
         # The dump goes in on stdin, through a sandboxed client, never

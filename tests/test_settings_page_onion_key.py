@@ -47,7 +47,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import backup, cli, key_manager  # noqa: E402
-from fake_docker import FakeDocker, on_path  # noqa: E402
+from fake_docker import FakeDocker, no_docker, on_path  # noqa: E402
 from onionpress.cli import OnionPressCLI  # noqa: E402
 from onionpress.platform import OS, resolve_paths  # noqa: E402
 import test_backup_hub_data_off_wordpress as hd  # noqa: E402
@@ -272,7 +272,6 @@ class TestRestoreFromBackupKeepsTheAddress(unittest.TestCase):
         self.install = _Install(self, self.tmp)
         self.logs = []
         for target, kw in (
-                ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
                 ("onionpress.key_manager.write_private_key",
                  {"side_effect": AssertionError("key written")}),
                 ("onionpress.backup.served_onion_address", {"return_value": OLD_ADDR}),
@@ -327,9 +326,6 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.install = _Install(self, self.tmp)
         self.logs = []
-        p = mock.patch("onionpress.backup.subprocess.run", mv._NoDocker(self))
-        p.start()
-        self.addCleanup(p.stop)
 
     def test_the_installed_address_stays(self):
         path = _keyless_backup(self.tmp, "k.zip", overrides={"ADDRESS_PREFIX": ADDR[:3]})
@@ -539,7 +535,6 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
         self.logs = []
         self.served = OLD_ADDR
         for target, kw in (
-                ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
                 ("onionpress.key_manager.write_private_key", {"side_effect": _KeyWritten}),
                 ("onionpress.backup.served_onion_address",
                  {"side_effect": lambda *a, **k: self.served}),
@@ -654,7 +649,6 @@ class TestLinuxSettingsPageRestoreRefusesAnotherAddress(unittest.TestCase):
         self.served = OLD_ADDR
         self.heartbeat = []
         for target, kw in (
-                ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
                 ("onionpress.key_manager.write_private_key", {"side_effect": _KeyWritten}),
                 ("onionpress.backup.served_onion_address",
                  {"side_effect": lambda *a, **k: self.served}),
@@ -756,7 +750,8 @@ class TestSettingsPageRestoreNodeRefusal(unittest.TestCase):
         self.addCleanup(p.stop)
 
     def test_who_is_refused(self):
-        refuse = backup.settings_page_restore_node_refusal
+        def refuse(*args, **kw):
+            return backup.settings_page_restore_node_refusal(*args, docker=no_docker(self), **kw)
         hub, home = backup.HUB_RESTORE_HERE_REFUSED_MSG, backup.ONIONHOME_RESTORE_HERE_REFUSED_MSG
         unverified = backup.UNVERIFIED_RESTORE_REFUSED_MSG
         self.assertIsNone(refuse(ADDR, "none", data_dir=self.tmp))
@@ -788,9 +783,12 @@ class TestSettingsPageRestoreNodeRefusal(unittest.TestCase):
         for address, state, onionhome in cases:
             with self.subTest(address=address, state=state, onionhome=onionhome):
                 self.onionhome.return_value = onionhome
-                got = (backup.settings_page_backup_refusal(address, state, data_dir=self.tmp),
+                docker = no_docker(self)    # the registry check is patched
+                got = (backup.settings_page_backup_refusal(address, state, data_dir=self.tmp,
+                                                           docker=docker),
                        backup.settings_page_restore_node_refusal(address, state,
-                                                                 data_dir=self.tmp))
+                                                                 data_dir=self.tmp,
+                                                                 docker=docker))
                 self.assertIn(got, pairs)
 
     def test_the_messages_are_plain_text(self):
@@ -813,7 +811,6 @@ class TestMacSettingsPageRestoreOnAHub(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.install = _Install(self, self.tmp)
         for target, kw in (
-                ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
                 ("onionpress.backup.extract_archive",
                  {"side_effect": AssertionError("upload opened")}),
                 ("onionpress.key_manager.write_private_key",

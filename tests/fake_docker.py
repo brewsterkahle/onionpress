@@ -56,8 +56,14 @@ class FakeDocker:
         if isinstance(ans, DockerResult):
             return ans
         if hasattr(ans, "returncode"):      # a CompletedProcess, or a Mock shaped like one
-            return DockerResult(ans.returncode, ans.stdout if ans.stdout is not None else "",
-                                ans.stderr if ans.stderr is not None else "")
+            def text(value):
+                # As Docker.run gives it: bytes only for a binary run.
+                if value is None:
+                    return b"" if binary else ""
+                if isinstance(value, bytes) and not binary:
+                    return value.decode("utf-8", errors="replace")
+                return value
+            return DockerResult(ans.returncode, text(ans.stdout), text(ans.stderr))
         if isinstance(ans, bool):
             return DockerResult(0 if ans else 1, "", "")
         if isinstance(ans, int):

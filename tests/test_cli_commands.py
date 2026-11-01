@@ -1172,25 +1172,25 @@ class TestHubRecoveryKeyCommands(Sandbox):
                 mock.patch("onionpress.hub_backup.unpack", return_value="hub"), \
                 mock.patch("onionpress.hub_backup.check", return_value="checked-hub"), \
                 mock.patch("onionpress.backup.write_hub_data") as write:
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 0)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 0)
             self.assertEqual(unseal.call_args.args, (b"blob", hub_backup.parse_private_key(text)))
             self.assertEqual(write.call_args.args[0], "checked-hub")
             self.assertIn("registrants' keys restored.", self.out.getvalue())
             # The key is checked before anything is written.
             other, _ = hub_backup.create_recovery_key(os.path.join(self.dir, "b"))
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", other), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", other, docker=mock.Mock()), 1)
             self.assertEqual(write.call_count, 1)
             # A failed write.
             write.side_effect = RuntimeError("docker cp")
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
             self.assertIn("could not restore the OnionHeaven data: docker cp", self.err.getvalue())
         with mock.patch("onionpress.backup.read_sealed_hub_member",
                         side_effect=ValueError("This backup holds no sealed hub data.")):
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
         self.assertIn("ERROR: This backup holds no sealed hub data.", self.err.getvalue())
         with mock.patch("onionpress.backup.read_sealed_hub_member",
                         return_value=({**meta, "onionheaven_sealed_format": 9}, b"blob")):
-            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text), 1)
+            self.assertEqual(OnionPressCLI.cmd_hub_recovery_key_restore("/b.zip", "pw", text, docker=mock.Mock()), 1)
         self.assertIn(hub_backup.NEWER_SEAL_MSG.split("\n")[0][:40], self.err.getvalue())
 
 

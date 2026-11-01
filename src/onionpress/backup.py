@@ -12,13 +12,13 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from onionpress import backup_crypto, derivatives, hub_backup, key_manager, wp_files
+from onionpress.docker import DockerError
 from onionpress.config import (DEFAULTS, prefix_for_address, SECRET_CONFIG_KEYS, load_secrets,
                                read_config, read_value, redact_config,
                                write_value)
@@ -272,8 +272,9 @@ def _phase_timer(log_func, prefix, name):
         log_func(f"{prefix}_PHASE: name={name} elapsed_s={elapsed:.2f}")
 
 
-def _query_workload_stats(db_creds):
-    """Return DB stats dict (bytes + per-table approximate row counts).
+def _query_workload_stats(docker, db_creds):
+    """Return DB stats dict (bytes + per-table approximate row counts),
+    asked of onionpress-db through *docker*.
 
     Uses INFORMATION_SCHEMA.TABLE_ROWS — approximate for InnoDB but
     cheap and good enough for ETA fitting. Multisite has per-blog
@@ -290,16 +291,13 @@ def _query_workload_stats(db_creds):
         "COALESCE(SUM(IF(TABLE_NAME='wp_blogs', TABLE_ROWS, 0)), 0) "
         "FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE();"
     )
-    result = subprocess.run(
+    result = docker.run(
         _db_client_argv('mariadb', '-B', '-N',
                         '-u', db_creds['user'],
                         '-D', db_creds['name'],
                         '-e', sql),
-        input=db_creds['password'] + '\n',
-        capture_output=True, text=True, encoding='utf-8',
-        errors='replace', timeout=10,
-    )
-    if result.returncode != 0:
+        input=db_creds['password'] + '\n', timeout=10, quiet=True)
+    if not result.ok:
         raise Exception(result.stderr.strip() or 'mariadb query failed')
     parts = result.stdout.strip().split('\t')
     if len(parts) != 6:
@@ -309,16 +307,13 @@ def _query_workload_stats(db_creds):
     return {k: int(v) for k, v in zip(keys, parts)}
 
 
-def _du_bytes(container, path, excludes=()):
-    """`du -sb` inside a container; return int bytes, 0 on any failure."""
+def _du_bytes(docker, container, path, excludes=()):
+    """`du -sb` inside a container (through *docker*); return int bytes, 0
+    on any failure."""
     excl = ' '.join(f'--exclude={e}' for e in excludes)
     cmd = f"du -sb {excl} {path} 2>/dev/null | cut -f1"
     try:
-        result = subprocess.run(
-            ['docker', 'exec', container, 'sh', '-c', cmd],
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=30,
-        )
+        result = docker.run(['exec', container, 'sh', '-c', cmd], timeout=30, quiet=True)
         out = result.stdout.strip()
         return int(out) if out.isdigit() else 0
     except Exception:
@@ -337,17 +332,18 @@ def _dir_size_bytes(path):
     return total
 
 
-def _log_workload_stats(log_func, label, db_creds):
+def _log_workload_stats(log_func, label, db_creds, *, docker):
     """Emit a single STATS line and return its figures (empty if they
     could not be read): the backup sizes its time limits from them. Never
-    raises — instrumentation must not break the operation it's measuring."""
+    raises — instrumentation must not break the operation it's measuring.
+    The containers are asked through *docker*."""
     try:
-        stats = _query_workload_stats(db_creds)
+        stats = _query_workload_stats(docker, db_creds)
         wpcontent_bytes = _du_bytes(
-            'onionpress-wordpress', '/var/www/html/wp-content',
+            docker, 'onionpress-wordpress', '/var/www/html/wp-content',
             excludes=('creations', '.thumbs', '.DS_Store'),
         )
-        onionheaven_bytes = _du_bytes('onionheaven', '/var/lib/onionheaven')
+        onionheaven_bytes = _du_bytes(docker, 'onionheaven', '/var/lib/onionheaven')
         kvs = [
             f"db_bytes={stats['db_bytes']}",
             f"wp_posts_rows={stats['wp_posts_rows']}",
@@ -516,7 +512,8 @@ def get_admin_username(data_dir=None, log=None, *, docker):
 
 
 def wp_content_tar_argv(*excludes):
-    """`docker exec` argv that streams wp-content as a tar, read as www-data.
+    """The `exec` arguments (after the docker binary, for Docker.popen)
+    that stream wp-content as a tar, read as www-data.
 
     Not as root: www-data can replace wp-content (or a folder in it) with a
     link, and root's tar -C followed it to any folder in the container,
@@ -525,23 +522,23 @@ def wp_content_tar_argv(*excludes):
     whole backup. --hard-dereference: each name of a hard-linked file is
     stored with its contents (unpack_plain_tar keeps no link entries).
     """
-    return (['docker'] + wp_files.exec_args('tar', '-cf', '-')
+    return (wp_files.exec_args('tar', '-cf', '-')
             + ['--hard-dereference', '--ignore-failed-read']
             + [f'--exclude={e}' for e in excludes]
             + ['-C', '/var/www/html/wp-content', '.'])
 
 
-def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None):
-    """Copy wp-content out of the WordPress container into *dest* as plain
-    files and folders (wp_content_tar_argv, unpack_plain_tar), then
-    scrub_staged_tree. The time allowed is sized from
-    *wpcontent_bytes*, measured in the container when not given."""
+def stage_wp_content(dest, log_func, *excludes, wpcontent_bytes=None, docker):
+    """Copy wp-content out of the WordPress container (through *docker*)
+    into *dest* as plain files and folders (wp_content_tar_argv,
+    unpack_plain_tar), then scrub_staged_tree. The time allowed is sized
+    from *wpcontent_bytes*, measured in the container when not given."""
     if wpcontent_bytes is None:
-        wpcontent_bytes = _du_bytes('onionpress-wordpress',
+        wpcontent_bytes = _du_bytes(docker, 'onionpress-wordpress',
                                     '/var/www/html/wp-content',
                                     excludes=tuple(e.removeprefix('./') for e in excludes))
     os.makedirs(dest, exist_ok=True)
-    _stage_container_tar(wp_content_tar_argv(*excludes), dest, log_func,
+    _stage_container_tar(docker, wp_content_tar_argv(*excludes), dest, log_func,
                          'wp-content',
                          timeout=wp_files.sized_timeout(wpcontent_bytes,
                                                         _STAGE_COPY_FLOOR_S))
@@ -587,19 +584,16 @@ def accepts_registrations(data_dir=None):
     return value.strip().lower() == 'yes'
 
 
-def onionhome_registry_present():
+def onionhome_registry_present(docker):
     """True if OnionHome's name registry is on its volume (only OnionHome
     has one), False if it is not, None if the tor container did not say
     (a failed `docker exec` and a missing file both exit 1, so the answer
-    comes on stdout)."""
-    try:
-        r = subprocess.run(['docker', 'exec', 'onionpress-tor', 'sh', '-c',
-                            'if [ -f "$1" ]; then echo yes; else echo no; fi', 'sh',
-                            f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
-                           capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    answer = r.stdout.strip() if r.returncode == 0 else ""
+    comes on stdout). Asked through *docker*."""
+    r = docker.run(['exec', 'onionpress-tor', 'sh', '-c',
+                    'if [ -f "$1" ]; then echo yes; else echo no; fi', 'sh',
+                    f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
+                   timeout=10, quiet=True)
+    answer = r.stdout.strip() if r.ok else ""
     return {"yes": True, "no": False}.get(answer)
 
 
@@ -620,7 +614,7 @@ class SettingsPageBackupRefused(ValueError):
     why and where to back it up instead)."""
 
 
-def settings_page_backup_refusal(own_address, hub_state, *, data_dir=None):
+def settings_page_backup_refusal(own_address, hub_state, *, data_dir=None, docker):
     """Why the Settings page must not back this node up, or None.
 
     That backup is handed to WordPress, under a password WordPress saw,
@@ -645,19 +639,20 @@ def settings_page_backup_refusal(own_address, hub_state, *, data_dir=None):
     return {"hub": HUB_BACKUP_REFUSED_MSG,
             "onionhome": ONIONHOME_BACKUP_REFUSED_MSG,
             "unverified": UNVERIFIED_BACKUP_REFUSED_MSG,
-            }.get(_settings_page_node(own_address, hub_state, data_dir))
+            }.get(_settings_page_node(own_address, hub_state, data_dir, docker))
 
 
-def _settings_page_node(own_address, hub_state, data_dir):
+def _settings_page_node(own_address, hub_state, data_dir, docker):
     """"hub", "onionhome", "unverified" (could be either) or None: what the
     Settings page's backup and restore are refused on
-    (settings_page_backup_refusal says how it is told, and fails closed)."""
+    (settings_page_backup_refusal says how it is told, and fails closed).
+    OnionHome's registry is asked for through *docker*."""
     if (own_address == ONIONHEAVEN_HUB_ADDRESS or hub_state == "hub"
             or accepts_registrations(data_dir)):
         return "hub"
     if own_address == ONIONHOME_ADDRESS:
         return "onionhome"
-    onionhome = onionhome_registry_present()
+    onionhome = onionhome_registry_present(docker)
     if onionhome:
         return "onionhome"
     if not own_address or hub_state != "none" or onionhome is None:
@@ -665,7 +660,7 @@ def _settings_page_node(own_address, hub_state, data_dir):
     return None
 
 
-def settings_page_restore_node_refusal(own_address, hub_state, *, data_dir=None):
+def settings_page_restore_node_refusal(own_address, hub_state, *, data_dir=None, docker):
     """Why the Settings page must not restore anything on this node, or None.
 
     The node is told as settings_page_backup_refusal tells it (*own_address*
@@ -680,7 +675,7 @@ def settings_page_restore_node_refusal(own_address, hub_state, *, data_dir=None)
     return {"hub": HUB_RESTORE_HERE_REFUSED_MSG,
             "onionhome": ONIONHOME_RESTORE_HERE_REFUSED_MSG,
             "unverified": UNVERIFIED_RESTORE_REFUSED_MSG,
-            }.get(_settings_page_node(own_address, hub_state, data_dir))
+            }.get(_settings_page_node(own_address, hub_state, data_dir, docker))
 
 
 def served_onion_address(docker):
@@ -786,7 +781,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    creds here so we can reuse them for the dump phase below
         #    without paying for two round trips through wp-cli.
         db_creds = _get_db_credentials(docker)
-        stats = _log_workload_stats(log_func, 'BACKUP_STATS', db_creds)
+        stats = _log_workload_stats(log_func, 'BACKUP_STATS', db_creds, docker=docker)
 
         # 1. Extract Tor keys (OpenSSH PEM, the delivered-key format) out of
         #    the tor container (key_manager.extract_keys: the delivered PEM,
@@ -804,9 +799,10 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #     page's) is refused on a hub or on OnionHome, or when that could
         #     not be checked, before anything else is copied: the key just
         #     staged is the node's own.
-        hub = hub_data_state()
+        hub = hub_data_state(docker)
         if not include_hub_data:
-            refusal = settings_page_backup_refusal(onion_address, hub, data_dir=_data_dir)
+            refusal = settings_page_backup_refusal(onion_address, hub, data_dir=_data_dir,
+                                                   docker=docker)
             if refusal:
                 log_func(f"Backup: refused (the Settings page's backup): {refusal}")
                 raise SettingsPageBackupRefused(refusal)
@@ -821,6 +817,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             # Streamed to the file, not held in memory, with a time limit
             # sized from the database (issue #317).
             _run_db_client_to_file(
+                docker,
                 _db_client_argv('mariadb-dump',
                                 '-u', db_creds['user'],
                                 db_creds['name']),
@@ -851,7 +848,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             wpcontent_dir = os.path.join(staging, 'wp-content')
             stage_wp_content(wpcontent_dir, log_func,
                              './creations', '.thumbs', '.DS_Store',
-                             wpcontent_bytes=stats.get('wpcontent_bytes'))
+                             wpcontent_bytes=stats.get('wpcontent_bytes'), docker=docker)
 
         # 3b. Drop WordPress's regenerable image derivatives (-WxH sizes and
         #     -scaled copies) from the staged uploads — about half of a
@@ -887,7 +884,8 @@ def create_backup(onion_address, username, password, output_path, version, log_f
             with _phase_timer(log_func, 'BACKUP', 'onionheaven_copy'):
                 log_func("Backup: copying the OnionHeaven registry and registrants' keys...")
                 is_onionheaven = True
-                hub_fields = stage_hub_backup(staging, log_func, data_dir=_data_dir)
+                hub_fields = stage_hub_backup(staging, log_func, data_dir=_data_dir,
+                                              docker=docker)
 
         # 4b. Backup OnionHome name registry if this is an OnionHome instance.
         #     The DB is tiny (KB) but losing it strands every inbound
@@ -904,7 +902,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #     registry and says so (the log, metadata
         #     onionhome_registry_unchecked, unchecked_notes).
         is_onionhome = False
-        onionhome = onionhome_registry_present()
+        onionhome = onionhome_registry_present(docker)
         if onionhome is None:
             log_func(ONIONHOME_REGISTRY_UNCHECKED_WARNING)
         elif onionhome:
@@ -916,13 +914,9 @@ def create_backup(onion_address, username, password, output_path, version, log_f
                 for name in ONIONHOME_REGISTRY_FILES:
                     # The write-ahead log exists only while SQLite has
                     # changes not yet in the db file: optional.
-                    subprocess.run(
-                        ['docker', 'cp',
-                         f'onionpress-tor:{ONIONHOME_REGISTRY_DIR}/{name}',
-                         os.path.join(onionhome_dir, name)],
-                        capture_output=True, timeout=60,
-                        check=(name == 'onionnames.db')
-                    )
+                    docker.run(['cp', f'onionpress-tor:{ONIONHOME_REGISTRY_DIR}/{name}',
+                                os.path.join(onionhome_dir, name)],
+                               timeout=60, check=(name == 'onionnames.db'), quiet=True)
                 scrub_staged_tree(onionhome_dir, log_func, 'onionhome')
 
         # 5. Save non-default config values. Not the host's secrets in a
@@ -1288,7 +1282,7 @@ def restore_from_backup(zip_path, password, log_func, *, docker, data_dir=None,
     if through_wordpress:
         current_address = served_onion_address(docker)
         refusal = settings_page_restore_node_refusal(
-            current_address, hub_data_state(), data_dir=data_dir)
+            current_address, hub_data_state(docker), data_dir=data_dir, docker=docker)
         if refusal:
             log_func(f"Restore: refused (the Settings page's restore): {refusal}")
             raise SettingsPageRestoreRefused(refusal)
@@ -1433,10 +1427,8 @@ def _restore_backup_key(tor_dir, metadata, log_func, data_dir, _data_dir,
         # next launch. This avoids stale key mismatches. The pre-2026-09-25
         # name goes too, or the launcher's migration would bring it back.
         log_func("Restore: removing key volume for clean restart...")
-        subprocess.run(
-            ['docker', 'volume', 'rm', 'onionpress-onion-keys', 'onionpress-arti-state'],
-            capture_output=True, timeout=15
-        )
+        docker.run(['volume', 'rm', 'onionpress-onion-keys', 'onionpress-arti-state'],
+                   timeout=15, quiet=True)
         from .containers import forget_key_volume_migration
         forget_key_volume_migration(
             data_dir if data_dir is not None else _default_data_dir())
@@ -1558,7 +1550,7 @@ def restore_container_artifacts(staging, metadata, log_func, *, docker, hub_volu
         # The one sandboxed import (db_import below, both platforms'): the
         # client's command parsing OFF, the dump on stdin after the
         # password line.
-        db_import(sql_path, db_password,
+        db_import(sql_path, db_password, docker=docker,
                   user=db_creds['user'], name=db_creds['name'])
 
         # Reconcile the wordpress mysql user's password with the
@@ -1587,15 +1579,12 @@ def restore_container_artifacts(staging, metadata, log_func, *, docker, hub_volu
             f"IDENTIFIED BY '{db_password}'; "
             f"FLUSH PRIVILEGES;"
         )
-        alter = subprocess.run(
-            ['docker', 'exec', '-i', 'onionpress-db', 'sh', '-c',
+        alter = docker.run(
+            ['exec', '-i', 'onionpress-db', 'sh', '-c',
              'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; '
              'exec mariadb -uroot --binary-mode --sandbox'],
-            input=alter_sql,
-            capture_output=True, text=True, encoding='utf-8',
-            errors='replace', timeout=15,
-        )
-        if alter.returncode == 0:
+            input=alter_sql, timeout=15, quiet=True)
+        if alter.ok:
             log_func("Restore: DB user password reconciled")
         else:
             # Don't fail the restore — the existing grant may already
@@ -1607,7 +1596,7 @@ def restore_container_artifacts(staging, metadata, log_func, *, docker, hub_volu
 
     # Post-import workload snapshot — row counts now reflect the
     # restored DB, so we can correlate ingest time with content size.
-    _log_workload_stats(log_func, 'RESTORE_STATS_POST', db_creds)
+    _log_workload_stats(log_func, 'RESTORE_STATS_POST', db_creds, docker=docker)
 
     # 3. Restore wp-content
     if wpcontent_dir and os.path.isdir(wpcontent_dir):
@@ -1655,11 +1644,11 @@ def restore_container_artifacts(staging, metadata, log_func, *, docker, hub_volu
         with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
             log_func("Restore: restoring the OnionHeaven registry and registrants' "
                      "keys (unsealed with the recovery key)...")
-            write_hub_data(hub_backup.check(hub_data, log_func), log_func)
+            write_hub_data(hub_backup.check(hub_data, log_func), log_func, docker=docker)
     elif has_hub_data:
         with _phase_timer(log_func, 'RESTORE', 'onionheaven_restore'):
             log_func("Restore: restoring the OnionHeaven registry and registrants' keys...")
-            restore_hub_data(onionheaven_dir, log_func)
+            restore_hub_data(onionheaven_dir, log_func, docker=docker)
     elif sealed:
         log_func(sealed_skipped_message(metadata))
 
@@ -1687,7 +1676,7 @@ def restore_container_artifacts(staging, metadata, log_func, *, docker, hub_volu
         log_func("Restore: OnionHome's name registry is restored once "
                  "onionpress-tor runs")
     elif has_name_registry:
-        restore_staged_name_registry(staging, log_func)
+        restore_staged_name_registry(staging, log_func, docker=docker)
 
     # 5. Re-add multisite constants to wp-config.php
     # WordPress Docker image generates a fresh wp-config.php without multisite
@@ -1748,10 +1737,11 @@ class NameRegistryNotRestored(Exception):
     why); the registry in use is as it was."""
 
 
-def restore_staged_name_registry(staging, log_func):
+def restore_staged_name_registry(staging, log_func, *, docker):
     """Restore the OnionHome name registry an extracted backup (*staging*)
-    holds, if any, through restore_name_registry. A refusal is logged as an
-    ERROR, the registry in use left as it was; nothing is raised."""
+    holds, if any, through restore_name_registry (and *docker*). A refusal
+    is logged as an ERROR, the registry in use left as it was; nothing is
+    raised."""
     onionhome_dir = _find_dir(staging, 'onionhome')
     if not os.path.lexists(os.path.join(onionhome_dir, 'onionnames.db')):
         return
@@ -1759,7 +1749,7 @@ def restore_staged_name_registry(staging, log_func):
         log_func("Restore: restoring OnionHome name registry (rebuilt by the "
                  "tor image's checks)...")
         try:
-            restore_name_registry(onionhome_dir, log_func)
+            restore_name_registry(onionhome_dir, log_func, docker=docker)
         except NameRegistryNotRestored as e:
             log_func(f"Restore: ERROR — OnionHome's name registry was not "
                      f"restored: {e}. The registry in use is unchanged.")
@@ -1775,14 +1765,14 @@ def _count(value):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def restore_name_registry(src, log_func):
+def restore_name_registry(src, log_func, *, docker):
     """Put a backup's OnionHome name registry (*src*, its onionhome/
-    folder) onto the registry's volume, through onionpress-tor, rebuilt by
-    the tor image's own checks (see above). Logs how many names the
-    registry held before and after. Raises NameRegistryNotRestored, the
-    registry in use unchanged, when the image refuses what the backup holds
-    (not a registry, damaged, too large or sparse) or the work in the
-    container fails."""
+    folder) onto the registry's volume, through onionpress-tor (reached
+    through *docker*), rebuilt by the tor image's own checks (see above).
+    Logs how many names the registry held before and after. Raises
+    NameRegistryNotRestored, the registry in use unchanged, when the image
+    refuses what the backup holds (not a registry, damaged, too large or
+    sparse) or the work in the container fails."""
     files = []
     for name in ONIONHOME_REGISTRY_FILES:
         try:
@@ -1792,55 +1782,52 @@ def restore_name_registry(src, log_func):
             pass
     if ONIONHOME_REGISTRY_FILES[0] not in files:
         raise NameRegistryNotRestored("the backup holds no onionnames.db file")
-    try:
-        tmp = subprocess.run(['docker', 'exec', 'onionpress-tor', 'mktemp', '-d'],
-                             capture_output=True, text=True, timeout=30,
-                             check=True).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as e:
-        raise NameRegistryNotRestored(f"onionpress-tor did not answer ({type(e).__name__})") from e
+    answer = docker.run(['exec', 'onionpress-tor', 'mktemp', '-d'], timeout=30, quiet=True)
+    if not answer.ok:
+        raise NameRegistryNotRestored(
+            "onionpress-tor did not answer ("
+            + ("timed out" if answer.timed_out else f"exit status {answer.returncode}") + ")")
+    tmp = answer.stdout.strip()
     if not _CONTAINER_TMP_RE.fullmatch(tmp):
         raise NameRegistryNotRestored(
             f"unexpected temporary folder name from onionpress-tor: {_printable(tmp, 80)!r}")
     try:
-        subprocess.run(['docker', 'exec', 'onionpress-tor', 'mkdir', '-p',
-                        f'{tmp}/backup/onionhome', f'{tmp}/rebuilt'],
-                       capture_output=True, timeout=30, check=True)
+        docker.run(['exec', 'onionpress-tor', 'mkdir', '-p',
+                    f'{tmp}/backup/onionhome', f'{tmp}/rebuilt'],
+                   timeout=30, check=True, quiet=True)
         for name in files:
-            subprocess.run(['docker', 'cp', os.path.join(src, name),
-                            f'onionpress-tor:{tmp}/backup/onionhome/{name}'],
-                           capture_output=True, timeout=120, check=True)
-        check = subprocess.run(
-            ['docker', 'exec', 'onionpress-tor', 'python3', ONIONHOME_MIGRATE_SCRIPT,
+            docker.run(['cp', os.path.join(src, name),
+                        f'onionpress-tor:{tmp}/backup/onionhome/{name}'],
+                       timeout=120, check=True, quiet=True)
+        check = docker.run(
+            ['exec', 'onionpress-tor', 'python3', ONIONHOME_MIGRATE_SCRIPT,
              '--legacy-parent', f'{tmp}/backup', '--dest', f'{tmp}/rebuilt',
              '--no-mount-check'],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=300)
-        if check.returncode != 0:
+            timeout=300, quiet=True)
+        if not check.ok:
             lines = [line for line in check.stderr.splitlines() if line.strip()]
             raise NameRegistryNotRestored(
                 "the tor image's checks refused it: "
                 + _printable(lines[-1] if lines else f"exit status {check.returncode}"))
-        marker = subprocess.run(
-            ['docker', 'exec', 'onionpress-tor', 'cat',
-             f'{tmp}/rebuilt/{ONIONHOME_MIGRATE_MARKER}'],
-            capture_output=True, text=True, timeout=30, check=True).stdout
+        marker = docker.run(
+            ['exec', 'onionpress-tor', 'cat', f'{tmp}/rebuilt/{ONIONHOME_MIGRATE_MARKER}'],
+            timeout=30, check=True, quiet=True).stdout
         info = json.loads(marker)
         if not isinstance(info, dict) or info.get('moved') is not True:
             why = info.get('reason') if isinstance(info, dict) else None
             raise NameRegistryNotRestored(
                 "what the backup holds is not a name registry"
                 + (f" ({_printable(why, 120)})" if why else ""))
-        placed = subprocess.run(
-            ['docker', 'exec', 'onionpress-tor', 'python3', '-c', _ONIONHOME_PUT_IN_PLACE_PY,
+        placed = docker.run(
+            ['exec', 'onionpress-tor', 'python3', '-c', _ONIONHOME_PUT_IN_PLACE_PY,
              f'{tmp}/rebuilt/onionnames.db', f'{ONIONHOME_REGISTRY_DIR}/onionnames.db'],
-            capture_output=True, text=True, timeout=120, check=True).stdout
+            timeout=120, check=True, quiet=True).stdout
         counts = json.loads(placed.strip().splitlines()[-1])
-    except (OSError, ValueError, IndexError, subprocess.SubprocessError) as e:
+    except (OSError, ValueError, IndexError, DockerError) as e:
         raise NameRegistryNotRestored(
             f"the work in onionpress-tor failed ({type(e).__name__})") from e
     finally:
-        subprocess.run(['docker', 'exec', 'onionpress-tor', 'rm', '-rf', tmp],
-                       capture_output=True, timeout=30)
+        docker.run(['exec', 'onionpress-tor', 'rm', '-rf', tmp], timeout=30, quiet=True)
     before = _count(counts.get('before')) if isinstance(counts, dict) else None
     after = _count(counts.get('after')) if isinstance(counts, dict) else None
     left_out = _count(info.get('left_out')) or 0
