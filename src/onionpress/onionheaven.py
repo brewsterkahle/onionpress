@@ -26,7 +26,8 @@ import time
 from datetime import datetime, timezone
 
 from onionpress import hub_record, key_manager
-from onionpress.platform import docker_env, find_docker_bin, resolve_paths
+from onionpress.docker import Docker
+from onionpress.platform import resolve_paths
 
 # The default hub (run by the Internet Archive), and what a malformed
 # ONIONHEAVEN_ADDRESS falls back to.
@@ -115,79 +116,36 @@ def _hub_url(path, hub=None):
     return f"http://{hub}:{ONIONHEAVEN_API_PORT}/{path}"
 
 
-def _docker_env(app):
-    """Build environment dict for docker commands using app's config.
-
-    The menubar app talks to Colima's socket; an app object that names its
-    own *docker_socket* (HubContext: the CLI on either platform, where
-    Linux uses the system or rootless daemon) gets that one instead.
-    """
-    socket_path = (getattr(app, "docker_socket", None)
-                   or f"{app.colima_home}/default/docker.sock")
-    return docker_env(socket_path,
-                      os.path.join(app.app_support, "docker-config"))
-
-
-def _docker_bin(app):
-    """Return path to docker binary: the bundled one in app.bin_dir, or
-    "docker" from PATH when there is no bundle (Linux). An app that names
-    no docker_socket (the menubar's) always gets the bundled path."""
-    bin_dir = getattr(app, "bin_dir", "") or ""
-    if bin_dir and not getattr(app, "docker_socket", None):
-        return os.path.join(bin_dir, "docker")
-    return find_docker_bin(bin_dir)
-
-
 def _run_docker(app, args, timeout=15, input=None):
-    """Run a docker command and return (success, stdout).
+    """Run a docker command through *app*.docker (the one runner, issue
+    #477: the daemon's, HubContext's) and return (success, stdout).
     *input*, if given, is written to the command's stdin."""
     try:
-        result = subprocess.run(
-            [_docker_bin(app)] + args, input=input,
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
-            env=_docker_env(app)
-        )
-        if result.returncode != 0 and result.stderr.strip():
-            app.log(f"OnionHeaven: docker cmd failed (rc={result.returncode}): {result.stderr.strip()[:200]}")
-        return result.returncode == 0, result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        app.log(f"OnionHeaven: docker cmd timed out after {timeout}s: {' '.join(str(a) for a in args[:4])}")
-        return False, ""
+        result = app.docker.run(args, timeout=timeout, input=input, quiet=True)
     except Exception as e:
         app.log(f"OnionHeaven: docker cmd error: {e}")
         return False, ""
-
-
-def _run_docker_raw(app, args, timeout=15):
-    """Run a docker command returning raw bytes (for key extraction)."""
-    try:
-        result = subprocess.run(
-            [_docker_bin(app)] + args,
-            capture_output=True, timeout=timeout,
-            env=_docker_env(app)
-        )
-        return result.returncode == 0, result.stdout
-    except Exception:
-        return False, b""
+    if result.timed_out:
+        app.log(f"OnionHeaven: docker cmd timed out after {timeout}s: {' '.join(str(a) for a in args[:4])}")
+        return False, ""
+    if result.returncode != 0 and result.stderr.strip():
+        app.log(f"OnionHeaven: docker cmd failed (rc={result.returncode}): {result.stderr.strip()[:200]}")
+    return result.returncode == 0, result.stdout.strip()
 
 
 def _run_docker_rc(app, args, timeout=15, input=None):
     """Run a docker command and return (returncode, stdout).
-    Unlike _run_docker, returns the actual return code rather than a bool.
+    Unlike _run_docker, returns the actual return code rather than a bool
+    (-1 for a timeout, as the runner answers it).
     *input*, if given, is written to the command's stdin."""
     try:
-        result = subprocess.run(
-            [_docker_bin(app)] + args, input=input,
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
-            env=_docker_env(app)
-        )
-        return result.returncode, result.stdout.strip()
-    except subprocess.TimeoutExpired:
-        app.log(f"OnionHeaven: docker cmd timed out after {timeout}s: {' '.join(str(a) for a in args[:4])}")
-        return -1, ""
+        result = app.docker.run(args, timeout=timeout, input=input, quiet=True)
     except Exception as e:
         app.log(f"OnionHeaven: docker cmd error: {e}")
         return -1, ""
+    if result.timed_out:
+        app.log(f"OnionHeaven: docker cmd timed out after {timeout}s: {' '.join(str(a) for a in args[:4])}")
+    return result.returncode, result.stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -443,10 +401,10 @@ def _address_on_hold(app, addr, now=None):
     return hub_record.address_on_hold(_load_registration_status(app), addr, now)
 
 
-def _key_address():
+def _key_address(app):
     """The address of the key in the tor container, or None if unreadable."""
     try:
-        _private, public = key_manager.extract_keys()
+        _private, public = key_manager.extract_keys(app.docker)
         return key_manager.derive_onion_address(public)
     except Exception:
         return None
@@ -517,7 +475,7 @@ def _heartbeat_landed(app, content_addr, freshness_seconds=180):
         return False
     try:
         from onionpress import onion_auth
-        secret_key_bytes, public_key_raw = key_manager.extract_keys()
+        secret_key_bytes, public_key_raw = key_manager.extract_keys(app.docker)
         if onion_auth.derive_onion_address(public_key_raw) != content_addr:
             return False  # the key is another address's (see _send_heartbeat_locked)
         timestamp = onion_auth.make_timestamp()
@@ -588,19 +546,18 @@ def describe_remaining(remaining):
 class HubContext:
     """The app an OnionHeavenClient (below) talks through outside the Mac
     daemon: the CLI (onionpress.cli onionheaven-unregister, reset,
-    restore) on either platform. Docker as resolve_paths() finds it: Colima's socket on a
-    Mac, the rootless or system daemon on Linux."""
+    restore) on either platform. Its docker is the one runner (issue
+    #477), built from *paths* unless the caller hands one in: Colima's
+    socket on a Mac, the rootless or system daemon on Linux."""
 
     is_onionheaven = False
     healthcheck_address = None
 
-    def __init__(self, paths, log_func, onion_address=None):
+    def __init__(self, paths, log_func, onion_address=None, docker=None):
         from onionpress import __version__
         self.app_support = paths.data_dir
         self.config_file = paths.config_file
-        self.bin_dir = paths.bin_dir
-        self.colima_home = paths.colima_home
-        self.docker_socket = paths.docker_socket
+        self.docker = docker or Docker(paths, log_func=log_func)
         self.onion_address = onion_address
         self.version = __version__
         self._log_func = log_func
@@ -1005,7 +962,7 @@ class OnionHeavenClient:
 
         try:
             from onionpress import onion_auth
-            secret_key_bytes, public_key_raw = key_manager.extract_keys()
+            secret_key_bytes, public_key_raw = key_manager.extract_keys(self.app.docker)
             # Guard: the keystore key and self.app.onion_address must agree. They can
             # diverge during a restore — write_private_key updates the keystore
             # in the running container, but self.onion_address (loaded from the
@@ -1239,7 +1196,7 @@ class OnionHeavenClient:
         # Sign the unregister request with ed25519
         try:
             from onionpress import onion_auth
-            secret_key_bytes, public_key_raw = key_manager.extract_keys()
+            secret_key_bytes, public_key_raw = key_manager.extract_keys(self.app.docker)
         except Exception as e:
             self.log(f"OnionHeaven: failed to extract keys for unregister: {e}")
             return False
@@ -1387,7 +1344,7 @@ class OnionHeavenClient:
         pairs = [p for p in _registrations(status, self.app) if p[0] != keep_address]
         if not pairs:
             return []
-        live = _key_address()
+        live = _key_address(self.app)
         remaining = []
         released_live = False
         for addr, hub in pairs:
@@ -1555,7 +1512,7 @@ class OnionHeavenClient:
                 changed = False
                 main = _main_registration(status, self.app)
                 if main is not None and main[0] != live:
-                    key_addr = _key_address() if network else None
+                    key_addr = _key_address(self.app) if network else None
                     if key_addr is not None and key_addr != main[0]:
                         _note_left_on_hub(status, main[0], main[1], "address changed")
                         status["registered"] = False
@@ -1653,7 +1610,7 @@ class OnionHeavenClient:
         # Sign with ed25519
         try:
             from onionpress import onion_auth
-            secret_key_bytes, public_key_raw = key_manager.extract_keys()
+            secret_key_bytes, public_key_raw = key_manager.extract_keys(self.app.docker)
             # See _send_heartbeat for context — same staleness guard applies to
             # lifecycle notifications (/online, /offline). Skip rather than ship
             # a mismatched (content_addr, arti_key_pem) pair.
@@ -2029,19 +1986,14 @@ def _file_log_func(log_file):
 
 
 def _hub_context(data_dir=None, log_func=None):
-    """HubContext for this install, with the configured hub and a docker
-    environment key_manager.extract_keys (plain `docker`, this process's
-    environment) can use: the launchers export DOCKER_HOST, a direct run
-    gets the socket resolve_paths finds."""
+    """HubContext for this install, with the configured hub. Its Docker
+    (HubContext.docker, from resolve_paths) is what every key read and hub
+    request runs through: nothing here edits this process's environment
+    for a bare `docker` any more (issue #477)."""
     paths = resolve_paths(data_dir=data_dir)
     log = log_func or _file_log_func(paths.log_file)
     ctx = HubContext(paths, log)
     use_configured_hub(ctx.read_config_value("ONIONHEAVEN_ADDRESS", ""), log)
-    os.environ.setdefault("DOCKER_HOST", f"unix://{paths.docker_socket}")
-    if paths.bin_dir and os.path.isdir(paths.bin_dir):
-        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-        if paths.bin_dir not in path_dirs:
-            os.environ["PATH"] = os.pathsep.join([paths.bin_dir] + path_dirs)
     return ctx
 
 

@@ -404,6 +404,7 @@ class TestPythonRestorePaths(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaises(ValueError):
                     backup.prepare_install_from_backup(path, PW, self.logs.append,
+                                                       docker=FakeDocker(_NoDocker(self)),
                                                        data_dir=self.data_dir)
                 self.assert_untouched()
 
@@ -420,7 +421,8 @@ class TestPythonRestorePaths(unittest.TestCase):
     def test_a_valid_backup_still_seeds_the_key_derived_address(self):
         path = _make_backup(self.tmp, _metadata())
         _, meta = backup.prepare_install_from_backup(
-            path, PW, self.logs.append, data_dir=self.data_dir)
+            path, PW, self.logs.append, docker=FakeDocker(_NoDocker(self)),
+            data_dir=self.data_dir)
         self.assertEqual(meta["onion_address"], ADDR)
         self.assertEqual(os.listdir(os.path.join(self.data_dir, "shared", "vanity-keys")),
                          [ADDR])
@@ -541,7 +543,8 @@ class TestLauncherRestorePaths(unittest.TestCase):
                 f.write(msg + "\n")
         data = os.path.join(self.tmp, "home", ".onionpress")
         try:
-            backup.prepare_install_from_backup(path, PW, log, data_dir=data)
+            backup.prepare_install_from_backup(path, PW, log, docker=FakeDocker(_NoDocker(self)),
+                                               data_dir=data)
         except Exception as e:
             log(f"Restore failed during extract/seed: {e}")
             return 1, str(e)

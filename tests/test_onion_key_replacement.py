@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from onionpress import confirm, key_import, key_manager  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 SCRIPTS_DIR = os.path.join(PROJECT_DIR, "src", "onionpress")
 LINUX = "linux/onionpress"
@@ -209,11 +210,15 @@ class _Install:
 
 class _FakeDocker:
     """key_import's `docker`: the tor container's files from the install's
-    TOR_FS (what the stub docker serves key_manager's own reads from)."""
+    TOR_FS, served to onion_hostname's exec() and to key_manager's
+    `cat` reads (run(binary=True), issue #477)."""
 
     class _Result:
         def __init__(self, ok, stdout=""):
             self.ok, self.stdout, self.output = ok, stdout, stdout
+            self.returncode = 0 if ok else 1
+            self.stderr = type(stdout)()
+            self.timed_out = False
 
     def __init__(self, inst):
         self.inst = inst
@@ -224,6 +229,20 @@ class _FakeDocker:
             with open(path) as f:
                 return self._Result(True, f.read())
         return self._Result(False)
+
+    def run(self, args, timeout=30, check=False, input=None, extra_env=None, quiet=False,
+            binary=False):
+        args = [str(a) for a in args]
+        with open(self.inst.calls, "a") as f:     # as the stub docker records its calls
+            f.write("docker " + " ".join(args) + "\n")
+        if args[:2] == ["exec", "onionpress-tor"] and args[2] == "cat":
+            path = self.inst.tor_fs + args[3]
+            if os.path.isfile(path):
+                with open(path, "rb") as f:
+                    data = f.read()
+                return self._Result(True, data if binary else data.decode("utf-8", "replace"))
+            return self._Result(False, b"" if binary else "")
+        return self._Result(False, b"" if binary else "")
 
 
 class _FakeContainers:
@@ -715,6 +734,7 @@ class TestLinuxSettingsPage(unittest.TestCase):
         from onionpress import handle_action as ha
         from onionpress.platform import resolve_paths
         docker = tha.FakeDocker(os.path.join(inst.tmp, "sandbox"))
+        docker.tor_fs = inst.tor_fs      # the served key, read through the runner
         docker.put("import-key-data", key_data)
         docker.put("requested-action", "import-key-file\n")
         launcher = os.path.join(inst.tmp, "launcher")
@@ -872,19 +892,21 @@ class TestKeepCurrentKeys(unittest.TestCase):
         key_manager.import_key_b32(b32(NEW), vanity)
         served = {key_manager.CTOR_SECRET_PATH: key_manager.CTOR_HEADER_SECRET + OLD}
 
-        def cat(path):
+        def cat(docker, path):
             return (True, served[path]) if path in served else (False, b"No such file")
 
+        docker = FakeDocker()
         with mock.patch.object(key_manager, "_docker_cat", side_effect=cat):
-            kept = key_manager.keep_current_keys(self.root, [os.path.join(vanity, NEW_ADDR)])
+            kept = key_manager.keep_current_keys(self.root, [os.path.join(vanity, NEW_ADDR)],
+                                                 docker=docker)
             self.assertEqual(sorted(key_manager.staged_key_address(k) for k in kept),
                              sorted([OLD_ADDR, NEW_ADDR]))
             # The delivered PEM of the same key is one key, kept once.
             served[key_manager.DELIVERED_KEY_PATH] = key_manager.build_openssh_key(
                 OLD, key_manager.derive_public_key(OLD))
-            self.assertEqual(len(key_manager.keep_current_keys(self.root)), 1)
+            self.assertEqual(len(key_manager.keep_current_keys(self.root, docker=docker)), 1)
         with mock.patch.object(key_manager, "_docker_cat", return_value=(False, b"")):
-            self.assertEqual(key_manager.keep_current_keys(self.root), [])
+            self.assertEqual(key_manager.keep_current_keys(self.root, docker=docker), [])
 
 
 class TestPageText(unittest.TestCase):

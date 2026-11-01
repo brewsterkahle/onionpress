@@ -41,7 +41,9 @@ sys.path.insert(0, DOCKER_TOR_DIR)
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
 import onionheaven_common as oc  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import onion_auth, onionheaven, key_manager  # noqa: E402
+from fake_docker import FakeDocker, answering  # noqa: E402
 from tests.test_hub_signature_verification import _keypair  # noqa: E402
 
 
@@ -288,8 +290,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -330,7 +331,7 @@ class ClientTest(unittest.TestCase):
     def _landed(self, reply):
         rec = _Recorder(reply)
         with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", self.hub), \
-                mock.patch.object(onionheaven.subprocess, "run", rec):
+                answering(self.app, rec):
             result = onionheaven._heartbeat_landed(self.app, self.site)
         return result, rec.calls
 
@@ -361,7 +362,7 @@ class ClientTest(unittest.TestCase):
     def test_another_keys_address_is_not_queried(self):
         rec = _Recorder("{}")
         with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", self.hub), \
-                mock.patch.object(onionheaven.subprocess, "run", rec):
+                answering(self.app, rec):
             self.assertFalse(onionheaven._heartbeat_landed(self.app, _keypair()[2]))
         self.assertEqual(rec.calls, [])
 

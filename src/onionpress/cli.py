@@ -753,7 +753,7 @@ class OnionPressCLI:
         # The address the live key derives to names the file: the tor
         # container's hostname can lag it for a while after a key import or
         # a restore.
-        addr = served_onion_address() or self.containers.get_onion_address()
+        addr = served_onion_address(self.docker) or self.containers.get_onion_address()
         filename = backup_filename(addr, username)
         if not output_path:
             backups_dir = os.path.expanduser("~/OnionPress/backups")
@@ -924,8 +924,8 @@ class OnionPressCLI:
                     self.log(f"Restore: the OnionHeaven hub data will not be restored: {e}")
 
             staging, meta = prepare_install_from_backup(
-                backup_path, password, self.log, data_dir=self.paths.data_dir,
-                after_extract=open_hub_data)
+                backup_path, password, self.log, docker=self.docker,
+                data_dir=self.paths.data_dir, after_extract=open_hub_data)
             addr = meta.get("onion_address", "")
             # Derived from the backup's key by the seed step (or, for a
             # backup without a key, the address this install keeps);
@@ -1496,7 +1496,7 @@ def cmd_settings_page_backup(output_path: str, password: str, data_dir: str,
     docker = docker or Docker(resolve_paths(data_dir=data_dir), log_func=log)
     try:
         metadata = create_backup(
-            served_onion_address() or "unknown",
+            served_onion_address(docker) or "unknown",
             get_admin_username(data_dir=data_dir, log=log, docker=docker),
             password, output_path, __version__, log, docker=docker,
             include_hub_data=False, include_host_secrets=False,
@@ -1571,7 +1571,7 @@ def cmd_settings_page_restore(backup_file: str, password: str, data_dir: str,
 
 
 def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
-                        json_output: bool = False) -> int:
+                        json_output: bool = False, docker=None) -> int:
     """`onionpress prepare-restore <zip>`: the welcome screen's Restore from
     backup, staged before the first start (backup.prepare_install_from_backup:
     extract, seed the onion key, apply the config overrides, write the
@@ -1582,13 +1582,14 @@ def cmd_prepare_restore(backup_file: str, password: str, data_dir: str,
     from . import confirm as _confirm
     from .backup import prepare_install_from_backup, sealed_skipped_message
     log = _settings_page_log(data_dir)
+    docker = docker or Docker(resolve_paths(data_dir=data_dir), log_func=log)
 
     def log_both(msg):
         log(msg)
         print(msg, file=sys.stderr)
     try:
         _staging, meta = prepare_install_from_backup(backup_file, password, log_both,
-                                                     data_dir=data_dir)
+                                                     docker=docker, data_dir=data_dir)
     except Exception as e:
         log(f"Restore from backup: prepare failed: {e}")
         return _confirm.answer_error(e, json_output)

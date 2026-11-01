@@ -16,6 +16,7 @@ file (a stub script a test wrote), else what `popen_factory` makes.
 that exercise the runner's own subprocess handling.
 """
 
+import contextlib
 import os
 import subprocess
 
@@ -145,6 +146,20 @@ def over_binary(docker_bin, env=None, log_func=None):
     d._docker_bin = docker_bin
     d._env = dict(os.environ if env is None else env)
     return d
+
+
+@contextlib.contextmanager
+def answering(app, run):
+    """Within the block, *app*.docker is a FakeDocker answering through
+    *run* (a subprocess.run stand-in): for the tests of code that reaches
+    docker through an app object (onionheaven's client, the analytics
+    upload, the status writer)."""
+    before = getattr(app, "docker", None)
+    app.docker = FakeDocker(run)
+    try:
+        yield app.docker
+    finally:
+        app.docker = before
 
 
 def no_docker(test):

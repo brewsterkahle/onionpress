@@ -711,7 +711,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
         zip_path = self._make_backup_zip()
         marker = os.path.join(self.data_dir, ".regenerate-derivatives-pending")
         backup_manager.prepare_install_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, docker=on_path(), data_dir=self.data_dir)
         self.assertTrue(os.path.exists(marker))
 
     def test_restore_overrides_mismatched_metadata(self):
@@ -820,7 +820,7 @@ class TestRestoreRoundTrip(unittest.TestCase):
             f.write("ADDRESS_PREFIX=zzz\nONIONNAME=old\n")
         zip_path = self._make_backup_zip()
         staging, metadata = backup_manager.prepare_install_from_backup(
-            zip_path, "testpw", self.logs.append, data_dir=self.data_dir)
+            zip_path, "testpw", self.logs.append, docker=on_path(), data_dir=self.data_dir)
 
         # Persistent staging dir (not a temp dir), still present afterward —
         # the import step removes it, not prepare.

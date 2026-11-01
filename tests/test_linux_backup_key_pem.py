@@ -31,7 +31,9 @@ from unittest import mock
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import backup, key_manager  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 try:
     from nacl import signing
@@ -98,7 +100,7 @@ class TestBackupKeyFromTheContainer(unittest.TestCase):
         private, public = _expanded_key()
         address = key_manager.key_pair_onion_address(private, public)
         with mock.patch.object(key_manager, "extract_keys", return_value=(private, public)):
-            got = backup._stage_onion_key(self.staging, "", True, self.logs.append)
+            got = backup._stage_onion_key(self.staging, "", True, self.logs.append, docker=FakeDocker())
         self.assertEqual(got, (address, False))
         staged = os.path.join(self.staging, "tor-keys")
         self.assertEqual(os.listdir(staged), ["ks_hs_id.ed25519_expanded_private"])
@@ -109,14 +111,14 @@ class TestBackupKeyFromTheContainer(unittest.TestCase):
     def test_left_out_on_purpose_derives_the_address_only(self):
         private, public = _expanded_key()
         with mock.patch.object(key_manager, "extract_keys", return_value=(private, public)):
-            got = backup._stage_onion_key(self.staging, "", False, self.logs.append)
+            got = backup._stage_onion_key(self.staging, "", False, self.logs.append, docker=FakeDocker())
         self.assertEqual(got, (key_manager.key_pair_onion_address(private, public), False))
         self.assertEqual(os.listdir(self.staging), [])
 
     def test_no_key_readable_is_a_keyless_backup_with_a_warning(self):
         with mock.patch.object(key_manager, "extract_keys",
                                side_effect=Exception("Could not read key file: no such file")):
-            got = backup._stage_onion_key(self.staging, "", True, self.logs.append)
+            got = backup._stage_onion_key(self.staging, "", True, self.logs.append, docker=FakeDocker())
         self.assertEqual(got, ("", True))
         self.assertEqual(os.listdir(self.staging), [], "nothing half-read goes into a keyless archive")
         [warning] = [m for m in self.logs if m.startswith("Backup: WARNING")]
@@ -126,9 +128,9 @@ class TestBackupKeyFromTheContainer(unittest.TestCase):
     def test_the_callers_address_is_kept_only_when_whole(self):
         whole = "a" * 56 + ".onion"
         with mock.patch.object(key_manager, "extract_keys", side_effect=Exception("down")):
-            self.assertEqual(backup._stage_onion_key(self.staging, whole, True, self.logs.append),
+            self.assertEqual(backup._stage_onion_key(self.staging, whole, True, self.logs.append, docker=FakeDocker()),
                              (whole, True))
-            self.assertEqual(backup._stage_onion_key(self.staging, "../x.onion", True, self.logs.append),
+            self.assertEqual(backup._stage_onion_key(self.staging, "../x.onion", True, self.logs.append, docker=FakeDocker()),
                              ("", True))
 
     def test_the_metadata_and_the_notes_say_so(self):

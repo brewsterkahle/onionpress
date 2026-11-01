@@ -34,20 +34,16 @@ RUNNERS = {
 
 # Hand-built docker argv lists left in each module, as of issue #477.
 REVIEWED = {
-    "src/onionpress/analytics_sharing.py": 1,
     "src/onionpress/app_commands.py": 1,
     "src/onionpress/backup.py": 13,
     "src/onionpress/daemon.py": 3,
     "src/onionpress/db_import.py": 2,
     "src/onionpress/handle_action.py": 1,
     "src/onionpress/hub_backup.py": 6,
-    "src/onionpress/key_manager.py": 5,
     "src/onionpress/launcher_ops.py": 2,
     # Started by the browser, outside the app's package: it cannot import
     # the runner.
     "src/onionpress/native_messaging_host.py": 3,
-    "src/onionpress/onionheaven.py": 3,
-    "src/onionpress/onionnames_registrar.py": 1,
     "src/onionpress/ports.py": 1,
 }
 

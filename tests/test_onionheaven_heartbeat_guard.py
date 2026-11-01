@@ -44,6 +44,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = app_support
+        self.docker = None      # _run_docker_rc is stubbed below; the key read too
         self.logs = []
 
     def log(self, msg):
@@ -79,7 +80,7 @@ class HeartbeatGuardTest(unittest.TestCase):
             return 0, '{"online":true,"registered":true}'
         onionheaven._run_docker_rc = fake_run_docker_rc
 
-        def fake_extract_keys():
+        def fake_extract_keys(docker):
             return (self.priv_64, self.pub_32)
         key_manager.extract_keys = fake_extract_keys
 
@@ -129,7 +130,7 @@ class HeartbeatGuardTest(unittest.TestCase):
                       f"ABORT should name the derived addr. line={line}")
 
     def test_extract_keys_failure_aborts(self):
-        def boom():
+        def boom(docker):
             raise RuntimeError("simulated extract_keys failure")
         key_manager.extract_keys = boom
         app = _FakeApp(self.matching_addr, self.tmpdir)

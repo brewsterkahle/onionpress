@@ -394,7 +394,7 @@ def onionname_set(name, paths, docker, os_name, log, *, json_output=False, out=N
     if address:
         if registrar is None:
             from .onionnames_registrar import Registrar
-            registrar = Registrar(docker_bin=docker.docker_bin, log=log)
+            registrar = Registrar(docker, log=log)
         try:
             result = registrar.register(name, address)
         except Exception as e:  # the registrar reports, never raises; belt and braces

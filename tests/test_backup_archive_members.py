@@ -387,7 +387,7 @@ class TestPythonPathsRefuseLinks(unittest.TestCase):
             with self.subTest(label):
                 with self.assertRaisesRegex(ValueError, "symbolic link"):
                     backup.prepare_install_from_backup(
-                        path, PW, self.logs.append, data_dir=self.data_dir)
+                        path, PW, self.logs.append, docker=no_docker(self), data_dir=self.data_dir)
                 self.assert_untouched()
 
     def test_a_wrong_password_on_format_2_still_says_so(self):

@@ -57,6 +57,7 @@ from onionpress import (  # noqa: E402
     auto_login, key_manager, native_messaging_host, onion_auth, onion_hostname,
     onion_proxy, onionheaven, setup_logic,
 )
+from fake_docker import FakeDocker, answering  # noqa: E402
 
 PHP = shutil.which("php")
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
@@ -109,8 +110,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -246,7 +246,7 @@ class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
     def test_a_well_formed_hub_is_posted_to(self):
         rec = _Recorder('{"online": true}')
         with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", OTHER_HUB), \
-                mock.patch.object(onionheaven.subprocess, "run", rec):
+                answering(self.app, rec):
             self.assertTrue(onionheaven._send_heartbeat(self.app))
         self.assertEqual(rec.calls[0][-1], f"http://{OTHER_HUB}:8083/online")
 
@@ -255,7 +255,7 @@ class TestHubRequestsRefuseAMalformedHub(unittest.TestCase):
             with self.subTest(hub=hub):
                 rec = _Recorder('{"online": true}')
                 with mock.patch.object(onionheaven, "ONIONHEAVEN_ADDRESS", hub), \
-                        mock.patch.object(onionheaven.subprocess, "run", rec):
+                        answering(self.app, rec):
                     self.assertFalse(fn())
                 self.assertEqual(rec.calls, [])
 
@@ -304,7 +304,7 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
                     app = _FakeApp(self.tmpdir, onion_address=site)
                     setattr(app, field, value)
                     rec = _Recorder('{"online": true}')
-                    with mock.patch.object(onionheaven.subprocess, "run", rec):
+                    with answering(app, rec):
                         self.assertFalse(onionheaven._send_heartbeat(app))
                         self.assertFalse(onionheaven._send_onionheaven_notification(
                             app, "offline", "offline"))
@@ -313,7 +313,7 @@ class TestOwnAddressesMustBeWhole(unittest.TestCase):
     def test_unregister_takes_no_malformed_cached_address(self):
         app = _FakeApp(self.tmpdir, onion_address="Starting...")
         rec = _Recorder('{"unregistered": true}')
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(app, rec):
             onionheaven.unregister_from_onionheaven(app)
         self.assertEqual(rec.calls, [])
         self.assertIn("OnionHeaven: no content address for unregister", app.logs)

@@ -432,11 +432,10 @@ class TestRegistrarDefaultRunner(unittest.TestCase):
     def test_post_body_goes_on_stdin(self):
         rec = _Recorder(lambda argv, stdin: (0, '{"ok": true}\n__HTTP_STATUS__:200'))
         reg = onionnames_registrar.Registrar(
-            docker_bin="/x/docker",
+            FakeDocker(rec, docker_bin="/x/docker"),
             key_source=lambda: (b"\x01" * 64, b"\x02" * 32))
-        with mock.patch.object(onionnames_registrar.subprocess, "run", rec), \
-                mock.patch.object(onionnames_registrar.onion_auth,
-                                  "sign_name_payload", return_value="SIG-SECRET"):
+        with mock.patch.object(onionnames_registrar.onion_auth,
+                               "sign_name_payload", return_value="SIG-SECRET"):
             self.assertTrue(reg.register("alice", "x.onion").ok)
             self.assertTrue(reg.check("alice").ok)
         (post, post_in, _), (get, get_in, _) = rec.calls

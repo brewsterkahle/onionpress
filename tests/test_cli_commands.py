@@ -297,7 +297,10 @@ class TestLogFuncs(Sandbox):
 
 class TestHubContext(Sandbox):
 
-    def test_the_docker_environment_and_the_hub_address(self):
+    def test_the_docker_runner_and_the_hub_address(self):
+        """The context's Docker is this install's (issue #477: its socket
+        from the paths), and nothing is exported into the process's
+        environment for a bare `docker` any more."""
         bin_dir = os.path.join(self.dir, "bin")
         os.mkdir(bin_dir)
         self.write("config", f"ONIONHEAVEN_ADDRESS={HUB}\n")
@@ -306,17 +309,14 @@ class TestHubContext(Sandbox):
         saved = onionheaven.ONIONHEAVEN_ADDRESS
         self.addCleanup(setattr, onionheaven, "ONIONHEAVEN_ADDRESS", saved)
         with mock.patch("onionpress.onionheaven.resolve_paths", return_value=paths), \
-                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}):
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}, clear=True):
             ctx = cli._hub_context(self.dir, self.log)
-            self.assertEqual(os.environ["DOCKER_HOST"], f"unix://{paths.docker_socket}")
-            self.assertEqual(os.environ["PATH"].split(os.pathsep)[0], bin_dir)
-            # A second call adds the bin dir once and keeps a DOCKER_HOST
-            # the launcher exported.
-            os.environ["DOCKER_HOST"] = "unix:///launcher"
-            cli._hub_context(self.dir, self.log)
-            self.assertEqual(os.environ["DOCKER_HOST"], "unix:///launcher")
-            self.assertEqual(os.environ["PATH"].split(os.pathsep).count(bin_dir), 1)
+            self.assertNotIn("DOCKER_HOST", os.environ)
+            self.assertEqual(os.environ["PATH"], "/usr/bin")
         self.assertIsInstance(ctx, onionheaven.HubContext)
+        self.assertIsInstance(ctx.docker, Docker)
+        self.assertEqual(ctx.docker.env["DOCKER_HOST"], f"unix://{paths.docker_socket}")
+        self.assertEqual(ctx.docker.env["PATH"].split(os.pathsep)[0], bin_dir)
         self.assertEqual(onionheaven.ONIONHEAVEN_ADDRESS, HUB)
 
 
@@ -847,7 +847,7 @@ class TestCmdRestore(Sandbox):
         self.read_meta = p(mock.patch("onionpress.backup.read_backup_metadata",
                                       side_effect=lambda *a: dict(self.meta)))
 
-        def prepare(zip_path, password, log, *, data_dir=None, after_extract=None):
+        def prepare(zip_path, password, log, *, docker=None, data_dir=None, after_extract=None):
             if after_extract:
                 after_extract(self.staging, dict(self.meta))
             return self.staging, dict(self.meta)
@@ -1498,7 +1498,9 @@ class TestPrepareRestore(Sandbox):
         with mock.patch("onionpress.backup.prepare_install_from_backup",
                         return_value=("/stg", meta)) as prepare:
             rc = cli.cmd_prepare_restore("/b.zip", "pw", self.dir, True)
-        self.assertEqual(prepare.call_args.kwargs, {"data_dir": self.dir})
+        kwargs = dict(prepare.call_args.kwargs)
+        self.assertIsInstance(kwargs.pop("docker"), Docker)
+        self.assertEqual(kwargs, {"data_dir": self.dir})
         return rc
 
     def test_a_plain_backup(self):

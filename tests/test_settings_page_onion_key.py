@@ -335,7 +335,8 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         path = _keyless_backup(self.tmp, "k.zip", overrides={"ADDRESS_PREFIX": ADDR[:3]})
         with mock.patch.object(backup, "served_onion_address", return_value=OLD_ADDR):
             staging, meta = backup.prepare_install_from_backup(
-                path, PW, self.logs.append, data_dir=self.install.data)
+                path, PW, self.logs.append, docker=FakeDocker(mv._NoDocker(self)),
+                data_dir=self.install.data)
         self.assertEqual(meta["onion_address"], OLD_ADDR)
         self.assertEqual(backup.staged_onion_key_address(staging, meta), "")
         with open(os.path.join(self.install.data, backup.INSTALL_FROM_BACKUP_MARKER)) as f:
@@ -352,6 +353,7 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         with mock.patch.object(backup, "served_onion_address", return_value=""):
             with self.assertRaises(ValueError) as cm:
                 backup.prepare_install_from_backup(path, PW, self.logs.append,
+                                                   docker=FakeDocker(mv._NoDocker(self)),
                                                    data_dir=self.install.data)
         self.assertEqual(str(cm.exception), backup.NO_KEY_TO_KEEP_MSG)
         self.assertFalse(os.path.exists(os.path.join(self.install.data, "restore-staging")))
@@ -364,7 +366,8 @@ class TestInstallFromBackupKeepsTheAddress(unittest.TestCase):
         with mock.patch.object(backup, "served_onion_address",
                                side_effect=AssertionError("not asked")):
             _, meta = backup.prepare_install_from_backup(
-                path, PW, self.logs.append, data_dir=self.install.data)
+                path, PW, self.logs.append, docker=FakeDocker(mv._NoDocker(self)),
+                data_dir=self.install.data)
         self.assertEqual(meta["onion_address"], ADDR)
         self.assertEqual(os.listdir(os.path.join(self.install.data, "shared", "vanity-keys")),
                          [ADDR])
@@ -539,7 +542,7 @@ class TestMacSettingsPageRestoreAsks(unittest.TestCase):
                 ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
                 ("onionpress.key_manager.write_private_key", {"side_effect": _KeyWritten}),
                 ("onionpress.backup.served_onion_address",
-                 {"side_effect": lambda: self.served}),
+                 {"side_effect": lambda *a, **k: self.served}),
                 ("onionpress.backup.hub_data_state", {"return_value": "none"}),
                 ("onionpress.backup.onionhome_registry_present", {"return_value": False})):
             p = mock.patch(target, **kw)
@@ -654,7 +657,7 @@ class TestLinuxSettingsPageRestoreRefusesAnotherAddress(unittest.TestCase):
                 ("onionpress.backup.subprocess.run", {"new": mv._NoDocker(self)}),
                 ("onionpress.key_manager.write_private_key", {"side_effect": _KeyWritten}),
                 ("onionpress.backup.served_onion_address",
-                 {"side_effect": lambda: self.served}),
+                 {"side_effect": lambda *a, **k: self.served}),
                 ("onionpress.backup.hub_data_state", {"return_value": "none"}),
                 ("onionpress.backup.onionhome_registry_present", {"return_value": False}),
                 ("onionpress.cli._settings_page_log", {"return_value": self.logs.append}),

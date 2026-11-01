@@ -42,7 +42,7 @@ for fake in ("AppKit", "Foundation", "objc"):
         sys.modules[fake] = types.ModuleType(fake)
 
 from onionpress import backup, key_manager, onion_auth, onionheaven  # noqa: E402
-from fake_docker import FakeDocker, on_path  # noqa: E402
+from fake_docker import FakeDocker, answering, on_path  # noqa: E402
 
 KEY_MANAGER = os.path.join(PROJECT_DIR, "src", "onionpress", "key_manager.py")
 HC = "vipwsi6bjeychxvdo3xjvojr2yvw7ggwagekemekmeccscryuhehp2id.onion"
@@ -102,8 +102,7 @@ class _FakeApp:
         self.version = "test"
         self.is_onionheaven = False
         self.app_support = tmpdir
-        self.colima_home = os.path.join(tmpdir, "colima")
-        self.bin_dir = os.path.join(tmpdir, "bin")
+        self.docker = FakeDocker()      # answering(app, rec) scripts it per test
         self.logs = []
 
     def log(self, msg):
@@ -141,7 +140,7 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
 
     def _post(self, fn, reply):
         rec = _Recorder(lambda argv: reply)
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(self.app, rec):
             result = fn()
         self.assertTrue(result is None or result, self.app.logs)
         self.assertEqual(len(rec.calls), 1, rec.calls)
@@ -179,7 +178,7 @@ class TestOnionHeavenPayloadOnStdin(unittest.TestCase):
 
     def test_helpers_pass_input_through(self):
         rec = _Recorder(lambda argv: "ok")
-        with mock.patch.object(onionheaven.subprocess, "run", rec):
+        with answering(self.app, rec):
             self.assertEqual(onionheaven._run_docker(self.app, ["x"], input="a"),
                              (True, "ok"))
             self.assertEqual(onionheaven._run_docker_rc(self.app, ["x"], input="b"),

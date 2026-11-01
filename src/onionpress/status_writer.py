@@ -294,7 +294,7 @@ def gather_fields(app, now=None):
     }
     if not app.is_running:
         return fields
-    docker = app._docker
+    docker = app.docker
     known = app._wp_installed
     installed = known if isinstance(known, bool) else wp_installed(docker)
     fields["wp_installed"] = bool(installed)
@@ -425,7 +425,7 @@ def write_volume(app, status):
     never a host path), version, config-current.json (the allowlisted
     config: the file is readable by PHP) and recent-logs.txt, as
     www-data."""
-    docker = app._docker
+    docker = app.docker
     _put(docker, "status.json", json.dumps(redact.status_for_wordpress(status), indent=2))
     _put(docker, "version", app.version)
     _put(docker, "config-current.json", json.dumps(status["config"], indent=2))

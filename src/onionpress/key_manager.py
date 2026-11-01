@@ -9,7 +9,6 @@ onionpress-onion-keys volume; C Tor's own key files are what Tor runs on.
 
 import base64
 import re
-import subprocess
 
 try:
     from onionpress import onion_auth, onion_keys
@@ -46,16 +45,10 @@ def build_openssh_key(private_key, public_key):
     return onion_keys.build_pem(private_key, public_key)
 
 
-def _docker_cat(path):
-    """docker exec cat <path>. Returns (ok, bytes-or-stderr)."""
-    try:
-        result = subprocess.run(
-            ["docker", "exec", CONTAINER, "cat", path],
-            capture_output=True,
-            timeout=10,
-        )
-    except Exception as e:
-        return False, str(e).encode()
+def _docker_cat(docker, path):
+    """`docker exec cat <path>` through *docker* (the caller's
+    onionpress.docker.Docker, the one runner). Returns (ok, bytes-or-stderr)."""
+    result = docker.run(["exec", CONTAINER, "cat", path], timeout=10, quiet=True, binary=True)
     if result.returncode != 0:
         return False, result.stderr
     return True, result.stdout
@@ -108,9 +101,10 @@ def _pubkey_from_hostname(hostname_bytes):
     return decoded[:32]
 
 
-def extract_keys():
+def extract_keys(docker):
     """
-    Extract both Ed25519 keys from the onionpress-tor container.
+    Extract both Ed25519 keys from the onionpress-tor container, through
+    *docker* (the caller's onionpress.docker.Docker).
     Returns (private_key_64bytes, public_key_32bytes).
 
     Tries the delivered PEM first (single file in the onionpress-onion-keys
@@ -119,7 +113,7 @@ def extract_keys():
     are missing we surface the PEM error, which is the more informative of
     the two on a broken install.
     """
-    pem_ok, pem_data = _docker_cat(DELIVERED_KEY_PATH)
+    pem_ok, pem_data = _docker_cat(docker, DELIVERED_KEY_PATH)
     if pem_ok:
         try:
             return parse_openssh_key(pem_data)
@@ -130,19 +124,19 @@ def extract_keys():
     # mode; the public key file is optional (newer tor omits it), so we
     # prefer hs_ed25519_public_key when present and otherwise recover the
     # pubkey from the hostname file (which is authoritative either way).
-    sec_ok, sec_data = _docker_cat(CTOR_SECRET_PATH)
+    sec_ok, sec_data = _docker_cat(docker, CTOR_SECRET_PATH)
     if sec_ok:
         try:
             expanded = _parse_ctor_secret(sec_data)
         except Exception as e:
             raise Exception(f"Failed to parse C Tor secret key: {e}")
-        pub_ok, pub_data = _docker_cat(CTOR_PUBLIC_PATH)
+        pub_ok, pub_data = _docker_cat(docker, CTOR_PUBLIC_PATH)
         if pub_ok:
             try:
                 return expanded, _parse_ctor_public(pub_data)
             except Exception as e:
                 raise Exception(f"Failed to parse C Tor public key: {e}")
-        host_ok, host_data = _docker_cat(CTOR_HOSTNAME_PATH)
+        host_ok, host_data = _docker_cat(docker, CTOR_HOSTNAME_PATH)
         if host_ok:
             try:
                 return expanded, _pubkey_from_hostname(host_data)
@@ -159,28 +153,29 @@ def extract_keys():
     raise Exception(f"Failed to extract keys: Could not read key file: {detail}")
 
 
-def extract_private_key():
+def extract_private_key(docker):
     """
     Extract the Ed25519 expanded private key from the container.
     Returns the raw 64-byte private key.
     """
-    private_key, _public_key = extract_keys()
+    private_key, _public_key = extract_keys(docker)
     return private_key
 
 
-def extract_public_key():
+def extract_public_key(docker):
     """
     Extract the Ed25519 public key from the container.
     Returns the raw 32-byte public key.
     """
-    _private_key, public_key = extract_keys()
+    _private_key, public_key = extract_keys(docker)
     return public_key
 
 
-def write_private_key(private_key, public_key):
+def write_private_key(docker, private_key, public_key):
     """
     Write a new key pair into the container's key volume as an OpenSSH PEM
-    and restart the tor container. This will change your onion address!
+    and restart the tor container, through *docker*. This will change your
+    onion address!
     """
     import tempfile
     import os
@@ -196,37 +191,23 @@ def write_private_key(private_key, public_key):
 
         try:
             # Ensure the key directory exists
-            result = subprocess.run(
-                ["docker", "exec", CONTAINER, "mkdir", "-p", DELIVERED_KEY_DIR],
-                capture_output=True,
-                timeout=10
-            )
+            docker.run(["exec", CONTAINER, "mkdir", "-p", DELIVERED_KEY_DIR],
+                       timeout=10, quiet=True)
 
             # Copy file to container
-            result = subprocess.run(
-                ["docker", "cp", temp_path,
-                 f"{CONTAINER}:{DELIVERED_KEY_PATH}"],
-                capture_output=True,
-                timeout=10
-            )
+            result = docker.run(["cp", temp_path, f"{CONTAINER}:{DELIVERED_KEY_PATH}"],
+                                timeout=10, quiet=True)
             if result.returncode != 0:
-                raise Exception(f"Failed to copy key to container: {result.stderr.decode()}")
+                raise Exception(f"Failed to copy key to container: {result.stderr}")
 
             # Set proper permissions inside container
-            result = subprocess.run(
-                ["docker", "exec", CONTAINER, "chmod", "600", DELIVERED_KEY_PATH],
-                capture_output=True,
-                timeout=10
-            )
+            result = docker.run(["exec", CONTAINER, "chmod", "600", DELIVERED_KEY_PATH],
+                                timeout=10, quiet=True)
             if result.returncode != 0:
-                raise Exception(f"Failed to set key permissions: {result.stderr.decode()}")
+                raise Exception(f"Failed to set key permissions: {result.stderr}")
 
             # Restart tor container to pick up the new key
-            subprocess.run(
-                ["docker", "restart", CONTAINER],
-                capture_output=True,
-                timeout=30
-            )
+            docker.run(["restart", CONTAINER], timeout=30, quiet=True)
 
             return True
 
@@ -724,22 +705,23 @@ def _key_dir_pair(key_dir):
     return private_key, check_expanded_secret_key(private_key)
 
 
-def served_key_pairs():
-    """The key pairs the tor container holds for the site: the one Tor
+def served_key_pairs(docker):
+    """The key pairs the tor container holds for the site (read through
+    *docker*): the one Tor
     serves (C Tor's hs_ed25519_secret_key) and the delivered PEM, either
     missing when it cannot be read (Docker down, tor not running), each
     once. A file that is there but is no valid key raises ValueError: the
     caller cannot keep what it cannot read, and must not go on as if
     there were nothing to keep."""
     pairs = []
-    ok, data = _docker_cat(CTOR_SECRET_PATH)
+    ok, data = _docker_cat(docker, CTOR_SECRET_PATH)
     if ok:
         try:
             private_key = _parse_ctor_secret(data)
         except Exception as e:
             raise ValueError(f"Tor's key file could not be read: {e}") from e
         pairs.append((private_key, check_expanded_secret_key(private_key)))
-    ok, data = _docker_cat(DELIVERED_KEY_PATH)
+    ok, data = _docker_cat(docker, DELIVERED_KEY_PATH)
     if ok:
         try:
             pair = parse_openssh_key(data)
@@ -751,13 +733,14 @@ def served_key_pairs():
     return pairs
 
 
-def keep_current_keys(root, key_dirs=(), served=True, when=None):
+def keep_current_keys(root, key_dirs=(), served=True, when=None, *, docker=None):
     """Keep a copy (keep_replaced_key) of every key this install may be
-    using: what the tor container holds (served=True) and the key files in
-    each of *key_dirs* (the imported or generated key in vanity-keys/),
-    once per address. Returns the kept folders; [] when there was nothing
-    to read. Raises when a key that is there cannot be read or kept."""
-    pairs = served_key_pairs() if served else []
+    using: what the tor container holds (served=True, read through
+    *docker*) and the key files in each of *key_dirs* (the imported or
+    generated key in vanity-keys/), once per address. Returns the kept
+    folders; [] when there was nothing to read. Raises when a key that is
+    there cannot be read or kept."""
+    pairs = served_key_pairs(docker) if served else []
     for key_dir in key_dirs:
         try:
             pair = _key_dir_pair(key_dir)
@@ -777,6 +760,14 @@ def keep_current_keys(root, key_dirs=(), served=True, when=None):
 
 if __name__ == "__main__":
     import sys
+
+    def _docker():
+        # The one docker runner (issue #477), for this install: the verbs
+        # that read the tor container (extract, keep-current) run from a
+        # checkout or the bundle, where the package imports.
+        from onionpress.docker import Docker
+        from onionpress.platform import resolve_paths
+        return Docker(resolve_paths())
 
     def _usage():
         print("Usage:")
@@ -804,9 +795,10 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     try:
         if cmd == "extract":
-            key_bytes = extract_private_key()
+            docker = _docker()
+            key_bytes = extract_private_key(docker)
             print(f"Successfully extracted {len(key_bytes)}-byte private key")
-            pub_bytes = extract_public_key()
+            pub_bytes = extract_public_key(docker)
             print(f"Successfully extracted {len(pub_bytes)}-byte public key")
 
         elif cmd == "ensure-formats":
@@ -878,7 +870,8 @@ if __name__ == "__main__":
                 served, args = False, args[1:]
             if not args:
                 _usage()
-            kept = keep_current_keys(args[0], args[1:], served=served)
+            kept = keep_current_keys(args[0], args[1:], served=served,
+                                     docker=_docker() if served else None)
             for path in kept:
                 print(path)
             sys.exit(0 if kept else 3)

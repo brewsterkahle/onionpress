@@ -27,16 +27,16 @@ DELETES = (
 )
 
 
-def hubs_holding_key(data_dir, log):
+def hubs_holding_key(data_dir, log, docker):
     """[(address, hub)] an OnionHeaven hub may hold a key of; [] on the hub
-    itself."""
+    itself. *docker* reads the served key."""
     from . import onionheaven
     ctx = onionheaven._hub_context(data_dir, log)
     pairs = onionheaven.registrations_left(ctx)
     served = ""
     try:
         from .backup import served_onion_address
-        served = served_onion_address()
+        served = served_onion_address(docker)
     except Exception:
         pass
     if served and onionheaven.is_onionheaven_instance(served):
@@ -48,7 +48,7 @@ def check(paths, docker, log, confirmed):
     """The questions, in order; the facts for the dialogs. Raises
     confirm.NeedsConfirmation for the first one not confirmed."""
     running = docker.container_running("onionpress-tor")
-    hubs = hubs_holding_key(paths.data_dir, log)
+    hubs = hubs_holding_key(paths.data_dir, log, docker)
     if hubs and not running:
         confirm.require(
             "hub-holds-key", confirmed,
@@ -74,7 +74,7 @@ def run(paths, docker, log, launcher, out=None):
     # stopping (the key in the tor container signs the request).
     remaining = []
     try:
-        if hubs_holding_key(paths.data_dir, log):
+        if hubs_holding_key(paths.data_dir, log, docker):
             log("Uninstall: asking OnionHeaven to delete its copy of the key...")
             remaining = release_onionheaven("uninstall", data_dir=paths.data_dir,
                                             log_func=log, out=out)

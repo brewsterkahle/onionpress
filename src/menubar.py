@@ -1708,7 +1708,7 @@ class OnionPressApp(PortAttributes, rumps.App):
             self._save_onionname(sw.admin_user, "", registered=False)
             return
 
-        reg = Registrar(docker_bin=self.docker.docker_bin, log=self.log)
+        reg = Registrar(self.docker, log=self.log)
 
         max_attempts = 5
         name = sw.admin_user

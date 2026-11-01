@@ -358,6 +358,12 @@ class Daemon(PortAttributes):
 
     # -- small helpers -----------------------------------------------------
 
+
+    @property
+    def docker(self):
+        """The one docker runner (issue #477): what onionheaven's client,
+        the analytics upload and the status writer run through."""
+        return self._docker
     def _read_bundle_version(self):
         try:
             with open(os.path.join(self.paths.app_bundle, "Contents", "Info.plist"), "rb") as f:
@@ -1608,7 +1614,7 @@ class Daemon(PortAttributes):
             except Exception as e:
                 self.log(f"onionname: retry cannot import registrar: {e}")
                 return
-            reg = Registrar(docker_bin=self._docker.docker_bin, log=self.log)
+            reg = Registrar(self._docker, log=self.log)
             result = reg.register(name, onionaddress)
             if result.ok:
                 self._save_onionname(name, onionaddress, registered=True)

@@ -36,7 +36,7 @@ CONTENT = "op2" + "a" * 53 + ".onion"
 HC = "h" * 56 + ".onion"
 
 
-def _random_keypair():
+def _random_keypair(docker=None):
     priv = os.urandom(32) + os.urandom(32)
     return priv, onion_auth.derive_public_key(priv)
 

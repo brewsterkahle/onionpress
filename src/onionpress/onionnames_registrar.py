@@ -15,7 +15,6 @@ integration path is validated manually against a live op2home onion.
 
 import json
 import os
-import subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -80,12 +79,17 @@ class Registrar:
       - release(name, onionaddr) → signed
     """
 
-    def __init__(self, docker_bin="docker", container=DEFAULT_CONTAINER,
+    def __init__(self, docker=None, container=DEFAULT_CONTAINER,
                  onionhome_address=DEFAULT_ONIONHOME_ADDRESS,
                  onionhome_port=DEFAULT_ONIONHOME_PORT,
                  timeout=DEFAULT_TIMEOUT, log=None,
                  runner=None, key_source=None):
-        self.docker_bin = docker_bin
+        # *docker*: the caller's onionpress.docker.Docker (the one runner,
+        # issue #477), for the curl runs and the key read; a test that
+        # injects both a runner and a key_source needs none.
+        if docker is None and (runner is None or key_source is None):
+            raise TypeError("Registrar needs a Docker, or a runner and a key_source")
+        self.docker = docker
         self.container = container
         self.onionhome_address = onionhome_address
         self.onionhome_port = onionhome_port
@@ -97,28 +101,24 @@ class Registrar:
         self._run = runner or self._default_runner
         # `key_source` is injected in tests — a callable returning
         # (expanded_key_64, public_key_32). In prod we read the live keystore.
-        self._key_source = key_source or key_manager.extract_keys
+        self._key_source = key_source or (lambda: key_manager.extract_keys(self.docker))
 
     def _url(self, path):
         return f"http://{self.onionhome_address}:{self.onionhome_port}{path}"
 
     def _default_runner(self, curl_args, timeout, input=None):
-        """Run `docker exec <container> curl …`, return (rc, stdout str).
-        With *input*, `docker exec -i` and *input* on curl's stdin."""
-        try:
-            result = subprocess.run(
-                [self.docker_bin, "exec"] + (["-i"] if input is not None else [])
-                + [self.container, "curl", *curl_args],
-                input=input,
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=timeout,
-            )
-            return result.returncode, result.stdout or ""
-        except subprocess.TimeoutExpired:
+        """Run `docker exec <container> curl …` through the Docker, return
+        (rc, stdout str): -1 for a timeout, -2 when docker could not be
+        run. With *input*, `docker exec -i` and *input* on curl's stdin."""
+        result = self.docker.run(
+            ["exec"] + (["-i"] if input is not None else []) + [self.container, "curl", *curl_args],
+            input=input, timeout=timeout, quiet=True)
+        if result.timed_out:
             return -1, ""
-        except Exception as e:
-            self.log(f"registrar: docker exec failed: {e}")
+        if result.returncode == 127:
+            self.log(f"registrar: docker exec failed: {result.stderr.strip()}")
             return -2, ""
+        return result.returncode, result.stdout or ""
 
     def _get(self, path):
         curl_args = [

@@ -655,7 +655,7 @@ class TestOnionnameRetry(_PathsCase):
     def test_success_is_saved_through_config_set(self):
         from onionpress.onionnames_registrar import RegistrarResult
         R, reg = self.retry(RegistrarResult(status="ok"))
-        R.assert_called_once_with(docker_bin=self.docker.docker_bin, log=self.d.log)
+        R.assert_called_once_with(self.docker, log=self.d.log)
         reg.register.assert_called_once_with("mysite", ADDR)
         self.assertEqual(self.config_sets(), [["ONIONNAME", "mysite"],
                                               ["ONIONNAME_ADDRESS", ADDR],

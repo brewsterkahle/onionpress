@@ -683,19 +683,20 @@ def settings_page_restore_node_refusal(own_address, hub_state, *, data_dir=None)
             }.get(_settings_page_node(own_address, hub_state, data_dir))
 
 
-def served_onion_address():
+def served_onion_address(docker):
     """The onion address of the key the tor container holds, derived from
-    the key (key_manager.extract_keys; private and public half must agree),
-    or '' when it could not be read. The address a restore keeps or would
-    replace."""
+    the key (key_manager.extract_keys through *docker*; private and public
+    half must agree), or '' when it could not be read. The address a
+    restore keeps or would replace."""
     try:
-        return key_manager.key_pair_onion_address(*key_manager.extract_keys())
+        return key_manager.key_pair_onion_address(*key_manager.extract_keys(docker))
     except Exception:
         return ''
 
 
-def _stage_onion_key(staging, onion_address, include_onion_key, log_func):
-    """create_backup's step 1: the key out of the tor container, the PEM
+def _stage_onion_key(staging, onion_address, include_onion_key, log_func, *, docker):
+    """create_backup's step 1: the key out of the tor container (through
+    *docker*), the PEM
     into <staging>/tor-keys/ when *include_onion_key*. Returns (the
     address the key derives to, whether no key could be read).
 
@@ -710,7 +711,7 @@ def _stage_onion_key(staging, onion_address, include_onion_key, log_func):
     address (metadata.json is validated on restore), else ''.
     """
     try:
-        priv, pub = key_manager.extract_keys()
+        priv, pub = key_manager.extract_keys(docker)
     except Exception as e:
         log_func(f"{ONION_KEY_UNREADABLE_WARNING} ({e})")
         kept = onion_address if key_manager.is_valid_onion_address(onion_address) else ''
@@ -796,7 +797,7 @@ def create_backup(onion_address, username, password, output_path, version, log_f
         #    ONION_KEY_UNREADABLE_WARNING; metadata excludes_onion_key).
         with _phase_timer(log_func, 'BACKUP', 'tor_keys'):
             onion_address, key_unreadable = _stage_onion_key(
-                staging, onion_address, include_onion_key, log_func)
+                staging, onion_address, include_onion_key, log_func, docker=docker)
 
         # 1b. Is this an OnionHeaven hub (its volume holds registrants' keys
         #     or registry rows)? A backup handed to WordPress (the Settings
@@ -1022,13 +1023,13 @@ def staged_onion_key_address(staging, metadata):
     return address
 
 
-def keep_installed_address(metadata, log_func):
+def keep_installed_address(metadata, log_func, *, docker):
     """For a restore of a backup without an onion service key: record in
     *metadata* the address this install keeps (served_onion_address), which
     the restore's config check (ADDRESS_PREFIX) holds the backup's
     preferences to. Raises ValueError (NO_KEY_TO_KEEP_MSG) when there is no
     address to keep: a restore never mints a new one in its place."""
-    address = served_onion_address()
+    address = served_onion_address(docker)
     if not key_manager.is_valid_onion_address(address):
         log_func("Restore: refused: the backup holds no onion service key and "
                  "this install's own address could not be read")
@@ -1175,7 +1176,7 @@ def seed_onion_key_for_install(staging, metadata, log_func, *, data_dir=None):
 INSTALL_FROM_BACKUP_MARKER = ".install-from-backup"
 
 
-def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None,
+def prepare_install_from_backup(zip_path, password, log_func, *, docker, data_dir=None,
                                 after_extract=None):
     """Host-side prep for an install-from-backup. Extracts the backup into a
     PERSISTENT staging dir (<data_dir>/restore-staging, survives a container
@@ -1216,7 +1217,7 @@ def prepare_install_from_backup(zip_path, password, log_func, *, data_dir=None,
         else:
             # No key in it (the Mac Settings page's backup): the install
             # keeps its own, and nothing under vanity-keys/ changes.
-            keep_installed_address(metadata, log_func)
+            keep_installed_address(metadata, log_func, docker=docker)
     except Exception:
         # Refused (invalid metadata or key) or failed before any marker
         # exists: nothing will import this staging, so don't leave the
@@ -1285,7 +1286,7 @@ def restore_from_backup(zip_path, password, log_func, *, docker, data_dir=None,
     # backup of another address would replace.
     current_address = ''
     if through_wordpress:
-        current_address = served_onion_address()
+        current_address = served_onion_address(docker)
         refusal = settings_page_restore_node_refusal(
             current_address, hub_data_state(), data_dir=data_dir)
         if refusal:
@@ -1357,10 +1358,10 @@ def restore_from_backup(zip_path, password, log_func, *, docker, data_dir=None,
                          f"and its address {current_address}")
                 metadata['onion_address'] = current_address
             else:
-                keep_installed_address(metadata, log_func)
+                keep_installed_address(metadata, log_func, docker=docker)
         else:
             _restore_backup_key(tor_dir, metadata, log_func, data_dir,
-                                _data_dir, before_key_change)
+                                _data_dir, before_key_change, docker=docker)
         leave_healthcheck_key_out(tor_dir, _data_dir, log_func)
 
         # 2-6. Container-side artifacts + config overrides — shared with the
@@ -1384,7 +1385,7 @@ def restore_from_backup(zip_path, password, log_func, *, docker, data_dir=None,
 
 
 def _restore_backup_key(tor_dir, metadata, log_func, data_dir, _data_dir,
-                        before_key_change):
+                        before_key_change, *, docker):
     """restore_from_backup's step 1, for a backup with a key: write it into
     the tor container, remove the key volume for a clean restart, and sync
     vanity-keys/, the cached address and ADDRESS_PREFIX/ONIONNAME to the
@@ -1412,7 +1413,7 @@ def _restore_backup_key(tor_dir, metadata, log_func, data_dir, _data_dir,
         derived_address = key_manager.key_pair_onion_address(priv, pub)
         if before_key_change is not None:
             before_key_change(derived_address)
-        key_manager.write_private_key(priv, pub)
+        key_manager.write_private_key(docker, priv, pub)
         metadata_address = metadata.get('onion_address', '')
         if metadata_address and metadata_address != derived_address:
             log_func(f"Restore: KEY-MISMATCH — backup "

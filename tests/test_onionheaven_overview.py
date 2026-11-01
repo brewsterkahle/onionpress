@@ -16,7 +16,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from onionpress import onionheaven  # noqa: E402
+from fake_docker import FakeDocker  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 HUB = onionheaven.DEFAULT_ONIONHEAVEN_ADDRESS
@@ -38,9 +40,7 @@ class FakeApp:
     def __init__(self, data_dir, config=None, onion_address=SITE):
         self.app_support = data_dir
         self.config_file = os.path.join(data_dir, "config")
-        self.bin_dir = ""
-        self.colima_home = data_dir
-        self.docker_socket = "/nonexistent.sock"
+        self.docker = FakeDocker()      # _run_docker is patched where a row matters
         self.onion_address = onion_address
         self.version = "0.0.0"
         self.logs = []
