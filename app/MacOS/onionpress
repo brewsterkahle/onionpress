@@ -1682,74 +1682,17 @@ main() {
             ;;
 
         restore)
-            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
-            # the password comes from read_backup_password and goes on to
-            # Python in the environment. The old `restore <password>
-            # <backup_file.zip>` is refused. The flags are the check/confirm
-            # protocol's (onionpress.confirm): --check answers what the
-            # backup is, or {"ask": "password"} without one.
+            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]:
+            # onionpress.cli's argparse (#529). The password comes from
+            # ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt (cli.read_backup_password;
+            # the old `restore <password> <backup_file.zip>` is refused there,
+            # issue #504); --check answers what the backup is, or {"ask":
+            # "password"} without one; a hub's recovery key goes along in the
+            # environment. The exit status is the CLI's, the caller's only
+            # sign of a refused or failed restore (the tray and the menubar
+            # check it); the CLI's own lines say what happened.
             setup_db_passwords
-            local restore_legacy_pass="" restore_path="" restore_check=no restore_what=no
-            restore_flags=()
-            restore_pos=()
-            for restore_arg in "${@:2}"; do
-                if [ "$restore_what" = yes ]; then
-                    restore_flags+=("$restore_arg")
-                    restore_what=no
-                    continue
-                fi
-                case "$restore_arg" in
-                    --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
-                    --json) restore_flags+=("$restore_arg") ;;
-                    --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
-                    --confirmed=?*) restore_flags+=("$restore_arg") ;;
-                    # An unknown flag must not become the legacy password.
-                    -?*) echo "ERROR: restore: unknown option $restore_arg" >&2; exit 2 ;;
-                    *) restore_pos+=("$restore_arg") ;;
-                esac
-            done
-            if [ "$restore_what" = yes ]; then
-                echo "ERROR: restore: --confirmed needs a value" >&2
-                exit 2
-            fi
-            if [ "${#restore_pos[@]}" -gt 2 ]; then
-                echo "ERROR: restore: too many arguments" >&2
-                exit 2
-            fi
-            restore_path="${restore_pos[0]:-}"
-            if [ -n "${restore_pos[1]:-}" ]; then
-                restore_legacy_pass="${restore_pos[0]}"
-                restore_path="${restore_pos[1]}"
-            fi
-            if [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]"
-                echo "Restores from an OnionPress backup. Containers must be running."
-                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
-                echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
-                echo "ONIONPRESS_HUB_RECOVERY_KEY, or a prompt (see: $0 hub-recovery-key)."
-                exit 1
-            fi
-            read_backup_password "$restore_legacy_pass"
-            if [ -z "$BACKUP_PASS" ] && [ "$restore_check" != yes ]; then
-                echo "ERROR: Password is required." >&2
-                exit 1
-            fi
-            if [ "$restore_check" = yes ]; then
-                # Changes nothing: the CLI's answer is the whole result.
-                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"
-                exit $?
-            fi
-            # install-from-backup: the Python CLI tears the install down and
-            # rebuilds it from the backup (seeded key + imported DB/content),
-            # replacing the old in-place overwrite + key-volume swap churn
-            # (no .import-key-pending, no manual multisite/Tor dance).
-            # The exit status is the caller's only sign of a refused or
-            # failed restore (the tray and the menubar check it).
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
-                echo "ERROR: Restore failed — see $LOG_FILE" >&2
-                exit 1
-            fi
-            echo "Done! OnionPress rebuilt from backup."
+            ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" bundled_python -m onionpress.cli --data-dir "$DATA_DIR" restore "${@:2}"
             ;;
 
         hub-recovery-key)
@@ -1856,91 +1799,8 @@ main() {
             ;;
 
         help|-h|--help)
-            cat <<EOF
-OnionPress - WordPress + Tor Onion Service
-
-Usage: $0 <command> [args]
-
-User commands:
-  start         Start WordPress and Tor containers
-  stop          Stop all containers (leaves the daemon, MenubarApp + VM running)
-  quit          Fully shut down: daemon + containers + Colima VM + MenubarApp
-                (equivalent of clicking Quit in the menubar)
-  daemon        The OnionPress daemon (status loop, probe, heartbeat, the
-                Settings page's requests, log captures, the extension
-                proxy), a launchd agent: daemon start | stop | status [--json]
-  restart       Restart all containers
-  status        Show container status
-  version       Show the OnionPress version (--json)
-  address       Show your .onion address (--url: the site's shareable URL
-                with its /<onionname>/ path; --copy: put it on the clipboard)
-  open          Open the site in a browser, logged in: open site | admin |
-                settings | onion (the .onion address, in Tor Browser)
-  logs          Tail container logs; logs --app | --launcher | --web prints
-                the end of that OnionPress log (-n N lines, -f to follow)
-  check-reachability
-                Test the site through the independent onionheaven Tor
-                client, as the Settings page does (--json)
-  check-docker  Say whether Docker Engine and Compose are new enough for
-                OnionPress (--json)
-  get           Fetch a URL over Tor and print the body (is this .onion up?)
-                (-i to include response headers, --max-time SECONDS)
-  update        Check GitHub for a new release and install it
-                (--check to only check, -y to skip prompt, --json)
-  backup        Create an encrypted backup zip
-  restore       Restore from an encrypted backup zip
-  setup         Run the first-time WordPress setup
-  import-key    Import an existing onion service key (base32, - for stdin,
-                or --file <hs_ed25519_secret_key>)
-  onionname     The site's onionname: onionname show | set NAME [--json]
-  config        Read and change settings: config get KEY | set KEY VALUE |
-                unset KEY | list [--json]  (a secret: set KEY - with the
-                value on stdin; run 'config list --help' for the keys)
-  onionheaven   Keep the site reachable through OnionHeaven:
-                onionheaven enable | disable | status [--json] |
-                overview [--json]
-  hub-recovery-key
-                An OnionHeaven hub's backup recovery key
-                (create, show, check, restore)
-  uninstall     Remove OnionPress: the onion address and key, the site,
-                the container VM and ~/.onionpress (asks first; then move
-                OnionPress.app to the Trash)
-  reset         Wipe everything and start over (asks first)
-
-Destructive commands ask before acting. A program runs them as
-  <command> --check --json   (answers {"ok": true}, {"confirm": "<what>", ...}
-                              or {"error": ...}, changing nothing)
-  <command> --confirmed <what>
-(or sets ONIONPRESS_CONFIRMED); without the confirmation they refuse.
-
-Advanced / internal (used by the menubar app or scripts):
-  start-tor, launch, upload-analytics, validate-oh-address, scrub,
-  daemon offline (the daemon tells the hub /offline before a stop),
-  handle-action (the WordPress Settings page's requests),
-  apply-config (its saved settings),
-  settings-page-backup, settings-page-restore (its backup and restore),
-  prepare-restore (the welcome screen's restore from a backup)
-
-Examples:
-  $0 status
-  $0 address --url
-  $0 open site
-  $0 logs --web -n 50
-  $0 check-reachability
-  $0 get http://<some-address>.onion/
-  $0 update --check
-  $0 update -y
-  $0 uninstall --check --json
-  $0 config set PREVENT_SLEEP never
-  $0 onionheaven status
-  $0 backup [-o <output_path>]
-  $0 restore <backup.zip>
-
-Your WordPress site will be available at:
-  - Via Tor: http://[your-onion-address].onion
-  - Locally (testing): http://localhost:8080
-
-EOF
+            # One text for both platforms (cli.launcher_help, #529).
+            bundled_python -m onionpress.cli --data-dir "$DATA_DIR" launcher-help
             exit 0
             ;;
 

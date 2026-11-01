@@ -478,6 +478,10 @@ ROWS = [
     # The launchers' top level (#405): ports.resolve_at_start with the
     # environment's preset, no OnionPressCLI; the answer is KEY=VALUE lines
     # (tests/test_launcher_env.py has the lines and the failure).
+    Row("launcher-help", ["launcher-help"], "cli.launcher_help", mock.call("linux"), rc=0,
+        returns="text"),
+    Row("launcher-help", ["launcher-help"], "cli.launcher_help", mock.call("macos"), rc=0,
+        returns="text", os_name="macos"),
     Row("launcher-env", ["launcher-env"], "ports.resolve_at_start",
         mock.call(D(""), preset="10000", docker=ANY, log=ANY), rc=0,
         returns=ports.PortConfig.from_offset(10000), env={"ONIONPRESS_PORT_OFFSET": "10000"}),

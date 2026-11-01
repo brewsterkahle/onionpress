@@ -1231,12 +1231,6 @@ update_finish() {
     echo "  Update complete! Now running OnionPress $new_version."
 }
 
-usage() {
-    echo "Usage: $0 {start|stop|restart|status|version|address|open|get|check-reachability|check-docker|logs|setup|provision|dashboard|config|onionname|onionheaven|reset|reset-onionheaven|import-key|generate-vanity|admin-password|backup|restore|hub-recovery-key|update|scrub|apply-config|handle-action|validate-oh-address|upload-analytics|uninstall}"
-    echo "  address [--url] [--copy]; open site|admin|settings|onion; logs [--app|--launcher|--web] [-n N] [-f];"
-    echo "  import-key <base32> | - | --file <hs_ed25519_secret_key>; onionname show|set NAME;"
-    echo "  onionheaven enable|disable|status|overview [--json]; config get|set|unset|list"
-}
 
 main() {
     launcher_environment
@@ -1494,77 +1488,17 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         restore)
-            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT];
-            # the password comes from read_backup_password and goes on to
-            # Python in the environment. The old `restore <password>
-            # <backup_file.zip>` is refused. The flags are the check/confirm
-            # protocol's (onionpress.confirm): --check answers what the
-            # backup is, or {"ask": "password"} without one.
+            # restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]:
+            # onionpress.cli's argparse (#529). The password comes from
+            # ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt (cli.read_backup_password;
+            # the old `restore <password> <backup_file.zip>` is refused there,
+            # issue #504); --check answers what the backup is, or {"ask":
+            # "password"} without one; a hub's recovery key goes along in the
+            # environment. The exit status is the CLI's, the caller's only
+            # sign of a refused or failed restore (the tray and the menubar
+            # check it); the CLI's own lines say what happened.
             setup_db_passwords
-            local restore_legacy_pass="" restore_path="" restore_check=no restore_what=no
-            local -a restore_flags=() restore_pos=()
-            local restore_arg
-            for restore_arg in "${@:2}"; do
-                if [ "$restore_what" = yes ]; then
-                    restore_flags+=("$restore_arg")
-                    restore_what=no
-                    continue
-                fi
-                case "$restore_arg" in
-                    --check) restore_check=yes; restore_flags+=("$restore_arg") ;;
-                    --json) restore_flags+=("$restore_arg") ;;
-                    --confirmed) restore_what=yes; restore_flags+=("$restore_arg") ;;
-                    --confirmed=?*) restore_flags+=("$restore_arg") ;;
-                    # An unknown flag must not become the legacy password.
-                    -?*) echo "ERROR: restore: unknown option $restore_arg" >&2; exit 2 ;;
-                    *) restore_pos+=("$restore_arg") ;;
-                esac
-            done
-            if [ "$restore_what" = yes ]; then
-                echo "ERROR: restore: --confirmed needs a value" >&2
-                exit 2
-            fi
-            if [ "${#restore_pos[@]}" -gt 2 ]; then
-                echo "ERROR: restore: too many arguments" >&2
-                exit 2
-            fi
-            restore_path="${restore_pos[0]:-}"
-            if [ -n "${restore_pos[1]:-}" ]; then
-                restore_legacy_pass="${restore_pos[0]}"
-                restore_path="${restore_pos[1]}"
-            fi
-            if [ -z "$restore_path" ]; then
-                echo "Usage: $0 restore <backup_file.zip> [--check] [--json] [--confirmed WHAT]"
-                echo "Restores from an OnionPress backup. Containers must be running."
-                echo "The password is read from ONIONPRESS_BACKUP_PASSWORD, stdin or a prompt."
-                echo "An OnionHeaven hub's sealed registry and keys need its recovery key:"
-                echo "ONIONPRESS_HUB_RECOVERY_KEY, or a prompt (see: $0 hub-recovery-key)."
-                exit 1
-            fi
-            read_backup_password "$restore_legacy_pass"
-            if [ -z "$BACKUP_PASS" ] && [ "$restore_check" != yes ]; then
-                echo "ERROR: Password is required." >&2
-                exit 1
-            fi
-            if [ "$restore_check" = yes ]; then
-                # Changes nothing: the CLI's answer is the whole result.
-                ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"
-                exit $?
-            fi
-            # install-from-backup: the shared Python CLI tears the install down
-            # and rebuilds it from the backup (seeded key + imported DB/content),
-            # replacing the in-place overwrite + key-volume swap churn (no
-            # .import-key-pending, no manual stop/start).
-            # The exit status is the caller's only sign of a refused or
-            # failed restore (the tray and the menubar check it).
-            # The restore asks the OnionHeaven hubs to delete their copy of
-            # a key a backup of another address replaces; the daemon sees
-            # the stack come back and registers the restored one.
-            if ! ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" ONIONPRESS_BACKUP_PASSWORD="$BACKUP_PASS" op_py --data-dir "$DATA_DIR" restore "$restore_path" "${restore_flags[@]}"; then
-                echo "ERROR: Restore failed — see $LOG_FILE" >&2
-                exit 1
-            fi
-            echo "Done! OnionPress rebuilt from backup."
+            ONIONPRESS_HUB_RECOVERY_KEY="$_HUB_RECOVERY_KEY" op_py --data-dir "$DATA_DIR" restore "${@:2}"
             ;;
 
         hub-recovery-key)
@@ -1744,7 +1678,9 @@ sys.exit(0 if provision_interactive(adopt_existing='--adopt-existing' in sys.arg
             ;;
 
         help|-h|--help)
-            usage
+            # One text for both platforms (cli.launcher_help, #529).
+            op_py --data-dir "$DATA_DIR" launcher-help
+            exit 0
             ;;
 
         *)

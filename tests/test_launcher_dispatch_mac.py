@@ -353,6 +353,10 @@ class TestDelegations(_Case):
 
 
 class TestRestore(_Case):
+    """`restore` is the CLI's argparse (#529): every argument reaches it,
+    the password travels in the environment (or on stdin, to the CLI
+    itself), and the CLI's exit status is the launcher's."""
+
     STUBS = ("setup_db_passwords",)
 
     def py(self, *rest):
@@ -362,71 +366,39 @@ class TestRestore(_Case):
         r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "s3cret"})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip")])
+        self.assertEqual(self.l.fn_calls(), ["setup_db_passwords"])
         self.assertIn("py-env s3cret", self.l.calls())
         self.assertNotIn("s3cret", " ".join(self.l.py_calls()))
-        self.assertIn("Done! OnionPress rebuilt from backup.", r.stdout)
 
-    def test_from_stdin_when_not_a_terminal(self):
-        r = self.l.run("restore", "/b/x.zip", input="piped\n")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("py-env piped", self.l.calls())
-
-    def test_the_old_positional_password_is_refused(self):
-        # Issue #504: nothing runs, the message names no password.
-        r = self.l.run("restore", "oldpw", "/b/x.zip")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertEqual(self.l.py_calls(), [])
-        self.assertIn("refused", r.stderr)
-        self.assertNotIn("oldpw", r.stderr + r.stdout)
-
-    def test_no_path_is_the_usage(self):
-        r = self.l.run("restore")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("restore <backup_file.zip>", r.stdout)
-        self.assertEqual(self.l.py_calls(), [])
-
-    def test_no_password_is_refused_before_the_cli(self):
-        r = self.l.run("restore", "/b/x.zip")
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("Password is required", r.stderr)
-        self.assertEqual(self.l.py_calls(), [])
-
-    def test_check_without_a_password_asks_the_cli(self):
-        # The CLI answers {"ask": "password"} (exit 5): its status is ours.
-        r = self.l.run("restore", "/b/x.zip", "--check", "--json", env={"STUB_RC_PY": "5"})
-        self.assertEqual(r.returncode, 5)
-        self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--check", "--json")])
-        self.assertIn("py-env <none>", self.l.calls())
-        self.assertNotIn("Done!", r.stdout)
-
-    def test_confirmed_takes_the_next_word_or_an_equals(self):
-        for argv, want in (
-                (("--confirmed", "sealed-hub-data-left-out"), "--confirmed sealed-hub-data-left-out"),
-                (("--confirmed=sealed-hub-data-left-out",), "--confirmed=sealed-hub-data-left-out")):
-            with self.subTest(argv=argv):
-                r = self.l.run("restore", *argv, "/b/x.zip", "--json",
-                               env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", want, "--json")])
-                self.assertIn("py-env pw", self.l.calls(), "the flag is never the password")
-
-    def test_a_bad_command_line_is_refused_before_the_cli(self):
-        for argv, msg in (
-                (("/b/x.zip", "--bogus"), "unknown option --bogus"),
-                (("/b/x.zip", "--confirmed"), "--confirmed needs a value"),
-                (("a", "b", "/b/x.zip"), "too many arguments")):
+    def test_every_argument_reaches_the_cli_verbatim(self):
+        # The legacy positional password, a bare `restore`, --confirmed in
+        # either form, an unknown flag: the CLI's parser answers them
+        # (cli.read_backup_password's refusal, argparse's usage), not bash.
+        for argv in (("oldpw", "/b/x.zip"), (), ("--confirmed", "sealed-hub-data-left-out", "/b/x.zip", "--json"),
+                     ("/b/x.zip", "--confirmed=sealed-hub-data-left-out"), ("/b/x.zip", "--bogus"),
+                     ("/b/x.zip", "--check", "--json")):
             with self.subTest(argv=argv):
                 r = self.l.run("restore", *argv, env={"ONIONPRESS_BACKUP_PASSWORD": "pw"})
-                self.assertEqual(r.returncode, 2)
-                self.assertIn(msg, r.stderr)
-                self.assertEqual(self.l.py_calls(), [])
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self.l.py_calls(), [self.py(*argv).rstrip()])
 
-    def test_a_failed_restore_fails(self):
-        r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_BACKUP_PASSWORD": "pw",
-                                                   "STUB_RC_PY": "3"})
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("Restore failed", r.stderr)
-        self.assertNotIn("Done!", r.stdout)
+    def test_the_clis_exit_status_is_the_launchers(self):
+        # 5: {"ask": "password"} for --check without one; 3: refused; 1: failed.
+        for rc in ("5", "3", "1"):
+            with self.subTest(rc=rc):
+                r = self.l.run("restore", "/b/x.zip", "--check", "--json", env={"STUB_RC_PY": rc})
+                self.assertEqual(r.returncode, int(rc))
+                self.assertEqual(self.l.py_calls(), [self.py("/b/x.zip", "--check", "--json")])
+                self.assertEqual(r.stdout + r.stderr, "", "nothing of bash's own is said")
+
+    def test_the_recovery_key_travels_in_the_environment(self):
+        self.l.add_stubs('op_py() { _op_rec "hubkey ${ONIONPRESS_HUB_RECOVERY_KEY:-unset}"; _op_py "$@"; }\n'
+                         'bundled_python() { shift 2; op_py "$@"; }')
+        r = self.l.run("restore", "/b/x.zip", env={"ONIONPRESS_HUB_RECOVERY_KEY": "rk",
+                                                   "ONIONPRESS_BACKUP_PASSWORD": "pw"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("hubkey rk", self.l.calls())
+        self.assertNotIn("rk", " ".join(self.l.py_calls()))
 
 
 class TestStartTor(_Case):
@@ -465,18 +437,14 @@ class TestScrub(_Case):
 
 
 class TestUsage(_Case):
-    def test_help_lists_the_commands_and_exits_0(self):
+    def test_help_is_the_clis_text_and_exits_0(self):
+        # #529: one text for both platforms (cli.launcher_help, tested in
+        # tests/test_launcher_help.py); the case prints it and exits 0.
         for flag in ("help", "-h", "--help"):
             with self.subTest(flag=flag):
                 r = self.l.run(flag)
                 self.assertEqual(r.returncode, 0)
-                for verb in ("start", "stop", "quit", "restart", "status", "backup",
-                             "restore", "config", "onionheaven", "update", "reset"):
-                    self.assertIn(f"\n  {verb}", r.stdout)
-
-    def test_help_names_no_removed_command(self):
-        # The hub message channel went on 2026-10-25 (CLAUDE.md).
-        self.assertNotIn("alerts", self.l.run("help").stdout)
+                self.assertEqual(self.l.py_calls(), [f"{self.dd()} launcher-help"])
 
     def test_an_unknown_verb_reaches_the_cli(self):
         """The default case hands every other verb to onionpress.cli: a

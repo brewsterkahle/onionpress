@@ -2849,6 +2849,140 @@ def launcher_environment(paths, port_config, environ=None, os_name=None) -> dict
     return env
 
 
+def launcher_help(os_name: str) -> str:
+    """The launchers' `help` text (issue #529: one text for both platforms,
+    where the Mac had a heredoc and Linux a one-line usage), with the
+    platform's own lines: a Mac's quit, Colima VM and app bundle; Linux's
+    units, /opt/onionpress and its headless verbs."""
+    mac = os_name == "macos"
+    stop_tail = ("(leaves the daemon, MenubarApp + VM running)" if mac
+                 else "(leaves the daemon running)")
+    daemon_how = "a launchd agent" if mac else "a systemd user unit"
+    lines = [
+        "OnionPress - WordPress + Tor Onion Service",
+        "",
+        "Usage: onionpress <command> [args]",
+        "",
+        "User commands:",
+        "  start         Start WordPress and Tor containers",
+        f"  stop          Stop all containers {stop_tail}",
+    ]
+    if mac:
+        lines += [
+            "  quit          Fully shut down: daemon + containers + Colima VM + MenubarApp",
+            "                (equivalent of clicking Quit in the menubar)",
+        ]
+    lines += [
+        "  daemon        The OnionPress daemon (status loop, probe, heartbeat, the",
+        "                Settings page's requests, log captures, the extension",
+        f"                proxy), {daemon_how}: daemon start | stop | status [--json]",
+        "  restart       Restart all containers",
+        "  status        Show container status",
+        "  version       Show the OnionPress version (--json)",
+        "  address       Show your .onion address (--url: the site's shareable URL",
+        "                with its /<onionname>/ path; --copy: put it on the clipboard)",
+        "  open          Open the site in a browser, logged in: open site | admin |",
+        "                settings | onion (the .onion address, in Tor Browser)",
+        "  logs          Tail container logs; logs --app | --launcher | --web prints",
+        "                the end of that OnionPress log (-n N lines, -f to follow)",
+        "  check-reachability",
+        "                Test the site through the independent onionheaven Tor",
+        "                client, as the Settings page does (--json)",
+        "  check-docker  Say whether Docker Engine and Compose are new enough for",
+        "                OnionPress (--json)",
+        "  get           Fetch a URL over Tor and print the body (is this .onion up?)",
+        "                (-i to include response headers, --max-time SECONDS)",
+        "  update        Check GitHub for a new release and install it",
+        "                (--check to only check, -y to skip prompt, --json)",
+        "  backup        Create an encrypted backup zip",
+        "  restore       Restore from an encrypted backup zip",
+        "  setup         Run the first-time WordPress setup",
+    ]
+    if not mac:
+        lines += [
+            "                (--user, --pass, --title; setup --from-backup <backup.zip>)",
+            "  provision     Provision an already-installed WordPress (headless installs)",
+            "  dashboard     Open wp-admin in your browser, logged in",
+            "  admin-password",
+            "                Print the recovery admin password",
+            "  generate-vanity",
+            "                Generate a vanity onion address with mkp224o",
+        ]
+    lines += [
+        "  import-key    Import an existing onion service key (base32, - for stdin,",
+        "                or --file <hs_ed25519_secret_key>)",
+        "  onionname     The site's onionname: onionname show | set NAME [--json]",
+        "  config        Read and change settings: config get KEY | set KEY VALUE |",
+        "                unset KEY | list [--json]  (a secret: set KEY - with the",
+        "                value on stdin; run 'config list --help' for the keys)",
+        "  onionheaven   Keep the site reachable through OnionHeaven:",
+        "                onionheaven enable | disable | status [--json] |",
+        "                overview [--json]",
+        "  hub-recovery-key",
+        "                An OnionHeaven hub's backup recovery key",
+        "                (create, show, check, restore)",
+    ]
+    if mac:
+        lines += [
+            "  uninstall     Remove OnionPress: the onion address and key, the site,",
+            "                the container VM and ~/.onionpress (asks first; then move",
+            "                OnionPress.app to the Trash)",
+        ]
+    else:
+        lines += [
+            "  uninstall     Remove OnionPress: the onion address and key, the site,",
+            "                the units, /opt/onionpress (sudo) and ~/.onionpress (asks",
+            "                first; offers a backup)",
+            "  reset-onionheaven",
+            "                (a hub) Clean stress-test entries, refresh the takeover workers",
+        ]
+    lines += [
+        "  reset         Wipe everything and start over (asks first)",
+        "",
+        "Destructive commands ask before acting. A program runs them as",
+        '  <command> --check --json   (answers {"ok": true}, {"confirm": "<what>", ...}',
+        '                              or {"error": ...}, changing nothing)',
+        "  <command> --confirmed <what>",
+        "(or sets ONIONPRESS_CONFIRMED); without the confirmation they refuse.",
+        "",
+        "Advanced / internal (used by the menubar app, the tray or scripts):",
+        ("  start-tor, launch, upload-analytics, validate-oh-address, scrub," if mac
+         else "  upload-analytics, validate-oh-address, scrub,"),
+        "  daemon offline (the daemon tells the hub /offline before a stop),",
+        "  handle-action (the WordPress Settings page's requests),",
+        "  apply-config (its saved settings),",
+        "  settings-page-backup, settings-page-restore (its backup and restore),",
+        "  prepare-restore (the welcome screen's restore from a backup)",
+        "",
+        "Examples:",
+        "  onionpress status",
+        "  onionpress address --url",
+        "  onionpress open site",
+        "  onionpress logs --web -n 50",
+        "  onionpress check-reachability",
+        "  onionpress get http://<some-address>.onion/",
+        "  onionpress update --check",
+        "  onionpress update -y",
+        "  onionpress uninstall --check --json",
+        "  onionpress config set PREVENT_SLEEP never",
+        "  onionpress onionheaven status",
+        "  onionpress backup [-o <output_path>]",
+        "  onionpress restore <backup.zip>",
+        "",
+        "Your WordPress site will be available at:",
+        "  - Via Tor: http://[your-onion-address].onion",
+        "  - Locally (testing): http://localhost:8080",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _run_launcher_help(run):
+    # The launchers' help case (#529): one text, the platform's lines.
+    print(launcher_help(detect_os().value))
+    return 0
+
+
 def _run_launcher_env(run):
     # The launchers' top level (issue #405): the ports once, by
     # ports.resolve_at_start (a preset ONIONPRESS_PORT_OFFSET as it is;
@@ -3241,6 +3375,10 @@ _COMMANDS = [
             "ones; both launchers gate every image pull on it"),
      _run_using_local_images),
     ("wordpress-egress", _add_wordpress_egress, _run_wordpress_egress),
+    ("launcher-help",
+     _plain("Print the launchers' help: the verbs of `onionpress <command>` on "
+            "this platform"),
+     _run_launcher_help),
     ("launcher-env",
      _plain("Print the environment a launcher exports at the top of its "
             "main(): the port variables (ports.resolve_at_start: a preset "

@@ -2501,8 +2501,10 @@ class TestGetSubcommandWiredIntoLaunchers(unittest.TestCase):
         self.assertIn('op_py get "${@:2}"', _read("linux/onionpress"))
 
     def test_both_launchers_list_get_in_usage(self):
-        self.assertRegex(_read("app/MacOS/onionpress"), r"(?m)^  get\s+Fetch a URL over Tor")
-        self.assertIn("|get|", _read("linux/onionpress"))
+        # The help is one text for both platforms (cli.launcher_help, #529).
+        from onionpress import cli
+        for os_name in ("macos", "linux"):
+            self.assertRegex(cli.launcher_help(os_name), r"(?m)^  get\s+Fetch a URL over Tor")
 
 
 class TestMigrationScriptLocally(unittest.TestCase):

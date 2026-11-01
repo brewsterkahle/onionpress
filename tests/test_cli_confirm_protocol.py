@@ -513,10 +513,12 @@ class TestLauncherDelegations(unittest.TestCase):
                 self.assertIn(f'bundled_python -m onionpress.cli --data-dir "$DATA_DIR" {tail}', case)
         self.assertIn('[ "${ONIONPRESS_YES:-}" != "true" ] || reset_args+=(--yes)', mac)
         self.assertIn('ONIONPRESS_APP_PATH="$(dirname "$APP_DIR")"', mac)
-        help_text = mac[mac.index("help|-h|--help)"):mac.index("Your WordPress site will be available at")]
-        for word in ("  uninstall     ", "handle-action", "--check --json",
-                     "--confirmed <what>", "ONIONPRESS_CONFIRMED"):
-            self.assertIn(word, help_text)
+        # The help is one text for both platforms (cli.launcher_help, #529).
+        for os_name in ("macos", "linux"):
+            help_text = cli.launcher_help(os_name)
+            for word in ("  uninstall     ", "handle-action", "--check --json",
+                         "--confirmed <what>", "ONIONPRESS_CONFIRMED"):
+                self.assertIn(word, help_text, os_name)
 
     def test_no_launcher_takes_a_secret_on_argv_for_them(self):
         for rel in ("app/MacOS/onionpress", "linux/onionpress"):

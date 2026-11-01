@@ -1229,7 +1229,8 @@ class TestLaunchers(unittest.TestCase):
         self.assertNotIn("                create-backup)\n", linux)
         # The update check is the shared handler's (`update --check --json`).
         self.assertNotIn("settings-page-update-check", linux)
-        self.assertIn("|handle-action|", linux)
+        from onionpress import cli
+        self.assertIn("handle-action (the WordPress Settings page's requests)", cli.launcher_help("linux"))
         self.assertEqual(linux.count('umask 077; cat > "$1"'), 0)
 
     def test_mac_cases_delegate(self):
