@@ -351,6 +351,39 @@ Issue: #522.
 - `heartbeat.read_config` is a fourth config reader, not test-held,
   with a different `strip()`.
 
+## Carried over from phase 4 (`docs/phase4-resume.md`)
+
+The phase 4 / 4b note is the record of how the first seven slices and the start/setup move were done. What it holds that the issues above did not say, and that every slice here must keep:
+
+### Slice mechanics
+- **Delegation shape.** Mac: `bundled_python -m onionpress.cli --data-dir "$DATA_DIR" <subcommand> "$@"` (the bundle's interpreter; `/usr/bin/python3` is a shim). Linux: `op_py --data-dir "$DATA_DIR" <subcommand>` (`op_py` is self-contained: the harnesses extract it alone). Where the caller needs the status: `… 2>&1 | tee -a "$LOG_FILE"` then `return "${PIPESTATUS[0]}"` (bash 3.2 has PIPESTATUS; under `set -e` a failing non-last pipeline member does not exit). Where a failure must never stop the start: the same, then `return 0`.
+- **A new subcommand is a fast path in `cli.main`**: never through `OnionPressCLI` when it can be avoided (its setup creates config and secrets and probes ports); the dispatch row says `setup_cli=False`. Log lines go through `cli._launcher_log_func` (`[ts] msg` on stdout, what `log` printed); a start step builds its manager with `cli._start_step_manager(paths)` (`PortConfig.from_offset` of `$ONIONPRESS_PORT_OFFSET`, never the bind probe).
+- **No traceback reaches the terminal or the log**: a fast path's work sits in `try/except` and whatever goes wrong is the WARNING's words (the bash `${out:-rc=$rc}` fallback). A helper that asks `detect_os()` uses the module-level import, so the dispatch census's `os_name` and a test's `mock.patch.object(cli, "detect_os", …)` reach it.
+- **Python runs Python only through `derivatives.isolated_cli_argv`** (`start.run_cli_step`, `run_detached_cli`; the Settings-page watcher's detached runs go through `systemd-run --user`): `tests/test_python_spawns_isolated.py` is the census. A `docker run` has `--cap-drop ALL`, the pinned `KEY_HELPER_IMAGE` / `containers.tor_image`, `--network none`, and a row in `tests/test_container_capabilities.py`.
+- **Every Python-to-bash output difference is a deliberate delta**, said in the commit (phase 4 recorded each: stderr tee'd where it went to the log only, a line through `log` that became stderr).
+
+### The start's contracts
+- **The start traces** (`tests/test_start_traces.py`, fixtures under `tests/fixtures/start-traces/<platform>/`): each launcher's real top level and `start_containers` run against a stateful fake docker, every `log` line, docker call, Python step and stubbed function recorded in order. A slice that changes a fixture re-records it with `OP_UPDATE_START_TRACES=1` and says why in the commit. This reaches #405 (the port offset runs in the launcher's top level), #523 (Linux's `write_status` is called from `start_containers`), and every #529 slice inside or beside the start (`wait_for_services`, `setup_db_passwords`, `start-tor`).
+- **START SUMMARY** (`start.StartErrors`, `--errors-file`, `note_start_errors`): a Python step names the steps it could not do, one per line (`^[a-z0-9]+(-[a-z0-9]+)*$`); the Mac reads them into `START_ERRORS`; Linux gets no summary, its WARNING/ERROR lines are the record. `START_ERRORS` is bash state the Python cannot set: a slice that moves a best-effort step keeps this contract.
+- **`ONIONPRESS_BIND_HOST` is named by no Python** (test-held): Linux's install-state steps (`bind_wordpress_port_for_install_state`, the heartbeat hold, `after_wordpress_installed`) stay bash between the core and Tor, which is why Linux's start is two CLI calls (`--until-core`, then `start-post-up`), not one. #407's daemon on Linux must not absorb them, and #529's "stays bash" list is final on this point.
+
+### Decisions already settled, not to re-open
+- **Images change only with a release**: no refresh toggle, no `update-images`, no image pass in Check for Updates, pulls `--policy missing` only; the start prunes what a moved pin superseded. #525's and #528's update work adds no pull pass.
+- **`start_cloudflare_tunnel` stays bash**, identical in both launchers (#500); the Python names neither `cloudflared` nor its container.
+- **`KEY_HELPER_IMAGE` stays in both launchers** (each is a consumer of `build/refresh-image-digests.sh`; `tests/test_image_pins.py` holds the two equal) even where no bash function uses it any more.
+- **The restore's two stagings are different things**: `setup --from-backup` runs `stage_setup_from_backup` (the key's address checked before anything is copied; no key means this install keeps its own) and then `cmd_restore`'s install-from-backup rebuild (#509); the Mac's start imports a kept `.install-from-backup` through `prepare_install_from_backup`. #406 keeps both.
+- **`db_import` reads the dump into memory** (`subprocess.run(input=…)`) because every restore test records `backup.subprocess.run`'s `input`; a streaming `Popen` was left for a slice of its own. #406 may take it, with those tests.
+- **`setup_from_terminal`'s exits** are 0 done, 1 failed, 2 already installed, 10 restart (the launcher's `setup` case stops and starts on 10, Linux also restarts the heartbeat); `--user` must be a valid onionname and the password 6+ characters (the GUI's rules, now in Python); `--email` is accepted and ignored. #527 builds on these, it does not redefine them.
+- **The archive.org login has a host path already in use**: `multisite.fetch_archive_s3_keys` + `save_archive_login` is what `setup --ia-account` runs on Linux and what `install_fresh_wordpress` runs at setup on both platforms. #528's decision is whether the Settings page's own login goes the same way, not whether a host path exists.
+- **`Docker.run_to`** streams a command's output to the log or stdout without a new argv literal; #477's conversions use it rather than growing the docker-argv census.
+
+### Running the tests here
+- `DOCKER_HOST=unix:///var/empty/no-docker-for-tests.sock make test-unit` on a Mac that runs OnionPress (docker-backed tests skip instead of touching the live site; about 90 skips), then `make coverage`; the floors are in `build/coverage-floors.sh` (`cli.py` 98, `handle_action.py` 95, `confirm.py` 98, `config.py` 85, `daemon.py` 81, …), never lowered. Each run is about 8 minutes.
+- **One suite at a time** on a machine: `test_onionpress_colima` (`/tmp/colima_test_args*`) and `test_backup_manager`'s staging-cleanup scans fail when two runs overlap (`make test-unit` beside `make coverage`).
+- **A bash-harness test that cuts a function out of a launcher** needs the delegation's runner defined (`bundled_python` / `op_py` → `sys.executable` with `PYTHONPATH=src`), or a one-line stub of the delegated function when the harness is about something else. On a Mac with OnionPress.app installed, `resolve_paths()` finds the bundle and `Docker(paths).docker_bin` is the bundle's docker, not a stub on PATH: run the CLI through `tests/cli_on_stub_docker.py` (no app bundle, `DOCKER_HOST` at the no-docker socket, HOME at a scratch folder), or the test skips there.
+- Never touch `~/.onionpress` or `/Applications/OnionPress.app` from a test or a session.
+- Known local-only failures the note recorded on a Linux machine (10 in `test_onionheaven_data_move_hardening` / `test_onionheaven_data_volume`, the later-arrivals/sparse cases; 2 in `test_wp_cli_as_www_data.TestWebRootOwnerGivesBack` with a relative `./bin` on PATH); CI was clean. Check against CI before chasing them.
+
 ## Rules worth adding to CLAUDE.md once the work lands
 
 - A launcher verb is a CLI subcommand; the launcher's default case
